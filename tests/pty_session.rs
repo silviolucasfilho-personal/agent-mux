@@ -87,6 +87,20 @@ async fn spawn_in_missing_directory_fails_without_creating_session() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn spawn_with_nonexistent_command_fails_without_creating_session() {
+    let (tx, _rx) = mpsc::channel(16);
+    let profile = Profile {
+        name: "test".into(),
+        command: "definitely-not-a-real-command-xyz123".into(),
+        args: vec![],
+        default_dir: None,
+    };
+    let result = Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx);
+    assert!(result.is_err());
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn interactive_input_roundtrip() {
     let (tx, mut rx) = mpsc::channel(256);
     let mut session =

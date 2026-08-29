@@ -6,6 +6,22 @@ pub enum AppEvent {
     /// (cols, rows) as crossterm reports them.
     Resize(u16, u16),
     PtyOutput { id: usize, bytes: Vec<u8> },
+    /// Session `id`'s pty has exited (or is exiting). Two things a consumer
+    /// must know before handling this, both driven by how `Session::spawn`
+    /// (session.rs) detects exit -- see its doc comment for the full
+    /// reasoning:
+    ///
+    /// - **Not once-per-session.** A reader thread (on `read()` EOF/err)
+    ///   and a separate exit-watcher thread each independently detect exit
+    ///   and can each send this for the same `id`, so duplicates for one
+    ///   session are expected, not a bug. Handling (e.g.
+    ///   `Session::mark_exited`) must be idempotent.
+    /// - **Not an end-of-output marker.** Ordering relative to a session's
+    ///   final `PtyOutput` batches is unspecified -- the watcher thread's
+    ///   copy can arrive before the reader thread has forwarded the last
+    ///   bit of output. Consumers must keep processing any `PtyOutput` that
+    ///   arrives after a `PtyExit` rather than treating `PtyExit` as a
+    ///   signal to stop feeding the parser.
     PtyExit { id: usize },
     Tick,
 }

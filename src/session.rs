@@ -31,20 +31,74 @@ pub fn find_exe(command: &str, path_var: &OsStr) -> Option<PathBuf> {
     None
 }
 
-/// (program, prefix_args) to hand to CommandBuilder. On Windows,
-/// npm-installed CLIs are .cmd shims that ConPTY can't spawn directly, so
-/// anything that isn't a native .exe goes through `cmd /c`.
+/// Extensions (besides `.exe`, which `find_exe` already covers) that
+/// Windows can run through `cmd /c` -- npm-installed CLIs and many other
+/// dev tools ship as one of these instead of a native `.exe`.
 #[cfg(windows)]
-pub fn resolve_command(command: &str) -> (String, Vec<String>) {
-    match find_exe(command, &std::env::var_os("PATH").unwrap_or_default()) {
-        Some(exe) => (exe.to_string_lossy().into_owned(), vec![]),
-        None => ("cmd.exe".into(), vec!["/c".into(), command.into()]),
+const SHIM_EXTENSIONS: [&str; 3] = ["cmd", "bat", "com"];
+
+/// True if `command` names something a Windows `cmd /c <command>`
+/// invocation could run, without itself being a native `.exe` (that's
+/// `find_exe`'s job): an existing file with `command`'s own extension, a
+/// `.cmd`/`.bat`/`.com` shim of that name in one of `path_var`'s entries,
+/// or `command` itself already pointing at an existing file (e.g. an
+/// absolute or relative path handed through as-is).
+#[cfg(windows)]
+fn find_shim(command: &str, path_var: &OsStr) -> bool {
+    let p = Path::new(command);
+    if p.is_file() {
+        return true;
     }
+    if p.is_absolute() {
+        return false;
+    }
+    let has_ext = p.extension().is_some();
+    for dir in std::env::split_paths(path_var) {
+        if has_ext && dir.join(command).is_file() {
+            return true;
+        }
+        for ext in SHIM_EXTENSIONS {
+            if dir.join(format!("{command}.{ext}")).is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// (program, prefix_args) to hand to CommandBuilder, or `None` if `command`
+/// can't be found at all. On Windows this is three-way:
+/// 1. a native `.exe` (`find_exe`) -> run it directly;
+/// 2. otherwise something `cmd /c` could run (`find_shim`: a `.cmd`/`.bat`/
+///    `.com` shim, a file already carrying its own extension, or an
+///    existing file path) -> `cmd.exe /c <command>`, letting `cmd` do its
+///    own PATHEXT-aware resolution;
+/// 3. nothing found -> `None`, so `Session::spawn` fails up front instead
+///    of spawning `cmd.exe` for a command that doesn't exist and only
+///    failing later with exit code 9009.
+///
+/// Unix has no shim concept and no separate resolution step of its own --
+/// this always succeeds, and a genuinely missing command surfaces as a
+/// spawn error from the OS.
+#[cfg(windows)]
+pub fn resolve_command(command: &str) -> Option<(String, Vec<String>)> {
+    resolve_command_with_path(command, &std::env::var_os("PATH").unwrap_or_default())
+}
+
+#[cfg(windows)]
+fn resolve_command_with_path(command: &str, path_var: &OsStr) -> Option<(String, Vec<String>)> {
+    if let Some(exe) = find_exe(command, path_var) {
+        return Some((exe.to_string_lossy().into_owned(), vec![]));
+    }
+    if find_shim(command, path_var) {
+        return Some(("cmd.exe".into(), vec!["/c".into(), command.into()]));
+    }
+    None
 }
 
 #[cfg(not(windows))]
-pub fn resolve_command(command: &str) -> (String, Vec<String>) {
-    (command.to_string(), vec![])
+pub fn resolve_command(command: &str) -> Option<(String, Vec<String>)> {
+    Some((command.to_string(), vec![]))
 }
 
 pub struct Session {
@@ -66,6 +120,25 @@ const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const SCROLLBACK_LINES: usize = 1000;
 
 impl Session {
+    /// Spawns `profile.command` in a new pty and starts two background
+    /// threads that report through `tx`:
+    ///
+    /// - a **reader thread** that forwards pty output as `AppEvent::PtyOutput`
+    ///   and, once `read()` returns `Ok(0)`/`Err` (the pty's output stream
+    ///   ending), sends one `AppEvent::PtyExit`;
+    /// - an **exit-watcher thread** that polls the child process directly
+    ///   and sends its own `AppEvent::PtyExit` as soon as the child has
+    ///   actually exited. This is necessary because on Windows the pty's
+    ///   output pipe does not EOF just because the child exited -- it stays
+    ///   open for as long as this Session's pseudo console handle
+    ///   (`master`) is alive, so the reader thread's EOF path alone would
+    ///   never fire for a normal exit there.
+    ///
+    /// Because of this, `AppEvent::PtyExit` for a given `id` is **not**
+    /// guaranteed once-per-session (either or both threads can send one)
+    /// and is **not** an end-of-output marker (a watcher-thread `PtyExit`
+    /// can arrive before the reader thread's last `PtyOutput` batches). See
+    /// `AppEvent::PtyExit`'s doc comment for what this means for consumers.
     pub fn spawn(
         id: usize,
         profile: Profile,
@@ -75,11 +148,12 @@ impl Session {
         tx: Sender<AppEvent>,
     ) -> anyhow::Result<Session> {
         anyhow::ensure!(dir.is_dir(), "not a directory: {}", dir.display());
+        let (program, prefix_args) = resolve_command(&profile.command)
+            .ok_or_else(|| anyhow::anyhow!("command not found: {}", profile.command))?;
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .context("openpty failed")?;
-        let (program, prefix_args) = resolve_command(&profile.command);
         let mut cmd = CommandBuilder::new(program);
         for a in &prefix_args {
             cmd.arg(a);
@@ -239,17 +313,31 @@ mod resolve_tests {
 
     #[cfg(windows)]
     #[test]
-    fn unresolved_command_falls_back_to_cmd_shim() {
-        // "definitely-not-on-path-xyz" won't resolve to an .exe
-        let (program, args) = resolve_command("definitely-not-on-path-xyz");
+    fn unresolved_command_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        // "definitely-not-on-path-xyz" won't resolve as an .exe, a
+        // .cmd/.bat/.com shim, or an existing file path.
+        assert_eq!(
+            resolve_command_with_path("definitely-not-on-path-xyz", dir.path().as_os_str()),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cmd_shim_on_path_resolves_via_cmd_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("myscript.cmd"), b"@echo off\r\n").unwrap();
+        let (program, args) =
+            resolve_command_with_path("myscript", dir.path().as_os_str()).unwrap();
         assert_eq!(program, "cmd.exe");
-        assert_eq!(args, vec!["/c".to_string(), "definitely-not-on-path-xyz".to_string()]);
+        assert_eq!(args, vec!["/c".to_string(), "myscript".to_string()]);
     }
 
     #[cfg(not(windows))]
     #[test]
     fn unix_always_direct() {
-        let (program, args) = resolve_command("claude");
+        let (program, args) = resolve_command("claude").unwrap();
         assert_eq!(program, "claude");
         assert!(args.is_empty());
     }
