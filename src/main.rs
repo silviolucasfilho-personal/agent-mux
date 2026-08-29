@@ -88,6 +88,7 @@ async fn main() -> Result<()> {
     let (rows, cols) = ui::main_pane_inner(Rect::new(0, 0, size.width, size.height));
     app.set_pane_size(rows, cols);
 
+    let mut draw_err = None;
     loop {
         let Some(first) = rx.recv().await else {
             break;
@@ -102,10 +103,18 @@ async fn main() -> Result<()> {
         if app.should_quit {
             break;
         }
-        terminal.draw(|f| ui::draw(f, &app, Instant::now()))?;
+        if let Err(e) = terminal.draw(|f| ui::draw(f, &app, Instant::now())) {
+            draw_err = Some(e);
+            break;
+        }
     }
 
+    // kill_all must run on every exit from the loop above -- including the
+    // draw-error path -- so live PTY children are never orphaned when we quit.
     app.kill_all();
+    if let Some(e) = draw_err {
+        return Err(e.into());
+    }
     Ok(())
 }
 
