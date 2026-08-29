@@ -35,8 +35,13 @@ async fn main() -> Result<()> {
     let cfg = config::load()?;
 
     enable_raw_mode()?;
-    crossterm::execute!(stdout(), EnterAlternateScreen)?;
+    // Constructed immediately after enable_raw_mode() succeeds, before
+    // EnterAlternateScreen: if EnterAlternateScreen fails, raw mode must
+    // still have a restorer on unwind/return. The guard's restore path
+    // (disable_raw_mode + LeaveAlternateScreen) is harmless to run even if
+    // the alternate screen was never entered.
     let _guard = TerminalGuard;
+    crossterm::execute!(stdout(), EnterAlternateScreen)?;
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();

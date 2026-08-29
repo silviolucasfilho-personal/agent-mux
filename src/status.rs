@@ -7,16 +7,25 @@ pub const ACTIVITY_WINDOW: Duration = Duration::from_secs(2);
 /// no longer exposes `Screen::audible_bell_count()`; this is the
 /// replacement used by `Session`'s parser.
 ///
-/// Also flags cursor-position-report requests (`ESC[6n`). On Windows,
-/// ConPTY sends this at startup (and TUI apps may send it later) and
-/// blocks the child process until it sees a `ESC[row;colR` reply on the
-/// input side — vt100 has no back-channel to the pty to answer this
-/// itself, so it can only signal the request here for `Session` to
-/// answer via its writer.
+/// Also counts pending cursor-position-report requests (plain `ESC[6n`,
+/// i.e. `CSI 6 n` with no intermediate byte). On Windows, ConPTY sends this
+/// at startup (and TUI apps may send it later) and blocks the child process
+/// until it sees a `ESC[row;colR` reply on the input side — vt100 has no
+/// back-channel to the pty to answer this itself, so it can only signal the
+/// request here for `Session` to answer via its writer.
+///
+/// A count rather than a bool because several plain `CSI 6 n` queries can
+/// arrive in a single `process()` batch and each one needs its own reply,
+/// or a child blocking on the Nth reply hangs forever.
+///
+/// `CSI ? 6 n` (DECXCPR, the `?`-intermediate variant) is a different query
+/// with a different reply format (`CSI ? row;col;1 R`) and is deliberately
+/// NOT counted here -- answering it with the plain-DSR reply format would
+/// be a wrong response injected into the child's input.
 #[derive(Debug, Default)]
 pub struct BellCounter {
     pub count: usize,
-    pub needs_cursor_report: bool,
+    pub pending_cursor_reports: usize,
 }
 
 impl vt100::Callbacks for BellCounter {
@@ -27,14 +36,16 @@ impl vt100::Callbacks for BellCounter {
     fn unhandled_csi(
         &mut self,
         _: &mut vt100::Screen,
-        _i1: Option<u8>,
+        i1: Option<u8>,
         _i2: Option<u8>,
         params: &[&[u16]],
         c: char,
     ) {
-        // CSI 6 n == Device Status Report / cursor position query.
-        if c == 'n' && params.first().and_then(|p| p.first()) == Some(&6) {
-            self.needs_cursor_report = true;
+        // CSI 6 n == Device Status Report / cursor position query. Only the
+        // no-intermediate form; see the doc comment above for why `CSI ? 6
+        // n` (i1 == Some(b'?')) is excluded.
+        if i1.is_none() && c == 'n' && params.first().and_then(|p| p.first()) == Some(&6) {
+            self.pending_cursor_reports += 1;
         }
     }
 }
@@ -184,5 +195,32 @@ mod tests {
         assert_eq!(parser.callbacks().count, 0);
         parser.process(b"hello\x07");
         assert_eq!(parser.callbacks().count, 1);
+    }
+
+    #[test]
+    fn plain_dsr_query_increments_pending_cursor_reports() {
+        let counter = BellCounter::default();
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, counter);
+        parser.process(b"\x1b[6n"); // CSI 6 n -- plain cursor position query
+        assert_eq!(parser.callbacks().pending_cursor_reports, 1);
+    }
+
+    #[test]
+    fn decxcpr_query_is_not_counted_as_a_plain_dsr_request() {
+        // CSI ? 6 n (DECXCPR) reaches unhandled_csi with i1 == Some(b'?')
+        // and uses a different reply format -- it must not be answered as
+        // if it were a plain CSI 6 n.
+        let counter = BellCounter::default();
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, counter);
+        parser.process(b"\x1b[?6n"); // CSI ? 6 n -- DECXCPR
+        assert_eq!(parser.callbacks().pending_cursor_reports, 0);
+    }
+
+    #[test]
+    fn two_plain_dsr_queries_in_one_batch_are_both_counted() {
+        let counter = BellCounter::default();
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, counter);
+        parser.process(b"\x1b[6n\x1b[6n"); // two queries in a single process() call
+        assert_eq!(parser.callbacks().pending_cursor_reports, 2);
     }
 }

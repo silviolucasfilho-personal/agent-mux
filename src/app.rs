@@ -413,11 +413,14 @@ impl App {
     }
 
     pub fn kill_all(&mut self) {
-        let now = Instant::now();
+        // Kill unconditionally, even for sessions whose status is already
+        // Exited: forward_bytes marks a session Exited(None) on a write
+        // failure without killing the child, so skipping "Exited" sessions
+        // here could leave a still-live child running past app quit.
+        // Session::kill() already swallows errors on a dead/already-exited
+        // child, so calling it again here is harmless.
         for s in &mut self.sessions {
-            if !matches!(s.status(now), Status::Exited(_)) {
-                s.kill();
-            }
+            s.kill();
         }
     }
 }

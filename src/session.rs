@@ -253,16 +253,21 @@ impl Session {
         self.tracker.on_output(now, bells, focused);
         // ConPTY (and some full-screen TUIs) query the cursor position and
         // block until we answer on the input side. See BellCounter's doc
-        // comment for why this lives on the callbacks type.
-        if self.parser.callbacks().needs_cursor_report {
-            self.parser.callbacks_mut().needs_cursor_report = false;
+        // comment for why this lives on the callbacks type, and for why
+        // this is a count rather than a flag: a batch can contain more than
+        // one plain `CSI 6 n` query, and each needs its own reply.
+        let pending = std::mem::take(&mut self.parser.callbacks_mut().pending_cursor_reports);
+        if pending > 0 {
             let (row, col) = self.parser.screen().cursor_position();
-            // Must be a single write_all: `write!` here fragments the reply
-            // across several small write() calls (one per formatted
-            // segment), and ConPTY's handshake reader does not tolerate a
-            // split escape sequence -- it just hangs forever.
             let reply = format!("\x1b[{};{}R", row + 1, col + 1);
-            let _ = self.writer.write_all(reply.as_bytes());
+            for _ in 0..pending {
+                // Must be a single write_all: `write!` here fragments the
+                // reply across several small write() calls (one per
+                // formatted segment), and ConPTY's handshake reader does
+                // not tolerate a split escape sequence -- it just hangs
+                // forever.
+                let _ = self.writer.write_all(reply.as_bytes());
+            }
             let _ = self.writer.flush();
         }
     }

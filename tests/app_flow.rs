@@ -148,6 +148,38 @@ async fn kill_confirm_respawn_and_remove() {
 }
 
 #[tokio::test]
+async fn duplicate_pty_exit_is_idempotent() {
+    // AppEvent::PtyExit for a given id is not guaranteed once-per-session
+    // (see Session::spawn's doc comment: both the reader thread and the
+    // exit-watcher thread can send one). A second handle_pty_exit for an
+    // already-exited session must be a no-op, not a panic or a status change.
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut app = App::new(shell_profiles(), tx);
+    create_session_via_dialog(&mut app);
+    let id = app.sessions[0].id;
+    app.sessions[0].kill();
+    let ok = pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {
+        matches!(a.sessions[0].status(Instant::now()), Status::Exited(_))
+    })
+    .await;
+    assert!(ok, "kill never produced Exited");
+    let status_before = app.sessions[0].status(Instant::now());
+
+    // Simulate the duplicate PtyExit arriving directly (bypassing the
+    // channel, since by now both background threads have already fired).
+    app.handle_pty_exit(id);
+
+    assert_eq!(app.sessions.len(), 1, "session must not be removed");
+    let status_after = app.sessions[0].status(Instant::now());
+    assert_eq!(
+        status_before, status_after,
+        "duplicate PtyExit must not change status"
+    );
+    assert!(matches!(status_after, Status::Exited(_)));
+    app.kill_all();
+}
+
+#[tokio::test]
 async fn quit_asks_for_confirmation_while_working() {
     let (tx, mut rx) = mpsc::channel(256);
     let mut app = App::new(shell_profiles(), tx);
