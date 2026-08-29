@@ -3,6 +3,42 @@ use std::time::{Duration, Instant};
 /// Output within this window => Working. Tunable here only.
 pub const ACTIVITY_WINDOW: Duration = Duration::from_secs(2);
 
+/// vt100 `Callbacks` implementation that counts audible bells. vt100 0.16.2
+/// no longer exposes `Screen::audible_bell_count()`; this is the
+/// replacement used by `Session`'s parser.
+///
+/// Also flags cursor-position-report requests (`ESC[6n`). On Windows,
+/// ConPTY sends this at startup (and TUI apps may send it later) and
+/// blocks the child process until it sees a `ESC[row;colR` reply on the
+/// input side — vt100 has no back-channel to the pty to answer this
+/// itself, so it can only signal the request here for `Session` to
+/// answer via its writer.
+#[derive(Debug, Default)]
+pub struct BellCounter {
+    pub count: usize,
+    pub needs_cursor_report: bool,
+}
+
+impl vt100::Callbacks for BellCounter {
+    fn audible_bell(&mut self, _: &mut vt100::Screen) {
+        self.count += 1;
+    }
+
+    fn unhandled_csi(
+        &mut self,
+        _: &mut vt100::Screen,
+        _i1: Option<u8>,
+        _i2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        // CSI 6 n == Device Status Report / cursor position query.
+        if c == 'n' && params.first().and_then(|p| p.first()) == Some(&6) {
+            self.needs_cursor_report = true;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Working,
@@ -133,18 +169,9 @@ mod tests {
 
     #[test]
     fn vt100_counts_real_bell_but_not_osc_terminator() {
-        // Verifies the design assumption behind using audible_bell_count().
+        // Verifies the design assumption behind using BellCounter in place
+        // of the no-longer-available Screen::audible_bell_count().
         // In vt100 0.16.2, bells are tracked via Callbacks trait.
-        #[derive(Default)]
-        struct BellCounter {
-            count: usize,
-        }
-        impl vt100::Callbacks for BellCounter {
-            fn audible_bell(&mut self, _: &mut vt100::Screen) {
-                self.count += 1;
-            }
-        }
-
         let counter = BellCounter::default();
         let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, counter);
         parser.process(b"\x1b]0;window title\x07"); // OSC set-title, BEL-terminated
