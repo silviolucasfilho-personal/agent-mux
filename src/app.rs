@@ -136,15 +136,21 @@ impl DialogState {
             .first()
             .and_then(|p| p.default_dir.clone())
             .unwrap_or_default();
-        DialogState { profile_idx: 0, dir, dir_edited: false, field: DialogField::Profile, error: None }
+        DialogState {
+            profile_idx: 0,
+            dir,
+            dir_edited: false,
+            field: DialogField::Profile,
+            error: None,
+        }
     }
 
     fn set_profile(&mut self, idx: usize, profiles: &[Profile]) {
         self.profile_idx = idx;
-        if !self.dir_edited {
-            if let Some(d) = profiles.get(idx).and_then(|p| p.default_dir.clone()) {
-                self.dir = d;
-            }
+        if !self.dir_edited
+            && let Some(d) = profiles.get(idx).and_then(|p| p.default_dir.clone())
+        {
+            self.dir = d;
         }
     }
 
@@ -269,11 +275,11 @@ impl App {
                 // the pty -- a failed write already dropped us to Control
                 // via forward_bytes (spec: write failure -> error + Exited
                 // + Control), and re-attaching here would override that.
-                if self.forward_bytes(&[0x11]) {
-                    if let Some(s) = self.sessions.get_mut(self.selected) {
-                        s.tracker.on_attach();
-                        self.mode = Mode::Attached;
-                    }
+                if self.forward_bytes(&[0x11])
+                    && let Some(s) = self.sessions.get_mut(self.selected)
+                {
+                    s.tracker.on_attach();
+                    self.mode = Mode::Attached;
                 }
             }
             Action::ForwardBytes(bytes) => {
@@ -311,20 +317,22 @@ impl App {
     /// Control) -- callers must not re-attach or otherwise treat the
     /// session as still live when this returns `false`.
     fn forward_bytes(&mut self, bytes: &[u8]) -> bool {
-        if let Some(s) = self.sessions.get_mut(self.selected) {
-            if let Err(e) = s.write_bytes(bytes) {
-                // spec: write failure -> status-bar error, session Exited
-                self.error = Some(format!("write to '{}' failed: {e}", s.profile.name));
-                s.tracker.on_exit(None);
-                self.mode = Mode::Control;
-                return false;
-            }
+        if let Some(s) = self.sessions.get_mut(self.selected)
+            && let Err(e) = s.write_bytes(bytes)
+        {
+            // spec: write failure -> status-bar error, session Exited
+            self.error = Some(format!("write to '{}' failed: {e}", s.profile.name));
+            s.tracker.on_exit(None);
+            self.mode = Mode::Control;
+            return false;
         }
         true
     }
 
     fn handle_dialog_key(&mut self, key: &KeyEvent) {
-        let Mode::NewSession(dialog) = &mut self.mode else { return };
+        let Mode::NewSession(dialog) = &mut self.mode else {
+            return;
+        };
         match dialog.handle_key(key, &self.profiles) {
             DialogResult::Consumed => {}
             DialogResult::Cancel => self.mode = Mode::Control,
@@ -350,7 +358,9 @@ impl App {
     }
 
     fn respawn_selected(&mut self) {
-        let Some(old) = self.sessions.get(self.selected) else { return };
+        let Some(old) = self.sessions.get(self.selected) else {
+            return;
+        };
         let (rows, cols) = self.pane_size;
         // Fresh id: a stale reader thread from the dead session may still
         // send PtyExit for the old id; it must not find the new session.
@@ -372,8 +382,11 @@ impl App {
     }
 
     pub fn handle_pty_output(&mut self, id: usize, bytes: &[u8], now: Instant) {
-        let focused =
-            self.attached().and_then(|i| self.sessions.get(i)).map(|s| s.id) == Some(id);
+        let focused = self
+            .attached()
+            .and_then(|i| self.sessions.get(i))
+            .map(|s| s.id)
+            == Some(id);
         if let Some(i) = self.session_index(id) {
             self.sessions[i].process_output(bytes, now, focused);
         }
@@ -424,60 +437,106 @@ mod dispatch_tests {
     }
 
     fn ctx(selected: Option<Status>) -> DispatchCtx {
-        DispatchCtx { selected_status: selected, any_working: false, just_detached: false }
+        DispatchCtx {
+            selected_status: selected,
+            any_working: false,
+            just_detached: false,
+        }
     }
 
     #[test]
     fn control_navigation() {
         let c = ctx(Some(Status::Idle));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Char('j')), &c), Action::MoveDown));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Down), &c), Action::MoveDown));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Char('k')), &c), Action::MoveUp));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Up), &c), Action::MoveUp));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('j')), &c),
+            Action::MoveDown
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Down), &c),
+            Action::MoveDown
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('k')), &c),
+            Action::MoveUp
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Up), &c),
+            Action::MoveUp
+        ));
     }
 
     #[test]
     fn control_attach_and_new() {
         let c = ctx(Some(Status::Idle));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Enter), &c), Action::Attach));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Char('n')), &c), Action::OpenNewSession));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Enter), &c),
+            Action::Attach
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('n')), &c),
+            Action::OpenNewSession
+        ));
     }
 
     #[test]
     fn enter_with_no_sessions_is_noop() {
         let c = ctx(None);
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Enter), &c), Action::None));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Enter), &c),
+            Action::None
+        ));
     }
 
     #[test]
     fn x_confirms_kill_when_running_removes_when_exited() {
         let running = ctx(Some(Status::Working));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Char('x')), &running), Action::EnterConfirmKill));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('x')), &running),
+            Action::EnterConfirmKill
+        ));
         let exited = ctx(Some(Status::Exited(Some(0))));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Char('x')), &exited), Action::RemoveSelected));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('x')), &exited),
+            Action::RemoveSelected
+        ));
     }
 
     #[test]
     fn r_respawns_only_exited() {
         let exited = ctx(Some(Status::Exited(Some(1))));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Char('r')), &exited), Action::RespawnSelected));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('r')), &exited),
+            Action::RespawnSelected
+        ));
         let running = ctx(Some(Status::Working));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Char('r')), &running), Action::None));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('r')), &running),
+            Action::None
+        ));
     }
 
     #[test]
     fn q_quits_directly_unless_something_is_working() {
         let quiet = ctx(Some(Status::Idle));
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Char('q')), &quiet), Action::Quit));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('q')), &quiet),
+            Action::Quit
+        ));
         let mut busy = ctx(Some(Status::Idle));
         busy.any_working = true;
-        assert!(matches!(dispatch(&Mode::Control, &key(KeyCode::Char('q')), &busy), Action::EnterConfirmQuit));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('q')), &busy),
+            Action::EnterConfirmQuit
+        ));
     }
 
     #[test]
     fn attached_ctrl_q_detaches_everything_else_forwards() {
         let c = ctx(Some(Status::Working));
-        assert!(matches!(dispatch(&Mode::Attached, &ctrl_q(), &c), Action::Detach));
+        assert!(matches!(
+            dispatch(&Mode::Attached, &ctrl_q(), &c),
+            Action::Detach
+        ));
         match dispatch(&Mode::Attached, &key(KeyCode::Char('a')), &c) {
             Action::ForwardBytes(b) => assert_eq!(b, b"a".to_vec()),
             other => panic!("expected ForwardBytes, got {other:?}"),
@@ -493,28 +552,55 @@ mod dispatch_tests {
     fn double_ctrl_q_sends_literal() {
         let mut c = ctx(Some(Status::Working));
         c.just_detached = true;
-        assert!(matches!(dispatch(&Mode::Control, &ctrl_q(), &c), Action::SendLiteralDetachKey));
+        assert!(matches!(
+            dispatch(&Mode::Control, &ctrl_q(), &c),
+            Action::SendLiteralDetachKey
+        ));
         // without the flag, Ctrl+Q in Control does nothing
         c.just_detached = false;
-        assert!(matches!(dispatch(&Mode::Control, &ctrl_q(), &c), Action::None));
+        assert!(matches!(
+            dispatch(&Mode::Control, &ctrl_q(), &c),
+            Action::None
+        ));
     }
 
     #[test]
     fn confirm_modes() {
         let c = ctx(Some(Status::Working));
-        assert!(matches!(dispatch(&Mode::ConfirmKill, &key(KeyCode::Char('y')), &c), Action::KillSelected));
-        assert!(matches!(dispatch(&Mode::ConfirmKill, &key(KeyCode::Enter), &c), Action::KillSelected));
-        assert!(matches!(dispatch(&Mode::ConfirmKill, &key(KeyCode::Esc), &c), Action::CancelToControl));
-        assert!(matches!(dispatch(&Mode::ConfirmKill, &key(KeyCode::Char('n')), &c), Action::CancelToControl));
-        assert!(matches!(dispatch(&Mode::ConfirmQuit, &key(KeyCode::Char('y')), &c), Action::Quit));
-        assert!(matches!(dispatch(&Mode::ConfirmQuit, &key(KeyCode::Esc), &c), Action::CancelToControl));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmKill, &key(KeyCode::Char('y')), &c),
+            Action::KillSelected
+        ));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmKill, &key(KeyCode::Enter), &c),
+            Action::KillSelected
+        ));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmKill, &key(KeyCode::Esc), &c),
+            Action::CancelToControl
+        ));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmKill, &key(KeyCode::Char('n')), &c),
+            Action::CancelToControl
+        ));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmQuit, &key(KeyCode::Char('y')), &c),
+            Action::Quit
+        ));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmQuit, &key(KeyCode::Esc), &c),
+            Action::CancelToControl
+        ));
     }
 
     #[test]
     fn new_session_mode_routes_to_dialog() {
         let mode = Mode::NewSession(DialogState::new(&crate::config::Config::default_profiles()));
         let c = ctx(None);
-        assert!(matches!(dispatch(&mode, &key(KeyCode::Char('a')), &c), Action::DialogKey));
+        assert!(matches!(
+            dispatch(&mode, &key(KeyCode::Char('a')), &c),
+            Action::DialogKey
+        ));
     }
 }
 
@@ -530,8 +616,18 @@ mod dialog_tests {
 
     fn profiles() -> Vec<Profile> {
         vec![
-            Profile { name: "A".into(), command: "a".into(), args: vec![], default_dir: Some("C:\\one".into()) },
-            Profile { name: "B".into(), command: "b".into(), args: vec![], default_dir: Some("C:\\two".into()) },
+            Profile {
+                name: "A".into(),
+                command: "a".into(),
+                args: vec![],
+                default_dir: Some("C:\\one".into()),
+            },
+            Profile {
+                name: "B".into(),
+                command: "b".into(),
+                args: vec![],
+                default_dir: Some("C:\\two".into()),
+            },
         ]
     }
 
@@ -577,8 +673,17 @@ mod dialog_tests {
     fn enter_submits_esc_cancels() {
         let ps = profiles();
         let mut d = DialogState::new(&ps);
-        assert!(matches!(d.handle_key(&key(KeyCode::Enter), &ps), DialogResult::Submit));
-        assert!(matches!(d.handle_key(&key(KeyCode::Esc), &ps), DialogResult::Cancel));
-        assert!(matches!(d.handle_key(&key(KeyCode::Char('q')), &ps), DialogResult::Consumed));
+        assert!(matches!(
+            d.handle_key(&key(KeyCode::Enter), &ps),
+            DialogResult::Submit
+        ));
+        assert!(matches!(
+            d.handle_key(&key(KeyCode::Esc), &ps),
+            DialogResult::Cancel
+        ));
+        assert!(matches!(
+            d.handle_key(&key(KeyCode::Char('q')), &ps),
+            DialogResult::Consumed
+        ));
     }
 }

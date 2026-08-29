@@ -13,7 +13,12 @@ fn shell_profile(args: &[&str]) -> Profile {
     let (command, base): (&str, Vec<String>) = ("sh", vec![]);
     let mut all = base;
     all.extend(args.iter().map(|s| s.to_string()));
-    Profile { name: "test".into(), command: command.into(), args: all, default_dir: None }
+    Profile {
+        name: "test".into(),
+        command: command.into(),
+        args: all,
+        default_dir: None,
+    }
 }
 
 fn echo_args(msg: &str) -> Vec<String> {
@@ -59,9 +64,11 @@ fn screen_text(session: &Session) -> String {
 async fn spawn_echo_renders_output_and_exits_zero() {
     let (tx, mut rx) = mpsc::channel(256);
     let profile = shell_profile(&[]);
-    let profile = Profile { args: echo_args("hello-agent-mux"), ..profile };
-    let mut session =
-        Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx).unwrap();
+    let profile = Profile {
+        args: echo_args("hello-agent-mux"),
+        ..profile
+    };
+    let mut session = Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx).unwrap();
     let ok = pump_until(&mut rx, &mut session, Duration::from_secs(10), |s| {
         screen_text(s).contains("hello-agent-mux")
             && matches!(s.status(Instant::now()), Status::Exited(_))
@@ -147,9 +154,11 @@ async fn kill_terminates_long_running_child() {
     let args = vec!["/c".to_string(), "ping -n 60 127.0.0.1 > NUL".to_string()];
     #[cfg(not(windows))]
     let args = vec!["-c".to_string(), "sleep 60".to_string()];
-    let profile = Profile { args, ..shell_profile(&[]) };
-    let mut session =
-        Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx).unwrap();
+    let profile = Profile {
+        args,
+        ..shell_profile(&[])
+    };
+    let mut session = Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx).unwrap();
     session.kill();
     let ok = pump_until(&mut rx, &mut session, Duration::from_secs(10), |s| {
         matches!(s.status(Instant::now()), Status::Exited(_))

@@ -1,10 +1,10 @@
 use crate::app::{App, DialogField, DialogState, Mode};
 use crate::status::Status;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
-use ratatui::Frame;
 use std::time::Instant;
 use tui_term::widget::PseudoTerminal;
 
@@ -16,7 +16,9 @@ pub fn status_label_style(status: Status) -> (String, Style) {
         Status::Idle => ("idle".into(), Style::default().fg(Color::DarkGray)),
         Status::NeedsAttention => (
             "attention".into(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         Status::Exited(Some(code)) => (format!("exit {code}"), Style::default().fg(Color::Red)),
         Status::Exited(None) => ("exited".into(), Style::default().fg(Color::Red)),
@@ -29,13 +31,16 @@ pub fn status_label_style(status: Status) -> (String, Style) {
 /// the main pane.
 pub fn main_pane_inner(total: Rect) -> (u16, u16) {
     let rows = total.height.saturating_sub(1).saturating_sub(2).max(1);
-    let cols = total.width.saturating_sub(SIDEBAR_WIDTH).saturating_sub(2).max(1);
+    let cols = total
+        .width
+        .saturating_sub(SIDEBAR_WIDTH)
+        .saturating_sub(2)
+        .max(1);
     (rows, cols)
 }
 
 pub fn draw(f: &mut Frame, app: &App, now: Instant) {
-    let [body, bar] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
+    let [body, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
     let [side, main] =
         Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
 
@@ -90,7 +95,11 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         return;
     };
     let (label, _) = status_label_style(session.status(now));
-    let title = format!(" {} — {} [{label}] ", session.profile.name, session.dir.display());
+    let title = format!(
+        " {} — {} [{label}] ",
+        session.profile.name,
+        session.dir.display()
+    );
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -109,7 +118,9 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     } else {
         match app.mode {
             Mode::Attached => Line::raw("ATTACHED — Ctrl+Q detach, Ctrl+Q Ctrl+Q send literal"),
-            _ => Line::raw("[j/k] select  [Enter] attach  [n] new  [x] kill  [r] respawn  [q] quit"),
+            _ => {
+                Line::raw("[j/k] select  [Enter] attach  [n] new  [x] kill  [r] respawn  [q] quit")
+            }
         }
     };
     f.render_widget(Paragraph::new(text), area);
@@ -127,9 +138,15 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
-    let area = centered(f.area(), 60, (app.profiles.len() as u16 + 8).min(f.area().height));
+    let area = centered(
+        f.area(),
+        60,
+        (app.profiles.len() as u16 + 8).min(f.area().height),
+    );
     f.render_widget(Clear, area);
-    let block = Block::default().borders(Borders::ALL).title(" New session ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" New session ");
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw("Profile:"));
     for (i, p) in app.profiles.iter().enumerate() {
@@ -171,8 +188,8 @@ mod tests {
     use crate::app::App;
     use crate::config::Config;
     use crate::status::Status;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use std::time::Instant;
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {

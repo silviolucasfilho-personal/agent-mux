@@ -2,7 +2,7 @@ use crate::config::Profile;
 use crate::events::AppEvent;
 use crate::status::{BellCounter, Status, StatusTracker};
 use anyhow::Context;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -22,8 +22,11 @@ pub fn find_exe(command: &str, path_var: &OsStr) -> Option<PathBuf> {
     }
     let has_exe_ext = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"));
     for dir in std::env::split_paths(path_var) {
-        let candidate =
-            if has_exe_ext { dir.join(command) } else { dir.join(format!("{command}.exe")) };
+        let candidate = if has_exe_ext {
+            dir.join(command)
+        } else {
+            dir.join(format!("{command}.exe"))
+        };
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -152,7 +155,12 @@ impl Session {
             .ok_or_else(|| anyhow::anyhow!("command not found: {}", profile.command))?;
         let pty = native_pty_system();
         let pair = pty
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .context("openpty failed")?;
         let mut cmd = CommandBuilder::new(program);
         for a in &prefix_args {
@@ -184,7 +192,10 @@ impl Session {
                     }
                     Ok(n) => {
                         let bytes = buf[..n].to_vec();
-                        if reader_tx.blocking_send(AppEvent::PtyOutput { id, bytes }).is_err() {
+                        if reader_tx
+                            .blocking_send(AppEvent::PtyOutput { id, bytes })
+                            .is_err()
+                        {
                             break; // app is shutting down
                         }
                     }
@@ -202,17 +213,21 @@ impl Session {
         // (e.g. real Unix ptys, or once the Session itself is torn down).
         let watcher_child = Arc::clone(&child);
         let watcher_tx = tx;
-        std::thread::spawn(move || loop {
-            if watcher_tx.is_closed() {
-                break; // app is shutting down
+        std::thread::spawn(move || {
+            loop {
+                if watcher_tx.is_closed() {
+                    break; // app is shutting down
+                }
+                let exited = watcher_child
+                    .lock()
+                    .ok()
+                    .and_then(|mut c| c.try_wait().ok().flatten());
+                if exited.is_some() {
+                    let _ = watcher_tx.blocking_send(AppEvent::PtyExit { id });
+                    break;
+                }
+                std::thread::sleep(EXIT_POLL_INTERVAL);
             }
-            let exited =
-                watcher_child.lock().ok().and_then(|mut c| c.try_wait().ok().flatten());
-            if exited.is_some() {
-                let _ = watcher_tx.blocking_send(AppEvent::PtyExit { id });
-                break;
-            }
-            std::thread::sleep(EXIT_POLL_INTERVAL);
         });
 
         Ok(Session {
@@ -259,7 +274,12 @@ impl Session {
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
         self.parser.screen_mut().set_size(rows, cols);
-        let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+        let _ = self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
     }
 
     pub fn kill(&mut self) {

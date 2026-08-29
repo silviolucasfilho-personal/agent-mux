@@ -5,7 +5,10 @@ pub enum AppEvent {
     Key(KeyEvent),
     /// (cols, rows) as crossterm reports them.
     Resize(u16, u16),
-    PtyOutput { id: usize, bytes: Vec<u8> },
+    PtyOutput {
+        id: usize,
+        bytes: Vec<u8>,
+    },
     /// Session `id`'s pty has exited (or is exiting). Two things a consumer
     /// must know before handling this, both driven by how `Session::spawn`
     /// (session.rs) detects exit -- see its doc comment for the full
@@ -22,6 +25,8 @@ pub enum AppEvent {
     ///   bit of output. Consumers must keep processing any `PtyOutput` that
     ///   arrives after a `PtyExit` rather than treating `PtyExit` as a
     ///   signal to stop feeding the parser.
-    PtyExit { id: usize },
+    PtyExit {
+        id: usize,
+    },
     Tick,
 }

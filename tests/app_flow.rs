@@ -132,7 +132,10 @@ async fn kill_confirm_respawn_and_remove() {
     assert!(ok, "kill never produced Exited");
     // r respawns with same profile/dir, screen resets, session is live again
     app.handle_key(&key(KeyCode::Char('r')), Instant::now());
-    assert!(!matches!(app.sessions[0].status(Instant::now()), Status::Exited(_)));
+    assert!(!matches!(
+        app.sessions[0].status(Instant::now()),
+        Status::Exited(_)
+    ));
     // kill again, then x removes the exited session
     app.sessions[0].kill();
     let ok = pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {

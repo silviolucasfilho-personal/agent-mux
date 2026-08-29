@@ -113,7 +113,10 @@ mod tests {
         let now = t0();
         let mut tracker = StatusTracker::new();
         tracker.on_output(now, 0, false);
-        assert_eq!(tracker.status(now + Duration::from_millis(500)), Status::Working);
+        assert_eq!(
+            tracker.status(now + Duration::from_millis(500)),
+            Status::Working
+        );
     }
 
     #[test]
@@ -121,7 +124,10 @@ mod tests {
         let now = t0();
         let mut tracker = StatusTracker::new();
         tracker.on_output(now, 0, false);
-        assert_eq!(tracker.status(now + ACTIVITY_WINDOW + Duration::from_millis(1)), Status::Idle);
+        assert_eq!(
+            tracker.status(now + ACTIVITY_WINDOW + Duration::from_millis(1)),
+            Status::Idle
+        );
     }
 
     #[test]

@@ -74,7 +74,10 @@ mod tests {
     #[test]
     fn plain_chars_pass_through_utf8() {
         assert_eq!(encode_key(&key(KeyCode::Char('a'))), Some(b"a".to_vec()));
-        assert_eq!(encode_key(&key(KeyCode::Char('é'))), Some("é".as_bytes().to_vec()));
+        assert_eq!(
+            encode_key(&key(KeyCode::Char('é'))),
+            Some("é".as_bytes().to_vec())
+        );
     }
 
     #[test]
@@ -97,7 +100,10 @@ mod tests {
         assert_eq!(encode_key(&key(KeyCode::Left)), Some(b"\x1b[D".to_vec()));
         assert_eq!(encode_key(&key(KeyCode::Delete)), Some(b"\x1b[3~".to_vec()));
         assert_eq!(encode_key(&key(KeyCode::PageUp)), Some(b"\x1b[5~".to_vec()));
-        assert_eq!(encode_key(&key(KeyCode::PageDown)), Some(b"\x1b[6~".to_vec()));
+        assert_eq!(
+            encode_key(&key(KeyCode::PageDown)),
+            Some(b"\x1b[6~".to_vec())
+        );
     }
 
     #[test]

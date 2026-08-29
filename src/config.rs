@@ -49,14 +49,15 @@ pub fn load() -> anyhow::Result<Config> {
     for path in candidates {
         if path.is_file() {
             let text = std::fs::read_to_string(&path)?;
-            let cfg = parse(&text)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            let cfg = parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
             if !cfg.profiles.is_empty() {
                 return Ok(cfg);
             }
         }
     }
-    Ok(Config { profiles: Config::default_profiles() })
+    Ok(Config {
+        profiles: Config::default_profiles(),
+    })
 }
 
 #[cfg(test)]
