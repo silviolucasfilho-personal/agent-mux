@@ -242,7 +242,7 @@ impl App {
         self.apply(action, key, now);
     }
 
-    fn apply(&mut self, action: Action, key: &KeyEvent, now: Instant) {
+    fn apply(&mut self, action: Action, key: &KeyEvent, _now: Instant) {
         match action {
             Action::None => {}
             Action::Quit => self.should_quit = true,
@@ -265,13 +265,20 @@ impl App {
             }
             Action::SendLiteralDetachKey => {
                 self.just_detached = false;
-                self.forward_bytes(&[0x11]);
-                if let Some(s) = self.sessions.get_mut(self.selected) {
-                    s.tracker.on_attach();
-                    self.mode = Mode::Attached;
+                // Only re-attach if the literal Ctrl+Q actually made it to
+                // the pty -- a failed write already dropped us to Control
+                // via forward_bytes (spec: write failure -> error + Exited
+                // + Control), and re-attaching here would override that.
+                if self.forward_bytes(&[0x11]) {
+                    if let Some(s) = self.sessions.get_mut(self.selected) {
+                        s.tracker.on_attach();
+                        self.mode = Mode::Attached;
+                    }
                 }
             }
-            Action::ForwardBytes(bytes) => self.forward_bytes(&bytes),
+            Action::ForwardBytes(bytes) => {
+                self.forward_bytes(&bytes);
+            }
             Action::OpenNewSession => {
                 self.mode = Mode::NewSession(DialogState::new(&self.profiles));
             }
@@ -296,15 +303,24 @@ impl App {
         }
     }
 
-    fn forward_bytes(&mut self, bytes: &[u8]) {
+    /// Writes `bytes` to the selected session. Returns `true` if the write
+    /// succeeded (or there was no selected session to write to -- a no-op
+    /// counts as success for callers deciding whether to proceed), `false`
+    /// if the write failed. On failure this already applies the full spec
+    /// consequence (status-bar error, session marked Exited, drop to
+    /// Control) -- callers must not re-attach or otherwise treat the
+    /// session as still live when this returns `false`.
+    fn forward_bytes(&mut self, bytes: &[u8]) -> bool {
         if let Some(s) = self.sessions.get_mut(self.selected) {
             if let Err(e) = s.write_bytes(bytes) {
                 // spec: write failure -> status-bar error, session Exited
                 self.error = Some(format!("write to '{}' failed: {e}", s.profile.name));
                 s.tracker.on_exit(None);
                 self.mode = Mode::Control;
+                return false;
             }
         }
+        true
     }
 
     fn handle_dialog_key(&mut self, key: &KeyEvent) {
