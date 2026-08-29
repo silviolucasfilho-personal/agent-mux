@@ -268,14 +268,28 @@ impl Session {
         }
     }
 
+    /// EOF (or an exit-watcher signal) already happened, so the child is
+    /// gone or going; wait briefly for the exit code, then give up and
+    /// record an unknown code. Never holds the child lock across the sleep,
+    /// so it doesn't block `kill()`/other callers polling `try_wait()`
+    /// concurrently. Idempotent: `PtyExit` for a given id can arrive twice
+    /// (reader thread + exit-watcher thread), and calling this a second
+    /// time just re-locks, finds the child already reaped, and re-records
+    /// (or -- once already recorded -- `StatusTracker::on_exit` overwriting
+    /// its own `exited` field is harmless).
     pub fn mark_exited(&mut self) {
-        let code = self
-            .child
-            .lock()
-            .ok()
-            .and_then(|mut c| c.try_wait().ok().flatten())
-            .map(|s| s.exit_code());
-        self.tracker.on_exit(code);
+        for _ in 0..20 {
+            let result = self.child.lock().ok().map(|mut c| c.try_wait());
+            match result {
+                Some(Ok(Some(status))) => {
+                    self.tracker.on_exit(Some(status.exit_code()));
+                    return;
+                }
+                Some(Ok(None)) => std::thread::sleep(Duration::from_millis(50)),
+                Some(Err(_)) | None => break,
+            }
+        }
+        self.tracker.on_exit(None);
     }
 
     pub fn status(&self, now: Instant) -> Status {

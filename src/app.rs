@@ -1,7 +1,11 @@
 use crate::config::Profile;
+use crate::events::AppEvent;
 use crate::keys::encode_key;
+use crate::session::Session;
 use crate::status::Status;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::Instant;
+use tokio::sync::mpsc::Sender;
 
 #[derive(Debug)]
 pub enum Mode {
@@ -180,6 +184,212 @@ impl DialogState {
             },
         }
         DialogResult::Consumed
+    }
+}
+
+pub struct App {
+    pub sessions: Vec<Session>,
+    pub selected: usize,
+    pub mode: Mode,
+    pub should_quit: bool,
+    pub error: Option<String>,
+    pub profiles: Vec<Profile>,
+    pub pane_size: (u16, u16), // (rows, cols)
+    just_detached: bool,
+    next_id: usize,
+    tx: Sender<AppEvent>,
+}
+
+impl App {
+    pub fn new(profiles: Vec<Profile>, tx: Sender<AppEvent>) -> App {
+        App {
+            sessions: Vec::new(),
+            selected: 0,
+            mode: Mode::Control,
+            should_quit: false,
+            error: None,
+            profiles,
+            pane_size: (24, 80),
+            just_detached: false,
+            next_id: 0,
+            tx,
+        }
+    }
+
+    pub fn attached(&self) -> Option<usize> {
+        matches!(self.mode, Mode::Attached).then_some(self.selected)
+    }
+
+    fn session_index(&self, id: usize) -> Option<usize> {
+        self.sessions.iter().position(|s| s.id == id)
+    }
+
+    pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) {
+        self.error = None;
+        let ctx = DispatchCtx {
+            selected_status: self.sessions.get(self.selected).map(|s| s.status(now)),
+            any_working: self
+                .sessions
+                .iter()
+                .any(|s| matches!(s.status(now), Status::Working)),
+            just_detached: self.just_detached,
+        };
+        let action = dispatch(&self.mode, key, &ctx);
+        // any Control-mode key other than the literal-send consumes the flag
+        if !matches!(action, Action::Detach | Action::SendLiteralDetachKey) {
+            self.just_detached = false;
+        }
+        self.apply(action, key, now);
+    }
+
+    fn apply(&mut self, action: Action, key: &KeyEvent, now: Instant) {
+        match action {
+            Action::None => {}
+            Action::Quit => self.should_quit = true,
+            Action::EnterConfirmQuit => self.mode = Mode::ConfirmQuit,
+            Action::MoveDown => {
+                if !self.sessions.is_empty() {
+                    self.selected = (self.selected + 1).min(self.sessions.len() - 1);
+                }
+            }
+            Action::MoveUp => self.selected = self.selected.saturating_sub(1),
+            Action::Attach => {
+                if let Some(s) = self.sessions.get_mut(self.selected) {
+                    s.tracker.on_attach();
+                    self.mode = Mode::Attached;
+                }
+            }
+            Action::Detach => {
+                self.mode = Mode::Control;
+                self.just_detached = true;
+            }
+            Action::SendLiteralDetachKey => {
+                self.just_detached = false;
+                self.forward_bytes(&[0x11]);
+                if let Some(s) = self.sessions.get_mut(self.selected) {
+                    s.tracker.on_attach();
+                    self.mode = Mode::Attached;
+                }
+            }
+            Action::ForwardBytes(bytes) => self.forward_bytes(&bytes),
+            Action::OpenNewSession => {
+                self.mode = Mode::NewSession(DialogState::new(&self.profiles));
+            }
+            Action::EnterConfirmKill => self.mode = Mode::ConfirmKill,
+            Action::KillSelected => {
+                if let Some(s) = self.sessions.get_mut(self.selected) {
+                    s.kill();
+                }
+                self.mode = Mode::Control;
+            }
+            Action::RemoveSelected => {
+                if self.selected < self.sessions.len() {
+                    self.sessions.remove(self.selected);
+                    if self.selected >= self.sessions.len() {
+                        self.selected = self.sessions.len().saturating_sub(1);
+                    }
+                }
+            }
+            Action::RespawnSelected => self.respawn_selected(),
+            Action::CancelToControl => self.mode = Mode::Control,
+            Action::DialogKey => self.handle_dialog_key(key),
+        }
+    }
+
+    fn forward_bytes(&mut self, bytes: &[u8]) {
+        if let Some(s) = self.sessions.get_mut(self.selected) {
+            if let Err(e) = s.write_bytes(bytes) {
+                // spec: write failure -> status-bar error, session Exited
+                self.error = Some(format!("write to '{}' failed: {e}", s.profile.name));
+                s.tracker.on_exit(None);
+                self.mode = Mode::Control;
+            }
+        }
+    }
+
+    fn handle_dialog_key(&mut self, key: &KeyEvent) {
+        let Mode::NewSession(dialog) = &mut self.mode else { return };
+        match dialog.handle_key(key, &self.profiles) {
+            DialogResult::Consumed => {}
+            DialogResult::Cancel => self.mode = Mode::Control,
+            DialogResult::Submit => {
+                let profile = match self.profiles.get(dialog.profile_idx) {
+                    Some(p) => p.clone(),
+                    None => return,
+                };
+                let dir = std::path::PathBuf::from(dialog.dir.clone());
+                let (rows, cols) = self.pane_size;
+                let id = self.next_id;
+                match Session::spawn(id, profile, dir, rows, cols, self.tx.clone()) {
+                    Ok(session) => {
+                        self.next_id += 1;
+                        self.sessions.push(session);
+                        self.selected = self.sessions.len() - 1;
+                        self.mode = Mode::Control;
+                    }
+                    Err(e) => dialog.error = Some(e.to_string()),
+                }
+            }
+        }
+    }
+
+    fn respawn_selected(&mut self) {
+        let Some(old) = self.sessions.get(self.selected) else { return };
+        let (rows, cols) = self.pane_size;
+        // Fresh id: a stale reader thread from the dead session may still
+        // send PtyExit for the old id; it must not find the new session.
+        let id = self.next_id;
+        match Session::spawn(
+            id,
+            old.profile.clone(),
+            old.dir.clone(),
+            rows,
+            cols,
+            self.tx.clone(),
+        ) {
+            Ok(session) => {
+                self.next_id += 1;
+                self.sessions[self.selected] = session;
+            }
+            Err(e) => self.error = Some(format!("respawn failed: {e}")),
+        }
+    }
+
+    pub fn handle_pty_output(&mut self, id: usize, bytes: &[u8], now: Instant) {
+        let focused =
+            self.attached().and_then(|i| self.sessions.get(i)).map(|s| s.id) == Some(id);
+        if let Some(i) = self.session_index(id) {
+            self.sessions[i].process_output(bytes, now, focused);
+        }
+    }
+
+    pub fn handle_pty_exit(&mut self, id: usize) {
+        if let Some(i) = self.session_index(id) {
+            self.sessions[i].mark_exited();
+            // if we were attached to it, drop back to Control
+            if self.attached() == Some(i) {
+                self.mode = Mode::Control;
+            }
+        }
+    }
+
+    pub fn set_pane_size(&mut self, rows: u16, cols: u16) {
+        if self.pane_size == (rows, cols) {
+            return;
+        }
+        self.pane_size = (rows, cols);
+        for s in &mut self.sessions {
+            s.resize(rows, cols);
+        }
+    }
+
+    pub fn kill_all(&mut self) {
+        let now = Instant::now();
+        for s in &mut self.sessions {
+            if !matches!(s.status(now), Status::Exited(_)) {
+                s.kill();
+            }
+        }
     }
 }
 
