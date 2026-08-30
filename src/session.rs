@@ -126,12 +126,6 @@ const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 const SCROLLBACK_LINES: usize = 1000;
 
-/// Pure anchoring math: while the user is scrolled back, new lines pushed
-/// into scrollback must grow the offset so the visible content stays put.
-pub(crate) fn anchored_offset(offset: usize, len_before: usize, len_after: usize) -> usize {
-    offset + len_after.saturating_sub(len_before)
-}
-
 impl Session {
     /// Spawns `profile.command` in a new pty and starts two background
     /// threads that report through `tx`:
@@ -259,19 +253,18 @@ impl Session {
     }
 
     pub fn process_output(&mut self, bytes: &[u8], now: Instant, focused: bool) {
-        let offset = self.parser.screen().scrollback();
-        let len_before = self.scrollback_len;
+        // Content-anchored while scrolled: vt100's `Grid::scroll_up`
+        // already increments `scrollback_offset` by 1 for every row it
+        // pushes into scrollback whenever the offset is nonzero (see
+        // vendored vt100 0.16.2 grid.rs, `scroll_up`), so no manual
+        // re-anchoring is needed here -- just process and refresh the
+        // cached length. Limitation: that increment is clamped to
+        // scrollback's length, so once scrollback saturates at
+        // SCROLLBACK_LINES, a view pinned at the very top (offset == len)
+        // can drift as the oldest rows get dropped out from under it --
+        // same trade-off real emulators make at their buffer cap.
         self.parser.process(bytes);
         self.scrollback_len = self.probe_scrollback_len();
-        if offset > 0 {
-            // Content-anchored: don't let new output move the scrolled
-            // view. Limitation: once scrollback hits SCROLLBACK_LINES,
-            // vt100 drops the oldest rows and `scrollback_len` stops
-            // growing, so a view pinned at the very top can drift -- same
-            // trade-off real emulators make at their buffer cap.
-            let anchored = anchored_offset(offset, len_before, self.scrollback_len);
-            self.parser.screen_mut().set_scrollback(anchored);
-        }
         let bells = self.parser.callbacks().count;
         self.tracker.on_output(now, bells, focused);
         // ConPTY (and some full-screen TUIs) query the cursor position and
@@ -391,15 +384,6 @@ impl Session {
 
 #[cfg(test)]
 mod scroll_tests {
-    use super::*;
-
-    #[test]
-    fn anchored_offset_grows_with_new_scrollback() {
-        assert_eq!(anchored_offset(5, 10, 13), 8); // 3 new lines while scrolled 5
-        assert_eq!(anchored_offset(5, 10, 10), 5); // no growth
-        assert_eq!(anchored_offset(0, 10, 13), 3); // caller only anchors when offset > 0; math still total
-    }
-
     #[test]
     fn vt100_set_scrollback_self_clamps_and_probe_reads_len() {
         let mut parser = vt100::Parser::new(5, 20, 100);
@@ -426,6 +410,55 @@ mod scroll_tests {
         assert!(!parser.screen().contents().contains("line-0"));
         parser.screen_mut().set_scrollback(usize::MAX);
         assert!(parser.screen().contents().contains("line-0"));
+    }
+
+    fn top_line(parser: &vt100::Parser<()>) -> String {
+        parser
+            .screen()
+            .contents()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Below the scrollback cap: vt100's own `scroll_up` grows the offset
+    /// by 1 per row pushed into scrollback whenever scrolled, so the view
+    /// stays pinned on new output with no help from `Session`.
+    #[test]
+    fn vt100_natively_anchors_view_below_scrollback_cap() {
+        let mut parser: vt100::Parser<()> = vt100::Parser::new(5, 20, 100);
+        for i in 0..30 {
+            parser.process(format!("line-{i}\r\n").as_bytes());
+        }
+        parser.screen_mut().set_scrollback(5);
+        let before = top_line(&parser);
+        for i in 30..33 {
+            parser.process(format!("line-{i}\r\n").as_bytes());
+        }
+        assert_eq!(parser.screen().scrollback(), 8);
+        assert_eq!(top_line(&parser), before, "view moved while scrolled");
+    }
+
+    /// At scrollback saturation: the same auto-increment still applies (it
+    /// is clamped to the -- now constant -- scrollback length, not to
+    /// whether the cap has been hit), so a view scrolled partway back
+    /// still tracks new output without drifting, as long as it isn't
+    /// pinned at the very top (offset == len; see the limitation comment
+    /// in `process_output`).
+    #[test]
+    fn vt100_natively_anchors_view_at_scrollback_saturation() {
+        let mut parser: vt100::Parser<()> = vt100::Parser::new(5, 20, 20);
+        for i in 0..40 {
+            parser.process(format!("line-{i}\r\n").as_bytes());
+        }
+        parser.screen_mut().set_scrollback(10);
+        let before = top_line(&parser);
+        for i in 40..45 {
+            parser.process(format!("line-{i}\r\n").as_bytes());
+        }
+        assert_eq!(parser.screen().scrollback(), 15);
+        assert_eq!(top_line(&parser), before, "view moved while scrolled");
     }
 }
 
