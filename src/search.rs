@@ -60,10 +60,15 @@ impl SearchState {
                 // map byte offsets to char indices for the col map
                 let start_char = hay[..start].chars().count();
                 let end_char = start_char + needle.chars().count();
-                if let (Some(&cs), Some(&ce)) =
-                    (col_of_char.get(start_char), col_of_char.get(end_char.saturating_sub(1)))
-                {
-                    self.matches.push(Match { row, col_start: cs, col_end: ce });
+                if let (Some(&cs), Some(&ce)) = (
+                    col_of_char.get(start_char),
+                    col_of_char.get(end_char.saturating_sub(1)),
+                ) {
+                    self.matches.push(Match {
+                        row,
+                        col_start: cs,
+                        col_end: ce,
+                    });
                 }
                 from = end.max(start + 1);
             }

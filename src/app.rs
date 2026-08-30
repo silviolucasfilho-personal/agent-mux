@@ -7,9 +7,7 @@ use crate::selection::{self, Pos, Selection};
 use crate::session::Session;
 use crate::status::Status;
 use crate::ui;
-use crossterm::event::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
@@ -457,8 +455,12 @@ impl App {
     }
 
     fn rerun_search(&mut self) {
-        let Some(st) = self.search.as_mut() else { return };
-        let Some(s) = self.sessions.get_mut(self.selected) else { return };
+        let Some(st) = self.search.as_mut() else {
+            return;
+        };
+        let Some(s) = self.sessions.get_mut(self.selected) else {
+            return;
+        };
         let (len, _) = s.scroll_view();
         st.run(&mut s.parser, len);
     }
@@ -471,7 +473,9 @@ impl App {
         else {
             return;
         };
-        let Some(s) = self.sessions.get_mut(self.selected) else { return };
+        let Some(s) = self.sessions.get_mut(self.selected) else {
+            return;
+        };
         let (len, _) = s.scroll_view();
         // live rows need no scrolling; scrollback rows go to the top of view
         let offset = len.saturating_sub(row);
@@ -547,8 +551,7 @@ impl App {
             | MouseEventKind::Up(MouseButton::Left) => {
                 // the agent owns the mouse when attached + it asked for
                 // events, unless Shift forces local selection (iTerm2 rule)
-                let agent_owns =
-                    attached && !shift && mouse_mode != vt100::MouseProtocolMode::None;
+                let agent_owns = attached && !shift && mouse_mode != vt100::MouseProtocolMode::None;
                 if agent_owns {
                     if let Some(bytes) = encode_mouse(ev.kind, lcol, lrow, mouse_mode, enc) {
                         self.forward_bytes(&bytes);

@@ -216,7 +216,10 @@ mod tests {
             anchor: Pos { row: 5, col: 0 }, // in scrollback
             head: Pos { row: 7, col: 5 },   // first live row
         };
-        assert_eq!(extract_text(&mut parser, len, &sel), "row-05\nrow-06\nrow-07");
+        assert_eq!(
+            extract_text(&mut parser, len, &sel),
+            "row-05\nrow-06\nrow-07"
+        );
         assert_eq!(parser.screen().scrollback(), 2, "offset must be restored");
     }
 

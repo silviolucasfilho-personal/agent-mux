@@ -221,7 +221,11 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     let text = if let Some(st) = &app.search {
         let count = if st.matches.is_empty() {
-            if st.query.is_empty() { String::new() } else { "no matches".into() }
+            if st.query.is_empty() {
+                String::new()
+            } else {
+                "no matches".into()
+            }
         } else {
             format!("{}/{}", st.current + 1, st.matches.len())
         };
@@ -430,8 +434,16 @@ mod tests {
         let area = Rect::new(2, 1, 10, 4);
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
         let matches = vec![
-            Match { row: 5, col_start: 1, col_end: 3 },
-            Match { row: 6, col_start: 0, col_end: 2 },
+            Match {
+                row: 5,
+                col_start: 1,
+                col_end: 3,
+            },
+            Match {
+                row: 6,
+                col_start: 0,
+                col_end: 2,
+            },
         ];
         // len=6, offset=2: abs 5 -> visual 1, abs 6 -> visual 2
         apply_search_highlight(&mut buf, area, &matches, 1, 6, 2);
@@ -458,7 +470,10 @@ mod tests {
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Search: hello"), "got: {text}");
-        assert!(text.contains("no matches"), "empty result indicator: {text}");
+        assert!(
+            text.contains("no matches"),
+            "empty result indicator: {text}"
+        );
     }
 
     #[test]

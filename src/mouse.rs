@@ -92,12 +92,20 @@ pub fn encode_mouse(
     let (x, y) = (col + 1, row + 1); // 1-based
     match encoding {
         MouseProtocolEncoding::Sgr => {
-            let terminator = if matches!(kind, MouseEventKind::Up(_)) { 'm' } else { 'M' };
+            let terminator = if matches!(kind, MouseEventKind::Up(_)) {
+                'm'
+            } else {
+                'M'
+            };
             Some(format!("\x1b[<{btn};{x};{y}{terminator}").into_bytes())
         }
         MouseProtocolEncoding::Default | MouseProtocolEncoding::Utf8 => {
             // legacy: byte-sized fields only
-            let btn = if matches!(kind, MouseEventKind::Up(_)) { 3 } else { btn };
+            let btn = if matches!(kind, MouseEventKind::Up(_)) {
+                3
+            } else {
+                btn
+            };
             let bx = u8::try_from(x + 32).ok()?;
             let by = u8::try_from(y + 32).ok()?;
             let bb = u8::try_from(btn + 32).ok()?;
@@ -115,31 +123,67 @@ mod tests {
     #[test]
     fn wheel_routing_rule_order() {
         // 1. Shift always local, even when the child wants mouse / alt screen
-        assert!(matches!(route_wheel(true, true, Mode::PressRelease, true), WheelRoute::Local));
+        assert!(matches!(
+            route_wheel(true, true, Mode::PressRelease, true),
+            WheelRoute::Local
+        ));
         // 2. child wants mouse -> forward
-        assert!(matches!(route_wheel(false, true, Mode::Press, false), WheelRoute::Forward));
-        assert!(matches!(route_wheel(false, true, Mode::AnyMotion, true), WheelRoute::Forward));
+        assert!(matches!(
+            route_wheel(false, true, Mode::Press, false),
+            WheelRoute::Forward
+        ));
+        assert!(matches!(
+            route_wheel(false, true, Mode::AnyMotion, true),
+            WheelRoute::Forward
+        ));
         // 3. alt screen without mouse interest -> arrows
-        assert!(matches!(route_wheel(false, true, Mode::None, true), WheelRoute::Arrows));
+        assert!(matches!(
+            route_wheel(false, true, Mode::None, true),
+            WheelRoute::Arrows
+        ));
         // 4. plain -> local
-        assert!(matches!(route_wheel(false, true, Mode::None, false), WheelRoute::Local));
+        assert!(matches!(
+            route_wheel(false, true, Mode::None, false),
+            WheelRoute::Local
+        ));
         // Control-mode preview: always local regardless of child state
-        assert!(matches!(route_wheel(false, false, Mode::AnyMotion, true), WheelRoute::Local));
+        assert!(matches!(
+            route_wheel(false, false, Mode::AnyMotion, true),
+            WheelRoute::Local
+        ));
     }
 
     #[test]
     fn sgr_encoding_press_release_wheel() {
         let e = Enc::Sgr;
         assert_eq!(
-            encode_mouse(MouseEventKind::Down(MouseButton::Left), 4, 9, Mode::PressRelease, e),
+            encode_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                4,
+                9,
+                Mode::PressRelease,
+                e
+            ),
             Some(b"\x1b[<0;5;10M".to_vec())
         );
         assert_eq!(
-            encode_mouse(MouseEventKind::Up(MouseButton::Left), 4, 9, Mode::PressRelease, e),
+            encode_mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                4,
+                9,
+                Mode::PressRelease,
+                e
+            ),
             Some(b"\x1b[<0;5;10m".to_vec())
         );
         assert_eq!(
-            encode_mouse(MouseEventKind::Down(MouseButton::Right), 0, 0, Mode::PressRelease, e),
+            encode_mouse(
+                MouseEventKind::Down(MouseButton::Right),
+                0,
+                0,
+                Mode::PressRelease,
+                e
+            ),
             Some(b"\x1b[<2;1;1M".to_vec())
         );
         assert_eq!(
@@ -172,25 +216,55 @@ mod tests {
     #[test]
     fn x10_mode_reports_press_only() {
         let e = Enc::Sgr;
-        assert!(encode_mouse(MouseEventKind::Down(MouseButton::Left), 0, 0, Mode::Press, e).is_some());
-        assert_eq!(encode_mouse(MouseEventKind::Up(MouseButton::Left), 0, 0, Mode::Press, e), None);
+        assert!(
+            encode_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                0,
+                0,
+                Mode::Press,
+                e
+            )
+            .is_some()
+        );
+        assert_eq!(
+            encode_mouse(MouseEventKind::Up(MouseButton::Left), 0, 0, Mode::Press, e),
+            None
+        );
     }
 
     #[test]
     fn default_encoding_uses_byte_offsets() {
         // legacy: ESC [ M, then button+32, col+33, row+33 (1-based + 32)
         assert_eq!(
-            encode_mouse(MouseEventKind::Down(MouseButton::Left), 4, 9, Mode::PressRelease, Enc::Default),
+            encode_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                4,
+                9,
+                Mode::PressRelease,
+                Enc::Default
+            ),
             Some(vec![0x1b, b'[', b'M', 32, 4 + 33, 9 + 33])
         );
         // release is button 3 in legacy encoding
         assert_eq!(
-            encode_mouse(MouseEventKind::Up(MouseButton::Left), 4, 9, Mode::PressRelease, Enc::Default),
+            encode_mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                4,
+                9,
+                Mode::PressRelease,
+                Enc::Default
+            ),
             Some(vec![0x1b, b'[', b'M', 3 + 32, 4 + 33, 9 + 33])
         );
         // coordinates that don't fit a byte are dropped, not corrupted
         assert_eq!(
-            encode_mouse(MouseEventKind::Down(MouseButton::Left), 250, 9, Mode::PressRelease, Enc::Default),
+            encode_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                250,
+                9,
+                Mode::PressRelease,
+                Enc::Default
+            ),
             None
         );
     }
@@ -198,7 +272,13 @@ mod tests {
     #[test]
     fn disabled_mode_and_moved_are_none() {
         assert_eq!(
-            encode_mouse(MouseEventKind::Down(MouseButton::Left), 0, 0, Mode::None, Enc::Sgr),
+            encode_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                0,
+                0,
+                Mode::None,
+                Enc::Sgr
+            ),
             None
         );
         assert_eq!(
