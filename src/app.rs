@@ -436,7 +436,7 @@ pub struct HistoryState {
 impl HistoryState {
     pub fn new(current_dir: Option<&std::path::Path>) -> Self {
         let base_dir = current_dir.map(|p| p.to_path_buf());
-        let sessions = history::discover_sessions(None, current_dir, false);
+        let sessions = history::discover_sessions(None, None, current_dir, false);
         let mut state = HistoryState {
             sessions,
             selected_session_idx: 0,
@@ -471,7 +471,7 @@ impl HistoryState {
 
     pub fn reload_sessions(&mut self) {
         let cur_ref = self.base_dir.as_deref();
-        self.sessions = history::discover_sessions(None, cur_ref, self.all_projects);
+        self.sessions = history::discover_sessions(None, None, cur_ref, self.all_projects);
         self.selected_session_idx = 0;
         self.load_selected_log();
     }
@@ -1136,20 +1136,40 @@ impl App {
     }
 
     fn resume_history_session(&mut self, summary: &SessionSummary) {
-        let profile = self
-            .profiles
-            .iter()
-            .find(|p| p.command == "claude" || p.name.to_lowercase().contains("claude"))
-            .cloned()
-            .unwrap_or_else(|| Profile {
-                name: "Claude Code".into(),
-                command: "claude".into(),
-                args: vec![],
-                default_dir: None,
-            });
-
-        let mut resume_profile = profile;
-        resume_profile.args = vec!["--resume".into(), summary.session_id.clone()];
+        let profile = match summary.provider {
+            crate::history::AgentProvider::Claude => {
+                let p = self
+                    .profiles
+                    .iter()
+                    .find(|p| p.command == "claude" || p.name.to_lowercase().contains("claude"))
+                    .cloned()
+                    .unwrap_or_else(|| Profile {
+                        name: "Claude Code".into(),
+                        command: "claude".into(),
+                        args: vec![],
+                        default_dir: None,
+                    });
+                let mut resume_profile = p;
+                resume_profile.args = vec!["--resume".into(), summary.session_id.clone()];
+                resume_profile
+            }
+            crate::history::AgentProvider::Antigravity => {
+                self.profiles
+                    .iter()
+                    .find(|p| {
+                        p.command == "agy"
+                            || p.name.to_lowercase().contains("antigravity")
+                            || p.name.to_lowercase().contains("agy")
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| Profile {
+                        name: "Antigravity".into(),
+                        command: "agy".into(),
+                        args: vec![],
+                        default_dir: None,
+                    })
+            }
+        };
 
         let dir = self
             .sessions
@@ -1160,7 +1180,7 @@ impl App {
 
         let (rows, cols) = self.pane_size;
         let id = self.next_id;
-        match Session::spawn(id, resume_profile, dir, rows, cols, self.tx.clone()) {
+        match Session::spawn(id, profile, dir, rows, cols, self.tx.clone()) {
             Ok(session) => {
                 self.next_id += 1;
                 self.sessions.push(session);
