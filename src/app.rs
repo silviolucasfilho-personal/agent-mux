@@ -408,8 +408,22 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent, _now: Instant) {
-        let Some((lcol, lrow)) = ui::pane_local(ev.column, ev.row, self.pane_size) else {
-            return; // outside the main pane: sidebar stays keyboard-driven in this iteration
+        // A live left-button drag must be able to finish even if the
+        // terminating Drag/Up event lands outside the pane (e.g. the mouse
+        // slid into the adjacent sidebar): clamp into the pane instead of
+        // dropping the event, so the drag can't get stranded with
+        // `dragging: true` and a frozen highlight. Any other out-of-pane
+        // event is still dropped -- the sidebar stays keyboard-driven.
+        let dragging = self.selection.as_ref().is_some_and(|a| a.dragging);
+        let finalizing_drag = dragging
+            && matches!(
+                ev.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            );
+        let (lcol, lrow) = match ui::pane_local(ev.column, ev.row, self.pane_size) {
+            Some(p) => p,
+            None if finalizing_drag => ui::pane_clamped(ev.column, ev.row, self.pane_size),
+            None => return,
         };
         let attached = matches!(self.mode, Mode::Attached);
         let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
@@ -487,9 +501,12 @@ impl App {
                         }
                     }
                     _ => {
-                        // release: finish the drag; copy-on-select or clear
+                        // release: apply the final position (a throttled
+                        // terminal may not have sent a Drag for it), finish
+                        // the drag, then copy-on-select or clear
                         let finished = self.selection.take_if(|a| a.dragging);
                         if let Some(mut a) = finished {
+                            a.sel.head = pos;
                             a.dragging = false;
                             if a.sel.is_empty() {
                                 // plain click: selection stays cleared

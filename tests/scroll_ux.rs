@@ -326,6 +326,40 @@ async fn selection_does_not_leak_across_sessions() {
 }
 
 #[tokio::test]
+async fn release_applies_final_position() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 31, 1), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 35, 1), Instant::now());
+    // no Drag ever reports this final position -- only the Up does (e.g. a
+    // terminal that throttles motion events)
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 31 + 7, 2), Instant::now());
+    let active = app.selection.as_ref().expect("selection should exist");
+    let (len, offset) = app.sessions[0].scroll_view();
+    let expected_row = agent_mux::selection::abs_row(len, offset, 1); // lrow = 2 - 1
+    assert_eq!(
+        active.sel.head,
+        agent_mux::selection::Pos { row: expected_row, col: 7 },
+        "release must apply the Up event's own position, not just the last Drag's"
+    );
+}
+
+#[tokio::test]
+async fn release_outside_pane_finalizes_drag() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 31, 1), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 40, 2), Instant::now());
+    // release lands in the sidebar, well outside the pane interior
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 5, 2), Instant::now());
+    let active = app.selection.as_ref().expect("selection should exist");
+    assert!(!active.dragging, "release must end the drag even from outside the pane");
+    assert_eq!(active.sel.head.col, 0, "head clamps to the pane's left edge");
+    // no stranded state: a subsequent plain click still clears normally
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 33, 1), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 33, 1), Instant::now());
+    assert!(app.selection.is_none());
+}
+
+#[tokio::test]
 #[ignore = "mutates the real system clipboard"]
 async fn copy_on_select_reaches_clipboard() {
     let (mut app, _rx) = app_with_history(100).await;

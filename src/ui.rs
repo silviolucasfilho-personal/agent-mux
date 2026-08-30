@@ -59,6 +59,21 @@ pub fn pane_local(col: u16, row: u16, pane: (u16, u16)) -> Option<(u16, u16)> {
     }
 }
 
+/// Like `pane_local`, but clamps out-of-range terminal coordinates into the
+/// pane interior instead of returning `None`. Used to finalize a drag whose
+/// terminating event (e.g. the mouse-up) landed outside the pane -- the
+/// drag still needs a definite final position rather than being stranded
+/// with `dragging: true` forever.
+pub fn pane_clamped(col: u16, row: u16, pane: (u16, u16)) -> (u16, u16) {
+    let (rows, cols) = pane;
+    let (x0, y0) = PANE_ORIGIN;
+    let max_x = x0 + cols.saturating_sub(1);
+    let max_y = y0 + rows.saturating_sub(1);
+    let cx = col.clamp(x0, max_x);
+    let cy = row.clamp(y0, max_y);
+    (cx - x0, cy - y0)
+}
+
 /// Applies REVERSED to every cell of `inner` whose grid-absolute position
 /// falls inside the selection. Pure over the buffer; testable headlessly.
 pub fn apply_selection_highlight(
@@ -296,6 +311,22 @@ mod tests {
         assert_eq!(pane_local(31 + 68, 1, pane), None);
         assert_eq!(pane_local(31, 0, pane), None); // top border
         assert_eq!(pane_local(31, 1 + 37, pane), None);
+    }
+
+    #[test]
+    fn pane_clamped_clamps_outside_coordinates() {
+        let pane = (37u16, 68u16); // (rows, cols) matching pane_local_matches_layout_math
+        // inside: same result as pane_local (passthrough)
+        assert_eq!(pane_clamped(31, 1, pane), (0, 0));
+        assert_eq!(pane_clamped(31 + 67, 1 + 36, pane), (67, 36));
+        // left of the pane -> clamps to the left edge column
+        assert_eq!(pane_clamped(0, 5, pane), (0, 4));
+        // right of the pane -> clamps to the last column
+        assert_eq!(pane_clamped(200, 5, pane), (67, 4));
+        // above the pane -> clamps to the top row
+        assert_eq!(pane_clamped(35, 0, pane), (4, 0));
+        // below the pane -> clamps to the last row
+        assert_eq!(pane_clamped(35, 100, pane), (4, 36));
     }
 
     #[test]
