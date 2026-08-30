@@ -216,6 +216,9 @@ async fn app_with_history(lines: u32) -> (App, mpsc::Receiver<AppEvent>) {
         args: print_lines_args(lines),
         ..shell_profile()
     };
+    // never touch the real system clipboard from ordinary tests; the
+    // #[ignore]d round-trip test opts back in explicitly
+    app.clipboard_enabled = false;
     let session = Session::spawn(900, profile, std::env::temp_dir(), 10, 80, tx).unwrap();
     app.sessions.push(session);
     let ok = pump_app(&mut rx, &mut app, Duration::from_secs(10), |a| {
@@ -501,6 +504,73 @@ async fn release_outside_pane_finalizes_drag() {
     assert!(app.selection.is_none());
 }
 
+#[tokio::test]
+async fn local_drag_survives_shift_release() {
+    let (mut app, _rx) = app_with_history(5).await;
+    // app_with_history already disables the clipboard; keep it explicit
+    // here too since this test exercises the copy-on-select path.
+    app.clipboard_enabled = false;
+    // Enable mouse reporting on the child, as a full-screen mouse-aware
+    // program would: an unshifted drag would then normally belong to the
+    // agent.
+    app.handle_pty_output(900, b"\x1b[?1000h", Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // attach (session is Exited; Enter still attaches)
+    assert!(matches!(app.mode, Mode::Attached));
+
+    // Shift+Down forces local selection (iTerm2 rule) even though the
+    // child asked for mouse events.
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 31,
+            row: 1,
+            modifiers: KeyModifiers::SHIFT,
+        },
+        Instant::now(),
+    );
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 31 + 7,
+            row: 2,
+            modifiers: KeyModifiers::SHIFT,
+        },
+        Instant::now(),
+    );
+    // Release WITHOUT shift. Under the pre-fix behavior, ownership was
+    // recomputed from this event's own (unshifted) modifiers, so the Up
+    // would be forwarded to the child instead of finalizing the drag --
+    // stranding `dragging: true` (and later letting an unrelated
+    // out-of-pane Up clamp and finalize the stale selection, overwriting
+    // the clipboard). With ownership latched at Down, this Up is still
+    // handled locally.
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 31 + 7,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        },
+        Instant::now(),
+    );
+
+    let active = app
+        .selection
+        .as_ref()
+        .expect("drag must finalize locally, not be forwarded/stranded");
+    assert!(!active.dragging, "release must end the drag");
+    let (len, offset) = app.sessions[0].scroll_view();
+    let expected_row = agent_mux::selection::abs_row(len, offset, 1); // lrow = 2 - 1
+    assert_eq!(
+        active.sel.head,
+        agent_mux::selection::Pos {
+            row: expected_row,
+            col: 7
+        },
+        "the release event's own position must be applied locally"
+    );
+}
+
 fn ctrl_shift(c: char) -> KeyEvent {
     KeyEvent::new(
         KeyCode::Char(c),
@@ -561,6 +631,14 @@ async fn open_search_bar_consumes_all_keys() {
     app.handle_key(&key(KeyCode::Char('q')), Instant::now());
     assert!(!app.should_quit, "q must edit the query, not quit");
     assert_eq!(app.search.as_ref().unwrap().query, "q");
+    // a Ctrl-modified char must not pollute the query (e.g. an accidental
+    // Ctrl+letter chord while the search bar is open)
+    app.handle_key(&ctrl('x'), Instant::now());
+    assert_eq!(
+        app.search.as_ref().unwrap().query,
+        "q",
+        "Ctrl+char must not edit the query"
+    );
     app.handle_key(&key(KeyCode::Backspace), Instant::now());
     assert_eq!(app.search.as_ref().unwrap().query, "");
 }
@@ -574,16 +652,19 @@ async fn plain_ctrl_f_opens_only_in_control_mode() {
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     // Attached: plain Ctrl+F is the agent's key (forwarded), bar stays shut
     app.handle_key(&key(KeyCode::Enter), Instant::now()); // attach (session is Exited; Enter still attaches)
-    if matches!(app.mode, Mode::Attached) {
-        app.handle_key(&ctrl('f'), Instant::now());
-        assert!(app.search.is_none());
-    }
+    assert!(matches!(app.mode, Mode::Attached));
+    app.handle_key(&ctrl('f'), Instant::now());
+    assert!(app.search.is_none());
 }
 
 #[tokio::test]
 #[ignore = "mutates the real system clipboard"]
 async fn copy_on_select_reaches_clipboard() {
     let (mut app, _rx) = app_with_history(100).await;
+    // app_with_history disables the clipboard by default so ordinary tests
+    // never touch the real one; this test's whole point is the real
+    // round-trip, so opt back in explicitly.
+    app.clipboard_enabled = true;
     app.handle_mouse(
         mouse(MouseEventKind::Down(MouseButton::Left), 31, 1),
         Instant::now(),

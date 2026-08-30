@@ -52,13 +52,21 @@ fn is_ctrl_q(key: &KeyEvent) -> bool {
         && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
 }
 
-/// Bytes to write for a paste: wrapped in bracketed-paste markers verbatim
-/// when the child enabled bracketed paste, otherwise newlines normalized
-/// to CR so a multi-line paste presses Enter instead of inserting raw LFs.
+/// Bytes to write for a paste: wrapped in bracketed-paste markers when the
+/// child enabled bracketed paste, otherwise newlines normalized to CR so a
+/// multi-line paste presses Enter instead of inserting raw LFs.
+///
+/// In the bracketed branch, any literal `ESC[201~` (the paste-end marker)
+/// already present in the clipboard text is stripped first. Otherwise
+/// clipboard content containing that sequence would terminate the bracket
+/// early and the remainder would land in the child as raw keystrokes
+/// instead of pasted text -- a classic paste-injection: e.g. a copied
+/// snippet ending the bracket then typing `rm -rf ~` as if the user had.
 fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     if bracketed {
+        let sanitized = text.replace("\x1b[201~", "");
         let mut b = b"\x1b[200~".to_vec();
-        b.extend_from_slice(text.as_bytes());
+        b.extend_from_slice(sanitized.as_bytes());
         b.extend_from_slice(b"\x1b[201~");
         b
     } else {
@@ -79,9 +87,28 @@ mod paste_tests {
     }
 
     #[test]
+    fn bracketed_paste_strips_embedded_terminator() {
+        // an embedded terminator must not end the bracket early; it's
+        // stripped, and the wrapper still appears exactly once, at the end
+        let text = "before\x1b[201~after";
+        assert_eq!(
+            paste_bytes(text, true),
+            b"\x1b[200~beforeafter\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
     fn unbracketed_paste_normalizes_newlines_to_cr() {
         assert_eq!(paste_bytes("a\r\nb\nc", false), b"a\rb\rc".to_vec());
         assert_eq!(paste_bytes("plain", false), b"plain".to_vec());
+    }
+
+    #[test]
+    fn unbracketed_paste_leaves_terminator_look_alike_untouched() {
+        // the unbracketed path never wraps in bracket markers at all, so an
+        // embedded ESC[201~ isn't a terminator here and is passed through
+        let text = "before\x1b[201~after";
+        assert_eq!(paste_bytes(text, false), text.as_bytes().to_vec());
     }
 }
 
@@ -240,6 +267,15 @@ pub struct ActiveSelection {
     pub dragging: bool,
 }
 
+/// Who owns an in-progress left-button drag, latched at `Down(Left)` so a
+/// modifier change mid-drag (e.g. releasing Shift) can't retarget its later
+/// Drag/Up events -- see `handle_mouse`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragOwner {
+    Local,
+    Agent,
+}
+
 pub struct App {
     pub sessions: Vec<Session>,
     pub selected: usize,
@@ -250,6 +286,12 @@ pub struct App {
     pub pane_size: (u16, u16), // (rows, cols)
     pub selection: Option<ActiveSelection>,
     pub search: Option<SearchState>,
+    /// When false, `copy_to_clipboard`/`paste_into_attached` are no-ops.
+    /// Tests that don't specifically exercise the clipboard round-trip set
+    /// this to `false` so `cargo test` never touches the real system
+    /// clipboard.
+    pub clipboard_enabled: bool,
+    drag_owner: Option<DragOwner>,
     just_detached: bool,
     next_id: usize,
     tx: Sender<AppEvent>,
@@ -267,6 +309,8 @@ impl App {
             pane_size: (24, 80),
             selection: None,
             search: None,
+            clipboard_enabled: true,
+            drag_owner: None,
             just_detached: false,
             next_id: 0,
             tx,
@@ -293,7 +337,7 @@ impl App {
     }
 
     fn copy_to_clipboard(&mut self, text: String) {
-        if text.is_empty() {
+        if text.is_empty() || !self.clipboard_enabled {
             return;
         }
         if let Err(e) = arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
@@ -315,6 +359,9 @@ impl App {
 
     fn paste_into_attached(&mut self) {
         if !matches!(self.mode, Mode::Attached) {
+            return;
+        }
+        if !self.clipboard_enabled {
             return;
         }
         let text = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
@@ -444,6 +491,12 @@ impl App {
                 self.scroll_to_current_match();
             }
             KeyCode::Char(c) => {
+                // Ctrl-modified chars (e.g. Ctrl+Shift+F reopening the
+                // chord, or any other Ctrl+letter) must not pollute the
+                // query -- only plain/Shift'd character input edits it.
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return;
+                }
                 if let Some(st) = self.search.as_mut() {
                     st.query.push(c);
                 }
@@ -489,12 +542,22 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent, _now: Instant) {
+        // Mouse handling is scoped to Control (sidebar preview scroll) and
+        // Attached (the pane showing a live child): during the NewSession
+        // dialog or a Confirm prompt the pane underneath must not react to
+        // clicks/drags/wheel meant for the dialog.
+        if !matches!(self.mode, Mode::Control | Mode::Attached) {
+            return;
+        }
         // A live left-button drag must be able to finish even if the
         // terminating Drag/Up event lands outside the pane (e.g. the mouse
         // slid into the adjacent sidebar): clamp into the pane instead of
         // dropping the event, so the drag can't get stranded with
         // `dragging: true` and a frozen highlight. Any other out-of-pane
         // event is still dropped -- the sidebar stays keyboard-driven.
+        // Keyed to an active LOCAL drag: `self.selection`'s `dragging` flag
+        // is only ever set true from the local (non-agent-owned) branch
+        // below, so this is already local-drag-specific.
         let dragging = self.selection.as_ref().is_some_and(|a| a.dragging);
         let finalizing_drag = dragging
             && matches!(
@@ -549,53 +612,77 @@ impl App {
             MouseEventKind::Down(MouseButton::Left)
             | MouseEventKind::Drag(MouseButton::Left)
             | MouseEventKind::Up(MouseButton::Left) => {
-                // the agent owns the mouse when attached + it asked for
-                // events, unless Shift forces local selection (iTerm2 rule)
-                let agent_owns = attached && !shift && mouse_mode != vt100::MouseProtocolMode::None;
+                let is_up = matches!(ev.kind, MouseEventKind::Up(_));
+                // Ownership is decided fresh at Down (agent owns the mouse
+                // when attached + it asked for events, unless Shift forces
+                // local selection -- the iTerm2 rule) and then latched in
+                // `drag_owner` for the rest of the drag. Without this, a
+                // modifier change mid-drag (e.g. releasing Shift) would let
+                // this same computation -- re-run per event, from that
+                // event's own shift flag -- retarget the Drag/Up to the
+                // child, stranding a local drag with `dragging: true` still
+                // set (and, worse, a later unrelated out-of-pane Up could
+                // then clamp and finalize that stale selection). Latching
+                // at Down means Drag/Up always follow where the drag
+                // started, regardless of the shift flag on those events.
+                let agent_owns = match ev.kind {
+                    MouseEventKind::Down(_) => {
+                        let owns =
+                            attached && !shift && mouse_mode != vt100::MouseProtocolMode::None;
+                        self.drag_owner = Some(if owns {
+                            DragOwner::Agent
+                        } else {
+                            DragOwner::Local
+                        });
+                        owns
+                    }
+                    _ => matches!(self.drag_owner, Some(DragOwner::Agent)),
+                };
                 if agent_owns {
                     if let Some(bytes) = encode_mouse(ev.kind, lcol, lrow, mouse_mode, enc) {
                         self.forward_bytes(&bytes);
                     }
-                    return;
-                }
-                let Some(s) = self.sessions.get(self.selected) else {
-                    return;
-                };
-                let (len, offset) = s.scroll_view();
-                let session_id = s.id;
-                let pos = Pos {
-                    row: selection::abs_row(len, offset, lrow),
-                    col: lcol,
-                };
-                match ev.kind {
-                    MouseEventKind::Down(_) => {
-                        self.selection = Some(ActiveSelection {
-                            session_id,
-                            sel: Selection::new(pos),
-                            dragging: true,
-                        });
-                    }
-                    MouseEventKind::Drag(_) => {
-                        if let Some(a) = self.selection.as_mut().filter(|a| a.dragging) {
-                            a.sel.head = pos;
+                } else if let Some(s) = self.sessions.get(self.selected) {
+                    let (len, offset) = s.scroll_view();
+                    let session_id = s.id;
+                    let pos = Pos {
+                        row: selection::abs_row(len, offset, lrow),
+                        col: lcol,
+                    };
+                    match ev.kind {
+                        MouseEventKind::Down(_) => {
+                            self.selection = Some(ActiveSelection {
+                                session_id,
+                                sel: Selection::new(pos),
+                                dragging: true,
+                            });
                         }
-                    }
-                    _ => {
-                        // release: apply the final position (a throttled
-                        // terminal may not have sent a Drag for it), finish
-                        // the drag, then copy-on-select or clear
-                        let finished = self.selection.take_if(|a| a.dragging);
-                        if let Some(mut a) = finished {
-                            a.sel.head = pos;
-                            a.dragging = false;
-                            if a.sel.is_empty() {
-                                // plain click: selection stays cleared
-                            } else {
-                                self.selection = Some(a);
-                                self.copy_selection();
+                        MouseEventKind::Drag(_) => {
+                            if let Some(a) = self.selection.as_mut().filter(|a| a.dragging) {
+                                a.sel.head = pos;
+                            }
+                        }
+                        _ => {
+                            // release: apply the final position (a
+                            // throttled terminal may not have sent a Drag
+                            // for it), finish the drag, then copy-on-select
+                            // or clear
+                            let finished = self.selection.take_if(|a| a.dragging);
+                            if let Some(mut a) = finished {
+                                a.sel.head = pos;
+                                a.dragging = false;
+                                if a.sel.is_empty() {
+                                    // plain click: selection stays cleared
+                                } else {
+                                    self.selection = Some(a);
+                                    self.copy_selection();
+                                }
                             }
                         }
                     }
+                }
+                if is_up {
+                    self.drag_owner = None;
                 }
             }
             _ => {

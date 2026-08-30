@@ -68,9 +68,11 @@ impl Selection {
     }
 }
 
-/// (col, contents) for every non-empty, non-continuation cell of a
-/// grid-absolute row. Temporarily moves the scrollback offset to bring the
-/// row into view and restores it before returning.
+/// (col, contents) for every non-continuation cell of a grid-absolute row,
+/// including cells whose contents are empty (e.g. blank/unwritten
+/// columns) -- callers distinguish "empty" from "absent" themselves.
+/// Temporarily moves the scrollback offset to bring the row into view and
+/// restores it before returning.
 pub fn row_cells<CB: vt100::Callbacks>(
     parser: &mut vt100::Parser<CB>,
     scrollback_len: usize,
