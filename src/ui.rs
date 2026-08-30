@@ -258,11 +258,11 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
-    let area = centered(
-        f.area(),
-        60,
-        (app.profiles.len() as u16 + 8).min(f.area().height),
-    );
+    let width = 68.min(f.area().width.saturating_sub(4)).max(40);
+    let height = (app.profiles.len() as u16 + 15)
+        .min(f.area().height.saturating_sub(2))
+        .max(14);
+    let area = centered(f.area(), width, height);
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -279,7 +279,7 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
         lines.push(Line::styled(format!("{marker}{}", p.name), style));
     }
     lines.push(Line::raw(""));
-    let dir_style = if matches!(dialog.field, DialogField::Dir) {
+    let dir_style = if matches!(dialog.field, DialogField::Dir) && dialog.dir_selected_idx.is_none() {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
         Style::default()
@@ -288,10 +288,56 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
         Span::raw("Directory: "),
         Span::styled(dialog.dir.clone(), dir_style),
     ]));
+    lines.push(Line::styled(
+        "  Select subfolder: (↑/↓ choose, → open, Enter select)",
+        Style::default().fg(Color::DarkGray),
+    ));
+    if dialog.dir_entries.is_empty() {
+        lines.push(Line::styled(
+            "    (no subdirectories)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        let max_visible = 5;
+        let selected = dialog.dir_selected_idx.unwrap_or(0);
+        let start = if selected >= max_visible {
+            selected + 1 - max_visible
+        } else {
+            0
+        };
+        let end = (start + max_visible).min(dialog.dir_entries.len());
+        for (idx, entry) in dialog.dir_entries[start..end].iter().enumerate() {
+            let actual_idx = start + idx;
+            let is_sel = dialog.dir_selected_idx == Some(actual_idx);
+            let marker = if is_sel { "> " } else { "  " };
+            let style = if is_sel && matches!(dialog.field, DialogField::Dir) {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else if entry == ".." {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Blue)
+            };
+            let display_name = if entry == ".." {
+                ".. (parent directory)".to_string()
+            } else {
+                format!("{entry}/")
+            };
+            lines.push(Line::styled(format!("    {marker}{display_name}"), style));
+        }
+        if dialog.dir_entries.len() > max_visible {
+            lines.push(Line::styled(
+                format!("      ... ({} total directories)", dialog.dir_entries.len()),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
     if let Some(err) = &dialog.error {
         lines.push(Line::styled(err.clone(), Style::default().fg(Color::Red)));
     }
-    lines.push(Line::raw("[Tab] switch  [Enter] start  [Esc] cancel"));
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(
+        "[Tab] switch field  [↑/↓] navigate  [→/Enter] select/open  [Esc] cancel",
+    ));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 

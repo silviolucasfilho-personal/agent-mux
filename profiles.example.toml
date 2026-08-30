@@ -3,9 +3,14 @@
 name = "Claude Code"
 command = "claude"
 args = []
-# default_dir = "C:\\Users\\me\\workspace"
+# default_dir = "~/workspace" # or "/home/user/workspace" on Linux/macOS, "C:\\Users\\me\\workspace" on Windows
 
 [[profiles]]
 name = "Codex"
 command = "codex"
+args = []
+
+[[profiles]]
+name = "Antigravity"
+command = "agy"
 args = []

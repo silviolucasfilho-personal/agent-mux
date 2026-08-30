@@ -31,6 +31,12 @@ impl Config {
                 args: vec![],
                 default_dir: None,
             },
+            Profile {
+                name: "Antigravity".into(),
+                command: "agy".into(),
+                args: vec![],
+                default_dir: None,
+            },
         ]
     }
 }
@@ -104,5 +110,6 @@ mod tests {
         let profiles = Config::default_profiles();
         assert!(profiles.iter().any(|p| p.command == "claude"));
         assert!(profiles.iter().any(|p| p.command == "codex"));
+        assert!(profiles.iter().any(|p| p.command == "agy"));
     }
 }

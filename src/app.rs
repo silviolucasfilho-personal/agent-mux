@@ -185,6 +185,63 @@ pub enum DialogResult {
     Consumed,
 }
 
+/// Resolves a user-provided or profile working directory path:
+/// - empty / whitespace / `.` -> current working directory
+/// - `~/...` or `~` -> user's home directory joined with the subpath
+/// - other paths -> parsed as PathBuf directly
+pub fn resolve_working_dir(dir_str: &str) -> std::path::PathBuf {
+    let trimmed = dir_str.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    } else if let Some(stripped) = trimmed.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            std::path::PathBuf::from(home).join(stripped)
+        } else {
+            std::path::PathBuf::from(trimmed)
+        }
+    } else if trimmed == "~" {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            std::path::PathBuf::from(home)
+        } else {
+            std::path::PathBuf::from(trimmed)
+        }
+    } else {
+        std::path::PathBuf::from(trimmed)
+    }
+}
+
+/// Lists subdirectories of a given directory, including ".." if a parent exists.
+pub fn list_subdirectories(dir: &std::path::Path) -> Vec<String> {
+    let mut entries = Vec::new();
+    if dir.parent().is_some() {
+        entries.push("..".to_string());
+    }
+    if let Ok(read_dir) = std::fs::read_dir(dir) {
+        let mut subdirs: Vec<String> = read_dir
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let file_name = e.file_name();
+                let name = file_name.to_string_lossy();
+                !name.starts_with('.') && e.path().is_dir()
+            })
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        subdirs.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        entries.extend(subdirs);
+    }
+    entries
+}
+
+fn default_dir_for_profile(profile: Option<&Profile>) -> String {
+    profile
+        .and_then(|p| p.default_dir.clone())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| ".".into())
+        })
+}
+
 #[derive(Debug)]
 pub struct DialogState {
     pub profile_idx: usize,
@@ -192,65 +249,159 @@ pub struct DialogState {
     pub dir_edited: bool,
     pub field: DialogField,
     pub error: Option<String>,
+    pub dir_entries: Vec<String>,
+    pub dir_selected_idx: Option<usize>,
 }
 
 impl DialogState {
     pub fn new(profiles: &[Profile]) -> Self {
-        let dir = profiles
-            .first()
-            .and_then(|p| p.default_dir.clone())
-            .unwrap_or_default();
+        let dir = default_dir_for_profile(profiles.first());
+        let resolved = resolve_working_dir(&dir);
+        let dir_entries = list_subdirectories(&resolved);
         DialogState {
             profile_idx: 0,
             dir,
             dir_edited: false,
             field: DialogField::Profile,
             error: None,
+            dir_entries,
+            dir_selected_idx: None,
+        }
+    }
+
+    pub fn refresh_dir_entries(&mut self) {
+        let resolved = resolve_working_dir(&self.dir);
+        self.dir_entries = list_subdirectories(&resolved);
+        if let Some(idx) = self.dir_selected_idx {
+            if idx >= self.dir_entries.len() {
+                self.dir_selected_idx = if self.dir_entries.is_empty() {
+                    None
+                } else {
+                    Some(self.dir_entries.len() - 1)
+                };
+            }
         }
     }
 
     fn set_profile(&mut self, idx: usize, profiles: &[Profile]) {
         self.profile_idx = idx;
-        if !self.dir_edited
-            && let Some(d) = profiles.get(idx).and_then(|p| p.default_dir.clone())
-        {
-            self.dir = d;
+        if !self.dir_edited {
+            self.dir = default_dir_for_profile(profiles.get(idx));
+            self.refresh_dir_entries();
         }
+    }
+
+    pub fn navigate_to_parent(&mut self) {
+        let resolved = resolve_working_dir(&self.dir);
+        if let Some(parent) = resolved.parent() {
+            self.dir = parent.to_string_lossy().into_owned();
+            self.dir_edited = true;
+            self.dir_selected_idx = None;
+            self.refresh_dir_entries();
+        }
+    }
+
+    pub fn navigate_into(&mut self, sub: &str) {
+        let resolved = resolve_working_dir(&self.dir);
+        let target = resolved.join(sub);
+        self.dir = target.to_string_lossy().into_owned();
+        self.dir_edited = true;
+        self.dir_selected_idx = None;
+        self.refresh_dir_entries();
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent, profiles: &[Profile]) -> DialogResult {
         match key.code {
-            KeyCode::Enter => return DialogResult::Submit,
             KeyCode::Esc => return DialogResult::Cancel,
             KeyCode::Tab | KeyCode::BackTab => {
                 self.field = match self.field {
                     DialogField::Profile => DialogField::Dir,
                     DialogField::Dir => DialogField::Profile,
                 };
+                self.dir_selected_idx = None;
+                return DialogResult::Consumed;
             }
-            _ => match self.field {
-                DialogField::Profile => match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let next = (self.profile_idx + 1) % profiles.len().max(1);
-                        self.set_profile(next, profiles);
+            _ => {}
+        }
+
+        match self.field {
+            DialogField::Profile => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let next = (self.profile_idx + 1) % profiles.len().max(1);
+                    self.set_profile(next, profiles);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let len = profiles.len().max(1);
+                    self.set_profile((self.profile_idx + len - 1) % len, profiles);
+                }
+                _ => {}
+            },
+            DialogField::Dir => match key.code {
+                KeyCode::Enter => {
+                    if let Some(idx) = self.dir_selected_idx {
+                        if let Some(entry) = self.dir_entries.get(idx).cloned() {
+                            if entry == ".." {
+                                self.navigate_to_parent();
+                                return DialogResult::Consumed;
+                            } else {
+                                self.navigate_into(&entry);
+                                return DialogResult::Submit;
+                            }
+                        }
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let len = profiles.len().max(1);
-                        self.set_profile((self.profile_idx + len - 1) % len, profiles);
+                    return DialogResult::Submit;
+                }
+                KeyCode::Right => {
+                    if let Some(idx) = self.dir_selected_idx {
+                        if let Some(entry) = self.dir_entries.get(idx).cloned() {
+                            if entry == ".." {
+                                self.navigate_to_parent();
+                            } else {
+                                self.navigate_into(&entry);
+                            }
+                        }
+                    } else if !self.dir_entries.is_empty() {
+                        self.dir_selected_idx = Some(0);
                     }
-                    _ => {}
-                },
-                DialogField::Dir => match key.code {
-                    KeyCode::Char(c) => {
-                        self.dir.push(c);
-                        self.dir_edited = true;
+                }
+                KeyCode::Left => {
+                    self.navigate_to_parent();
+                }
+                KeyCode::Down => {
+                    if self.dir_entries.is_empty() {
+                        self.dir_selected_idx = None;
+                    } else {
+                        self.dir_selected_idx = match self.dir_selected_idx {
+                            None => Some(0),
+                            Some(i) => {
+                                Some((i + 1).min(self.dir_entries.len().saturating_sub(1)))
+                            }
+                        };
                     }
-                    KeyCode::Backspace => {
-                        self.dir.pop();
-                        self.dir_edited = true;
+                }
+                KeyCode::Up => {
+                    if let Some(i) = self.dir_selected_idx {
+                        if i == 0 {
+                            self.dir_selected_idx = None;
+                        } else {
+                            self.dir_selected_idx = Some(i - 1);
+                        }
                     }
-                    _ => {}
-                },
+                }
+                KeyCode::Char(c) => {
+                    self.dir.push(c);
+                    self.dir_edited = true;
+                    self.dir_selected_idx = None;
+                    self.refresh_dir_entries();
+                }
+                KeyCode::Backspace => {
+                    self.dir.pop();
+                    self.dir_edited = true;
+                    self.dir_selected_idx = None;
+                    self.refresh_dir_entries();
+                }
+                _ => {}
             },
         }
         DialogResult::Consumed
@@ -810,7 +961,7 @@ impl App {
                     Some(p) => p.clone(),
                     None => return,
                 };
-                let dir = std::path::PathBuf::from(dialog.dir.clone());
+                let dir = resolve_working_dir(&dialog.dir);
                 let (rows, cols) = self.pane_size;
                 let id = self.next_id;
                 match Session::spawn(id, profile, dir, rows, cols, self.tx.clone()) {
@@ -1160,5 +1311,83 @@ mod dialog_tests {
             d.handle_key(&key(KeyCode::Char('q')), &ps),
             DialogResult::Consumed
         ));
+    }
+
+    #[test]
+    fn new_dialog_prefills_current_dir_when_no_default_dir() {
+        let profiles = vec![Profile {
+            name: "Default".into(),
+            command: "claude".into(),
+            args: vec![],
+            default_dir: None,
+        }];
+        let d = DialogState::new(&profiles);
+        assert_eq!(d.profile_idx, 0);
+        let expected = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| ".".into());
+        assert_eq!(d.dir, expected);
+    }
+
+    #[test]
+    fn resolve_working_dir_empty_and_tilde() {
+        let cur = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        assert_eq!(resolve_working_dir(""), cur);
+        assert_eq!(resolve_working_dir("   "), cur);
+        assert_eq!(resolve_working_dir("."), cur);
+        if let Some(home) = std::env::var_os("HOME") {
+            assert_eq!(resolve_working_dir("~"), std::path::PathBuf::from(&home));
+            assert_eq!(
+                resolve_working_dir("~/test"),
+                std::path::PathBuf::from(&home).join("test")
+            );
+        }
+    }
+
+    #[test]
+    fn directory_navigation_and_selection() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        std::fs::create_dir(root.join("sub_a")).unwrap();
+        std::fs::create_dir(root.join("sub_b")).unwrap();
+
+        let profiles = vec![Profile {
+            name: "Test".into(),
+            command: "sh".into(),
+            args: vec![],
+            default_dir: Some(root.to_string_lossy().into_owned()),
+        }];
+
+        let mut d = DialogState::new(&profiles);
+        d.handle_key(&key(KeyCode::Tab), &profiles); // switch to Dir field
+        assert!(matches!(d.field, DialogField::Dir));
+        assert!(d.dir_entries.contains(&"sub_a".to_string()));
+        assert!(d.dir_entries.contains(&"sub_b".to_string()));
+
+        // Down arrow selects first entry
+        d.handle_key(&key(KeyCode::Down), &profiles);
+        assert_eq!(d.dir_selected_idx, Some(0));
+
+        // Up arrow goes back to text field
+        d.handle_key(&key(KeyCode::Up), &profiles);
+        assert_eq!(d.dir_selected_idx, None);
+
+        // Find index of sub_a
+        let sub_a_idx = d.dir_entries.iter().position(|e| e == "sub_a").unwrap();
+        d.dir_selected_idx = Some(sub_a_idx);
+
+        // Right arrow descends into sub_a
+        d.handle_key(&key(KeyCode::Right), &profiles);
+        assert_eq!(
+            std::path::PathBuf::from(&d.dir),
+            root.join("sub_a")
+        );
+
+        // Left arrow goes back up to root
+        d.handle_key(&key(KeyCode::Left), &profiles);
+        assert_eq!(
+            std::path::PathBuf::from(&d.dir),
+            root
+        );
     }
 }
