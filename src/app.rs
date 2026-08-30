@@ -1,5 +1,6 @@
 use crate::config::Profile;
 use crate::events::AppEvent;
+use crate::history::{self, SessionSummary};
 use crate::keys::encode_key;
 use crate::mouse::{WheelRoute, encode_mouse, route_wheel};
 use crate::search::SearchState;
@@ -16,6 +17,7 @@ pub enum Mode {
     Control,
     Attached,
     NewSession(DialogState),
+    SessionHistory(HistoryState),
     ConfirmKill,
     ConfirmQuit,
 }
@@ -30,6 +32,7 @@ pub enum Action {
     Attach,
     Detach,
     OpenNewSession,
+    OpenSessionHistory,
     KillSelected,
     EnterConfirmKill,
     RemoveSelected,
@@ -39,6 +42,8 @@ pub enum Action {
     SendLiteralDetachKey,
     /// NewSession mode: App routes the key to the DialogState it owns.
     DialogKey,
+    /// SessionHistory mode: App routes the key to the HistoryState it owns.
+    HistoryKey,
 }
 
 pub struct DispatchCtx {
@@ -129,6 +134,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 KeyCode::Char('k') | KeyCode::Up => Action::MoveUp,
                 KeyCode::Enter if ctx.selected_status.is_some() => Action::Attach,
                 KeyCode::Char('n') => Action::OpenNewSession,
+                KeyCode::Char('l') | KeyCode::Char('L') => Action::OpenSessionHistory,
                 KeyCode::Char('x') => match ctx.selected_status {
                     Some(Status::Exited(_)) => Action::RemoveSelected,
                     Some(_) => Action::EnterConfirmKill,
@@ -159,6 +165,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
             }
         }
         Mode::NewSession(_) => Action::DialogKey,
+        Mode::SessionHistory(_) => Action::HistoryKey,
         Mode::ConfirmKill => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::KillSelected,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
@@ -226,7 +233,7 @@ pub fn list_subdirectories(dir: &std::path::Path) -> Vec<String> {
             })
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        subdirs.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        subdirs.sort_by_key(|a| a.to_lowercase());
         entries.extend(subdirs);
     }
     entries
@@ -272,14 +279,14 @@ impl DialogState {
     pub fn refresh_dir_entries(&mut self) {
         let resolved = resolve_working_dir(&self.dir);
         self.dir_entries = list_subdirectories(&resolved);
-        if let Some(idx) = self.dir_selected_idx {
-            if idx >= self.dir_entries.len() {
-                self.dir_selected_idx = if self.dir_entries.is_empty() {
-                    None
-                } else {
-                    Some(self.dir_entries.len() - 1)
-                };
-            }
+        if let Some(idx) = self.dir_selected_idx
+            && idx >= self.dir_entries.len()
+        {
+            self.dir_selected_idx = if self.dir_entries.is_empty() {
+                None
+            } else {
+                Some(self.dir_entries.len() - 1)
+            };
         }
     }
 
@@ -339,27 +346,27 @@ impl DialogState {
             },
             DialogField::Dir => match key.code {
                 KeyCode::Enter => {
-                    if let Some(idx) = self.dir_selected_idx {
-                        if let Some(entry) = self.dir_entries.get(idx).cloned() {
-                            if entry == ".." {
-                                self.navigate_to_parent();
-                                return DialogResult::Consumed;
-                            } else {
-                                self.navigate_into(&entry);
-                                return DialogResult::Submit;
-                            }
+                    if let Some(idx) = self.dir_selected_idx
+                        && let Some(entry) = self.dir_entries.get(idx).cloned()
+                    {
+                        if entry == ".." {
+                            self.navigate_to_parent();
+                            return DialogResult::Consumed;
+                        } else {
+                            self.navigate_into(&entry);
+                            return DialogResult::Submit;
                         }
                     }
                     return DialogResult::Submit;
                 }
                 KeyCode::Right => {
-                    if let Some(idx) = self.dir_selected_idx {
-                        if let Some(entry) = self.dir_entries.get(idx).cloned() {
-                            if entry == ".." {
-                                self.navigate_to_parent();
-                            } else {
-                                self.navigate_into(&entry);
-                            }
+                    if let Some(idx) = self.dir_selected_idx
+                        && let Some(entry) = self.dir_entries.get(idx).cloned()
+                    {
+                        if entry == ".." {
+                            self.navigate_to_parent();
+                        } else {
+                            self.navigate_into(&entry);
                         }
                     } else if !self.dir_entries.is_empty() {
                         self.dir_selected_idx = Some(0);
@@ -405,6 +412,68 @@ impl DialogState {
             },
         }
         DialogResult::Consumed
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryPane {
+    SessionsList,
+    LogDetail,
+}
+
+#[derive(Debug)]
+pub struct HistoryState {
+    pub sessions: Vec<SessionSummary>,
+    pub selected_session_idx: usize,
+    pub log_lines: Vec<ratatui::text::Line<'static>>,
+    pub scroll_offset: usize,
+    pub focused_pane: HistoryPane,
+    pub all_projects: bool,
+    pub error: Option<String>,
+    pub base_dir: Option<std::path::PathBuf>,
+}
+
+impl HistoryState {
+    pub fn new(current_dir: Option<&std::path::Path>) -> Self {
+        let base_dir = current_dir.map(|p| p.to_path_buf());
+        let sessions = history::discover_sessions(None, current_dir, false);
+        let mut state = HistoryState {
+            sessions,
+            selected_session_idx: 0,
+            log_lines: Vec::new(),
+            scroll_offset: 0,
+            focused_pane: HistoryPane::SessionsList,
+            all_projects: false,
+            error: None,
+            base_dir,
+        };
+        state.load_selected_log();
+        state
+    }
+
+    pub fn load_selected_log(&mut self) {
+        self.scroll_offset = 0;
+        if let Some(summary) = self.sessions.get(self.selected_session_idx) {
+            match history::load_session_log(&summary.file_path) {
+                Ok(entries) => {
+                    self.log_lines = history::render_log_lines(&entries);
+                    self.error = None;
+                }
+                Err(e) => {
+                    self.log_lines = Vec::new();
+                    self.error = Some(format!("Failed to load session log: {e}"));
+                }
+            }
+        } else {
+            self.log_lines = Vec::new();
+        }
+    }
+
+    pub fn reload_sessions(&mut self) {
+        let cur_ref = self.base_dir.as_deref();
+        self.sessions = history::discover_sessions(None, cur_ref, self.all_projects);
+        self.selected_session_idx = 0;
+        self.load_selected_log();
     }
 }
 
@@ -693,6 +762,14 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent, _now: Instant) {
+        if let Mode::SessionHistory(ref mut history) = self.mode {
+            if matches!(ev.kind, MouseEventKind::ScrollUp) {
+                history.scroll_offset = history.scroll_offset.saturating_sub(3);
+            } else if matches!(ev.kind, MouseEventKind::ScrollDown) {
+                history.scroll_offset = history.scroll_offset.saturating_add(3);
+            }
+            return;
+        }
         // Mouse handling is scoped to Control (sidebar preview scroll) and
         // Attached (the pane showing a live child): during the NewSession
         // dialog or a Confirm prompt the pane underneath must not react to
@@ -910,6 +987,15 @@ impl App {
                     }
                 }
             }
+            Action::OpenSessionHistory => {
+                let cur_dir = self
+                    .sessions
+                    .get(self.selected)
+                    .map(|s| s.dir.clone())
+                    .or_else(|| std::env::current_dir().ok());
+                self.mode = Mode::SessionHistory(HistoryState::new(cur_dir.as_deref()));
+            }
+            Action::HistoryKey => self.handle_history_key(key),
             Action::RespawnSelected => {
                 self.selection = None;
                 self.respawn_selected();
@@ -973,6 +1059,117 @@ impl App {
                     }
                     Err(e) => dialog.error = Some(e.to_string()),
                 }
+            }
+        }
+    }
+
+    fn handle_history_key(&mut self, key: &KeyEvent) {
+        let Mode::SessionHistory(history) = &mut self.mode else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Control;
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                history.focused_pane = match history.focused_pane {
+                    HistoryPane::SessionsList => HistoryPane::LogDetail,
+                    HistoryPane::LogDetail => HistoryPane::SessionsList,
+                };
+            }
+            KeyCode::Left => {
+                history.focused_pane = HistoryPane::SessionsList;
+            }
+            KeyCode::Right => {
+                history.focused_pane = HistoryPane::LogDetail;
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                history.all_projects = !history.all_projects;
+                history.reload_sessions();
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Enter => {
+                if let Some(summary) = history.sessions.get(history.selected_session_idx).cloned() {
+                    self.resume_history_session(&summary);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => match history.focused_pane {
+                HistoryPane::SessionsList => {
+                    if !history.sessions.is_empty() {
+                        let next = (history.selected_session_idx + 1).min(history.sessions.len() - 1);
+                        if next != history.selected_session_idx {
+                            history.selected_session_idx = next;
+                            history.load_selected_log();
+                        }
+                    }
+                }
+                HistoryPane::LogDetail => {
+                    if !history.log_lines.is_empty() {
+                        history.scroll_offset = history.scroll_offset.saturating_add(1);
+                    }
+                }
+            },
+            KeyCode::Up | KeyCode::Char('k') => match history.focused_pane {
+                HistoryPane::SessionsList => {
+                    if history.selected_session_idx > 0 {
+                        history.selected_session_idx -= 1;
+                        history.load_selected_log();
+                    }
+                }
+                HistoryPane::LogDetail => {
+                    history.scroll_offset = history.scroll_offset.saturating_sub(1);
+                }
+            },
+            KeyCode::PageDown => {
+                history.scroll_offset = history.scroll_offset.saturating_add(15);
+            }
+            KeyCode::PageUp => {
+                history.scroll_offset = history.scroll_offset.saturating_sub(15);
+            }
+            KeyCode::Home => {
+                history.scroll_offset = 0;
+            }
+            KeyCode::End => {
+                history.scroll_offset = history.log_lines.len().saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn resume_history_session(&mut self, summary: &SessionSummary) {
+        let profile = self
+            .profiles
+            .iter()
+            .find(|p| p.command == "claude" || p.name.to_lowercase().contains("claude"))
+            .cloned()
+            .unwrap_or_else(|| Profile {
+                name: "Claude Code".into(),
+                command: "claude".into(),
+                args: vec![],
+                default_dir: None,
+            });
+
+        let mut resume_profile = profile;
+        resume_profile.args = vec!["--resume".into(), summary.session_id.clone()];
+
+        let dir = self
+            .sessions
+            .get(self.selected)
+            .map(|s| s.dir.clone())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        let (rows, cols) = self.pane_size;
+        let id = self.next_id;
+        match Session::spawn(id, resume_profile, dir, rows, cols, self.tx.clone()) {
+            Ok(session) => {
+                self.next_id += 1;
+                self.sessions.push(session);
+                self.selected = self.sessions.len() - 1;
+                self.mode = Mode::Control;
+            }
+            Err(e) => {
+                self.error = Some(format!("Failed to resume session: {e}"));
+                self.mode = Mode::Control;
             }
         }
     }
@@ -1391,3 +1588,72 @@ mod dialog_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctx() -> DispatchCtx {
+        DispatchCtx {
+            selected_status: None,
+            any_working: false,
+            just_detached: false,
+        }
+    }
+
+    #[test]
+    fn l_in_control_opens_history() {
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('l')), &ctx()),
+            Action::OpenSessionHistory
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('L')), &ctx()),
+            Action::OpenSessionHistory
+        ));
+    }
+
+    #[test]
+    fn history_mode_dispatches_history_key() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(vec![], tx);
+        app.mode = Mode::SessionHistory(HistoryState::new(None));
+        assert!(matches!(
+            dispatch(&app.mode, &key(KeyCode::Tab), &ctx()),
+            Action::HistoryKey
+        ));
+    }
+
+    #[test]
+    fn history_navigation_and_tab() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(vec![], tx);
+        let mut hist = HistoryState::new(None);
+        hist.log_lines = vec![ratatui::text::Line::raw("line1"), ratatui::text::Line::raw("line2")];
+        app.mode = Mode::SessionHistory(hist);
+
+        // Tab toggles to LogDetail
+        app.handle_key(&key(KeyCode::Tab), Instant::now());
+        if let Mode::SessionHistory(ref h) = app.mode {
+            assert_eq!(h.focused_pane, HistoryPane::LogDetail);
+        } else {
+            panic!("Expected SessionHistory mode");
+        }
+
+        // Down in LogDetail scrolls
+        app.handle_key(&key(KeyCode::Down), Instant::now());
+        if let Mode::SessionHistory(ref h) = app.mode {
+            assert_eq!(h.scroll_offset, 1);
+        }
+
+        // Esc returns to Control
+        app.handle_key(&key(KeyCode::Esc), Instant::now());
+        assert!(matches!(app.mode, Mode::Control));
+    }
+}
+
