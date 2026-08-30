@@ -1,4 +1,4 @@
-use crate::app::{App, DialogField, DialogState, Mode};
+use crate::app::{App, DialogField, DialogState, HistoryPane, HistoryState, Mode};
 use crate::status::Status;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -138,6 +138,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 
     match &app.mode {
         Mode::NewSession(dialog) => draw_new_session_dialog(f, dialog, app),
+        Mode::SessionHistory(history) => draw_session_history(f, history, app),
         Mode::ConfirmKill => draw_confirm(f, "Kill this session? [y/n]"),
         Mode::ConfirmQuit => draw_confirm(f, "Sessions are still working. Quit anyway? [y/n]"),
         _ => {}
@@ -239,7 +240,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
         match app.mode {
             Mode::Attached => Line::raw("ATTACHED — Ctrl+Q detach, Ctrl+Q Ctrl+Q send literal"),
             _ => {
-                Line::raw("[j/k] select  [Enter] attach  [n] new  [x] kill  [r] respawn  [q] quit")
+                Line::raw("[j/k] select  [Enter] attach  [n] new  [l] logs  [x] kill  [r] respawn  [q] quit")
             }
         }
     };
@@ -339,6 +340,130 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
         "[Tab] switch field  [↑/↓] navigate  [→/Enter] select/open  [Esc] cancel",
     ));
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
+    let width = (f.area().width * 95 / 100).clamp(60, 140);
+    let height = (f.area().height * 90 / 100).clamp(18, 45);
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+
+    let [body, footer] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(38), Constraint::Min(0)]).areas(body);
+
+    // Left pane: Session List
+    let left_border_style = if matches!(history.focused_pane, HistoryPane::SessionsList) {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let scope_label = if history.all_projects {
+        "all projects"
+    } else {
+        "this project"
+    };
+    let left_title = format!(
+        " Past Sessions ({}) [a: {scope_label}] ",
+        history.sessions.len()
+    );
+    let left_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(left_border_style)
+        .title(left_title);
+
+    if history.sessions.is_empty() {
+        let hint = Paragraph::new("\n  No past sessions found.\n\n  Press [a] to search all projects.")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(left_block);
+        f.render_widget(hint, left);
+    } else {
+        let items: Vec<ListItem> = history
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let is_sel = i == history.selected_session_idx;
+                let marker = if is_sel { "> " } else { "  " };
+                let title_str = if s.title.len() > 22 {
+                    format!("{}...", &s.title[..19])
+                } else {
+                    s.title.clone()
+                };
+                let line = Line::from(vec![
+                    Span::raw(format!("{marker}{:<16} ", s.timestamp_str)),
+                    Span::styled(
+                        title_str,
+                        Style::default().fg(if is_sel { Color::Yellow } else { Color::White }),
+                    ),
+                ]);
+                let item = ListItem::new(line);
+                if is_sel && matches!(history.focused_pane, HistoryPane::SessionsList) {
+                    item.style(Style::default().add_modifier(Modifier::REVERSED))
+                } else if is_sel {
+                    item.style(Style::default().fg(Color::Yellow))
+                } else {
+                    item
+                }
+            })
+            .collect();
+        f.render_widget(List::new(items).block(left_block), left);
+    }
+
+    // Right pane: Log Details
+    let right_border_style = if matches!(history.focused_pane, HistoryPane::LogDetail) {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let right_title = if let Some(s) = history.sessions.get(history.selected_session_idx) {
+        let id_short = if s.session_id.len() >= 8 {
+            &s.session_id[..8]
+        } else {
+            &s.session_id
+        };
+        let scroll_tag = if history.scroll_offset > 0 {
+            format!(" [↑ {}] ", history.scroll_offset)
+        } else {
+            String::new()
+        };
+        format!(" Log: {} ({id_short}){scroll_tag} ", s.title)
+    } else {
+        " Log ".to_string()
+    };
+    let right_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(right_border_style)
+        .title(right_title);
+
+    let inner_right = right_block.inner(right);
+    f.render_widget(right_block, right);
+
+    if let Some(err) = &history.error {
+        let p = Paragraph::new(Line::styled(err.clone(), Style::default().fg(Color::Red)));
+        f.render_widget(p, inner_right);
+    } else if history.log_lines.is_empty() {
+        let p = Paragraph::new(Line::styled(
+            "  (No log output for this session)",
+            Style::default().fg(Color::DarkGray),
+        ));
+        f.render_widget(p, inner_right);
+    } else {
+        let start = history
+            .scroll_offset
+            .min(history.log_lines.len().saturating_sub(1));
+        let visible: Vec<Line> = history.log_lines[start..].to_vec();
+        let p = Paragraph::new(visible);
+        f.render_widget(p, inner_right);
+    }
+
+    // Footer line
+    let footer_text = Line::styled(
+        " [Tab] switch pane  [↑/↓/PgUp/PgDn] select/scroll  [a] toggle all projects  [r/Enter] resume  [Esc] close",
+        Style::default().fg(Color::Black).bg(Color::Cyan),
+    );
+    f.render_widget(Paragraph::new(footer_text), footer);
 }
 
 fn draw_confirm(f: &mut Frame, message: &str) {
@@ -532,5 +657,34 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("New session"), "got: {text}");
         assert!(text.contains("Claude Code"), "got: {text}");
+    }
+
+    #[test]
+    fn session_history_mode_renders_split_view() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(Config::default_profiles(), tx);
+        let mut history = crate::app::HistoryState::new(None);
+        history.sessions = vec![crate::history::SessionSummary {
+            session_id: "test-uuid-1234".into(),
+            title: "Test History Title".into(),
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            file_path: std::path::PathBuf::from("/fake/path.jsonl"),
+            turn_count: 5,
+            project_slug: "-test".into(),
+            timestamp_str: "2026-08-30 19:28".into(),
+        }];
+        history.log_lines = vec![
+            ratatui::text::Line::raw("👤 USER: hello world"),
+            ratatui::text::Line::raw("🤖 CLAUDE: hi there!"),
+        ];
+        app.mode = crate::app::Mode::SessionHistory(history);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Past Sessions"), "got: {text}");
+        assert!(text.contains("Test History Title"), "got: {text}");
+        assert!(text.contains("hello world"), "got: {text}");
+        assert!(text.contains("hi there!"), "got: {text}");
+        assert!(text.contains("switch pane"), "got: {text}");
     }
 }

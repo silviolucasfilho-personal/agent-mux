@@ -1,6 +1,7 @@
 pub mod app;
 pub mod config;
 pub mod events;
+pub mod history;
 pub mod keys;
 pub mod mouse;
 pub mod search;
@@ -8,3 +9,4 @@ pub mod selection;
 pub mod session;
 pub mod status;
 pub mod ui;
+
