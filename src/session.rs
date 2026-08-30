@@ -110,6 +110,10 @@ pub struct Session {
     pub dir: PathBuf,
     pub parser: vt100::Parser<BellCounter>,
     pub tracker: StatusTracker,
+    /// Cached total scrollback row count, refreshed at the end of
+    /// `process_output`/`resize`. See `scroll_view`/`probe_scrollback_len`
+    /// for why this needs caching rather than reading it on demand.
+    scrollback_len: usize,
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty>,
     // Shared with the exit-watcher thread spawned in `spawn()` (see there
@@ -121,6 +125,12 @@ pub struct Session {
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 const SCROLLBACK_LINES: usize = 1000;
+
+/// Pure anchoring math: while the user is scrolled back, new lines pushed
+/// into scrollback must grow the offset so the visible content stays put.
+pub(crate) fn anchored_offset(offset: usize, len_before: usize, len_after: usize) -> usize {
+    offset + len_after.saturating_sub(len_before)
+}
 
 impl Session {
     /// Spawns `profile.command` in a new pty and starts two background
@@ -241,6 +251,7 @@ impl Session {
                 BellCounter::default(),
             ),
             tracker: StatusTracker::new(),
+            scrollback_len: 0,
             writer,
             master: pair.master,
             child,
@@ -248,7 +259,19 @@ impl Session {
     }
 
     pub fn process_output(&mut self, bytes: &[u8], now: Instant, focused: bool) {
+        let offset = self.parser.screen().scrollback();
+        let len_before = self.scrollback_len;
         self.parser.process(bytes);
+        self.scrollback_len = self.probe_scrollback_len();
+        if offset > 0 {
+            // Content-anchored: don't let new output move the scrolled
+            // view. Limitation: once scrollback hits SCROLLBACK_LINES,
+            // vt100 drops the oldest rows and `scrollback_len` stops
+            // growing, so a view pinned at the very top can drift -- same
+            // trade-off real emulators make at their buffer cap.
+            let anchored = anchored_offset(offset, len_before, self.scrollback_len);
+            self.parser.screen_mut().set_scrollback(anchored);
+        }
         let bells = self.parser.callbacks().count;
         self.tracker.on_output(now, bells, focused);
         // ConPTY (and some full-screen TUIs) query the cursor position and
@@ -285,6 +308,50 @@ impl Session {
             pixel_width: 0,
             pixel_height: 0,
         });
+        // Reflow can change how many rows scrollback holds.
+        self.scrollback_len = self.probe_scrollback_len();
+    }
+
+    /// Rows currently scrolled back (0 = live bottom).
+    pub fn scrolled(&self) -> usize {
+        self.parser.screen().scrollback()
+    }
+
+    /// (total scrollback rows, current offset) without touching the parser.
+    /// The length is cached by process_output/resize because probing vt100
+    /// for it requires mutation, and the render path is immutable.
+    pub fn scroll_view(&self) -> (usize, usize) {
+        (self.scrollback_len, self.parser.screen().scrollback())
+    }
+
+    /// vt100 doesn't expose scrollback length; set_scrollback self-clamps,
+    /// so probing with usize::MAX and restoring reads it in O(1).
+    fn probe_scrollback_len(&mut self) -> usize {
+        let cur = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(usize::MAX);
+        let len = self.parser.screen().scrollback();
+        self.parser.screen_mut().set_scrollback(cur);
+        len
+    }
+
+    /// Positive delta scrolls back into history; negative toward live.
+    /// Clamped at both ends (vt100 clamps the top, we clamp at 0).
+    pub fn scroll_by(&mut self, delta: i32) {
+        let cur = self.parser.screen().scrollback() as i64;
+        let next = (cur + i64::from(delta)).max(0) as usize;
+        self.parser.screen_mut().set_scrollback(next);
+    }
+
+    pub fn set_scroll(&mut self, offset: usize) {
+        self.parser.screen_mut().set_scrollback(offset);
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.parser.screen_mut().set_scrollback(usize::MAX);
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.parser.screen_mut().set_scrollback(0);
     }
 
     pub fn kill(&mut self) {
@@ -319,6 +386,46 @@ impl Session {
 
     pub fn status(&self, now: Instant) -> Status {
         self.tracker.status(now)
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn anchored_offset_grows_with_new_scrollback() {
+        assert_eq!(anchored_offset(5, 10, 13), 8); // 3 new lines while scrolled 5
+        assert_eq!(anchored_offset(5, 10, 10), 5); // no growth
+        assert_eq!(anchored_offset(0, 10, 13), 3); // caller only anchors when offset > 0; math still total
+    }
+
+    #[test]
+    fn vt100_set_scrollback_self_clamps_and_probe_reads_len() {
+        let mut parser = vt100::Parser::new(5, 20, 100);
+        for i in 0..30 {
+            parser.process(format!("line-{i}\r\n").as_bytes());
+        }
+        // 30 lines on a 5-row screen -> scrollback holds the rest
+        parser.screen_mut().set_scrollback(usize::MAX);
+        let len = parser.screen().scrollback();
+        assert!(len >= 20, "expected >=20 scrollback rows, got {len}");
+        parser.screen_mut().set_scrollback(0);
+        assert_eq!(parser.screen().scrollback(), 0);
+        // offset beyond len clamps to len
+        parser.screen_mut().set_scrollback(len + 50);
+        assert_eq!(parser.screen().scrollback(), len);
+    }
+
+    #[test]
+    fn scrolled_view_shows_history() {
+        let mut parser = vt100::Parser::new(5, 20, 100);
+        for i in 0..30 {
+            parser.process(format!("line-{i}\r\n").as_bytes());
+        }
+        assert!(!parser.screen().contents().contains("line-0"));
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert!(parser.screen().contents().contains("line-0"));
     }
 }
 
