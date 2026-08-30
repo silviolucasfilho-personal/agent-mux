@@ -1,8 +1,11 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent};
 
 #[derive(Debug)]
 pub enum AppEvent {
     Key(KeyEvent),
+    /// A captured terminal mouse event (wheel, click, drag). Routed by
+    /// App::handle_mouse; events outside the main pane are dropped there.
+    Mouse(MouseEvent),
     /// (cols, rows) as crossterm reports them.
     Resize(u16, u16),
     PtyOutput {

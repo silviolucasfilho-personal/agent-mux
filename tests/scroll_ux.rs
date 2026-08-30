@@ -1,7 +1,9 @@
+use agent_mux::app::{App, Mode};
 use agent_mux::config::Profile;
 use agent_mux::events::AppEvent;
 use agent_mux::session::Session;
 use agent_mux::status::Status;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -118,4 +120,158 @@ async fn view_stays_anchored_while_new_output_arrives() {
         matches!(s.status(Instant::now()), Status::Exited(_))
     })
     .await;
+}
+
+pub async fn pump_app(
+    rx: &mut mpsc::Receiver<AppEvent>,
+    app: &mut App,
+    timeout: Duration,
+    mut pred: impl FnMut(&App) -> bool,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if pred(app) {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(AppEvent::PtyOutput { id, bytes })) => {
+                app.handle_pty_output(id, &bytes, Instant::now());
+            }
+            Ok(Some(AppEvent::PtyExit { id })) => app.handle_pty_exit(id),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    pred(app)
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn shift_key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::SHIFT)
+}
+
+fn wheel(kind: MouseEventKind, modifiers: KeyModifiers) -> MouseEvent {
+    // (32, 2): inside the pane for any pane at least 2x2
+    MouseEvent { kind, column: 32, row: 2, modifiers }
+}
+
+/// App with one spawned shell session that has printed `lines` lines and
+/// exited, sized 10 rows x 80 cols.
+async fn app_with_history(
+    lines: u32,
+) -> (App, mpsc::Receiver<AppEvent>) {
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut app = App::new(vec![shell_profile()], tx.clone());
+    app.set_pane_size(10, 80);
+    let profile = Profile { args: print_lines_args(lines), ..shell_profile() };
+    let session = Session::spawn(900, profile, std::env::temp_dir(), 10, 80, tx).unwrap();
+    app.sessions.push(session);
+    let ok = pump_app(&mut rx, &mut app, Duration::from_secs(10), |a| {
+        a.sessions[0]
+            .parser
+            .screen()
+            .contents()
+            .contains(&format!("line-{lines}"))
+            && matches!(a.sessions[0].status(Instant::now()), Status::Exited(_))
+    })
+    .await;
+    assert!(ok, "history session never finished");
+    (app, rx)
+}
+
+#[tokio::test]
+async fn wheel_scrolls_control_preview_locally() {
+    let (mut app, _rx) = app_with_history(100).await;
+    for _ in 0..4 {
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp, KeyModifiers::NONE), Instant::now());
+    }
+    assert_eq!(app.sessions[0].scrolled(), 12); // 4 ticks x 3 lines
+    app.handle_mouse(wheel(MouseEventKind::ScrollDown, KeyModifiers::NONE), Instant::now());
+    assert_eq!(app.sessions[0].scrolled(), 9);
+}
+
+#[tokio::test]
+async fn wheel_outside_pane_is_ignored() {
+    let (mut app, _rx) = app_with_history(100).await;
+    let ev = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 5, // inside the sidebar
+        row: 2,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse(ev, Instant::now());
+    assert_eq!(app.sessions[0].scrolled(), 0);
+}
+
+#[tokio::test]
+async fn shift_paging_and_home_end() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.handle_key(&shift_key(KeyCode::PageUp), Instant::now());
+    let after_page = app.sessions[0].scrolled();
+    assert!(after_page > 0);
+    app.handle_key(&shift_key(KeyCode::Home), Instant::now());
+    let (len, offset) = app.sessions[0].scroll_view();
+    assert_eq!(offset, len);
+    app.handle_key(&shift_key(KeyCode::End), Instant::now());
+    assert_eq!(app.sessions[0].scrolled(), 0);
+    app.handle_key(&shift_key(KeyCode::PageUp), Instant::now());
+    app.handle_key(&shift_key(KeyCode::PageDown), Instant::now());
+    assert_eq!(app.sessions[0].scrolled(), 0);
+}
+
+#[tokio::test]
+async fn forwarded_key_snaps_to_live_when_attached() {
+    // live interactive shell, filled with enough output to have scrollback
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut app = App::new(vec![shell_profile()], tx.clone());
+    app.set_pane_size(10, 80);
+    let session = Session::spawn(901, shell_profile(), std::env::temp_dir(), 10, 80, tx).unwrap();
+    app.sessions.push(session);
+    let ok = pump_app(&mut rx, &mut app, Duration::from_secs(10), |a| {
+        !a.sessions[0].parser.screen().contents().trim().is_empty()
+    })
+    .await;
+    assert!(ok, "shell never painted its prompt");
+    #[cfg(windows)]
+    app.sessions[0].write_bytes(b"for /L %i in (1,1,50) do @echo fill-%i\r").unwrap();
+    #[cfg(not(windows))]
+    app.sessions[0].write_bytes(b"i=1; while [ $i -le 50 ]; do echo fill-$i; i=$((i+1)); done\n").unwrap();
+    let ok = pump_app(&mut rx, &mut app, Duration::from_secs(10), |a| {
+        a.sessions[0].parser.screen().contents().contains("fill-50")
+    })
+    .await;
+    assert!(ok);
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // attach
+    assert!(matches!(app.mode, Mode::Attached));
+    app.sessions[0].scroll_by(5);
+    assert!(app.sessions[0].scrolled() > 0, "test setup: expected scrollback");
+    app.handle_key(&key(KeyCode::Char('a')), Instant::now());
+    assert_eq!(app.sessions[0].scrolled(), 0, "forwarded key must snap to live");
+    app.kill_all();
+}
+
+#[tokio::test]
+async fn scroll_indicator_renders_in_title() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let (mut app, _rx) = app_with_history(100).await;
+    app.sessions[0].scroll_by(7);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|f| agent_mux::ui::draw(f, &app, Instant::now()))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut text = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    assert!(text.contains("SCROLL"), "no scroll indicator: {text}");
+    assert!(text.contains('7'), "offset missing from indicator");
 }

@@ -1,9 +1,11 @@
 use crate::config::Profile;
 use crate::events::AppEvent;
 use crate::keys::encode_key;
+use crate::mouse::{WheelRoute, encode_mouse, route_wheel};
 use crate::session::Session;
 use crate::status::Status;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::ui;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
@@ -232,6 +234,10 @@ impl App {
 
     pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) {
         self.error = None;
+        if self.handle_ux_key(key) {
+            self.just_detached = false;
+            return;
+        }
         let ctx = DispatchCtx {
             selected_status: self.sessions.get(self.selected).map(|s| s.status(now)),
             any_working: self
@@ -246,6 +252,99 @@ impl App {
             self.just_detached = false;
         }
         self.apply(action, key, now);
+    }
+
+    /// Terminal-emulator chords intercepted before v1 dispatch (Ghostty /
+    /// Windows Terminal convention: the app reserves Ctrl+Shift and
+    /// Shift+navigation for itself; everything else still reaches the
+    /// agent). Returns true if the key was consumed. Tasks: selection
+    /// (Ctrl+Shift+C/V) and search (Ctrl+Shift+F) add arms here.
+    fn handle_ux_key(&mut self, key: &KeyEvent) -> bool {
+        if !matches!(self.mode, Mode::Control | Mode::Attached) {
+            return false;
+        }
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let page = i32::from(self.pane_size.0.saturating_sub(1).max(1));
+        let Some(s) = self.sessions.get_mut(self.selected) else {
+            return false;
+        };
+        match (key.code, shift) {
+            (KeyCode::PageUp, true) => {
+                s.scroll_by(page);
+                true
+            }
+            (KeyCode::PageDown, true) => {
+                s.scroll_by(-page);
+                true
+            }
+            (KeyCode::Home, true) => {
+                s.scroll_to_top();
+                true
+            }
+            (KeyCode::End, true) => {
+                s.scroll_to_bottom();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn handle_mouse(&mut self, ev: MouseEvent, _now: Instant) {
+        let Some((lcol, lrow)) = ui::pane_local(ev.column, ev.row, self.pane_size) else {
+            return; // outside the main pane: sidebar stays keyboard-driven in this iteration
+        };
+        let attached = matches!(self.mode, Mode::Attached);
+        let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
+        // read child terminal state up front so no borrow is held across
+        // the mutating calls below
+        let Some((mouse_mode, enc, alt, app_cursor)) = self.sessions.get(self.selected).map(|s| {
+            let sc = s.parser.screen();
+            (
+                sc.mouse_protocol_mode(),
+                sc.mouse_protocol_encoding(),
+                sc.alternate_screen(),
+                sc.application_cursor(),
+            )
+        }) else {
+            return;
+        };
+        match ev.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = matches!(ev.kind, MouseEventKind::ScrollUp);
+                match route_wheel(shift, attached, mouse_mode, alt) {
+                    WheelRoute::Local => {
+                        if let Some(s) = self.sessions.get_mut(self.selected) {
+                            s.scroll_by(if up { 3 } else { -3 });
+                        }
+                    }
+                    WheelRoute::Forward => {
+                        if let Some(bytes) = encode_mouse(ev.kind, lcol, lrow, mouse_mode, enc) {
+                            self.forward_bytes(&bytes);
+                        }
+                    }
+                    WheelRoute::Arrows => {
+                        let seq: &[u8] = match (up, app_cursor) {
+                            (true, false) => b"\x1b[A",
+                            (true, true) => b"\x1bOA",
+                            (false, false) => b"\x1b[B",
+                            (false, true) => b"\x1bOB",
+                        };
+                        self.forward_bytes(&seq.repeat(3));
+                    }
+                }
+            }
+            _ => {
+                // Press/drag/release: when attached and the agent asked for
+                // mouse events (and Shift isn't overriding), the agent owns
+                // the mouse. Local selection arrives in a later task.
+                if attached
+                    && !shift
+                    && let Some(bytes) = encode_mouse(ev.kind, lcol, lrow, mouse_mode, enc)
+                {
+                    self.forward_bytes(&bytes);
+                }
+            }
+        }
     }
 
     fn apply(&mut self, action: Action, key: &KeyEvent, _now: Instant) {
@@ -271,6 +370,7 @@ impl App {
             }
             Action::SendLiteralDetachKey => {
                 self.just_detached = false;
+                self.snap_selected_to_live();
                 // Only re-attach if the literal Ctrl+Q actually made it to
                 // the pty -- a failed write already dropped us to Control
                 // via forward_bytes (spec: write failure -> error + Exited
@@ -283,6 +383,7 @@ impl App {
                 }
             }
             Action::ForwardBytes(bytes) => {
+                self.snap_selected_to_live();
                 self.forward_bytes(&bytes);
             }
             Action::OpenNewSession => {
@@ -327,6 +428,16 @@ impl App {
             return false;
         }
         true
+    }
+
+    /// Spec: any keystroke forwarded while scrolled first snaps the view
+    /// back to the live bottom, like every terminal emulator.
+    fn snap_selected_to_live(&mut self) {
+        if let Some(s) = self.sessions.get_mut(self.selected)
+            && s.scrolled() > 0
+        {
+            s.scroll_to_bottom();
+        }
     }
 
     fn handle_dialog_key(&mut self, key: &KeyEvent) {

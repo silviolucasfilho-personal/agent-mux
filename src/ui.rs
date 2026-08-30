@@ -39,6 +39,26 @@ pub fn main_pane_inner(total: Rect) -> (u16, u16) {
     (rows, cols)
 }
 
+/// (x, y) of the main pane's interior top-left cell. Keep in sync with
+/// draw()'s layout: sidebar occupies columns 0..SIDEBAR_WIDTH, then the
+/// pane's own left border, then the interior; row 0 is the pane's top
+/// border. pane_local_matches_layout_math pins this against
+/// main_pane_inner's numbers.
+pub const PANE_ORIGIN: (u16, u16) = (SIDEBAR_WIDTH + 1, 1);
+
+/// Translate absolute terminal coordinates into pane-local (col, row).
+/// `pane` is App's pane_size, i.e. (rows, cols). None = outside the pane
+/// interior (border cells count as outside).
+pub fn pane_local(col: u16, row: u16, pane: (u16, u16)) -> Option<(u16, u16)> {
+    let (rows, cols) = pane;
+    let (x0, y0) = PANE_ORIGIN;
+    if col >= x0 && col < x0 + cols && row >= y0 && row < y0 + rows {
+        Some((col - x0, row - y0))
+    } else {
+        None
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App, now: Instant) {
     let [body, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
     let [side, main] =
@@ -95,8 +115,14 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         return;
     };
     let (label, _) = status_label_style(session.status(now));
+    let (_, scroll_offset) = session.scroll_view();
+    let scroll_tag = if scroll_offset > 0 {
+        format!("[SCROLL ↑ {scroll_offset}] ")
+    } else {
+        String::new()
+    };
     let title = format!(
-        " {} — {} [{label}] ",
+        " {} — {} [{label}] {scroll_tag}",
         session.profile.name,
         session.dir.display()
     );
@@ -105,8 +131,9 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     f.render_widget(block, area);
     let screen = session.parser.screen();
     f.render_widget(PseudoTerminal::new(screen), inner);
-    // real cursor while attached, so the agent's input caret is visible
-    if matches!(app.mode, Mode::Attached) && !screen.hide_cursor() {
+    // real cursor while attached AND live: a scrolled view is history, the
+    // cursor belongs to the bottom of the buffer
+    if matches!(app.mode, Mode::Attached) && !screen.hide_cursor() && scroll_offset == 0 {
         let (row, col) = screen.cursor_position();
         f.set_cursor_position((inner.x + col, inner.y + row));
     }
@@ -227,6 +254,20 @@ mod tests {
         let tiny = ratatui::layout::Rect::new(0, 0, 5, 2);
         let (rows, cols) = main_pane_inner(tiny);
         assert!(rows >= 1 && cols >= 1);
+    }
+
+    #[test]
+    fn pane_local_matches_layout_math() {
+        // pane interior starts right of the sidebar border column
+        assert_eq!(PANE_ORIGIN, (SIDEBAR_WIDTH + 1, 1));
+        let pane = (37u16, 68u16); // (rows, cols) for a 100x40 terminal
+        assert_eq!(pane_local(31, 1, pane), Some((0, 0)));
+        assert_eq!(pane_local(31 + 67, 1 + 36, pane), Some((67, 36)));
+        // one past either edge is outside
+        assert_eq!(pane_local(30, 1, pane), None); // sidebar border
+        assert_eq!(pane_local(31 + 68, 1, pane), None);
+        assert_eq!(pane_local(31, 0, pane), None); // top border
+        assert_eq!(pane_local(31, 1 + 37, pane), None);
     }
 
     #[test]

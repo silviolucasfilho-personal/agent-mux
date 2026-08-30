@@ -2,7 +2,7 @@ use agent_mux::app::App;
 use agent_mux::events::AppEvent;
 use agent_mux::{config, ui};
 use anyhow::Result;
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen);
+    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
 }
 
 /// Restores the terminal on normal exit and on unwind.
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     // (disable_raw_mode + LeaveAlternateScreen) is harmless to run even if
     // the alternate screen was never entered.
     let _guard = TerminalGuard;
-    crossterm::execute!(stdout(), EnterAlternateScreen)?;
+    crossterm::execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
@@ -63,6 +63,11 @@ async fn main() -> Result<()> {
                     }
                     Ok(Event::Resize(cols, rows)) => {
                         if tx.blocking_send(AppEvent::Resize(cols, rows)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Event::Mouse(m)) => {
+                        if tx.blocking_send(AppEvent::Mouse(m)).is_err() {
                             break;
                         }
                     }
@@ -132,6 +137,7 @@ fn handle_event(app: &mut App, event: AppEvent) {
         }
         AppEvent::PtyOutput { id, bytes } => app.handle_pty_output(id, &bytes, Instant::now()),
         AppEvent::PtyExit { id } => app.handle_pty_exit(id),
+        AppEvent::Mouse(m) => app.handle_mouse(m, Instant::now()),
         AppEvent::Tick => {} // redraw after every batch covers badge refresh
     }
 }
