@@ -2,6 +2,7 @@ use crate::config::Profile;
 use crate::events::AppEvent;
 use crate::keys::encode_key;
 use crate::mouse::{WheelRoute, encode_mouse, route_wheel};
+use crate::search::SearchState;
 use crate::selection::{self, Pos, Selection};
 use crate::session::Session;
 use crate::status::Status;
@@ -250,6 +251,7 @@ pub struct App {
     pub profiles: Vec<Profile>,
     pub pane_size: (u16, u16), // (rows, cols)
     pub selection: Option<ActiveSelection>,
+    pub search: Option<SearchState>,
     just_detached: bool,
     next_id: usize,
     tx: Sender<AppEvent>,
@@ -266,6 +268,7 @@ impl App {
             profiles,
             pane_size: (24, 80),
             selection: None,
+            search: None,
             just_detached: false,
             next_id: 0,
             tx,
@@ -333,6 +336,10 @@ impl App {
 
     pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) {
         self.error = None;
+        if self.search.is_some() {
+            self.handle_search_key(key);
+            return;
+        }
         if self.handle_ux_key(key) {
             self.just_detached = false;
             return;
@@ -371,6 +378,7 @@ impl App {
             Bottom,
             Copy,
             Paste,
+            OpenSearch,
         }
         let chord = match (key.code, shift, ctrl) {
             (KeyCode::PageUp, true, _) => Chord::PageUp,
@@ -379,6 +387,13 @@ impl App {
             (KeyCode::End, true, _) => Chord::Bottom,
             (KeyCode::Char('c') | KeyCode::Char('C'), true, true) => Chord::Copy,
             (KeyCode::Char('v') | KeyCode::Char('V'), true, true) => Chord::Paste,
+            (KeyCode::Char('f') | KeyCode::Char('F'), true, true) => Chord::OpenSearch,
+            // plain Ctrl+F only when nothing is forwarded (Control mode)
+            (KeyCode::Char('f') | KeyCode::Char('F'), false, true)
+                if matches!(self.mode, Mode::Control) =>
+            {
+                Chord::OpenSearch
+            }
             _ => return false,
         };
         let page = i32::from(self.pane_size.0.saturating_sub(1).max(1));
@@ -397,8 +412,70 @@ impl App {
             }
             Chord::Copy => self.copy_selection(),
             Chord::Paste => self.paste_into_attached(),
+            Chord::OpenSearch => {
+                self.search = Some(SearchState::new());
+            }
         }
         true
+    }
+
+    fn handle_search_key(&mut self, key: &KeyEvent) {
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Esc => {
+                self.search = None;
+                if let Some(s) = self.sessions.get_mut(self.selected) {
+                    s.scroll_to_bottom();
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(st) = self.search.as_mut() {
+                    if shift {
+                        st.prev();
+                    } else {
+                        st.next();
+                    }
+                }
+                self.scroll_to_current_match();
+            }
+            KeyCode::Backspace => {
+                if let Some(st) = self.search.as_mut() {
+                    st.query.pop();
+                }
+                self.rerun_search();
+                self.scroll_to_current_match();
+            }
+            KeyCode::Char(c) => {
+                if let Some(st) = self.search.as_mut() {
+                    st.query.push(c);
+                }
+                self.rerun_search();
+                self.scroll_to_current_match();
+            }
+            _ => {}
+        }
+    }
+
+    fn rerun_search(&mut self) {
+        let Some(st) = self.search.as_mut() else { return };
+        let Some(s) = self.sessions.get_mut(self.selected) else { return };
+        let (len, _) = s.scroll_view();
+        st.run(&mut s.parser, len);
+    }
+
+    fn scroll_to_current_match(&mut self) {
+        let Some(row) = self
+            .search
+            .as_ref()
+            .and_then(|st| st.current_match().map(|m| m.row))
+        else {
+            return;
+        };
+        let Some(s) = self.sessions.get_mut(self.selected) else { return };
+        let (len, _) = s.scroll_view();
+        // live rows need no scrolling; scrollback rows go to the top of view
+        let offset = len.saturating_sub(row);
+        s.set_scroll(offset);
     }
 
     fn scroll_selected(&mut self, delta: i32) {
@@ -691,6 +768,9 @@ impl App {
             == Some(id);
         if let Some(i) = self.session_index(id) {
             self.sessions[i].process_output(bytes, now, focused);
+        }
+        if self.search.is_some() && self.sessions.get(self.selected).map(|s| s.id) == Some(id) {
+            self.rerun_search();
         }
     }
 

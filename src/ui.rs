@@ -95,6 +95,38 @@ pub fn apply_selection_highlight(
     }
 }
 
+/// Highlight search matches: all matches yellow, the current one white +
+/// bold. Same visual-coordinate mapping as the selection pass.
+pub fn apply_search_highlight(
+    buf: &mut ratatui::buffer::Buffer,
+    inner: Rect,
+    matches: &[crate::search::Match],
+    current: usize,
+    scrollback_len: usize,
+    offset: usize,
+) {
+    for (i, m) in matches.iter().enumerate() {
+        // abs = len - offset + v  =>  v = row + offset - len
+        let Some(v) = (m.row + offset).checked_sub(scrollback_len) else {
+            continue; // above the current view
+        };
+        if v >= usize::from(inner.height) {
+            continue; // below the current view
+        }
+        let style = if i == current {
+            Style::default()
+                .bg(Color::White)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().bg(Color::Yellow).fg(Color::Black)
+        };
+        for c in m.col_start..=m.col_end.min(inner.width.saturating_sub(1)) {
+            buf[(inner.x + c, inner.y + v as u16)].set_style(style);
+        }
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App, now: Instant) {
     let [body, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
     let [side, main] =
@@ -180,10 +212,24 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         let (len, offset) = session.scroll_view();
         apply_selection_highlight(f.buffer_mut(), inner, sel, len, offset);
     }
+    if let Some(st) = &app.search {
+        let (len, offset) = session.scroll_view();
+        apply_search_highlight(f.buffer_mut(), inner, &st.matches, st.current, len, offset);
+    }
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
-    let text = if let Some(err) = &app.error {
+    let text = if let Some(st) = &app.search {
+        let count = if st.matches.is_empty() {
+            if st.query.is_empty() { String::new() } else { "no matches".into() }
+        } else {
+            format!("{}/{}", st.current + 1, st.matches.len())
+        };
+        Line::raw(format!(
+            "Search: {}  {count}  [Enter] next  [Shift+Enter] prev  [Esc] close",
+            st.query
+        ))
+    } else if let Some(err) = &app.error {
         Line::styled(err.clone(), Style::default().fg(Color::Red))
     } else {
         match app.mode {
@@ -375,6 +421,44 @@ mod tests {
         assert!(!buf[(2 + 2, 1 + 2)].modifier.contains(Modifier::REVERSED));
         assert!(!buf[(2 + 2, 1)].modifier.contains(Modifier::REVERSED)); // row above
         assert!(!buf[(2 + 3, 1 + 3)].modifier.contains(Modifier::REVERSED)); // row below
+    }
+
+    #[test]
+    fn search_highlight_styles_match_cells() {
+        use crate::search::Match;
+        use ratatui::buffer::Buffer;
+        let area = Rect::new(2, 1, 10, 4);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+        let matches = vec![
+            Match { row: 5, col_start: 1, col_end: 3 },
+            Match { row: 6, col_start: 0, col_end: 2 },
+        ];
+        // len=6, offset=2: abs 5 -> visual 1, abs 6 -> visual 2
+        apply_search_highlight(&mut buf, area, &matches, 1, 6, 2);
+        // non-current match: yellow bg
+        let cell = &buf[(2 + 1, 1 + 1)];
+        assert_eq!(cell.style().bg, Some(Color::Yellow));
+        // current match (index 1): white bg + bold
+        let cell = &buf[(2, 1 + 2)];
+        assert_eq!(cell.style().bg, Some(Color::White));
+        assert!(cell.style().add_modifier.contains(Modifier::BOLD));
+        // outside any match: untouched (ratatui's default Cell bg is
+        // Color::Reset, not None -- style() always reports Some(_))
+        assert_eq!(buf[(2 + 5, 1 + 1)].style().bg, Some(Color::Reset));
+    }
+
+    #[test]
+    fn search_bar_renders_query_and_count() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(Config::default_profiles(), tx);
+        let mut st = crate::search::SearchState::new();
+        st.query = "hello".into();
+        app.search = Some(st);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Search: hello"), "got: {text}");
+        assert!(text.contains("no matches"), "empty result indicator: {text}");
     }
 
     #[test]

@@ -359,6 +359,72 @@ async fn release_outside_pane_finalizes_drag() {
     assert!(app.selection.is_none());
 }
 
+fn ctrl_shift(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+}
+
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+#[tokio::test]
+async fn search_finds_and_navigates_history() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.handle_key(&ctrl_shift('f'), Instant::now());
+    assert!(app.search.is_some());
+    for c in "line-3".chars() {
+        app.handle_key(&key(KeyCode::Char(c)), Instant::now());
+    }
+    let st = app.search.as_ref().unwrap();
+    assert_eq!(st.query, "line-3");
+    // line-3, line-30..line-39 = 11 matches
+    assert_eq!(st.matches.len(), 11);
+    // current = nearest bottom (line-39); the view jumped so it's visible
+    assert!(
+        app.sessions[0].parser.screen().contents().lines().any(|l| l.trim() == "line-39"),
+        "view did not scroll to current match"
+    );
+    // Enter walks up through history
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(
+        app.sessions[0].parser.screen().contents().lines().any(|l| l.trim() == "line-38")
+    );
+    // Shift+Enter walks back down
+    app.handle_key(&shift_key(KeyCode::Enter), Instant::now());
+    let st = app.search.as_ref().unwrap();
+    assert_eq!(st.current, st.matches.len() - 1);
+    // Esc closes and snaps to live
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    assert!(app.search.is_none());
+    assert_eq!(app.sessions[0].scrolled(), 0);
+}
+
+#[tokio::test]
+async fn open_search_bar_consumes_all_keys() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.handle_key(&ctrl_shift('f'), Instant::now());
+    app.handle_key(&key(KeyCode::Char('q')), Instant::now());
+    assert!(!app.should_quit, "q must edit the query, not quit");
+    assert_eq!(app.search.as_ref().unwrap().query, "q");
+    app.handle_key(&key(KeyCode::Backspace), Instant::now());
+    assert_eq!(app.search.as_ref().unwrap().query, "");
+}
+
+#[tokio::test]
+async fn plain_ctrl_f_opens_only_in_control_mode() {
+    let (mut app, _rx) = app_with_history(100).await;
+    // Control mode: plain Ctrl+F opens
+    app.handle_key(&ctrl('f'), Instant::now());
+    assert!(app.search.is_some());
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    // Attached: plain Ctrl+F is the agent's key (forwarded), bar stays shut
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // attach (session is Exited; Enter still attaches)
+    if matches!(app.mode, Mode::Attached) {
+        app.handle_key(&ctrl('f'), Instant::now());
+        assert!(app.search.is_none());
+    }
+}
+
 #[tokio::test]
 #[ignore = "mutates the real system clipboard"]
 async fn copy_on_select_reaches_clipboard() {
