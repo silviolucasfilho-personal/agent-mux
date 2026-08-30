@@ -2,10 +2,13 @@ use crate::config::Profile;
 use crate::events::AppEvent;
 use crate::keys::encode_key;
 use crate::mouse::{WheelRoute, encode_mouse, route_wheel};
+use crate::selection::{self, Pos, Selection};
 use crate::session::Session;
 use crate::status::Status;
 use crate::ui;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
@@ -48,6 +51,39 @@ pub struct DispatchCtx {
 fn is_ctrl_q(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+}
+
+/// Bytes to write for a paste: wrapped in bracketed-paste markers verbatim
+/// when the child enabled bracketed paste, otherwise newlines normalized
+/// to CR so a multi-line paste presses Enter instead of inserting raw LFs.
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let mut b = b"\x1b[200~".to_vec();
+        b.extend_from_slice(text.as_bytes());
+        b.extend_from_slice(b"\x1b[201~");
+        b
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::paste_bytes;
+
+    #[test]
+    fn bracketed_paste_wraps_verbatim() {
+        assert_eq!(
+            paste_bytes("a\r\nb\nc", true),
+            b"\x1b[200~a\r\nb\nc\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn unbracketed_paste_normalizes_newlines_to_cr() {
+        assert_eq!(paste_bytes("a\r\nb\nc", false), b"a\rb\rc".to_vec());
+        assert_eq!(paste_bytes("plain", false), b"plain".to_vec());
+    }
 }
 
 pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
@@ -195,6 +231,16 @@ impl DialogState {
     }
 }
 
+/// A local (non-agent) text selection being dragged or held over one
+/// session's screen. `session_id` (not an index) so a selection can be
+/// recognized as stale once its session is removed/replaced/reordered.
+#[derive(Debug)]
+pub struct ActiveSelection {
+    pub session_id: usize,
+    pub sel: Selection,
+    pub dragging: bool,
+}
+
 pub struct App {
     pub sessions: Vec<Session>,
     pub selected: usize,
@@ -203,6 +249,7 @@ pub struct App {
     pub error: Option<String>,
     pub profiles: Vec<Profile>,
     pub pane_size: (u16, u16), // (rows, cols)
+    pub selection: Option<ActiveSelection>,
     just_detached: bool,
     next_id: usize,
     tx: Sender<AppEvent>,
@@ -218,6 +265,7 @@ impl App {
             error: None,
             profiles,
             pane_size: (24, 80),
+            selection: None,
             just_detached: false,
             next_id: 0,
             tx,
@@ -230,6 +278,57 @@ impl App {
 
     fn session_index(&self, id: usize) -> Option<usize> {
         self.sessions.iter().position(|s| s.id == id)
+    }
+
+    /// The selection, but only if it belongs to the session currently shown
+    /// in the main pane -- selections on removed/replaced/other sessions
+    /// are treated as gone.
+    pub fn displayed_selection(&self) -> Option<&Selection> {
+        let shown = self.sessions.get(self.selected)?.id;
+        self.selection
+            .as_ref()
+            .filter(|a| a.session_id == shown)
+            .map(|a| &a.sel)
+    }
+
+    fn copy_to_clipboard(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if let Err(e) = arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+            self.error = Some(format!("clipboard: {e}"));
+        }
+    }
+
+    fn copy_selection(&mut self) {
+        let Some(sel) = self.displayed_selection().copied() else {
+            return;
+        };
+        let Some(s) = self.sessions.get_mut(self.selected) else {
+            return;
+        };
+        let (len, _) = s.scroll_view();
+        let text = selection::extract_text(&mut s.parser, len, &sel);
+        self.copy_to_clipboard(text);
+    }
+
+    fn paste_into_attached(&mut self) {
+        if !matches!(self.mode, Mode::Attached) {
+            return;
+        }
+        let text = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+            Ok(t) => t,
+            Err(e) => {
+                self.error = Some(format!("clipboard: {e}"));
+                return;
+            }
+        };
+        let Some(s) = self.sessions.get(self.selected) else {
+            return;
+        };
+        let bytes = paste_bytes(&text, s.parser.screen().bracketed_paste());
+        self.snap_selected_to_live();
+        self.forward_bytes(&bytes);
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) {
@@ -264,28 +363,47 @@ impl App {
             return false;
         }
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let page = i32::from(self.pane_size.0.saturating_sub(1).max(1));
-        let Some(s) = self.sessions.get_mut(self.selected) else {
-            return false;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        enum Chord {
+            PageUp,
+            PageDown,
+            Top,
+            Bottom,
+            Copy,
+            Paste,
+        }
+        let chord = match (key.code, shift, ctrl) {
+            (KeyCode::PageUp, true, _) => Chord::PageUp,
+            (KeyCode::PageDown, true, _) => Chord::PageDown,
+            (KeyCode::Home, true, _) => Chord::Top,
+            (KeyCode::End, true, _) => Chord::Bottom,
+            (KeyCode::Char('c') | KeyCode::Char('C'), true, true) => Chord::Copy,
+            (KeyCode::Char('v') | KeyCode::Char('V'), true, true) => Chord::Paste,
+            _ => return false,
         };
-        match (key.code, shift) {
-            (KeyCode::PageUp, true) => {
-                s.scroll_by(page);
-                true
+        let page = i32::from(self.pane_size.0.saturating_sub(1).max(1));
+        match chord {
+            Chord::PageUp => self.scroll_selected(page),
+            Chord::PageDown => self.scroll_selected(-page),
+            Chord::Top => {
+                if let Some(s) = self.sessions.get_mut(self.selected) {
+                    s.scroll_to_top();
+                }
             }
-            (KeyCode::PageDown, true) => {
-                s.scroll_by(-page);
-                true
+            Chord::Bottom => {
+                if let Some(s) = self.sessions.get_mut(self.selected) {
+                    s.scroll_to_bottom();
+                }
             }
-            (KeyCode::Home, true) => {
-                s.scroll_to_top();
-                true
-            }
-            (KeyCode::End, true) => {
-                s.scroll_to_bottom();
-                true
-            }
-            _ => false,
+            Chord::Copy => self.copy_selection(),
+            Chord::Paste => self.paste_into_attached(),
+        }
+        true
+    }
+
+    fn scroll_selected(&mut self, delta: i32) {
+        if let Some(s) = self.sessions.get_mut(self.selected) {
+            s.scroll_by(delta);
         }
     }
 
@@ -333,10 +451,58 @@ impl App {
                     }
                 }
             }
+            MouseEventKind::Down(MouseButton::Left)
+            | MouseEventKind::Drag(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Left) => {
+                // the agent owns the mouse when attached + it asked for
+                // events, unless Shift forces local selection (iTerm2 rule)
+                let agent_owns =
+                    attached && !shift && mouse_mode != vt100::MouseProtocolMode::None;
+                if agent_owns {
+                    if let Some(bytes) = encode_mouse(ev.kind, lcol, lrow, mouse_mode, enc) {
+                        self.forward_bytes(&bytes);
+                    }
+                    return;
+                }
+                let Some(s) = self.sessions.get(self.selected) else {
+                    return;
+                };
+                let (len, offset) = s.scroll_view();
+                let session_id = s.id;
+                let pos = Pos {
+                    row: selection::abs_row(len, offset, lrow),
+                    col: lcol,
+                };
+                match ev.kind {
+                    MouseEventKind::Down(_) => {
+                        self.selection = Some(ActiveSelection {
+                            session_id,
+                            sel: Selection::new(pos),
+                            dragging: true,
+                        });
+                    }
+                    MouseEventKind::Drag(_) => {
+                        if let Some(a) = self.selection.as_mut().filter(|a| a.dragging) {
+                            a.sel.head = pos;
+                        }
+                    }
+                    _ => {
+                        // release: finish the drag; copy-on-select or clear
+                        let finished = self.selection.take_if(|a| a.dragging);
+                        if let Some(mut a) = finished {
+                            a.dragging = false;
+                            if a.sel.is_empty() {
+                                // plain click: selection stays cleared
+                            } else {
+                                self.selection = Some(a);
+                                self.copy_selection();
+                            }
+                        }
+                    }
+                }
+            }
             _ => {
-                // Press/drag/release: when attached and the agent asked for
-                // mouse events (and Shift isn't overriding), the agent owns
-                // the mouse. Local selection arrives in a later task.
+                // other buttons: forward when the agent owns the mouse
                 if attached
                     && !shift
                     && let Some(bytes) = encode_mouse(ev.kind, lcol, lrow, mouse_mode, enc)
@@ -353,11 +519,15 @@ impl App {
             Action::Quit => self.should_quit = true,
             Action::EnterConfirmQuit => self.mode = Mode::ConfirmQuit,
             Action::MoveDown => {
+                self.selection = None;
                 if !self.sessions.is_empty() {
                     self.selected = (self.selected + 1).min(self.sessions.len() - 1);
                 }
             }
-            Action::MoveUp => self.selected = self.selected.saturating_sub(1),
+            Action::MoveUp => {
+                self.selection = None;
+                self.selected = self.selected.saturating_sub(1);
+            }
             Action::Attach => {
                 if let Some(s) = self.sessions.get_mut(self.selected) {
                     s.tracker.on_attach();
@@ -397,6 +567,7 @@ impl App {
                 self.mode = Mode::Control;
             }
             Action::RemoveSelected => {
+                self.selection = None;
                 if self.selected < self.sessions.len() {
                     self.sessions.remove(self.selected);
                     if self.selected >= self.sessions.len() {
@@ -404,7 +575,10 @@ impl App {
                     }
                 }
             }
-            Action::RespawnSelected => self.respawn_selected(),
+            Action::RespawnSelected => {
+                self.selection = None;
+                self.respawn_selected();
+            }
             Action::CancelToControl => self.mode = Mode::Control,
             Action::DialogKey => self.handle_dialog_key(key),
         }

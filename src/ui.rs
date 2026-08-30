@@ -59,6 +59,27 @@ pub fn pane_local(col: u16, row: u16, pane: (u16, u16)) -> Option<(u16, u16)> {
     }
 }
 
+/// Applies REVERSED to every cell of `inner` whose grid-absolute position
+/// falls inside the selection. Pure over the buffer; testable headlessly.
+pub fn apply_selection_highlight(
+    buf: &mut ratatui::buffer::Buffer,
+    inner: Rect,
+    sel: &crate::selection::Selection,
+    scrollback_len: usize,
+    offset: usize,
+) {
+    for v in 0..inner.height {
+        let row = crate::selection::abs_row(scrollback_len, offset, v);
+        for c in 0..inner.width {
+            if sel.contains(row, c) {
+                let cell = &mut buf[(inner.x + c, inner.y + v)];
+                let style = cell.style().add_modifier(Modifier::REVERSED);
+                cell.set_style(style);
+            }
+        }
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App, now: Instant) {
     let [body, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
     let [side, main] =
@@ -129,13 +150,20 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let screen = session.parser.screen();
-    f.render_widget(PseudoTerminal::new(screen), inner);
-    // real cursor while attached AND live: a scrolled view is history, the
-    // cursor belongs to the bottom of the buffer
-    if matches!(app.mode, Mode::Attached) && !screen.hide_cursor() && scroll_offset == 0 {
-        let (row, col) = screen.cursor_position();
+    let cursor = {
+        let screen = session.parser.screen();
+        f.render_widget(PseudoTerminal::new(screen), inner);
+        // real cursor while attached AND live: a scrolled view is history,
+        // the cursor belongs to the bottom of the buffer
+        (matches!(app.mode, Mode::Attached) && !screen.hide_cursor() && scroll_offset == 0)
+            .then(|| screen.cursor_position())
+    };
+    if let Some((row, col)) = cursor {
         f.set_cursor_position((inner.x + col, inner.y + row));
+    }
+    if let Some(sel) = app.displayed_selection() {
+        let (len, offset) = session.scroll_view();
+        apply_selection_highlight(f.buffer_mut(), inner, sel, len, offset);
     }
 }
 
@@ -294,6 +322,28 @@ mod tests {
             })
             .unwrap();
         assert!(buffer_text(&terminal).contains("hello-widget"));
+    }
+
+    #[test]
+    fn selection_highlight_marks_expected_cells() {
+        use crate::selection::{Pos, Selection};
+        use ratatui::buffer::Buffer;
+        let area = Rect::new(2, 1, 10, 4); // inner pane at (2,1), 10 cols x 4 rows
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+        // len=6, offset=2 -> visual row v shows abs row 4 + v
+        let sel = Selection {
+            anchor: Pos { row: 5, col: 3 },
+            head: Pos { row: 6, col: 1 },
+        };
+        apply_selection_highlight(&mut buf, area, &sel, 6, 2);
+        // abs 5 = visual 1, abs 6 = visual 2
+        assert!(buf[(2 + 3, 1 + 1)].modifier.contains(Modifier::REVERSED));
+        assert!(buf[(2 + 9, 1 + 1)].modifier.contains(Modifier::REVERSED)); // rest of first row
+        assert!(buf[(2, 1 + 2)].modifier.contains(Modifier::REVERSED)); // start of last row
+        assert!(buf[(2 + 1, 1 + 2)].modifier.contains(Modifier::REVERSED)); // inclusive end
+        assert!(!buf[(2 + 2, 1 + 2)].modifier.contains(Modifier::REVERSED));
+        assert!(!buf[(2 + 2, 1)].modifier.contains(Modifier::REVERSED)); // row above
+        assert!(!buf[(2 + 3, 1 + 3)].modifier.contains(Modifier::REVERSED)); // row below
     }
 
     #[test]

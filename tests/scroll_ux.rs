@@ -3,7 +3,7 @@ use agent_mux::config::Profile;
 use agent_mux::events::AppEvent;
 use agent_mux::session::Session;
 use agent_mux::status::Status;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -274,4 +274,64 @@ async fn scroll_indicator_renders_in_title() {
     }
     assert!(text.contains("SCROLL"), "no scroll indicator: {text}");
     assert!(text.contains('7'), "offset missing from indicator");
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE }
+}
+
+#[tokio::test]
+async fn drag_selects_and_extracts_screen_text() {
+    let (mut app, _rx) = app_with_history(100).await;
+    // pane interior starts at (31, 1); drag across two rows
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 31, 1), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 31 + 7, 2), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 31 + 7, 2), Instant::now());
+    let active = app.selection.as_ref().expect("selection should exist");
+    assert!(!active.sel.is_empty());
+    assert!(!active.dragging, "release must end the drag");
+    let sel = active.sel;
+    let (len, _) = app.sessions[0].scroll_view();
+    let text = agent_mux::selection::extract_text(&mut app.sessions[0].parser, len, &sel);
+    // the visible screen at rows 0..=1 holds two of the trailing lines
+    // (line-93.., depending on prompt rows); assert shape, not exact rows
+    assert!(text.contains('\n'), "two-row drag extracts two rows: {text:?}");
+    assert!(text.contains("line-9"), "extracted from visible tail: {text:?}");
+}
+
+#[tokio::test]
+async fn plain_click_clears_selection() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 31, 1), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 40, 2), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 40, 2), Instant::now());
+    assert!(app.selection.is_some());
+    // click without drag clears
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 33, 1), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 33, 1), Instant::now());
+    assert!(app.selection.is_none());
+}
+
+#[tokio::test]
+async fn selection_does_not_leak_across_sessions() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 31, 1), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 40, 2), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 40, 2), Instant::now());
+    assert!(app.displayed_selection().is_some());
+    // respawn replaces the session (fresh id) -> selection no longer displayed
+    app.handle_key(&key(KeyCode::Char('r')), Instant::now());
+    assert!(app.displayed_selection().is_none());
+    app.kill_all();
+}
+
+#[tokio::test]
+#[ignore = "mutates the real system clipboard"]
+async fn copy_on_select_reaches_clipboard() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 31, 1), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 31 + 7, 1), Instant::now());
+    app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 31 + 7, 1), Instant::now());
+    let text = arboard::Clipboard::new().unwrap().get_text().unwrap();
+    assert!(text.contains("line-9"), "clipboard got: {text:?}");
 }
