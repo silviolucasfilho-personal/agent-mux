@@ -386,13 +386,23 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
             .map(|(i, s)| {
                 let is_sel = i == history.selected_session_idx;
                 let marker = if is_sel { "> " } else { "  " };
-                let title_str = if s.title.len() > 22 {
-                    format!("{}...", &s.title[..19])
+                let badge = match s.provider {
+                    crate::history::AgentProvider::Claude => {
+                        Span::styled("[Claude] ", Style::default().fg(Color::LightMagenta))
+                    }
+                    crate::history::AgentProvider::Antigravity => {
+                        Span::styled("[AGY]    ", Style::default().fg(Color::LightCyan))
+                    }
+                };
+                let title_str = if s.title.len() > 18 {
+                    format!("{}...", &s.title[..15])
                 } else {
                     s.title.clone()
                 };
                 let line = Line::from(vec![
-                    Span::raw(format!("{marker}{:<16} ", s.timestamp_str)),
+                    Span::raw(marker),
+                    badge,
+                    Span::raw(format!("{:<16} ", s.timestamp_str)),
                     Span::styled(
                         title_str,
                         Style::default().fg(if is_sel { Color::Yellow } else { Color::White }),
@@ -428,7 +438,11 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
         } else {
             String::new()
         };
-        format!(" Log: {} ({id_short}){scroll_tag} ", s.title)
+        let provider_tag = match s.provider {
+            crate::history::AgentProvider::Claude => "Claude",
+            crate::history::AgentProvider::Antigravity => "Antigravity",
+        };
+        format!(" Log [{provider_tag}]: {} ({id_short}){scroll_tag} ", s.title)
     } else {
         " Log ".to_string()
     };
@@ -672,6 +686,7 @@ mod tests {
             turn_count: 5,
             project_slug: "-test".into(),
             timestamp_str: "2026-08-30 19:28".into(),
+            provider: crate::history::AgentProvider::Claude,
         }];
         history.log_lines = vec![
             ratatui::text::Line::raw("👤 USER: hello world"),

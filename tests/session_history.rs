@@ -35,7 +35,8 @@ fn create_mock_claude_project_dir() -> tempfile::TempDir {
 #[test]
 fn test_discovery_and_log_parsing() {
     let temp = create_mock_claude_project_dir();
-    let sessions = discover_sessions(Some(temp.path()), Some(Path::new("/workspace/my-app")), false);
+    let empty_brain = temp.path().join("empty_brain");
+    let sessions = discover_sessions(Some(temp.path()), Some(&empty_brain), Some(Path::new("/workspace/my-app")), false);
     assert_eq!(sessions.len(), 2);
 
     let s1 = sessions.iter().find(|s| s.session_id == "session-abc-123").unwrap();
@@ -57,6 +58,7 @@ fn test_discovery_and_log_parsing() {
 #[tokio::test]
 async fn test_app_history_flow_and_navigation() {
     let temp = create_mock_claude_project_dir();
+    let empty_brain = temp.path().join("empty_brain");
     let (tx, _rx) = mpsc::channel(256);
     let mut app = App::new(
         vec![Profile {
@@ -77,7 +79,7 @@ async fn test_app_history_flow_and_navigation() {
 
     // Inject mock discovered sessions
     if let Mode::SessionHistory(ref mut hist) = app.mode {
-        hist.sessions = discover_sessions(Some(temp.path()), Some(Path::new("/workspace/my-app")), false);
+        hist.sessions = discover_sessions(Some(temp.path()), Some(&empty_brain), Some(Path::new("/workspace/my-app")), false);
         hist.selected_session_idx = 0;
         hist.load_selected_log();
         assert_eq!(hist.sessions.len(), 2);
@@ -113,6 +115,7 @@ async fn test_app_history_flow_and_navigation() {
 #[tokio::test]
 async fn test_app_history_resume_spawns_session() {
     let temp = create_mock_claude_project_dir();
+    let empty_brain = temp.path().join("empty_brain");
     let (tx, _rx) = mpsc::channel(256);
     let mut app = App::new(
         vec![Profile {
@@ -126,7 +129,7 @@ async fn test_app_history_resume_spawns_session() {
 
     app.handle_key(&key(KeyCode::Char('l')), Instant::now());
     if let Mode::SessionHistory(ref mut hist) = app.mode {
-        hist.sessions = discover_sessions(Some(temp.path()), Some(Path::new("/workspace/my-app")), false);
+        hist.sessions = discover_sessions(Some(temp.path()), Some(&empty_brain), Some(Path::new("/workspace/my-app")), false);
         hist.selected_session_idx = 0;
         hist.load_selected_log();
     }
@@ -143,4 +146,56 @@ async fn test_app_history_resume_spawns_session() {
     assert_eq!(app.sessions.len(), 1);
     let spawned = &app.sessions[0];
     assert_eq!(spawned.profile.args, vec!["--resume", &selected_id]);
+}
+
+#[tokio::test]
+async fn test_antigravity_discovery_and_resume() {
+    let temp = tempfile::tempdir().unwrap();
+    let empty_claude = temp.path().join("empty_claude");
+    let brain_dir = temp.path().join("brain").join("conv-12345");
+    let logs_dir = brain_dir.join(".system_generated").join("logs");
+    std::fs::create_dir_all(&logs_dir).unwrap();
+
+    let transcript = logs_dir.join("transcript.jsonl");
+    let content = r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-08-30T17:00:00Z","content":"<USER_REQUEST>\nBuild the parser\n</USER_REQUEST>"}
+{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-08-30T17:01:00Z","thinking":"Writing code","tool_calls":[{"name":"run_command","args":{"CommandLine":"\"cargo test\"","Cwd":"\"/workspace/my-app\""}}]}
+"#;
+    std::fs::write(&transcript, content).unwrap();
+
+    let (tx, _rx) = mpsc::channel(256);
+    let mut app = App::new(
+        vec![Profile {
+            name: "Antigravity".into(),
+            command: "agy".into(),
+            args: vec![],
+            default_dir: None,
+        }],
+        tx,
+    );
+
+    let summaries = discover_sessions(Some(&empty_claude), Some(&temp.path().join("brain")), Some(Path::new("/workspace/my-app")), false);
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].title, "Build the parser");
+    assert_eq!(summaries[0].provider, agent_mux::history::AgentProvider::Antigravity);
+
+    let entries = load_session_log(&summaries[0].file_path).unwrap();
+    assert_eq!(entries.len(), 3);
+    let rendered = render_log_lines(&entries);
+    let text = rendered.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+    assert!(text.contains("ANTIGRAVITY"));
+    assert!(text.contains("Build the parser"));
+    assert!(text.contains("cargo test"));
+
+    app.handle_key(&key(KeyCode::Char('l')), Instant::now());
+    if let Mode::SessionHistory(ref mut hist) = app.mode {
+        hist.sessions = summaries;
+        hist.selected_session_idx = 0;
+        hist.load_selected_log();
+    }
+
+    // Press 'r' to launch Antigravity session
+    app.handle_key(&key(KeyCode::Char('r')), Instant::now());
+    assert!(matches!(app.mode, Mode::Control));
+    assert_eq!(app.sessions.len(), 1);
+    assert_eq!(app.sessions[0].profile.command, "agy");
 }
