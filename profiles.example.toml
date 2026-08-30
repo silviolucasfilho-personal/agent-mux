@@ -1,0 +1,11 @@
+# Copy to profiles.toml (same directory as the exe, or ~/.agent-mux/profiles.toml)
+[[profiles]]
+name = "Claude Code"
+command = "claude"
+args = []
+# default_dir = "C:\\Users\\me\\workspace"
+
+[[profiles]]
+name = "Codex"
+command = "codex"
+args = []
