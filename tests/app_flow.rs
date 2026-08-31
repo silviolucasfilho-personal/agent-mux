@@ -20,6 +20,7 @@ fn shell_profiles() -> Vec<Profile> {
         command: command.into(),
         args: vec![],
         default_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+        langfuse: None,
     }]
 }
 
@@ -59,7 +60,7 @@ fn create_session_via_dialog(app: &mut App) {
 #[tokio::test]
 async fn dialog_submit_spawns_session_and_returns_to_control() {
     let (tx, mut rx) = mpsc::channel(256);
-    let mut app = App::new(shell_profiles(), tx);
+    let mut app = App::new(shell_profiles(), None, tx);
     create_session_via_dialog(&mut app);
     assert!(matches!(app.mode, Mode::Control));
     assert_eq!(app.sessions.len(), 1);
@@ -76,7 +77,7 @@ async fn dialog_submit_spawns_session_and_returns_to_control() {
 #[tokio::test]
 async fn dialog_submit_with_bad_directory_stays_open_with_error() {
     let (tx, _rx) = mpsc::channel(256);
-    let mut app = App::new(shell_profiles(), tx);
+    let mut app = App::new(shell_profiles(), None, tx);
     let now = Instant::now();
     app.handle_key(&key(KeyCode::Char('n')), now);
     // wipe the prefilled dir and type a bad one
@@ -97,7 +98,7 @@ async fn dialog_submit_with_bad_directory_stays_open_with_error() {
 #[tokio::test]
 async fn attach_detach_and_literal_ctrl_q() {
     let (tx, mut rx) = mpsc::channel(256);
-    let mut app = App::new(shell_profiles(), tx);
+    let mut app = App::new(shell_profiles(), None, tx);
     create_session_via_dialog(&mut app);
     let now = Instant::now();
     app.handle_key(&key(KeyCode::Enter), now); // attach
@@ -118,7 +119,7 @@ async fn attach_detach_and_literal_ctrl_q() {
 #[tokio::test]
 async fn kill_confirm_respawn_and_remove() {
     let (tx, mut rx) = mpsc::channel(256);
-    let mut app = App::new(shell_profiles(), tx);
+    let mut app = App::new(shell_profiles(), None, tx);
     create_session_via_dialog(&mut app);
     let now = Instant::now();
     // x on a running session -> confirm -> y kills it
@@ -154,7 +155,7 @@ async fn duplicate_pty_exit_is_idempotent() {
     // exit-watcher thread can send one). A second handle_pty_exit for an
     // already-exited session must be a no-op, not a panic or a status change.
     let (tx, mut rx) = mpsc::channel(256);
-    let mut app = App::new(shell_profiles(), tx);
+    let mut app = App::new(shell_profiles(), None, tx);
     create_session_via_dialog(&mut app);
     let id = app.sessions[0].id;
     app.sessions[0].kill();
@@ -182,7 +183,7 @@ async fn duplicate_pty_exit_is_idempotent() {
 #[tokio::test]
 async fn quit_asks_for_confirmation_while_working() {
     let (tx, mut rx) = mpsc::channel(256);
-    let mut app = App::new(shell_profiles(), tx);
+    let mut app = App::new(shell_profiles(), None, tx);
     create_session_via_dialog(&mut app);
     // make the session Working: pump until some output arrived just now
     let ok = pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {

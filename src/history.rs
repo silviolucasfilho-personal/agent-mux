@@ -1,3 +1,4 @@
+use crate::transcript::TranscriptEvent;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -83,18 +84,20 @@ pub fn default_claude_dir() -> Option<PathBuf> {
     None
 }
 
+/// The antigravity-cli ROOT (`~/.gemini/antigravity-cli`) — `brain/` and
+/// `presence/` live under it. Shared by the history viewer, the Langfuse
+/// correlator, and the doctor so they can never disagree on composition.
+pub fn default_antigravity_root() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".gemini").join("antigravity-cli"))
+}
+
 /// Returns the base Antigravity brain directory, resolving `~/.gemini/antigravity-cli/brain`.
 pub fn default_antigravity_dir() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        let p = PathBuf::from(home)
-            .join(".gemini")
-            .join("antigravity-cli")
-            .join("brain");
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    None
+    default_antigravity_root()
+        .map(|root| root.join("brain"))
+        .filter(|p| p.is_dir())
 }
 
 /// Scans both Claude and Antigravity storage for past session files.
@@ -262,16 +265,7 @@ pub fn summarize_claude_file(file_path: &Path, project_slug: &str) -> Option<Ses
     })
 }
 
-/// Extracts inner text from `<USER_REQUEST>...</USER_REQUEST>` if present.
-pub fn extract_user_request(raw: &str) -> String {
-    if let Some(start) = raw.find("<USER_REQUEST>") {
-        let after = &raw[start + "<USER_REQUEST>".len()..];
-        if let Some(end) = after.find("</USER_REQUEST>") {
-            return after[..end].trim().to_string();
-        }
-    }
-    raw.trim().to_string()
-}
+pub use crate::transcript::extract_user_request;
 
 /// Scans Antigravity brain directories for session transcripts.
 pub fn discover_antigravity_sessions(
@@ -457,7 +451,25 @@ pub fn load_session_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> {
     }
 }
 
-/// Parses a Claude Code session JSONL file.
+/// Flattens Claude structured tool input to the viewer's display string:
+/// prefer `command`, then `file_path`, else pretty-printed JSON.
+fn format_claude_tool_args(args: &Value) -> String {
+    if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
+        cmd.to_string()
+    } else if let Some(file_path) = args.get("file_path").and_then(|c| c.as_str()) {
+        file_path.to_string()
+    } else if args.is_object() || args.is_array() {
+        serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string())
+    } else {
+        args.to_string()
+    }
+}
+
+/// Parses a Claude Code session JSONL file. Thin display adapter over
+/// `transcript::parse_claude_line`: thinking and usage (which the viewer
+/// never showed) are dropped, tool args are flattened to strings, and
+/// array-form tool_result content collapses to "" — exactly the
+/// pre-refactor behavior, pinned by the existing tests.
 pub fn load_claude_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> {
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
@@ -468,124 +480,49 @@ pub fn load_claude_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> {
             Ok(l) => l,
             Err(_) => continue,
         };
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let v: Value = match serde_json::from_str(&line) {
-            Ok(val) => val,
-            Err(_) => continue,
-        };
-
-        let timestamp = v
-            .get("timestamp")
-            .and_then(|t| t.as_str())
-            .map(|t| t.to_string());
-        let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-        match event_type {
-            "user" => {
-                if let Some(msg) = v.get("message") {
-                    if let Some(content_str) = msg.get("content").and_then(|c| c.as_str()) {
-                        entries.push(LogEntry::User {
-                            text: content_str.to_string(),
-                            timestamp: timestamp.clone(),
-                        });
-                    } else if let Some(arr) = msg.get("content").and_then(|c| c.as_array()) {
-                        for item in arr {
-                            let item_type =
-                                item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            if item_type == "text" {
-                                if let Some(txt) = item.get("text").and_then(|t| t.as_str()) {
-                                    entries.push(LogEntry::User {
-                                        text: txt.to_string(),
-                                        timestamp: timestamp.clone(),
-                                    });
-                                }
-                            } else if item_type == "tool_result" {
-                                let id = item
-                                    .get("tool_use_id")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let content = item
-                                    .get("content")
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let is_error = item
-                                    .get("is_error")
-                                    .and_then(|e| e.as_bool())
-                                    .unwrap_or(false);
-                                entries.push(LogEntry::ToolResult {
-                                    id,
-                                    content,
-                                    is_error,
-                                    timestamp: timestamp.clone(),
-                                });
-                            }
-                        }
-                    }
+        for ev in crate::transcript::parse_claude_line(&line) {
+            match ev {
+                TranscriptEvent::User { text, ts } => {
+                    entries.push(LogEntry::User {
+                        text,
+                        timestamp: ts,
+                    });
                 }
-            }
-            "assistant" => {
-                if let Some(msg) = v.get("message") {
-                    let model = msg
-                        .get("model")
-                        .and_then(|m| m.as_str())
-                        .map(|m| m.to_string());
-                    if let Some(arr) = msg.get("content").and_then(|c| c.as_array()) {
-                        for item in arr {
-                            let item_type =
-                                item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            if item_type == "text" {
-                                if let Some(txt) = item.get("text").and_then(|t| t.as_str()) {
-                                    entries.push(LogEntry::Assistant {
-                                        provider: AgentProvider::Claude,
-                                        text: txt.to_string(),
-                                        model: model.clone(),
-                                        thinking: None,
-                                        timestamp: timestamp.clone(),
-                                    });
-                                }
-                            } else if item_type == "tool_use" {
-                                let id = item
-                                    .get("id")
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let name = item
-                                    .get("name")
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("unknown")
-                                    .to_string();
-                                let input_val = item.get("input").unwrap_or(&Value::Null);
-                                let input_str = if let Some(cmd) =
-                                    input_val.get("command").and_then(|c| c.as_str())
-                                {
-                                    cmd.to_string()
-                                } else if let Some(file_path) =
-                                    input_val.get("file_path").and_then(|c| c.as_str())
-                                {
-                                    file_path.to_string()
-                                } else if input_val.is_object() || input_val.is_array() {
-                                    serde_json::to_string_pretty(input_val)
-                                        .unwrap_or_else(|_| input_val.to_string())
-                                } else {
-                                    input_val.to_string()
-                                };
-                                entries.push(LogEntry::ToolUse {
-                                    id,
-                                    name,
-                                    input: input_str,
-                                    timestamp: timestamp.clone(),
-                                });
-                            }
-                        }
-                    }
+                TranscriptEvent::Assistant {
+                    text, model, ts, ..
+                } => {
+                    entries.push(LogEntry::Assistant {
+                        provider: AgentProvider::Claude,
+                        text,
+                        model,
+                        thinking: None,
+                        timestamp: ts,
+                    });
                 }
+                TranscriptEvent::ToolUse { id, name, args, ts } => {
+                    entries.push(LogEntry::ToolUse {
+                        id,
+                        name,
+                        input: format_claude_tool_args(&args),
+                        timestamp: ts,
+                    });
+                }
+                TranscriptEvent::ToolResult {
+                    id,
+                    content,
+                    is_error,
+                    ts,
+                } => {
+                    entries.push(LogEntry::ToolResult {
+                        id,
+                        content: content.as_str().unwrap_or("").to_string(),
+                        is_error,
+                        timestamp: ts,
+                    });
+                }
+                // export-only events the viewer never displayed
+                _ => {}
             }
-            _ => {}
         }
     }
 
@@ -621,6 +558,9 @@ fn format_antigravity_tool_args(tool_name: &str, args: &Value) -> String {
 }
 
 /// Parses an Antigravity transcript.jsonl file into structured log entries.
+/// Thin display adapter over `transcript::parse_antigravity_line` — same
+/// output as the pre-refactor parser (tool args flattened for display,
+/// thinking kept).
 pub fn load_antigravity_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> {
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
@@ -631,83 +571,49 @@ pub fn load_antigravity_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> 
             Ok(l) => l,
             Err(_) => continue,
         };
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let v: Value = match serde_json::from_str(&line) {
-            Ok(val) => val,
-            Err(_) => continue,
-        };
-
-        let timestamp = v
-            .get("created_at")
-            .and_then(|t| t.as_str())
-            .map(|t| t.to_string());
-        let step_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-        match step_type {
-            "USER_INPUT" => {
-                if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                    let clean = extract_user_request(content);
-                    if !clean.is_empty() {
-                        entries.push(LogEntry::User {
-                            text: clean,
-                            timestamp: timestamp.clone(),
-                        });
-                    }
+        for ev in crate::transcript::parse_antigravity_line(&line) {
+            match ev {
+                TranscriptEvent::User { text, ts } => {
+                    entries.push(LogEntry::User {
+                        text,
+                        timestamp: ts,
+                    });
                 }
-            }
-            "PLANNER_RESPONSE" => {
-                let thinking = v
-                    .get("thinking")
-                    .and_then(|t| t.as_str())
-                    .map(|t| t.to_string());
-                let text = v
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !text.is_empty() || thinking.is_some() {
+                TranscriptEvent::Assistant {
+                    text, thinking, ts, ..
+                } => {
                     entries.push(LogEntry::Assistant {
                         provider: AgentProvider::Antigravity,
                         text,
                         model: None,
                         thinking,
-                        timestamp: timestamp.clone(),
+                        timestamp: ts,
                     });
                 }
-                if let Some(tool_calls) = v.get("tool_calls").and_then(|tc| tc.as_array()) {
-                    for tc in tool_calls {
-                        let name = tc
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let args = tc.get("args").unwrap_or(&Value::Null);
-                        let input_str = format_antigravity_tool_args(&name, args);
-                        entries.push(LogEntry::ToolUse {
-                            id: "".to_string(),
-                            name,
-                            input: input_str,
-                            timestamp: timestamp.clone(),
-                        });
-                    }
+                TranscriptEvent::ToolUse { name, args, ts, .. } => {
+                    let input = format_antigravity_tool_args(&name, &args);
+                    entries.push(LogEntry::ToolUse {
+                        id: String::new(),
+                        name,
+                        input,
+                        timestamp: ts,
+                    });
                 }
-            }
-            "GENERIC" => {
-                if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                    let is_error = content.contains("error")
-                        || content.contains("Exit code") && !content.contains("Exit code 0");
+                TranscriptEvent::ToolResult {
+                    content,
+                    is_error,
+                    ts,
+                    ..
+                } => {
                     entries.push(LogEntry::ToolResult {
-                        id: "".to_string(),
-                        content: content.to_string(),
+                        id: String::new(),
+                        content: content.as_str().unwrap_or("").to_string(),
                         is_error,
-                        timestamp: timestamp.clone(),
+                        timestamp: ts,
                     });
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 

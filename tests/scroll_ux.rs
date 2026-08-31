@@ -17,6 +17,7 @@ pub fn shell_profile() -> Profile {
         command: command.into(),
         args: vec![],
         default_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+        langfuse: None,
     }
 }
 
@@ -65,7 +66,7 @@ async fn scrolling_reveals_history_and_snaps_back() {
         args: print_lines_args(100),
         ..shell_profile()
     };
-    let mut s = Session::spawn(1, profile, std::env::temp_dir(), 10, 80, tx).unwrap();
+    let mut s = Session::spawn(1, profile, std::env::temp_dir(), 10, 80, tx, &[], &[]).unwrap();
     let ok = pump_session(&mut rx, &mut s, Duration::from_secs(10), |s| {
         matches!(s.status(Instant::now()), Status::Exited(_))
             && s.parser.screen().contents().contains("line-100")
@@ -109,7 +110,7 @@ async fn scrolling_reveals_history_and_snaps_back() {
 #[tokio::test]
 async fn view_stays_anchored_while_new_output_arrives() {
     let (tx, mut rx) = mpsc::channel(256);
-    let mut s = Session::spawn(1, shell_profile(), std::env::temp_dir(), 10, 80, tx).unwrap();
+    let mut s = Session::spawn(1, shell_profile(), std::env::temp_dir(), 10, 80, tx, &[], &[]).unwrap();
     // interactive shell: print 50 lines, scroll up, then print 20 more
     let ok = pump_session(&mut rx, &mut s, Duration::from_secs(10), |s| {
         !s.parser.screen().contents().trim().is_empty()
@@ -210,7 +211,7 @@ fn wheel(kind: MouseEventKind, modifiers: KeyModifiers) -> MouseEvent {
 /// exited, sized 10 rows x 80 cols.
 async fn app_with_history(lines: u32) -> (App, mpsc::Receiver<AppEvent>) {
     let (tx, mut rx) = mpsc::channel(256);
-    let mut app = App::new(vec![shell_profile()], tx.clone());
+    let mut app = App::new(vec![shell_profile()], None, tx.clone());
     app.set_pane_size(10, 80);
     let profile = Profile {
         args: print_lines_args(lines),
@@ -219,7 +220,7 @@ async fn app_with_history(lines: u32) -> (App, mpsc::Receiver<AppEvent>) {
     // never touch the real system clipboard from ordinary tests; the
     // #[ignore]d round-trip test opts back in explicitly
     app.clipboard_enabled = false;
-    let session = Session::spawn(900, profile, std::env::temp_dir(), 10, 80, tx).unwrap();
+    let session = Session::spawn(900, profile, std::env::temp_dir(), 10, 80, tx, &[], &[]).unwrap();
     app.sessions.push(session);
     let ok = pump_app(&mut rx, &mut app, Duration::from_secs(10), |a| {
         a.sessions[0]
@@ -284,9 +285,9 @@ async fn shift_paging_and_home_end() {
 async fn forwarded_key_snaps_to_live_when_attached() {
     // live interactive shell, filled with enough output to have scrollback
     let (tx, mut rx) = mpsc::channel(256);
-    let mut app = App::new(vec![shell_profile()], tx.clone());
+    let mut app = App::new(vec![shell_profile()], None, tx.clone());
     app.set_pane_size(10, 80);
-    let session = Session::spawn(901, shell_profile(), std::env::temp_dir(), 10, 80, tx).unwrap();
+    let session = Session::spawn(901, shell_profile(), std::env::temp_dir(), 10, 80, tx, &[], &[]).unwrap();
     app.sessions.push(session);
     let ok = pump_app(&mut rx, &mut app, Duration::from_secs(10), |a| {
         !a.sessions[0].parser.screen().contents().trim().is_empty()
