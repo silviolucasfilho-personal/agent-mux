@@ -181,10 +181,27 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogContentMode {
+    Full,
+    Metadata,
+}
+
+impl std::fmt::Display for DialogContentMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DialogContentMode::Full => write!(f, "full"),
+            DialogContentMode::Metadata => write!(f, "metadata"),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum DialogField {
     Profile,
     Dir,
+    Tracing,
+    ContentMode,
 }
 
 #[derive(Debug)]
@@ -260,13 +277,29 @@ pub struct DialogState {
     pub error: Option<String>,
     pub dir_entries: Vec<String>,
     pub dir_selected_idx: Option<usize>,
+    pub tracing_enabled: bool,
+    pub content_mode: DialogContentMode,
 }
 
 impl DialogState {
     pub fn new(profiles: &[Profile]) -> Self {
-        let dir = default_dir_for_profile(profiles.first());
+        let first = profiles.first();
+        let dir = default_dir_for_profile(first);
         let resolved = resolve_working_dir(&dir);
         let dir_entries = list_subdirectories(&resolved);
+        let tracing_enabled = first
+            .and_then(|p| p.langfuse.as_ref())
+            .and_then(|l| l.enabled)
+            .unwrap_or(true);
+        let content_mode = if first
+            .and_then(|p| p.langfuse.as_ref())
+            .and_then(|l| l.content_mode.as_deref())
+            == Some("metadata")
+        {
+            DialogContentMode::Metadata
+        } else {
+            DialogContentMode::Full
+        };
         DialogState {
             profile_idx: 0,
             dir,
@@ -275,6 +308,8 @@ impl DialogState {
             error: None,
             dir_entries,
             dir_selected_idx: None,
+            tracing_enabled,
+            content_mode,
         }
     }
 
@@ -294,6 +329,20 @@ impl DialogState {
 
     fn set_profile(&mut self, idx: usize, profiles: &[Profile]) {
         self.profile_idx = idx;
+        if let Some(p) = profiles.get(idx) {
+            if let Some(over) = &p.langfuse {
+                if let Some(en) = over.enabled {
+                    self.tracing_enabled = en;
+                }
+                if let Some(cm) = over.content_mode.as_deref() {
+                    self.content_mode = if cm == "metadata" {
+                        DialogContentMode::Metadata
+                    } else {
+                        DialogContentMode::Full
+                    };
+                }
+            }
+        }
         if !self.dir_edited {
             self.dir = default_dir_for_profile(profiles.get(idx));
             self.refresh_dir_entries();
@@ -322,10 +371,22 @@ impl DialogState {
     pub fn handle_key(&mut self, key: &KeyEvent, profiles: &[Profile]) -> DialogResult {
         match key.code {
             KeyCode::Esc => return DialogResult::Cancel,
-            KeyCode::Tab | KeyCode::BackTab => {
+            KeyCode::Tab => {
                 self.field = match self.field {
                     DialogField::Profile => DialogField::Dir,
+                    DialogField::Dir => DialogField::Tracing,
+                    DialogField::Tracing => DialogField::ContentMode,
+                    DialogField::ContentMode => DialogField::Profile,
+                };
+                self.dir_selected_idx = None;
+                return DialogResult::Consumed;
+            }
+            KeyCode::BackTab => {
+                self.field = match self.field {
+                    DialogField::Profile => DialogField::ContentMode,
                     DialogField::Dir => DialogField::Profile,
+                    DialogField::Tracing => DialogField::Dir,
+                    DialogField::ContentMode => DialogField::Tracing,
                 };
                 self.dir_selected_idx = None;
                 return DialogResult::Consumed;
@@ -409,6 +470,31 @@ impl DialogState {
                     self.dir_edited = true;
                     self.dir_selected_idx = None;
                     self.refresh_dir_entries();
+                }
+                _ => {}
+            },
+            DialogField::Tracing => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(' ')
+                | KeyCode::Char('t')
+                | KeyCode::Char('T')
+                | KeyCode::Left
+                | KeyCode::Right => {
+                    self.tracing_enabled = !self.tracing_enabled;
+                }
+                _ => {}
+            },
+            DialogField::ContentMode => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(' ')
+                | KeyCode::Char('m')
+                | KeyCode::Char('M')
+                | KeyCode::Left
+                | KeyCode::Right => {
+                    self.content_mode = match self.content_mode {
+                        DialogContentMode::Full => DialogContentMode::Metadata,
+                        DialogContentMode::Metadata => DialogContentMode::Full,
+                    };
                 }
                 _ => {}
             },
@@ -1090,10 +1176,14 @@ impl App {
             DialogResult::Consumed => {}
             DialogResult::Cancel => self.mode = Mode::Control,
             DialogResult::Submit => {
-                let profile = match self.profiles.get(dialog.profile_idx) {
+                let mut profile = match self.profiles.get(dialog.profile_idx) {
                     Some(p) => p.clone(),
                     None => return,
                 };
+                let mut p_langfuse = profile.langfuse.unwrap_or_default();
+                p_langfuse.enabled = Some(dialog.tracing_enabled);
+                p_langfuse.content_mode = Some(dialog.content_mode.to_string());
+                profile.langfuse = Some(p_langfuse);
                 let dir = resolve_working_dir(&dialog.dir);
                 let id = self.next_id;
                 match self.spawn_traced(id, profile, dir) {
@@ -1509,6 +1599,24 @@ mod dispatch_tests {
             Action::None
         ));
     }
+}
+
+#[cfg(test)]
+mod confirm_modes {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctx(selected: Option<Status>) -> DispatchCtx {
+        DispatchCtx {
+            selected_status: selected,
+            any_working: false,
+            just_detached: false,
+        }
+    }
 
     #[test]
     fn confirm_modes() {
@@ -1602,9 +1710,58 @@ mod dialog_tests {
         let mut d = DialogState::new(&ps);
         d.handle_key(&key(KeyCode::Tab), &ps); // to Dir field
         d.handle_key(&key(KeyCode::Char('X')), &ps);
+        d.handle_key(&key(KeyCode::Tab), &ps); // to Tracing
+        d.handle_key(&key(KeyCode::Tab), &ps); // to ContentMode
         d.handle_key(&key(KeyCode::Tab), &ps); // back to Profile
         d.handle_key(&key(KeyCode::Down), &ps);
         assert_eq!(d.dir, "C:\\oneX");
+    }
+
+    #[test]
+    fn dialog_tab_navigation_cycles_all_fields() {
+        let ps = profiles();
+        let mut d = DialogState::new(&ps);
+        assert_eq!(d.field, DialogField::Profile);
+
+        d.handle_key(&key(KeyCode::Tab), &ps);
+        assert_eq!(d.field, DialogField::Dir);
+
+        d.handle_key(&key(KeyCode::Tab), &ps);
+        assert_eq!(d.field, DialogField::Tracing);
+
+        d.handle_key(&key(KeyCode::Tab), &ps);
+        assert_eq!(d.field, DialogField::ContentMode);
+
+        d.handle_key(&key(KeyCode::Tab), &ps);
+        assert_eq!(d.field, DialogField::Profile);
+
+        // BackTab reverse
+        d.handle_key(&key(KeyCode::BackTab), &ps);
+        assert_eq!(d.field, DialogField::ContentMode);
+    }
+
+    #[test]
+    fn dialog_toggles_tracing_and_content_mode() {
+        let ps = profiles();
+        let mut d = DialogState::new(&ps);
+        assert!(d.tracing_enabled);
+        assert_eq!(d.content_mode, DialogContentMode::Full);
+
+        // Focus Tracing field and toggle
+        d.field = DialogField::Tracing;
+        d.handle_key(&key(KeyCode::Char(' ')), &ps);
+        assert!(!d.tracing_enabled);
+
+        d.handle_key(&key(KeyCode::Char('t')), &ps);
+        assert!(d.tracing_enabled);
+
+        // Focus ContentMode field and toggle
+        d.field = DialogField::ContentMode;
+        d.handle_key(&key(KeyCode::Char(' ')), &ps);
+        assert_eq!(d.content_mode, DialogContentMode::Metadata);
+
+        d.handle_key(&key(KeyCode::Char('m')), &ps);
+        assert_eq!(d.content_mode, DialogContentMode::Full);
     }
 
     #[test]
