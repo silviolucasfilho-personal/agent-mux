@@ -184,6 +184,7 @@ pub struct TurnAssembler {
     turn: Option<OpenTurn>,
     last_event_nanos: i128,
     session_extra: Vec<(String, String)>,
+    last_known_model: Option<String>,
 }
 
 impl TurnAssembler {
@@ -200,6 +201,7 @@ impl TurnAssembler {
             turn: None,
             last_event_nanos: 0,
             session_extra: Vec::new(),
+            last_known_model: None,
         }
     }
 
@@ -379,6 +381,9 @@ impl TurnAssembler {
         for (k, v) in &generation.usage {
             attrs.push(attr(&format!("gen_ai.usage.{k}"), AnyValue::Int(*v)));
         }
+        if let Some(inp) = turn.user_text.as_ref().and_then(|t| self.full_content(t)) {
+            attrs.push(str_attr("langfuse.observation.input", inp));
+        }
         if let Some(out) = self.full_content(&generation.text) {
             attrs.push(str_attr("langfuse.observation.output", out));
         }
@@ -522,7 +527,54 @@ impl TurnAssembler {
             turn.trace_key, tool.name, tool.id, tool.event_index
         );
         let mut attrs = self.common_attrs();
-        attrs.push(str_attr("langfuse.observation.type", "tool"));
+        let mut span_name = tool.name.clone();
+        let mut obs_type = "tool";
+
+        if let Some(agent) = extract_agent_info(&tool.name, &tool.args) {
+            obs_type = "agent";
+            span_name = agent.name;
+            if let Some(role) = agent.role {
+                attrs.push(str_attr("langfuse.observation.metadata.agent_role", role));
+            }
+            if let Some(type_name) = agent.type_name {
+                attrs.push(str_attr("langfuse.observation.metadata.agent_type", type_name));
+            }
+            if let Some(model) = agent.model {
+                attrs.push(str_attr("langfuse.observation.metadata.agent_model", model));
+            }
+            if self.settings.content_mode == ContentMode::Full
+                && let Some(prompt) = &agent.prompt
+                && let Some(p) = self.full_content(prompt)
+            {
+                attrs.push(str_attr("langfuse.observation.metadata.agent_prompt", p));
+            }
+            attrs.push(str_attr("langfuse.observation.metadata.kind", "agent_invocation"));
+        } else if let Some((skill_name, skill_path)) = extract_skill_info(&tool.name, &tool.args) {
+            span_name = format!("skill: {skill_name}");
+            attrs.push(str_attr("langfuse.observation.metadata.skill_name", skill_name));
+            if !skill_path.is_empty() {
+                attrs.push(str_attr("langfuse.observation.metadata.skill_path", skill_path));
+            }
+            attrs.push(str_attr("langfuse.observation.metadata.kind", "skill_load"));
+        }
+
+        if let Some(summary) = tool.args.get("toolSummary").or_else(|| tool.args.get("summary")).and_then(clean_json_str) {
+            attrs.push(str_attr("langfuse.observation.metadata.summary", summary));
+        }
+        if let Some(action) = tool.args.get("toolAction").or_else(|| tool.args.get("action")).or_else(|| tool.args.get("Description")).and_then(clean_json_str) {
+            attrs.push(str_attr("langfuse.observation.metadata.action", action));
+        }
+        if let Some(cmd) = tool.args.get("CommandLine").or_else(|| tool.args.get("command")).or_else(|| tool.args.get("cmd")).and_then(clean_json_str) {
+            attrs.push(str_attr("langfuse.observation.metadata.command", cmd));
+        }
+        if let Some(query) = tool.args.get("Query").or_else(|| tool.args.get("query")).or_else(|| tool.args.get("pattern")).and_then(clean_json_str) {
+            attrs.push(str_attr("langfuse.observation.metadata.query", query));
+        }
+        if let Some(path) = tool.args.get("AbsolutePath").or_else(|| tool.args.get("TargetFile")).or_else(|| tool.args.get("DirectoryPath")).or_else(|| tool.args.get("path")).or_else(|| tool.args.get("file_path")).and_then(clean_json_str) {
+            attrs.push(str_attr("langfuse.observation.metadata.path", path));
+        }
+
+        attrs.push(str_attr("langfuse.observation.type", obs_type));
         if self.settings.content_mode == ContentMode::Full {
             let args_str = match &tool.args {
                 serde_json::Value::Null => String::new(),
@@ -558,7 +610,7 @@ impl TurnAssembler {
             trace_id: turn.trace_id,
             span_id: otlp::span_id_for(&span_key),
             parent_span_id: Some(turn.root_span_id),
-            name: tool.name.clone(),
+            name: span_name,
             start_nanos: tool.start_nanos,
             end_nanos,
             attributes: attrs,
@@ -585,6 +637,9 @@ impl TurnAssembler {
                     self.session_id = Some(id);
                 }
                 if let Some(obj) = extra.as_object() {
+                    if let Some(m) = obj.get("model").and_then(|v| v.as_str()) {
+                        self.last_known_model = Some(m.to_string());
+                    }
                     for (k, v) in obj {
                         let val = match v {
                             serde_json::Value::String(s) => s.clone(),
@@ -674,7 +729,7 @@ impl TurnAssembler {
                     }
                     let generation = PendingGen {
                         text: text.clone(),
-                        model,
+                        model: model.or_else(|| self.last_known_model.clone()),
                         thinking,
                         usage,
                         start_nanos: start,
@@ -801,6 +856,184 @@ impl TurnAssembler {
     pub fn finalize(&mut self) -> Vec<Span> {
         self.close_turn()
     }
+}
+
+fn clean_json_str(val: &serde_json::Value) -> Option<String> {
+    match val {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+                if let Ok(serde_json::Value::String(unescaped)) = serde_json::from_str(trimmed) {
+                    return Some(unescaped.trim().to_string());
+                }
+                return Some(trimmed[1..trimmed.len() - 1].trim().to_string());
+            }
+            Some(trimmed.to_string())
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_tool_name(name: &str) -> &str {
+    if let Some(pos) = name.rfind(':') {
+        &name[pos + 1..]
+    } else {
+        name
+    }
+}
+
+struct AgentInfo {
+    name: String,
+    role: Option<String>,
+    type_name: Option<String>,
+    model: Option<String>,
+    prompt: Option<String>,
+}
+
+fn extract_skill_info(raw_tool_name: &str, args: &serde_json::Value) -> Option<(String, String)> {
+    let tool_name = normalize_tool_name(raw_tool_name);
+    if tool_name.eq_ignore_ascii_case("skill")
+        || tool_name == "load_skill"
+        || tool_name == "use_skill"
+        || tool_name == "activate_skill"
+    {
+        let name = args
+            .get("skill")
+            .or_else(|| args.get("skill_name"))
+            .or_else(|| args.get("name"))
+            .and_then(clean_json_str)
+            .unwrap_or_else(|| "skill".into());
+        let path = args
+            .get("path")
+            .or_else(|| args.get("file_path"))
+            .and_then(clean_json_str)
+            .unwrap_or_default();
+        return Some((name, path));
+    }
+    
+    // Tools that read skill files
+    let path = args
+        .get("AbsolutePath")
+        .or_else(|| args.get("file_path"))
+        .or_else(|| args.get("path"))
+        .or_else(|| args.get("filePath"))
+        .or_else(|| args.get("target_file"))
+        .and_then(clean_json_str)?;
+
+    let path_lower = path.to_lowercase();
+    if path_lower.contains("/skills/")
+        || path_lower.contains("\\skills\\")
+        || path_lower.ends_with("skill.md")
+        || path_lower.contains(".claude/skills")
+        || path_lower.contains(".gemini/skills")
+        || path_lower.contains(".agent/skills")
+    {
+        let p = std::path::Path::new(&path);
+        let skill_name = if p.file_name().is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case("skill.md")) {
+            p.parent()
+                .and_then(|parent| parent.file_name())
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "custom_skill".into())
+        } else {
+            p.file_stem()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "custom_skill".into())
+        };
+        return Some((skill_name, path));
+    }
+    None
+}
+
+fn extract_agent_info(raw_tool_name: &str, args: &serde_json::Value) -> Option<AgentInfo> {
+    let tool_name = normalize_tool_name(raw_tool_name);
+    if tool_name == "invoke_subagent" || tool_name == "launch_subagent" || tool_name == "spawn_agent" {
+        let subagents_val = args.get("Subagents").or_else(|| args.get("subagents"));
+        let parsed_arr: Option<Vec<serde_json::Value>> = match subagents_val {
+            Some(serde_json::Value::Array(arr)) => Some(arr.clone()),
+            Some(serde_json::Value::String(s)) => {
+                let trimmed = s.trim();
+                serde_json::from_str(trimmed).ok()
+            }
+            _ => None,
+        };
+
+        if let Some(subagents) = parsed_arr && let Some(first) = subagents.first() {
+            let role = first.get("Role").or_else(|| first.get("role")).and_then(clean_json_str);
+            let type_name = first
+                .get("TypeName")
+                .or_else(|| first.get("type_name"))
+                .or_else(|| first.get("type"))
+                .and_then(clean_json_str);
+            let model = first.get("Model").or_else(|| first.get("model")).and_then(clean_json_str);
+            let prompt = first
+                .get("Prompt")
+                .or_else(|| first.get("prompt"))
+                .or_else(|| first.get("instruction"))
+                .and_then(clean_json_str);
+            let display_name = match (&role, &type_name) {
+                (Some(r), Some(t)) => format!("agent: {r} ({t})"),
+                (Some(r), None) => format!("agent: {r}"),
+                (None, Some(t)) => format!("agent: {t}"),
+                (None, None) => "agent: subagent".into(),
+            };
+            return Some(AgentInfo {
+                name: display_name,
+                role,
+                type_name,
+                model,
+                prompt,
+            });
+        }
+        return Some(AgentInfo {
+            name: "agent: invoke_subagent".into(),
+            role: None,
+            type_name: None,
+            model: None,
+            prompt: None,
+        });
+    }
+    if tool_name == "define_subagent" || tool_name == "create_agent" {
+        let name = args.get("name").and_then(clean_json_str).unwrap_or_else(|| "custom_agent".into());
+        let desc = args.get("description").and_then(clean_json_str);
+        let prompt = args.get("system_prompt").or_else(|| args.get("prompt")).and_then(clean_json_str);
+        return Some(AgentInfo {
+            name: format!("define_agent: {name}"),
+            role: Some(name),
+            type_name: desc,
+            model: None,
+            prompt,
+        });
+    }
+    if tool_name.eq_ignore_ascii_case("agent")
+        || tool_name.eq_ignore_ascii_case("task")
+        || tool_name == "dispatch_agent"
+        || tool_name == "subagent"
+    {
+        let sub_type = args
+            .get("subagent_type")
+            .or_else(|| args.get("type"))
+            .or_else(|| args.get("role"))
+            .and_then(clean_json_str);
+        let prompt = args
+            .get("prompt")
+            .or_else(|| args.get("instruction"))
+            .or_else(|| args.get("description"))
+            .and_then(clean_json_str);
+        let display_name = sub_type
+            .as_ref()
+            .map(|t| format!("agent: {t}"))
+            .unwrap_or_else(|| "agent: subagent".into());
+        return Some(AgentInfo {
+            name: display_name,
+            role: None,
+            type_name: sub_type,
+            model: None,
+            prompt,
+        });
+    }
+    None
 }
 
 /// Outcome recorded on the lifecycle `session_ended` span.
@@ -1494,5 +1727,171 @@ mod tests {
         );
         assert_eq!(attr_str(&quit, "langfuse.trace.metadata.termination"), Some("app_quit"));
         assert!(attr_int(&quit, "langfuse.trace.metadata.exit_code").is_none());
+    }
+
+    #[test]
+    fn skill_and_agent_observations_and_details() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("sess-1".into()),
+            "deterministic",
+        );
+        let mut spans = Vec::new();
+        spans.extend(asm.feed(user("build something", "2026-08-30T10:00:00Z"), 0));
+        
+        // Skill loading tool call
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t1".into(),
+                name: "view_file".into(),
+                args: serde_json::json!({
+                    "AbsolutePath": "/home/user/.gemini/skills/agy-customizations/SKILL.md",
+                    "toolAction": "Viewing skill file",
+                    "toolSummary": "View agy-customizations"
+                }),
+                ts: Some("2026-08-30T10:00:01Z".into()),
+            },
+            0,
+        ));
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolResult {
+                id: "t1".into(),
+                content: serde_json::Value::String("# Skill content".into()),
+                is_error: false,
+                ts: Some("2026-08-30T10:00:02Z".into()),
+            },
+            0,
+        ));
+
+        // Subagent invocation tool call
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t2".into(),
+                name: "invoke_subagent".into(),
+                args: serde_json::json!({
+                    "Subagents": [{
+                        "Role": "Codebase Researcher",
+                        "TypeName": "research",
+                        "Model": "flash",
+                        "Prompt": "explore files"
+                    }]
+                }),
+                ts: Some("2026-08-30T10:00:03Z".into()),
+            },
+            0,
+        ));
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolResult {
+                id: "t2".into(),
+                content: serde_json::Value::String("subagent finished".into()),
+                is_error: false,
+                ts: Some("2026-08-30T10:00:04Z".into()),
+            },
+            0,
+        ));
+
+        // Assistant generation
+        spans.extend(asm.feed(
+            TranscriptEvent::Assistant {
+                text: "all done".into(),
+                model: Some("gemini-3.7-flash".into()),
+                thinking: Some("reasoning details".into()),
+                usage: vec![],
+                msg_id: None,
+                ts: Some("2026-08-30T10:00:05Z".into()),
+            },
+            0,
+        ));
+
+        // Skill span checks
+        let skill_span = spans.iter().find(|s| s.name.contains("skill:")).expect("skill span missing");
+        assert_eq!(skill_span.name, "skill: agy-customizations");
+        assert_eq!(attr_str(skill_span, "langfuse.observation.metadata.skill_name"), Some("agy-customizations"));
+        assert_eq!(attr_str(skill_span, "langfuse.observation.metadata.kind"), Some("skill_load"));
+        assert_eq!(attr_str(skill_span, "langfuse.observation.metadata.action"), Some("Viewing skill file"));
+        assert_eq!(attr_str(skill_span, "langfuse.observation.output"), Some("# Skill content"));
+
+        // Agent span checks
+        let agent_span = spans.iter().find(|s| s.name.contains("agent:")).expect("agent span missing");
+        assert_eq!(agent_span.name, "agent: Codebase Researcher (research)");
+        assert_eq!(attr_str(agent_span, "langfuse.observation.type"), Some("agent"));
+        assert_eq!(attr_str(agent_span, "langfuse.observation.metadata.agent_role"), Some("Codebase Researcher"));
+        assert_eq!(attr_str(agent_span, "langfuse.observation.metadata.agent_type"), Some("research"));
+        assert_eq!(attr_str(agent_span, "langfuse.observation.metadata.agent_prompt"), Some("explore files"));
+
+        // Generation span checks (includes user input prompt)
+        let gen_span = spans.iter().find(|s| s.name == "assistant").expect("assistant gen missing");
+        assert_eq!(attr_str(gen_span, "langfuse.observation.input"), Some("build something"));
+        assert_eq!(attr_str(gen_span, "langfuse.observation.output"), Some("all done"));
+        assert_eq!(attr_str(gen_span, "langfuse.observation.metadata.thinking"), Some("reasoning details"));
+        assert_eq!(attr_str(gen_span, "gen_ai.request.model"), Some("gemini-3.7-flash"));
+    }
+
+    #[test]
+    fn antigravity_escaped_quotes_and_namespaced_tools() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("sess-1".into()),
+            "deterministic",
+        );
+        let mut spans = Vec::new();
+        spans.extend(asm.feed(user("build something", "2026-08-30T10:00:00Z"), 0));
+        
+        // Namespaced tool with escaped string quotes in JSON args
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t1".into(),
+                name: "default_api:view_file".into(),
+                args: serde_json::json!({
+                    "AbsolutePath": "\"/home/silvio/.gemini/antigravity-cli/builtin/skills/agy-customizations/SKILL.md\"",
+                    "toolAction": "\"Viewing skill file\"",
+                    "toolSummary": "\"View agy-customizations\""
+                }),
+                ts: Some("2026-08-30T10:00:01Z".into()),
+            },
+            0,
+        ));
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolResult {
+                id: "t1".into(),
+                content: serde_json::Value::String("# Skill content".into()),
+                is_error: false,
+                ts: Some("2026-08-30T10:00:02Z".into()),
+            },
+            0,
+        ));
+
+        // Namespaced subagent with stringified JSON array
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t2".into(),
+                name: "default_api:invoke_subagent".into(),
+                args: serde_json::json!({
+                    "Subagents": "[{\"Role\":\"Codebase Researcher\",\"TypeName\":\"research\",\"Model\":\"flash\",\"Prompt\":\"explore files\"}]"
+                }),
+                ts: Some("2026-08-30T10:00:03Z".into()),
+            },
+            0,
+        ));
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolResult {
+                id: "t2".into(),
+                content: serde_json::Value::String("subagent finished".into()),
+                is_error: false,
+                ts: Some("2026-08-30T10:00:04Z".into()),
+            },
+            0,
+        ));
+
+        let skill_span = spans.iter().find(|s| s.name.contains("skill:")).expect("skill span missing");
+        assert_eq!(skill_span.name, "skill: agy-customizations");
+        assert_eq!(attr_str(skill_span, "langfuse.observation.metadata.skill_name"), Some("agy-customizations"));
+        assert_eq!(attr_str(skill_span, "langfuse.observation.metadata.action"), Some("Viewing skill file"));
+
+        let agent_span = spans.iter().find(|s| s.name.contains("agent:")).expect("agent span missing");
+        assert_eq!(agent_span.name, "agent: Codebase Researcher (research)");
+        assert_eq!(attr_str(agent_span, "langfuse.observation.type"), Some("agent"));
+        assert_eq!(attr_str(agent_span, "langfuse.observation.metadata.agent_role"), Some("Codebase Researcher"));
+        assert_eq!(attr_str(agent_span, "langfuse.observation.metadata.agent_prompt"), Some("explore files"));
     }
 }

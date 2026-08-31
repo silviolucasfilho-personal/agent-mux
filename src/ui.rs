@@ -1,4 +1,6 @@
-use crate::app::{App, DialogField, DialogState, HistoryPane, HistoryState, Mode};
+use crate::app::{
+    App, DialogContentMode, DialogField, DialogState, HistoryPane, HistoryState, Mode,
+};
 use crate::status::Status;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -146,7 +148,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let block = Block::default().borders(Borders::ALL).title("sessions");
+    let block = Block::default().borders(Borders::ALL).title("agent-mux");
     if app.sessions.is_empty() {
         let hint = Paragraph::new("no sessions\n\n[n] new session").block(block);
         f.render_widget(hint, area);
@@ -159,10 +161,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         .map(|(i, s)| {
             let (label, style) = status_label_style(s.status(now));
             let marker = if i == app.selected { "> " } else { "  " };
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::raw(format!("{marker}{} ", s.profile.name)),
                 Span::styled(format!("[{label}]"), style),
-            ]);
+            ];
+            if s.trace.is_some() {
+                spans.push(Span::styled(" [● TRACE]", Style::default().fg(Color::Cyan)));
+            }
+            let line = Line::from(spans);
             let item = ListItem::new(line);
             if i == app.selected {
                 item.style(Style::default().add_modifier(Modifier::REVERSED))
@@ -190,8 +196,13 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     } else {
         String::new()
     };
+    let trace_tag = if session.trace.is_some() {
+        "[● TRACE] "
+    } else {
+        ""
+    };
     let title = format!(
-        " {} — {} [{label}] {scroll_tag}",
+        " {} — {} [{label}] {trace_tag}{scroll_tag}",
         session.profile.name,
         session.dir.display()
     );
@@ -240,7 +251,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
         match app.mode {
             Mode::Attached => Line::raw("ATTACHED — Ctrl+Q detach, Ctrl+Q Ctrl+Q send literal"),
             _ => {
-                Line::raw("[j/k] select  [Enter] attach  [n] new  [l] logs  [x] kill  [r] respawn  [q] quit")
+                Line::raw("[j/k] select  [Enter] attach  [n] new  [t] trace  [l] logs  [x] kill  [r] respawn  [q] quit")
             }
         }
     };
@@ -259,10 +270,10 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
-    let width = 68.min(f.area().width.saturating_sub(4)).max(40);
-    let height = (app.profiles.len() as u16 + 15)
+    let width = 72.min(f.area().width.saturating_sub(4)).max(40);
+    let height = (app.profiles.len() as u16 + 20)
         .min(f.area().height.saturating_sub(2))
-        .max(14);
+        .max(18);
     let area = centered(f.area(), width, height);
     f.render_widget(Clear, area);
     let block = Block::default()
@@ -299,7 +310,7 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
             Style::default().fg(Color::DarkGray),
         ));
     } else {
-        let max_visible = 5;
+        let max_visible = 4;
         let selected = dialog.dir_selected_idx.unwrap_or(0);
         let start = if selected >= max_visible {
             selected + 1 - max_visible
@@ -332,12 +343,47 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
             ));
         }
     }
+    lines.push(Line::raw(""));
+
+    // Tracing Option
+    let tracing_style = if matches!(dialog.field, DialogField::Tracing) {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    let (trace_box, trace_color) = if dialog.tracing_enabled {
+        ("[●] Enabled", Color::Cyan)
+    } else {
+        ("[○] Disabled", Color::DarkGray)
+    };
+    lines.push(Line::from(vec![
+        Span::raw("Langfuse Tracing: "),
+        Span::styled(trace_box, tracing_style.fg(trace_color)),
+        Span::styled(" (Space to toggle)", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    // Content Mode Option
+    let mode_style = if matches!(dialog.field, DialogField::ContentMode) {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    let mode_desc = match dialog.content_mode {
+        DialogContentMode::Full => "[Full] Prompts, tool I/O, skills & subagents",
+        DialogContentMode::Metadata => "[Metadata] Privacy-safe, token counts & timings only",
+    };
+    lines.push(Line::from(vec![
+        Span::raw("Content Mode:     "),
+        Span::styled(mode_desc, mode_style.fg(Color::Yellow)),
+        Span::styled(" (Space to toggle)", Style::default().fg(Color::DarkGray)),
+    ]));
+
     if let Some(err) = &dialog.error {
         lines.push(Line::styled(err.clone(), Style::default().fg(Color::Red)));
     }
     lines.push(Line::raw(""));
     lines.push(Line::raw(
-        "[Tab] switch field  [↑/↓] navigate  [→/Enter] select/open  [Esc] cancel",
+        "[Tab] switch field  [Space] toggle  [Enter] launch  [Esc] cancel",
     ));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
@@ -671,6 +717,8 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("New session"), "got: {text}");
         assert!(text.contains("Claude Code"), "got: {text}");
+        assert!(text.contains("Langfuse Tracing:"), "got: {text}");
+        assert!(text.contains("Content Mode:"), "got: {text}");
     }
 
     #[test]
