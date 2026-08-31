@@ -66,7 +66,9 @@ async fn test_app_history_flow_and_navigation() {
             command: "echo".into(),
             args: vec![],
             default_dir: None,
+            langfuse: None,
         }],
+        None,
         tx,
     );
 
@@ -123,7 +125,9 @@ async fn test_app_history_resume_spawns_session() {
             command: "echo".into(),
             args: vec![],
             default_dir: None,
+            langfuse: None,
         }],
+        None,
         tx,
     );
 
@@ -169,7 +173,9 @@ async fn test_antigravity_discovery_and_resume() {
             command: "agy".into(),
             args: vec![],
             default_dir: None,
+            langfuse: None,
         }],
+        None,
         tx,
     );
 

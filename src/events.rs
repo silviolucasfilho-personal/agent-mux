@@ -31,5 +31,8 @@ pub enum AppEvent {
     PtyExit {
         id: usize,
     },
+    /// One-line Langfuse status notice for the status bar (emitted at most
+    /// once per class per run by the langfuse runtime/exporter).
+    LangfuseStatus(String),
     Tick,
 }

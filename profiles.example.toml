@@ -1,9 +1,61 @@
 # Copy to profiles.toml (same directory as the exe, or ~/.agent-mux/profiles.toml)
+#
+# Note: a cwd-relative ./profiles.toml wins the search even when it contains
+# only a [langfuse] section — the built-in default profiles are used and any
+# ~/.agent-mux/profiles.toml is shadowed. If you customize profiles, keep
+# [langfuse] in the same file as them.
+
+# Optional Langfuse tracing. Off unless enabled = true and keys resolve.
+# Keys fall back to $LANGFUSE_PUBLIC_KEY / $LANGFUSE_SECRET_KEY / $LANGFUSE_HOST;
+# the env vars are strongly recommended for secret_key — this file is easy to
+# commit by accident.
+#
+# content_mode = "metadata" (default) exports NO prompt/response/tool bodies —
+# only names, timings, models, token usage, and error levels.
+# content_mode = "full" exports content, passed through built-in secret-pattern
+# masking (sk-, pk-lf-, AKIA, ghp_, xox, Bearer, -----BEGIN blocks) plus your
+# redact_literals and size truncation. Known residual risk: an agent echoing a
+# secret in a shape the scanner doesn't recognize will be exported.
+#
+# [langfuse]
+# enabled = true
+# host = "https://cloud.langfuse.com"   # or https://us.cloud.langfuse.com / self-hosted (Langfuse >= v3.22.0)
+# public_key = "pk-lf-..."
+# secret_key = "sk-lf-..."              # prefer $LANGFUSE_SECRET_KEY
+# content_mode = "metadata"
+# user_id = "me"                        # default: $USER / $USERNAME
+# release = "rollout-1"
+# tags = ["agent-mux"]
+# environment = "development"
+# content_max_bytes = 16384             # per-field truncation cap (full mode)
+# redact_literals = []                  # extra literal substrings masked in full mode
+# backfill_max_bytes = 4194304          # prime-pass cap for huge resumed transcripts
+# poll_interval_ms = 500
+# flush_interval_ms = 3000
+# shutdown_flush_ms = 3000              # 0 = never wait for flush at quit
+# claude_dir = "/custom/.claude"        # dir overrides (mostly for tests)
+# codex_dir = "/custom/.codex"
+# antigravity_dir = "/custom/.gemini/antigravity-cli"   # the antigravity-cli ROOT (brain/ and presence/ live under it)
+
 [[profiles]]
 name = "Claude Code"
 command = "claude"
 args = []
 # default_dir = "~/workspace" # or "/home/user/workspace" on Linux/macOS, "C:\\Users\\me\\workspace" on Windows
+
+# Per-profile Langfuse overrides (all optional):
+# [profiles.langfuse]
+# enabled = true
+# provider = "claude"          # force CLI-kind detection for wrapper commands; "none" = never trace
+# content_mode = "full"        # dial one profile up
+# inject_session_id = false    # never add --session-id. The flag needs claude >= 1.0.34 (mid-2025);
+#                              # `agent-mux langfuse doctor` checks your installed version.
+#
+# Codex note: deeper Codex fidelity (subagent nesting, per-model-call usage) is
+# available via the official langfuse/codex-observability-plugin instead of /
+# alongside agent-mux's built-in tracing — but that plugin needs your Langfuse
+# keys in the codex process environment, where the agent's own shell tool can
+# read them. agent-mux's pipeline never passes credentials to child processes.
 
 [[profiles]]
 name = "Codex"

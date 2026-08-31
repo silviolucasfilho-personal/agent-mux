@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn empty_app_renders_hint() {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let app = App::new(Config::default_profiles(), tx);
+        let app = App::new(Config::default_profiles(), None, tx);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn search_bar_renders_query_and_count() {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let mut app = App::new(Config::default_profiles(), tx);
+        let mut app = App::new(Config::default_profiles(), None, tx);
         let mut st = crate::search::SearchState::new();
         st.query = "hello".into();
         app.search = Some(st);
@@ -664,7 +664,7 @@ mod tests {
     #[test]
     fn dialog_mode_renders_profile_and_dir() {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let mut app = App::new(Config::default_profiles(), tx);
+        let mut app = App::new(Config::default_profiles(), None, tx);
         app.mode = crate::app::Mode::NewSession(crate::app::DialogState::new(&app.profiles));
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
@@ -676,7 +676,7 @@ mod tests {
     #[test]
     fn session_history_mode_renders_split_view() {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let mut app = App::new(Config::default_profiles(), tx);
+        let mut app = App::new(Config::default_profiles(), None, tx);
         let mut history = crate::app::HistoryState::new(None);
         history.sessions = vec![crate::history::SessionSummary {
             session_id: "test-uuid-1234".into(),

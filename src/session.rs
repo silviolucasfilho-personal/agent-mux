@@ -110,6 +110,10 @@ pub struct Session {
     pub dir: PathBuf,
     pub parser: vt100::Parser<BellCounter>,
     pub tracker: StatusTracker,
+    /// Langfuse pipeline handle, attached by App after a successful spawn
+    /// when tracing is planned for this launch. Dropping the Session closes
+    /// the phase channel, which the pipeline treats like an exit.
+    pub trace: Option<crate::langfuse::SessionTraceHandle>,
     /// Cached total scrollback row count, refreshed at the end of
     /// `process_output`/`resize`. See `scroll_view`/`probe_scrollback_len`
     /// for why this needs caching rather than reading it on demand.
@@ -146,6 +150,11 @@ impl Session {
     /// and is **not** an end-of-output marker (a watcher-thread `PtyExit`
     /// can arrive before the reader thread's last `PtyOutput` batches). See
     /// `AppEvent::PtyExit`'s doc comment for what this means for consumers.
+    /// `extra_args` are appended AFTER `profile.args` and `extra_env` is
+    /// set additively on the child only — launch-time extras (e.g. an
+    /// injected `--session-id`) are deliberately NOT part of `profile`, so
+    /// respawn (which clones the profile) re-plans fresh ones.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         id: usize,
         profile: Profile,
@@ -153,6 +162,8 @@ impl Session {
         rows: u16,
         cols: u16,
         tx: Sender<AppEvent>,
+        extra_args: &[String],
+        extra_env: &[(String, String)],
     ) -> anyhow::Result<Session> {
         anyhow::ensure!(dir.is_dir(), "not a directory: {}", dir.display());
         let (program, prefix_args) = resolve_command(&profile.command)
@@ -172,6 +183,12 @@ impl Session {
         }
         for a in &profile.args {
             cmd.arg(a);
+        }
+        for a in extra_args {
+            cmd.arg(a);
+        }
+        for (key, value) in extra_env {
+            cmd.env(key, value);
         }
         cmd.cwd(&dir);
         let child = pair
@@ -238,6 +255,7 @@ impl Session {
             id,
             profile,
             dir,
+            trace: None,
             parser: vt100::Parser::new_with_callbacks(
                 rows,
                 cols,

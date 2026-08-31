@@ -515,10 +515,15 @@ pub struct App {
     just_detached: bool,
     next_id: usize,
     tx: Sender<AppEvent>,
+    langfuse: Option<crate::langfuse::LangfuseRuntime>,
 }
 
 impl App {
-    pub fn new(profiles: Vec<Profile>, tx: Sender<AppEvent>) -> App {
+    pub fn new(
+        profiles: Vec<Profile>,
+        langfuse: Option<crate::langfuse::LangfuseRuntime>,
+        tx: Sender<AppEvent>,
+    ) -> App {
         App {
             sessions: Vec::new(),
             selected: 0,
@@ -534,7 +539,41 @@ impl App {
             just_detached: false,
             next_id: 0,
             tx,
+            langfuse,
         }
+    }
+
+    /// Spawns a session with Langfuse launch extras applied and the tracing
+    /// pipeline attached on success. The single spawn path for all three
+    /// call sites (dialog, resume, respawn); with tracing off it degrades to
+    /// a plain `Session::spawn`.
+    fn spawn_traced(
+        &mut self,
+        id: usize,
+        profile: Profile,
+        dir: std::path::PathBuf,
+    ) -> anyhow::Result<Session> {
+        let (rows, cols) = self.pane_size;
+        let plan = self
+            .langfuse
+            .as_ref()
+            .and_then(|rt| rt.plan_launch(&profile, &dir));
+        let (extra_args, extra_env): (&[String], &[(String, String)]) = match &plan {
+            Some(p) => (&p.extra_args, &p.extra_env),
+            None => (&[], &[]),
+        };
+        let mut session =
+            Session::spawn(id, profile, dir, rows, cols, self.tx.clone(), extra_args, extra_env)?;
+        if let (Some(rt), Some(plan)) = (self.langfuse.as_mut(), plan) {
+            session.trace = Some(rt.start_session(id, plan));
+        }
+        Ok(session)
+    }
+
+    /// Hands the runtime back to `main` for the post-`kill_all` bounded
+    /// shutdown flush.
+    pub fn take_langfuse(&mut self) -> Option<crate::langfuse::LangfuseRuntime> {
+        self.langfuse.take()
     }
 
     pub fn attached(&self) -> Option<usize> {
@@ -1019,6 +1058,11 @@ impl App {
             // spec: write failure -> status-bar error, session Exited
             self.error = Some(format!("write to '{}' failed: {e}", s.profile.name));
             s.tracker.on_exit(None);
+            // this path marks Exited with no PtyExit event ever arriving —
+            // the tracing pipeline must still learn about it
+            if let Some(trace) = &s.trace {
+                trace.mark_exited(None);
+            }
             self.mode = Mode::Control;
             return false;
         }
@@ -1048,16 +1092,20 @@ impl App {
                     None => return,
                 };
                 let dir = resolve_working_dir(&dialog.dir);
-                let (rows, cols) = self.pane_size;
                 let id = self.next_id;
-                match Session::spawn(id, profile, dir, rows, cols, self.tx.clone()) {
+                match self.spawn_traced(id, profile, dir) {
                     Ok(session) => {
                         self.next_id += 1;
                         self.sessions.push(session);
                         self.selected = self.sessions.len() - 1;
                         self.mode = Mode::Control;
                     }
-                    Err(e) => dialog.error = Some(e.to_string()),
+                    Err(e) => {
+                        let Mode::NewSession(dialog) = &mut self.mode else {
+                            return;
+                        };
+                        dialog.error = Some(e.to_string());
+                    }
                 }
             }
         }
@@ -1148,13 +1196,15 @@ impl App {
                         command: "claude".into(),
                         args: vec![],
                         default_dir: None,
+                        langfuse: None,
                     });
                 let mut resume_profile = p;
                 resume_profile.args = vec!["--resume".into(), summary.session_id.clone()];
                 resume_profile
             }
             crate::history::AgentProvider::Antigravity => {
-                self.profiles
+                let p = self
+                    .profiles
                     .iter()
                     .find(|p| {
                         p.command == "agy"
@@ -1167,7 +1217,14 @@ impl App {
                         command: "agy".into(),
                         args: vec![],
                         default_dir: None,
-                    })
+                        langfuse: None,
+                    });
+                // `agy` alone starts a NEW conversation; resuming requires
+                // the id (this also makes resume correlation deterministic
+                // for Langfuse).
+                let mut resume_profile = p;
+                resume_profile.args = vec!["--conversation".into(), summary.session_id.clone()];
+                resume_profile
             }
         };
 
@@ -1178,9 +1235,8 @@ impl App {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-        let (rows, cols) = self.pane_size;
         let id = self.next_id;
-        match Session::spawn(id, profile, dir, rows, cols, self.tx.clone()) {
+        match self.spawn_traced(id, profile, dir) {
             Ok(session) => {
                 self.next_id += 1;
                 self.sessions.push(session);
@@ -1198,18 +1254,14 @@ impl App {
         let Some(old) = self.sessions.get(self.selected) else {
             return;
         };
-        let (rows, cols) = self.pane_size;
+        let profile = old.profile.clone();
+        let dir = old.dir.clone();
         // Fresh id: a stale reader thread from the dead session may still
         // send PtyExit for the old id; it must not find the new session.
+        // Launch extras are re-planned fresh too (never stored in the
+        // profile), so a respawned Claude tab gets a NEW session uuid.
         let id = self.next_id;
-        match Session::spawn(
-            id,
-            old.profile.clone(),
-            old.dir.clone(),
-            rows,
-            cols,
-            self.tx.clone(),
-        ) {
+        match self.spawn_traced(id, profile, dir) {
             Ok(session) => {
                 self.next_id += 1;
                 self.sessions[self.selected] = session;
@@ -1235,6 +1287,15 @@ impl App {
     pub fn handle_pty_exit(&mut self, id: usize) {
         if let Some(i) = self.session_index(id) {
             self.sessions[i].mark_exited();
+            // notify the tracing pipeline (idempotent against the
+            // documented duplicate PtyExit) with the exit code now known
+            if let Some(trace) = &self.sessions[i].trace {
+                let code = match self.sessions[i].status(Instant::now()) {
+                    Status::Exited(code) => code,
+                    _ => None,
+                };
+                trace.mark_exited(code);
+            }
             // if we were attached to it, drop back to Control
             if self.attached() == Some(i) {
                 self.mode = Mode::Control;
@@ -1464,12 +1525,14 @@ mod dialog_tests {
                 command: "a".into(),
                 args: vec![],
                 default_dir: Some("C:\\one".into()),
+                langfuse: None,
             },
             Profile {
                 name: "B".into(),
                 command: "b".into(),
                 args: vec![],
                 default_dir: Some("C:\\two".into()),
+                langfuse: None,
             },
         ]
     }
@@ -1537,6 +1600,7 @@ mod dialog_tests {
             command: "claude".into(),
             args: vec![],
             default_dir: None,
+            langfuse: None,
         }];
         let d = DialogState::new(&profiles);
         assert_eq!(d.profile_idx, 0);
@@ -1573,6 +1637,7 @@ mod dialog_tests {
             command: "sh".into(),
             args: vec![],
             default_dir: Some(root.to_string_lossy().into_owned()),
+            langfuse: None,
         }];
 
         let mut d = DialogState::new(&profiles);
@@ -1641,7 +1706,7 @@ mod history_tests {
     #[test]
     fn history_mode_dispatches_history_key() {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let mut app = App::new(vec![], tx);
+        let mut app = App::new(vec![], None, tx);
         app.mode = Mode::SessionHistory(HistoryState::new(None));
         assert!(matches!(
             dispatch(&app.mode, &key(KeyCode::Tab), &ctx()),
@@ -1652,7 +1717,7 @@ mod history_tests {
     #[test]
     fn history_navigation_and_tab() {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let mut app = App::new(vec![], tx);
+        let mut app = App::new(vec![], None, tx);
         let mut hist = HistoryState::new(None);
         hist.log_lines = vec![ratatui::text::Line::raw("line1"), ratatui::text::Line::raw("line2")];
         app.mode = Mode::SessionHistory(hist);
