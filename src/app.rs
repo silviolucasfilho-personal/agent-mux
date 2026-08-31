@@ -37,6 +37,7 @@ pub enum Action {
     EnterConfirmKill,
     RemoveSelected,
     RespawnSelected,
+    ToggleTracing,
     CancelToControl,
     ForwardBytes(Vec<u8>),
     SendLiteralDetachKey,
@@ -135,6 +136,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 KeyCode::Enter if ctx.selected_status.is_some() => Action::Attach,
                 KeyCode::Char('n') => Action::OpenNewSession,
                 KeyCode::Char('l') | KeyCode::Char('L') => Action::OpenSessionHistory,
+                KeyCode::Char('t') | KeyCode::Char('T') => Action::ToggleTracing,
                 KeyCode::Char('x') => match ctx.selected_status {
                     Some(Status::Exited(_)) => Action::RemoveSelected,
                     Some(_) => Action::EnterConfirmKill,
@@ -1039,6 +1041,7 @@ impl App {
                 self.selection = None;
                 self.respawn_selected();
             }
+            Action::ToggleTracing => self.toggle_selected_tracing(),
             Action::CancelToControl => self.mode = Mode::Control,
             Action::DialogKey => self.handle_dialog_key(key),
         }
@@ -1270,6 +1273,32 @@ impl App {
         }
     }
 
+    pub fn toggle_selected_tracing(&mut self) {
+        let Some(s) = self.sessions.get_mut(self.selected) else {
+            return;
+        };
+        if let Some(trace) = s.trace.take() {
+            trace.mark_stopped();
+            self.error = Some(format!("tracing stopped for '{}'", s.profile.name));
+        } else {
+            if matches!(s.status(Instant::now()), Status::Exited(_)) {
+                self.error = Some("cannot trace an exited session".into());
+                return;
+            }
+            let Some(rt) = self.langfuse.as_mut() else {
+                self.error = Some("langfuse tracing is not configured/enabled".into());
+                return;
+            };
+            if let Some(plan) = rt.plan_attach(&s.profile, &s.dir) {
+                let id = s.id;
+                s.trace = Some(rt.start_session(id, plan));
+                self.error = Some(format!("tracing started for '{}'", s.profile.name));
+            } else {
+                self.error = Some(format!("tracing is not supported for '{}'", s.profile.name));
+            }
+        }
+    }
+
     pub fn handle_pty_output(&mut self, id: usize, bytes: &[u8], now: Instant) {
         let focused = self
             .attached()
@@ -1379,6 +1408,19 @@ mod dispatch_tests {
         assert!(matches!(
             dispatch(&Mode::Control, &key(KeyCode::Char('n')), &c),
             Action::OpenNewSession
+        ));
+    }
+
+    #[test]
+    fn control_toggle_tracing() {
+        let c = ctx(Some(Status::Idle));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('t')), &c),
+            Action::ToggleTracing
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('T')), &c),
+            Action::ToggleTracing
         ));
     }
 

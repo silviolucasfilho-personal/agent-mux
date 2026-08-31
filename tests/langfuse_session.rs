@@ -255,3 +255,90 @@ exit 0
         "session grouping attr missing"
     );
 }
+
+#[tokio::test]
+async fn toggle_tracing_attaches_and_stops_on_demand() {
+    let (addr, bodies) = stub_server();
+    let temp = tempfile::tempdir().unwrap();
+    let claude_dir = temp.path().join("claude-home");
+    let workdir = temp.path().join("proj");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script_path = bin_dir.join("claude");
+    let script = r#"#!/bin/sh
+sleep 0.8
+exit 0
+"#;
+    std::fs::write(&script_path, script).unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let toml = format!(
+        r#"
+        [langfuse]
+        enabled = true
+        host = "{addr}"
+        public_key = "pk-lf-e2e"
+        secret_key = "sk-lf-e2e"
+        content_mode = "full"
+        poll_interval_ms = 60
+        flush_interval_ms = 60
+        claude_dir = "{claude}"
+
+        [[profiles]]
+        name = "Claude Code"
+        command = "{cmd}"
+        args = []
+        default_dir = "{dir}"
+        [profiles.langfuse]
+        enabled = false
+        "#,
+        claude = claude_dir.display(),
+        cmd = script_path.display(),
+        dir = workdir.display(),
+    );
+    let cfg = config::parse(&toml).unwrap();
+    let resolved = config::resolve_langfuse(cfg.langfuse.as_ref(), &|_| None).unwrap();
+    let profiles: Vec<Profile> = cfg.profiles;
+
+    let (tx, mut rx) = mpsc::channel(1024);
+    let runtime = LangfuseRuntime::new(resolved, tx.clone());
+    let mut app = App::new(profiles, Some(runtime), tx);
+    app.clipboard_enabled = false;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert_eq!(app.sessions.len(), 1);
+    assert!(app.sessions[0].trace.is_none(), "initially untraced because profile enabled = false");
+
+    // Press 't' to dynamically start tracing
+    app.handle_key(&key(KeyCode::Char('t')), Instant::now());
+    assert!(app.sessions[0].trace.is_some(), "tracing attached after pressing 't'");
+    assert!(app.error.as_deref().unwrap_or("").contains("tracing started"));
+
+    // Press 't' again to stop tracing
+    app.handle_key(&key(KeyCode::Char('t')), Instant::now());
+    assert!(app.sessions[0].trace.is_none(), "tracing detached after pressing 't' again");
+    assert!(app.error.as_deref().unwrap_or("").contains("tracing stopped"));
+
+    pump_until(&mut rx, &mut app, Duration::from_secs(5), |a| {
+        matches!(a.sessions[0].status(Instant::now()), Status::Exited(_))
+    }).await;
+
+    app.kill_all();
+    let rt = app.take_langfuse().unwrap();
+    rt.shutdown(Duration::from_secs(3)).await;
+
+    let bodies = bodies.lock().unwrap();
+    let names = all_span_names(&bodies);
+    assert!(
+        names.iter().any(|n| n == "session_started"),
+        "session_started emitted when trace started: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "session_ended"),
+        "session_ended emitted when trace stopped: {names:?}"
+    );
+}

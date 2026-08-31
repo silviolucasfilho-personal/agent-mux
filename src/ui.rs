@@ -159,10 +159,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         .map(|(i, s)| {
             let (label, style) = status_label_style(s.status(now));
             let marker = if i == app.selected { "> " } else { "  " };
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::raw(format!("{marker}{} ", s.profile.name)),
                 Span::styled(format!("[{label}]"), style),
-            ]);
+            ];
+            if s.trace.is_some() {
+                spans.push(Span::styled(" [● TRACE]", Style::default().fg(Color::Cyan)));
+            }
+            let line = Line::from(spans);
             let item = ListItem::new(line);
             if i == app.selected {
                 item.style(Style::default().add_modifier(Modifier::REVERSED))
@@ -190,8 +194,13 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     } else {
         String::new()
     };
+    let trace_tag = if session.trace.is_some() {
+        "[● TRACE] "
+    } else {
+        ""
+    };
     let title = format!(
-        " {} — {} [{label}] {scroll_tag}",
+        " {} — {} [{label}] {trace_tag}{scroll_tag}",
         session.profile.name,
         session.dir.display()
     );
@@ -240,7 +249,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
         match app.mode {
             Mode::Attached => Line::raw("ATTACHED — Ctrl+Q detach, Ctrl+Q Ctrl+Q send literal"),
             _ => {
-                Line::raw("[j/k] select  [Enter] attach  [n] new  [l] logs  [x] kill  [r] respawn  [q] quit")
+                Line::raw("[j/k] select  [Enter] attach  [n] new  [t] trace  [l] logs  [x] kill  [r] respawn  [q] quit")
             }
         }
     };

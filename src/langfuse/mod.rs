@@ -39,6 +39,7 @@ use tokio::sync::watch;
 pub enum Phase {
     Running,
     Exited(Option<u32>),
+    Stopped,
 }
 
 /// Held by `Session`; dropping the Session closes the phase channel, which
@@ -51,6 +52,10 @@ pub struct SessionTraceHandle {
 impl SessionTraceHandle {
     pub fn mark_exited(&self, exit_code: Option<u32>) {
         let _ = self.phase.send(Phase::Exited(exit_code));
+    }
+
+    pub fn mark_stopped(&self) {
+        let _ = self.phase.send(Phase::Stopped);
     }
 }
 
@@ -203,8 +208,23 @@ impl LangfuseRuntime {
     /// Decides how (and whether) to trace one launch. `None` = fully
     /// untraced: no extras, no markers, no pipeline, no lifecycle trace.
     pub fn plan_launch(&self, profile: &Profile, dir: &Path) -> Option<LaunchPlan> {
+        self.plan_launch_opt(profile, dir, false)
+    }
+
+    /// Explicit/dynamic trace plan (e.g. user toggled tracing on via keybinding).
+    /// Ignores `enabled = false` in profile override, but respects `provider = "none"`.
+    pub fn plan_attach(&self, profile: &Profile, dir: &Path) -> Option<LaunchPlan> {
+        self.plan_launch_opt(profile, dir, true)
+    }
+
+    pub fn plan_launch_opt(
+        &self,
+        profile: &Profile,
+        dir: &Path,
+        force_enabled: bool,
+    ) -> Option<LaunchPlan> {
         let over = profile.langfuse.as_ref();
-        if !over.and_then(|o| o.enabled).unwrap_or(true) {
+        if !force_enabled && !over.and_then(|o| o.enabled).unwrap_or(true) {
             return None;
         }
         let provider = match over.and_then(|o| o.provider.as_deref()) {
@@ -714,6 +734,11 @@ async fn run_pipeline(
         }
         let phase = *phase_rx.borrow();
         let sender_gone = phase_rx.has_changed().is_err();
+        if matches!(phase, Phase::Stopped) {
+            pipeline.tick();
+            pipeline.finalize("stopped", None);
+            return;
+        }
         if let Phase::Exited(code) = phase {
             // Grace sweep: the CLI's final flushes can trail the PTY exit.
             // Shutdown-aware — a quit arriving mid-sweep must not burn the
