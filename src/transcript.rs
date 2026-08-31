@@ -309,6 +309,29 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
 //              transcript_full.jsonl (or transcript.jsonl)
 // ---------------------------------------------------------------------------
 
+/// Extracts model name from `<USER_SETTINGS_CHANGE>` if present.
+fn extract_antigravity_model(raw: &str) -> Option<String> {
+    if let Some(start) = raw.find("Model Selection` from None to ") {
+        let rest = &raw[start + "Model Selection` from None to ".len()..];
+        if let Some(end) = rest.find('.') {
+            let m = rest[..end].trim();
+            if !m.is_empty() {
+                return Some(m.to_string());
+            }
+        }
+    }
+    if let Some(start) = raw.find("Model Selection` to ") {
+        let rest = &raw[start + "Model Selection` to ".len()..];
+        if let Some(end) = rest.find('.') {
+            let m = rest[..end].trim();
+            if !m.is_empty() {
+                return Some(m.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
     let Some(v) = parse_json_line(line) else {
         return Vec::new();
@@ -324,15 +347,25 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
         "USER_INPUT" => {
             if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
                 let clean = extract_user_request(content);
+                let model = extract_antigravity_model(content);
                 if !clean.is_empty() {
                     events.push(TranscriptEvent::User {
                         text: clean,
                         ts: ts.clone(),
                     });
                 }
+                if let Some(m) = model {
+                    events.push(TranscriptEvent::SessionMeta {
+                        session_id: None,
+                        cwd: None,
+                        extra: serde_json::json!({ "model": m }),
+                        ts: ts.clone(),
+                    });
+                }
             }
         }
         "PLANNER_RESPONSE" => {
+            let model = v.get("model").and_then(|m| m.as_str()).map(|s| s.to_string());
             let thinking = v
                 .get("thinking")
                 .and_then(|t| t.as_str())
@@ -345,7 +378,7 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
             if !text.is_empty() || thinking.is_some() {
                 events.push(TranscriptEvent::Assistant {
                     text,
-                    model: None,
+                    model,
                     thinking,
                     usage: Vec::new(),
                     msg_id: None,

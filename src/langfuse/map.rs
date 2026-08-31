@@ -184,6 +184,7 @@ pub struct TurnAssembler {
     turn: Option<OpenTurn>,
     last_event_nanos: i128,
     session_extra: Vec<(String, String)>,
+    last_known_model: Option<String>,
 }
 
 impl TurnAssembler {
@@ -200,6 +201,7 @@ impl TurnAssembler {
             turn: None,
             last_event_nanos: 0,
             session_extra: Vec::new(),
+            last_known_model: None,
         }
     }
 
@@ -379,6 +381,9 @@ impl TurnAssembler {
         for (k, v) in &generation.usage {
             attrs.push(attr(&format!("gen_ai.usage.{k}"), AnyValue::Int(*v)));
         }
+        if let Some(inp) = turn.user_text.as_ref().and_then(|t| self.full_content(t)) {
+            attrs.push(str_attr("langfuse.observation.input", inp));
+        }
         if let Some(out) = self.full_content(&generation.text) {
             attrs.push(str_attr("langfuse.observation.output", out));
         }
@@ -522,7 +527,54 @@ impl TurnAssembler {
             turn.trace_key, tool.name, tool.id, tool.event_index
         );
         let mut attrs = self.common_attrs();
-        attrs.push(str_attr("langfuse.observation.type", "tool"));
+        let mut span_name = tool.name.clone();
+        let mut obs_type = "tool";
+
+        if let Some(agent) = extract_agent_info(&tool.name, &tool.args) {
+            obs_type = "agent";
+            span_name = agent.name;
+            if let Some(role) = agent.role {
+                attrs.push(str_attr("langfuse.observation.metadata.agent_role", role));
+            }
+            if let Some(type_name) = agent.type_name {
+                attrs.push(str_attr("langfuse.observation.metadata.agent_type", type_name));
+            }
+            if let Some(model) = agent.model {
+                attrs.push(str_attr("langfuse.observation.metadata.agent_model", model));
+            }
+            if self.settings.content_mode == ContentMode::Full
+                && let Some(prompt) = &agent.prompt
+                && let Some(p) = self.full_content(prompt)
+            {
+                attrs.push(str_attr("langfuse.observation.metadata.agent_prompt", p));
+            }
+            attrs.push(str_attr("langfuse.observation.metadata.kind", "agent_invocation"));
+        } else if let Some((skill_name, skill_path)) = extract_skill_info(&tool.name, &tool.args) {
+            span_name = format!("skill: {skill_name}");
+            attrs.push(str_attr("langfuse.observation.metadata.skill_name", skill_name));
+            if !skill_path.is_empty() {
+                attrs.push(str_attr("langfuse.observation.metadata.skill_path", skill_path));
+            }
+            attrs.push(str_attr("langfuse.observation.metadata.kind", "skill_load"));
+        }
+
+        if let Some(summary) = tool.args.get("toolSummary").and_then(|v| v.as_str()) {
+            attrs.push(str_attr("langfuse.observation.metadata.summary", summary.to_string()));
+        }
+        if let Some(action) = tool.args.get("toolAction").and_then(|v| v.as_str()) {
+            attrs.push(str_attr("langfuse.observation.metadata.action", action.to_string()));
+        }
+        if let Some(cmd) = tool.args.get("CommandLine").or_else(|| tool.args.get("command")).and_then(|v| v.as_str()) {
+            attrs.push(str_attr("langfuse.observation.metadata.command", cmd.to_string()));
+        }
+        if let Some(query) = tool.args.get("Query").or_else(|| tool.args.get("query")).and_then(|v| v.as_str()) {
+            attrs.push(str_attr("langfuse.observation.metadata.query", query.to_string()));
+        }
+        if let Some(path) = tool.args.get("AbsolutePath").or_else(|| tool.args.get("path")).and_then(|v| v.as_str()) {
+            attrs.push(str_attr("langfuse.observation.metadata.path", path.to_string()));
+        }
+
+        attrs.push(str_attr("langfuse.observation.type", obs_type));
         if self.settings.content_mode == ContentMode::Full {
             let args_str = match &tool.args {
                 serde_json::Value::Null => String::new(),
@@ -558,7 +610,7 @@ impl TurnAssembler {
             trace_id: turn.trace_id,
             span_id: otlp::span_id_for(&span_key),
             parent_span_id: Some(turn.root_span_id),
-            name: tool.name.clone(),
+            name: span_name,
             start_nanos: tool.start_nanos,
             end_nanos,
             attributes: attrs,
@@ -585,6 +637,9 @@ impl TurnAssembler {
                     self.session_id = Some(id);
                 }
                 if let Some(obj) = extra.as_object() {
+                    if let Some(m) = obj.get("model").and_then(|v| v.as_str()) {
+                        self.last_known_model = Some(m.to_string());
+                    }
                     for (k, v) in obj {
                         let val = match v {
                             serde_json::Value::String(s) => s.clone(),
@@ -674,7 +729,7 @@ impl TurnAssembler {
                     }
                     let generation = PendingGen {
                         text: text.clone(),
-                        model,
+                        model: model.or_else(|| self.last_known_model.clone()),
                         thinking,
                         usage,
                         start_nanos: start,
@@ -801,6 +856,111 @@ impl TurnAssembler {
     pub fn finalize(&mut self) -> Vec<Span> {
         self.close_turn()
     }
+}
+
+struct AgentInfo {
+    name: String,
+    role: Option<String>,
+    type_name: Option<String>,
+    model: Option<String>,
+    prompt: Option<String>,
+}
+
+fn extract_skill_info(tool_name: &str, args: &serde_json::Value) -> Option<(String, String)> {
+    if tool_name == "Skill" {
+        let name = args.get("skill").or_else(|| args.get("name")).and_then(|v| v.as_str())?;
+        return Some((name.to_string(), String::new()));
+    }
+    if tool_name == "view_file" || tool_name == "read_file" || tool_name == "view_url_content" {
+        let path = args
+            .get("AbsolutePath")
+            .or_else(|| args.get("file_path"))
+            .or_else(|| args.get("path"))
+            .and_then(|v| v.as_str())?;
+        if path.contains("/skills/") || path.contains("\\skills\\") || path.ends_with("SKILL.md") {
+            let p = std::path::Path::new(path);
+            let skill_name = if p.file_name().is_some_and(|f| f == "SKILL.md") {
+                p.parent()
+                    .and_then(|parent| parent.file_name())
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "custom_skill".into())
+            } else {
+                p.file_stem()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "custom_skill".into())
+            };
+            return Some((skill_name, path.to_string()));
+        }
+    }
+    None
+}
+
+fn extract_agent_info(tool_name: &str, args: &serde_json::Value) -> Option<AgentInfo> {
+    if tool_name == "invoke_subagent" {
+        if let Some(subagents) = args.get("Subagents").and_then(|s| s.as_array()) {
+            if let Some(first) = subagents.first() {
+                let role = first.get("Role").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let type_name = first.get("TypeName").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let model = first.get("Model").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let prompt = first.get("Prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let display_name = match (&role, &type_name) {
+                    (Some(r), Some(t)) => format!("agent: {r} ({t})"),
+                    (Some(r), None) => format!("agent: {r}"),
+                    (None, Some(t)) => format!("agent: {t}"),
+                    (None, None) => "agent: subagent".into(),
+                };
+                return Some(AgentInfo {
+                    name: display_name,
+                    role,
+                    type_name,
+                    model,
+                    prompt,
+                });
+            }
+        }
+        return Some(AgentInfo {
+            name: "agent: invoke_subagent".into(),
+            role: None,
+            type_name: None,
+            model: None,
+            prompt: None,
+        });
+    }
+    if tool_name == "define_subagent" {
+        let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("custom_agent");
+        let desc = args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+        return Some(AgentInfo {
+            name: format!("define_agent: {name}"),
+            role: Some(name.to_string()),
+            type_name: desc,
+            model: None,
+            prompt: args.get("system_prompt").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        });
+    }
+    if tool_name == "Agent" || tool_name == "dispatch_agent" {
+        let sub_type = args
+            .get("subagent_type")
+            .or_else(|| args.get("type"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let prompt = args
+            .get("prompt")
+            .or_else(|| args.get("instruction"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let display_name = sub_type
+            .as_ref()
+            .map(|t| format!("agent: {t}"))
+            .unwrap_or_else(|| "agent".into());
+        return Some(AgentInfo {
+            name: display_name,
+            role: None,
+            type_name: sub_type,
+            model: None,
+            prompt,
+        });
+    }
+    None
 }
 
 /// Outcome recorded on the lifecycle `session_ended` span.
@@ -1494,5 +1654,103 @@ mod tests {
         );
         assert_eq!(attr_str(&quit, "langfuse.trace.metadata.termination"), Some("app_quit"));
         assert!(attr_int(&quit, "langfuse.trace.metadata.exit_code").is_none());
+    }
+
+    #[test]
+    fn skill_and_agent_observations_and_details() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("sess-1".into()),
+            "deterministic",
+        );
+        let mut spans = Vec::new();
+        spans.extend(asm.feed(user("build something", "2026-08-30T10:00:00Z"), 0));
+        
+        // Skill loading tool call
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t1".into(),
+                name: "view_file".into(),
+                args: serde_json::json!({
+                    "AbsolutePath": "/home/user/.gemini/skills/agy-customizations/SKILL.md",
+                    "toolAction": "Viewing skill file",
+                    "toolSummary": "View agy-customizations"
+                }),
+                ts: Some("2026-08-30T10:00:01Z".into()),
+            },
+            0,
+        ));
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolResult {
+                id: "t1".into(),
+                content: serde_json::Value::String("# Skill content".into()),
+                is_error: false,
+                ts: Some("2026-08-30T10:00:02Z".into()),
+            },
+            0,
+        ));
+
+        // Subagent invocation tool call
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t2".into(),
+                name: "invoke_subagent".into(),
+                args: serde_json::json!({
+                    "Subagents": [{
+                        "Role": "Codebase Researcher",
+                        "TypeName": "research",
+                        "Model": "flash",
+                        "Prompt": "explore files"
+                    }]
+                }),
+                ts: Some("2026-08-30T10:00:03Z".into()),
+            },
+            0,
+        ));
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolResult {
+                id: "t2".into(),
+                content: serde_json::Value::String("subagent finished".into()),
+                is_error: false,
+                ts: Some("2026-08-30T10:00:04Z".into()),
+            },
+            0,
+        ));
+
+        // Assistant generation
+        spans.extend(asm.feed(
+            TranscriptEvent::Assistant {
+                text: "all done".into(),
+                model: Some("gemini-3.7-flash".into()),
+                thinking: Some("reasoning details".into()),
+                usage: vec![],
+                msg_id: None,
+                ts: Some("2026-08-30T10:00:05Z".into()),
+            },
+            0,
+        ));
+
+        // Skill span checks
+        let skill_span = spans.iter().find(|s| s.name.contains("skill:")).expect("skill span missing");
+        assert_eq!(skill_span.name, "skill: agy-customizations");
+        assert_eq!(attr_str(skill_span, "langfuse.observation.metadata.skill_name"), Some("agy-customizations"));
+        assert_eq!(attr_str(skill_span, "langfuse.observation.metadata.kind"), Some("skill_load"));
+        assert_eq!(attr_str(skill_span, "langfuse.observation.metadata.action"), Some("Viewing skill file"));
+        assert_eq!(attr_str(skill_span, "langfuse.observation.output"), Some("# Skill content"));
+
+        // Agent span checks
+        let agent_span = spans.iter().find(|s| s.name.contains("agent:")).expect("agent span missing");
+        assert_eq!(agent_span.name, "agent: Codebase Researcher (research)");
+        assert_eq!(attr_str(agent_span, "langfuse.observation.type"), Some("agent"));
+        assert_eq!(attr_str(agent_span, "langfuse.observation.metadata.agent_role"), Some("Codebase Researcher"));
+        assert_eq!(attr_str(agent_span, "langfuse.observation.metadata.agent_type"), Some("research"));
+        assert_eq!(attr_str(agent_span, "langfuse.observation.metadata.agent_prompt"), Some("explore files"));
+
+        // Generation span checks (includes user input prompt)
+        let gen_span = spans.iter().find(|s| s.name == "assistant").expect("assistant gen missing");
+        assert_eq!(attr_str(gen_span, "langfuse.observation.input"), Some("build something"));
+        assert_eq!(attr_str(gen_span, "langfuse.observation.output"), Some("all done"));
+        assert_eq!(attr_str(gen_span, "langfuse.observation.metadata.thinking"), Some("reasoning details"));
+        assert_eq!(attr_str(gen_span, "gen_ai.request.model"), Some("gemini-3.7-flash"));
     }
 }
