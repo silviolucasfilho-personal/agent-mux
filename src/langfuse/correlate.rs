@@ -68,9 +68,6 @@ impl Drop for ClaimGuard {
     }
 }
 
-/// How long before the Claude watcher widens from the computed slug path to
-/// a uuid-filename glob across all project dirs.
-const CLAUDE_GLOB_FALLBACK: Duration = Duration::from_secs(10);
 /// How long before a sole unclaimed Antigravity candidate is adopted on
 /// timing alone.
 const ANTIGRAVITY_SOLE_CANDIDATE: Duration = Duration::from_secs(15);
@@ -89,6 +86,12 @@ pub enum CorrelationSpec {
         projects_dir: PathBuf,
         /// True for resumes: the pre-existing content is primed, not emitted.
         resume: bool,
+    },
+    /// Claude watching for newly created or active session in projects_dir.
+    WatchClaude {
+        projects_dir: PathBuf,
+        cwd: PathBuf,
+        t0: SystemTime,
     },
     /// Antigravity resume via `--conversation <id>`.
     KnownAntigravity {
@@ -207,11 +210,9 @@ pub fn poll(
                     resume_prime: *resume,
                 });
             }
-            // The uuid is the invariant; the slug scheme is not. After a
-            // while, look for the uuid filename under any project dir.
-            if started.elapsed() >= CLAUDE_GLOB_FALLBACK
-                && let Ok(entries) = std::fs::read_dir(&*projects_dir)
-            {
+            // The uuid is the invariant; the slug scheme is not.
+            // Look for the uuid filename under any project dir.
+            if let Ok(entries) = std::fs::read_dir(&*projects_dir) {
                 let filename = format!("{session_id}.jsonl");
                 for entry in entries.filter_map(|e| e.ok()) {
                     let candidate = entry.path().join(&filename);
@@ -224,6 +225,70 @@ pub fn poll(
                             path: candidate,
                             correlation: "deterministic",
                             resume_prime: *resume,
+                        });
+                    }
+                }
+            }
+            None
+        }
+        CorrelationSpec::WatchClaude {
+            projects_dir,
+            cwd,
+            t0,
+        } => {
+            let want_slug = crate::history::project_slug(cwd);
+            let preferred_dir = projects_dir.join(&want_slug);
+            if let Ok(entries) = std::fs::read_dir(&preferred_dir) {
+                let mut candidates: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
+                    .filter(|e| mtime_in_window(&e.path(), *t0))
+                    .collect();
+                candidates.sort_by_key(|e| {
+                    std::fs::metadata(e.path())
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH)
+                });
+                if let Some(newest) = candidates.last() {
+                    let path = newest.path();
+                    let session_id = path.file_stem().unwrap().to_string_lossy().into_owned();
+                    if try_claim(claims, Provider::Claude, &session_id) {
+                        return Some(Adopted {
+                            session_id,
+                            path,
+                            correlation: "watched",
+                            resume_prime: false,
+                        });
+                    }
+                }
+            }
+            if let Ok(project_entries) = std::fs::read_dir(&*projects_dir) {
+                let mut candidates = Vec::new();
+                for proj in project_entries.filter_map(|e| e.ok()) {
+                    if !proj.path().is_dir() {
+                        continue;
+                    }
+                    if let Ok(entries) = std::fs::read_dir(proj.path()) {
+                        for e in entries.filter_map(|e| e.ok()) {
+                            let p = e.path();
+                            if p.extension().is_some_and(|ext| ext == "jsonl") && mtime_in_window(&p, *t0) {
+                                let mtime = std::fs::metadata(&p)
+                                    .and_then(|m| m.modified())
+                                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                                candidates.push((mtime, p));
+                            }
+                        }
+                    }
+                }
+                candidates.sort_by_key(|(mtime, _)| *mtime);
+                if let Some((_, path)) = candidates.last() {
+                    let session_id = path.file_stem().unwrap().to_string_lossy().into_owned();
+                    if try_claim(claims, Provider::Claude, &session_id) {
+                        return Some(Adopted {
+                            session_id,
+                            path: path.clone(),
+                            correlation: "heuristic",
+                            resume_prime: false,
                         });
                     }
                 }

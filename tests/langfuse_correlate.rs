@@ -75,14 +75,38 @@ fn known_claude_glob_fallback_finds_uuid_under_any_slug() {
         projects_dir: projects.clone(),
         resume: true,
     };
-    // before the fallback window: not found
-    assert_eq!(correlate::poll(&mut spec, Instant::now(), &claims), None);
-    // pretend 10s elapsed by backdating `started`
-    let started = Instant::now() - Duration::from_secs(11);
-    let adopted = correlate::poll(&mut spec, started, &claims).unwrap();
+    let adopted = correlate::poll(&mut spec, Instant::now(), &claims).unwrap();
     assert_eq!(adopted.path, actual);
     assert_eq!(adopted.correlation, "deterministic");
     assert!(adopted.resume_prime, "resume flag must carry through");
+}
+
+#[test]
+fn watch_claude_adopts_newest_session_in_cwd_or_across_projects() {
+    let dir = tempfile::tempdir().unwrap();
+    let projects = dir.path().join("projects");
+    let work_dir = dir.path().join("my-app");
+    std::fs::create_dir_all(&work_dir).unwrap();
+
+    let slug = agent_mux::history::project_slug(&work_dir);
+    let app_proj = projects.join(&slug);
+    let s1 = app_proj.join("sess-old.jsonl");
+    let s2 = app_proj.join("sess-new.jsonl");
+    write_file(&s1, "{}\n");
+    std::thread::sleep(Duration::from_millis(50));
+    write_file(&s2, "{}\n");
+
+    let claims = registry();
+    let mut spec = CorrelationSpec::WatchClaude {
+        projects_dir: projects.clone(),
+        cwd: work_dir.clone(),
+        t0: SystemTime::now() - Duration::from_secs(10),
+    };
+    let adopted = correlate::poll(&mut spec, Instant::now(), &claims).unwrap();
+    assert_eq!(adopted.session_id, "sess-new");
+    assert_eq!(adopted.path, s2);
+    assert_eq!(adopted.correlation, "watched");
+    assert!(!adopted.resume_prime);
 }
 
 #[test]

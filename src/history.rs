@@ -17,7 +17,15 @@ pub enum AgentProvider {
 /// Converts a directory path into Claude Code's project folder slug format.
 /// E.g. `/home/user/project` -> `-home-user-project`
 pub fn project_slug(path: &Path) -> String {
-    let s = path.to_string_lossy();
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(path)
+    } else {
+        path.to_path_buf()
+    };
+    let normalized = abs_path.canonicalize().unwrap_or(abs_path);
+    let s = normalized.to_string_lossy();
     let mut slug = String::with_capacity(s.len() + 1);
     for c in s.chars() {
         if c == '/' || c == '\\' || c == ':' {
