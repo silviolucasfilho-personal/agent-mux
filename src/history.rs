@@ -17,7 +17,15 @@ pub enum AgentProvider {
 /// Converts a directory path into Claude Code's project folder slug format.
 /// E.g. `/home/user/project` -> `-home-user-project`
 pub fn project_slug(path: &Path) -> String {
-    let s = path.to_string_lossy();
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(path)
+    } else {
+        path.to_path_buf()
+    };
+    let normalized = abs_path.canonicalize().unwrap_or(abs_path);
+    let s = normalized.to_string_lossy();
     let mut slug = String::with_capacity(s.len() + 1);
     for c in s.chars() {
         if c == '/' || c == '\\' || c == ':' {
@@ -43,6 +51,10 @@ pub struct SessionSummary {
     pub project_slug: String,
     pub timestamp_str: String,
     pub provider: AgentProvider,
+    /// The working directory the session ran in, as recorded in the
+    /// transcript — resume launches there, not in whatever directory
+    /// happens to be selected now.
+    pub cwd: Option<PathBuf>,
 }
 
 /// Structured turn or event in a session log.
@@ -186,6 +198,7 @@ pub fn summarize_claude_file(file_path: &Path, project_slug: &str) -> Option<Ses
     let mut first_user_prompt: Option<String> = None;
     let mut first_timestamp: Option<String> = None;
     let mut turn_count = 0;
+    let mut cwd: Option<PathBuf> = None;
 
     for line_res in reader.lines() {
         let line = match line_res {
@@ -205,6 +218,13 @@ pub fn summarize_claude_file(file_path: &Path, project_slug: &str) -> Option<Ses
             && let Some(ts) = v.get("timestamp").and_then(|t| t.as_str())
         {
             first_timestamp = Some(ts.to_string());
+        }
+
+        if cwd.is_none()
+            && let Some(dir) = v.get("cwd").and_then(|c| c.as_str())
+            && !dir.is_empty()
+        {
+            cwd = Some(PathBuf::from(dir));
         }
 
         if let Some(event_type) = v.get("type").and_then(|t| t.as_str()) {
@@ -246,7 +266,7 @@ pub fn summarize_claude_file(file_path: &Path, project_slug: &str) -> Option<Ses
             }
         }))
         .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| format!("Session {}", &file_stem[..file_stem.len().min(8)]));
+        .unwrap_or_else(|| format!("Session {}", file_stem.chars().take(8).collect::<String>()));
 
     let timestamp_str = first_timestamp
         .as_deref()
@@ -262,6 +282,7 @@ pub fn summarize_claude_file(file_path: &Path, project_slug: &str) -> Option<Ses
         project_slug: project_slug.to_string(),
         timestamp_str,
         provider: AgentProvider::Claude,
+        cwd,
     })
 }
 
@@ -333,6 +354,7 @@ pub fn summarize_antigravity_file(
     let mut turn_count = 0;
     let mut matches_project = all_projects;
     let mut detected_project_name: Option<String> = None;
+    let mut detected_cwd: Option<PathBuf> = None;
 
     for line_res in reader.lines() {
         let line = match line_res {
@@ -393,6 +415,13 @@ pub fn summarize_antigravity_file(
                             if let Some(name) = Path::new(unquoted).file_name() {
                                 detected_project_name =
                                     Some(name.to_string_lossy().into_owned());
+                                // directory-valued keys double as the cwd;
+                                // a file path contributes its parent
+                                detected_cwd = if *key == "AbsolutePath" {
+                                    Path::new(unquoted).parent().map(|p| p.to_path_buf())
+                                } else {
+                                    Some(PathBuf::from(unquoted))
+                                };
                                 break;
                             }
                         }
@@ -416,7 +445,7 @@ pub fn summarize_antigravity_file(
             }
         })
         .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| format!("Session {}", &session_id[..session_id.len().min(8)]));
+        .unwrap_or_else(|| format!("Session {}", session_id.chars().take(8).collect::<String>()));
 
     let timestamp_str = first_timestamp
         .as_deref()
@@ -434,6 +463,7 @@ pub fn summarize_antigravity_file(
         project_slug,
         timestamp_str,
         provider: AgentProvider::Antigravity,
+        cwd: detected_cwd,
     })
 }
 
@@ -482,7 +512,7 @@ pub fn load_claude_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> {
         };
         for ev in crate::transcript::parse_claude_line(&line) {
             match ev {
-                TranscriptEvent::User { text, ts } => {
+                TranscriptEvent::User { text, ts, .. } => {
                     entries.push(LogEntry::User {
                         text,
                         timestamp: ts,
@@ -499,7 +529,9 @@ pub fn load_claude_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> {
                         timestamp: ts,
                     });
                 }
-                TranscriptEvent::ToolUse { id, name, args, ts } => {
+                TranscriptEvent::ToolUse {
+                    id, name, args, ts, ..
+                } => {
                     entries.push(LogEntry::ToolUse {
                         id,
                         name,
@@ -512,6 +544,7 @@ pub fn load_claude_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> {
                     content,
                     is_error,
                     ts,
+                    ..
                 } => {
                     entries.push(LogEntry::ToolResult {
                         id,
@@ -573,7 +606,7 @@ pub fn load_antigravity_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> 
         };
         for ev in crate::transcript::parse_antigravity_line(&line) {
             match ev {
-                TranscriptEvent::User { text, ts } => {
+                TranscriptEvent::User { text, ts, .. } => {
                     entries.push(LogEntry::User {
                         text,
                         timestamp: ts,

@@ -1,5 +1,6 @@
 use crate::app::{
     App, DialogContentMode, DialogField, DialogState, HistoryPane, HistoryState, Mode,
+    NoticeLevel,
 };
 use crate::status::Status;
 use ratatui::Frame;
@@ -11,6 +12,31 @@ use std::time::Instant;
 use tui_term::widget::PseudoTerminal;
 
 pub const SIDEBAR_WIDTH: u16 = 30;
+
+/// First visible index of the sidebar's session list: 0 until the selected
+/// row would fall below the window, then scrolled just far enough to keep
+/// it on the last row. Pure — the mouse handler uses the same math to map a
+/// clicked row back to a session index.
+pub fn sidebar_window(selected: usize, len: usize, visible: usize) -> usize {
+    if visible == 0 || len <= visible {
+        0
+    } else if selected >= visible {
+        (selected + 1 - visible).min(len - visible)
+    } else {
+        0
+    }
+}
+
+/// Char-boundary-safe truncation with an ellipsis. Byte slicing here
+/// panicked on non-ASCII titles (emoji, accents).
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        let keep: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{keep}...")
+    } else {
+        s.to_string()
+    }
+}
 
 pub fn status_label_style(status: Status) -> (String, Style) {
     match status {
@@ -143,26 +169,43 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::SessionHistory(history) => draw_session_history(f, history, app),
         Mode::ConfirmKill => draw_confirm(f, "Kill this session? [y/n]"),
         Mode::ConfirmQuit => draw_confirm(f, "Sessions are still working. Quit anyway? [y/n]"),
+        Mode::Help => draw_help(f),
         _ => {}
     }
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let block = Block::default().borders(Borders::ALL).title("agent-mux");
+    let title = if app.sessions.is_empty() {
+        "agent-mux".to_string()
+    } else {
+        format!("agent-mux [{}/{}]", app.selected + 1, app.sessions.len())
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     if app.sessions.is_empty() {
         let hint = Paragraph::new("no sessions\n\n[n] new session").block(block);
         f.render_widget(hint, area);
         return;
     }
-    let items: Vec<ListItem> = app
-        .sessions
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = sidebar_window(app.selected, app.sessions.len(), visible);
+    let end = (start + visible.max(1)).min(app.sessions.len());
+    let items: Vec<ListItem> = app.sessions[start..end]
         .iter()
         .enumerate()
-        .map(|(i, s)| {
+        .map(|(offset, s)| {
+            let i = start + offset;
             let (label, style) = status_label_style(s.status(now));
             let marker = if i == app.selected { "> " } else { "  " };
+            // rows 1-9 are directly addressable from Control mode
+            let num = if i < 9 {
+                format!("{} ", i + 1)
+            } else {
+                "  ".into()
+            };
             let mut spans = vec![
-                Span::raw(format!("{marker}{} ", s.profile.name)),
+                Span::raw(marker.to_string()),
+                Span::styled(num, Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("{} ", s.profile.name)),
                 Span::styled(format!("[{label}]"), style),
             ];
             if s.trace.is_some() {
@@ -190,9 +233,9 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         return;
     };
     let (label, _) = status_label_style(session.status(now));
-    let (_, scroll_offset) = session.scroll_view();
+    let (scrollback_len, scroll_offset) = session.scroll_view();
     let scroll_tag = if scroll_offset > 0 {
-        format!("[SCROLL ↑ {scroll_offset}] ")
+        format!("[SCROLL ↑ {scroll_offset}/{scrollback_len}] ")
     } else {
         String::new()
     };
@@ -245,17 +288,79 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
             "Search: {}  {count}  [Enter] next  [Shift+Enter] prev  [Esc] close",
             st.query
         ))
-    } else if let Some(err) = &app.error {
-        Line::styled(err.clone(), Style::default().fg(Color::Red))
+    } else if let Some(notice) = &app.notice {
+        let color = match notice.level {
+            NoticeLevel::Info => Color::Cyan,
+            NoticeLevel::Warn => Color::Yellow,
+            NoticeLevel::Error => Color::Red,
+        };
+        Line::styled(notice.text.clone(), Style::default().fg(color))
     } else {
         match app.mode {
-            Mode::Attached => Line::raw("ATTACHED — Ctrl+Q detach, Ctrl+Q Ctrl+Q send literal"),
+            Mode::Attached => Line::raw(
+                "ATTACHED — Ctrl+Q detach · Shift+PgUp/PgDn scroll · Ctrl+Shift+C/V copy/paste · Ctrl+Shift+F search",
+            ),
             _ => {
-                Line::raw("[j/k] select  [Enter] attach  [n] new  [t] trace  [l] logs  [x] kill  [r] respawn  [q] quit")
+                Line::raw("[j/k] select  [Enter] attach  [n] new  [l] logs  [t] trace  [x] kill  [?] help  [q] quit")
             }
         }
     };
     f.render_widget(Paragraph::new(text), area);
+}
+
+/// Full keybinding reference — the one place every chord (including the
+/// otherwise invisible Ctrl+Shift ones) is written down in the UI.
+fn draw_help(f: &mut Frame) {
+    let key_style = Style::default().fg(Color::Cyan);
+    let dim = Style::default().fg(Color::DarkGray);
+    let head = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let row = |key: &str, desc: &str| {
+        Line::from(vec![
+            Span::styled(format!("  {key:<18}"), key_style),
+            Span::raw(desc.to_string()),
+        ])
+    };
+    let lines: Vec<Line> = vec![
+        Line::styled("Control mode", head),
+        row("j/k, ↑/↓", "select session"),
+        row("1-9", "jump to session N"),
+        row("Enter", "attach to selected session"),
+        row("n", "new session"),
+        row("l", "browse past session logs"),
+        row("t", "toggle Langfuse tracing"),
+        row("x", "kill session (remove if exited)"),
+        row("r", "respawn exited session"),
+        row("q", "quit"),
+        Line::raw(""),
+        Line::styled("Attached mode", head),
+        row("Ctrl+Q", "detach back to control mode"),
+        row("Ctrl+Q Ctrl+Q", "send a literal Ctrl+Q to the agent"),
+        Line::raw(""),
+        Line::styled("Scrollback, selection & search", head),
+        row("Shift+PgUp/PgDn", "scroll one page"),
+        row("Shift+Home/End", "jump to top / back to live"),
+        row("mouse wheel", "scroll (forwarded to the agent when it asks)"),
+        row("mouse drag", "select text — copied on release"),
+        row("Ctrl+Shift+C/V", "copy selection / paste"),
+        row("Ctrl+Shift+F", "search scrollback (Ctrl+F in control mode)"),
+        Line::raw(""),
+        Line::styled("Session logs", head),
+        row("Tab, ←/→", "switch pane"),
+        row("a", "toggle this project / all projects"),
+        row("r or Enter", "resume the selected session"),
+        Line::raw(""),
+        Line::styled("  [Esc] or [?] to close", dim),
+    ];
+    let height = (lines.len() as u16 + 2).min(f.area().height.saturating_sub(2));
+    let width = 64.min(f.area().width.saturating_sub(4)).max(40);
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Keyboard & mouse reference ");
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -440,11 +545,7 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
                         Span::styled("[AGY]    ", Style::default().fg(Color::LightCyan))
                     }
                 };
-                let title_str = if s.title.len() > 18 {
-                    format!("{}...", &s.title[..15])
-                } else {
-                    s.title.clone()
-                };
+                let title_str = truncate_chars(&s.title, 18);
                 let line = Line::from(vec![
                     Span::raw(marker),
                     badge,
@@ -474,13 +575,9 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
         Style::default().fg(Color::DarkGray)
     };
     let right_title = if let Some(s) = history.sessions.get(history.selected_session_idx) {
-        let id_short = if s.session_id.len() >= 8 {
-            &s.session_id[..8]
-        } else {
-            &s.session_id
-        };
+        let id_short: String = s.session_id.chars().take(8).collect();
         let scroll_tag = if history.scroll_offset > 0 {
-            format!(" [↑ {}] ", history.scroll_offset)
+            format!(" [↑ {}/{}] ", history.scroll_offset, history.log_lines.len())
         } else {
             String::new()
         };
@@ -499,6 +596,8 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
 
     let inner_right = right_block.inner(right);
     f.render_widget(right_block, right);
+    // hand the real viewport height back so scrolling clamps to a full page
+    history.viewport_rows.set(usize::from(inner_right.height));
 
     if let Some(err) = &history.error {
         let p = Paragraph::new(Line::styled(err.clone(), Style::default().fg(Color::Red)));
@@ -527,7 +626,8 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
 }
 
 fn draw_confirm(f: &mut Frame, message: &str) {
-    let area = centered(f.area(), (message.len() as u16 + 4).min(f.area().width), 3);
+    let width = (message.chars().count() as u16 + 4).min(f.area().width);
+    let area = centered(f.area(), width, 3);
     f.render_widget(Clear, area);
     let block = Block::default().borders(Borders::ALL);
     f.render_widget(Paragraph::new(message).block(block), area);
@@ -619,6 +719,76 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("no sessions"), "got: {text}");
         assert!(text.contains("[n]"), "keybinding hint missing: {text}");
+    }
+
+    #[test]
+    fn sidebar_window_keeps_selection_visible() {
+        // fits: never scrolls
+        assert_eq!(sidebar_window(0, 3, 5), 0);
+        assert_eq!(sidebar_window(2, 3, 5), 0);
+        // overflow: 0 until the selection passes the window, then follows
+        assert_eq!(sidebar_window(0, 10, 4), 0);
+        assert_eq!(sidebar_window(3, 10, 4), 0);
+        assert_eq!(sidebar_window(4, 10, 4), 1);
+        assert_eq!(sidebar_window(9, 10, 4), 6);
+        // degenerate viewport
+        assert_eq!(sidebar_window(5, 10, 0), 0);
+    }
+
+    #[test]
+    fn truncate_chars_is_multibyte_safe() {
+        assert_eq!(truncate_chars("short", 18), "short");
+        // 19 emoji: byte-index slicing panicked here before
+        let emoji = "🚀".repeat(19);
+        let out = truncate_chars(&emoji, 18);
+        assert!(out.ends_with("..."));
+        assert_eq!(out.chars().count(), 18);
+    }
+
+    #[test]
+    fn help_overlay_lists_hidden_chords() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(Config::default_profiles(), None, tx);
+        app.mode = crate::app::Mode::Help;
+        let mut terminal = Terminal::new(TestBackend::new(100, 34)).unwrap();
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        for needle in [
+            "Ctrl+Shift+C/V",
+            "Ctrl+Shift+F",
+            "Shift+PgUp/PgDn",
+            "Ctrl+Q Ctrl+Q",
+            "jump to session N",
+            "resume the selected session",
+        ] {
+            assert!(text.contains(needle), "help overlay missing {needle}: {text}");
+        }
+    }
+
+    #[test]
+    fn control_hint_advertises_help() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let app = App::new(Config::default_profiles(), None, tx);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        assert!(buffer_text(&terminal).contains("[?] help"));
+    }
+
+    #[test]
+    fn notice_levels_render_distinct_colors() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(Config::default_profiles(), None, tx);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for (notice, want) in [
+            (crate::app::Notice::info("tracing started"), Color::Cyan),
+            (crate::app::Notice::warn("langfuse: check config"), Color::Yellow),
+            (crate::app::Notice::error("write failed"), Color::Red),
+        ] {
+            app.notice = Some(notice);
+            terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+            let cell = &terminal.backend().buffer()[(0, 23)];
+            assert_eq!(cell.style().fg, Some(want), "level color mismatch");
+        }
     }
 
     #[test]
@@ -735,11 +905,15 @@ mod tests {
             project_slug: "-test".into(),
             timestamp_str: "2026-08-30 19:28".into(),
             provider: crate::history::AgentProvider::Claude,
+            cwd: None,
         }];
         history.log_lines = vec![
             ratatui::text::Line::raw("👤 USER: hello world"),
             ratatui::text::Line::raw("🤖 CLAUDE: hi there!"),
         ];
+        // HistoryState::new may have scrolled a machine-local log; this
+        // synthetic 2-line log starts at the top
+        history.scroll_offset = 0;
         app.mode = crate::app::Mode::SessionHistory(history);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();

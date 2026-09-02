@@ -73,6 +73,7 @@ pub fn basic_auth(public_key: &str, secret_key: &str) -> String {
 pub enum AnyValue {
     Str(String),
     Int(i64),
+    Double(f64),
     Bool(bool),
     Array(Vec<AnyValue>),
 }
@@ -85,6 +86,7 @@ impl Serialize for AnyValue {
             // proto3 JSON: int64 as decimal string
             AnyValue::Str(s) => map.serialize_entry("stringValue", s)?,
             AnyValue::Int(n) => map.serialize_entry("intValue", &n.to_string())?,
+            AnyValue::Double(d) => map.serialize_entry("doubleValue", d)?,
             AnyValue::Bool(b) => map.serialize_entry("boolValue", b)?,
             AnyValue::Array(values) => {
                 #[derive(Serialize)]
@@ -226,7 +228,7 @@ pub fn estimated_size(span: &Span) -> usize {
 fn any_value_size(v: &AnyValue) -> usize {
     match v {
         AnyValue::Str(s) => s.len(),
-        AnyValue::Int(_) | AnyValue::Bool(_) => 8,
+        AnyValue::Int(_) | AnyValue::Double(_) | AnyValue::Bool(_) => 8,
         AnyValue::Array(items) => items.iter().map(any_value_size).sum::<usize>() + 16,
     }
 }

@@ -211,10 +211,117 @@ impl LangfuseRuntime {
         self.plan_launch_opt(profile, dir, false)
     }
 
-    /// Explicit/dynamic trace plan (e.g. user toggled tracing on via keybinding).
+    /// Explicit/dynamic trace plan (e.g. user toggled tracing on via keybinding `t`).
     /// Ignores `enabled = false` in profile override, but respects `provider = "none"`.
+    /// Attaches to an already-running session (no extra CLI args injected).
     pub fn plan_attach(&self, profile: &Profile, dir: &Path) -> Option<LaunchPlan> {
-        self.plan_launch_opt(profile, dir, true)
+        let over = profile.langfuse.as_ref();
+        let provider = match over.and_then(|o| o.provider.as_deref()) {
+            Some("claude") => Provider::Claude,
+            Some("codex") => Provider::Codex,
+            Some("antigravity") => Provider::Antigravity,
+            Some("none") => return None,
+            Some(_) => return None, // unknown override: fail safe, untraced
+            None => match basename(&profile.command) {
+                "claude" => Provider::Claude,
+                "codex" => Provider::Codex,
+                "agy" => Provider::Antigravity,
+                _ => return None,
+            },
+        };
+        let content_mode = match over.and_then(|o| o.content_mode.as_deref()) {
+            Some("full") => ContentMode::Full,
+            Some(_) => ContentMode::Metadata,
+            None => self.settings.content_mode,
+        };
+        let launch_id = uuid::Uuid::new_v4().to_string();
+        let mut known_session_id: Option<String> = None;
+        let t0 = SystemTime::now()
+            .checked_sub(Duration::from_secs(3600))
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        let (correlation, correlation_label) = match provider {
+            Provider::Claude => {
+                let claude_dir = self.claude_dir()?;
+                let projects_dir = claude_dir.join("projects");
+                let args = &profile.args;
+                if let Some(id) = arg_value(args, "--resume")
+                    .or_else(|| arg_value(args, "-r"))
+                    .or_else(|| arg_value(args, "--session-id"))
+                {
+                    known_session_id = Some(id.to_string());
+                    let expected_path = projects_dir
+                        .join(crate::history::project_slug(dir))
+                        .join(format!("{id}.jsonl"));
+                    (
+                        CorrelationSpec::KnownClaude {
+                            session_id: id.to_string(),
+                            expected_path,
+                            projects_dir,
+                            resume: true,
+                        },
+                        "deterministic",
+                    )
+                } else {
+                    (
+                        CorrelationSpec::WatchClaude {
+                            projects_dir,
+                            cwd: dir.to_path_buf(),
+                            t0,
+                        },
+                        "watched",
+                    )
+                }
+            }
+            Provider::Codex => {
+                let sessions_dir = self.codex_dir()?.join("sessions");
+                (
+                    CorrelationSpec::WatchCodex {
+                        sessions_dir,
+                        cwd: dir.to_path_buf(),
+                        t0,
+                    },
+                    "watched",
+                )
+            }
+            Provider::Antigravity => {
+                let root = self.antigravity_root()?;
+                if let Some(id) = arg_value(&profile.args, "--conversation") {
+                    known_session_id = Some(id.to_string());
+                    (
+                        CorrelationSpec::KnownAntigravity {
+                            conversation_id: id.to_string(),
+                            root,
+                        },
+                        "deterministic",
+                    )
+                } else {
+                    (
+                        CorrelationSpec::WatchAntigravity {
+                            root,
+                            cwd: dir.to_path_buf(),
+                            t0,
+                            initial: None,
+                        },
+                        "watched",
+                    )
+                }
+            }
+        };
+
+        Some(LaunchPlan {
+            extra_env: Vec::new(),
+            launch_id,
+            extra_args: Vec::new(),
+            provider,
+            content_mode,
+            correlation,
+            correlation_label,
+            known_session_id,
+            injected: false,
+            profile_name: profile.name.clone(),
+            dir: dir.to_path_buf(),
+        })
     }
 
     pub fn plan_launch_opt(
@@ -643,6 +750,7 @@ impl Pipeline {
             session_id: self.assembler.session_id().map(|s| s.to_string()),
             parse_errors: self.parse_errors,
             dropped_spans: self.ctx.dropped.load(Ordering::Relaxed),
+            cost: self.assembler.cost_snapshot(),
         };
         spans.push(map::session_ended_span(&self.ctx.map_settings, &end, now_nanos()));
         self.send_spans(spans);
@@ -976,5 +1084,23 @@ mod plan_tests {
         });
         let plan = rt.plan_launch(&full, Path::new("/tmp")).unwrap();
         assert_eq!(plan.content_mode, ContentMode::Full);
+    }
+
+    #[test]
+    fn plan_attach_watches_running_sessions_without_extra_args() {
+        let rt = runtime();
+        let claude = rt
+            .plan_attach(&profile("Claude Code", "claude", &[]), Path::new("/tmp"))
+            .unwrap();
+        assert!(claude.extra_args.is_empty());
+        assert!(!claude.injected);
+        assert!(matches!(claude.correlation, CorrelationSpec::WatchClaude { .. }));
+        assert_eq!(claude.correlation_label, "watched");
+
+        let agy = rt
+            .plan_attach(&profile("Antigravity", "agy", &[]), Path::new("/tmp"))
+            .unwrap();
+        assert!(agy.extra_args.is_empty());
+        assert!(matches!(agy.correlation, CorrelationSpec::WatchAntigravity { .. }));
     }
 }

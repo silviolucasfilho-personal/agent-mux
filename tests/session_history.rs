@@ -103,7 +103,12 @@ async fn test_app_history_flow_and_navigation() {
         assert_eq!(hist.focused_pane, HistoryPane::LogDetail);
     }
 
-    // Press 'j' in LogDetail -> scrolls log
+    // Press 'j' in LogDetail -> scrolls log (shrink the viewport below the
+    // content first: scrolling clamps to the last full page)
+    if let Mode::SessionHistory(ref mut hist) = app.mode {
+        hist.viewport_rows.set(1);
+        hist.scroll_offset = 0;
+    }
     app.handle_key(&key(KeyCode::Char('j')), Instant::now());
     if let Mode::SessionHistory(ref hist) = app.mode {
         assert_eq!(hist.scroll_offset, 1);

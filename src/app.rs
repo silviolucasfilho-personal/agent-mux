@@ -20,6 +20,7 @@ pub enum Mode {
     SessionHistory(HistoryState),
     ConfirmKill,
     ConfirmQuit,
+    Help,
 }
 
 #[derive(Debug)]
@@ -29,10 +30,13 @@ pub enum Action {
     EnterConfirmQuit,
     MoveUp,
     MoveDown,
+    /// Jump straight to session N (the `1`-`9` keys).
+    SelectSession(usize),
     Attach,
     Detach,
     OpenNewSession,
     OpenSessionHistory,
+    OpenHelp,
     KillSelected,
     EnterConfirmKill,
     RemoveSelected,
@@ -45,6 +49,34 @@ pub enum Action {
     DialogKey,
     /// SessionHistory mode: App routes the key to the HistoryState it owns.
     HistoryKey,
+}
+
+/// Severity of a status-bar notice. The old single `error: Option<String>`
+/// channel painted "tracing started" the same red as a PTY write failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+/// One transient status-bar message; cleared on the next keypress.
+#[derive(Debug, Clone)]
+pub struct Notice {
+    pub level: NoticeLevel,
+    pub text: String,
+}
+
+impl Notice {
+    pub fn info(text: impl Into<String>) -> Self {
+        Notice { level: NoticeLevel::Info, text: text.into() }
+    }
+    pub fn warn(text: impl Into<String>) -> Self {
+        Notice { level: NoticeLevel::Warn, text: text.into() }
+    }
+    pub fn error(text: impl Into<String>) -> Self {
+        Notice { level: NoticeLevel::Error, text: text.into() }
+    }
 }
 
 pub struct DispatchCtx {
@@ -133,10 +165,12 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => Action::MoveDown,
                 KeyCode::Char('k') | KeyCode::Up => Action::MoveUp,
+                KeyCode::Char(c @ '1'..='9') => Action::SelectSession(c as usize - '1' as usize),
                 KeyCode::Enter if ctx.selected_status.is_some() => Action::Attach,
                 KeyCode::Char('n') => Action::OpenNewSession,
                 KeyCode::Char('l') | KeyCode::Char('L') => Action::OpenSessionHistory,
                 KeyCode::Char('t') | KeyCode::Char('T') => Action::ToggleTracing,
+                KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
                 KeyCode::Char('x') => match ctx.selected_status {
                     Some(Status::Exited(_)) => Action::RemoveSelected,
                     Some(_) => Action::EnterConfirmKill,
@@ -176,6 +210,14 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::ConfirmQuit => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::Quit,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
+            _ => Action::None,
+        },
+        Mode::Help => match key.code {
+            KeyCode::Esc
+            | KeyCode::Char('q')
+            | KeyCode::Char('?')
+            | KeyCode::Enter
+            | KeyCode::F(1) => Action::CancelToControl,
             _ => Action::None,
         },
     }
@@ -329,18 +371,18 @@ impl DialogState {
 
     fn set_profile(&mut self, idx: usize, profiles: &[Profile]) {
         self.profile_idx = idx;
-        if let Some(p) = profiles.get(idx) {
-            if let Some(over) = &p.langfuse {
-                if let Some(en) = over.enabled {
-                    self.tracing_enabled = en;
-                }
-                if let Some(cm) = over.content_mode.as_deref() {
-                    self.content_mode = if cm == "metadata" {
-                        DialogContentMode::Metadata
-                    } else {
-                        DialogContentMode::Full
-                    };
-                }
+        if let Some(p) = profiles.get(idx)
+            && let Some(over) = &p.langfuse
+        {
+            if let Some(en) = over.enabled {
+                self.tracing_enabled = en;
+            }
+            if let Some(cm) = over.content_mode.as_deref() {
+                self.content_mode = if cm == "metadata" {
+                    DialogContentMode::Metadata
+                } else {
+                    DialogContentMode::Full
+                };
             }
         }
         if !self.dir_edited {
@@ -519,6 +561,10 @@ pub struct HistoryState {
     pub all_projects: bool,
     pub error: Option<String>,
     pub base_dir: Option<std::path::PathBuf>,
+    /// Log-pane interior height, written back by the renderer each frame so
+    /// scrolling can clamp to "last full page" instead of running past the
+    /// end of the content (Cell: draw only has &HistoryState).
+    pub viewport_rows: std::cell::Cell<usize>,
 }
 
 impl HistoryState {
@@ -534,13 +580,21 @@ impl HistoryState {
             all_projects: false,
             error: None,
             base_dir,
+            viewport_rows: std::cell::Cell::new(30),
         };
         state.load_selected_log();
         state
     }
 
+    /// Greatest scroll offset that still shows a full page (0 when the log
+    /// fits in the viewport).
+    pub fn max_scroll(&self) -> usize {
+        self.log_lines
+            .len()
+            .saturating_sub(self.viewport_rows.get().max(1))
+    }
+
     pub fn load_selected_log(&mut self) {
-        self.scroll_offset = 0;
         if let Some(summary) = self.sessions.get(self.selected_session_idx) {
             match history::load_session_log(&summary.file_path) {
                 Ok(entries) => {
@@ -555,6 +609,8 @@ impl HistoryState {
         } else {
             self.log_lines = Vec::new();
         }
+        // open at the most recent turn, not the oldest
+        self.scroll_offset = self.max_scroll();
     }
 
     pub fn reload_sessions(&mut self) {
@@ -589,7 +645,7 @@ pub struct App {
     pub selected: usize,
     pub mode: Mode,
     pub should_quit: bool,
-    pub error: Option<String>,
+    pub notice: Option<Notice>,
     pub profiles: Vec<Profile>,
     pub pane_size: (u16, u16), // (rows, cols)
     pub selection: Option<ActiveSelection>,
@@ -617,7 +673,7 @@ impl App {
             selected: 0,
             mode: Mode::Control,
             should_quit: false,
-            error: None,
+            notice: None,
             profiles,
             pane_size: (24, 80),
             selection: None,
@@ -688,7 +744,7 @@ impl App {
             return;
         }
         if let Err(e) = arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
-            self.error = Some(format!("clipboard: {e}"));
+            self.notice = Some(Notice::error(format!("clipboard: {e}")));
         }
     }
 
@@ -714,7 +770,7 @@ impl App {
         let text = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
             Ok(t) => t,
             Err(e) => {
-                self.error = Some(format!("clipboard: {e}"));
+                self.notice = Some(Notice::error(format!("clipboard: {e}")));
                 return;
             }
         };
@@ -727,7 +783,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) {
-        self.error = None;
+        self.notice = None;
         if self.search.is_some() {
             self.handle_search_key(key);
             return;
@@ -893,7 +949,8 @@ impl App {
             if matches!(ev.kind, MouseEventKind::ScrollUp) {
                 history.scroll_offset = history.scroll_offset.saturating_sub(3);
             } else if matches!(ev.kind, MouseEventKind::ScrollDown) {
-                history.scroll_offset = history.scroll_offset.saturating_add(3);
+                history.scroll_offset =
+                    history.scroll_offset.saturating_add(3).min(history.max_scroll());
             }
             return;
         }
@@ -902,6 +959,30 @@ impl App {
         // dialog or a Confirm prompt the pane underneath must not react to
         // clicks/drags/wheel meant for the dialog.
         if !matches!(self.mode, Mode::Control | Mode::Attached) {
+            return;
+        }
+        // Left click on a sidebar row selects that session (and follows it
+        // when attached). Only a fresh Down, never a drag that slid over.
+        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.selection.as_ref().is_none_or(|a| !a.dragging)
+            && ev.column > 0
+            && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
+            && ev.row >= 1
+        {
+            let visible = usize::from(self.pane_size.0);
+            let row = usize::from(ev.row) - 1;
+            if row < visible {
+                let idx = ui::sidebar_window(self.selected, self.sessions.len(), visible) + row;
+                if idx < self.sessions.len() && idx != self.selected {
+                    self.selection = None;
+                    self.selected = idx;
+                    if matches!(self.mode, Mode::Attached)
+                        && let Some(s) = self.sessions.get_mut(idx)
+                    {
+                        s.tracker.on_attach();
+                    }
+                }
+            }
             return;
         }
         // A live left-button drag must be able to finish even if the
@@ -1067,6 +1148,12 @@ impl App {
                 self.selection = None;
                 self.selected = self.selected.saturating_sub(1);
             }
+            Action::SelectSession(idx) => {
+                if idx < self.sessions.len() {
+                    self.selection = None;
+                    self.selected = idx;
+                }
+            }
             Action::Attach => {
                 if let Some(s) = self.sessions.get_mut(self.selected) {
                     s.tracker.on_attach();
@@ -1098,6 +1185,7 @@ impl App {
             Action::OpenNewSession => {
                 self.mode = Mode::NewSession(DialogState::new(&self.profiles));
             }
+            Action::OpenHelp => self.mode = Mode::Help,
             Action::EnterConfirmKill => self.mode = Mode::ConfirmKill,
             Action::KillSelected => {
                 if let Some(s) = self.sessions.get_mut(self.selected) {
@@ -1145,7 +1233,10 @@ impl App {
             && let Err(e) = s.write_bytes(bytes)
         {
             // spec: write failure -> status-bar error, session Exited
-            self.error = Some(format!("write to '{}' failed: {e}", s.profile.name));
+            self.notice = Some(Notice::error(format!(
+                "write to '{}' failed: {e}",
+                s.profile.name
+            )));
             s.tracker.on_exit(None);
             // this path marks Exited with no PtyExit event ever arriving —
             // the tracing pipeline must still learn about it
@@ -1244,9 +1335,8 @@ impl App {
                     }
                 }
                 HistoryPane::LogDetail => {
-                    if !history.log_lines.is_empty() {
-                        history.scroll_offset = history.scroll_offset.saturating_add(1);
-                    }
+                    history.scroll_offset =
+                        history.scroll_offset.saturating_add(1).min(history.max_scroll());
                 }
             },
             KeyCode::Up | KeyCode::Char('k') => match history.focused_pane {
@@ -1261,7 +1351,8 @@ impl App {
                 }
             },
             KeyCode::PageDown => {
-                history.scroll_offset = history.scroll_offset.saturating_add(15);
+                history.scroll_offset =
+                    history.scroll_offset.saturating_add(15).min(history.max_scroll());
             }
             KeyCode::PageUp => {
                 history.scroll_offset = history.scroll_offset.saturating_sub(15);
@@ -1270,7 +1361,7 @@ impl App {
                 history.scroll_offset = 0;
             }
             KeyCode::End => {
-                history.scroll_offset = history.log_lines.len().saturating_sub(1);
+                history.scroll_offset = history.max_scroll();
             }
             _ => {}
         }
@@ -1321,10 +1412,14 @@ impl App {
             }
         };
 
-        let dir = self
-            .sessions
-            .get(self.selected)
-            .map(|s| s.dir.clone())
+        // The resumed session must run where it originally ran — the
+        // transcript records it. Only if that is unknown (or gone) fall
+        // back to the selected session's dir / the current dir.
+        let dir = summary
+            .cwd
+            .clone()
+            .filter(|p| p.is_dir())
+            .or_else(|| self.sessions.get(self.selected).map(|s| s.dir.clone()))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
 
@@ -1337,7 +1432,7 @@ impl App {
                 self.mode = Mode::Control;
             }
             Err(e) => {
-                self.error = Some(format!("Failed to resume session: {e}"));
+                self.notice = Some(Notice::error(format!("Failed to resume session: {e}")));
                 self.mode = Mode::Control;
             }
         }
@@ -1359,7 +1454,7 @@ impl App {
                 self.next_id += 1;
                 self.sessions[self.selected] = session;
             }
-            Err(e) => self.error = Some(format!("respawn failed: {e}")),
+            Err(e) => self.notice = Some(Notice::error(format!("respawn failed: {e}"))),
         }
     }
 
@@ -1369,22 +1464,31 @@ impl App {
         };
         if let Some(trace) = s.trace.take() {
             trace.mark_stopped();
-            self.error = Some(format!("tracing stopped for '{}'", s.profile.name));
+            self.notice = Some(Notice::info(format!(
+                "tracing stopped for '{}'",
+                s.profile.name
+            )));
         } else {
             if matches!(s.status(Instant::now()), Status::Exited(_)) {
-                self.error = Some("cannot trace an exited session".into());
+                self.notice = Some(Notice::warn("cannot trace an exited session"));
                 return;
             }
             let Some(rt) = self.langfuse.as_mut() else {
-                self.error = Some("langfuse tracing is not configured/enabled".into());
+                self.notice = Some(Notice::warn("langfuse tracing is not configured/enabled"));
                 return;
             };
             if let Some(plan) = rt.plan_attach(&s.profile, &s.dir) {
                 let id = s.id;
                 s.trace = Some(rt.start_session(id, plan));
-                self.error = Some(format!("tracing started for '{}'", s.profile.name));
+                self.notice = Some(Notice::info(format!(
+                    "tracing started for '{}'",
+                    s.profile.name
+                )));
             } else {
-                self.error = Some(format!("tracing is not supported for '{}'", s.profile.name));
+                self.notice = Some(Notice::warn(format!(
+                    "tracing is not supported for '{}'",
+                    s.profile.name
+                )));
             }
         }
     }
@@ -1498,6 +1602,38 @@ mod dispatch_tests {
         assert!(matches!(
             dispatch(&Mode::Control, &key(KeyCode::Char('n')), &c),
             Action::OpenNewSession
+        ));
+    }
+
+    #[test]
+    fn digits_select_sessions_and_question_mark_opens_help() {
+        let c = ctx(Some(Status::Idle));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('1')), &c),
+            Action::SelectSession(0)
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('9')), &c),
+            Action::SelectSession(8)
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('?')), &c),
+            Action::OpenHelp
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::F(1)), &c),
+            Action::OpenHelp
+        ));
+        // any close key leaves Help
+        for code in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('?'), KeyCode::Enter] {
+            assert!(matches!(
+                dispatch(&Mode::Help, &key(code), &c),
+                Action::CancelToControl
+            ));
+        }
+        assert!(matches!(
+            dispatch(&Mode::Help, &key(KeyCode::Char('x')), &c),
+            Action::None
         ));
     }
 
@@ -1919,6 +2055,9 @@ mod history_tests {
         let mut app = App::new(vec![], None, tx);
         let mut hist = HistoryState::new(None);
         hist.log_lines = vec![ratatui::text::Line::raw("line1"), ratatui::text::Line::raw("line2")];
+        // 1-row viewport: two lines of content leave exactly one scroll step
+        hist.viewport_rows.set(1);
+        hist.scroll_offset = 0;
         app.mode = Mode::SessionHistory(hist);
 
         // Tab toggles to LogDetail

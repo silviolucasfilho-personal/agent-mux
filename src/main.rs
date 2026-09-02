@@ -127,12 +127,13 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut app = App::new(cfg.profiles, langfuse_rt, tx);
     if langfuse_misconfigured {
-        app.error =
-            Some("langfuse: enabled but keys don't resolve — tracing is off (see `agent-mux langfuse doctor`)".into());
+        app.notice = Some(agent_mux::app::Notice::warn(
+            "langfuse: enabled but keys don't resolve — tracing is off (see `agent-mux langfuse doctor`)",
+        ));
     } else if secret_in_cwd_file {
-        app.error = Some(
-            "langfuse: secret_key found in ./profiles.toml (commit hazard) — prefer $LANGFUSE_SECRET_KEY".into(),
-        );
+        app.notice = Some(agent_mux::app::Notice::warn(
+            "langfuse: secret_key found in ./profiles.toml (commit hazard) — prefer $LANGFUSE_SECRET_KEY",
+        ));
     }
     let size = terminal.size()?;
     let (rows, cols) = ui::main_pane_inner(Rect::new(0, 0, size.width, size.height));
@@ -184,7 +185,9 @@ fn handle_event(app: &mut App, event: AppEvent) {
         AppEvent::PtyOutput { id, bytes } => app.handle_pty_output(id, &bytes, Instant::now()),
         AppEvent::PtyExit { id } => app.handle_pty_exit(id),
         AppEvent::Mouse(m) => app.handle_mouse(m, Instant::now()),
-        AppEvent::LangfuseStatus(message) => app.error = Some(message),
+        AppEvent::LangfuseStatus(message) => {
+            app.notice = Some(agent_mux::app::Notice::warn(message))
+        }
         AppEvent::Tick => {} // redraw after every batch covers badge refresh
     }
 }

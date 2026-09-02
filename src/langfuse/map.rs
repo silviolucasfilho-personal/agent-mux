@@ -119,6 +119,8 @@ struct OpenTool {
     id: String,
     name: String,
     args: serde_json::Value,
+    /// attributionSkill of the message that issued the call.
+    skill: Option<String>,
     start_nanos: i128,
     ts_approx: bool,
     /// The event index at ToolUse time — the tool's identity in span-id
@@ -131,6 +133,12 @@ struct PendingGen {
     model: Option<String>,
     thinking: Option<String>,
     usage: Vec<(String, i64)>,
+    skill: Option<String>,
+    /// Names of the tools this API call issued (tool_use-only messages).
+    tool_calls: Vec<String>,
+    /// True for a generation minted from a tool_use-only message's usage:
+    /// it has no text output, only tool calls.
+    tool_only: bool,
     start_nanos: i128,
     end_nanos: i128,
     ts_approx: bool,
@@ -159,12 +167,30 @@ struct OpenTurn {
     /// Emitted-generation cursor: keeps `{trace_key}|gen|{i}` span keys
     /// deterministic across the immediate and buffered emission paths.
     gen_count: usize,
+    /// Distinct attributionSkills seen this turn, in order of appearance.
+    skills: Vec<String>,
+    /// Tool names issued since the last emitted generation — context for
+    /// the tool_use-only generation minted from a TokenCount.
+    tools_since_gen: Vec<String>,
+    /// The CLI's own measured turn latency (`turn_duration` line).
+    reported_duration_ms: Option<i64>,
+    reported_message_count: Option<i64>,
     any_ts_approx: bool,
     aborted: bool,
     /// True for the turn left open when the prime pass ended: it is history
     /// and must not be emitted, and live events never join it — they drop
     /// it and open a fresh turn instead.
     stale: bool,
+}
+
+impl OpenTurn {
+    fn note_skill(&mut self, skill: &Option<String>) {
+        if let Some(s) = skill
+            && !self.skills.iter().any(|k| k == s)
+        {
+            self.skills.push(s.clone());
+        }
+    }
 }
 
 pub struct TurnAssembler {
@@ -185,6 +211,17 @@ pub struct TurnAssembler {
     last_event_nanos: i128,
     session_extra: Vec<(String, String)>,
     last_known_model: Option<String>,
+    /// Latest CLI-reported session totals (Claude `cost-state` lines).
+    cost: Option<CostSnapshot>,
+}
+
+/// The CLI's own running session totals, surfaced on the lifecycle
+/// `session_ended` span.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CostSnapshot {
+    pub total_cost_usd: Option<f64>,
+    pub total_lines_added: Option<i64>,
+    pub total_lines_removed: Option<i64>,
 }
 
 impl TurnAssembler {
@@ -202,7 +239,13 @@ impl TurnAssembler {
             last_event_nanos: 0,
             session_extra: Vec::new(),
             last_known_model: None,
+            cost: None,
         }
+    }
+
+    /// Latest CLI-reported session totals, if any `cost-state` line was seen.
+    pub fn cost_snapshot(&self) -> Option<CostSnapshot> {
+        self.cost
     }
 
     pub fn set_session_id(&mut self, id: &str, correlation: &str) {
@@ -306,12 +349,15 @@ impl TurnAssembler {
     }
 
     fn tag_attrs(&self) -> KeyValue {
-        let mut tags = vec![
-            AnyValue::Str("agent-mux".into()),
-            AnyValue::Str(self.settings.provider.as_str().into()),
-        ];
-        tags.extend(self.settings.tags.iter().map(|t| AnyValue::Str(t.clone())));
-        attr("langfuse.trace.tags", AnyValue::Array(tags))
+        attr(
+            "langfuse.trace.tags",
+            AnyValue::Array(
+                session_tags(&self.settings)
+                    .into_iter()
+                    .map(AnyValue::Str)
+                    .collect(),
+            ),
+        )
     }
 
     fn event_nanos(&mut self, ts: &Option<String>, recv_nanos: i128) -> (i128, bool) {
@@ -345,6 +391,10 @@ impl TurnAssembler {
             seen_usage_msg_ids: std::collections::HashSet::new(),
             event_index: 0,
             gen_count: 0,
+            skills: Vec::new(),
+            tools_since_gen: Vec::new(),
+            reported_duration_ms: None,
+            reported_message_count: None,
             any_ts_approx: false,
             aborted: false,
             stale: false,
@@ -384,7 +434,9 @@ impl TurnAssembler {
         if let Some(inp) = turn.user_text.as_ref().and_then(|t| self.full_content(t)) {
             attrs.push(str_attr("langfuse.observation.input", inp));
         }
-        if let Some(out) = self.full_content(&generation.text) {
+        if !generation.text.is_empty()
+            && let Some(out) = self.full_content(&generation.text)
+        {
             attrs.push(str_attr("langfuse.observation.output", out));
         }
         if let Some(th) = generation
@@ -394,6 +446,15 @@ impl TurnAssembler {
         {
             attrs.push(str_attr("langfuse.observation.metadata.thinking", th));
         }
+        if let Some(skill) = &generation.skill {
+            attrs.push(str_attr("langfuse.observation.metadata.skill", skill.clone()));
+        }
+        if !generation.tool_calls.is_empty() {
+            attrs.push(str_attr(
+                "langfuse.observation.metadata.tool_calls",
+                generation.tool_calls.join(", "),
+            ));
+        }
         if generation.ts_approx {
             attrs.push(str_attr("langfuse.observation.metadata.ts", "approx"));
         }
@@ -401,7 +462,11 @@ impl TurnAssembler {
             trace_id: turn.trace_id,
             span_id: otlp::span_id_for(&span_key),
             parent_span_id: Some(turn.root_span_id),
-            name: "assistant".into(),
+            name: if generation.tool_only {
+                "assistant (tool use)".into()
+            } else {
+                "assistant".into()
+            },
             start_nanos: generation.start_nanos,
             end_nanos: generation.end_nanos,
             attributes: attrs,
@@ -440,7 +505,7 @@ impl TurnAssembler {
         // Unpaired tools close with the turn.
         let unpaired: Vec<OpenTool> = std::mem::take(&mut turn.open_tools);
         for tool in &unpaired {
-            spans.push(self.tool_span(&turn, tool, end_nanos, None, false, true));
+            spans.push(self.tool_span(&turn, tool, end_nanos, None, None, false, true));
         }
 
         // Root span.
@@ -487,6 +552,31 @@ impl TurnAssembler {
         {
             attrs.push(str_attr("langfuse.trace.metadata.thinking", th));
         }
+        if !turn.skills.is_empty() {
+            attrs.push(str_attr(
+                "langfuse.trace.metadata.skills",
+                turn.skills.join(", "),
+            ));
+        }
+        if let Some(ms) = turn.reported_duration_ms {
+            attrs.push(attr(
+                "langfuse.trace.metadata.turn_duration_ms",
+                AnyValue::Int(ms),
+            ));
+        }
+        if let Some(n) = turn.reported_message_count {
+            attrs.push(attr(
+                "langfuse.trace.metadata.turn_message_count",
+                AnyValue::Int(n),
+            ));
+        }
+        if let Some(cost) = self.cost.and_then(|c| c.total_cost_usd) {
+            // running session total at turn close, from the CLI itself
+            attrs.push(attr(
+                "langfuse.trace.metadata.session_cost_usd",
+                AnyValue::Double(cost),
+            ));
+        }
         // Generation start times are always approximated from the previous
         // event's timestamp (transcript lines are written at completion), so
         // any turn containing a generation is flagged — not just missing-ts.
@@ -517,6 +607,7 @@ impl TurnAssembler {
         tool: &OpenTool,
         end_nanos: i128,
         content: Option<&serde_json::Value>,
+        structured: Option<&serde_json::Value>,
         is_error: bool,
         unpaired: bool,
     ) -> Span {
@@ -530,7 +621,14 @@ impl TurnAssembler {
         let mut span_name = tool.name.clone();
         let mut obs_type = "tool";
 
-        if let Some(agent) = extract_agent_info(&tool.name, &tool.args) {
+        if let Some((server, mcp_tool)) = split_mcp_name(&tool.name) {
+            // MCP server tools are never subagents/skills, whatever their
+            // short name matches
+            span_name = format!("mcp: {server}/{mcp_tool}");
+            attrs.push(str_attr("langfuse.observation.metadata.mcp_server", server));
+            attrs.push(str_attr("langfuse.observation.metadata.mcp_tool", mcp_tool));
+            attrs.push(str_attr("langfuse.observation.metadata.kind", "mcp_tool"));
+        } else if let Some(agent) = extract_agent_info(&tool.name, &tool.args) {
             obs_type = "agent";
             span_name = agent.name;
             if let Some(role) = agent.role {
@@ -558,20 +656,33 @@ impl TurnAssembler {
             attrs.push(str_attr("langfuse.observation.metadata.kind", "skill_load"));
         }
 
-        if let Some(summary) = tool.args.get("toolSummary").or_else(|| tool.args.get("summary")).and_then(clean_json_str) {
-            attrs.push(str_attr("langfuse.observation.metadata.summary", summary));
+        if let Some(skill) = &tool.skill {
+            attrs.push(str_attr("langfuse.observation.metadata.skill", skill.clone()));
         }
-        if let Some(action) = tool.args.get("toolAction").or_else(|| tool.args.get("action")).or_else(|| tool.args.get("Description")).and_then(clean_json_str) {
-            attrs.push(str_attr("langfuse.observation.metadata.action", action));
-        }
-        if let Some(cmd) = tool.args.get("CommandLine").or_else(|| tool.args.get("command")).or_else(|| tool.args.get("cmd")).and_then(clean_json_str) {
-            attrs.push(str_attr("langfuse.observation.metadata.command", cmd));
-        }
-        if let Some(query) = tool.args.get("Query").or_else(|| tool.args.get("query")).or_else(|| tool.args.get("pattern")).and_then(clean_json_str) {
-            attrs.push(str_attr("langfuse.observation.metadata.query", query));
+
+        // Content-bearing argument extracts (summaries, commands, queries)
+        // are full-mode only and pass the masker like every other content
+        // string; a bare path is structure (cwd already ships in metadata).
+        if self.settings.content_mode == ContentMode::Full {
+            if let Some(summary) = tool.args.get("toolSummary").or_else(|| tool.args.get("summary")).and_then(clean_json_str).and_then(|s| self.full_content(&s)) {
+                attrs.push(str_attr("langfuse.observation.metadata.summary", summary));
+            }
+            if let Some(action) = tool.args.get("toolAction").or_else(|| tool.args.get("action")).or_else(|| tool.args.get("Description")).and_then(clean_json_str).and_then(|s| self.full_content(&s)) {
+                attrs.push(str_attr("langfuse.observation.metadata.action", action));
+            }
+            if let Some(cmd) = tool.args.get("CommandLine").or_else(|| tool.args.get("command")).or_else(|| tool.args.get("cmd")).and_then(clean_json_str).and_then(|s| self.full_content(&s)) {
+                attrs.push(str_attr("langfuse.observation.metadata.command", cmd));
+            }
+            if let Some(query) = tool.args.get("Query").or_else(|| tool.args.get("query")).or_else(|| tool.args.get("pattern")).and_then(clean_json_str).and_then(|s| self.full_content(&s)) {
+                attrs.push(str_attr("langfuse.observation.metadata.query", query));
+            }
         }
         if let Some(path) = tool.args.get("AbsolutePath").or_else(|| tool.args.get("TargetFile")).or_else(|| tool.args.get("DirectoryPath")).or_else(|| tool.args.get("path")).or_else(|| tool.args.get("file_path")).and_then(clean_json_str) {
             attrs.push(str_attr("langfuse.observation.metadata.path", path));
+        }
+
+        if let Some(s) = structured {
+            self.push_structured_result_attrs(&mut attrs, s);
         }
 
         attrs.push(str_attr("langfuse.observation.type", obs_type));
@@ -619,6 +730,88 @@ impl TurnAssembler {
         }
     }
 
+    /// Attributes distilled from Claude's structured `toolUseResult`.
+    /// Execution facts (sizes, interruption, patch stats, agent identity)
+    /// are structure and flow in both content modes; free-text fields are
+    /// full-mode only and masked.
+    fn push_structured_result_attrs(&self, attrs: &mut Vec<KeyValue>, s: &serde_json::Value) {
+        fn push_unique(attrs: &mut Vec<KeyValue>, key: String, value: AnyValue) {
+            if !attrs.iter().any(|a| a.key == key) {
+                attrs.push(KeyValue { key, value });
+            }
+        }
+        const M: &str = "langfuse.observation.metadata.";
+        // Bash-shaped: stdout/stderr/interrupted
+        if let Some(stdout) = s.get("stdout").and_then(|v| v.as_str()) {
+            push_unique(attrs, format!("{M}stdout_bytes"), AnyValue::Int(stdout.len() as i64));
+        }
+        if let Some(stderr) = s.get("stderr").and_then(|v| v.as_str())
+            && !stderr.is_empty()
+        {
+            push_unique(attrs, format!("{M}stderr_bytes"), AnyValue::Int(stderr.len() as i64));
+        }
+        if s.get("interrupted").and_then(|v| v.as_bool()) == Some(true) {
+            push_unique(attrs, format!("{M}interrupted"), AnyValue::Bool(true));
+        }
+        if let Some(rci) = s.get("returnCodeInterpretation").and_then(|v| v.as_str()) {
+            push_unique(attrs, format!("{M}return_code"), AnyValue::Str(rci.into()));
+        }
+        // Edit/Write-shaped: diff stats from structuredPatch hunks
+        if let Some(hunks) = s.get("structuredPatch").and_then(|v| v.as_array()) {
+            let (mut added, mut removed) = (0i64, 0i64);
+            for hunk in hunks {
+                if let Some(lines) = hunk.get("lines").and_then(|l| l.as_array()) {
+                    for line in lines.iter().filter_map(|l| l.as_str()) {
+                        if line.starts_with('+') {
+                            added += 1;
+                        } else if line.starts_with('-') {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+            if added > 0 || removed > 0 {
+                push_unique(attrs, format!("{M}lines_added"), AnyValue::Int(added));
+                push_unique(attrs, format!("{M}lines_removed"), AnyValue::Int(removed));
+            }
+            if s.get("userModified").and_then(|v| v.as_bool()) == Some(true) {
+                push_unique(attrs, format!("{M}user_modified"), AnyValue::Bool(true));
+            }
+        }
+        // Agent-shaped: the subagent's identity and outcome
+        if let Some(agent_id) = s.get("agentId").and_then(|v| v.as_str()) {
+            push_unique(attrs, format!("{M}agent_id"), AnyValue::Str(agent_id.into()));
+            if let Some(model) = s.get("resolvedModel").and_then(|v| v.as_str()) {
+                push_unique(attrs, format!("{M}agent_model"), AnyValue::Str(model.into()));
+            }
+            if let Some(status) = s.get("status").and_then(|v| v.as_str()) {
+                push_unique(attrs, format!("{M}agent_status"), AnyValue::Str(status.into()));
+            }
+            if s.get("isAsync").and_then(|v| v.as_bool()) == Some(true) {
+                push_unique(attrs, format!("{M}agent_async"), AnyValue::Bool(true));
+            }
+            if let Some(out) = s.get("outputFile").and_then(|v| v.as_str()) {
+                push_unique(attrs, format!("{M}agent_output_file"), AnyValue::Str(out.into()));
+            }
+            if self.settings.content_mode == ContentMode::Full
+                && let Some(desc) = s.get("description").and_then(|v| v.as_str())
+                && let Some(d) = self.full_content(desc)
+            {
+                push_unique(attrs, format!("{M}summary"), AnyValue::Str(d));
+            }
+        }
+        // Workflow-shaped
+        if let Some(wf) = s.get("workflowName").and_then(|v| v.as_str()) {
+            push_unique(attrs, format!("{M}workflow_name"), AnyValue::Str(wf.into()));
+            if let Some(run) = s.get("runId").and_then(|v| v.as_str()) {
+                push_unique(attrs, format!("{M}workflow_run_id"), AnyValue::Str(run.into()));
+            }
+            if let Some(status) = s.get("status").and_then(|v| v.as_str()) {
+                push_unique(attrs, format!("{M}workflow_status"), AnyValue::Str(status.into()));
+            }
+        }
+    }
+
     /// Feeds one event. `recv_nanos` is the wall-clock fallback for events
     /// with a missing/unparseable timestamp.
     pub fn feed(&mut self, event: TranscriptEvent, recv_nanos: i128) -> Vec<Span> {
@@ -645,7 +838,15 @@ impl TurnAssembler {
                             serde_json::Value::String(s) => s.clone(),
                             other => serde_json::to_string(other).unwrap_or_default(),
                         };
-                        self.session_extra.push((k.clone(), val));
+                        // dedup by key, last wins: session context repeats
+                        // (per thread root / per turn_context)
+                        if let Some(entry) =
+                            self.session_extra.iter_mut().find(|(ek, _)| ek == k)
+                        {
+                            entry.1 = val;
+                        } else {
+                            self.session_extra.push((k.clone(), val));
+                        }
                     }
                 }
             }
@@ -672,8 +873,24 @@ impl TurnAssembler {
                     }
                 }
             }
-            TranscriptEvent::User { text, ts } => {
+            TranscriptEvent::User { text, meta, ts } => {
                 let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
+                if meta {
+                    // Harness chatter written as a user line (task
+                    // notifications, command echoes, injected reminders):
+                    // it belongs to whatever turn is running and must never
+                    // close one, open one, or become a trace name/input.
+                    // With no turn running there is nothing to describe.
+                    if self.turn.as_ref().is_some_and(|t| t.stale) {
+                        self.turn = None;
+                    }
+                    if let Some(turn) = self.turn.as_mut() {
+                        turn.last_nanos = nanos;
+                        turn.any_ts_approx |= approx;
+                        turn.event_index += 1;
+                    }
+                    return spans;
+                }
                 if self.explicit_boundaries {
                     if self.turn.as_ref().is_some_and(|t| t.stale) {
                         self.turn = None; // primed history: dropped silently
@@ -700,6 +917,7 @@ impl TurnAssembler {
                 thinking,
                 mut usage,
                 msg_id,
+                skill,
                 ts,
             } => {
                 let prev_nanos = self.last_event_nanos;
@@ -709,6 +927,10 @@ impl TurnAssembler {
                 self.ensure_live_turn(nanos);
                 let mut emit_now: Option<(usize, PendingGen)> = None;
                 if let Some(turn) = self.turn.as_mut() {
+                    turn.note_skill(&skill);
+                    // tools issued before this text belong to earlier API
+                    // calls whose spans already shipped — drop the backlog
+                    turn.tools_since_gen.clear();
                     // A multi-line message repeats identical usage on every
                     // line; charge each API message id exactly once.
                     if !usage.is_empty()
@@ -732,6 +954,9 @@ impl TurnAssembler {
                         model: model.or_else(|| self.last_known_model.clone()),
                         thinking,
                         usage,
+                        skill,
+                        tool_calls: Vec::new(),
+                        tool_only: false,
                         start_nanos: start,
                         end_nanos: nanos,
                         ts_approx: approx,
@@ -758,15 +983,24 @@ impl TurnAssembler {
                     spans.push(self.gen_span(turn, index, &generation));
                 }
             }
-            TranscriptEvent::ToolUse { id, name, args, ts } => {
+            TranscriptEvent::ToolUse {
+                id,
+                name,
+                args,
+                skill,
+                ts,
+            } => {
                 let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
                 self.ensure_live_turn(nanos);
                 if let Some(turn) = self.turn.as_mut() {
+                    turn.note_skill(&skill);
+                    turn.tools_since_gen.push(name.clone());
                     turn.event_index += 1;
                     turn.open_tools.push(OpenTool {
                         id,
                         name,
                         args,
+                        skill,
                         start_nanos: nanos,
                         ts_approx: approx,
                         event_index: turn.event_index,
@@ -779,6 +1013,7 @@ impl TurnAssembler {
                 id,
                 content,
                 is_error,
+                structured,
                 ts,
             } => {
                 let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
@@ -804,6 +1039,7 @@ impl TurnAssembler {
                                 id,
                                 name: "unknown".into(),
                                 args: serde_json::Value::Null,
+                                skill: None,
                                 start_nanos: nanos,
                                 ts_approx: approx,
                                 event_index: turn_ref.event_index,
@@ -815,8 +1051,15 @@ impl TurnAssembler {
                 if let (Some((tool, orphan)), Some(turn)) = (popped.as_ref(), self.turn.as_ref())
                     && self.emitting
                 {
-                    let mut span =
-                        self.tool_span(turn, tool, nanos, Some(&content), is_error, false);
+                    let mut span = self.tool_span(
+                        turn,
+                        tool,
+                        nanos,
+                        Some(&content),
+                        structured.as_ref(),
+                        is_error,
+                        false,
+                    );
                     if *orphan {
                         span.status_message = Some("unpaired result".to_string());
                     }
@@ -832,21 +1075,97 @@ impl TurnAssembler {
                     turn.any_ts_approx |= approx;
                 }
             }
-            TranscriptEvent::TokenCount { usage, msg_id, ts } => {
-                let (nanos, _) = self.event_nanos(&ts, recv_nanos);
+            TranscriptEvent::TokenCount {
+                usage,
+                msg_id,
+                model,
+                ts,
+            } => {
+                let prev_nanos = self.last_event_nanos;
+                let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
                 self.ensure_live_turn(nanos);
+                let mut emit_now: Option<(usize, PendingGen)> = None;
                 if let Some(turn) = self.turn.as_mut() {
-                    // dedup repeated usage lines of one API message; then
-                    // ACCUMULATE — a turn can span several API calls, and
-                    // overwriting would keep only the last one
+                    // dedup repeated usage lines of one API message
                     let already_charged = msg_id
                         .as_ref()
                         .is_some_and(|id| !turn.seen_usage_msg_ids.insert(id.clone()));
+                    let tool_calls = std::mem::take(&mut turn.tools_since_gen);
                     if !already_charged {
-                        accumulate_usage(&mut turn.pending_turn_usage, &usage);
+                        // A model-attributed count is a real API call (a
+                        // Claude tool_use-only message): mint a generation
+                        // so Langfuse cost inference applies, instead of
+                        // parking the usage on the uncosted turn root.
+                        // Codex's per-turn counts keep the buffered path.
+                        if self.settings.provider != Provider::Codex
+                            && let Some(model_name) = model
+                        {
+                            let start = if prev_nanos > 0 && prev_nanos <= nanos {
+                                prev_nanos
+                            } else {
+                                nanos
+                            };
+                            let mut thinking = None;
+                            if !turn.pending_thinking.is_empty() {
+                                thinking = Some(turn.pending_thinking.join("\n"));
+                                turn.pending_thinking.clear();
+                            }
+                            let generation = PendingGen {
+                                text: String::new(),
+                                model: Some(model_name),
+                                thinking,
+                                usage,
+                                skill: None,
+                                tool_calls,
+                                tool_only: true,
+                                start_nanos: start,
+                                end_nanos: nanos,
+                                ts_approx: approx,
+                            };
+                            let index = turn.gen_count;
+                            turn.gen_count += 1;
+                            emit_now = Some((index, generation));
+                        } else {
+                            // ACCUMULATE — a turn can span several API
+                            // calls, and overwriting would keep only the
+                            // last one
+                            accumulate_usage(&mut turn.pending_turn_usage, &usage);
+                        }
                     }
                     turn.last_nanos = nanos;
                 }
+                if let (Some((index, generation)), Some(turn)) = (emit_now, self.turn.as_ref())
+                    && self.emitting
+                {
+                    spans.push(self.gen_span(turn, index, &generation));
+                }
+            }
+            TranscriptEvent::TurnDuration {
+                duration_ms,
+                message_count,
+                ts,
+            } => {
+                let (nanos, _) = self.event_nanos(&ts, recv_nanos);
+                // the CLI writes it as the turn completes: attach to the
+                // open turn; with no open turn there is nothing to describe
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.reported_duration_ms = Some(duration_ms);
+                    turn.reported_message_count = message_count;
+                    turn.last_nanos = turn.last_nanos.max(nanos);
+                }
+            }
+            TranscriptEvent::CostState {
+                total_cost_usd,
+                total_lines_added,
+                total_lines_removed,
+                ts,
+            } => {
+                let _ = self.event_nanos(&ts, recv_nanos);
+                self.cost = Some(CostSnapshot {
+                    total_cost_usd,
+                    total_lines_added,
+                    total_lines_removed,
+                });
             }
         }
         spans
@@ -881,6 +1200,17 @@ fn normalize_tool_name(name: &str) -> &str {
         &name[pos + 1..]
     } else {
         name
+    }
+}
+
+/// Splits Claude's MCP tool convention `mcp__<server>__<tool>`.
+fn split_mcp_name(name: &str) -> Option<(String, String)> {
+    let rest = name.strip_prefix("mcp__")?;
+    match rest.split_once("__") {
+        Some((server, tool)) if !server.is_empty() && !tool.is_empty() => {
+            Some((server.to_string(), tool.to_string()))
+        }
+        _ => None,
     }
 }
 
@@ -1046,6 +1376,20 @@ pub struct SessionEnd {
     pub parse_errors: u64,
     /// App-wide dropped-span count at session end (backpressure/network).
     pub dropped_spans: u64,
+    /// The CLI's own running totals (Claude `cost-state`), when observed.
+    pub cost: Option<CostSnapshot>,
+}
+
+/// Built-in tags plus the user's configured ones, deduped (a configured
+/// "agent-mux" tag must not double the built-in).
+fn session_tags(settings: &MapSettings) -> Vec<String> {
+    let mut tags = vec!["agent-mux".to_string(), settings.provider.as_str().to_string()];
+    for t in &settings.tags {
+        if !tags.contains(t) {
+            tags.push(t.clone());
+        }
+    }
+    tags
 }
 
 fn lifecycle_common(settings: &MapSettings, correlation: &str) -> Vec<KeyValue> {
@@ -1101,12 +1445,10 @@ pub fn session_started_span(
     if let Some(user) = &settings.user_id {
         attrs.push(str_attr("langfuse.user.id", user.clone()));
     }
-    let mut tags = vec![
-        AnyValue::Str("agent-mux".into()),
-        AnyValue::Str(settings.provider.as_str().into()),
-    ];
-    tags.extend(settings.tags.iter().map(|t| AnyValue::Str(t.clone())));
-    attrs.push(attr("langfuse.trace.tags", AnyValue::Array(tags)));
+    attrs.push(attr(
+        "langfuse.trace.tags",
+        AnyValue::Array(session_tags(settings).into_iter().map(AnyValue::Str).collect()),
+    ));
     Span {
         trace_id: lifecycle_trace_id(settings),
         span_id: otlp::span_id_for(&format!("amx1|{}|lifecycle|started", settings.launch_id)),
@@ -1149,6 +1491,26 @@ pub fn session_ended_span(settings: &MapSettings, end: &SessionEnd, now_nanos: i
             AnyValue::Int(end.dropped_spans as i64),
         ));
     }
+    if let Some(cost) = &end.cost {
+        if let Some(usd) = cost.total_cost_usd {
+            attrs.push(attr(
+                "langfuse.trace.metadata.total_cost_usd",
+                AnyValue::Double(usd),
+            ));
+        }
+        if let Some(n) = cost.total_lines_added {
+            attrs.push(attr(
+                "langfuse.trace.metadata.total_lines_added",
+                AnyValue::Int(n),
+            ));
+        }
+        if let Some(n) = cost.total_lines_removed {
+            attrs.push(attr(
+                "langfuse.trace.metadata.total_lines_removed",
+                AnyValue::Int(n),
+            ));
+        }
+    }
     Span {
         trace_id: lifecycle_trace_id(settings),
         span_id: otlp::span_id_for(&format!("amx1|{}|lifecycle|ended", settings.launch_id)),
@@ -1186,6 +1548,7 @@ mod tests {
 
     fn user(text: &str, ts: &str) -> TranscriptEvent {
         TranscriptEvent::User {
+            meta: false,
             text: text.into(),
             ts: Some(ts.into()),
         }
@@ -1193,6 +1556,7 @@ mod tests {
 
     fn assistant(text: &str, ts: &str, usage: Vec<(String, i64)>) -> TranscriptEvent {
         TranscriptEvent::Assistant {
+            skill: None,
             text: text.into(),
             model: Some("claude-fable-5".into()),
             thinking: None,
@@ -1224,6 +1588,7 @@ mod tests {
         spans.extend(asm.feed(assistant("on it", "2026-08-30T10:00:05Z", vec![("input_tokens".into(), 10)]), 0));
         spans.extend(asm.feed(
             TranscriptEvent::ToolUse {
+                skill: None,
                 id: "t1".into(),
                 name: "Bash".into(),
                 args: serde_json::json!({"command": "ls"}),
@@ -1233,6 +1598,7 @@ mod tests {
         ));
         spans.extend(asm.feed(
             TranscriptEvent::ToolResult {
+                structured: None,
                 id: "t1".into(),
                 content: serde_json::Value::String("ok".into()),
                 is_error: false,
@@ -1293,6 +1659,7 @@ mod tests {
         spans.extend(asm.feed(user("secret prompt", "2026-08-30T10:00:00Z"), 0));
         spans.extend(asm.feed(
             TranscriptEvent::Assistant {
+                skill: None,
                 text: "secret reply".into(),
                 model: Some("m".into()),
                 thinking: Some("secret thoughts".into()),
@@ -1304,6 +1671,7 @@ mod tests {
         ));
         spans.extend(asm.feed(
             TranscriptEvent::ToolUse {
+                skill: None,
                 id: "t1".into(),
                 name: "Bash".into(),
                 args: serde_json::json!({"command": "cat /etc/passwd"}),
@@ -1313,6 +1681,7 @@ mod tests {
         ));
         spans.extend(asm.feed(
             TranscriptEvent::ToolResult {
+                structured: None,
                 id: "t1".into(),
                 content: serde_json::Value::String("secret output".into()),
                 is_error: true,
@@ -1372,6 +1741,7 @@ mod tests {
         spans.extend(asm.feed(assistant("working", "2026-08-30T10:00:02Z", vec![]), 0));
         spans.extend(asm.feed(
             TranscriptEvent::TokenCount {
+                model: None,
                 usage: vec![("input_tokens".into(), 200), ("output_tokens".into(), 20)],
                 msg_id: None,
                 ts: Some("2026-08-30T10:00:03Z".into()),
@@ -1420,6 +1790,7 @@ mod tests {
         for name in ["list_dir", "view_file"] {
             spans.extend(asm.feed(
                 TranscriptEvent::ToolUse {
+                    skill: None,
                     id: String::new(),
                     name: name.into(),
                     args: serde_json::Value::Null,
@@ -1431,6 +1802,7 @@ mod tests {
         // one positional result: pairs FIFO with list_dir
         spans.extend(asm.feed(
             TranscriptEvent::ToolResult {
+                structured: None,
                 id: String::new(),
                 content: serde_json::Value::String("dir contents".into()),
                 is_error: false,
@@ -1484,6 +1856,7 @@ mod tests {
         let recv = 1_788_118_098_000_000_000_i128;
         let _ = asm.feed(
             TranscriptEvent::User {
+                meta: false,
                 text: "no ts".into(),
                 ts: None,
             },
@@ -1502,6 +1875,7 @@ mod tests {
         spans.extend(asm.feed(user("u", "2026-08-30T10:00:00Z"), 0));
         spans.extend(asm.feed(
             TranscriptEvent::Assistant {
+                skill: None,
                 text: "synthetic".into(),
                 model: Some("<synthetic>".into()),
                 thinking: None,
@@ -1548,6 +1922,7 @@ mod tests {
         for (i, text) in ["part one", "part two"].iter().enumerate() {
             spans.extend(asm.feed(
                 TranscriptEvent::Assistant {
+                    skill: None,
                     text: text.to_string(),
                     model: Some("m".into()),
                     thinking: None,
@@ -1563,6 +1938,7 @@ mod tests {
         for (msg, tokens) in [("msg_2", 50), ("msg_3", 25), ("msg_1", 999)] {
             spans.extend(asm.feed(
                 TranscriptEvent::TokenCount {
+                    model: None,
                     usage: vec![("input_tokens".into(), tokens)],
                     msg_id: Some(msg.into()),
                     ts: Some("2026-08-30T10:00:05Z".into()),
@@ -1595,6 +1971,7 @@ mod tests {
         for _ in 0..2 {
             spans.extend(asm.feed(
                 TranscriptEvent::ToolUse {
+                    skill: None,
                     id: String::new(),
                     name: "run_command".into(),
                     args: serde_json::Value::Null,
@@ -1619,6 +1996,7 @@ mod tests {
         let _ = asm.feed(user("go", "2026-08-30T10:00:00Z"), 0);
         let spans = asm.feed(
             TranscriptEvent::ToolResult {
+                structured: None,
                 id: "never-seen".into(),
                 content: serde_json::Value::String("late output".into()),
                 is_error: false,
@@ -1694,6 +2072,7 @@ mod tests {
         let ended = session_ended_span(
             &s,
             &SessionEnd {
+                cost: None,
                 termination: "exit",
                 exit_code: Some(0),
                 correlation: "watched".into(),
@@ -1716,6 +2095,7 @@ mod tests {
         let quit = session_ended_span(
             &s,
             &SessionEnd {
+                cost: None,
                 termination: "app_quit",
                 exit_code: None,
                 correlation: "none".into(),
@@ -1742,6 +2122,7 @@ mod tests {
         // Skill loading tool call
         spans.extend(asm.feed(
             TranscriptEvent::ToolUse {
+                skill: None,
                 id: "t1".into(),
                 name: "view_file".into(),
                 args: serde_json::json!({
@@ -1755,6 +2136,7 @@ mod tests {
         ));
         spans.extend(asm.feed(
             TranscriptEvent::ToolResult {
+                structured: None,
                 id: "t1".into(),
                 content: serde_json::Value::String("# Skill content".into()),
                 is_error: false,
@@ -1766,6 +2148,7 @@ mod tests {
         // Subagent invocation tool call
         spans.extend(asm.feed(
             TranscriptEvent::ToolUse {
+                skill: None,
                 id: "t2".into(),
                 name: "invoke_subagent".into(),
                 args: serde_json::json!({
@@ -1782,6 +2165,7 @@ mod tests {
         ));
         spans.extend(asm.feed(
             TranscriptEvent::ToolResult {
+                structured: None,
                 id: "t2".into(),
                 content: serde_json::Value::String("subagent finished".into()),
                 is_error: false,
@@ -1793,6 +2177,7 @@ mod tests {
         // Assistant generation
         spans.extend(asm.feed(
             TranscriptEvent::Assistant {
+                skill: None,
                 text: "all done".into(),
                 model: Some("gemini-3.7-flash".into()),
                 thinking: Some("reasoning details".into()),
@@ -1827,6 +2212,421 @@ mod tests {
         assert_eq!(attr_str(gen_span, "gen_ai.request.model"), Some("gemini-3.7-flash"));
     }
 
+    fn attr_f64(span: &Span, key: &str) -> Option<f64> {
+        span.attributes.iter().find(|a| a.key == key).and_then(|a| match &a.value {
+            AnyValue::Double(d) => Some(*d),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn meta_user_lines_do_not_fragment_turns() {
+        let mut asm =
+            TurnAssembler::new(settings(ContentMode::Full), Some("s".into()), "deterministic");
+        let mut spans = Vec::new();
+        spans.extend(asm.feed(user("real prompt", "2026-08-30T10:00:00Z"), 0));
+        spans.extend(asm.feed(assistant("working", "2026-08-30T10:00:01Z", vec![]), 0));
+        // an async task-notification arrives mid-turn as a user line
+        spans.extend(asm.feed(
+            TranscriptEvent::User {
+                text: "<task-notification>agent finished</task-notification>".into(),
+                meta: true,
+                ts: Some("2026-08-30T10:00:02Z".into()),
+            },
+            0,
+        ));
+        spans.extend(asm.feed(assistant("done", "2026-08-30T10:00:03Z", vec![]), 0));
+        // a REAL second prompt closes turn 1
+        spans.extend(asm.feed(user("next prompt", "2026-08-30T10:01:00Z"), 0));
+        spans.extend(asm.finalize());
+        let roots: Vec<_> = spans.iter().filter(|s| s.name.starts_with("turn")).collect();
+        assert_eq!(roots.len(), 2, "meta line must not split the turn: {spans:#?}");
+        let turn1 = roots.iter().find(|s| s.name == "turn 1").unwrap();
+        assert_eq!(attr_str(turn1, "langfuse.trace.input"), Some("real prompt"));
+        assert_eq!(attr_str(turn1, "langfuse.trace.output"), Some("done"));
+        let turn2 = roots.iter().find(|s| s.name == "turn 2").unwrap();
+        assert_eq!(attr_str(turn2, "langfuse.trace.input"), Some("next prompt"));
+        for s in &spans {
+            for kv in &s.attributes {
+                if let AnyValue::Str(v) = &kv.value {
+                    assert!(
+                        !v.contains("task-notification"),
+                        "meta text leaked into {}: {v}",
+                        kv.key
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_tools_get_server_and_tool_metadata() {
+        let mut asm =
+            TurnAssembler::new(settings(ContentMode::Metadata), Some("s".into()), "deterministic");
+        let _ = asm.feed(user("go", "2026-08-30T10:00:00Z"), 0);
+        let _ = asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t1".into(),
+                // short name "search_files" must not fall into skill/agent heuristics
+                name: "mcp__claude_ai_Google_Drive__search_files".into(),
+                args: serde_json::json!({"query": "quarterly report"}),
+                skill: None,
+                ts: Some("2026-08-30T10:00:01Z".into()),
+            },
+            0,
+        );
+        let spans = asm.feed(
+            TranscriptEvent::ToolResult {
+                id: "t1".into(),
+                content: serde_json::Value::String("3 files".into()),
+                is_error: false,
+                structured: None,
+                ts: Some("2026-08-30T10:00:02Z".into()),
+            },
+            0,
+        );
+        assert_eq!(spans.len(), 1);
+        let tool = &spans[0];
+        assert_eq!(tool.name, "mcp: claude_ai_Google_Drive/search_files");
+        assert_eq!(attr_str(tool, "langfuse.observation.type"), Some("tool"));
+        assert_eq!(
+            attr_str(tool, "langfuse.observation.metadata.mcp_server"),
+            Some("claude_ai_Google_Drive")
+        );
+        assert_eq!(
+            attr_str(tool, "langfuse.observation.metadata.mcp_tool"),
+            Some("search_files")
+        );
+        assert_eq!(attr_str(tool, "langfuse.observation.metadata.kind"), Some("mcp_tool"));
+        // metadata mode: the query string is content and stays home
+        assert_eq!(attr_str(tool, "langfuse.observation.metadata.query"), None);
+    }
+
+    #[test]
+    fn structured_results_enrich_bash_edit_and_agent_spans() {
+        let mut asm =
+            TurnAssembler::new(settings(ContentMode::Full), Some("s".into()), "deterministic");
+        let _ = asm.feed(user("go", "2026-08-30T10:00:00Z"), 0);
+        let tool_use = |id: &str, name: &str, args: serde_json::Value| TranscriptEvent::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            args,
+            skill: None,
+            ts: Some("2026-08-30T10:00:01Z".into()),
+        };
+        let result = |id: &str, structured: serde_json::Value| TranscriptEvent::ToolResult {
+            id: id.into(),
+            content: serde_json::Value::String("out".into()),
+            is_error: false,
+            structured: Some(structured),
+            ts: Some("2026-08-30T10:00:02Z".into()),
+        };
+        let _ = asm.feed(tool_use("b1", "Bash", serde_json::json!({"command": "cargo test"})), 0);
+        let bash = asm
+            .feed(
+                result(
+                    "b1",
+                    serde_json::json!({"stdout": "ok!!", "stderr": "warn", "interrupted": true, "returnCodeInterpretation": "failure"}),
+                ),
+                0,
+            )
+            .remove(0);
+        assert_eq!(attr_int(&bash, "langfuse.observation.metadata.stdout_bytes"), Some(4));
+        assert_eq!(attr_int(&bash, "langfuse.observation.metadata.stderr_bytes"), Some(4));
+        assert_eq!(
+            attr_str(&bash, "langfuse.observation.metadata.return_code"),
+            Some("failure")
+        );
+        assert!(
+            bash.attributes
+                .iter()
+                .any(|a| a.key == "langfuse.observation.metadata.interrupted"
+                    && a.value == AnyValue::Bool(true))
+        );
+        assert_eq!(
+            attr_str(&bash, "langfuse.observation.metadata.command"),
+            Some("cargo test")
+        );
+
+        let _ = asm.feed(tool_use("e1", "Edit", serde_json::json!({"file_path": "/proj/a.rs"})), 0);
+        let edit = asm
+            .feed(
+                result(
+                    "e1",
+                    serde_json::json!({"filePath": "/proj/a.rs", "userModified": true, "structuredPatch": [{"lines": ["+new line", "+another", "-old", " ctx"]}]}),
+                ),
+                0,
+            )
+            .remove(0);
+        assert_eq!(attr_int(&edit, "langfuse.observation.metadata.lines_added"), Some(2));
+        assert_eq!(attr_int(&edit, "langfuse.observation.metadata.lines_removed"), Some(1));
+        assert!(
+            edit.attributes
+                .iter()
+                .any(|a| a.key == "langfuse.observation.metadata.user_modified")
+        );
+
+        let _ = asm.feed(
+            tool_use(
+                "a1",
+                "Agent",
+                serde_json::json!({"subagent_type": "Explore", "prompt": "look around"}),
+            ),
+            0,
+        );
+        let agent = asm
+            .feed(
+                result(
+                    "a1",
+                    serde_json::json!({"agentId": "abc123", "resolvedModel": "claude-opus-5[1m]", "status": "async_launched", "isAsync": true, "outputFile": "/tmp/tasks/abc123.output", "description": "Audit the UI"}),
+                ),
+                0,
+            )
+            .remove(0);
+        assert_eq!(agent.name, "agent: Explore");
+        assert_eq!(attr_str(&agent, "langfuse.observation.type"), Some("agent"));
+        assert_eq!(attr_str(&agent, "langfuse.observation.metadata.agent_id"), Some("abc123"));
+        assert_eq!(
+            attr_str(&agent, "langfuse.observation.metadata.agent_model"),
+            Some("claude-opus-5[1m]")
+        );
+        assert_eq!(
+            attr_str(&agent, "langfuse.observation.metadata.agent_status"),
+            Some("async_launched")
+        );
+        assert_eq!(
+            attr_str(&agent, "langfuse.observation.metadata.agent_output_file"),
+            Some("/tmp/tasks/abc123.output")
+        );
+        assert_eq!(attr_str(&agent, "langfuse.observation.metadata.summary"), Some("Audit the UI"));
+    }
+
+    #[test]
+    fn token_count_with_model_mints_a_costed_generation() {
+        let mut asm =
+            TurnAssembler::new(settings(ContentMode::Metadata), Some("s".into()), "deterministic");
+        let _ = asm.feed(user("go", "2026-08-30T10:00:00Z"), 0);
+        // the tool_use block of the same API message arrives first
+        let _ = asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t1".into(),
+                name: "Bash".into(),
+                args: serde_json::Value::Null,
+                skill: None,
+                ts: Some("2026-08-30T10:00:01Z".into()),
+            },
+            0,
+        );
+        let spans = asm.feed(
+            TranscriptEvent::TokenCount {
+                usage: vec![("input_tokens".into(), 120), ("output_tokens".into(), 30)],
+                msg_id: Some("msg_9".into()),
+                model: Some("claude-fable-5".into()),
+                ts: Some("2026-08-30T10:00:01Z".into()),
+            },
+            0,
+        );
+        assert_eq!(spans.len(), 1, "a model-attributed count becomes a generation");
+        let generation = &spans[0];
+        assert_eq!(generation.name, "assistant (tool use)");
+        assert_eq!(
+            attr_str(generation, "langfuse.observation.type"),
+            Some("generation")
+        );
+        assert_eq!(attr_str(generation, "gen_ai.request.model"), Some("claude-fable-5"));
+        assert_eq!(attr_int(generation, "gen_ai.usage.input_tokens"), Some(120));
+        assert_eq!(
+            attr_str(generation, "langfuse.observation.metadata.tool_calls"),
+            Some("Bash")
+        );
+        // a repeat of the same message id stays deduped
+        let repeat = asm.feed(
+            TranscriptEvent::TokenCount {
+                usage: vec![("input_tokens".into(), 120)],
+                msg_id: Some("msg_9".into()),
+                model: Some("claude-fable-5".into()),
+                ts: Some("2026-08-30T10:00:02Z".into()),
+            },
+            0,
+        );
+        assert!(repeat.is_empty(), "duplicate usage must not mint a second generation");
+        // and the root no longer parks that usage
+        let close = asm.finalize();
+        let root = close.iter().find(|s| s.name.starts_with("turn")).unwrap();
+        assert_eq!(attr_int(root, "gen_ai.usage.input_tokens"), None);
+    }
+
+    #[test]
+    fn skill_attribution_reaches_generation_tool_and_root() {
+        let mut asm =
+            TurnAssembler::new(settings(ContentMode::Metadata), Some("s".into()), "deterministic");
+        let mut spans = Vec::new();
+        spans.extend(asm.feed(user("go", "2026-08-30T10:00:00Z"), 0));
+        spans.extend(asm.feed(
+            TranscriptEvent::Assistant {
+                text: "per the skill".into(),
+                model: Some("m".into()),
+                thinking: None,
+                usage: vec![],
+                msg_id: None,
+                skill: Some("spec-wave".into()),
+                ts: Some("2026-08-30T10:00:01Z".into()),
+            },
+            0,
+        ));
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t1".into(),
+                name: "Edit".into(),
+                args: serde_json::Value::Null,
+                skill: Some("artifact-design".into()),
+                ts: Some("2026-08-30T10:00:02Z".into()),
+            },
+            0,
+        ));
+        spans.extend(asm.feed(
+            TranscriptEvent::ToolResult {
+                id: "t1".into(),
+                content: serde_json::Value::Null,
+                is_error: false,
+                structured: None,
+                ts: Some("2026-08-30T10:00:03Z".into()),
+            },
+            0,
+        ));
+        spans.extend(asm.finalize());
+        let generation = spans.iter().find(|s| s.name == "assistant").unwrap();
+        assert_eq!(
+            attr_str(generation, "langfuse.observation.metadata.skill"),
+            Some("spec-wave")
+        );
+        let tool = spans.iter().find(|s| s.name == "Edit").unwrap();
+        assert_eq!(
+            attr_str(tool, "langfuse.observation.metadata.skill"),
+            Some("artifact-design")
+        );
+        let root = spans.iter().find(|s| s.name.starts_with("turn")).unwrap();
+        assert_eq!(
+            attr_str(root, "langfuse.trace.metadata.skills"),
+            Some("spec-wave, artifact-design")
+        );
+    }
+
+    #[test]
+    fn turn_duration_and_cost_state_land_as_metadata() {
+        let mut asm =
+            TurnAssembler::new(settings(ContentMode::Metadata), Some("s".into()), "deterministic");
+        let _ = asm.feed(user("go", "2026-08-30T10:00:00Z"), 0);
+        let _ = asm.feed(
+            TranscriptEvent::TurnDuration {
+                duration_ms: 5400,
+                message_count: Some(12),
+                ts: Some("2026-08-30T10:00:06Z".into()),
+            },
+            0,
+        );
+        let _ = asm.feed(
+            TranscriptEvent::CostState {
+                total_cost_usd: Some(1.5),
+                total_lines_added: Some(30),
+                total_lines_removed: Some(4),
+                ts: Some("2026-08-30T10:00:07Z".into()),
+            },
+            0,
+        );
+        let close = asm.finalize();
+        let root = close.iter().find(|s| s.name.starts_with("turn")).unwrap();
+        assert_eq!(attr_int(root, "langfuse.trace.metadata.turn_duration_ms"), Some(5400));
+        assert_eq!(attr_int(root, "langfuse.trace.metadata.turn_message_count"), Some(12));
+        assert_eq!(attr_f64(root, "langfuse.trace.metadata.session_cost_usd"), Some(1.5));
+        // the lifecycle span carries the CLI's totals
+        let snapshot = asm.cost_snapshot().expect("cost snapshot recorded");
+        let ended = session_ended_span(
+            &settings(ContentMode::Metadata),
+            &SessionEnd {
+                termination: "exit",
+                exit_code: Some(0),
+                correlation: "deterministic".into(),
+                session_id: Some("s".into()),
+                parse_errors: 0,
+                dropped_spans: 0,
+                cost: Some(snapshot),
+            },
+            9_000,
+        );
+        assert_eq!(attr_f64(&ended, "langfuse.trace.metadata.total_cost_usd"), Some(1.5));
+        assert_eq!(attr_int(&ended, "langfuse.trace.metadata.total_lines_added"), Some(30));
+        assert_eq!(attr_int(&ended, "langfuse.trace.metadata.total_lines_removed"), Some(4));
+    }
+
+    #[test]
+    fn metadata_mode_withholds_command_query_and_summaries() {
+        let mut asm =
+            TurnAssembler::new(settings(ContentMode::Metadata), Some("s".into()), "deterministic");
+        let _ = asm.feed(user("go", "2026-08-30T10:00:00Z"), 0);
+        let _ = asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t1".into(),
+                name: "Bash".into(),
+                args: serde_json::json!({"command": "cat /etc/passwd", "toolSummary": "read the shadow file", "query": "root"}),
+                skill: None,
+                ts: Some("2026-08-30T10:00:01Z".into()),
+            },
+            0,
+        );
+        let spans = asm.feed(
+            TranscriptEvent::ToolResult {
+                id: "t1".into(),
+                content: serde_json::Value::String("secret output".into()),
+                is_error: false,
+                structured: Some(serde_json::json!({"stdout": "secret output", "stderr": ""})),
+                ts: Some("2026-08-30T10:00:02Z".into()),
+            },
+            0,
+        );
+        let tool = &spans[0];
+        for gone in [
+            "langfuse.observation.metadata.command",
+            "langfuse.observation.metadata.summary",
+            "langfuse.observation.metadata.query",
+            "langfuse.observation.metadata.action",
+        ] {
+            assert_eq!(attr_str(tool, gone), None, "{gone} leaked in metadata mode");
+        }
+        // structure still flows: sizes are counts, not content
+        assert_eq!(attr_int(tool, "langfuse.observation.metadata.stdout_bytes"), Some(13));
+    }
+
+    #[test]
+    fn full_mode_masks_command_metadata() {
+        let mut asm =
+            TurnAssembler::new(settings(ContentMode::Full), Some("s".into()), "deterministic");
+        let _ = asm.feed(user("go", "2026-08-30T10:00:00Z"), 0);
+        let _ = asm.feed(
+            TranscriptEvent::ToolUse {
+                id: "t1".into(),
+                name: "Bash".into(),
+                args: serde_json::json!({"command": "export KEY=sk-live-topsecret && run"}),
+                skill: None,
+                ts: Some("2026-08-30T10:00:01Z".into()),
+            },
+            0,
+        );
+        let spans = asm.feed(
+            TranscriptEvent::ToolResult {
+                id: "t1".into(),
+                content: serde_json::Value::Null,
+                is_error: false,
+                structured: None,
+                ts: Some("2026-08-30T10:00:02Z".into()),
+            },
+            0,
+        );
+        let cmd = attr_str(&spans[0], "langfuse.observation.metadata.command").unwrap();
+        assert!(!cmd.contains("topsecret"), "secret leaked via command metadata: {cmd}");
+        assert!(cmd.contains("[REDACTED]"), "{cmd}");
+    }
+
     #[test]
     fn antigravity_escaped_quotes_and_namespaced_tools() {
         let mut asm = TurnAssembler::new(
@@ -1840,6 +2640,7 @@ mod tests {
         // Namespaced tool with escaped string quotes in JSON args
         spans.extend(asm.feed(
             TranscriptEvent::ToolUse {
+                skill: None,
                 id: "t1".into(),
                 name: "default_api:view_file".into(),
                 args: serde_json::json!({
@@ -1853,6 +2654,7 @@ mod tests {
         ));
         spans.extend(asm.feed(
             TranscriptEvent::ToolResult {
+                structured: None,
                 id: "t1".into(),
                 content: serde_json::Value::String("# Skill content".into()),
                 is_error: false,
@@ -1864,6 +2666,7 @@ mod tests {
         // Namespaced subagent with stringified JSON array
         spans.extend(asm.feed(
             TranscriptEvent::ToolUse {
+                skill: None,
                 id: "t2".into(),
                 name: "default_api:invoke_subagent".into(),
                 args: serde_json::json!({
@@ -1875,6 +2678,7 @@ mod tests {
         ));
         spans.extend(asm.feed(
             TranscriptEvent::ToolResult {
+                structured: None,
                 id: "t2".into(),
                 content: serde_json::Value::String("subagent finished".into()),
                 is_error: false,
