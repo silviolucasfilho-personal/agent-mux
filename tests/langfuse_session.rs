@@ -203,7 +203,7 @@ exit 0
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
     assert!(matches!(app.mode, Mode::NewSession(_)));
     app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Control), "spawn failed: {:?}", app.error);
+    assert!(matches!(app.mode, Mode::Control), "spawn failed: {:?}", app.notice);
     assert_eq!(app.sessions.len(), 1);
     assert!(app.sessions[0].trace.is_some(), "pipeline attached");
 
@@ -313,15 +313,22 @@ exit 0
     assert_eq!(app.sessions.len(), 1);
     assert!(app.sessions[0].trace.is_none(), "initially untraced because profile enabled = false");
 
+    let notice_text =
+        |app: &App| app.notice.as_ref().map(|n| n.text.clone()).unwrap_or_default();
     // Press 't' to dynamically start tracing
     app.handle_key(&key(KeyCode::Char('t')), Instant::now());
     assert!(app.sessions[0].trace.is_some(), "tracing attached after pressing 't'");
-    assert!(app.error.as_deref().unwrap_or("").contains("tracing started"));
+    assert!(notice_text(&app).contains("tracing started"));
+    assert_eq!(
+        app.notice.as_ref().map(|n| n.level),
+        Some(agent_mux::app::NoticeLevel::Info),
+        "a success notice must not render as an error"
+    );
 
     // Press 't' again to stop tracing
     app.handle_key(&key(KeyCode::Char('t')), Instant::now());
     assert!(app.sessions[0].trace.is_none(), "tracing detached after pressing 't' again");
-    assert!(app.error.as_deref().unwrap_or("").contains("tracing stopped"));
+    assert!(notice_text(&app).contains("tracing stopped"));
 
     pump_until(&mut rx, &mut app, Duration::from_secs(5), |a| {
         matches!(a.sessions[0].status(Instant::now()), Status::Exited(_))

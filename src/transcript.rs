@@ -44,6 +44,11 @@ pub enum TurnBoundaryKind {
 pub enum TranscriptEvent {
     User {
         text: String,
+        /// Harness/system chatter written as a user line (Claude
+        /// `isMeta: true`, `<task-notification>`, `<command-name>`,
+        /// `<bash-stdout>` and friends). Not a real prompt: it must never
+        /// open a new turn or become a trace name/input.
+        meta: bool,
         ts: Option<String>,
     },
     Assistant {
@@ -57,6 +62,9 @@ pub enum TranscriptEvent {
         /// repeats identical usage on every line; the assembler charges each
         /// id once.
         msg_id: Option<String>,
+        /// Claude `attributionSkill`: the skill whose instructions this
+        /// message was produced under.
+        skill: Option<String>,
         ts: Option<String>,
     },
     ToolUse {
@@ -65,6 +73,8 @@ pub enum TranscriptEvent {
         name: String,
         /// Raw structured arguments (Null when the source had none).
         args: Value,
+        /// Claude `attributionSkill` of the message issuing the call.
+        skill: Option<String>,
         ts: Option<String>,
     },
     ToolResult {
@@ -72,6 +82,10 @@ pub enum TranscriptEvent {
         /// Raw content value — string, array, or Null.
         content: Value,
         is_error: bool,
+        /// Claude top-level `toolUseResult` object: the rich structured
+        /// result (Bash stdout/stderr/interrupted, Edit structuredPatch,
+        /// Agent agentId/resolvedModel/outputFile, ...), when present.
+        structured: Option<Value>,
         ts: Option<String>,
     },
     /// Standalone reasoning/thinking not attached to an assistant message
@@ -86,6 +100,24 @@ pub enum TranscriptEvent {
         usage: Vec<(String, i64)>,
         /// See `Assistant::msg_id` — used to dedup repeated usage lines.
         msg_id: Option<String>,
+        /// The model that produced the usage (Claude tool_use-only
+        /// messages carry it) — lets the assembler mint a real generation
+        /// so Langfuse cost inference applies.
+        model: Option<String>,
+        ts: Option<String>,
+    },
+    /// Claude `system`/`turn_duration` line: the CLI's own measured turn
+    /// latency.
+    TurnDuration {
+        duration_ms: i64,
+        message_count: Option<i64>,
+        ts: Option<String>,
+    },
+    /// Claude `cost-state` line: the CLI's running session totals.
+    CostState {
+        total_cost_usd: Option<f64>,
+        total_lines_added: Option<i64>,
+        total_lines_removed: Option<i64>,
         ts: Option<String>,
     },
     /// Codex explicit turn boundary (`task_started` / `task_complete` /
@@ -151,21 +183,81 @@ fn parse_json_line(line: &str) -> Option<Value> {
 }
 
 /// Integer-valued entries of a JSON object (key-sorted, serde_json's map
-/// order). Non-integer members (nested objects, strings) are dropped —
-/// Langfuse usageDetails is a string->int map, and keys like Claude's
-/// `cache_creation` object or `service_tier` string must never reach it.
+/// order). Langfuse usageDetails is a string->int map: strings like
+/// Claude's `service_tier` are dropped, and nested objects of integers
+/// (e.g. `cache_creation: {ephemeral_5m_input_tokens: n}`) are flattened
+/// one level to `parent.child` keys instead of being lost.
 fn integer_usage(usage: Option<&Value>) -> Vec<(String, i64)> {
     let Some(obj) = usage.and_then(|u| u.as_object()) else {
         return Vec::new();
     };
-    obj.iter()
-        .filter_map(|(k, v)| v.as_i64().map(|n| (k.clone(), n)))
-        .collect()
+    let mut out = Vec::new();
+    for (k, v) in obj {
+        if let Some(n) = v.as_i64() {
+            out.push((k.clone(), n));
+        } else if let Some(sub) = v.as_object() {
+            for (k2, v2) in sub {
+                if let Some(n) = v2.as_i64() {
+                    out.push((format!("{k}.{k2}"), n));
+                }
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
 // Claude Code: ~/.claude/projects/<slug>/<uuid>.jsonl
 // ---------------------------------------------------------------------------
+
+/// Harness-generated user-line prefixes: local command echoes, bash tool
+/// output, async task notifications, injected reminders. They share the
+/// user role on disk but are not prompts.
+const CLAUDE_META_TAGS: [&str; 10] = [
+    "<local-command-caveat>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+    "<command-name>",
+    "<command-message>",
+    "<bash-input>",
+    "<bash-stdout>",
+    "<bash-stderr>",
+    "<task-notification>",
+    "<system-reminder>",
+];
+
+fn is_claude_meta_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    CLAUDE_META_TAGS.iter().any(|tag| trimmed.starts_with(tag))
+}
+
+fn tag_inner<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(&text[start..end])
+}
+
+/// A `<command-name>/spec-wave</command-name>` (+ optional
+/// `<command-args>`) line is the user's actual action — a session driven
+/// entirely by slash commands would otherwise have no prompt at all, and
+/// its traces no name or input. Returns the command as prompt text
+/// ("/spec-wave build the thing").
+fn extract_claude_command(text: &str) -> Option<String> {
+    let name = tag_inner(text, "command-name")?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let args = tag_inner(text, "command-args")
+        .map(str::trim)
+        .unwrap_or_default();
+    Some(if args.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {args}")
+    })
+}
 
 pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
     let Some(v) = parse_json_line(line) else {
@@ -176,25 +268,81 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
         .and_then(|t| t.as_str())
         .map(|t| t.to_string());
     let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let is_meta_line = v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false);
+    let skill = v
+        .get("attributionSkill")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string());
     let mut events = Vec::new();
+
+    // Session context rides on every conversation line; surface it once per
+    // thread root (parentUuid null) — the assembler dedups by key.
+    if matches!(event_type, "user" | "assistant")
+        && v.get("parentUuid").is_none_or(|p| p.is_null())
+    {
+        let mut extra = serde_json::Map::new();
+        if let Some(branch) = v.get("gitBranch").and_then(|b| b.as_str())
+            && !branch.is_empty()
+        {
+            extra.insert("git_branch".into(), Value::String(branch.to_string()));
+        }
+        if let Some(ver) = v.get("version").and_then(|b| b.as_str()) {
+            extra.insert("cli_version".into(), Value::String(ver.to_string()));
+        }
+        if !extra.is_empty() {
+            events.push(TranscriptEvent::SessionMeta {
+                session_id: v
+                    .get("sessionId")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
+                cwd: v.get("cwd").and_then(|c| c.as_str()).map(|c| c.to_string()),
+                extra: Value::Object(extra),
+                ts: ts.clone(),
+            });
+        }
+    }
 
     match event_type {
         "user" => {
             if let Some(msg) = v.get("message") {
+                // The rich structured result (top-level, beside `message`);
+                // it describes this line's single tool_result item.
+                let mut structured = v
+                    .get("toolUseResult")
+                    .filter(|t| t.is_object())
+                    .cloned();
                 if let Some(content_str) = msg.get("content").and_then(|c| c.as_str()) {
-                    events.push(TranscriptEvent::User {
-                        text: content_str.to_string(),
-                        ts: ts.clone(),
-                    });
+                    if let Some(cmd) = extract_claude_command(content_str) {
+                        events.push(TranscriptEvent::User {
+                            text: cmd,
+                            meta: false,
+                            ts: ts.clone(),
+                        });
+                    } else {
+                        events.push(TranscriptEvent::User {
+                            text: content_str.to_string(),
+                            meta: is_meta_line || is_claude_meta_text(content_str),
+                            ts: ts.clone(),
+                        });
+                    }
                 } else if let Some(arr) = msg.get("content").and_then(|c| c.as_array()) {
                     for item in arr {
                         let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
                         if item_type == "text" {
                             if let Some(txt) = item.get("text").and_then(|t| t.as_str()) {
-                                events.push(TranscriptEvent::User {
-                                    text: txt.to_string(),
-                                    ts: ts.clone(),
-                                });
+                                if let Some(cmd) = extract_claude_command(txt) {
+                                    events.push(TranscriptEvent::User {
+                                        text: cmd,
+                                        meta: false,
+                                        ts: ts.clone(),
+                                    });
+                                } else {
+                                    events.push(TranscriptEvent::User {
+                                        text: txt.to_string(),
+                                        meta: is_meta_line || is_claude_meta_text(txt),
+                                        ts: ts.clone(),
+                                    });
+                                }
                             }
                         } else if item_type == "tool_result" {
                             events.push(TranscriptEvent::ToolResult {
@@ -208,6 +356,7 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
                                     .get("is_error")
                                     .and_then(|e| e.as_bool())
                                     .unwrap_or(false),
+                                structured: structured.take(),
                                 ts: ts.clone(),
                             });
                         }
@@ -254,6 +403,7 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
                                         // first text item only
                                         usage: std::mem::take(&mut usage),
                                         msg_id: msg_id.clone(),
+                                        skill: skill.clone(),
                                         ts: ts.clone(),
                                     });
                                     saw_text = true;
@@ -272,6 +422,7 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
                                         .unwrap_or("unknown")
                                         .to_string(),
                                     args: item.get("input").cloned().unwrap_or(Value::Null),
+                                    skill: skill.clone(),
                                     ts: ts.clone(),
                                 });
                             }
@@ -293,11 +444,31 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
                         events.push(TranscriptEvent::TokenCount {
                             usage,
                             msg_id: msg_id.clone(),
+                            model: model.clone(),
                             ts: ts.clone(),
                         });
                     }
                 }
             }
+        }
+        "system" => {
+            if v.get("subtype").and_then(|s| s.as_str()) == Some("turn_duration")
+                && let Some(duration_ms) = v.get("durationMs").and_then(|d| d.as_i64())
+            {
+                events.push(TranscriptEvent::TurnDuration {
+                    duration_ms,
+                    message_count: v.get("messageCount").and_then(|m| m.as_i64()),
+                    ts: ts.clone(),
+                });
+            }
+        }
+        "cost-state" => {
+            events.push(TranscriptEvent::CostState {
+                total_cost_usd: v.get("totalCostUSD").and_then(|c| c.as_f64()),
+                total_lines_added: v.get("totalLinesAdded").and_then(|n| n.as_i64()),
+                total_lines_removed: v.get("totalLinesRemoved").and_then(|n| n.as_i64()),
+                ts: ts.clone(),
+            });
         }
         _ => {}
     }
@@ -351,6 +522,7 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
                 if !clean.is_empty() {
                     events.push(TranscriptEvent::User {
                         text: clean,
+                        meta: false,
                         ts: ts.clone(),
                     });
                 }
@@ -382,6 +554,7 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
                     thinking,
                     usage: Vec::new(),
                     msg_id: None,
+                    skill: None,
                     ts: ts.clone(),
                 });
             }
@@ -395,6 +568,7 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
                             .unwrap_or("unknown")
                             .to_string(),
                         args: tc.get("args").cloned().unwrap_or(Value::Null),
+                        skill: None,
                         ts: ts.clone(),
                     });
                 }
@@ -408,6 +582,7 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
                     id: String::new(),
                     content: Value::String(content.to_string()),
                     is_error,
+                    structured: None,
                     ts: ts.clone(),
                 });
             }
@@ -480,6 +655,24 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                 ts,
             });
         }
+        // per-turn context: the only place a Codex rollout names its model
+        "turn_context" => {
+            let mut extra = serde_json::Map::new();
+            if let Some(model) = payload.get("model").and_then(|m| m.as_str()) {
+                extra.insert("model".into(), Value::String(model.to_string()));
+            }
+            if !extra.is_empty() {
+                events.push(TranscriptEvent::SessionMeta {
+                    session_id: None,
+                    cwd: payload
+                        .get("cwd")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string()),
+                    extra: Value::Object(extra),
+                    ts,
+                });
+            }
+        }
         "response_item" => {
             let item_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match item_type {
@@ -491,7 +684,11 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                         // messages; they are context, not conversation (the
                         // official Langfuse codex plugin filters the same)
                         "user" if !text.is_empty() && !is_codex_session_prefix(&text) => {
-                            events.push(TranscriptEvent::User { text, ts });
+                            events.push(TranscriptEvent::User {
+                                text,
+                                meta: false,
+                                ts,
+                            });
                         }
                         "assistant" if !text.is_empty() => {
                             events.push(TranscriptEvent::Assistant {
@@ -500,6 +697,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                                 thinking: None,
                                 usage: Vec::new(),
                                 msg_id: None,
+                                skill: None,
                                 ts,
                             });
                         }
@@ -533,6 +731,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                             .unwrap_or("unknown")
                             .to_string(),
                         args,
+                        skill: None,
                         ts,
                     });
                 }
@@ -549,6 +748,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                             .unwrap_or("unknown")
                             .to_string(),
                         args: payload.get("input").cloned().unwrap_or(Value::Null),
+                        skill: None,
                         ts,
                     });
                 }
@@ -561,6 +761,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                             .to_string(),
                         name: "local_shell".to_string(),
                         args: payload.get("action").cloned().unwrap_or(Value::Null),
+                        skill: None,
                         ts,
                     });
                 }
@@ -573,6 +774,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                             .to_string(),
                         name: "web_search".to_string(),
                         args: payload.get("action").cloned().unwrap_or(Value::Null),
+                        skill: None,
                         ts,
                     });
                 }
@@ -585,6 +787,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                             .to_string(),
                         content: payload.get("output").cloned().unwrap_or(Value::Null),
                         is_error: false,
+                        structured: None,
                         ts,
                     });
                 }
@@ -604,6 +807,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                         events.push(TranscriptEvent::TokenCount {
                             usage,
                             msg_id: None,
+                            model: None,
                             ts,
                         });
                     }
@@ -679,17 +883,21 @@ mod tests {
                 thinking,
                 usage,
                 msg_id: _,
+                skill,
                 ts,
             } => {
                 assert_eq!(text, "hello");
                 assert_eq!(model.as_deref(), Some("claude-fable-5"));
                 assert_eq!(thinking.as_deref(), Some("hmm"));
-                // integer keys only; objects and strings dropped
+                assert_eq!(skill.as_deref(), None);
+                // integer keys kept, nested integer objects flattened to
+                // parent.child, strings dropped
                 let mut sorted = usage.clone();
                 sorted.sort();
                 assert_eq!(
                     sorted,
                     vec![
+                        ("cache_creation.x".to_string(), 1),
                         ("cache_read_input_tokens".to_string(), 5),
                         ("input_tokens".to_string(), 100),
                         ("output_tokens".to_string(), 20),
@@ -718,6 +926,153 @@ mod tests {
         assert!(
             matches!(&events[1], TranscriptEvent::TokenCount { usage, .. } if usage == &vec![("output_tokens".to_string(), 7)])
         );
+    }
+
+    #[test]
+    fn claude_meta_user_lines_are_flagged() {
+        // isMeta flag
+        let caveat = r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>Caveat: local commands</local-command-caveat>"}}"#;
+        assert!(
+            matches!(&parse_claude_line(caveat)[0], TranscriptEvent::User { meta: true, .. })
+        );
+        // tag-prefixed content without the flag
+        for tag in [
+            "<task-notification>\n<task-id>x</task-id>",
+            "<local-command-stdout>Set model to Opus</local-command-stdout>",
+            "  <bash-stdout>ok</bash-stdout>",
+            "<system-reminder>recalled</system-reminder>",
+        ] {
+            let line = format!(
+                r#"{{"type":"user","message":{{"content":{}}}}}"#,
+                serde_json::to_string(tag).unwrap()
+            );
+            assert!(
+                matches!(&parse_claude_line(&line)[0], TranscriptEvent::User { meta: true, .. }),
+                "tag {tag} must flag meta"
+            );
+        }
+        // a real prompt stays non-meta
+        let real = r#"{"type":"user","message":{"content":"fix the bug"}}"#;
+        assert!(
+            matches!(&parse_claude_line(real)[0], TranscriptEvent::User { meta: false, .. })
+        );
+    }
+
+    #[test]
+    fn claude_slash_commands_become_real_prompts() {
+        // tag order varies between CLI versions; both must extract
+        let with_args = r#"{"type":"user","message":{"content":"<command-message>spec-wave</command-message>\n<command-name>/spec-wave</command-name>\n<command-args>plan the login epic</command-args>"}}"#;
+        assert!(matches!(
+            &parse_claude_line(with_args)[0],
+            TranscriptEvent::User { text, meta: false, .. } if text == "/spec-wave plan the login epic"
+        ));
+        let no_args = r#"{"type":"user","message":{"content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"}}"#;
+        assert!(matches!(
+            &parse_claude_line(no_args)[0],
+            TranscriptEvent::User { text, meta: false, .. } if text == "/model"
+        ));
+        // its stdout echo stays meta
+        let stdout = r#"{"type":"user","message":{"content":"<local-command-stdout>Set model</local-command-stdout>"}}"#;
+        assert!(matches!(
+            &parse_claude_line(stdout)[0],
+            TranscriptEvent::User { meta: true, .. }
+        ));
+    }
+
+    #[test]
+    fn claude_tool_use_result_rides_the_tool_result_event() {
+        let line = r#"{"type":"user","timestamp":"2026-08-30T10:00:00Z","toolUseResult":{"stdout":"ok\n","stderr":"","interrupted":false,"isImage":false},"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#;
+        match &parse_claude_line(line)[0] {
+            TranscriptEvent::ToolResult { id, structured, .. } => {
+                assert_eq!(id, "t1");
+                let s = structured.as_ref().expect("structured result missing");
+                assert_eq!(s["stdout"], "ok\n");
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_attribution_skill_lands_on_assistant_and_tool_use() {
+        let line = r#"{"type":"assistant","attributionSkill":"spec-wave","message":{"model":"m","content":[{"type":"text","text":"per the spec"},{"type":"tool_use","id":"t1","name":"Edit","input":{}}]}}"#;
+        let events = parse_claude_line(line);
+        assert!(
+            matches!(&events[0], TranscriptEvent::Assistant { skill: Some(s), .. } if s == "spec-wave")
+        );
+        assert!(
+            matches!(&events[1], TranscriptEvent::ToolUse { skill: Some(s), .. } if s == "spec-wave")
+        );
+    }
+
+    #[test]
+    fn claude_tool_only_token_count_carries_model() {
+        let line = r#"{"type":"assistant","message":{"model":"claude-fable-5","id":"msg_1","usage":{"input_tokens":9},"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}"#;
+        let events = parse_claude_line(line);
+        assert!(
+            matches!(&events[1], TranscriptEvent::TokenCount { model: Some(m), .. } if m == "claude-fable-5")
+        );
+    }
+
+    #[test]
+    fn claude_turn_duration_and_cost_state_lines() {
+        let dur = r#"{"type":"system","subtype":"turn_duration","durationMs":3644107,"messageCount":214,"timestamp":"2026-08-30T23:34:39Z"}"#;
+        assert!(matches!(
+            &parse_claude_line(dur)[0],
+            TranscriptEvent::TurnDuration { duration_ms: 3644107, message_count: Some(214), .. }
+        ));
+        // other system subtypes stay invisible
+        let away = r#"{"type":"system","subtype":"away_summary","timestamp":"t"}"#;
+        assert!(parse_claude_line(away).is_empty());
+        let cost = r#"{"type":"cost-state","totalCostUSD":1.25,"totalLinesAdded":10,"totalLinesRemoved":2}"#;
+        match &parse_claude_line(cost)[0] {
+            TranscriptEvent::CostState {
+                total_cost_usd,
+                total_lines_added,
+                total_lines_removed,
+                ..
+            } => {
+                assert_eq!(*total_cost_usd, Some(1.25));
+                assert_eq!(*total_lines_added, Some(10));
+                assert_eq!(*total_lines_removed, Some(2));
+            }
+            other => panic!("expected CostState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_thread_root_line_surfaces_git_branch_and_version() {
+        let line = r#"{"type":"user","parentUuid":null,"sessionId":"sess-1","cwd":"/proj","gitBranch":"fix/thing","version":"2.1.251","message":{"content":"go"}}"#;
+        let events = parse_claude_line(line);
+        match &events[0] {
+            TranscriptEvent::SessionMeta {
+                session_id,
+                cwd,
+                extra,
+                ..
+            } => {
+                assert_eq!(session_id.as_deref(), Some("sess-1"));
+                assert_eq!(cwd.as_deref(), Some("/proj"));
+                assert_eq!(extra["git_branch"], "fix/thing");
+                assert_eq!(extra["cli_version"], "2.1.251");
+            }
+            other => panic!("expected SessionMeta, got {other:?}"),
+        }
+        assert!(matches!(&events[1], TranscriptEvent::User { .. }));
+        // non-root lines don't repeat it
+        let child = r#"{"type":"user","parentUuid":"u1","gitBranch":"fix/thing","version":"2.1.251","message":{"content":"more"}}"#;
+        assert_eq!(parse_claude_line(child).len(), 1);
+    }
+
+    #[test]
+    fn codex_turn_context_names_the_model() {
+        let line = r#"{"timestamp":"t","type":"turn_context","payload":{"cwd":"/proj","model":"gpt-5.3-codex","approval_policy":"never"}}"#;
+        match &parse_codex_line(line)[0] {
+            TranscriptEvent::SessionMeta { extra, cwd, .. } => {
+                assert_eq!(extra["model"], "gpt-5.3-codex");
+                assert_eq!(cwd.as_deref(), Some("/proj"));
+            }
+            other => panic!("expected SessionMeta, got {other:?}"),
+        }
     }
 
     #[test]

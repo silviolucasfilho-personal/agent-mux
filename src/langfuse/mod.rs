@@ -750,6 +750,7 @@ impl Pipeline {
             session_id: self.assembler.session_id().map(|s| s.to_string()),
             parse_errors: self.parse_errors,
             dropped_spans: self.ctx.dropped.load(Ordering::Relaxed),
+            cost: self.assembler.cost_snapshot(),
         };
         spans.push(map::session_ended_span(&self.ctx.map_settings, &end, now_nanos()));
         self.send_spans(spans);
