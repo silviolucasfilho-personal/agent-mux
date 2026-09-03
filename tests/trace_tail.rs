@@ -1,4 +1,4 @@
-use agent_mux::langfuse::tail::{TailPoll, Tailer};
+use agent_mux::tracing::tail::{TailPoll, Tailer};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -90,7 +90,10 @@ fn prime_backfill_cap_is_tail_biased_and_flagged() {
     assert!(lines.len() < 100);
     // every surfaced line is complete
     for line in &lines {
-        assert!(line.starts_with("line number "), "torn line surfaced: {line:?}");
+        assert!(
+            line.starts_with("line number "),
+            "torn line surfaced: {line:?}"
+        );
     }
     // and the newest line made it
     assert_eq!(lines.last().unwrap(), "line number 0099");

@@ -20,7 +20,7 @@ fn shell_profiles() -> Vec<Profile> {
         command: command.into(),
         args: vec![],
         default_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
-        langfuse: None,
+        tracing: None,
     }]
 }
 

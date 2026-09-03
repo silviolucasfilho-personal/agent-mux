@@ -120,8 +120,16 @@ pub fn discover_sessions(
     all_projects: bool,
 ) -> Vec<SessionSummary> {
     let mut summaries = Vec::new();
-    summaries.extend(discover_claude_sessions(claude_dir, current_dir, all_projects));
-    summaries.extend(discover_antigravity_sessions(antigravity_dir, current_dir, all_projects));
+    summaries.extend(discover_claude_sessions(
+        claude_dir,
+        current_dir,
+        all_projects,
+    ));
+    summaries.extend(discover_antigravity_sessions(
+        antigravity_dir,
+        current_dir,
+        all_projects,
+    ));
     summaries.sort_by_key(|a| std::cmp::Reverse(a.modified));
     summaries
 }
@@ -413,8 +421,7 @@ pub fn summarize_antigravity_file(
                         if let Some(val) = args.get(key).and_then(|v| v.as_str()) {
                             let unquoted = val.trim_matches('"');
                             if let Some(name) = Path::new(unquoted).file_name() {
-                                detected_project_name =
-                                    Some(name.to_string_lossy().into_owned());
+                                detected_project_name = Some(name.to_string_lossy().into_owned());
                                 // directory-valued keys double as the cwd;
                                 // a file path contributes its parent
                                 detected_cwd = if *key == "AbsolutePath" {
@@ -615,6 +622,10 @@ pub fn load_antigravity_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> 
                 TranscriptEvent::Assistant {
                     text, thinking, ts, ..
                 } => {
+                    if text.is_empty() && thinking.is_none() {
+                        // tool-call-only planner step: nothing to show
+                        continue;
+                    }
                     entries.push(LogEntry::Assistant {
                         provider: AgentProvider::Antigravity,
                         text,
@@ -777,9 +788,7 @@ pub fn render_log_lines(entries: &[LogEntry]) -> Vec<Line<'static>> {
                 }
             }
             LogEntry::ToolResult {
-                content,
-                is_error,
-                ..
+                content, is_error, ..
             } => {
                 let (status_label, style) = if *is_error {
                     ("  ── Result (Error) ──", Style::default().fg(Color::Red))
@@ -863,7 +872,11 @@ mod tests {
 "#;
         std::fs::write(&session_file, jsonl_content).unwrap();
 
-        let summaries = discover_claude_sessions(Some(temp_dir.path()), Some(Path::new("/test/project")), false);
+        let summaries = discover_claude_sessions(
+            Some(temp_dir.path()),
+            Some(Path::new("/test/project")),
+            false,
+        );
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].session_id, "test-session-uuid");
         assert_eq!(summaries[0].title, "My Test Session");
@@ -872,14 +885,24 @@ mod tests {
 
         let entries = load_session_log(&session_file).unwrap();
         assert_eq!(entries.len(), 4);
-        assert!(matches!(&entries[0], LogEntry::User { text, .. } if text == "Fix the build error"));
-        assert!(matches!(&entries[1], LogEntry::Assistant { text, model, provider, .. } if text == "Sure, running cargo check." && model.as_deref() == Some("claude-opus-5") && *provider == AgentProvider::Claude));
-        assert!(matches!(&entries[2], LogEntry::ToolUse { name, input, .. } if name == "Bash" && input == "cargo check"));
+        assert!(
+            matches!(&entries[0], LogEntry::User { text, .. } if text == "Fix the build error")
+        );
+        assert!(
+            matches!(&entries[1], LogEntry::Assistant { text, model, provider, .. } if text == "Sure, running cargo check." && model.as_deref() == Some("claude-opus-5") && *provider == AgentProvider::Claude)
+        );
+        assert!(
+            matches!(&entries[2], LogEntry::ToolUse { name, input, .. } if name == "Bash" && input == "cargo check")
+        );
         assert!(matches!(&entries[3], LogEntry::ToolResult { is_error, .. } if *is_error));
 
         let lines = render_log_lines(&entries);
         assert!(!lines.is_empty());
-        let text = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        let text = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("USER"));
         assert!(text.contains("CLAUDE"));
         assert!(text.contains("TOOL: Bash"));
@@ -900,7 +923,11 @@ mod tests {
 "#;
         std::fs::write(&transcript_file, transcript_content).unwrap();
 
-        let summaries = discover_antigravity_sessions(Some(&temp_dir.path().join("brain")), Some(Path::new("/test/my-project")), false);
+        let summaries = discover_antigravity_sessions(
+            Some(&temp_dir.path().join("brain")),
+            Some(Path::new("/test/my-project")),
+            false,
+        );
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].session_id, "agy-session-uuid");
         assert_eq!(summaries[0].title, "install rust and build this app");
@@ -908,13 +935,25 @@ mod tests {
 
         let entries = load_session_log(&transcript_file).unwrap();
         assert_eq!(entries.len(), 4);
-        assert!(matches!(&entries[0], LogEntry::User { text, .. } if text == "install rust and build this app"));
-        assert!(matches!(&entries[1], LogEntry::Assistant { thinking, provider, .. } if thinking.as_deref() == Some("I need to list directory first") && *provider == AgentProvider::Antigravity));
-        assert!(matches!(&entries[2], LogEntry::ToolUse { name, input, .. } if name == "list_dir" && input == "/test/my-project"));
-        assert!(matches!(&entries[3], LogEntry::ToolResult { content, .. } if content.contains("Cargo.toml")));
+        assert!(
+            matches!(&entries[0], LogEntry::User { text, .. } if text == "install rust and build this app")
+        );
+        assert!(
+            matches!(&entries[1], LogEntry::Assistant { thinking, provider, .. } if thinking.as_deref() == Some("I need to list directory first") && *provider == AgentProvider::Antigravity)
+        );
+        assert!(
+            matches!(&entries[2], LogEntry::ToolUse { name, input, .. } if name == "list_dir" && input == "/test/my-project")
+        );
+        assert!(
+            matches!(&entries[3], LogEntry::ToolResult { content, .. } if content.contains("Cargo.toml"))
+        );
 
         let lines = render_log_lines(&entries);
-        let text = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+        let text = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("USER"));
         assert!(text.contains("install rust and build this app"));
         assert!(text.contains("TOOL: list_dir"));

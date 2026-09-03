@@ -31,8 +31,14 @@ pub enum AppEvent {
     PtyExit {
         id: usize,
     },
-    /// One-line Langfuse status notice for the status bar (emitted at most
-    /// once per class per run by the langfuse runtime/exporter).
-    LangfuseStatus(String),
+    /// One-line tracing status notice for the status bar (emitted at most
+    /// once per class per run by the trace runtime/writer).
+    TraceStatus(String),
+    /// Live per-launch rollup from the store writer (throttled to one per
+    /// launch per second); `launch_id` matches `SessionTraceHandle`.
+    TraceStats {
+        launch_id: String,
+        stats: crate::tracing::store::query::LaunchStats,
+    },
     Tick,
 }

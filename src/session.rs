@@ -110,10 +110,12 @@ pub struct Session {
     pub dir: PathBuf,
     pub parser: vt100::Parser<BellCounter>,
     pub tracker: StatusTracker,
-    /// Langfuse pipeline handle, attached by App after a successful spawn
+    /// Tracing pipeline handle, attached by App after a successful spawn
     /// when tracing is planned for this launch. Dropping the Session closes
     /// the phase channel, which the pipeline treats like an exit.
-    pub trace: Option<crate::langfuse::SessionTraceHandle>,
+    pub trace: Option<crate::tracing::SessionTraceHandle>,
+    /// Latest live rollup from the trace store for this session's launch.
+    pub trace_stats: Option<crate::tracing::store::query::LaunchStats>,
     /// Cached total scrollback row count, refreshed at the end of
     /// `process_output`/`resize`. See `scroll_view`/`probe_scrollback_len`
     /// for why this needs caching rather than reading it on demand.
@@ -256,6 +258,7 @@ impl Session {
             profile,
             dir,
             trace: None,
+            trace_stats: None,
             parser: vt100::Parser::new_with_callbacks(
                 rows,
                 cols,

@@ -107,7 +107,11 @@ impl Tailer {
             return TailPoll::NoChange;
         }
         let mut new_bytes = Vec::with_capacity((len - self.offset) as usize);
-        if file.take(len - self.offset).read_to_end(&mut new_bytes).is_err() {
+        if file
+            .take(len - self.offset)
+            .read_to_end(&mut new_bytes)
+            .is_err()
+        {
             return TailPoll::NoChange;
         }
         self.offset += new_bytes.len() as u64;
