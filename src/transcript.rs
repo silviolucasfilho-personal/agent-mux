@@ -4,7 +4,7 @@
 //! - the history viewer (`history.rs`), which adapts `TranscriptEvent`s into
 //!   its display-oriented `LogEntry`s — bit-for-bit compatible with the
 //!   pre-refactor parsers (pinned by the existing history tests);
-//! - the Langfuse exporter (`langfuse::map`), which needs the fields the
+//! - the trace store assembler (`tracing::map`), which needs the fields the
 //!   viewer historically dropped: token usage, structured tool args/results,
 //!   thinking, and Codex turn boundaries.
 //!
@@ -65,6 +65,9 @@ pub enum TranscriptEvent {
         /// Claude `attributionSkill`: the skill whose instructions this
         /// message was produced under.
         skill: Option<String>,
+        /// Antigravity `step_index`: the join key for the per-request
+        /// usage agy keeps outside the transcript.
+        step_index: Option<u64>,
         ts: Option<String>,
     },
     ToolUse {
@@ -90,10 +93,7 @@ pub enum TranscriptEvent {
     },
     /// Standalone reasoning/thinking not attached to an assistant message
     /// (Codex `reasoning` items; Claude thinking-only messages).
-    Thinking {
-        text: String,
-        ts: Option<String>,
-    },
+    Thinking { text: String, ts: Option<String> },
     /// Usage reported separately from any assistant message (Codex
     /// `token_count`; Claude assistant messages with usage but no text).
     TokenCount {
@@ -277,8 +277,7 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
 
     // Session context rides on every conversation line; surface it once per
     // thread root (parentUuid null) — the assembler dedups by key.
-    if matches!(event_type, "user" | "assistant")
-        && v.get("parentUuid").is_none_or(|p| p.is_null())
+    if matches!(event_type, "user" | "assistant") && v.get("parentUuid").is_none_or(|p| p.is_null())
     {
         let mut extra = serde_json::Map::new();
         if let Some(branch) = v.get("gitBranch").and_then(|b| b.as_str())
@@ -307,10 +306,7 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
             if let Some(msg) = v.get("message") {
                 // The rich structured result (top-level, beside `message`);
                 // it describes this line's single tool_result item.
-                let mut structured = v
-                    .get("toolUseResult")
-                    .filter(|t| t.is_object())
-                    .cloned();
+                let mut structured = v.get("toolUseResult").filter(|t| t.is_object()).cloned();
                 if let Some(content_str) = msg.get("content").and_then(|c| c.as_str()) {
                     if let Some(cmd) = extract_claude_command(content_str) {
                         events.push(TranscriptEvent::User {
@@ -404,6 +400,7 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
                                         usage: std::mem::take(&mut usage),
                                         msg_id: msg_id.clone(),
                                         skill: skill.clone(),
+                                        step_index: None,
                                         ts: ts.clone(),
                                     });
                                     saw_text = true;
@@ -537,7 +534,10 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
             }
         }
         "PLANNER_RESPONSE" => {
-            let model = v.get("model").and_then(|m| m.as_str()).map(|s| s.to_string());
+            let model = v
+                .get("model")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string());
             let thinking = v
                 .get("thinking")
                 .and_then(|t| t.as_str())
@@ -547,7 +547,14 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
                 .and_then(|c| c.as_str())
                 .unwrap_or("")
                 .to_string();
-            if !text.is_empty() || thinking.is_some() {
+            let has_tool_calls = v
+                .get("tool_calls")
+                .and_then(|tc| tc.as_array())
+                .is_some_and(|tc| !tc.is_empty());
+            // a tool-call-only step is still one model request: it gets an
+            // (empty-text) assistant event so its usage has a generation to
+            // land on; the history viewer skips such entries
+            if !text.is_empty() || thinking.is_some() || has_tool_calls {
                 events.push(TranscriptEvent::Assistant {
                     text,
                     model,
@@ -555,6 +562,7 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
                     usage: Vec::new(),
                     msg_id: None,
                     skill: None,
+                    step_index: v.get("step_index").and_then(|i| i.as_u64()),
                     ts: ts.clone(),
                 });
             }
@@ -698,6 +706,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                                 usage: Vec::new(),
                                 msg_id: None,
                                 skill: None,
+                                step_index: None,
                                 ts,
                             });
                         }
@@ -798,11 +807,8 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
             let event_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match event_type {
                 "token_count" => {
-                    let usage = integer_usage(
-                        payload
-                            .get("info")
-                            .and_then(|i| i.get("last_token_usage")),
-                    );
+                    let usage =
+                        integer_usage(payload.get("info").and_then(|i| i.get("last_token_usage")));
                     if !usage.is_empty() {
                         events.push(TranscriptEvent::TokenCount {
                             usage,
@@ -884,6 +890,7 @@ mod tests {
                 usage,
                 msg_id: _,
                 skill,
+                step_index: None,
                 ts,
             } => {
                 assert_eq!(text, "hello");
@@ -922,7 +929,9 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"model":"m","usage":{"output_tokens":7},"content":[{"type":"thinking","thinking":"only thoughts"}]}}"#;
         let events = parse_claude_line(line);
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], TranscriptEvent::Thinking { text, .. } if text == "only thoughts"));
+        assert!(
+            matches!(&events[0], TranscriptEvent::Thinking { text, .. } if text == "only thoughts")
+        );
         assert!(
             matches!(&events[1], TranscriptEvent::TokenCount { usage, .. } if usage == &vec![("output_tokens".to_string(), 7)])
         );
@@ -932,9 +941,10 @@ mod tests {
     fn claude_meta_user_lines_are_flagged() {
         // isMeta flag
         let caveat = r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>Caveat: local commands</local-command-caveat>"}}"#;
-        assert!(
-            matches!(&parse_claude_line(caveat)[0], TranscriptEvent::User { meta: true, .. })
-        );
+        assert!(matches!(
+            &parse_claude_line(caveat)[0],
+            TranscriptEvent::User { meta: true, .. }
+        ));
         // tag-prefixed content without the flag
         for tag in [
             "<task-notification>\n<task-id>x</task-id>",
@@ -947,15 +957,19 @@ mod tests {
                 serde_json::to_string(tag).unwrap()
             );
             assert!(
-                matches!(&parse_claude_line(&line)[0], TranscriptEvent::User { meta: true, .. }),
+                matches!(
+                    &parse_claude_line(&line)[0],
+                    TranscriptEvent::User { meta: true, .. }
+                ),
                 "tag {tag} must flag meta"
             );
         }
         // a real prompt stays non-meta
         let real = r#"{"type":"user","message":{"content":"fix the bug"}}"#;
-        assert!(
-            matches!(&parse_claude_line(real)[0], TranscriptEvent::User { meta: false, .. })
-        );
+        assert!(matches!(
+            &parse_claude_line(real)[0],
+            TranscriptEvent::User { meta: false, .. }
+        ));
     }
 
     #[test]
@@ -1018,7 +1032,11 @@ mod tests {
         let dur = r#"{"type":"system","subtype":"turn_duration","durationMs":3644107,"messageCount":214,"timestamp":"2026-08-30T23:34:39Z"}"#;
         assert!(matches!(
             &parse_claude_line(dur)[0],
-            TranscriptEvent::TurnDuration { duration_ms: 3644107, message_count: Some(214), .. }
+            TranscriptEvent::TurnDuration {
+                duration_ms: 3644107,
+                message_count: Some(214),
+                ..
+            }
         ));
         // other system subtypes stay invisible
         let away = r#"{"type":"system","subtype":"away_summary","timestamp":"t"}"#;
@@ -1083,7 +1101,10 @@ mod tests {
         match &events[0] {
             TranscriptEvent::ToolResult { id, content, .. } => {
                 assert_eq!(id, "t1");
-                assert!(content.is_array(), "array content must survive: {content:?}");
+                assert!(
+                    content.is_array(),
+                    "array content must survive: {content:?}"
+                );
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
@@ -1114,9 +1135,13 @@ mod tests {
         let user = r#"{"type":"USER_INPUT","source":"USER_EXPLICIT","created_at":"2026-08-30T19:01:37Z","content":"<USER_REQUEST>\ndo the thing\n</USER_REQUEST>"}"#;
         let events = parse_antigravity_line(user);
         assert!(matches!(&events[0], TranscriptEvent::User { text, .. } if text == "do the thing"));
-        let generic = r#"{"type":"GENERIC","created_at":"2026-08-30T19:01:40Z","content":"Exit code 1"}"#;
+        let generic =
+            r#"{"type":"GENERIC","created_at":"2026-08-30T19:01:40Z","content":"Exit code 1"}"#;
         let events = parse_antigravity_line(generic);
-        assert!(matches!(&events[0], TranscriptEvent::ToolResult { is_error: true, .. }));
+        assert!(matches!(
+            &events[0],
+            TranscriptEvent::ToolResult { is_error: true, .. }
+        ));
     }
 
     // -- Codex fixtures (source-derived from openai/codex rollout schema) --
@@ -1155,7 +1180,11 @@ mod tests {
 
     #[test]
     fn codex_session_prologue_user_messages_are_not_conversation() {
-        for prefix in ["<user_instructions>", "<environment_context>", "<turn_context>"] {
+        for prefix in [
+            "<user_instructions>",
+            "<environment_context>",
+            "<turn_context>",
+        ] {
             let line = format!(
                 r#"{{"timestamp":"t","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{prefix} lots of context {}"}}]}}}}"#,
                 prefix.replace('<', "</")
@@ -1195,7 +1224,9 @@ mod tests {
         }
         let unparseable = r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"not json","call_id":"c2"}}"#;
         match &parse_codex_line(unparseable)[0] {
-            TranscriptEvent::ToolUse { args, .. } => assert_eq!(args, &Value::String("not json".into())),
+            TranscriptEvent::ToolUse { args, .. } => {
+                assert_eq!(args, &Value::String("not json".into()))
+            }
             other => panic!("expected ToolUse, got {other:?}"),
         }
         let output = r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"ok"}}"#;
@@ -1225,7 +1256,8 @@ mod tests {
             ("task_complete", TurnBoundaryKind::Complete),
             ("turn_aborted", TurnBoundaryKind::Aborted),
         ] {
-            let line = format!(r#"{{"timestamp":"t","type":"event_msg","payload":{{"type":"{wire}"}}}}"#);
+            let line =
+                format!(r#"{{"timestamp":"t","type":"event_msg","payload":{{"type":"{wire}"}}}}"#);
             assert!(
                 matches!(&parse_codex_line(&line)[0], TranscriptEvent::TurnBoundary { kind: k, .. } if *k == kind),
                 "boundary {wire}"

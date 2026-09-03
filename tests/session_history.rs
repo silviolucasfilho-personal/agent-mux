@@ -36,17 +36,29 @@ fn create_mock_claude_project_dir() -> tempfile::TempDir {
 fn test_discovery_and_log_parsing() {
     let temp = create_mock_claude_project_dir();
     let empty_brain = temp.path().join("empty_brain");
-    let sessions = discover_sessions(Some(temp.path()), Some(&empty_brain), Some(Path::new("/workspace/my-app")), false);
+    let sessions = discover_sessions(
+        Some(temp.path()),
+        Some(&empty_brain),
+        Some(Path::new("/workspace/my-app")),
+        false,
+    );
     assert_eq!(sessions.len(), 2);
 
-    let s1 = sessions.iter().find(|s| s.session_id == "session-abc-123").unwrap();
+    let s1 = sessions
+        .iter()
+        .find(|s| s.session_id == "session-abc-123")
+        .unwrap();
     assert_eq!(s1.title, "Add database migrations");
 
     let entries = load_session_log(&s1.file_path).unwrap();
     assert_eq!(entries.len(), 4);
 
     let rendered = render_log_lines(&entries);
-    let full_text = rendered.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+    let full_text = rendered
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(full_text.contains("USER"));
     assert!(full_text.contains("Create migration table"));
     assert!(full_text.contains("CLAUDE"));
@@ -66,7 +78,7 @@ async fn test_app_history_flow_and_navigation() {
             command: "echo".into(),
             args: vec![],
             default_dir: None,
-            langfuse: None,
+            tracing: None,
         }],
         None,
         tx,
@@ -81,7 +93,12 @@ async fn test_app_history_flow_and_navigation() {
 
     // Inject mock discovered sessions
     if let Mode::SessionHistory(ref mut hist) = app.mode {
-        hist.sessions = discover_sessions(Some(temp.path()), Some(&empty_brain), Some(Path::new("/workspace/my-app")), false);
+        hist.sessions = discover_sessions(
+            Some(temp.path()),
+            Some(&empty_brain),
+            Some(Path::new("/workspace/my-app")),
+            false,
+        );
         hist.selected_session_idx = 0;
         hist.load_selected_log();
         assert_eq!(hist.sessions.len(), 2);
@@ -93,8 +110,16 @@ async fn test_app_history_flow_and_navigation() {
     app.handle_key(&key(KeyCode::Char('j')), Instant::now());
     if let Mode::SessionHistory(ref hist) = app.mode {
         assert_eq!(hist.selected_session_idx, 1);
-        let log_text = hist.log_lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
-        assert!(log_text.contains("The login endpoint panics") || log_text.contains("Create migration table"));
+        let log_text = hist
+            .log_lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            log_text.contains("The login endpoint panics")
+                || log_text.contains("Create migration table")
+        );
     }
 
     // Press 'Tab' -> switches focus to LogDetail
@@ -130,7 +155,7 @@ async fn test_app_history_resume_spawns_session() {
             command: "echo".into(),
             args: vec![],
             default_dir: None,
-            langfuse: None,
+            tracing: None,
         }],
         None,
         tx,
@@ -138,7 +163,12 @@ async fn test_app_history_resume_spawns_session() {
 
     app.handle_key(&key(KeyCode::Char('l')), Instant::now());
     if let Mode::SessionHistory(ref mut hist) = app.mode {
-        hist.sessions = discover_sessions(Some(temp.path()), Some(&empty_brain), Some(Path::new("/workspace/my-app")), false);
+        hist.sessions = discover_sessions(
+            Some(temp.path()),
+            Some(&empty_brain),
+            Some(Path::new("/workspace/my-app")),
+            false,
+        );
         hist.selected_session_idx = 0;
         hist.load_selected_log();
     }
@@ -178,21 +208,33 @@ async fn test_antigravity_discovery_and_resume() {
             command: "agy".into(),
             args: vec![],
             default_dir: None,
-            langfuse: None,
+            tracing: None,
         }],
         None,
         tx,
     );
 
-    let summaries = discover_sessions(Some(&empty_claude), Some(&temp.path().join("brain")), Some(Path::new("/workspace/my-app")), false);
+    let summaries = discover_sessions(
+        Some(&empty_claude),
+        Some(&temp.path().join("brain")),
+        Some(Path::new("/workspace/my-app")),
+        false,
+    );
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].title, "Build the parser");
-    assert_eq!(summaries[0].provider, agent_mux::history::AgentProvider::Antigravity);
+    assert_eq!(
+        summaries[0].provider,
+        agent_mux::history::AgentProvider::Antigravity
+    );
 
     let entries = load_session_log(&summaries[0].file_path).unwrap();
     assert_eq!(entries.len(), 3);
     let rendered = render_log_lines(&entries);
-    let text = rendered.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
+    let text = rendered
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(text.contains("ANTIGRAVITY"));
     assert!(text.contains("Build the parser"));
     assert!(text.contains("cargo test"));

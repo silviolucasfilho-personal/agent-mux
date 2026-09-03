@@ -1,4 +1,4 @@
-use agent_mux::langfuse::correlate::{
+use agent_mux::tracing::correlate::{
     self, Adopted, ClaimRegistry, CorrelationSpec, release_claim, try_claim,
 };
 use agent_mux::transcript::Provider;
@@ -113,7 +113,11 @@ fn watch_claude_adopts_newest_session_in_cwd_or_across_projects() {
 fn known_antigravity_prefers_transcript_full() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let logs = root.join("brain").join("conv-1").join(".system_generated").join("logs");
+    let logs = root
+        .join("brain")
+        .join("conv-1")
+        .join(".system_generated")
+        .join("logs");
     write_file(&logs.join("transcript.jsonl"), "{}\n");
     write_file(&logs.join("transcript_full.jsonl"), "{}\n");
     let claims = registry();
@@ -156,7 +160,10 @@ fn codex_adopts_only_matching_cwd() {
     assert_eq!(adopted.session_id, "our-session");
     assert_eq!(adopted.path, ours);
     assert_eq!(adopted.correlation, "watched");
-    assert!(!adopted.resume_prime, "watch-adopted content must be exported");
+    assert!(
+        !adopted.resume_prime,
+        "watch-adopted content must be exported"
+    );
 }
 
 #[test]
@@ -182,11 +189,17 @@ fn codex_stale_rollouts_predating_spawn_are_ignored() {
 fn claim_registry_prevents_double_adoption_and_releases() {
     let claims = registry();
     assert!(try_claim(&claims, Provider::Codex, "sess-1"));
-    assert!(!try_claim(&claims, Provider::Codex, "sess-1"), "double claim");
+    assert!(
+        !try_claim(&claims, Provider::Codex, "sess-1"),
+        "double claim"
+    );
     // same id under a different provider is a different key
     assert!(try_claim(&claims, Provider::Claude, "sess-1"));
     release_claim(&claims, Provider::Codex, "sess-1");
-    assert!(try_claim(&claims, Provider::Codex, "sess-1"), "released claims re-adopt");
+    assert!(
+        try_claim(&claims, Provider::Codex, "sess-1"),
+        "released claims re-adopt"
+    );
 }
 
 #[test]

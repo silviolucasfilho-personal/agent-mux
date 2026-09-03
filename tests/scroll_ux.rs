@@ -17,7 +17,7 @@ pub fn shell_profile() -> Profile {
         command: command.into(),
         args: vec![],
         default_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
-        langfuse: None,
+        tracing: None,
     }
 }
 
@@ -110,7 +110,17 @@ async fn scrolling_reveals_history_and_snaps_back() {
 #[tokio::test]
 async fn view_stays_anchored_while_new_output_arrives() {
     let (tx, mut rx) = mpsc::channel(256);
-    let mut s = Session::spawn(1, shell_profile(), std::env::temp_dir(), 10, 80, tx, &[], &[]).unwrap();
+    let mut s = Session::spawn(
+        1,
+        shell_profile(),
+        std::env::temp_dir(),
+        10,
+        80,
+        tx,
+        &[],
+        &[],
+    )
+    .unwrap();
     // interactive shell: print 50 lines, scroll up, then print 20 more
     let ok = pump_session(&mut rx, &mut s, Duration::from_secs(10), |s| {
         !s.parser.screen().contents().trim().is_empty()
@@ -287,7 +297,17 @@ async fn forwarded_key_snaps_to_live_when_attached() {
     let (tx, mut rx) = mpsc::channel(256);
     let mut app = App::new(vec![shell_profile()], None, tx.clone());
     app.set_pane_size(10, 80);
-    let session = Session::spawn(901, shell_profile(), std::env::temp_dir(), 10, 80, tx, &[], &[]).unwrap();
+    let session = Session::spawn(
+        901,
+        shell_profile(),
+        std::env::temp_dir(),
+        10,
+        80,
+        tx,
+        &[],
+        &[],
+    )
+    .unwrap();
     app.sessions.push(session);
     let ok = pump_app(&mut rx, &mut app, Duration::from_secs(10), |a| {
         !a.sessions[0].parser.screen().contents().trim().is_empty()

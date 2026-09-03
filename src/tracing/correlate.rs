@@ -174,10 +174,7 @@ fn codex_date_dirs(sessions_dir: &Path, t0: SystemTime) -> Vec<PathBuf> {
             let odt = time::OffsetDateTime::from(t);
             let key = (odt.year(), odt.month() as u8, odt.day());
             if seen.insert(key) {
-                dirs.push(sessions_dir.join(format!(
-                    "{:04}/{:02}/{:02}",
-                    key.0, key.1, key.2
-                )));
+                dirs.push(sessions_dir.join(format!("{:04}/{:02}/{:02}", key.0, key.1, key.2)));
             }
         }
     }
@@ -271,7 +268,9 @@ pub fn poll(
                     if let Ok(entries) = std::fs::read_dir(proj.path()) {
                         for e in entries.filter_map(|e| e.ok()) {
                             let p = e.path();
-                            if p.extension().is_some_and(|ext| ext == "jsonl") && mtime_in_window(&p, *t0) {
+                            if p.extension().is_some_and(|ext| ext == "jsonl")
+                                && mtime_in_window(&p, *t0)
+                            {
                                 let mtime = std::fs::metadata(&p)
                                     .and_then(|m| m.modified())
                                     .unwrap_or(SystemTime::UNIX_EPOCH);

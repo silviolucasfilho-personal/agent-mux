@@ -35,14 +35,16 @@ async fn main() -> Result<()> {
     // one-shot subcommands run before any terminal setup
     {
         let args: Vec<String> = std::env::args().collect();
-        if args.get(1).map(String::as_str) == Some("langfuse") {
-            return match args.get(2).map(String::as_str) {
-                Some("doctor") => agent_mux::langfuse::doctor::run(),
-                _ => {
-                    eprintln!("usage: agent-mux langfuse doctor");
-                    Ok(())
-                }
-            };
+        match args.get(1).map(String::as_str) {
+            Some("trace") => return agent_mux::tracing::cli::run(&args[2..]),
+            Some("langfuse") => {
+                eprintln!(
+                    "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\
+                     Try `agent-mux trace doctor`."
+                );
+                return Ok(());
+            }
+            _ => {}
         }
     }
 
@@ -106,34 +108,50 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Langfuse runtime: only when [langfuse] is enabled and keys resolve.
-    // A misconfigured section must never stop the TUI — it surfaces as one
+    // Trace runtime: on by default (local SQLite store, no keys). A store
+    // that cannot be opened must never stop the TUI — it surfaces as one
     // status-bar line instead.
-    let langfuse_resolved =
-        config::resolve_langfuse(cfg.langfuse.as_ref(), &|k| std::env::var(k).ok());
-    let langfuse_misconfigured =
-        cfg.langfuse.as_ref().is_some_and(|lf| lf.enabled) && langfuse_resolved.is_none();
-    let secret_in_cwd_file = langfuse_resolved.as_ref().is_some_and(|r| r.secret_from_file)
-        && cfg.loaded_from.as_deref() == Some(std::path::Path::new("profiles.toml"));
+    let tracing_resolved =
+        config::resolve_tracing(cfg.tracing.as_ref(), &|k| std::env::var(k).ok());
     let shutdown_flush = Duration::from_millis(
-        langfuse_resolved
+        tracing_resolved
             .as_ref()
             .map(|r| r.shutdown_flush_ms)
             .unwrap_or(0),
     );
-    let langfuse_rt = langfuse_resolved
-        .map(|resolved| agent_mux::langfuse::LangfuseRuntime::new(resolved, tx.clone()));
+    let mut startup_notices: Vec<String> = Vec::new();
+    if cfg.legacy_langfuse_section {
+        startup_notices.push(
+            "tracing: [langfuse] is now [tracing] — local SQLite store; host/keys are ignored"
+                .into(),
+        );
+    }
+    if let Some(r) = &tracing_resolved
+        && config::is_wsl_drive_mount(&r.db_path)
+    {
+        startup_notices.push(
+            "tracing: db_path is on a Windows drive mount (/mnt/*) — prefer a path under $HOME"
+                .into(),
+        );
+    }
+    let trace_rt = match tracing_resolved {
+        Some(resolved) => match agent_mux::tracing::TraceRuntime::new(resolved, tx.clone()) {
+            Ok(rt) => Some(rt),
+            Err(e) => {
+                startup_notices.insert(
+                    0,
+                    format!("tracing: store unavailable — {e} (see `agent-mux trace doctor`)"),
+                );
+                None
+            }
+        },
+        None => None,
+    };
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-    let mut app = App::new(cfg.profiles, langfuse_rt, tx);
-    if langfuse_misconfigured {
-        app.notice = Some(agent_mux::app::Notice::warn(
-            "langfuse: enabled but keys don't resolve — tracing is off (see `agent-mux langfuse doctor`)",
-        ));
-    } else if secret_in_cwd_file {
-        app.notice = Some(agent_mux::app::Notice::warn(
-            "langfuse: secret_key found in ./profiles.toml (commit hazard) — prefer $LANGFUSE_SECRET_KEY",
-        ));
+    let mut app = App::new(cfg.profiles, trace_rt, tx);
+    if let Some(first) = startup_notices.into_iter().next() {
+        app.notice = Some(agent_mux::app::Notice::warn(first));
     }
     let size = terminal.size()?;
     let (rows, cols) = ui::main_pane_inner(Rect::new(0, 0, size.width, size.height));
@@ -163,10 +181,10 @@ async fn main() -> Result<()> {
     // kill_all must run on every exit from the loop above -- including the
     // draw-error path -- so live PTY children are never orphaned when we quit.
     app.kill_all();
-    // Bounded Langfuse flush AFTER kill_all: the main loop is gone, so the
+    // Bounded store flush AFTER kill_all: the main loop is gone, so the
     // runtime's shutdown watch is the pipelines' only exit signal; the
-    // deadline (breaker-aware inside) caps quit latency.
-    if let Some(rt) = app.take_langfuse() {
+    // deadline caps quit latency.
+    if let Some(rt) = app.take_tracing() {
         rt.shutdown(shutdown_flush).await;
     }
     if let Some(e) = draw_err {
@@ -185,9 +203,8 @@ fn handle_event(app: &mut App, event: AppEvent) {
         AppEvent::PtyOutput { id, bytes } => app.handle_pty_output(id, &bytes, Instant::now()),
         AppEvent::PtyExit { id } => app.handle_pty_exit(id),
         AppEvent::Mouse(m) => app.handle_mouse(m, Instant::now()),
-        AppEvent::LangfuseStatus(message) => {
-            app.notice = Some(agent_mux::app::Notice::warn(message))
-        }
-        AppEvent::Tick => {} // redraw after every batch covers badge refresh
+        AppEvent::TraceStatus(message) => app.notice = Some(agent_mux::app::Notice::warn(message)),
+        AppEvent::TraceStats { launch_id, stats } => app.handle_trace_stats(&launch_id, stats),
+        AppEvent::Tick => app.on_tick(Instant::now()),
     }
 }

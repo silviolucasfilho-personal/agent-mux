@@ -1,34 +1,39 @@
-//! Langfuse session tracing.
+//! Local session tracing into a SQLite store.
 //!
-//! Spec: `docs/superpowers/specs/2026-08-30-langfuse-integration-design.md`.
+//! Spec: `docs/superpowers/specs/2026-09-03-sqlite-trace-store-design.md`.
 //!
-//! `LangfuseRuntime` is constructed once at startup iff the global
-//! `[langfuse]` section is enabled and keys resolve. Per launch,
-//! `plan_launch` merges the profile's overrides and decides correlation
-//! (Claude: injected `--session-id`; Codex/Antigravity: transcript watch;
-//! resumes: known ids). `start_session` emits the lifecycle
-//! `session_started` span and spawns the per-session pipeline task, which
-//! correlates, tails the live transcript, assembles turns, and feeds the one
-//! blocking exporter thread. Everything is fail-open: no failure here may
-//! break, block, or slow a session.
+//! `TraceRuntime` is constructed once at startup when the `[tracing]`
+//! section resolves and the store opens. Per launch, `plan_launch` merges
+//! the profile's overrides and decides correlation (Claude: injected
+//! `--session-id`; Codex/Antigravity: transcript watch; resumes: known
+//! ids). `start_session` records the launch row and spawns the per-session
+//! pipeline task, which correlates, tails the live transcript, assembles
+//! turns, and feeds the one writer thread. Everything is fail-open: no
+//! failure here may break, block, or slow a session.
 
+pub mod agy_usage;
+pub mod cli;
 pub mod correlate;
-pub mod doctor;
-pub mod export;
+pub mod ids;
 pub mod map;
-pub mod otlp;
+pub mod pricing;
+pub mod store;
 pub mod tail;
+pub mod usage;
 
-use crate::config::{ContentMode, Profile, ResolvedLangfuse};
+use crate::config::{ContentMode, Profile, ResolvedTracing};
 use crate::events::AppEvent;
 use crate::transcript::Provider;
 use correlate::{Adopted, ClaimRegistry, CorrelationSpec};
 use map::{MapSettings, SessionEnd, TurnAssembler};
+use pricing::PriceTable;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+use store::model::StoreOp;
+use store::writer::{WriterConfig, WriterHandle, spawn_writer};
 use tail::{TailPoll, Tailer};
 use tokio::sync::watch;
 
@@ -47,6 +52,8 @@ pub enum Phase {
 #[derive(Debug)]
 pub struct SessionTraceHandle {
     phase: watch::Sender<Phase>,
+    /// The launch this handle traces — the join key for live stats.
+    pub launch_id: String,
 }
 
 impl SessionTraceHandle {
@@ -67,8 +74,7 @@ pub struct LaunchPlan {
     provider: Provider,
     content_mode: ContentMode,
     correlation: CorrelationSpec,
-    /// Label for the lifecycle trace before adoption:
-    /// "deterministic" | "watched" | "none".
+    /// "deterministic" | "watched" | "none"
     correlation_label: &'static str,
     /// Session id already known at spawn (Claude injection/resume, agy
     /// `--conversation`).
@@ -76,25 +82,27 @@ pub struct LaunchPlan {
     /// True when this launch had `--session-id` injected (drives the
     /// fast-failure hint).
     injected: bool,
+    /// True when attached to an already-running session (the `t` toggle).
+    attached: bool,
     profile_name: String,
     dir: PathBuf,
 }
 
-pub struct LangfuseRuntime {
-    settings: ResolvedLangfuse,
+pub struct TraceRuntime {
+    settings: ResolvedTracing,
     claims: Arc<ClaimRegistry>,
-    exporter: export::ExporterHandle,
+    writer: WriterHandle,
+    run_id: String,
     shutdown_tx: watch::Sender<bool>,
     pipelines: Vec<tokio::task::JoinHandle<()>>,
     status_tx: tokio::sync::mpsc::Sender<AppEvent>,
     /// Profiles whose `--session-id` injection got disabled for the run
     /// after repeated fast failures.
     injection_disabled: Arc<Mutex<HashSet<String>>>,
-    /// Consecutive injected-launch fast failures per profile (reset by any
-    /// launch that adopts its transcript or survives past the window).
+    /// Consecutive injected-launch fast failures per profile.
     fast_failures: Arc<Mutex<std::collections::HashMap<String, u32>>>,
-    /// Once-per-run latch for the dropped-spans warning, shared between the
-    /// exporter's status sink and the pipelines' queue-full paths.
+    /// Once-per-run latch for the dropped-ops warning, shared between the
+    /// writer's status sink and the pipelines' queue-full paths.
     drop_warned: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -109,6 +117,10 @@ fn now_nanos() -> i128 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos() as i128)
         .unwrap_or(0)
+}
+
+fn now_ns() -> i64 {
+    store::now_ns()
 }
 
 /// Extracts the value of `flag` from an args list — both the two-token form
@@ -143,44 +155,82 @@ fn basename(command: &str) -> &str {
         .unwrap_or(command)
 }
 
-impl LangfuseRuntime {
-    /// Constructed iff the global section resolved. `status_tx` is the app
-    /// event channel for status-bar lines.
+/// The price table in effect for a resolved configuration.
+pub fn price_table(settings: &ResolvedTracing) -> PriceTable {
+    PriceTable::builtin().with_overrides(&settings.models)
+}
+
+impl TraceRuntime {
+    /// Opens the store and starts the writer thread. `Err` carries a
+    /// status-bar message; the caller runs untraced.
     pub fn new(
-        settings: ResolvedLangfuse,
+        settings: ResolvedTracing,
         status_tx: tokio::sync::mpsc::Sender<AppEvent>,
-    ) -> LangfuseRuntime {
-        let exporter_cfg = export::ExporterConfig::new(
-            &settings.host,
-            &settings.public_key,
-            &settings.secret_key,
-            settings.flush_interval_ms,
-        );
-        let status_for_exporter = status_tx.clone();
+    ) -> Result<TraceRuntime, String> {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let store = store::open_rw(
+            &settings.db_path,
+            store::OpenOptions {
+                prices: price_table(&settings),
+                run_id: run_id.clone(),
+                retention_days: settings.retention_days,
+                agent_mux_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+        )?;
+        let status_for_writer = status_tx.clone();
         let drop_warned = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let drop_warned_exporter = Arc::clone(&drop_warned);
-        let exporter = export::spawn_exporter(
-            exporter_cfg,
+        let drop_warned_writer = Arc::clone(&drop_warned);
+        let stats_tx = status_tx.clone();
+        let mut last_stats: std::collections::HashMap<String, Instant> =
+            std::collections::HashMap::new();
+        let writer = spawn_writer(
+            store,
+            WriterConfig::new(settings.flush_interval_ms),
             Box::new(move |class, message| {
-                // share the once-per-run "dropped" latch with the pipelines'
-                // queue-full warning so the class fires exactly once overall
-                if class == "dropped" && drop_warned_exporter.swap(true, Ordering::Relaxed) {
+                if class == "dropped" && drop_warned_writer.swap(true, Ordering::Relaxed) {
                     return;
                 }
-                let _ = status_for_exporter.try_send(AppEvent::LangfuseStatus(message));
+                let _ = status_for_writer.try_send(AppEvent::TraceStatus(message));
             }),
+            Some(Box::new(move |store, launches| {
+                // live badges: at most one stats event per launch per second
+                for launch_id in launches {
+                    let due = last_stats
+                        .get(launch_id)
+                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
+                    if !due {
+                        continue;
+                    }
+                    if let Ok(stats) = store::query::launch_stats(store.conn(), launch_id) {
+                        last_stats.insert(launch_id.clone(), Instant::now());
+                        let _ = stats_tx.try_send(AppEvent::TraceStats {
+                            launch_id: launch_id.clone(),
+                            stats,
+                        });
+                    }
+                }
+            })),
         );
-        LangfuseRuntime {
+        Ok(TraceRuntime {
             settings,
             claims: Arc::new(Mutex::new(HashSet::new())),
-            exporter,
+            writer,
+            run_id,
             shutdown_tx: watch::Sender::new(false),
             pipelines: Vec::new(),
             status_tx,
             injection_disabled: Arc::new(Mutex::new(HashSet::new())),
             fast_failures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             drop_warned,
-        }
+        })
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn db_path(&self) -> &Path {
+        &self.settings.db_path
     }
 
     pub fn claude_dir(&self) -> Option<PathBuf> {
@@ -206,7 +256,7 @@ impl LangfuseRuntime {
     }
 
     /// Decides how (and whether) to trace one launch. `None` = fully
-    /// untraced: no extras, no markers, no pipeline, no lifecycle trace.
+    /// untraced: no extras, no markers, no pipeline, no launch row.
     pub fn plan_launch(&self, profile: &Profile, dir: &Path) -> Option<LaunchPlan> {
         self.plan_launch_opt(profile, dir, false)
     }
@@ -215,13 +265,13 @@ impl LangfuseRuntime {
     /// Ignores `enabled = false` in profile override, but respects `provider = "none"`.
     /// Attaches to an already-running session (no extra CLI args injected).
     pub fn plan_attach(&self, profile: &Profile, dir: &Path) -> Option<LaunchPlan> {
-        let over = profile.langfuse.as_ref();
+        let over = profile.tracing.as_ref();
         let provider = match over.and_then(|o| o.provider.as_deref()) {
             Some("claude") => Provider::Claude,
             Some("codex") => Provider::Codex,
             Some("antigravity") => Provider::Antigravity,
             Some("none") => return None,
-            Some(_) => return None, // unknown override: fail safe, untraced
+            Some(_) => return None,
             None => match basename(&profile.command) {
                 "claude" => Provider::Claude,
                 "codex" => Provider::Codex,
@@ -231,8 +281,8 @@ impl LangfuseRuntime {
         };
         let content_mode = match over.and_then(|o| o.content_mode.as_deref()) {
             Some("full") => ContentMode::Full,
-            Some(_) => ContentMode::Metadata,
-            None => self.settings.content_mode,
+            Some("metadata") => ContentMode::Metadata,
+            _ => self.settings.content_mode,
         };
         let launch_id = uuid::Uuid::new_v4().to_string();
         let mut known_session_id: Option<String> = None;
@@ -319,6 +369,7 @@ impl LangfuseRuntime {
             correlation_label,
             known_session_id,
             injected: false,
+            attached: true,
             profile_name: profile.name.clone(),
             dir: dir.to_path_buf(),
         })
@@ -330,7 +381,7 @@ impl LangfuseRuntime {
         dir: &Path,
         force_enabled: bool,
     ) -> Option<LaunchPlan> {
-        let over = profile.langfuse.as_ref();
+        let over = profile.tracing.as_ref();
         if !force_enabled && !over.and_then(|o| o.enabled).unwrap_or(true) {
             return None;
         }
@@ -349,8 +400,8 @@ impl LangfuseRuntime {
         };
         let content_mode = match over.and_then(|o| o.content_mode.as_deref()) {
             Some("full") => ContentMode::Full,
-            Some(_) => ContentMode::Metadata,
-            None => self.settings.content_mode,
+            Some("metadata") => ContentMode::Metadata,
+            _ => self.settings.content_mode,
         };
         let launch_id = uuid::Uuid::new_v4().to_string();
         let mut extra_args: Vec<String> = Vec::new();
@@ -383,8 +434,6 @@ impl LangfuseRuntime {
                     .or_else(|| arg_value(args, "-r"))
                     .or_else(|| arg_value(args, "--session-id"))
                 {
-                    // explicit id in the args: Known; pre-existing content
-                    // is history
                     known_session_id = Some(id.to_string());
                     (
                         CorrelationSpec::KnownClaude {
@@ -396,8 +445,6 @@ impl LangfuseRuntime {
                         "deterministic",
                     )
                 } else if skip || !inject_allowed {
-                    // bare -r / --continue / -p, or injection switched off:
-                    // no id is knowable -> lifecycle only
                     (CorrelationSpec::None, "none")
                 } else {
                     let id = uuid::Uuid::new_v4().to_string();
@@ -465,12 +512,18 @@ impl LangfuseRuntime {
             correlation_label,
             known_session_id,
             injected,
+            attached: false,
             profile_name: profile.name.clone(),
             dir: dir.to_path_buf(),
         })
     }
 
-    fn map_settings(&self, plan: &LaunchPlan, agent_mux_session: usize) -> MapSettings {
+    fn map_settings(
+        &self,
+        plan: &LaunchPlan,
+        agent_mux_session: usize,
+        started_ns: i64,
+    ) -> MapSettings {
         MapSettings {
             provider: plan.provider,
             content_mode: plan.content_mode,
@@ -485,29 +538,49 @@ impl LangfuseRuntime {
             project_slug: crate::history::project_slug(&plan.dir),
             agent_mux_session,
             launch_id: plan.launch_id.clone(),
+            run_id: self.run_id.clone(),
+            correlation_plan: plan.correlation_label.to_string(),
+            injected: plan.injected,
+            attached: plan.attached,
+            started_ns,
         }
     }
 
-    /// Emits the lifecycle `session_started` span and spawns the pipeline.
-    /// Must be called from within the tokio runtime (all spawn sites are).
-    pub fn start_session(&mut self, agent_mux_session: usize, plan: LaunchPlan) -> SessionTraceHandle {
-        let map_settings = self.map_settings(&plan, agent_mux_session);
-        let started = map::session_started_span(
-            &map_settings,
-            plan.known_session_id.as_deref(),
-            plan.correlation_label,
-            now_nanos(),
-        );
-        if self.exporter.tx.try_send(started).is_err() {
-            self.exporter.dropped.fetch_add(1, Ordering::Relaxed);
+    fn send(&self, op: StoreOp) {
+        if self.writer.tx.try_send(op).is_err() {
+            self.writer.dropped.fetch_add(1, Ordering::Relaxed);
             self.warn_dropped();
         }
+    }
+
+    /// Records the launch row and spawns the pipeline. Must be called from
+    /// within the tokio runtime (all spawn sites are).
+    pub fn start_session(
+        &mut self,
+        agent_mux_session: usize,
+        plan: LaunchPlan,
+    ) -> SessionTraceHandle {
+        let started_ns = now_ns();
+        let map_settings = self.map_settings(&plan, agent_mux_session, started_ns);
+        if let Some(id) = &plan.known_session_id {
+            let seed = TurnAssembler::new(
+                map_settings.clone(),
+                Some(id.clone()),
+                plan.correlation_label,
+            );
+            self.send(StoreOp::Session(seed.session_row(started_ns)));
+        }
+        self.send(StoreOp::Launch(map::launch_started(
+            &map_settings,
+            plan.known_session_id.as_deref(),
+        )));
         let phase_tx = watch::Sender::new(Phase::Running);
         let phase_rx = phase_tx.subscribe();
+        let launch_id = plan.launch_id.clone();
         let ctx = PipelineCtx {
             claims: Arc::clone(&self.claims),
-            span_tx: self.exporter.tx.clone(),
-            dropped: Arc::clone(&self.exporter.dropped),
+            op_tx: self.writer.tx.clone(),
+            dropped: Arc::clone(&self.writer.dropped),
             status_tx: self.status_tx.clone(),
             injection_disabled: Arc::clone(&self.injection_disabled),
             fast_failures: Arc::clone(&self.fast_failures),
@@ -525,25 +598,26 @@ impl LangfuseRuntime {
         let shutdown_rx = self.shutdown_tx.subscribe();
         self.pipelines
             .push(tokio::spawn(run_pipeline(ctx, phase_rx, shutdown_rx)));
-        SessionTraceHandle { phase: phase_tx }
+        SessionTraceHandle {
+            phase: phase_tx,
+            launch_id,
+        }
     }
 
     fn warn_dropped(&self) {
         if !self.drop_warned.swap(true, Ordering::Relaxed) {
-            let _ = self.status_tx.try_send(AppEvent::LangfuseStatus(
-                "langfuse: some spans were dropped (network/backpressure)".into(),
+            let _ = self.status_tx.try_send(AppEvent::TraceStatus(
+                "tracing: some trace rows were dropped (store errors/backpressure)".into(),
             ));
         }
     }
 
     /// Bounded shutdown after `App::kill_all`: signal every pipeline (the
     /// main loop is gone, so this watch is their only exit signal), wait
-    /// ~half the deadline for them, then drain the exporter with the rest.
-    /// Breaker-open makes the drain a no-op, so a dead network costs
-    /// milliseconds here.
+    /// ~half the deadline for them, then drain the writer with the rest.
     pub async fn shutdown(self, deadline: Duration) {
-        let LangfuseRuntime {
-            exporter,
+        let TraceRuntime {
+            writer,
             shutdown_tx,
             pipelines,
             ..
@@ -558,15 +632,13 @@ impl LangfuseRuntime {
         };
         let _ = tokio::time::timeout(half, join_all).await;
         let remaining = deadline.saturating_sub(started.elapsed());
-        // `finish` is blocking (bounded by `remaining`); keep it off the
-        // async worker
-        let _ = tokio::task::spawn_blocking(move || exporter.finish(remaining)).await;
+        let _ = tokio::task::spawn_blocking(move || writer.finish(remaining)).await;
     }
 }
 
 struct PipelineCtx {
     claims: Arc<ClaimRegistry>,
-    span_tx: std::sync::mpsc::SyncSender<otlp::Span>,
+    op_tx: std::sync::mpsc::SyncSender<StoreOp>,
     dropped: Arc<AtomicU64>,
     status_tx: tokio::sync::mpsc::Sender<AppEvent>,
     injection_disabled: Arc<Mutex<HashSet<String>>>,
@@ -590,18 +662,20 @@ struct Pipeline {
     adopted: Option<Adopted>,
     /// RAII: releases the transcript claim even if this pipeline panics.
     claim_guard: Option<correlate::ClaimGuard>,
+    /// Antigravity: the per-request usage agy keeps outside the transcript.
+    agy_usage: Option<agy_usage::AgyUsageReader>,
     parse_errors: u64,
     started: Instant,
 }
 
 impl Pipeline {
-    fn send_spans(&self, spans: Vec<otlp::Span>) {
-        for span in spans {
-            if self.ctx.span_tx.try_send(span).is_err() {
+    fn send_ops(&self, ops: Vec<StoreOp>) {
+        for op in ops {
+            if self.ctx.op_tx.try_send(op).is_err() {
                 self.ctx.dropped.fetch_add(1, Ordering::Relaxed);
                 if !self.ctx.drop_warned.swap(true, Ordering::Relaxed) {
-                    let _ = self.ctx.status_tx.try_send(AppEvent::LangfuseStatus(
-                        "langfuse: some spans were dropped (network/backpressure)".into(),
+                    let _ = self.ctx.status_tx.try_send(AppEvent::TraceStatus(
+                        "tracing: some trace rows were dropped (store errors/backpressure)".into(),
                     ));
                 }
             }
@@ -613,25 +687,21 @@ impl Pipeline {
             return;
         }
         let events = crate::transcript::parse_line(self.ctx.provider, line);
-        if events.is_empty()
-            && serde_json::from_str::<serde::de::IgnoredAny>(line).is_err()
-        {
+        if events.is_empty() && serde_json::from_str::<serde::de::IgnoredAny>(line).is_err() {
             self.parse_errors += 1;
             return;
         }
         let recv = now_nanos();
-        let mut spans = Vec::new();
+        let mut ops = Vec::new();
         for event in events {
-            spans.extend(self.assembler.feed(event, recv));
+            ops.extend(self.assembler.feed(event, recv));
         }
-        self.send_spans(spans);
+        self.send_ops(ops);
     }
 
     /// Prime (no emission) an existing transcript for Known resumes; always
     /// leaves the tailer positioned so only NEW content is exported.
     fn adopt(&mut self, adopted: Adopted) {
-        // the claim was registered inside correlate::poll; the guard now
-        // owns its release (panic- and abort-safe)
         self.claim_guard = Some(correlate::ClaimGuard::new(
             Arc::clone(&self.ctx.claims),
             self.ctx.provider,
@@ -658,19 +728,50 @@ impl Pipeline {
                     self.tailer = Some(tailer);
                 }
                 Err(_) => {
-                    // fall back to tail-from-start; better duplicated than lost
                     self.tailer = Some(Tailer::new(&adopted.path));
                 }
             }
         } else {
-            // watch-adopted or fresh file: everything from byte 0 is live
             self.tailer = Some(Tailer::new(&adopted.path));
         }
+        if self.ctx.provider == Provider::Antigravity
+            && let Some(db) = agy_usage::conversation_db_for(&adopted.path, &adopted.session_id)
+        {
+            let mut reader = agy_usage::AgyUsageReader::new(db);
+            if adopted.resume_prime {
+                reader.skip_existing();
+            }
+            self.agy_usage = Some(reader);
+        }
+        // adoption facts: the session row and the launch's outcome
+        let now = now_ns();
+        self.send_ops(vec![
+            StoreOp::Session(self.assembler.session_row(now)),
+            StoreOp::Launch(map::launch_adopted(
+                &self.ctx.map_settings,
+                &adopted.session_id,
+                adopted.correlation,
+            )),
+        ]);
         self.adopted = Some(adopted);
     }
 
-    /// One work tick. Returns false only if correlation is impossible
-    /// (spec None) — the pipeline then just waits for exit.
+    /// Antigravity side channel: attach any new per-request usage records.
+    fn poll_agy_usage(&mut self) {
+        let Some(reader) = self.agy_usage.as_mut() else {
+            return;
+        };
+        let records = reader.poll();
+        if records.is_empty() {
+            return;
+        }
+        let mut ops = Vec::new();
+        for record in &records {
+            ops.extend(self.assembler.attach_step_usage(record));
+        }
+        self.send_ops(ops);
+    }
+
     fn tick(&mut self) {
         if self.adopted.is_none()
             && let Some(adopted) =
@@ -678,6 +779,11 @@ impl Pipeline {
         {
             self.adopt(adopted);
         }
+        self.tick_tail();
+        self.poll_agy_usage();
+    }
+
+    fn tick_tail(&mut self) {
         let Some(tailer) = self.tailer.as_mut() else {
             return;
         };
@@ -691,9 +797,7 @@ impl Pipeline {
             TailPoll::Truncated => {
                 // Unexpected rewrite: the file's contents CHANGED, so the
                 // old assembler's ordinals no longer describe it. Rebuild a
-                // FRESH assembler (reusing it would double-count ordinals
-                // into unsalted ids colliding with already-exported turns)
-                // and salt this run's trace ids unconditionally.
+                // FRESH assembler and salt this run's trace ids.
                 if let Some(adopted) = &self.adopted {
                     let path = adopted.path.clone();
                     let session_id = adopted.session_id.clone();
@@ -711,8 +815,7 @@ impl Pipeline {
                             self.assembler.set_emitting(false);
                             let recv = now_nanos();
                             for line in &lines {
-                                for event in
-                                    crate::transcript::parse_line(self.ctx.provider, line)
+                                for event in crate::transcript::parse_line(self.ctx.provider, line)
                                 {
                                     let _ = self.assembler.feed(event, recv);
                                 }
@@ -728,11 +831,11 @@ impl Pipeline {
     }
 
     fn finalize(&mut self, termination: &'static str, exit_code: Option<u32>) {
-        // best-effort parse of a torn trailing line
         if let Some(line) = self.tailer.as_mut().and_then(|t| t.take_remainder()) {
             self.feed_line(&line);
         }
-        let mut spans = self.assembler.finalize();
+        self.poll_agy_usage();
+        let mut ops = self.assembler.finalize();
         let end = SessionEnd {
             termination,
             exit_code,
@@ -749,18 +852,19 @@ impl Pipeline {
                 }),
             session_id: self.assembler.session_id().map(|s| s.to_string()),
             parse_errors: self.parse_errors,
-            dropped_spans: self.ctx.dropped.load(Ordering::Relaxed),
+            dropped_ops: self.ctx.dropped.load(Ordering::Relaxed),
             cost: self.assembler.cost_snapshot(),
         };
-        spans.push(map::session_ended_span(&self.ctx.map_settings, &end, now_nanos()));
-        self.send_spans(spans);
-        // the claim guard releases on drop (exit-then-resume re-adopts)
+        ops.push(StoreOp::Launch(map::launch_ended(
+            &self.ctx.map_settings,
+            &end,
+            now_ns(),
+        )));
+        self.send_ops(ops);
         self.claim_guard = None;
-        // Fast-failure tracking for injected --session-id launches. One
-        // quick nonzero exit is only a hint (any script can exit fast);
-        // TWO consecutive ones disable injection for the profile for the
-        // rest of the run — an old claude binary rejecting the flag fails
-        // this way every single time.
+        // Fast-failure tracking for injected --session-id launches: two
+        // consecutive immediate nonzero exits disable injection for the
+        // profile for the rest of the run.
         if self.ctx.injected && termination == "exit" {
             let fast_failure = self.adopted.is_none()
                 && exit_code.is_some_and(|c| c != 0)
@@ -777,9 +881,9 @@ impl Pipeline {
                     })
                     .unwrap_or(0);
                 if strikes == 1 {
-                    let _ = self.ctx.status_tx.try_send(AppEvent::LangfuseStatus(format!(
-                        "langfuse: '{}' exited immediately with an injected --session-id — \
-                         old claude? (set inject_session_id = false, or run `agent-mux langfuse doctor`)",
+                    let _ = self.ctx.status_tx.try_send(AppEvent::TraceStatus(format!(
+                        "tracing: '{}' exited immediately with an injected --session-id — \
+                         old claude? (set inject_session_id = false, or run `agent-mux trace doctor`)",
                         self.ctx.profile_name
                     )));
                 } else if strikes >= 2 {
@@ -790,15 +894,14 @@ impl Pipeline {
                         .map(|mut s| s.insert(self.ctx.profile_name.clone()))
                         .unwrap_or(false);
                     if newly {
-                        let _ = self.ctx.status_tx.try_send(AppEvent::LangfuseStatus(format!(
-                            "langfuse: --session-id injection disabled for '{}' this run \
+                        let _ = self.ctx.status_tx.try_send(AppEvent::TraceStatus(format!(
+                            "tracing: --session-id injection disabled for '{}' this run \
                              after repeated immediate exits",
                             self.ctx.profile_name
                         )));
                     }
                 }
             } else if let Ok(mut m) = self.ctx.fast_failures.lock() {
-                // a launch that adopted or survived resets the streak
                 m.remove(&self.ctx.profile_name);
             }
         }
@@ -826,18 +929,22 @@ async fn run_pipeline(
         tailer: None,
         adopted: None,
         claim_guard: None,
+        agy_usage: None,
         parse_errors: 0,
         started: Instant::now(),
     };
     loop {
         pipeline.tick();
-        // exit conditions, checked after the tick so pre-exit output on
-        // this poll still made it in
         if *shutdown_rx.borrow() {
-            // app quit: kill_all already ran and the main loop is gone —
-            // one final pass, then close with "app_quit"
+            // app quit: kill_all already ran and the main loop is gone. A
+            // session that had already exited keeps its real outcome — the
+            // quit must not overwrite an exit the App reported earlier.
             pipeline.tick();
-            pipeline.finalize("app_quit", None);
+            match *phase_rx.borrow() {
+                Phase::Exited(code) => pipeline.finalize("exit", code),
+                Phase::Stopped => pipeline.finalize("stopped", None),
+                Phase::Running => pipeline.finalize("app_quit", None),
+            }
             return;
         }
         let phase = *phase_rx.borrow();
@@ -849,22 +956,21 @@ async fn run_pipeline(
         }
         if let Phase::Exited(code) = phase {
             // Grace sweep: the CLI's final flushes can trail the PTY exit.
-            // Shutdown-aware — a quit arriving mid-sweep must not burn the
-            // whole app deadline (one straggler would starve every other
-            // pipeline's final flush).
             for _ in 0..3 {
                 tokio::select! {
                     _ = tokio::time::sleep(poll_interval.min(Duration::from_millis(350))) => {}
                     _ = shutdown_rx.changed() => {
                         pipeline.tick();
+                        let code = match *phase_rx.borrow() {
+                            Phase::Exited(late @ Some(_)) => late,
+                            _ => code,
+                        };
                         pipeline.finalize("exit", code);
                         return;
                     }
                 }
                 pipeline.tick();
             }
-            // a duplicate PtyExit can deliver the real code after the first
-            // Exited(None) was latched — prefer a known code
             let code = match *phase_rx.borrow() {
                 Phase::Exited(late @ Some(_)) => late,
                 _ => code,
@@ -873,7 +979,6 @@ async fn run_pipeline(
             return;
         }
         if sender_gone {
-            // Session dropped (RemoveSelected / respawn replacement)
             pipeline.tick();
             pipeline.finalize("exit", None);
             return;
@@ -889,22 +994,19 @@ async fn run_pipeline(
 #[cfg(test)]
 mod plan_tests {
     use super::*;
-    use crate::config::{LangfuseConfig, ProfileLangfuse, resolve_langfuse};
+    use crate::config::{ProfileTracing, TracingConfig, resolve_tracing};
 
-    fn runtime() -> LangfuseRuntime {
-        let lf = LangfuseConfig {
-            enabled: true,
-            public_key: Some("pk-lf-test".into()),
-            secret_key: Some("sk-lf-test".into()),
-            host: Some("http://127.0.0.1:9".into()),
+    fn runtime(dir: &Path) -> TraceRuntime {
+        let lf = TracingConfig {
+            db_path: Some(dir.join("t.db").to_string_lossy().into_owned()),
             claude_dir: Some("/tmp/fake-claude".into()),
             codex_dir: Some("/tmp/fake-codex".into()),
             antigravity_dir: Some("/tmp/fake-agy".into()),
             ..Default::default()
         };
-        let resolved = resolve_langfuse(Some(&lf), &|_| None).unwrap();
+        let resolved = resolve_tracing(Some(&lf), &|_| None).unwrap();
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        LangfuseRuntime::new(resolved, tx)
+        TraceRuntime::new(resolved, tx).unwrap()
     }
 
     fn profile(name: &str, command: &str, args: &[&str]) -> Profile {
@@ -913,13 +1015,14 @@ mod plan_tests {
             command: command.into(),
             args: args.iter().map(|s| s.to_string()).collect(),
             default_dir: None,
-            langfuse: None,
+            tracing: None,
         }
     }
 
     #[test]
     fn claude_new_session_injects_session_id_and_markers() {
-        let rt = runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime(dir.path());
         let plan = rt
             .plan_launch(&profile("Claude Code", "claude", &[]), Path::new("/tmp"))
             .unwrap();
@@ -928,27 +1031,36 @@ mod plan_tests {
         let id = plan.extra_args[1].clone();
         assert!(uuid::Uuid::parse_str(&id).is_ok(), "injected id is a uuid");
         assert!(plan.injected);
+        assert!(!plan.attached);
         assert_eq!(plan.known_session_id.as_deref(), Some(id.as_str()));
         assert_eq!(plan.correlation_label, "deterministic");
         assert!(matches!(
             &plan.correlation,
             CorrelationSpec::KnownClaude { resume: false, .. }
         ));
-        assert!(plan.extra_env.iter().any(|(k, v)| k == "AGENT_MUX" && v == "1"));
-        assert!(plan
-            .extra_env
-            .iter()
-            .any(|(k, v)| k == "AGENT_MUX_SESSION_ID" && *v == plan.launch_id));
-        // wrapper-path commands still classify by basename
+        assert!(
+            plan.extra_env
+                .iter()
+                .any(|(k, v)| k == "AGENT_MUX" && v == "1")
+        );
+        assert!(
+            plan.extra_env
+                .iter()
+                .any(|(k, v)| k == "AGENT_MUX_SESSION_ID" && *v == plan.launch_id)
+        );
         let plan2 = rt
-            .plan_launch(&profile("C", "/usr/local/bin/claude", &[]), Path::new("/tmp"))
+            .plan_launch(
+                &profile("C", "/usr/local/bin/claude", &[]),
+                Path::new("/tmp"),
+            )
             .unwrap();
         assert!(plan2.injected);
     }
 
     #[test]
     fn claude_explicit_resume_id_is_known_without_injection() {
-        let rt = runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime(dir.path());
         let plan = rt
             .plan_launch(
                 &profile("Claude Code", "claude", &["--resume", "abc-123"]),
@@ -962,7 +1074,6 @@ mod plan_tests {
             &plan.correlation,
             CorrelationSpec::KnownClaude { session_id, resume: true, .. } if session_id == "abc-123"
         ));
-        // --session-id in the args behaves the same
         let plan2 = rt
             .plan_launch(
                 &profile("Claude Code", "claude", &["--session-id", "def-456"]),
@@ -974,8 +1085,9 @@ mod plan_tests {
     }
 
     #[test]
-    fn claude_skip_flags_without_id_are_lifecycle_only() {
-        let rt = runtime();
+    fn claude_skip_flags_without_id_are_launch_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime(dir.path());
         for args in [
             vec!["-r"],
             vec!["--continue"],
@@ -988,16 +1100,20 @@ mod plan_tests {
                 .unwrap();
             assert!(plan.extra_args.is_empty(), "no injection for {args:?}");
             assert!(plan.known_session_id.is_none());
-            assert!(matches!(plan.correlation, CorrelationSpec::None), "{args:?}");
+            assert!(
+                matches!(plan.correlation, CorrelationSpec::None),
+                "{args:?}"
+            );
             assert_eq!(plan.correlation_label, "none");
         }
     }
 
     #[test]
     fn inject_session_id_false_is_an_escape_hatch() {
-        let rt = runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime(dir.path());
         let mut p = profile("Claude Code", "claude", &[]);
-        p.langfuse = Some(ProfileLangfuse {
+        p.tracing = Some(ProfileTracing {
             inject_session_id: Some(false),
             ..Default::default()
         });
@@ -1009,46 +1125,56 @@ mod plan_tests {
 
     #[test]
     fn disabled_profile_none_provider_and_unknown_command_are_untraced() {
-        let rt = runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime(dir.path());
         let mut disabled = profile("X", "claude", &[]);
-        disabled.langfuse = Some(ProfileLangfuse {
+        disabled.tracing = Some(ProfileTracing {
             enabled: Some(false),
             ..Default::default()
         });
         assert!(rt.plan_launch(&disabled, Path::new("/tmp")).is_none());
         let mut none = profile("X", "claude", &[]);
-        none.langfuse = Some(ProfileLangfuse {
+        none.tracing = Some(ProfileTracing {
             provider: Some("none".into()),
             ..Default::default()
         });
         assert!(rt.plan_launch(&none, Path::new("/tmp")).is_none());
-        assert!(rt
-            .plan_launch(&profile("Shell", "bash", &[]), Path::new("/tmp"))
-            .is_none());
+        assert!(
+            rt.plan_launch(&profile("Shell", "bash", &[]), Path::new("/tmp"))
+                .is_none()
+        );
     }
 
     #[test]
     fn provider_override_forces_kind_for_wrapper_commands() {
-        let rt = runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime(dir.path());
         let mut wrapper = profile("My Wrapper", "my-agent-wrapper", &[]);
-        wrapper.langfuse = Some(ProfileLangfuse {
+        wrapper.tracing = Some(ProfileTracing {
             provider: Some("codex".into()),
             ..Default::default()
         });
         let plan = rt.plan_launch(&wrapper, Path::new("/tmp")).unwrap();
         assert_eq!(plan.provider, Provider::Codex);
-        assert!(matches!(plan.correlation, CorrelationSpec::WatchCodex { .. }));
+        assert!(matches!(
+            plan.correlation,
+            CorrelationSpec::WatchCodex { .. }
+        ));
         assert_eq!(plan.correlation_label, "watched");
         assert!(plan.extra_args.is_empty());
     }
 
     #[test]
     fn codex_and_antigravity_watch_agy_resume_is_known() {
-        let rt = runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime(dir.path());
         let codex = rt
             .plan_launch(&profile("Codex", "codex", &[]), Path::new("/tmp"))
             .unwrap();
-        assert!(matches!(codex.correlation, CorrelationSpec::WatchCodex { .. }));
+        assert!(matches!(
+            codex.correlation,
+            CorrelationSpec::WatchCodex { .. }
+        ));
         let agy = rt
             .plan_launch(&profile("Antigravity", "agy", &[]), Path::new("/tmp"))
             .unwrap();
@@ -1072,35 +1198,57 @@ mod plan_tests {
 
     #[test]
     fn content_mode_override_applies_per_profile() {
-        let rt = runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime(dir.path());
         let plain = rt
             .plan_launch(&profile("Claude Code", "claude", &[]), Path::new("/tmp"))
             .unwrap();
-        assert_eq!(plain.content_mode, ContentMode::Metadata);
-        let mut full = profile("Claude Code", "claude", &[]);
-        full.langfuse = Some(ProfileLangfuse {
-            content_mode: Some("full".into()),
+        assert_eq!(plain.content_mode, ContentMode::Full, "full is the default");
+        let mut meta = profile("Claude Code", "claude", &[]);
+        meta.tracing = Some(ProfileTracing {
+            content_mode: Some("metadata".into()),
             ..Default::default()
         });
-        let plan = rt.plan_launch(&full, Path::new("/tmp")).unwrap();
-        assert_eq!(plan.content_mode, ContentMode::Full);
+        let plan = rt.plan_launch(&meta, Path::new("/tmp")).unwrap();
+        assert_eq!(plan.content_mode, ContentMode::Metadata);
     }
 
     #[test]
     fn plan_attach_watches_running_sessions_without_extra_args() {
-        let rt = runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime(dir.path());
         let claude = rt
             .plan_attach(&profile("Claude Code", "claude", &[]), Path::new("/tmp"))
             .unwrap();
         assert!(claude.extra_args.is_empty());
         assert!(!claude.injected);
-        assert!(matches!(claude.correlation, CorrelationSpec::WatchClaude { .. }));
+        assert!(claude.attached);
+        assert!(matches!(
+            claude.correlation,
+            CorrelationSpec::WatchClaude { .. }
+        ));
         assert_eq!(claude.correlation_label, "watched");
-
         let agy = rt
             .plan_attach(&profile("Antigravity", "agy", &[]), Path::new("/tmp"))
             .unwrap();
         assert!(agy.extra_args.is_empty());
-        assert!(matches!(agy.correlation, CorrelationSpec::WatchAntigravity { .. }));
+        assert!(matches!(
+            agy.correlation,
+            CorrelationSpec::WatchAntigravity { .. }
+        ));
+    }
+
+    #[test]
+    fn unopenable_store_yields_an_error_not_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").unwrap();
+        let lf = TracingConfig {
+            db_path: Some(blocker.join("t.db").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let resolved = resolve_tracing(Some(&lf), &|_| None).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        assert!(TraceRuntime::new(resolved, tx).is_err());
     }
 }

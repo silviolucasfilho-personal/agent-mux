@@ -18,7 +18,7 @@ fn shell_profile(args: &[&str]) -> Profile {
         command: command.into(),
         args: all,
         default_dir: None,
-        langfuse: None,
+        tracing: None,
     }
 }
 
@@ -69,7 +69,8 @@ async fn spawn_echo_renders_output_and_exits_zero() {
         args: echo_args("hello-agent-mux"),
         ..profile
     };
-    let mut session = Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx, &[], &[]).unwrap();
+    let mut session =
+        Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx, &[], &[]).unwrap();
     let ok = pump_until(&mut rx, &mut session, Duration::from_secs(10), |s| {
         screen_text(s).contains("hello-agent-mux")
             && matches!(s.status(Instant::now()), Status::Exited(_))
@@ -88,7 +89,10 @@ async fn spawn_in_missing_directory_fails_without_creating_session() {
         PathBuf::from("Z:/definitely/not/a/dir"),
         24,
         80,
-        tx, &[], &[]);
+        tx,
+        &[],
+        &[],
+    );
     assert!(result.is_err());
 }
 
@@ -101,7 +105,7 @@ async fn spawn_with_nonexistent_command_fails_without_creating_session() {
         command: "definitely-not-a-real-command-xyz123".into(),
         args: vec![],
         default_dir: None,
-        langfuse: None,
+        tracing: None,
     };
     let result = Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx, &[], &[]);
     assert!(result.is_err());
@@ -111,8 +115,17 @@ async fn spawn_with_nonexistent_command_fails_without_creating_session() {
 #[tokio::test]
 async fn interactive_input_roundtrip() {
     let (tx, mut rx) = mpsc::channel(256);
-    let mut session =
-        Session::spawn(1, shell_profile(&[]), std::env::temp_dir(), 24, 80, tx, &[], &[]).unwrap();
+    let mut session = Session::spawn(
+        1,
+        shell_profile(&[]),
+        std::env::temp_dir(),
+        24,
+        80,
+        tx,
+        &[],
+        &[],
+    )
+    .unwrap();
     // wait for the cmd prompt
     let ok = pump_until(&mut rx, &mut session, Duration::from_secs(10), |s| {
         screen_text(s).contains('>')
@@ -137,8 +150,17 @@ async fn interactive_input_roundtrip() {
 #[tokio::test]
 async fn resize_updates_parser_screen_size() {
     let (tx, mut rx) = mpsc::channel(256);
-    let mut session =
-        Session::spawn(1, shell_profile(&[]), std::env::temp_dir(), 24, 80, tx, &[], &[]).unwrap();
+    let mut session = Session::spawn(
+        1,
+        shell_profile(&[]),
+        std::env::temp_dir(),
+        24,
+        80,
+        tx,
+        &[],
+        &[],
+    )
+    .unwrap();
     session.resize(30, 100);
     assert_eq!(session.parser.screen().size(), (30, 100));
     session.kill();
@@ -159,7 +181,8 @@ async fn kill_terminates_long_running_child() {
         args,
         ..shell_profile(&[])
     };
-    let mut session = Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx, &[], &[]).unwrap();
+    let mut session =
+        Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx, &[], &[]).unwrap();
     session.kill();
     let ok = pump_until(&mut rx, &mut session, Duration::from_secs(10), |s| {
         matches!(s.status(Instant::now()), Status::Exited(_))

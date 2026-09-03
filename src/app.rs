@@ -18,6 +18,7 @@ pub enum Mode {
     Attached,
     NewSession(DialogState),
     SessionHistory(HistoryState),
+    TraceBrowser(Box<TraceBrowserState>),
     ConfirmKill,
     ConfirmQuit,
     Help,
@@ -36,6 +37,7 @@ pub enum Action {
     Detach,
     OpenNewSession,
     OpenSessionHistory,
+    OpenTraceBrowser,
     OpenHelp,
     KillSelected,
     EnterConfirmKill,
@@ -49,6 +51,8 @@ pub enum Action {
     DialogKey,
     /// SessionHistory mode: App routes the key to the HistoryState it owns.
     HistoryKey,
+    /// TraceBrowser mode: App routes the key to the TraceBrowserState it owns.
+    BrowserKey,
 }
 
 /// Severity of a status-bar notice. The old single `error: Option<String>`
@@ -69,13 +73,22 @@ pub struct Notice {
 
 impl Notice {
     pub fn info(text: impl Into<String>) -> Self {
-        Notice { level: NoticeLevel::Info, text: text.into() }
+        Notice {
+            level: NoticeLevel::Info,
+            text: text.into(),
+        }
     }
     pub fn warn(text: impl Into<String>) -> Self {
-        Notice { level: NoticeLevel::Warn, text: text.into() }
+        Notice {
+            level: NoticeLevel::Warn,
+            text: text.into(),
+        }
     }
     pub fn error(text: impl Into<String>) -> Self {
-        Notice { level: NoticeLevel::Error, text: text.into() }
+        Notice {
+            level: NoticeLevel::Error,
+            text: text.into(),
+        }
     }
 }
 
@@ -169,7 +182,8 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 KeyCode::Enter if ctx.selected_status.is_some() => Action::Attach,
                 KeyCode::Char('n') => Action::OpenNewSession,
                 KeyCode::Char('l') | KeyCode::Char('L') => Action::OpenSessionHistory,
-                KeyCode::Char('t') | KeyCode::Char('T') => Action::ToggleTracing,
+                KeyCode::Char('t') => Action::ToggleTracing,
+                KeyCode::Char('T') => Action::OpenTraceBrowser,
                 KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
                 KeyCode::Char('x') => match ctx.selected_status {
                     Some(Status::Exited(_)) => Action::RemoveSelected,
@@ -202,6 +216,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         }
         Mode::NewSession(_) => Action::DialogKey,
         Mode::SessionHistory(_) => Action::HistoryKey,
+        Mode::TraceBrowser(_) => Action::BrowserKey,
         Mode::ConfirmKill => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::KillSelected,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
@@ -330,11 +345,11 @@ impl DialogState {
         let resolved = resolve_working_dir(&dir);
         let dir_entries = list_subdirectories(&resolved);
         let tracing_enabled = first
-            .and_then(|p| p.langfuse.as_ref())
+            .and_then(|p| p.tracing.as_ref())
             .and_then(|l| l.enabled)
             .unwrap_or(true);
         let content_mode = if first
-            .and_then(|p| p.langfuse.as_ref())
+            .and_then(|p| p.tracing.as_ref())
             .and_then(|l| l.content_mode.as_deref())
             == Some("metadata")
         {
@@ -372,7 +387,7 @@ impl DialogState {
     fn set_profile(&mut self, idx: usize, profiles: &[Profile]) {
         self.profile_idx = idx;
         if let Some(p) = profiles.get(idx)
-            && let Some(over) = &p.langfuse
+            && let Some(over) = &p.tracing
         {
             if let Some(en) = over.enabled {
                 self.tracing_enabled = en;
@@ -486,9 +501,7 @@ impl DialogState {
                     } else {
                         self.dir_selected_idx = match self.dir_selected_idx {
                             None => Some(0),
-                            Some(i) => {
-                                Some((i + 1).min(self.dir_entries.len().saturating_sub(1)))
-                            }
+                            Some(i) => Some((i + 1).min(self.dir_entries.len().saturating_sub(1))),
                         };
                     }
                 }
@@ -621,6 +634,323 @@ impl HistoryState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserPane {
+    Sessions,
+    Turns,
+    Detail,
+}
+
+/// The `T` trace browser: sessions → turns → observations, read from the
+/// local store through a read-only connection. Queries are indexed and
+/// `LIMIT`ed, so they run synchronously on the main thread like the
+/// history viewer's file reads.
+pub struct TraceBrowserState {
+    conn: Option<rusqlite::Connection>,
+    pub error: Option<String>,
+    pub sessions: Vec<crate::tracing::store::query::SessionStat>,
+    pub selected_session: usize,
+    pub turns: Vec<crate::tracing::store::query::TraceStat>,
+    pub selected_turn: usize,
+    pub observations: Vec<crate::tracing::store::query::ObservationView>,
+    pub selected_observation: usize,
+    /// Detail pane shows the selected observation's body instead of the
+    /// observation list.
+    pub expanded: bool,
+    pub detail_lines: Vec<ratatui::text::Line<'static>>,
+    pub scroll_offset: usize,
+    pub focused: BrowserPane,
+    pub all_projects: bool,
+    pub project_slug: Option<String>,
+    /// Search prompt: `Some` while typing after `/`.
+    pub search_input: Option<String>,
+    /// The query the turns pane currently shows hits for.
+    pub search_query: Option<String>,
+    /// Detail-pane interior height, written back by the renderer.
+    pub viewport_rows: std::cell::Cell<usize>,
+    last_refresh: Instant,
+}
+
+impl std::fmt::Debug for TraceBrowserState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TraceBrowserState")
+            .field("open", &self.conn.is_some())
+            .field("error", &self.error)
+            .field("sessions", &self.sessions.len())
+            .field("selected_session", &self.selected_session)
+            .field("turns", &self.turns.len())
+            .field("selected_turn", &self.selected_turn)
+            .field("observations", &self.observations.len())
+            .field("focused", &self.focused)
+            .field("all_projects", &self.all_projects)
+            .finish()
+    }
+}
+
+impl TraceBrowserState {
+    /// `db_path` is `None` when tracing is off for this run.
+    pub fn new(db_path: Option<&std::path::Path>, current_dir: Option<&std::path::Path>) -> Self {
+        let (conn, error) = match db_path {
+            None => (None, Some("tracing is off — nothing to browse".to_string())),
+            Some(path) => match crate::tracing::store::open_ro(path) {
+                Ok(c) => (Some(c), None),
+                Err(e) => (None, Some(e)),
+            },
+        };
+        let mut state = TraceBrowserState {
+            conn,
+            error,
+            sessions: Vec::new(),
+            selected_session: 0,
+            turns: Vec::new(),
+            selected_turn: 0,
+            observations: Vec::new(),
+            selected_observation: 0,
+            expanded: false,
+            detail_lines: Vec::new(),
+            scroll_offset: 0,
+            focused: BrowserPane::Sessions,
+            all_projects: false,
+            project_slug: current_dir.map(history::project_slug),
+            search_input: None,
+            search_query: None,
+            viewport_rows: std::cell::Cell::new(30),
+            last_refresh: Instant::now(),
+        };
+        state.reload_sessions();
+        state
+    }
+
+    fn filter(&self) -> crate::tracing::store::query::SessionFilter {
+        crate::tracing::store::query::SessionFilter {
+            project_slug: if self.all_projects {
+                None
+            } else {
+                self.project_slug.clone()
+            },
+            since_ns: None,
+            limit: 500,
+        }
+    }
+
+    pub fn reload_sessions(&mut self) {
+        let Some(conn) = &self.conn else {
+            return;
+        };
+        match crate::tracing::store::query::list_sessions(conn, &self.filter()) {
+            Ok(rows) => {
+                self.sessions = rows;
+                self.error = None;
+            }
+            Err(e) => {
+                self.sessions.clear();
+                self.error = Some(e.to_string());
+            }
+        }
+        self.selected_session = self
+            .selected_session
+            .min(self.sessions.len().saturating_sub(1));
+        self.search_query = None;
+        self.load_turns();
+    }
+
+    pub fn load_turns(&mut self) {
+        let Some(conn) = &self.conn else {
+            return;
+        };
+        self.turns = match self.sessions.get(self.selected_session) {
+            Some(s) => crate::tracing::store::query::list_traces(conn, &s.key).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        // open at the newest turn
+        self.selected_turn = self.turns.len().saturating_sub(1);
+        self.load_observations();
+    }
+
+    pub fn load_observations(&mut self) {
+        let Some(conn) = &self.conn else {
+            return;
+        };
+        self.observations = match self.turns.get(self.selected_turn) {
+            Some(t) => {
+                crate::tracing::store::query::list_observations(conn, &t.id).unwrap_or_default()
+            }
+            None => Vec::new(),
+        };
+        self.selected_observation = self
+            .selected_observation
+            .min(self.observations.len().saturating_sub(1));
+        self.expanded = false;
+        self.scroll_offset = 0;
+        self.rebuild_detail();
+    }
+
+    /// Runs an FTS query and shows the matching turns in the turns pane.
+    pub fn run_search(&mut self, query: &str) {
+        let Some(conn) = &self.conn else {
+            return;
+        };
+        match crate::tracing::store::query::search(conn, query, 200) {
+            Ok(hits) => {
+                let mut seen = std::collections::HashSet::new();
+                let mut turns = Vec::new();
+                for hit in hits {
+                    if seen.insert(hit.trace_id.clone())
+                        && let Ok(Some(t)) =
+                            crate::tracing::store::query::find_trace(conn, &hit.trace_id)
+                    {
+                        turns.push(t);
+                    }
+                }
+                self.turns = turns;
+                self.selected_turn = 0;
+                self.search_query = Some(query.to_string());
+                self.focused = BrowserPane::Turns;
+                self.error = None;
+                self.load_observations();
+            }
+            Err(e) => self.error = Some(format!("search: {e}")),
+        }
+    }
+
+    fn rebuild_detail(&mut self) {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::Line;
+        let mut lines = Vec::new();
+        if let Some(o) = self.observations.get(self.selected_observation)
+            && self.expanded
+        {
+            let dim = Style::default().fg(Color::DarkGray);
+            let head = |label: &str| {
+                Line::styled(format!("── {label} ──"), Style::default().fg(Color::Yellow))
+            };
+            lines.push(Line::styled(
+                format!(
+                    "{} {}  {}{}",
+                    o.obs_type,
+                    o.name,
+                    o.model.clone().unwrap_or_default(),
+                    o.status_message
+                        .as_ref()
+                        .map(|m| format!("  ({m})"))
+                        .unwrap_or_default()
+                ),
+                Style::default().fg(Color::Cyan),
+            ));
+            let duration = o
+                .end_ns
+                .map(|e| crate::tracing::cli::fmt_ms((e - o.start_ns) / 1_000_000))
+                .unwrap_or_else(|| "running".into());
+            lines.push(Line::styled(
+                format!(
+                    "{}  {}  tokens {}  cost {}",
+                    crate::tracing::cli::fmt_time(o.start_ns),
+                    duration,
+                    crate::tracing::cli::fmt_tokens(o.total_tokens),
+                    crate::tracing::cli::fmt_cost(o.total_cost_usd)
+                ),
+                dim,
+            ));
+            for (label, body) in [
+                ("input", &o.input),
+                ("output", &o.output),
+                ("thinking", &o.thinking),
+            ] {
+                if let Some(text) = body {
+                    lines.push(head(label));
+                    for l in text.lines().take(2_000) {
+                        lines.push(Line::raw(l.to_string()));
+                    }
+                }
+            }
+            if o.metadata != "{}" {
+                lines.push(head("metadata"));
+                lines.push(Line::raw(o.metadata.clone()));
+            }
+            if o.input.is_none() && o.output.is_none() {
+                lines.push(Line::styled("(no content stored — metadata mode)", dim));
+            }
+        }
+        self.detail_lines = lines;
+    }
+
+    pub fn max_scroll(&self) -> usize {
+        self.detail_lines
+            .len()
+            .saturating_sub(self.viewport_rows.get().max(1))
+    }
+
+    pub fn toggle_expanded(&mut self) {
+        if self.observations.is_empty() {
+            return;
+        }
+        self.expanded = !self.expanded;
+        self.scroll_offset = 0;
+        self.rebuild_detail();
+    }
+
+    pub fn select_observation(&mut self, idx: usize) {
+        if self.observations.is_empty() {
+            return;
+        }
+        self.selected_observation = idx.min(self.observations.len() - 1);
+        self.scroll_offset = 0;
+        self.rebuild_detail();
+    }
+
+    /// Live sessions change under the browser: re-query at most once a
+    /// second while the selected session still has an open turn.
+    pub fn refresh_if_live(&mut self, now: Instant) {
+        if now.duration_since(self.last_refresh) < std::time::Duration::from_secs(1) {
+            return;
+        }
+        let live = self
+            .sessions
+            .get(self.selected_session)
+            .is_some_and(|s| s.open_turns > 0)
+            || self.turns.iter().any(|t| t.status == "open");
+        if !live || self.search_query.is_some() {
+            return;
+        }
+        self.last_refresh = now;
+        let filter = self.filter();
+        let Some(conn) = &self.conn else {
+            return;
+        };
+        let selected_key = self
+            .sessions
+            .get(self.selected_session)
+            .map(|s| s.key.clone());
+        let selected_turn_id = self.turns.get(self.selected_turn).map(|t| t.id.clone());
+        let selected_obs_id = self
+            .observations
+            .get(self.selected_observation)
+            .map(|o| o.id.clone());
+        if let Ok(rows) = crate::tracing::store::query::list_sessions(conn, &filter) {
+            self.sessions = rows;
+        }
+        if let Some(key) = selected_key
+            && let Some(idx) = self.sessions.iter().position(|s| s.key == key)
+        {
+            self.selected_session = idx;
+            self.turns = crate::tracing::store::query::list_traces(conn, &key).unwrap_or_default();
+            self.selected_turn = selected_turn_id
+                .and_then(|id| self.turns.iter().position(|t| t.id == id))
+                .unwrap_or(self.turns.len().saturating_sub(1));
+            if let Some(t) = self.turns.get(self.selected_turn) {
+                self.observations = crate::tracing::store::query::list_observations(conn, &t.id)
+                    .unwrap_or_default();
+                self.selected_observation = selected_obs_id
+                    .and_then(|id| self.observations.iter().position(|o| o.id == id))
+                    .unwrap_or(self.observations.len().saturating_sub(1));
+                let keep_scroll = self.scroll_offset;
+                self.rebuild_detail();
+                self.scroll_offset = keep_scroll.min(self.max_scroll());
+            }
+        }
+    }
+}
+
 /// A local (non-agent) text selection being dragged or held over one
 /// session's screen. `session_id` (not an index) so a selection can be
 /// recognized as stale once its session is removed/replaced/reordered.
@@ -659,15 +989,18 @@ pub struct App {
     just_detached: bool,
     next_id: usize,
     tx: Sender<AppEvent>,
-    langfuse: Option<crate::langfuse::LangfuseRuntime>,
+    tracing: Option<crate::tracing::TraceRuntime>,
+    /// Where the trace browser reads from; `None` when tracing is off.
+    trace_db_path: Option<std::path::PathBuf>,
 }
 
 impl App {
     pub fn new(
         profiles: Vec<Profile>,
-        langfuse: Option<crate::langfuse::LangfuseRuntime>,
+        tracing: Option<crate::tracing::TraceRuntime>,
         tx: Sender<AppEvent>,
     ) -> App {
+        let trace_db_path = tracing.as_ref().map(|rt| rt.db_path().to_path_buf());
         App {
             sessions: Vec::new(),
             selected: 0,
@@ -683,11 +1016,20 @@ impl App {
             just_detached: false,
             next_id: 0,
             tx,
-            langfuse,
+            tracing,
+            trace_db_path,
         }
     }
 
-    /// Spawns a session with Langfuse launch extras applied and the tracing
+    /// Periodic housekeeping driven by `AppEvent::Tick`: the trace browser
+    /// re-queries live sessions.
+    pub fn on_tick(&mut self, now: Instant) {
+        if let Mode::TraceBrowser(browser) = &mut self.mode {
+            browser.refresh_if_live(now);
+        }
+    }
+
+    /// Spawns a session with tracing launch extras applied and the tracing
     /// pipeline attached on success. The single spawn path for all three
     /// call sites (dialog, resume, respawn); with tracing off it degrades to
     /// a plain `Session::spawn`.
@@ -699,16 +1041,24 @@ impl App {
     ) -> anyhow::Result<Session> {
         let (rows, cols) = self.pane_size;
         let plan = self
-            .langfuse
+            .tracing
             .as_ref()
             .and_then(|rt| rt.plan_launch(&profile, &dir));
         let (extra_args, extra_env): (&[String], &[(String, String)]) = match &plan {
             Some(p) => (&p.extra_args, &p.extra_env),
             None => (&[], &[]),
         };
-        let mut session =
-            Session::spawn(id, profile, dir, rows, cols, self.tx.clone(), extra_args, extra_env)?;
-        if let (Some(rt), Some(plan)) = (self.langfuse.as_mut(), plan) {
+        let mut session = Session::spawn(
+            id,
+            profile,
+            dir,
+            rows,
+            cols,
+            self.tx.clone(),
+            extra_args,
+            extra_env,
+        )?;
+        if let (Some(rt), Some(plan)) = (self.tracing.as_mut(), plan) {
             session.trace = Some(rt.start_session(id, plan));
         }
         Ok(session)
@@ -716,8 +1066,24 @@ impl App {
 
     /// Hands the runtime back to `main` for the post-`kill_all` bounded
     /// shutdown flush.
-    pub fn take_langfuse(&mut self) -> Option<crate::langfuse::LangfuseRuntime> {
-        self.langfuse.take()
+    pub fn take_tracing(&mut self) -> Option<crate::tracing::TraceRuntime> {
+        self.tracing.take()
+    }
+
+    /// Routes a live rollup from the store writer to the session it
+    /// belongs to (by launch id); unknown launches are ignored.
+    pub fn handle_trace_stats(
+        &mut self,
+        launch_id: &str,
+        stats: crate::tracing::store::query::LaunchStats,
+    ) {
+        if let Some(s) = self
+            .sessions
+            .iter_mut()
+            .find(|s| s.trace.as_ref().is_some_and(|t| t.launch_id == launch_id))
+        {
+            s.trace_stats = Some(stats);
+        }
     }
 
     pub fn attached(&self) -> Option<usize> {
@@ -945,12 +1311,25 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent, _now: Instant) {
+        if let Mode::TraceBrowser(ref mut browser) = self.mode {
+            if matches!(ev.kind, MouseEventKind::ScrollUp) {
+                browser.scroll_offset = browser.scroll_offset.saturating_sub(3);
+            } else if matches!(ev.kind, MouseEventKind::ScrollDown) {
+                browser.scroll_offset = browser
+                    .scroll_offset
+                    .saturating_add(3)
+                    .min(browser.max_scroll());
+            }
+            return;
+        }
         if let Mode::SessionHistory(ref mut history) = self.mode {
             if matches!(ev.kind, MouseEventKind::ScrollUp) {
                 history.scroll_offset = history.scroll_offset.saturating_sub(3);
             } else if matches!(ev.kind, MouseEventKind::ScrollDown) {
-                history.scroll_offset =
-                    history.scroll_offset.saturating_add(3).min(history.max_scroll());
+                history.scroll_offset = history
+                    .scroll_offset
+                    .saturating_add(3)
+                    .min(history.max_scroll());
             }
             return;
         }
@@ -1211,6 +1590,18 @@ impl App {
                 self.mode = Mode::SessionHistory(HistoryState::new(cur_dir.as_deref()));
             }
             Action::HistoryKey => self.handle_history_key(key),
+            Action::OpenTraceBrowser => {
+                let cur_dir = self
+                    .sessions
+                    .get(self.selected)
+                    .map(|s| s.dir.clone())
+                    .or_else(|| std::env::current_dir().ok());
+                self.mode = Mode::TraceBrowser(Box::new(TraceBrowserState::new(
+                    self.trace_db_path.as_deref(),
+                    cur_dir.as_deref(),
+                )));
+            }
+            Action::BrowserKey => self.handle_browser_key(key),
             Action::RespawnSelected => {
                 self.selection = None;
                 self.respawn_selected();
@@ -1271,10 +1662,10 @@ impl App {
                     Some(p) => p.clone(),
                     None => return,
                 };
-                let mut p_langfuse = profile.langfuse.unwrap_or_default();
-                p_langfuse.enabled = Some(dialog.tracing_enabled);
-                p_langfuse.content_mode = Some(dialog.content_mode.to_string());
-                profile.langfuse = Some(p_langfuse);
+                let mut p_tracing = profile.tracing.unwrap_or_default();
+                p_tracing.enabled = Some(dialog.tracing_enabled);
+                p_tracing.content_mode = Some(dialog.content_mode.to_string());
+                profile.tracing = Some(p_tracing);
                 let dir = resolve_working_dir(&dialog.dir);
                 let id = self.next_id;
                 match self.spawn_traced(id, profile, dir) {
@@ -1293,6 +1684,167 @@ impl App {
                 }
             }
         }
+    }
+
+    fn handle_browser_key(&mut self, key: &KeyEvent) {
+        let Mode::TraceBrowser(browser) = &mut self.mode else {
+            return;
+        };
+        // the search prompt captures every key until Enter/Esc
+        if let Some(input) = browser.search_input.as_mut() {
+            match key.code {
+                KeyCode::Esc => browser.search_input = None,
+                KeyCode::Enter => {
+                    let query = input.trim().to_string();
+                    browser.search_input = None;
+                    if query.is_empty() {
+                        browser.reload_sessions();
+                    } else {
+                        browser.run_search(&query);
+                    }
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => input.push(c),
+                _ => {}
+            }
+            return;
+        }
+        let page = browser.viewport_rows.get().max(1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if browser.expanded {
+                    browser.toggle_expanded();
+                } else if browser.search_query.is_some() {
+                    browser.reload_sessions();
+                    browser.focused = BrowserPane::Sessions;
+                } else {
+                    self.mode = Mode::Control;
+                }
+            }
+            KeyCode::Tab | KeyCode::Right => {
+                browser.focused = match browser.focused {
+                    BrowserPane::Sessions => BrowserPane::Turns,
+                    BrowserPane::Turns => BrowserPane::Detail,
+                    BrowserPane::Detail => BrowserPane::Sessions,
+                };
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                browser.focused = match browser.focused {
+                    BrowserPane::Sessions => BrowserPane::Detail,
+                    BrowserPane::Turns => BrowserPane::Sessions,
+                    BrowserPane::Detail => BrowserPane::Turns,
+                };
+            }
+            KeyCode::Char('/') => browser.search_input = Some(String::new()),
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                browser.all_projects = !browser.all_projects;
+                browser.reload_sessions();
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                if let Some(session) = browser.sessions.get(browser.selected_session).cloned() {
+                    self.resume_traced_session(&session);
+                }
+            }
+            KeyCode::Enter => match browser.focused {
+                BrowserPane::Sessions => browser.focused = BrowserPane::Turns,
+                BrowserPane::Turns => browser.focused = BrowserPane::Detail,
+                BrowserPane::Detail => browser.toggle_expanded(),
+            },
+            KeyCode::Down | KeyCode::Char('j') => match browser.focused {
+                BrowserPane::Sessions => {
+                    if !browser.sessions.is_empty() {
+                        let next = (browser.selected_session + 1).min(browser.sessions.len() - 1);
+                        if next != browser.selected_session {
+                            browser.selected_session = next;
+                            browser.search_query = None;
+                            browser.load_turns();
+                        }
+                    }
+                }
+                BrowserPane::Turns => {
+                    if !browser.turns.is_empty() {
+                        let next = (browser.selected_turn + 1).min(browser.turns.len() - 1);
+                        if next != browser.selected_turn {
+                            browser.selected_turn = next;
+                            browser.load_observations();
+                        }
+                    }
+                }
+                BrowserPane::Detail => {
+                    if browser.expanded {
+                        browser.scroll_offset = browser
+                            .scroll_offset
+                            .saturating_add(1)
+                            .min(browser.max_scroll());
+                    } else {
+                        browser.select_observation(browser.selected_observation + 1);
+                    }
+                }
+            },
+            KeyCode::Up | KeyCode::Char('k') => match browser.focused {
+                BrowserPane::Sessions => {
+                    if browser.selected_session > 0 {
+                        browser.selected_session -= 1;
+                        browser.search_query = None;
+                        browser.load_turns();
+                    }
+                }
+                BrowserPane::Turns => {
+                    if browser.selected_turn > 0 {
+                        browser.selected_turn -= 1;
+                        browser.load_observations();
+                    }
+                }
+                BrowserPane::Detail => {
+                    if browser.expanded {
+                        browser.scroll_offset = browser.scroll_offset.saturating_sub(1);
+                    } else {
+                        browser.select_observation(browser.selected_observation.saturating_sub(1));
+                    }
+                }
+            },
+            KeyCode::PageDown => {
+                browser.scroll_offset = browser
+                    .scroll_offset
+                    .saturating_add(page)
+                    .min(browser.max_scroll());
+            }
+            KeyCode::PageUp => browser.scroll_offset = browser.scroll_offset.saturating_sub(page),
+            KeyCode::Home => browser.scroll_offset = 0,
+            KeyCode::End => browser.scroll_offset = browser.max_scroll(),
+            _ => {}
+        }
+    }
+
+    /// Resumes a session picked in the trace browser through the same path
+    /// the history viewer uses.
+    fn resume_traced_session(&mut self, session: &crate::tracing::store::query::SessionStat) {
+        let provider = match session.provider.as_str() {
+            "claude" => crate::history::AgentProvider::Claude,
+            "antigravity" => crate::history::AgentProvider::Antigravity,
+            other => {
+                self.notice = Some(Notice::warn(format!(
+                    "resume is not supported for {other} sessions"
+                )));
+                return;
+            }
+        };
+        let summary = SessionSummary {
+            session_id: session.session_id.clone(),
+            title: session.title.clone().unwrap_or_default(),
+            modified: std::time::SystemTime::UNIX_EPOCH,
+            file_path: std::path::PathBuf::from(
+                session.transcript_path.clone().unwrap_or_default(),
+            ),
+            turn_count: session.turn_count as usize,
+            project_slug: session.project_slug.clone().unwrap_or_default(),
+            timestamp_str: String::new(),
+            provider,
+            cwd: session.cwd.as_ref().map(std::path::PathBuf::from),
+        };
+        self.resume_history_session(&summary);
     }
 
     fn handle_history_key(&mut self, key: &KeyEvent) {
@@ -1327,7 +1879,8 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => match history.focused_pane {
                 HistoryPane::SessionsList => {
                     if !history.sessions.is_empty() {
-                        let next = (history.selected_session_idx + 1).min(history.sessions.len() - 1);
+                        let next =
+                            (history.selected_session_idx + 1).min(history.sessions.len() - 1);
                         if next != history.selected_session_idx {
                             history.selected_session_idx = next;
                             history.load_selected_log();
@@ -1335,8 +1888,10 @@ impl App {
                     }
                 }
                 HistoryPane::LogDetail => {
-                    history.scroll_offset =
-                        history.scroll_offset.saturating_add(1).min(history.max_scroll());
+                    history.scroll_offset = history
+                        .scroll_offset
+                        .saturating_add(1)
+                        .min(history.max_scroll());
                 }
             },
             KeyCode::Up | KeyCode::Char('k') => match history.focused_pane {
@@ -1351,8 +1906,10 @@ impl App {
                 }
             },
             KeyCode::PageDown => {
-                history.scroll_offset =
-                    history.scroll_offset.saturating_add(15).min(history.max_scroll());
+                history.scroll_offset = history
+                    .scroll_offset
+                    .saturating_add(15)
+                    .min(history.max_scroll());
             }
             KeyCode::PageUp => {
                 history.scroll_offset = history.scroll_offset.saturating_sub(15);
@@ -1380,7 +1937,7 @@ impl App {
                         command: "claude".into(),
                         args: vec![],
                         default_dir: None,
-                        langfuse: None,
+                        tracing: None,
                     });
                 let mut resume_profile = p;
                 resume_profile.args = vec!["--resume".into(), summary.session_id.clone()];
@@ -1401,11 +1958,11 @@ impl App {
                         command: "agy".into(),
                         args: vec![],
                         default_dir: None,
-                        langfuse: None,
+                        tracing: None,
                     });
                 // `agy` alone starts a NEW conversation; resuming requires
                 // the id (this also makes resume correlation deterministic
-                // for Langfuse).
+                // for tracing).
                 let mut resume_profile = p;
                 resume_profile.args = vec!["--conversation".into(), summary.session_id.clone()];
                 resume_profile
@@ -1464,6 +2021,7 @@ impl App {
         };
         if let Some(trace) = s.trace.take() {
             trace.mark_stopped();
+            s.trace_stats = None;
             self.notice = Some(Notice::info(format!(
                 "tracing stopped for '{}'",
                 s.profile.name
@@ -1473,8 +2031,10 @@ impl App {
                 self.notice = Some(Notice::warn("cannot trace an exited session"));
                 return;
             }
-            let Some(rt) = self.langfuse.as_mut() else {
-                self.notice = Some(Notice::warn("langfuse tracing is not configured/enabled"));
+            let Some(rt) = self.tracing.as_mut() else {
+                self.notice = Some(Notice::warn(
+                    "tracing is off (store unavailable or [tracing] enabled = false)",
+                ));
                 return;
             };
             if let Some(plan) = rt.plan_attach(&s.profile, &s.dir) {
@@ -1625,7 +2185,12 @@ mod dispatch_tests {
             Action::OpenHelp
         ));
         // any close key leaves Help
-        for code in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('?'), KeyCode::Enter] {
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Char('q'),
+            KeyCode::Char('?'),
+            KeyCode::Enter,
+        ] {
             assert!(matches!(
                 dispatch(&Mode::Help, &key(code), &c),
                 Action::CancelToControl
@@ -1644,9 +2209,10 @@ mod dispatch_tests {
             dispatch(&Mode::Control, &key(KeyCode::Char('t')), &c),
             Action::ToggleTracing
         ));
+        // Shift+T is the trace browser, not a second toggle
         assert!(matches!(
             dispatch(&Mode::Control, &key(KeyCode::Char('T')), &c),
-            Action::ToggleTracing
+            Action::OpenTraceBrowser
         ));
     }
 
@@ -1811,14 +2377,14 @@ mod dialog_tests {
                 command: "a".into(),
                 args: vec![],
                 default_dir: Some("C:\\one".into()),
-                langfuse: None,
+                tracing: None,
             },
             Profile {
                 name: "B".into(),
                 command: "b".into(),
                 args: vec![],
                 default_dir: Some("C:\\two".into()),
-                langfuse: None,
+                tracing: None,
             },
         ]
     }
@@ -1935,7 +2501,7 @@ mod dialog_tests {
             command: "claude".into(),
             args: vec![],
             default_dir: None,
-            langfuse: None,
+            tracing: None,
         }];
         let d = DialogState::new(&profiles);
         assert_eq!(d.profile_idx, 0);
@@ -1972,7 +2538,7 @@ mod dialog_tests {
             command: "sh".into(),
             args: vec![],
             default_dir: Some(root.to_string_lossy().into_owned()),
-            langfuse: None,
+            tracing: None,
         }];
 
         let mut d = DialogState::new(&profiles);
@@ -1995,17 +2561,11 @@ mod dialog_tests {
 
         // Right arrow descends into sub_a
         d.handle_key(&key(KeyCode::Right), &profiles);
-        assert_eq!(
-            std::path::PathBuf::from(&d.dir),
-            root.join("sub_a")
-        );
+        assert_eq!(std::path::PathBuf::from(&d.dir), root.join("sub_a"));
 
         // Left arrow goes back up to root
         d.handle_key(&key(KeyCode::Left), &profiles);
-        assert_eq!(
-            std::path::PathBuf::from(&d.dir),
-            root
-        );
+        assert_eq!(std::path::PathBuf::from(&d.dir), root);
     }
 }
 
@@ -2039,6 +2599,32 @@ mod history_tests {
     }
 
     #[test]
+    fn shift_t_opens_the_trace_browser_and_t_toggles_tracing() {
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('T')), &ctx()),
+            Action::OpenTraceBrowser
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('t')), &ctx()),
+            Action::ToggleTracing
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(vec![], None, tx);
+        // tracing off: opening still works and explains itself
+        app.handle_key(&key(KeyCode::Char('T')), Instant::now());
+        match &app.mode {
+            Mode::TraceBrowser(b) => assert!(b.error.is_some()),
+            other => panic!("expected the trace browser, got {other:?}"),
+        }
+        assert!(matches!(
+            dispatch(&app.mode, &key(KeyCode::Tab), &ctx()),
+            Action::BrowserKey
+        ));
+        app.handle_key(&key(KeyCode::Esc), Instant::now());
+        assert!(matches!(app.mode, Mode::Control));
+    }
+
+    #[test]
     fn history_mode_dispatches_history_key() {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut app = App::new(vec![], None, tx);
@@ -2054,7 +2640,10 @@ mod history_tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut app = App::new(vec![], None, tx);
         let mut hist = HistoryState::new(None);
-        hist.log_lines = vec![ratatui::text::Line::raw("line1"), ratatui::text::Line::raw("line2")];
+        hist.log_lines = vec![
+            ratatui::text::Line::raw("line1"),
+            ratatui::text::Line::raw("line2"),
+        ];
         // 1-row viewport: two lines of content leave exactly one scroll step
         hist.viewport_rows.set(1);
         hist.scroll_offset = 0;
@@ -2079,4 +2668,3 @@ mod history_tests {
         assert!(matches!(app.mode, Mode::Control));
     }
 }
-

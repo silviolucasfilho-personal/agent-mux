@@ -1,0 +1,172 @@
+# Bundled model price table. USD per 1M tokens. Data, not code: verify every
+# row against the provider's pricing page when editing, and bump
+# `updated_at`. Users override or add rows with `[[tracing.models]]` in
+# profiles.toml; rows edited directly in the DB (`source = 'user'`) are never
+# touched by this file.
+#
+# `match` entries are lowercase; a trailing `*` is a prefix match. Model
+# names are normalized before matching (provider prefixes, `[1m]`, Bedrock
+# and date suffixes stripped), so `claude-sonnet-4-5-20250929` matches
+# `claude-sonnet-4-5`.
+#
+# Sources: Anthropic API reference snapshot (2026-06) for the Claude rows;
+# Langfuse `default-model-prices.json` (v4.24.0) for cross-checks and the
+# Codex/GPT rows. Cache write 5m = 1.25× input, 1h = 2× input, cache read =
+# 0.1× input for Claude unless the provider states otherwise.
+updated_at = "2026-06-24"
+
+[[models]]
+id = "claude-fable-5-1"
+provider = "anthropic"
+match = ["claude-fable-5-1", "claude-mythos-5-1"]
+input = 10.0
+output = 50.0
+cache_read = 0.25
+cache_write = 12.5
+cache_write_1h = 20.0
+
+[[models]]
+id = "claude-fable-5"
+provider = "anthropic"
+match = ["claude-fable-5", "claude-mythos-5"]
+input = 10.0
+output = 50.0
+cache_read = 1.0
+cache_write = 12.5
+cache_write_1h = 20.0
+
+[[models]]
+id = "claude-opus-5"
+provider = "anthropic"
+match = ["claude-opus-5"]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+cache_write_1h = 10.0
+
+[[models]]
+id = "claude-opus-4-8"
+provider = "anthropic"
+match = ["claude-opus-4-8"]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+cache_write_1h = 10.0
+
+[[models]]
+id = "claude-opus-4-7"
+provider = "anthropic"
+match = ["claude-opus-4-7"]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+cache_write_1h = 10.0
+
+[[models]]
+id = "claude-opus-4-6"
+provider = "anthropic"
+match = ["claude-opus-4-6"]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+cache_write_1h = 10.0
+
+[[models]]
+id = "claude-opus-4-5"
+provider = "anthropic"
+match = ["claude-opus-4-5"]
+input = 5.0
+output = 25.0
+cache_read = 0.5
+cache_write = 6.25
+cache_write_1h = 10.0
+
+[[models]]
+id = "claude-sonnet-5"
+provider = "anthropic"
+match = ["claude-sonnet-5"]
+input = 2.0
+output = 10.0
+cache_read = 0.2
+cache_write = 2.5
+cache_write_1h = 4.0
+
+[[models]]
+id = "claude-sonnet-4-6"
+provider = "anthropic"
+match = ["claude-sonnet-4-6"]
+input = 3.0
+output = 15.0
+cache_read = 0.3
+cache_write = 3.75
+cache_write_1h = 6.0
+
+[[models]]
+id = "claude-sonnet-4-5"
+provider = "anthropic"
+match = ["claude-sonnet-4-5", "claude-sonnet-4-5-*"]
+input = 3.0
+output = 15.0
+cache_read = 0.3
+cache_write = 3.75
+cache_write_1h = 6.0
+
+[[models]]
+id = "claude-sonnet-4"
+provider = "anthropic"
+match = ["claude-sonnet-4", "claude-sonnet-4-*"]
+input = 3.0
+output = 15.0
+cache_read = 0.3
+cache_write = 3.75
+cache_write_1h = 6.0
+
+[[models]]
+id = "claude-opus-4-1"
+provider = "anthropic"
+match = ["claude-opus-4-1", "claude-opus-4-1-*"]
+input = 15.0
+output = 75.0
+cache_read = 1.5
+cache_write = 18.75
+cache_write_1h = 30.0
+
+[[models]]
+id = "claude-opus-4"
+provider = "anthropic"
+match = ["claude-opus-4", "claude-opus-4-*"]
+input = 15.0
+output = 75.0
+cache_read = 1.5
+cache_write = 18.75
+cache_write_1h = 30.0
+
+[[models]]
+id = "claude-haiku-4-5"
+provider = "anthropic"
+match = ["claude-haiku-4-5", "claude-haiku-4-5-*"]
+input = 1.0
+output = 5.0
+cache_read = 0.1
+cache_write = 1.25
+cache_write_1h = 2.0
+
+[[models]]
+id = "gpt-5.3-codex"
+provider = "openai"
+match = ["gpt-5.3-codex"]
+input = 1.75
+output = 14.0
+cache_read = 0.175
+
+[[models]]
+id = "gpt-5"
+provider = "openai"
+match = ["gpt-5", "gpt-5-codex"]
+input = 1.25
+output = 10.0
+cache_read = 0.125

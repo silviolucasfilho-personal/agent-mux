@@ -3,12 +3,11 @@ pub mod config;
 pub mod events;
 pub mod history;
 pub mod keys;
-pub mod langfuse;
 pub mod mouse;
 pub mod search;
-pub mod transcript;
 pub mod selection;
 pub mod session;
 pub mod status;
+pub mod tracing;
+pub mod transcript;
 pub mod ui;
-
