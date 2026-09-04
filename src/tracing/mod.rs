@@ -14,17 +14,22 @@
 pub mod agy_usage;
 pub mod cli;
 pub mod correlate;
+pub mod hooks;
 pub mod ids;
+pub mod langfuse;
 pub mod map;
 pub mod pricing;
 pub mod store;
 pub mod tail;
 pub mod usage;
+pub mod view;
 
-use crate::config::{ContentMode, Profile, ResolvedTracing};
+use crate::config::{Backend, ContentMode, Profile, ResolvedTracing};
 use crate::events::AppEvent;
 use crate::transcript::Provider;
 use correlate::{Adopted, ClaimRegistry, CorrelationSpec};
+use hooks::feed::HookFeed;
+use langfuse::ExporterHandle;
 use map::{MapSettings, SessionEnd, TurnAssembler};
 use pricing::PriceTable;
 use std::collections::HashSet;
@@ -54,6 +59,8 @@ pub struct SessionTraceHandle {
     phase: watch::Sender<Phase>,
     /// The launch this handle traces — the join key for live stats.
     pub launch_id: String,
+    /// Where the launch's rows go (drives the badge glyph).
+    pub backend: Backend,
 }
 
 impl SessionTraceHandle {
@@ -84,6 +91,13 @@ pub struct LaunchPlan {
     injected: bool,
     /// True when attached to an already-running session (the `t` toggle).
     attached: bool,
+    /// True when a per-launch hook registration was added to the args.
+    hooks_registered: bool,
+    /// Where this launch's rows go.
+    pub backend: Backend,
+    /// The backend the profile or dialog asked for when it could not be
+    /// honored (Langfuse not configured): recorded on the launch row.
+    pub backend_requested: Option<Backend>,
     profile_name: String,
     dir: PathBuf,
 }
@@ -92,6 +106,8 @@ pub struct TraceRuntime {
     settings: ResolvedTracing,
     claims: Arc<ClaimRegistry>,
     writer: WriterHandle,
+    /// The Langfuse sink, spawned only when credentials resolve.
+    exporter: Option<ExporterHandle>,
     run_id: String,
     shutdown_tx: watch::Sender<bool>,
     pipelines: Vec<tokio::task::JoinHandle<()>>,
@@ -104,6 +120,15 @@ pub struct TraceRuntime {
     /// Once-per-run latch for the dropped-ops warning, shared between the
     /// writer's status sink and the pipelines' queue-full paths.
     drop_warned: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Which sinks an op reaches under `backend`: (local store, Langfuse).
+/// Launch rows always stay local.
+pub fn sink_targets(op: &StoreOp, backend: Backend) -> (bool, bool) {
+    match op {
+        StoreOp::Launch(_) => (true, false),
+        _ => (backend.local(), backend.langfuse()),
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -211,10 +236,36 @@ impl TraceRuntime {
                 }
             })),
         );
+        let exporter = settings.langfuse.as_ref().map(|lf| {
+            let status_for_exporter = status_tx.clone();
+            let stats_tx = status_tx.clone();
+            let mut last_stats: std::collections::HashMap<String, Instant> =
+                std::collections::HashMap::new();
+            langfuse::spawn_exporter(
+                langfuse::ExporterConfig::new(lf),
+                langfuse::map::MapCtx::from_settings(&settings),
+                Box::new(move |_class, message| {
+                    let _ = status_for_exporter.try_send(AppEvent::TraceStatus(message));
+                }),
+                Box::new(move |launch_id, stats| {
+                    let due = last_stats
+                        .get(launch_id)
+                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
+                    if due {
+                        last_stats.insert(launch_id.to_string(), Instant::now());
+                        let _ = stats_tx.try_send(AppEvent::TraceStats {
+                            launch_id: launch_id.to_string(),
+                            stats,
+                        });
+                    }
+                }),
+            )
+        });
         Ok(TraceRuntime {
             settings,
             claims: Arc::new(Mutex::new(HashSet::new())),
             writer,
+            exporter,
             run_id,
             shutdown_tx: watch::Sender::new(false),
             pipelines: Vec::new(),
@@ -231,6 +282,38 @@ impl TraceRuntime {
 
     pub fn db_path(&self) -> &Path {
         &self.settings.db_path
+    }
+
+    /// True when Langfuse credentials resolved and the exporter is running.
+    pub fn langfuse_configured(&self) -> bool {
+        self.exporter.is_some()
+    }
+
+    /// The configured default destination.
+    pub fn default_backend(&self) -> Backend {
+        self.settings.backend
+    }
+
+    /// The destination for a launch: the profile's choice, else the global
+    /// default, downgraded to local (with a one-line notice) when Langfuse
+    /// is not configured. Returns the backend and, when downgraded, what
+    /// was asked for.
+    fn resolve_backend(&self, profile: &Profile) -> (Backend, Option<Backend>) {
+        let wanted = profile
+            .tracing
+            .as_ref()
+            .and_then(|o| o.backend.as_deref())
+            .and_then(Backend::parse)
+            .unwrap_or(self.settings.backend);
+        if wanted.langfuse() && self.exporter.is_none() {
+            let _ = self.status_tx.try_send(AppEvent::TraceStatus(format!(
+                "tracing: Langfuse is not configured — '{}' is traced locally \
+                 (set [tracing.langfuse] or $LANGFUSE_* keys; see `agent-mux trace doctor`)",
+                profile.name
+            )));
+            return (Backend::Local, Some(wanted));
+        }
+        (wanted, None)
     }
 
     pub fn claude_dir(&self) -> Option<PathBuf> {
@@ -359,6 +442,7 @@ impl TraceRuntime {
             }
         };
 
+        let (backend, backend_requested) = self.resolve_backend(profile);
         Some(LaunchPlan {
             extra_env: Vec::new(),
             launch_id,
@@ -370,6 +454,9 @@ impl TraceRuntime {
             known_session_id,
             injected: false,
             attached: true,
+            hooks_registered: false,
+            backend,
+            backend_requested,
             profile_name: profile.name.clone(),
             dir: dir.to_path_buf(),
         })
@@ -499,11 +586,58 @@ impl TraceRuntime {
             }
         };
 
+        // Per-launch hook registrations: nothing is written anywhere, and a
+        // profile that already failed fast twice gets none (an old binary
+        // rejecting unknown flags looks exactly like that).
+        let hooks_wanted = self.settings.hooks.registers()
+            && over.and_then(|o| o.hooks.as_deref()) != Some("off")
+            && !self
+                .injection_disabled
+                .lock()
+                .map(|s| s.contains(&profile.name))
+                .unwrap_or(false);
+        let mut hooks_registered = false;
+        let mut extra_env = vec![
+            ("AGENT_MUX".to_string(), "1".to_string()),
+            ("AGENT_MUX_SESSION_ID".to_string(), launch_id.clone()),
+        ];
+        if hooks_wanted && let Some(exe) = hooks::register::current_exe() {
+            extra_env.push(("AGENT_MUX_EXE".into(), exe.to_string_lossy().into_owned()));
+            let reg = hooks::register::Registration {
+                exe,
+                home: self.settings.home.clone(),
+                content_mode,
+            };
+            match provider {
+                Provider::Claude => {
+                    let user_files = [
+                        self.settings.home.join(".claude").join("settings.json"),
+                        dir.join(".claude").join("settings.json"),
+                        dir.join(".claude").join("settings.local.json"),
+                    ];
+                    extra_args.push("--settings".into());
+                    extra_args.push(hooks::register::claude_settings_json(&reg, &user_files));
+                    hooks_registered = true;
+                }
+                Provider::Codex => {
+                    let chain = hooks::register::codex_user_notify(&self.settings.home);
+                    extra_args.push("-c".into());
+                    extra_args.push(hooks::register::codex_notify_override(
+                        &reg,
+                        &launch_id,
+                        chain.as_deref(),
+                    ));
+                    hooks_registered = true;
+                }
+                // agy loads hooks only from customization roots: see
+                // `trace hooks install agy`
+                Provider::Antigravity => {}
+            }
+        }
+
+        let (backend, backend_requested) = self.resolve_backend(profile);
         Some(LaunchPlan {
-            extra_env: vec![
-                ("AGENT_MUX".into(), "1".into()),
-                ("AGENT_MUX_SESSION_ID".into(), launch_id.clone()),
-            ],
+            extra_env,
             launch_id,
             extra_args,
             provider,
@@ -513,6 +647,9 @@ impl TraceRuntime {
             known_session_id,
             injected,
             attached: false,
+            hooks_registered,
+            backend,
+            backend_requested,
             profile_name: profile.name.clone(),
             dir: dir.to_path_buf(),
         })
@@ -539,7 +676,11 @@ impl TraceRuntime {
             agent_mux_session,
             launch_id: plan.launch_id.clone(),
             run_id: self.run_id.clone(),
-            correlation_plan: plan.correlation_label.to_string(),
+            correlation_plan: if plan.hooks_registered {
+                format!("announced+{}", plan.correlation_label)
+            } else {
+                plan.correlation_label.to_string()
+            },
             injected: plan.injected,
             attached: plan.attached,
             started_ns,
@@ -550,6 +691,27 @@ impl TraceRuntime {
         if self.writer.tx.try_send(op).is_err() {
             self.writer.dropped.fetch_add(1, Ordering::Relaxed);
             self.warn_dropped();
+        }
+    }
+
+    /// Sends one op to the sinks `backend` selects (launch rows always go
+    /// to the store).
+    fn send_routed(&self, op: StoreOp, backend: Backend) {
+        let (local, remote) = sink_targets(&op, backend);
+        if remote && let Some(exporter) = &self.exporter {
+            if local {
+                if exporter.tx.try_send(op.clone()).is_err() {
+                    exporter.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            } else if exporter.tx.try_send(op).is_err() {
+                exporter.dropped.fetch_add(1, Ordering::Relaxed);
+                return;
+            } else {
+                return;
+            }
+        }
+        if local {
+            self.send(op);
         }
     }
 
@@ -568,19 +730,45 @@ impl TraceRuntime {
                 Some(id.clone()),
                 plan.correlation_label,
             );
-            self.send(StoreOp::Session(seed.session_row(started_ns)));
+            self.send_routed(StoreOp::Session(seed.session_row(started_ns)), plan.backend);
         }
-        self.send(StoreOp::Launch(map::launch_started(
-            &map_settings,
-            plan.known_session_id.as_deref(),
-        )));
+        let mut launch = map::launch_started(&map_settings, plan.known_session_id.as_deref());
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "backend".into(),
+            serde_json::Value::from(plan.backend.as_str()),
+        );
+        if let Some(wanted) = plan.backend_requested {
+            meta.insert(
+                "backend_requested".into(),
+                serde_json::Value::from(wanted.as_str()),
+            );
+        }
+        launch.metadata = Some(serde_json::Value::Object(meta));
+        self.send(StoreOp::Launch(launch));
         let phase_tx = watch::Sender::new(Phase::Running);
         let phase_rx = phase_tx.subscribe();
         let launch_id = plan.launch_id.clone();
+        let backend = plan.backend;
+        let known_resume = matches!(
+            &plan.correlation,
+            CorrelationSpec::KnownClaude { resume: true, .. }
+                | CorrelationSpec::KnownAntigravity { .. }
+        );
+        let codex_sessions_dir = match &plan.correlation {
+            CorrelationSpec::WatchCodex { sessions_dir, .. } => Some(sessions_dir.clone()),
+            _ => None,
+        };
         let ctx = PipelineCtx {
+            db_path: self.settings.db_path.clone(),
+            known_resume,
+            codex_sessions_dir,
             claims: Arc::clone(&self.claims),
             op_tx: self.writer.tx.clone(),
             dropped: Arc::clone(&self.writer.dropped),
+            backend: plan.backend,
+            export_tx: self.exporter.as_ref().map(|e| e.tx.clone()),
+            export_dropped: self.exporter.as_ref().map(|e| Arc::clone(&e.dropped)),
             status_tx: self.status_tx.clone(),
             injection_disabled: Arc::clone(&self.injection_disabled),
             fast_failures: Arc::clone(&self.fast_failures),
@@ -589,7 +777,7 @@ impl TraceRuntime {
             correlation: plan.correlation,
             correlation_label: plan.correlation_label,
             known_session_id: plan.known_session_id,
-            injected: plan.injected,
+            injected: plan.injected || plan.hooks_registered,
             profile_name: plan.profile_name,
             provider: plan.provider,
             poll_interval: Duration::from_millis(self.settings.poll_interval_ms.max(50)),
@@ -601,6 +789,7 @@ impl TraceRuntime {
         SessionTraceHandle {
             phase: phase_tx,
             launch_id,
+            backend,
         }
     }
 
@@ -618,6 +807,7 @@ impl TraceRuntime {
     pub async fn shutdown(self, deadline: Duration) {
         let TraceRuntime {
             writer,
+            exporter,
             shutdown_tx,
             pipelines,
             ..
@@ -632,14 +822,31 @@ impl TraceRuntime {
         };
         let _ = tokio::time::timeout(half, join_all).await;
         let remaining = deadline.saturating_sub(started.elapsed());
-        let _ = tokio::task::spawn_blocking(move || writer.finish(remaining)).await;
+        let writer_done = tokio::task::spawn_blocking(move || writer.finish(remaining));
+        let exporter_done =
+            exporter.map(|e| tokio::task::spawn_blocking(move || e.finish(remaining)));
+        let _ = writer_done.await;
+        if let Some(done) = exporter_done {
+            let _ = done.await;
+        }
     }
 }
 
 struct PipelineCtx {
+    /// The store, for the hook feed's read-only connection.
+    db_path: PathBuf,
+    /// The launch resumes existing history (prime, never re-emit).
+    known_resume: bool,
+    /// Codex: where to look a hook-announced thread id up.
+    codex_sessions_dir: Option<PathBuf>,
     claims: Arc<ClaimRegistry>,
     op_tx: std::sync::mpsc::SyncSender<StoreOp>,
     dropped: Arc<AtomicU64>,
+    /// Where this launch's rows go.
+    backend: Backend,
+    /// The Langfuse sink, when configured (`backend` decides its use).
+    export_tx: Option<std::sync::mpsc::SyncSender<StoreOp>>,
+    export_dropped: Option<Arc<AtomicU64>>,
     status_tx: tokio::sync::mpsc::Sender<AppEvent>,
     injection_disabled: Arc<Mutex<HashSet<String>>>,
     fast_failures: Arc<Mutex<std::collections::HashMap<String, u32>>>,
@@ -664,6 +871,9 @@ struct Pipeline {
     claim_guard: Option<correlate::ClaimGuard>,
     /// Antigravity: the per-request usage agy keeps outside the transcript.
     agy_usage: Option<agy_usage::AgyUsageReader>,
+    /// The hook channel for this launch.
+    hook_feed: HookFeed,
+    hook_events: u64,
     parse_errors: u64,
     started: Instant,
 }
@@ -671,6 +881,17 @@ struct Pipeline {
 impl Pipeline {
     fn send_ops(&self, ops: Vec<StoreOp>) {
         for op in ops {
+            let (local, remote) = sink_targets(&op, self.ctx.backend);
+            if remote
+                && let Some(tx) = &self.ctx.export_tx
+                && tx.try_send(op.clone()).is_err()
+                && let Some(counter) = &self.ctx.export_dropped
+            {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+            if !local {
+                continue;
+            }
             if self.ctx.op_tx.try_send(op).is_err() {
                 self.ctx.dropped.fetch_add(1, Ordering::Relaxed);
                 if !self.ctx.drop_warned.swap(true, Ordering::Relaxed) {
@@ -711,6 +932,7 @@ impl Pipeline {
             .set_session_id(&adopted.session_id, adopted.correlation);
         self.assembler
             .set_transcript_path(&adopted.path.to_string_lossy());
+        self.hook_feed.set_session(&adopted.session_id);
         if adopted.resume_prime {
             match Tailer::prime(&adopted.path, self.ctx.backfill_max_bytes) {
                 Ok((tailer, lines, truncated)) => {
@@ -772,15 +994,85 @@ impl Pipeline {
         self.send_ops(ops);
     }
 
+    /// A hook that named this launch's session (and transcript) wins over
+    /// every watch heuristic. `resume_prime` follows the CLI's own word:
+    /// a `resume` start, or a launch that already knew it resumes, primes
+    /// the existing content instead of re-recording it.
+    fn try_announced(&mut self) -> Option<Adopted> {
+        let ann = self.hook_feed.announcement()?;
+        let path = match ann.transcript_path.as_deref() {
+            Some(p) => PathBuf::from(p),
+            None if self.ctx.provider == Provider::Codex => correlate::codex_rollout_by_thread(
+                self.ctx.codex_sessions_dir.as_deref()?,
+                &ann.session_id,
+            )?,
+            None => return None,
+        };
+        if !path.is_file() {
+            return None;
+        }
+        if !correlate::try_claim(&self.ctx.claims, self.ctx.provider, &ann.session_id) {
+            return None;
+        }
+        Some(Adopted {
+            session_id: ann.session_id,
+            path,
+            correlation: "announced",
+            resume_prime: self.ctx.known_resume || ann.source.as_deref() == Some("resume"),
+        })
+    }
+
+    /// Hook rows since the last tick: launch-level facts go straight to the
+    /// launch row, everything else to the assembler.
+    fn poll_hooks(&mut self) {
+        let events = self.hook_feed.poll();
+        if events.is_empty() {
+            return;
+        }
+        self.hook_events += events.len() as u64;
+        let mut ops = Vec::new();
+        for ev in &events {
+            match ev.event.as_str() {
+                "SessionStart" => {
+                    let meta = serde_json::json!({
+                        "hooks": true,
+                        "session_start_source": ev.payload.get("source").cloned().unwrap_or(serde_json::Value::Null),
+                    });
+                    ops.push(StoreOp::Launch(map::launch_metadata(
+                        &self.ctx.map_settings,
+                        self.assembler.session_id(),
+                        meta,
+                    )));
+                }
+                "SessionEnd" => {
+                    let meta = serde_json::json!({
+                        "session_end_reason": ev.payload.get("reason").cloned().unwrap_or(serde_json::Value::Null),
+                    });
+                    ops.push(StoreOp::Launch(map::launch_metadata(
+                        &self.ctx.map_settings,
+                        self.assembler.session_id(),
+                        meta,
+                    )));
+                }
+                _ => ops.extend(self.assembler.attach_hook_event(ev)),
+            }
+        }
+        self.send_ops(ops);
+    }
+
     fn tick(&mut self) {
-        if self.adopted.is_none()
-            && let Some(adopted) =
+        if self.adopted.is_none() {
+            if let Some(adopted) = self.try_announced() {
+                self.adopt(adopted);
+            } else if let Some(adopted) =
                 correlate::poll(&mut self.ctx.correlation, self.started, &self.ctx.claims)
-        {
-            self.adopt(adopted);
+            {
+                self.adopt(adopted);
+            }
         }
         self.tick_tail();
         self.poll_agy_usage();
+        self.poll_hooks();
     }
 
     fn tick_tail(&mut self) {
@@ -835,6 +1127,7 @@ impl Pipeline {
             self.feed_line(&line);
         }
         self.poll_agy_usage();
+        self.poll_hooks();
         let mut ops = self.assembler.finalize();
         let end = SessionEnd {
             termination,
@@ -855,11 +1148,11 @@ impl Pipeline {
             dropped_ops: self.ctx.dropped.load(Ordering::Relaxed),
             cost: self.assembler.cost_snapshot(),
         };
-        ops.push(StoreOp::Launch(map::launch_ended(
-            &self.ctx.map_settings,
-            &end,
-            now_ns(),
-        )));
+        let mut ended = map::launch_ended(&self.ctx.map_settings, &end, now_ns());
+        if self.hook_events > 0 {
+            ended.metadata = Some(serde_json::json!({ "hook_events": self.hook_events }));
+        }
+        ops.push(StoreOp::Launch(ended));
         self.send_ops(ops);
         self.claim_guard = None;
         // Fast-failure tracking for injected --session-id launches: two
@@ -882,8 +1175,8 @@ impl Pipeline {
                     .unwrap_or(0);
                 if strikes == 1 {
                     let _ = self.ctx.status_tx.try_send(AppEvent::TraceStatus(format!(
-                        "tracing: '{}' exited immediately with an injected --session-id — \
-                         old claude? (set inject_session_id = false, or run `agent-mux trace doctor`)",
+                        "tracing: '{}' exited immediately with injected launch flags — \
+                         old CLI? (set inject_session_id = false / hooks = \"off\", or run `agent-mux trace doctor`)",
                         self.ctx.profile_name
                     )));
                 } else if strikes >= 2 {
@@ -895,8 +1188,8 @@ impl Pipeline {
                         .unwrap_or(false);
                     if newly {
                         let _ = self.ctx.status_tx.try_send(AppEvent::TraceStatus(format!(
-                            "tracing: --session-id injection disabled for '{}' this run \
-                             after repeated immediate exits",
+                            "tracing: launch-flag injection (--session-id, hooks) disabled for '{}' \
+                             this run after repeated immediate exits",
                             self.ctx.profile_name
                         )));
                     }
@@ -923,6 +1216,7 @@ async fn run_pipeline(
         },
     );
     let poll_interval = ctx.poll_interval;
+    let hook_feed = HookFeed::new(&ctx.db_path, ctx.provider, &ctx.map_settings.launch_id);
     let mut pipeline = Pipeline {
         ctx,
         assembler,
@@ -930,6 +1224,8 @@ async fn run_pipeline(
         adopted: None,
         claim_guard: None,
         agy_usage: None,
+        hook_feed,
+        hook_events: 0,
         parse_errors: 0,
         started: Instant::now(),
     };
@@ -996,17 +1292,233 @@ mod plan_tests {
     use super::*;
     use crate::config::{ProfileTracing, TracingConfig, resolve_tracing};
 
+    /// A runtime with per-launch hook registration off, so the
+    /// correlation-only assertions below stay exact.
     fn runtime(dir: &Path) -> TraceRuntime {
+        runtime_with(dir, Some("off"), dir)
+    }
+
+    /// The default (hooks = auto) with `home` as the user's home.
+    fn runtime_hooks(dir: &Path, home: &Path) -> TraceRuntime {
+        runtime_with(dir, None, home)
+    }
+
+    fn runtime_with(dir: &Path, hooks: Option<&str>, home: &Path) -> TraceRuntime {
         let lf = TracingConfig {
             db_path: Some(dir.join("t.db").to_string_lossy().into_owned()),
             claude_dir: Some("/tmp/fake-claude".into()),
             codex_dir: Some("/tmp/fake-codex".into()),
             antigravity_dir: Some("/tmp/fake-agy".into()),
+            hooks: hooks.map(str::to_string),
+            ..Default::default()
+        };
+        let home = home.to_string_lossy().into_owned();
+        let resolved =
+            resolve_tracing(Some(&lf), &|k| (k == "HOME").then(|| home.clone())).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        TraceRuntime::new(resolved, tx).unwrap()
+    }
+
+    fn settings_arg(plan: &LaunchPlan) -> Option<serde_json::Value> {
+        let i = plan.extra_args.iter().position(|a| a == "--settings")?;
+        serde_json::from_str(&plan.extra_args[i + 1]).ok()
+    }
+
+    #[test]
+    fn claude_launches_register_hooks_via_inline_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{"hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"lint.sh"}]}]}}"#,
+        )
+        .unwrap();
+        let rt = runtime_hooks(dir.path(), &home);
+        // a fresh session: --session-id first, then --settings
+        let plan = rt
+            .plan_launch(&profile("Claude Code", "claude", &[]), Path::new("/tmp"))
+            .unwrap();
+        assert_eq!(plan.extra_args[0], "--session-id");
+        assert_eq!(plan.extra_args[2], "--settings");
+        assert!(plan.hooks_registered && plan.injected);
+        let v = settings_arg(&plan).expect("valid JSON");
+        let hooks = v["hooks"].as_object().unwrap();
+        for (event, _, _) in hooks::register::CLAUDE_EVENTS {
+            assert!(hooks.contains_key(*event), "{event}");
+        }
+        let post = hooks["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 2, "user hook merged behind ours");
+        assert_eq!(post[1]["matcher"], "Bash");
+        let ours = &post[0]["hooks"][0];
+        assert_eq!(
+            ours["command"].as_str(),
+            Some(&*std::env::current_exe().unwrap().to_string_lossy())
+        );
+        assert_eq!(ours["args"][4].as_str(), Some(&*home.to_string_lossy()));
+        assert_eq!(ours["args"][6], rt.settings.content_mode.as_str());
+        assert_eq!(ours["async"], true);
+        assert_eq!(hooks["SessionEnd"][0]["hooks"][0].get("async"), None);
+        assert!(plan.extra_env.iter().any(|(k, _)| k == "AGENT_MUX_EXE"));
+        // launches the planner cannot correlate still announce themselves
+        for args in [
+            vec!["-r"],
+            vec!["--continue"],
+            vec!["-p", "hi"],
+            vec!["--resume", "abc"],
+        ] {
+            let plan = rt
+                .plan_launch(&profile("Claude Code", "claude", &args), Path::new("/tmp"))
+                .unwrap();
+            assert_eq!(plan.extra_args[0], "--settings", "{args:?}");
+            assert!(settings_arg(&plan).is_some(), "{args:?}");
+            assert!(plan.hooks_registered);
+        }
+        // the plan label records both channels
+        let settings = rt.map_settings(&plan, 1, 0);
+        assert_eq!(settings.correlation_plan, "announced+deterministic");
+    }
+
+    #[test]
+    fn backend_follows_profile_then_global_and_downgrades_without_langfuse() {
+        let dir = tempfile::tempdir().unwrap();
+        // no credentials: every request for Langfuse runs local, noted
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let lf = TracingConfig {
+            db_path: Some(dir.path().join("t.db").to_string_lossy().into_owned()),
+            backend: Some("both".into()),
+            hooks: Some("off".into()),
             ..Default::default()
         };
         let resolved = resolve_tracing(Some(&lf), &|_| None).unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        TraceRuntime::new(resolved, tx).unwrap()
+        let rt = TraceRuntime::new(resolved, tx).unwrap();
+        assert!(!rt.langfuse_configured());
+        let plan = rt
+            .plan_launch(&profile("Claude Code", "claude", &[]), Path::new("/tmp"))
+            .unwrap();
+        assert_eq!(plan.backend, Backend::Local);
+        assert_eq!(plan.backend_requested, Some(Backend::Both));
+        match rx.try_recv() {
+            Ok(AppEvent::TraceStatus(msg)) => {
+                assert!(msg.contains("Langfuse is not configured"), "{msg}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // with credentials: the profile wins over the global default
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let env = |k: &str| match k {
+            "LANGFUSE_PUBLIC_KEY" => Some("pk".to_string()),
+            "LANGFUSE_SECRET_KEY" => Some("sk".to_string()),
+            "LANGFUSE_HOST" => Some("http://127.0.0.1:9".to_string()),
+            _ => None,
+        };
+        let resolved = resolve_tracing(Some(&lf), &env).unwrap();
+        let rt = TraceRuntime::new(resolved, tx).unwrap();
+        assert!(rt.langfuse_configured());
+        assert_eq!(rt.default_backend(), Backend::Both);
+        let plan = rt
+            .plan_launch(&profile("Claude Code", "claude", &[]), Path::new("/tmp"))
+            .unwrap();
+        assert_eq!(plan.backend, Backend::Both);
+        assert!(plan.backend_requested.is_none());
+        let mut p = profile("Claude Code", "claude", &[]);
+        p.tracing = Some(ProfileTracing {
+            backend: Some("langfuse".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            rt.plan_launch(&p, Path::new("/tmp")).unwrap().backend,
+            Backend::Langfuse
+        );
+        let attached = rt.plan_attach(&p, Path::new("/tmp")).unwrap();
+        assert_eq!(attached.backend, Backend::Langfuse);
+        assert!(rx.try_recv().is_err(), "no notice when honored");
+        // routing: launch rows stay local whatever the backend
+        let launch = StoreOp::Launch(map::launch_started(&rt.map_settings(&plan, 1, 0), None));
+        assert_eq!(sink_targets(&launch, Backend::Langfuse), (true, false));
+        let seed = TurnAssembler::new(rt.map_settings(&plan, 1, 0), Some("s".into()), "x");
+        let session = StoreOp::Session(seed.session_row(0));
+        assert_eq!(sink_targets(&session, Backend::Langfuse), (false, true));
+        assert_eq!(sink_targets(&session, Backend::Both), (true, true));
+        assert_eq!(sink_targets(&session, Backend::Local), (true, false));
+    }
+
+    #[test]
+    fn hook_registration_honors_profile_and_global_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime_hooks(dir.path(), dir.path());
+        let mut p = profile("Claude Code", "claude", &[]);
+        p.tracing = Some(ProfileTracing {
+            hooks: Some("off".into()),
+            ..Default::default()
+        });
+        let plan = rt.plan_launch(&p, Path::new("/tmp")).unwrap();
+        assert!(!plan.hooks_registered);
+        assert!(!plan.extra_args.iter().any(|a| a == "--settings"));
+        assert_eq!(
+            rt.map_settings(&plan, 1, 0).correlation_plan,
+            "deterministic"
+        );
+        let off = runtime(dir.path());
+        let plan = off
+            .plan_launch(&profile("Codex", "codex", &[]), Path::new("/tmp"))
+            .unwrap();
+        assert!(plan.extra_args.is_empty() && !plan.hooks_registered);
+        // `installed` registers like auto
+        let installed = runtime_with(dir.path(), Some("installed"), dir.path());
+        let plan = installed
+            .plan_launch(&profile("Claude Code", "claude", &[]), Path::new("/tmp"))
+            .unwrap();
+        assert!(plan.hooks_registered);
+    }
+
+    #[test]
+    fn codex_launches_register_notify_and_chain_the_users_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let rt = runtime_hooks(dir.path(), &home);
+        let plan = rt
+            .plan_launch(
+                &profile("Codex", "codex", &["--model", "gpt-5"]),
+                Path::new("/tmp"),
+            )
+            .unwrap();
+        assert_eq!(plan.extra_args[0], "-c");
+        let doc: toml::Value = toml::from_str(&plan.extra_args[1]).expect("valid TOML");
+        let argv: Vec<&str> = doc["notify"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(argv[1..4], ["trace", "hook", "codex-notify"]);
+        assert_eq!(argv[5], &*home.to_string_lossy());
+        assert_eq!(argv[7], plan.launch_id);
+        assert_eq!(argv.len(), 8, "nothing to chain");
+        assert!(plan.hooks_registered);
+        assert_eq!(
+            rt.map_settings(&plan, 1, 0).correlation_plan,
+            "announced+watched"
+        );
+        // an existing notify is chained, not displaced
+        std::fs::write(
+            home.join(".codex").join("config.toml"),
+            "notify = [\"python3\", \"/x/notify.py\"]\n",
+        )
+        .unwrap();
+        let plan = rt
+            .plan_launch(&profile("Codex", "codex", &[]), Path::new("/tmp"))
+            .unwrap();
+        let doc: toml::Value = toml::from_str(&plan.extra_args[1]).unwrap();
+        let argv = doc["notify"].as_array().unwrap();
+        assert_eq!(argv[8].as_str(), Some("--chain"));
+        assert_eq!(argv[9].as_str(), Some(r#"["python3","/x/notify.py"]"#));
+        // agy has no per-launch channel
+        let agy = rt
+            .plan_launch(&profile("Antigravity", "agy", &[]), Path::new("/tmp"))
+            .unwrap();
+        assert!(agy.extra_args.is_empty() && !agy.hooks_registered);
     }
 
     fn profile(name: &str, command: &str, args: &[&str]) -> Profile {

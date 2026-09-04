@@ -51,6 +51,7 @@ pub struct PruneCounts {
     pub launches: i64,
     pub sessions: i64,
     pub runs: i64,
+    pub hook_events: i64,
 }
 
 fn create_private_file(path: &Path) -> Result<(), String> {
@@ -337,6 +338,7 @@ impl Store {
             runs: count(
                 "SELECT COUNT(*) FROM runs WHERE started_ns < ?1 AND ended_ns IS NOT NULL AND id NOT IN (SELECT run_id FROM launches WHERE started_ns >= ?1)",
             )?,
+            hook_events: count("SELECT COUNT(*) FROM hook_events WHERE ts_ns < ?1")?,
         };
         if dry_run {
             return Ok(counts);
@@ -357,6 +359,10 @@ impl Store {
         )?;
         tx.execute(
             "DELETE FROM runs WHERE started_ns < ?1 AND ended_ns IS NOT NULL AND id NOT IN (SELECT run_id FROM launches)",
+            params![cutoff_ns],
+        )?;
+        tx.execute(
+            "DELETE FROM hook_events WHERE ts_ns < ?1",
             params![cutoff_ns],
         )?;
         tx.commit()?;
@@ -492,10 +498,11 @@ fn upsert_launch(tx: &Transaction, l: &LaunchRow) -> rusqlite::Result<()> {
         "INSERT INTO launches (id, run_id, agent_mux_session, profile, provider, cwd, project_slug, content_mode,
            correlation_plan, correlation, session_key, injected_session_id, attached, started_ns, ended_ns, termination,
            exit_code, parse_errors, dropped_ops, reported_cost_usd, reported_lines_added, reported_lines_removed,
-           agent_mux_version, user_id, release, environment, tags)
+           agent_mux_version, user_id, release, environment, tags, metadata)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, COALESCE(?18, 0), COALESCE(?19, 0),
-           ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
+           ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, COALESCE(?28, '{}'))
          ON CONFLICT(id) DO UPDATE SET
+           metadata = json_patch(metadata, COALESCE(excluded.metadata, '{}')),
            correlation = COALESCE(excluded.correlation, correlation),
            session_key = COALESCE(excluded.session_key, session_key),
            attached = MAX(attached, excluded.attached),
@@ -536,6 +543,7 @@ fn upsert_launch(tx: &Transaction, l: &LaunchRow) -> rusqlite::Result<()> {
         l.release,
         l.environment,
         tags,
+        l.metadata.as_ref().map(|v| v.to_string()),
     ])?;
     Ok(())
 }
@@ -723,12 +731,224 @@ fn upsert_observation(
     Ok(())
 }
 
+/// The hook command's writer: read-write, no creation, no migration, no
+/// run row. A store that is missing or still on an older schema yields an
+/// error the caller turns into "nothing recorded".
+pub fn open_hook_sink(path: &Path, busy: Duration) -> Result<Connection, String> {
+    if !path.is_file() {
+        return Err(format!("no trace store at {}", path.display()));
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("open {}: {e}", path.display()))?;
+    conn.busy_timeout(busy).map_err(|e| e.to_string())?;
+    let version: i32 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if version < 2 {
+        return Err(format!(
+            "store schema v{version} predates hook_events; start agent-mux once to migrate"
+        ));
+    }
+    if version > schema::SCHEMA_VERSION {
+        return Err(format!(
+            "database schema v{version} is newer than this agent-mux (v{})",
+            schema::SCHEMA_VERSION
+        ));
+    }
+    Ok(conn)
+}
+
+/// Appends one hook event. Returns `false` when its key already existed.
+pub fn insert_hook_event(
+    conn: &Connection,
+    ev: &crate::tracing::hooks::HookEvent,
+) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO hook_events (key, provider, session_id, launch_id, event, ts_ns, cwd, transcript_path,
+           turn_key, tool_use_id, tool_name, agent_id, agent_type, step_index, model, is_error, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            ev.key(),
+            ev.provider.as_str(),
+            ev.session_id,
+            ev.launch_id,
+            ev.event,
+            ev.ts_ns,
+            ev.cwd,
+            ev.transcript_path,
+            ev.turn_key,
+            ev.tool_use_id,
+            ev.tool_name,
+            ev.agent_id,
+            ev.agent_type,
+            ev.step_index,
+            ev.model,
+            ev.is_error,
+            ev.payload_json(),
+        ],
+    )?;
+    Ok(n > 0)
+}
+
 /// Reads one meta value.
 pub fn meta_value(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
         r.get(0)
     })
     .optional()
+}
+
+/// Reads one session's rows back as ops in emission order (session, then
+/// each turn followed by its observations), so a stored session can be
+/// replayed through another sink.
+pub fn read_session_ops(conn: &Connection, session_key: &str) -> rusqlite::Result<Vec<StoreOp>> {
+    use model::{Level, ObservationType, TraceStatus};
+    let mut ops = Vec::new();
+    let session = conn.query_row(
+        "SELECT key, provider, session_id, user_id, cwd, project_slug, transcript_path, title,
+                last_seen_ns, extra
+         FROM sessions WHERE key = ?1",
+        params![session_key],
+        |r| {
+            Ok(SessionRow {
+                key: r.get(0)?,
+                provider: r.get(1)?,
+                session_id: r.get(2)?,
+                user_id: r.get(3)?,
+                cwd: r.get(4)?,
+                project_slug: r.get(5)?,
+                transcript_path: r.get(6)?,
+                title: r.get(7)?,
+                seen_ns: r.get(8)?,
+                extra: r
+                    .get::<_, String>(9)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+            })
+        },
+    )?;
+    let (provider, session_id) = (session.provider.clone(), session.session_id.clone());
+    ops.push(StoreOp::Session(session));
+    let mut traces = conn.prepare(
+        "SELECT id, launch_id, ordinal, name, status, start_ns, end_ns, input, output, thinking,
+                skills, reported_duration_ms, reported_message_count, session_cost_usd,
+                timing_approx, ordinal_salted, metadata
+         FROM traces WHERE session_key = ?1 ORDER BY ordinal, rid",
+    )?;
+    let trace_rows: Vec<TraceRow> = traces
+        .query_map(params![session_key], |r| {
+            let status: String = r.get(4)?;
+            let skills: String = r.get(10)?;
+            let metadata: String = r.get(16)?;
+            Ok(TraceRow {
+                id: r.get(0)?,
+                session_key: session_key.to_string(),
+                provider: provider.clone(),
+                session_id: session_id.clone(),
+                launch_id: r.get(1)?,
+                ordinal: r.get(2)?,
+                name: r.get(3)?,
+                status: match status.as_str() {
+                    "open" => TraceStatus::Open,
+                    "aborted" => TraceStatus::Aborted,
+                    _ => TraceStatus::Closed,
+                },
+                start_ns: r.get(5)?,
+                end_ns: r.get(6)?,
+                input: r.get(7)?,
+                output: r.get(8)?,
+                thinking: r.get(9)?,
+                skills: serde_json::from_str::<Vec<String>>(&skills)
+                    .ok()
+                    .filter(|v| !v.is_empty()),
+                reported_duration_ms: r.get(11)?,
+                reported_message_count: r.get(12)?,
+                session_cost_usd: r.get(13)?,
+                timing_approx: r.get::<_, i64>(14)? != 0,
+                ordinal_salted: r.get::<_, i64>(15)? != 0,
+                metadata: serde_json::from_str::<serde_json::Value>(&metadata)
+                    .ok()
+                    .filter(|v| v.as_object().is_some_and(|m| !m.is_empty())),
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut observations = conn.prepare(
+        "SELECT id, parent_id, type, name, kind, start_ns, end_ns, level, status_message, model,
+                input, output, thinking, usage, input_tokens, output_tokens, cache_read_tokens,
+                cache_write_tokens, cache_write_1h_tokens, reasoning_tokens, total_tokens,
+                tool_id, tool_name, skill, mcp_server, path, is_error, ts_approx, metadata
+         FROM observations WHERE trace_id = ?1 ORDER BY start_ns, rid",
+    )?;
+    for trace in trace_rows {
+        let trace_id = trace.id.clone();
+        ops.push(StoreOp::Trace(trace));
+        let rows = observations.query_map(params![trace_id], |r| {
+            let obs_type: String = r.get(2)?;
+            let level: String = r.get(7)?;
+            let usage_raw: Option<String> = r.get(13)?;
+            let metadata: String = r.get(28)?;
+            let usage = NormalizedUsage {
+                input: r.get(14)?,
+                output: r.get(15)?,
+                cache_read: r.get(16)?,
+                cache_write: r.get(17)?,
+                cache_write_1h: r.get(18)?,
+                reasoning: r.get(19)?,
+                total: r.get(20)?,
+            };
+            Ok(ObservationRow {
+                id: r.get(0)?,
+                trace_id: trace_id.clone(),
+                parent_id: r.get(1)?,
+                obs_type: match obs_type.as_str() {
+                    "generation" => ObservationType::Generation,
+                    "tool" => ObservationType::Tool,
+                    "agent" => ObservationType::Agent,
+                    "event" => ObservationType::Event,
+                    _ => ObservationType::Span,
+                },
+                name: r.get(3)?,
+                kind: r.get(4)?,
+                start_ns: r.get(5)?,
+                end_ns: r.get(6)?,
+                level: match level.as_str() {
+                    "ERROR" => Level::Error,
+                    "WARNING" => Level::Warning,
+                    _ => Level::Default,
+                },
+                status_message: r.get(8)?,
+                model: r.get(9)?,
+                input: r.get(10)?,
+                output: r.get(11)?,
+                thinking: r.get(12)?,
+                usage_raw: usage_raw
+                    .and_then(|s| {
+                        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s).ok()
+                    })
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| v.as_i64().map(|n| (k.clone(), n)))
+                            .collect::<Vec<_>>()
+                    }),
+                usage: (!usage.is_empty()).then_some(usage),
+                tool_id: r.get(21)?,
+                tool_name: r.get(22)?,
+                skill: r.get(23)?,
+                mcp_server: r.get(24)?,
+                path: r.get(25)?,
+                is_error: r.get::<_, i64>(26)? != 0,
+                ts_approx: r.get::<_, i64>(27)? != 0,
+                metadata: serde_json::from_str(&metadata).unwrap_or_default(),
+            })
+        })?;
+        for row in rows {
+            ops.push(StoreOp::Observation(row?));
+        }
+    }
+    Ok(ops)
 }
 
 #[cfg(test)]
@@ -779,6 +999,7 @@ mod tests {
             release: None,
             environment: None,
             tags: vec!["agent-mux".into(), "claude".into()],
+            metadata: None,
         }
     }
 
@@ -872,7 +1093,7 @@ mod tests {
             meta_value(store.conn(), "schema_version")
                 .unwrap()
                 .as_deref(),
-            Some("1")
+            Some("2")
         );
         let runs: i64 = store
             .conn()
@@ -925,6 +1146,62 @@ mod tests {
         .unwrap();
         assert!(err.contains("newer"), "{err}");
         assert!(open_ro(&dir.path().join("t.db")).is_err());
+    }
+
+    #[test]
+    fn v1_store_migrates_to_v2_and_accepts_hook_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        // a store as the previous release left it: v1 schema only
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!(
+                "BEGIN;\n{}\nPRAGMA user_version = 1;\nCOMMIT;",
+                schema::MIGRATIONS[0]
+            ))
+            .unwrap();
+        }
+        // the hook sink refuses a v1 store instead of guessing
+        let err = open_hook_sink(&path, Duration::from_millis(50))
+            .err()
+            .unwrap();
+        assert!(err.contains("predates"), "{err}");
+        let store = open_temp(dir.path());
+        let version: i32 = store
+            .conn()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        drop(store);
+        let sink = open_hook_sink(&path, Duration::from_millis(50)).unwrap();
+        let ev = crate::tracing::hooks::parse(
+            crate::tracing::hooks::HookSource::Claude,
+            None,
+            &serde_json::json!({"session_id":"s1","hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"t1","tool_response":"ok"}),
+            &crate::tracing::hooks::ContentPolicy::full(),
+            5_000,
+            Some("l1".into()),
+        )
+        .unwrap();
+        assert!(insert_hook_event(&sink, &ev).unwrap());
+        assert!(!insert_hook_event(&sink, &ev).unwrap(), "same key: ignored");
+        let (n, payload): (i64, String) = sink
+            .query_row("SELECT COUNT(*), MAX(payload) FROM hook_events", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(payload.contains("\"tool_result\":\"ok\""));
+        // prune covers hook rows
+        let store = open_temp(dir.path());
+        let counts = store.prune(10_000, true).unwrap();
+        assert_eq!(counts.hook_events, 1);
+        store.prune(10_000, false).unwrap();
+        let n: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM hook_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]

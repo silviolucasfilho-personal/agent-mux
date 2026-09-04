@@ -16,6 +16,7 @@ time = { version = "0.3.55", default-features = false, features = ["parsing", "s
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 toml = "1.1.4"
 tui-term = "0.3.4"
+ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
 uuid = { version = "1.26.0", features = ["v4", "v5"] }
 vt100 = "0.16.2"
 

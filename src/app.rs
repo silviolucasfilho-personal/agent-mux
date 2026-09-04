@@ -258,6 +258,7 @@ pub enum DialogField {
     Profile,
     Dir,
     Tracing,
+    Backend,
     ContentMode,
 }
 
@@ -336,6 +337,11 @@ pub struct DialogState {
     pub dir_selected_idx: Option<usize>,
     pub tracing_enabled: bool,
     pub content_mode: DialogContentMode,
+    /// Where this launch's traces go.
+    pub backend: crate::config::Backend,
+    /// False when no Langfuse credentials resolved: the field cannot leave
+    /// local and says why.
+    pub langfuse_available: bool,
 }
 
 impl DialogState {
@@ -357,6 +363,11 @@ impl DialogState {
         } else {
             DialogContentMode::Full
         };
+        let backend = first
+            .and_then(|p| p.tracing.as_ref())
+            .and_then(|l| l.backend.as_deref())
+            .and_then(crate::config::Backend::parse)
+            .unwrap_or_default();
         DialogState {
             profile_idx: 0,
             dir,
@@ -367,7 +378,31 @@ impl DialogState {
             dir_selected_idx: None,
             tracing_enabled,
             content_mode,
+            backend,
+            langfuse_available: false,
         }
+    }
+
+    /// Applies the runtime's defaults: the configured backend (unless the
+    /// first profile overrides it) and whether Langfuse can be chosen at
+    /// all. A Langfuse choice without credentials falls back to local.
+    pub fn with_backend_options(
+        mut self,
+        default: crate::config::Backend,
+        langfuse_available: bool,
+        profiles: &[Profile],
+    ) -> Self {
+        let overridden = profiles
+            .get(self.profile_idx)
+            .and_then(|p| p.tracing.as_ref())
+            .and_then(|l| l.backend.as_deref())
+            .and_then(crate::config::Backend::parse);
+        self.backend = overridden.unwrap_or(default);
+        self.langfuse_available = langfuse_available;
+        if !langfuse_available && self.backend.langfuse() {
+            self.backend = crate::config::Backend::Local;
+        }
+        self
     }
 
     pub fn refresh_dir_entries(&mut self) {
@@ -398,6 +433,14 @@ impl DialogState {
                 } else {
                     DialogContentMode::Full
                 };
+            }
+            if let Some(b) = over
+                .backend
+                .as_deref()
+                .and_then(crate::config::Backend::parse)
+                && (self.langfuse_available || !b.langfuse())
+            {
+                self.backend = b;
             }
         }
         if !self.dir_edited {
@@ -432,7 +475,8 @@ impl DialogState {
                 self.field = match self.field {
                     DialogField::Profile => DialogField::Dir,
                     DialogField::Dir => DialogField::Tracing,
-                    DialogField::Tracing => DialogField::ContentMode,
+                    DialogField::Tracing => DialogField::Backend,
+                    DialogField::Backend => DialogField::ContentMode,
                     DialogField::ContentMode => DialogField::Profile,
                 };
                 self.dir_selected_idx = None;
@@ -443,7 +487,8 @@ impl DialogState {
                     DialogField::Profile => DialogField::ContentMode,
                     DialogField::Dir => DialogField::Profile,
                     DialogField::Tracing => DialogField::Dir,
-                    DialogField::ContentMode => DialogField::Tracing,
+                    DialogField::Backend => DialogField::Tracing,
+                    DialogField::ContentMode => DialogField::Backend,
                 };
                 self.dir_selected_idx = None;
                 return DialogResult::Consumed;
@@ -536,6 +581,18 @@ impl DialogState {
                 | KeyCode::Left
                 | KeyCode::Right => {
                     self.tracing_enabled = !self.tracing_enabled;
+                }
+                _ => {}
+            },
+            DialogField::Backend => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Left if self.langfuse_available => {
+                    self.backend = self.backend.next().next();
+                }
+                KeyCode::Char(' ') | KeyCode::Char('b') | KeyCode::Char('B') | KeyCode::Right
+                    if self.langfuse_available =>
+                {
+                    self.backend = self.backend.next();
                 }
                 _ => {}
             },
@@ -641,6 +698,36 @@ pub enum BrowserPane {
     Detail,
 }
 
+/// How the Detail pane draws a turn's observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailView {
+    /// Flat, one line per observation (the original).
+    #[default]
+    List,
+    /// Box-drawing hierarchy with collapsible subtrees.
+    Tree,
+    /// Bars over the turn's own time window.
+    Timeline,
+}
+
+impl DetailView {
+    pub fn next(self) -> DetailView {
+        match self {
+            DetailView::List => DetailView::Tree,
+            DetailView::Tree => DetailView::Timeline,
+            DetailView::Timeline => DetailView::List,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DetailView::List => "list",
+            DetailView::Tree => "tree",
+            DetailView::Timeline => "timeline",
+        }
+    }
+}
+
 /// The `T` trace browser: sessions → turns → observations, read from the
 /// local store through a read-only connection. Queries are indexed and
 /// `LIMIT`ed, so they run synchronously on the main thread like the
@@ -657,6 +744,11 @@ pub struct TraceBrowserState {
     /// Detail pane shows the selected observation's body instead of the
     /// observation list.
     pub expanded: bool,
+    /// Which shape the Detail pane draws.
+    pub detail_view: DetailView,
+    /// Observation ids whose subtree is folded away in the tree view.
+    /// Cleared whenever the turn changes.
+    pub collapsed: std::collections::HashSet<String>,
     pub detail_lines: Vec<ratatui::text::Line<'static>>,
     pub scroll_offset: usize,
     pub focused: BrowserPane,
@@ -681,6 +773,7 @@ impl std::fmt::Debug for TraceBrowserState {
             .field("turns", &self.turns.len())
             .field("selected_turn", &self.selected_turn)
             .field("observations", &self.observations.len())
+            .field("detail_view", &self.detail_view)
             .field("focused", &self.focused)
             .field("all_projects", &self.all_projects)
             .finish()
@@ -706,6 +799,8 @@ impl TraceBrowserState {
             selected_turn: 0,
             observations: Vec::new(),
             selected_observation: 0,
+            detail_view: DetailView::default(),
+            collapsed: std::collections::HashSet::new(),
             expanded: false,
             detail_lines: Vec::new(),
             scroll_offset: 0,
@@ -782,6 +877,7 @@ impl TraceBrowserState {
             .min(self.observations.len().saturating_sub(1));
         self.expanded = false;
         self.scroll_offset = 0;
+        self.collapsed.clear();
         self.rebuild_detail();
     }
 
@@ -896,6 +992,83 @@ impl TraceBrowserState {
         self.selected_observation = idx.min(self.observations.len() - 1);
         self.scroll_offset = 0;
         self.rebuild_detail();
+    }
+
+    /// The observations the current view actually draws, in draw order.
+    /// Only the tree view hides rows (folded subtrees).
+    pub fn visible_rows(&self) -> Vec<usize> {
+        match self.detail_view {
+            DetailView::Tree => {
+                let rows = crate::tracing::view::tree_rows(&self.observations, &self.collapsed);
+                let visible: std::collections::HashSet<&str> =
+                    rows.iter().map(|r| r.obs.id.as_str()).collect();
+                self.observations
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| visible.contains(o.id.as_str()))
+                    .map(|(i, _)| i)
+                    .collect()
+            }
+            _ => (0..self.observations.len()).collect(),
+        }
+    }
+
+    /// Moves the selection `delta` rows through the *visible* rows, so a
+    /// folded subtree is stepped over rather than through.
+    pub fn step_observation(&mut self, delta: isize) {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let at = rows
+            .iter()
+            .position(|&i| i == self.selected_observation)
+            .unwrap_or(0);
+        let next = (at as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
+        self.select_observation(rows[next]);
+    }
+
+    /// Cycles list → tree → timeline. Leaving the tree keeps the fold set
+    /// so coming back looks the way it was left; the selection is pulled
+    /// back onto a visible row.
+    pub fn cycle_detail_view(&mut self) {
+        self.detail_view = self.detail_view.next();
+        self.expanded = false;
+        self.scroll_offset = 0;
+        let rows = self.visible_rows();
+        if !rows.is_empty() && !rows.contains(&self.selected_observation) {
+            // the selection fell inside a folded subtree: land on its
+            // nearest visible ancestor
+            let fallback = rows
+                .iter()
+                .rev()
+                .find(|&&i| i < self.selected_observation)
+                .copied()
+                .unwrap_or(rows[0]);
+            self.selected_observation = fallback;
+        }
+        self.rebuild_detail();
+    }
+
+    /// Folds or unfolds the selected row's subtree (tree view only, and
+    /// only where there is a subtree to fold).
+    pub fn toggle_collapsed(&mut self) {
+        if self.detail_view != DetailView::Tree {
+            return;
+        }
+        let Some(o) = self.observations.get(self.selected_observation) else {
+            return;
+        };
+        let id = o.id.clone();
+        let has_children = crate::tracing::view::tree_rows(&self.observations, &Default::default())
+            .iter()
+            .any(|r| r.obs.id == id && r.has_children);
+        if !has_children {
+            return;
+        }
+        if !self.collapsed.remove(&id) {
+            self.collapsed.insert(id);
+        }
     }
 
     /// Live sessions change under the browser: re-query at most once a
@@ -1562,7 +1735,16 @@ impl App {
                 self.forward_bytes(&bytes);
             }
             Action::OpenNewSession => {
-                self.mode = Mode::NewSession(DialogState::new(&self.profiles));
+                let (default, available) = match &self.tracing {
+                    Some(rt) => (rt.default_backend(), rt.langfuse_configured()),
+                    None => (crate::config::Backend::Local, false),
+                };
+                self.mode =
+                    Mode::NewSession(DialogState::new(&self.profiles).with_backend_options(
+                        default,
+                        available,
+                        &self.profiles,
+                    ));
             }
             Action::OpenHelp => self.mode = Mode::Help,
             Action::EnterConfirmKill => self.mode = Mode::ConfirmKill,
@@ -1665,6 +1847,7 @@ impl App {
                 let mut p_tracing = profile.tracing.unwrap_or_default();
                 p_tracing.enabled = Some(dialog.tracing_enabled);
                 p_tracing.content_mode = Some(dialog.content_mode.to_string());
+                p_tracing.backend = Some(dialog.backend.as_str().to_string());
                 profile.tracing = Some(p_tracing);
                 let dir = resolve_working_dir(&dialog.dir);
                 let id = self.next_id;
@@ -1738,6 +1921,8 @@ impl App {
                 };
             }
             KeyCode::Char('/') => browser.search_input = Some(String::new()),
+            KeyCode::Char('v') | KeyCode::Char('V') => browser.cycle_detail_view(),
+            KeyCode::Char(' ') => browser.toggle_collapsed(),
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 browser.all_projects = !browser.all_projects;
                 browser.reload_sessions();
@@ -1779,7 +1964,7 @@ impl App {
                             .saturating_add(1)
                             .min(browser.max_scroll());
                     } else {
-                        browser.select_observation(browser.selected_observation + 1);
+                        browser.step_observation(1);
                     }
                 }
             },
@@ -1801,7 +1986,7 @@ impl App {
                     if browser.expanded {
                         browser.scroll_offset = browser.scroll_offset.saturating_sub(1);
                     } else {
-                        browser.select_observation(browser.selected_observation.saturating_sub(1));
+                        browser.step_observation(-1);
                     }
                 }
             },
@@ -2432,6 +2617,9 @@ mod dialog_tests {
         assert_eq!(d.field, DialogField::Tracing);
 
         d.handle_key(&key(KeyCode::Tab), &ps);
+        assert_eq!(d.field, DialogField::Backend);
+
+        d.handle_key(&key(KeyCode::Tab), &ps);
         assert_eq!(d.field, DialogField::ContentMode);
 
         d.handle_key(&key(KeyCode::Tab), &ps);
@@ -2464,6 +2652,52 @@ mod dialog_tests {
 
         d.handle_key(&key(KeyCode::Char('m')), &ps);
         assert_eq!(d.content_mode, DialogContentMode::Full);
+    }
+
+    #[test]
+    fn dialog_backend_cycles_only_when_langfuse_is_available() {
+        use crate::config::Backend;
+        let ps = profiles();
+        // no credentials: the field is inert and a profile asking for
+        // Langfuse still launches local
+        let mut d = DialogState::new(&ps).with_backend_options(Backend::Both, false, &ps);
+        assert_eq!(d.backend, Backend::Local);
+        assert!(!d.langfuse_available);
+        d.field = DialogField::Backend;
+        d.handle_key(&key(KeyCode::Char(' ')), &ps);
+        assert_eq!(d.backend, Backend::Local);
+        // with credentials: Space/b cycle forward, Left cycles back
+        let mut d = DialogState::new(&ps).with_backend_options(Backend::Local, true, &ps);
+        d.field = DialogField::Backend;
+        d.handle_key(&key(KeyCode::Char(' ')), &ps);
+        assert_eq!(d.backend, Backend::Langfuse);
+        d.handle_key(&key(KeyCode::Char('b')), &ps);
+        assert_eq!(d.backend, Backend::Both);
+        d.handle_key(&key(KeyCode::Right), &ps);
+        assert_eq!(d.backend, Backend::Local);
+        d.handle_key(&key(KeyCode::Left), &ps);
+        assert_eq!(d.backend, Backend::Both);
+        // the profile's own default applies when it has one
+        let mut with_override = ps.clone();
+        with_override[0].tracing = Some(crate::config::ProfileTracing {
+            backend: Some("langfuse".into()),
+            ..Default::default()
+        });
+        let d = DialogState::new(&with_override).with_backend_options(
+            Backend::Local,
+            true,
+            &with_override,
+        );
+        assert_eq!(d.backend, Backend::Langfuse);
+        // Tab reaches the field between Tracing and Content Mode
+        let mut d = DialogState::new(&ps);
+        d.field = DialogField::Tracing;
+        d.handle_key(&key(KeyCode::Tab), &ps);
+        assert_eq!(d.field, DialogField::Backend);
+        d.handle_key(&key(KeyCode::Tab), &ps);
+        assert_eq!(d.field, DialogField::ContentMode);
+        d.handle_key(&key(KeyCode::BackTab), &ps);
+        assert_eq!(d.field, DialogField::Backend);
     }
 
     #[test]
@@ -2596,6 +2830,115 @@ mod history_tests {
             dispatch(&Mode::Control, &key(KeyCode::Char('L')), &ctx()),
             Action::OpenSessionHistory
         ));
+    }
+
+    /// A browser state with a known tree of observations and no store.
+    fn browser_with_tree() -> TraceBrowserState {
+        use crate::tracing::store::query::ObservationView;
+        let obs = |id: &str, depth: usize| ObservationView {
+            id: id.into(),
+            trace_id: "t".into(),
+            parent_id: None,
+            depth,
+            obs_type: "tool".into(),
+            name: id.into(),
+            kind: None,
+            start_ns: 0,
+            end_ns: Some(1_000_000),
+            level: "DEFAULT".into(),
+            status_message: None,
+            model: None,
+            model_id: None,
+            input: None,
+            output: None,
+            thinking: None,
+            usage: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: None,
+            total_cost_usd: None,
+            tool_id: None,
+            tool_name: None,
+            skill: None,
+            mcp_server: None,
+            path: None,
+            is_error: false,
+            metadata: "{}".into(),
+        };
+        let mut browser = TraceBrowserState::new(None, None);
+        // gen, agent[grep, read], bash
+        browser.observations = vec![
+            obs("gen", 0),
+            obs("agent", 0),
+            obs("grep", 1),
+            obs("read", 1),
+            obs("bash", 0),
+        ];
+        browser.error = None;
+        browser
+    }
+
+    #[test]
+    fn v_cycles_the_detail_view_and_space_folds_only_in_the_tree() {
+        let mut b = browser_with_tree();
+        assert_eq!(b.detail_view, DetailView::List);
+        // space does nothing outside the tree
+        b.selected_observation = 1;
+        b.toggle_collapsed();
+        assert!(b.collapsed.is_empty(), "list view does not fold");
+
+        b.cycle_detail_view();
+        assert_eq!(b.detail_view, DetailView::Tree);
+        b.toggle_collapsed();
+        assert_eq!(b.collapsed.len(), 1, "the agent row folds");
+        assert_eq!(b.visible_rows(), vec![0, 1, 4], "its children are hidden");
+        b.toggle_collapsed();
+        assert!(b.collapsed.is_empty(), "space unfolds again");
+
+        // a leaf cannot be folded
+        b.selected_observation = 2;
+        b.toggle_collapsed();
+        assert!(b.collapsed.is_empty(), "a leaf has no subtree");
+
+        b.cycle_detail_view();
+        assert_eq!(b.detail_view, DetailView::Timeline);
+        assert_eq!(b.visible_rows().len(), 5, "the timeline hides nothing");
+        b.cycle_detail_view();
+        assert_eq!(b.detail_view, DetailView::List);
+    }
+
+    #[test]
+    fn selection_steps_over_folded_subtrees_and_never_hides() {
+        let mut b = browser_with_tree();
+        b.cycle_detail_view();
+        b.selected_observation = 1;
+        b.toggle_collapsed();
+        // down from the folded agent lands on bash, not on its children
+        b.step_observation(1);
+        assert_eq!(b.observations[b.selected_observation].id, "bash");
+        b.step_observation(-1);
+        assert_eq!(b.observations[b.selected_observation].id, "agent");
+        b.step_observation(-1);
+        assert_eq!(b.observations[b.selected_observation].id, "gen");
+        b.step_observation(-1);
+        assert_eq!(b.observations[b.selected_observation].id, "gen", "clamped");
+
+        // a selection inside a subtree folded from elsewhere is pulled
+        // back to a visible row when the view is entered again
+        b.collapsed.clear();
+        b.selected_observation = 3; // "read", inside agent
+        b.collapsed.insert("agent".to_string());
+        b.detail_view = DetailView::List;
+        b.cycle_detail_view(); // List → Tree, where the fold applies
+        assert_eq!(b.detail_view, DetailView::Tree);
+        assert!(
+            b.visible_rows().contains(&b.selected_observation),
+            "selection is never left on a hidden row"
+        );
+        assert_eq!(b.observations[b.selected_observation].id, "agent");
     }
 
     #[test]

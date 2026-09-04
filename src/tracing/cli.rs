@@ -18,18 +18,25 @@ commands:
   path                         print the resolved database path
   ls [--all] [--project DIR] [--since 7d] [--limit N] [--json]
                                sessions with turns, tokens, cost
-  show <session|trace> [--full] [--json]
+  show <session|trace> [--full] [--json] [--tree | --timeline]
                                turns of a session, or observations of a trace
+                               (--tree: nesting; --timeline: bars over the turn)
   search <fts5 query> [--limit N] [--json]
                                full-text search over content (full mode data)
   import <path>... | --discover [--provider claude|codex|antigravity] [--content-mode full|metadata]
                                backfill transcripts (idempotent)
   export [--session ID] [--since 30d] [--out FILE]
                                JSON Lines dump of every table
+  export --langfuse [--session ID] [--since 30d] [--dry-run]
+                               replay stored sessions to Langfuse ([tracing.langfuse] / $LANGFUSE_*)
   prune [--older-than 90d] [--vacuum] [--dry-run]
                                delete old rows; --vacuum reclaims space
   recost                       recompute cost from usage and the current price table
-  sql <select ...> [--json]    read-only query";
+  sql <select ...> [--json]    read-only query
+  hook <claude|codex|codex-notify|agy> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
+                               hook entry point invoked by the CLIs (reads the payload from stdin or the last argument)
+  hooks install|uninstall|status [codex|agy]
+                               the opt-in hook installers (Claude and Codex notify need none: they register per launch)";
 
 struct Args {
     positional: Vec<String>,
@@ -48,7 +55,15 @@ impl Args {
                     flags.insert(k.to_string(), Some(v.to_string()));
                 } else if matches!(
                     name,
-                    "all" | "json" | "full" | "discover" | "vacuum" | "dry-run"
+                    "all"
+                        | "json"
+                        | "full"
+                        | "discover"
+                        | "vacuum"
+                        | "dry-run"
+                        | "langfuse"
+                        | "tree"
+                        | "timeline"
                 ) {
                     flags.insert(name.to_string(), None);
                 } else {
@@ -200,6 +215,21 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         "prune" => prune(&args),
         "recost" => recost(),
         "sql" => sql(&args),
+        "hooks" => hooks_cmd(&args),
+        "hook" => {
+            let outcome = hook_run(&raw[1..], None);
+            if let Some(response) = &outcome.response {
+                println!("{response}");
+            }
+            if std::env::var_os("AGENT_MUX_HOOK_DEBUG").is_some() {
+                eprintln!(
+                    "agent-mux hook: inserted={} {}",
+                    outcome.inserted,
+                    outcome.error.as_deref().unwrap_or("")
+                );
+            }
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(())
@@ -253,6 +283,248 @@ fn dir_status(path: Option<&Path>) -> (bool, String) {
     }
 }
 
+/// `trace hooks install|uninstall|status [codex|agy]`.
+fn hooks_cmd(args: &Args) -> anyhow::Result<()> {
+    use super::hooks::install;
+    let action = args
+        .positional
+        .first()
+        .map(String::as_str)
+        .unwrap_or("status");
+    let provider = args.positional.get(1).map(String::as_str);
+    let (_, resolved) = resolved()?;
+    let home = resolved.home.clone();
+    let exe = super::hooks::register::current_exe();
+    let providers: Vec<&str> = match provider {
+        Some(p @ ("codex" | "agy")) => vec![p],
+        Some("antigravity") => vec!["agy"],
+        Some(other) => anyhow::bail!("unknown provider {other:?}: expected codex or agy"),
+        None if action == "status" => vec!["codex", "agy"],
+        None => anyhow::bail!("usage: agent-mux trace hooks {action} <codex|agy>"),
+    };
+    for p in providers {
+        match action {
+            "install" => {
+                let Some(exe) = exe.as_deref() else {
+                    anyhow::bail!("cannot resolve the path of this binary");
+                };
+                let report = match p {
+                    "codex" => install::install_codex(exe, &home),
+                    _ => install::install_agy(exe, &home),
+                }
+                .map_err(|e| anyhow::anyhow!(e))?;
+                println!(
+                    "{p}: {} {}",
+                    if report.changed {
+                        "installed at"
+                    } else {
+                        "already current at"
+                    },
+                    report.path.display()
+                );
+                println!("  {}", report.note);
+            }
+            "uninstall" => {
+                let report = match p {
+                    "codex" => install::uninstall_codex(&home),
+                    _ => install::uninstall_agy(&home),
+                }
+                .map_err(|e| anyhow::anyhow!(e))?;
+                println!("{p}: {} ({})", report.note, report.path.display());
+            }
+            "status" => print_hook_status(&hook_status(p, &home, exe.as_deref())),
+            other => {
+                anyhow::bail!("unknown action {other:?}: expected install, uninstall or status")
+            }
+        }
+    }
+    if action == "status" {
+        println!(
+            "claude: per-launch --settings registration (hooks = {}); codex notify: per-launch -c override",
+            resolved.hooks.as_str()
+        );
+    }
+    Ok(())
+}
+
+fn hook_status(provider: &str, home: &Path, exe: Option<&Path>) -> super::hooks::install::Status {
+    match provider {
+        "codex" => super::hooks::install::codex_status(home, exe),
+        _ => super::hooks::install::agy_status(home, exe),
+    }
+}
+
+fn print_hook_status(status: &super::hooks::install::Status) {
+    if !status.installed {
+        // opt-in: absent is a state, not a failure
+        println!("  [-- ] {} hooks: {}", status.provider, status.note);
+        return;
+    }
+    check(
+        &format!("{} hooks", status.provider),
+        !status.stale,
+        &format!("{} — {}", status.path.display(), status.note),
+    );
+}
+
+/// Hook rows per provider in the last 24 h, with the age of the newest.
+fn hook_activity(conn: &rusqlite::Connection) -> Vec<(String, i64, i64)> {
+    let since = now_ns() - 24 * 3600 * 1_000_000_000;
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT provider, count(*), max(ts_ns) FROM hook_events WHERE ts_ns >= ?1 GROUP BY provider ORDER BY provider",
+    ) else {
+        return Vec::new();
+    };
+    stmt.query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
+fn now_ns() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
+}
+
+fn fmt_age(ns: i64) -> String {
+    let secs = (now_ns() - ns).max(0) / 1_000_000_000;
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else {
+        format!("{}h ago", secs / 3600)
+    }
+}
+
+/// `trace export --langfuse`: replays stored sessions through the
+/// Langfuse sink.
+fn export_langfuse(
+    conn: &Connection,
+    resolved: &ResolvedTracing,
+    session_key: Option<String>,
+    since: Option<i64>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use super::langfuse::{ExporterConfig, map::MapCtx, replay_sessions};
+    let Some(lf) = &resolved.langfuse else {
+        anyhow::bail!(
+            "Langfuse is not configured: set [tracing.langfuse] host/public_key/secret_key or the \
+             LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY environment variables"
+        );
+    };
+    let keys: Vec<String> = match session_key {
+        Some(key) => vec![key],
+        None => {
+            let mut stmt = conn.prepare(
+                "SELECT key FROM sessions WHERE (?1 IS NULL OR last_seen_ns >= ?1) ORDER BY last_seen_ns",
+            )?;
+            stmt.query_map(rusqlite::params![since], |r| r.get::<_, String>(0))?
+                .collect::<Result<_, _>>()?
+        }
+    };
+    if keys.is_empty() {
+        println!("nothing to export");
+        return Ok(());
+    }
+    let mut cfg = ExporterConfig::new(lf);
+    cfg.flush_interval = std::time::Duration::from_millis(200);
+    let report = replay_sessions(
+        conn,
+        cfg,
+        MapCtx::from_settings(resolved),
+        &keys,
+        dry_run,
+        std::time::Duration::from_secs(120),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    println!(
+        "{} {} session(s), {} row(s), {} event(s) to {}",
+        if dry_run { "would send" } else { "sent" },
+        report.sessions,
+        report.ops,
+        report.events,
+        lf.host
+    );
+    if dry_run && let Some(first) = &report.first_event {
+        println!("first event: {first}");
+    }
+    if report.dropped > 0 {
+        println!("[!!] {} event(s) were not accepted", report.dropped);
+    }
+    for note in &report.notes {
+        println!("  {note}");
+    }
+    if report.notes.iter().any(|n| n.contains("authentication")) {
+        anyhow::bail!("Langfuse rejected the credentials");
+    }
+    Ok(())
+}
+
+/// The doctor's Langfuse section.
+fn doctor_langfuse(resolved: &ResolvedTracing, cfg: &config::Config) {
+    println!(
+        "\nlangfuse (default backend: {}):",
+        resolved.backend.as_str()
+    );
+    let Some(lf) = &resolved.langfuse else {
+        println!(
+            "  [-- ] credentials: none resolved — the Langfuse backend is unavailable; launches run local\n        (set [tracing.langfuse] host/public_key/secret_key, or $LANGFUSE_PUBLIC_KEY / $LANGFUSE_SECRET_KEY)"
+        );
+        return;
+    };
+    let masked: String = lf.public_key.chars().take(8).collect::<String>() + "…";
+    let source = if lf.legacy_keys {
+        "legacy [langfuse] keys (move them to [tracing.langfuse])"
+    } else if lf.secret_from_file {
+        "config file"
+    } else {
+        "environment"
+    };
+    check(
+        "credentials",
+        !lf.legacy_keys,
+        &format!("{source}; host {}; public key {masked}", lf.host),
+    );
+    if lf.secret_from_file
+        && let Some(path) = &cfg.loaded_from
+        && !path.is_absolute()
+    {
+        println!(
+            "  [!!] the secret key sits in {} — prefer $LANGFUSE_SECRET_KEY (easy to commit)",
+            path.display()
+        );
+    }
+    match super::langfuse::probe(lf) {
+        Ok(()) => check(
+            "probe",
+            true,
+            "OTLP endpoint reachable, credentials accepted",
+        ),
+        Err(e) => check("probe", false, &e),
+    }
+    if resolved.backend == config::Backend::Local {
+        println!("  launches go to Langfuse only when a profile or the launch dialog picks it");
+    }
+    if let Ok(conn) = store::open_ro(&resolved.db_path) {
+        let since = now_ns() - 7 * 24 * 3600 * 1_000_000_000;
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT COALESCE(json_extract(metadata, '$.backend'), 'local'), count(*) FROM launches \
+             WHERE started_ns >= ?1 GROUP BY 1 ORDER BY 1",
+        ) {
+            let rows: Vec<(String, i64)> = stmt
+                .query_map([since], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map(|rows| rows.filter_map(Result::ok).collect())
+                .unwrap_or_default();
+            if !rows.is_empty() {
+                let parts: Vec<String> = rows.iter().map(|(b, n)| format!("{b} {n}")).collect();
+                println!("  launches (7d): {}", parts.join(", "));
+            }
+        }
+    }
+}
+
 fn doctor() -> anyhow::Result<()> {
     println!("agent-mux trace doctor\n");
     let cfg = config::load()?;
@@ -288,6 +560,8 @@ fn doctor() -> anyhow::Result<()> {
             "  [!!] db_path is on a Windows drive mount (/mnt/*) — SQLite locking is unreliable there; prefer a path under $HOME"
         );
     }
+
+    doctor_langfuse(&resolved, &cfg);
 
     println!("\nstore:");
     match store::open_ro(&resolved.db_path) {
@@ -445,6 +719,31 @@ fn doctor() -> anyhow::Result<()> {
         .map(|d| d.join("brain"));
     let (ok, detail) = dir_status(brain.as_deref());
     check("antigravity brain dir", ok, &detail);
+
+    println!("\nhooks (mode: {}):", resolved.hooks.as_str());
+    if resolved.hooks.registers() {
+        println!(
+            "  claude: registered per launch through --settings; codex notify: per launch through -c"
+        );
+    } else {
+        println!("  per-launch registrations are off; installed hooks still write rows");
+    }
+    let exe = super::hooks::register::current_exe();
+    for p in ["codex", "agy"] {
+        print_hook_status(&hook_status(p, &resolved.home, exe.as_deref()));
+    }
+    if let Ok(conn) = store::open_ro(&resolved.db_path) {
+        let activity = hook_activity(&conn);
+        if activity.is_empty() {
+            println!("  rows (24h): none");
+        } else {
+            let parts: Vec<String> = activity
+                .iter()
+                .map(|(p, n, last)| format!("{p} {n} (last {})", fmt_age(*last)))
+                .collect();
+            println!("  rows (24h): {}", parts.join(", "));
+        }
+    }
     println!(
         "\nA provider marked [!!] still gets a launch row per session; turn traces need\nits transcript machinery above to be in place."
     );
@@ -546,9 +845,106 @@ fn trace_json(t: &query::TraceStat) -> serde_json::Value {
     })
 }
 
+fn print_observation_bodies(o: &query::ObservationView) {
+    if let Some(input) = &o.input {
+        print_body("input", input);
+    }
+    if let Some(output) = &o.output {
+        print_body("output", output);
+    }
+    if let Some(thinking) = &o.thinking {
+        print_body("thinking", thinking);
+    }
+    if o.metadata != "{}" {
+        println!("    metadata: {}", o.metadata);
+    }
+}
+
+/// `show --tree`: the turn's hierarchy, connectors and all.
+fn tree_lines(observations: &[query::ObservationView]) -> Vec<String> {
+    let rows = super::view::tree_rows(observations, &std::collections::HashSet::new());
+    let width = rows
+        .iter()
+        .map(|r| r.prefix.chars().count() + r.obs.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(20, 70);
+    rows.iter()
+        .map(|r| {
+            let label = format!("{}{}", r.prefix, r.obs.name);
+            let duration = r
+                .obs
+                .end_ns
+                .map(|e| fmt_ms((e - r.obs.start_ns) / 1_000_000))
+                .unwrap_or_else(|| "running".into());
+            format!(
+                "{:<width$}  {:<10} {:>8} {:>8} {:>9}{}",
+                truncate_display(&label, width),
+                r.obs.obs_type,
+                duration,
+                fmt_tokens(r.obs.total_tokens),
+                fmt_cost(r.obs.total_cost_usd),
+                if r.obs.is_error { "  ERROR" } else { "" }
+            )
+        })
+        .collect()
+}
+
+/// `show --timeline`: bars over the turn's own window.
+fn timeline_lines(
+    trace: &query::TraceStat,
+    observations: &[query::ObservationView],
+    now_ns: i64,
+) -> Vec<String> {
+    const TRACK: usize = 60;
+    const LABEL: usize = 28;
+    let window = super::view::window(trace.start_ns, trace.end_ns, observations, now_ns);
+    let mut lines = vec![format!(
+        "{:<LABEL$} {}",
+        "",
+        super::view::axis(&window, TRACK)
+    )];
+    for o in observations {
+        let bar = super::view::bar(o.start_ns, o.end_ns, &window, TRACK);
+        let body = if bar.instant {
+            "▏".to_string()
+        } else if bar.running {
+            format!("{}▶", "█".repeat(bar.width.saturating_sub(1)))
+        } else {
+            "█".repeat(bar.width)
+        };
+        let label = format!("{}{}", "  ".repeat(o.depth.min(3)), o.name);
+        lines.push(format!(
+            "{:<LABEL$} {}{}",
+            truncate_display(&label, LABEL),
+            " ".repeat(bar.offset),
+            body
+        ));
+    }
+    lines
+}
+
+/// Truncates on char boundaries for the fixed-width columns above.
+fn truncate_display(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+}
+
+/// A nested observation's name, indented under its parent.
+pub fn indent(depth: usize, name: &str) -> String {
+    if depth == 0 {
+        name.to_string()
+    } else {
+        format!("{}└ {name}", "  ".repeat(depth - 1))
+    }
+}
+
 fn observation_json(o: &query::ObservationView) -> serde_json::Value {
     serde_json::json!({
-        "id": o.id, "trace_id": o.trace_id, "type": o.obs_type, "name": o.name, "kind": o.kind,
+        "id": o.id, "trace_id": o.trace_id, "parent_id": o.parent_id, "depth": o.depth,
+        "type": o.obs_type, "name": o.name, "kind": o.kind,
         "start_ns": o.start_ns, "end_ns": o.end_ns, "level": o.level, "status_message": o.status_message,
         "model": o.model, "model_id": o.model_id, "input": o.input, "output": o.output, "thinking": o.thinking,
         "usage": o.usage.as_deref().and_then(|u| serde_json::from_str::<serde_json::Value>(u).ok()),
@@ -650,6 +1046,33 @@ fn show(args: &Args) -> anyhow::Result<()> {
             print_body("input", input);
         }
         println!();
+        let tree = args.flags.contains_key("tree");
+        let timeline = args.flags.contains_key("timeline");
+        if tree && timeline {
+            anyhow::bail!("--tree and --timeline are two views of the same turn: pick one");
+        }
+        if tree {
+            for line in tree_lines(&observations) {
+                println!("{line}");
+            }
+        }
+        if timeline {
+            for line in timeline_lines(&trace, &observations, now_ns()) {
+                println!("{line}");
+            }
+        }
+        if tree || timeline {
+            if full {
+                for o in &observations {
+                    print_observation_bodies(o);
+                }
+            }
+            if let Some(output) = &trace.output {
+                println!();
+                print_body("output", output);
+            }
+            return Ok(());
+        }
         println!(
             "{:<12} {:<10} {:<19} {:>8} {:>8} {:>9} {:<7}  name",
             "time", "type", "model", "duration", "tokens", "cost", "level"
@@ -673,25 +1096,14 @@ fn show(args: &Args) -> anyhow::Result<()> {
                 fmt_tokens(o.total_tokens),
                 fmt_cost(o.total_cost_usd),
                 o.level,
-                o.name,
+                indent(o.depth, &o.name),
                 o.status_message
                     .as_ref()
                     .map(|m| format!(" ({m})"))
                     .unwrap_or_default()
             );
             if full {
-                if let Some(input) = &o.input {
-                    print_body("input", input);
-                }
-                if let Some(output) = &o.output {
-                    print_body("output", output);
-                }
-                if let Some(thinking) = &o.thinking {
-                    print_body("thinking", thinking);
-                }
-                if o.metadata != "{}" {
-                    println!("    metadata: {}", o.metadata);
-                }
+                print_observation_bodies(o);
             }
         }
         if let Some(output) = &trace.output {
@@ -1070,6 +1482,15 @@ fn export(args: &Args) -> anyhow::Result<()> {
         ),
         None => None,
     };
+    if args.flags.contains_key("langfuse") {
+        return export_langfuse(
+            &conn,
+            &resolved,
+            session_key,
+            since,
+            args.flags.contains_key("dry-run"),
+        );
+    }
     let mut out: Box<dyn std::io::Write> = match args.value("out") {
         Some(path) => Box::new(std::io::BufWriter::new(std::fs::File::create(path)?)),
         None => Box::new(std::io::stdout().lock()),
@@ -1090,6 +1511,10 @@ fn export(args: &Args) -> anyhow::Result<()> {
         (
             "observations",
             "SELECT o.* FROM observations o JOIN traces t ON t.id = o.trace_id WHERE (?1 IS NULL OR t.session_key = ?1) AND (?2 IS NULL OR t.start_ns >= ?2)",
+        ),
+        (
+            "hook_events",
+            "SELECT h.* FROM hook_events h WHERE (?1 IS NULL OR h.session_id = (SELECT session_id FROM sessions WHERE key = ?1)) AND (?2 IS NULL OR h.ts_ns >= ?2)",
         ),
     ];
     let mut n = 0usize;
@@ -1196,9 +1621,257 @@ fn sql(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What one hook invocation did. The command itself always exits 0; this is
+/// for tests and the `AGENT_MUX_HOOK_DEBUG` line.
+#[derive(Debug, Default)]
+pub struct HookOutcome {
+    pub inserted: bool,
+    /// What agy expects on stdout (`None` for the other sources).
+    pub response: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Longest the hook waits for the store's write lock before giving up.
+pub const HOOK_BUSY_CAP: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// `trace hook <source> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]`.
+/// `stdin_override` lets tests supply the payload without a pipe.
+pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
+    use crate::tracing::hooks::{self, ContentPolicy, HookSource};
+    let mut outcome = HookOutcome::default();
+    let Some(source) = raw.first().and_then(|s| HookSource::parse(s)) else {
+        outcome.error = Some("unknown hook source".into());
+        return outcome;
+    };
+    let args = Args::parse(&raw[1..]);
+    let event = args.value("event").map(str::to_string);
+    if source == HookSource::Antigravity {
+        outcome.response = Some(hooks::agy_response(event.as_deref().unwrap_or("")).to_string());
+    }
+    // payload: the last JSON-looking positional (Codex notify), else stdin
+    let payload_text = match args
+        .positional
+        .iter()
+        .rev()
+        .find(|p| p.trim_start().starts_with('{'))
+    {
+        Some(p) => p.clone(),
+        None => match stdin_override {
+            Some(s) => s.to_string(),
+            None => {
+                let mut buf = String::new();
+                let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf);
+                buf
+            }
+        },
+    };
+    let payload: serde_json::Value = match serde_json::from_str(payload_text.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            outcome.error = Some(format!("payload: {e}"));
+            return outcome;
+        }
+    };
+    // configuration: the registering TUI's home, never the CLI's cwd
+    let home: PathBuf = args
+        .value("home")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let cfg = match config::load_from_home(&home) {
+        Ok(c) => c,
+        Err(e) => {
+            outcome.error = Some(format!("config: {e}"));
+            return outcome;
+        }
+    };
+    let home_str = home.to_string_lossy().into_owned();
+    let env = |k: &str| match k {
+        "HOME" | "USERPROFILE" => Some(home_str.clone()),
+        other => std::env::var(other).ok(),
+    };
+    let Some(mut resolved) = config::resolve_tracing(cfg.tracing.as_ref(), &env) else {
+        outcome.error = Some("tracing disabled".into());
+        return outcome;
+    };
+    if let Some(db) = args.value("db") {
+        resolved.db_path = PathBuf::from(db);
+    }
+    let mode_override = match args.value("content-mode") {
+        Some("metadata") => Some(ContentMode::Metadata),
+        Some("full") => Some(ContentMode::Full),
+        _ => None,
+    };
+    let policy = ContentPolicy::from_resolved(&resolved, mode_override);
+    let launch_id = args
+        .value("launch")
+        .map(str::to_string)
+        .or_else(|| std::env::var("AGENT_MUX_SESSION_ID").ok())
+        .filter(|s| !s.is_empty());
+    let Some(ev) = hooks::parse(
+        source,
+        event.as_deref(),
+        &payload,
+        &policy,
+        store::now_ns(),
+        launch_id,
+    ) else {
+        outcome.error = Some("event not stored".into());
+        return outcome;
+    };
+    match store::open_hook_sink(&resolved.db_path, HOOK_BUSY_CAP) {
+        Ok(conn) => match store::insert_hook_event(&conn, &ev) {
+            Ok(inserted) => outcome.inserted = inserted,
+            Err(e) => outcome.error = Some(format!("insert: {e}")),
+        },
+        Err(e) => outcome.error = Some(e),
+    }
+    // a user's own notify program, displaced by our per-launch override,
+    // still gets the payload
+    if let Some(chain) = args.value("chain")
+        && let Ok(argv) = serde_json::from_str::<Vec<String>>(chain)
+        && let Some((program, rest)) = argv.split_first()
+    {
+        let _ = std::process::Command::new(program)
+            .args(rest)
+            .arg(&payload_text)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn view_of(
+        id: &str,
+        name: &str,
+        depth: usize,
+        start_ns: i64,
+        end_ns: Option<i64>,
+    ) -> query::ObservationView {
+        query::ObservationView {
+            id: id.into(),
+            trace_id: "t".into(),
+            parent_id: None,
+            depth,
+            obs_type: "tool".into(),
+            name: name.into(),
+            kind: None,
+            start_ns,
+            end_ns,
+            level: "DEFAULT".into(),
+            status_message: None,
+            model: None,
+            model_id: None,
+            input: None,
+            output: None,
+            thinking: None,
+            usage: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: None,
+            total_cost_usd: None,
+            tool_id: None,
+            tool_name: None,
+            skill: None,
+            mcp_server: None,
+            path: None,
+            is_error: false,
+            metadata: "{}".into(),
+        }
+    }
+
+    fn trace_of(start_ns: i64, end_ns: Option<i64>) -> query::TraceStat {
+        query::TraceStat {
+            id: "t".into(),
+            session_key: "claude:s".into(),
+            launch_id: None,
+            ordinal: 1,
+            name: "turn".into(),
+            status: "closed".into(),
+            start_ns,
+            end_ns,
+            latency_ms: 0,
+            input: None,
+            output: None,
+            thinking: None,
+            skills: "[]".into(),
+            reported_duration_ms: None,
+            session_cost_usd: None,
+            closed_by: None,
+            observation_count: 0,
+            generation_count: 0,
+            tool_count: 0,
+            error_count: 0,
+            open_count: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            total_cost_usd: None,
+            unpriced_generations: 0,
+            models: None,
+        }
+    }
+
+    #[test]
+    fn show_tree_prints_the_hierarchy() {
+        let obs = vec![
+            view_of("a", "agent: Explore", 0, 0, Some(2_000_000_000)),
+            view_of("g", "Grep", 1, 200_000_000, Some(900_000_000)),
+            view_of("r", "Read", 1, 1_000_000_000, None),
+        ];
+        let lines = tree_lines(&obs);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("agent: Explore"), "{:?}", lines[0]);
+        assert!(lines[1].starts_with("├─ Grep"), "{:?}", lines[1]);
+        assert!(lines[2].starts_with("└─ Read"), "{:?}", lines[2]);
+        assert!(lines[0].contains("2.0s"), "{:?}", lines[0]);
+        assert!(lines[2].contains("running"), "{:?}", lines[2]);
+    }
+
+    #[test]
+    fn show_timeline_prints_an_axis_and_proportional_bars() {
+        let obs = vec![
+            view_of("a", "first", 0, 0, Some(1_000_000_000)),
+            view_of("b", "second", 1, 3_000_000_000, Some(4_000_000_000)),
+            view_of("c", "open", 0, 3_500_000_000, None),
+        ];
+        let lines = timeline_lines(&trace_of(0, Some(4_000_000_000)), &obs, 0);
+        assert_eq!(lines.len(), 4, "the axis plus one row each");
+        assert!(
+            lines[0].contains("0ms") && lines[0].contains("4.0s"),
+            "{:?}",
+            lines[0]
+        );
+        // the first bar starts flush left, the second is pushed right
+        let bar_col = |l: &str| l.find('█').unwrap_or(usize::MAX);
+        assert!(bar_col(&lines[1]) < bar_col(&lines[2]), "{lines:?}");
+        assert!(
+            lines[2].starts_with("  second"),
+            "nesting is indented: {:?}",
+            lines[2]
+        );
+        assert!(
+            lines[3].ends_with('▶'),
+            "the open row is capped: {:?}",
+            lines[3]
+        );
+        // a closed turn holding an open row is not stretched to now
+        let far_future = 9_000_000_000_000;
+        let same = timeline_lines(&trace_of(0, Some(4_000_000_000)), &obs, far_future);
+        assert_eq!(same, lines, "now only matters while the turn is open");
+    }
 
     #[test]
     fn duration_parsing() {
