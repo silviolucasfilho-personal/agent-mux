@@ -22,6 +22,7 @@ pub mod pricing;
 pub mod store;
 pub mod tail;
 pub mod usage;
+pub mod view;
 
 use crate::config::{Backend, ContentMode, Profile, ResolvedTracing};
 use crate::events::AppEvent;

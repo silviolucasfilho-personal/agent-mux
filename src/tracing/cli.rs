@@ -18,8 +18,9 @@ commands:
   path                         print the resolved database path
   ls [--all] [--project DIR] [--since 7d] [--limit N] [--json]
                                sessions with turns, tokens, cost
-  show <session|trace> [--full] [--json]
+  show <session|trace> [--full] [--json] [--tree | --timeline]
                                turns of a session, or observations of a trace
+                               (--tree: nesting; --timeline: bars over the turn)
   search <fts5 query> [--limit N] [--json]
                                full-text search over content (full mode data)
   import <path>... | --discover [--provider claude|codex|antigravity] [--content-mode full|metadata]
@@ -54,7 +55,15 @@ impl Args {
                     flags.insert(k.to_string(), Some(v.to_string()));
                 } else if matches!(
                     name,
-                    "all" | "json" | "full" | "discover" | "vacuum" | "dry-run" | "langfuse"
+                    "all"
+                        | "json"
+                        | "full"
+                        | "discover"
+                        | "vacuum"
+                        | "dry-run"
+                        | "langfuse"
+                        | "tree"
+                        | "timeline"
                 ) {
                     flags.insert(name.to_string(), None);
                 } else {
@@ -836,6 +845,93 @@ fn trace_json(t: &query::TraceStat) -> serde_json::Value {
     })
 }
 
+fn print_observation_bodies(o: &query::ObservationView) {
+    if let Some(input) = &o.input {
+        print_body("input", input);
+    }
+    if let Some(output) = &o.output {
+        print_body("output", output);
+    }
+    if let Some(thinking) = &o.thinking {
+        print_body("thinking", thinking);
+    }
+    if o.metadata != "{}" {
+        println!("    metadata: {}", o.metadata);
+    }
+}
+
+/// `show --tree`: the turn's hierarchy, connectors and all.
+fn tree_lines(observations: &[query::ObservationView]) -> Vec<String> {
+    let rows = super::view::tree_rows(observations, &std::collections::HashSet::new());
+    let width = rows
+        .iter()
+        .map(|r| r.prefix.chars().count() + r.obs.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(20, 70);
+    rows.iter()
+        .map(|r| {
+            let label = format!("{}{}", r.prefix, r.obs.name);
+            let duration = r
+                .obs
+                .end_ns
+                .map(|e| fmt_ms((e - r.obs.start_ns) / 1_000_000))
+                .unwrap_or_else(|| "running".into());
+            format!(
+                "{:<width$}  {:<10} {:>8} {:>8} {:>9}{}",
+                truncate_display(&label, width),
+                r.obs.obs_type,
+                duration,
+                fmt_tokens(r.obs.total_tokens),
+                fmt_cost(r.obs.total_cost_usd),
+                if r.obs.is_error { "  ERROR" } else { "" }
+            )
+        })
+        .collect()
+}
+
+/// `show --timeline`: bars over the turn's own window.
+fn timeline_lines(
+    trace: &query::TraceStat,
+    observations: &[query::ObservationView],
+    now_ns: i64,
+) -> Vec<String> {
+    const TRACK: usize = 60;
+    const LABEL: usize = 28;
+    let window = super::view::window(trace.start_ns, trace.end_ns, observations, now_ns);
+    let mut lines = vec![format!(
+        "{:<LABEL$} {}",
+        "",
+        super::view::axis(&window, TRACK)
+    )];
+    for o in observations {
+        let bar = super::view::bar(o.start_ns, o.end_ns, &window, TRACK);
+        let body = if bar.instant {
+            "▏".to_string()
+        } else if bar.running {
+            format!("{}▶", "█".repeat(bar.width.saturating_sub(1)))
+        } else {
+            "█".repeat(bar.width)
+        };
+        let label = format!("{}{}", "  ".repeat(o.depth.min(3)), o.name);
+        lines.push(format!(
+            "{:<LABEL$} {}{}",
+            truncate_display(&label, LABEL),
+            " ".repeat(bar.offset),
+            body
+        ));
+    }
+    lines
+}
+
+/// Truncates on char boundaries for the fixed-width columns above.
+fn truncate_display(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+}
+
 /// A nested observation's name, indented under its parent.
 pub fn indent(depth: usize, name: &str) -> String {
     if depth == 0 {
@@ -950,6 +1046,33 @@ fn show(args: &Args) -> anyhow::Result<()> {
             print_body("input", input);
         }
         println!();
+        let tree = args.flags.contains_key("tree");
+        let timeline = args.flags.contains_key("timeline");
+        if tree && timeline {
+            anyhow::bail!("--tree and --timeline are two views of the same turn: pick one");
+        }
+        if tree {
+            for line in tree_lines(&observations) {
+                println!("{line}");
+            }
+        }
+        if timeline {
+            for line in timeline_lines(&trace, &observations, now_ns()) {
+                println!("{line}");
+            }
+        }
+        if tree || timeline {
+            if full {
+                for o in &observations {
+                    print_observation_bodies(o);
+                }
+            }
+            if let Some(output) = &trace.output {
+                println!();
+                print_body("output", output);
+            }
+            return Ok(());
+        }
         println!(
             "{:<12} {:<10} {:<19} {:>8} {:>8} {:>9} {:<7}  name",
             "time", "type", "model", "duration", "tokens", "cost", "level"
@@ -980,18 +1103,7 @@ fn show(args: &Args) -> anyhow::Result<()> {
                     .unwrap_or_default()
             );
             if full {
-                if let Some(input) = &o.input {
-                    print_body("input", input);
-                }
-                if let Some(output) = &o.output {
-                    print_body("output", output);
-                }
-                if let Some(thinking) = &o.thinking {
-                    print_body("thinking", thinking);
-                }
-                if o.metadata != "{}" {
-                    println!("    metadata: {}", o.metadata);
-                }
+                print_observation_bodies(o);
             }
         }
         if let Some(output) = &trace.output {
@@ -1635,6 +1747,131 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn view_of(
+        id: &str,
+        name: &str,
+        depth: usize,
+        start_ns: i64,
+        end_ns: Option<i64>,
+    ) -> query::ObservationView {
+        query::ObservationView {
+            id: id.into(),
+            trace_id: "t".into(),
+            parent_id: None,
+            depth,
+            obs_type: "tool".into(),
+            name: name.into(),
+            kind: None,
+            start_ns,
+            end_ns,
+            level: "DEFAULT".into(),
+            status_message: None,
+            model: None,
+            model_id: None,
+            input: None,
+            output: None,
+            thinking: None,
+            usage: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: None,
+            total_cost_usd: None,
+            tool_id: None,
+            tool_name: None,
+            skill: None,
+            mcp_server: None,
+            path: None,
+            is_error: false,
+            metadata: "{}".into(),
+        }
+    }
+
+    fn trace_of(start_ns: i64, end_ns: Option<i64>) -> query::TraceStat {
+        query::TraceStat {
+            id: "t".into(),
+            session_key: "claude:s".into(),
+            launch_id: None,
+            ordinal: 1,
+            name: "turn".into(),
+            status: "closed".into(),
+            start_ns,
+            end_ns,
+            latency_ms: 0,
+            input: None,
+            output: None,
+            thinking: None,
+            skills: "[]".into(),
+            reported_duration_ms: None,
+            session_cost_usd: None,
+            closed_by: None,
+            observation_count: 0,
+            generation_count: 0,
+            tool_count: 0,
+            error_count: 0,
+            open_count: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            total_cost_usd: None,
+            unpriced_generations: 0,
+            models: None,
+        }
+    }
+
+    #[test]
+    fn show_tree_prints_the_hierarchy() {
+        let obs = vec![
+            view_of("a", "agent: Explore", 0, 0, Some(2_000_000_000)),
+            view_of("g", "Grep", 1, 200_000_000, Some(900_000_000)),
+            view_of("r", "Read", 1, 1_000_000_000, None),
+        ];
+        let lines = tree_lines(&obs);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("agent: Explore"), "{:?}", lines[0]);
+        assert!(lines[1].starts_with("├─ Grep"), "{:?}", lines[1]);
+        assert!(lines[2].starts_with("└─ Read"), "{:?}", lines[2]);
+        assert!(lines[0].contains("2.0s"), "{:?}", lines[0]);
+        assert!(lines[2].contains("running"), "{:?}", lines[2]);
+    }
+
+    #[test]
+    fn show_timeline_prints_an_axis_and_proportional_bars() {
+        let obs = vec![
+            view_of("a", "first", 0, 0, Some(1_000_000_000)),
+            view_of("b", "second", 1, 3_000_000_000, Some(4_000_000_000)),
+            view_of("c", "open", 0, 3_500_000_000, None),
+        ];
+        let lines = timeline_lines(&trace_of(0, Some(4_000_000_000)), &obs, 0);
+        assert_eq!(lines.len(), 4, "the axis plus one row each");
+        assert!(
+            lines[0].contains("0ms") && lines[0].contains("4.0s"),
+            "{:?}",
+            lines[0]
+        );
+        // the first bar starts flush left, the second is pushed right
+        let bar_col = |l: &str| l.find('█').unwrap_or(usize::MAX);
+        assert!(bar_col(&lines[1]) < bar_col(&lines[2]), "{lines:?}");
+        assert!(
+            lines[2].starts_with("  second"),
+            "nesting is indented: {:?}",
+            lines[2]
+        );
+        assert!(
+            lines[3].ends_with('▶'),
+            "the open row is capped: {:?}",
+            lines[3]
+        );
+        // a closed turn holding an open row is not stretched to now
+        let far_future = 9_000_000_000_000;
+        let same = timeline_lines(&trace_of(0, Some(4_000_000_000)), &obs, far_future);
+        assert_eq!(same, lines, "now only matters while the turn is open");
+    }
 
     #[test]
     fn duration_parsing() {

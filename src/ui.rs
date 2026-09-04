@@ -5,6 +5,7 @@ use crate::app::{
 use crate::status::Status;
 use crate::tracing::cli::{fmt_cost, fmt_ms, fmt_time, fmt_tokens};
 use crate::tracing::store::query::LaunchStats;
+use crate::tracing::view::{self as trace_view, Bar};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -213,7 +214,10 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
             ];
             if s.trace.is_some() {
                 spans.push(Span::styled(
-                    format!(" {}", trace_badge(s.trace_stats.as_ref(), false)),
+                    format!(
+                        " {}",
+                        trace_badge(s.trace_stats.as_ref(), false, session_backend(s))
+                    ),
                     Style::default().fg(Color::Cyan),
                 ));
             }
@@ -246,7 +250,10 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         String::new()
     };
     let trace_tag = if session.trace.is_some() {
-        format!("{} ", trace_badge(session.trace_stats.as_ref(), true))
+        format!(
+            "{} ",
+            trace_badge(session.trace_stats.as_ref(), true, session_backend(session))
+        )
     } else {
         String::new()
     };
@@ -333,10 +340,17 @@ fn draw_help(f: &mut Frame) {
         row("j/k, ↑/↓", "select session"),
         row("1-9", "jump to session N"),
         row("Enter", "attach to selected session"),
-        row("n", "new session"),
+        row(
+            "n",
+            "new session (pick the trace backend: SQLite, Langfuse, both)",
+        ),
         row("l", "browse past session logs"),
         row("t", "toggle tracing (local SQLite store)"),
-        row("T", "browse traces: turns, tools, tokens, cost"),
+        row("T", "browse local traces: turns, tools, tokens, cost"),
+        row(
+            "● ◆ ◈",
+            "badge glyphs: traced locally, to Langfuse, to both",
+        ),
         row("x", "kill session (remove if exited)"),
         row("r", "respawn exited session"),
         row("q", "quit"),
@@ -483,6 +497,28 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
         Span::raw("Tracing:          "),
         Span::styled(trace_box, tracing_style.fg(trace_color)),
         Span::styled(" (Space to toggle)", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    // Backend Option
+    let backend_style = if matches!(dialog.field, DialogField::Backend) {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    let backend_label = match dialog.backend {
+        crate::config::Backend::Local => "[Local SQLite]",
+        crate::config::Backend::Langfuse => "[Langfuse]",
+        crate::config::Backend::Both => "[Both] SQLite + Langfuse",
+    };
+    let backend_hint = if dialog.langfuse_available {
+        " (Space to cycle)"
+    } else {
+        " (Langfuse: not configured — see `agent-mux trace doctor`)"
+    };
+    lines.push(Line::from(vec![
+        Span::raw("Backend:          "),
+        Span::styled(backend_label, backend_style.fg(Color::Yellow)),
+        Span::styled(backend_hint, Style::default().fg(Color::DarkGray)),
     ]));
 
     // Content Mode Option
@@ -652,16 +688,34 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
 
 /// `[● TRACE]` until the first live rollup arrives, then turns + cost (or
 /// tokens when nothing is priced); the verbose form adds the running tool.
-pub fn trace_badge(stats: Option<&LaunchStats>, verbose: bool) -> String {
+/// The backend a live session's launch chose (local when untraced).
+fn session_backend(session: &crate::session::Session) -> crate::config::Backend {
+    session
+        .trace
+        .as_ref()
+        .map(|t| t.backend)
+        .unwrap_or_default()
+}
+
+pub fn trace_badge(
+    stats: Option<&LaunchStats>,
+    verbose: bool,
+    backend: crate::config::Backend,
+) -> String {
+    let glyph = match backend {
+        crate::config::Backend::Local => "●",
+        crate::config::Backend::Langfuse => "◆",
+        crate::config::Backend::Both => "◈",
+    };
     let Some(stats) = stats else {
-        return "[● TRACE]".to_string();
+        return format!("[{glyph} TRACE]");
     };
     let money = match (stats.cost_usd, stats.total_tokens) {
         (Some(c), _) if c > 0.0 => fmt_cost(Some(c)),
         (_, Some(t)) if t > 0 => format!("{} tok", fmt_tokens(Some(t))),
         _ => String::new(),
     };
-    let mut badge = format!("[● {}t", stats.turns);
+    let mut badge = format!("[{glyph} {}t", stats.turns);
     if !money.is_empty() {
         badge.push(' ');
         badge.push_str(&money);
@@ -874,8 +928,9 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             browser.observations.len()
         ),
         Some(t) => format!(
-            " Turn #{} · {} observation(s) · {} · {} tok · {} ",
+            " Turn #{} · {} · {} obs · {} · {} tok · {} ",
             t.ordinal,
+            browser.detail_view.label(),
             browser.observations.len(),
             fmt_ms(t.latency_ms),
             fmt_tokens(t.total_tokens),
@@ -914,6 +969,10 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             )],
         };
         f.render_widget(Paragraph::new(hint), inner_right);
+    } else if browser.detail_view == crate::app::DetailView::Tree {
+        draw_observation_tree(f, browser, inner_right);
+    } else if browser.detail_view == crate::app::DetailView::Timeline {
+        draw_observation_timeline(f, browser, inner_right);
     } else {
         let visible = usize::from(inner_right.height);
         let start = sidebar_window(
@@ -950,7 +1009,10 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::raw(format!("{glyph} ")),
-                    Span::raw(truncate_chars(&o.name, 28)),
+                    Span::raw(truncate_chars(
+                        &crate::tracing::cli::indent(o.depth, &o.name),
+                        28,
+                    )),
                     Span::styled(
                         format!(
                             " {:>7} {:>6} {:>7}",
@@ -978,11 +1040,175 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             Style::default().fg(Color::Black).bg(Color::Yellow),
         ),
         None => Line::styled(
-            " [Tab] pane  [↑/↓] select  [Enter] drill/expand  [/] search  [a] all projects  [r] resume  [Esc] close",
+            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [a] all  [r] resume  [Esc] close",
             Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
     };
     f.render_widget(Paragraph::new(footer_text), footer);
+}
+
+/// Colour for an observation row, shared by both new views.
+fn obs_style(o: &crate::tracing::store::query::ObservationView) -> Style {
+    if o.is_error || o.level == "ERROR" {
+        return Style::default().fg(Color::Red);
+    }
+    match o.level.as_str() {
+        "WARNING" => Style::default().fg(Color::Yellow),
+        _ => match o.obs_type.as_str() {
+            "generation" => Style::default().fg(Color::Blue),
+            "agent" => Style::default().fg(Color::Cyan),
+            _ => Style::default(),
+        },
+    }
+}
+
+fn obs_glyph(o: &crate::tracing::store::query::ObservationView) -> &'static str {
+    match (o.obs_type.as_str(), o.end_ns.is_some()) {
+        ("generation", _) => "💬",
+        ("agent", _) => "🤖",
+        (_, false) => "⏳",
+        _ => "🔧",
+    }
+}
+
+/// The hierarchy: connectors from the depth sequence, folded subtrees
+/// reporting what they hide.
+fn draw_observation_tree(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
+    let rows = trace_view::tree_rows(&browser.observations, &browser.collapsed);
+    let selected = rows
+        .iter()
+        .position(|r| r.obs.id == browser.observations[browser.selected_observation].id)
+        .unwrap_or(0);
+    let height = usize::from(area.height);
+    let start = sidebar_window(selected, rows.len(), height);
+    let end = (start + height.max(1)).min(rows.len());
+    let width = usize::from(area.width);
+    let items: Vec<ListItem> = rows[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, r)| {
+            let i = start + offset;
+            let is_sel = i == selected;
+            let fold = if !r.has_children {
+                "  "
+            } else if r.collapsed {
+                "▸ "
+            } else {
+                "▾ "
+            };
+            let metrics = if r.collapsed {
+                format!(
+                    " +{} {:>6} {:>7}",
+                    r.hidden,
+                    fmt_tokens(Some(r.subtree.tokens).filter(|t| *t > 0)),
+                    fmt_cost(Some(r.subtree.cost).filter(|c| *c > 0.0))
+                )
+            } else {
+                format!(
+                    " {:>7} {:>6} {:>7}",
+                    r.obs
+                        .end_ns
+                        .map(|e| fmt_ms((e - r.obs.start_ns) / 1_000_000))
+                        .unwrap_or_else(|| "running".into()),
+                    fmt_tokens(r.obs.total_tokens),
+                    fmt_cost(r.obs.total_cost_usd)
+                )
+            };
+            // the name takes whatever the connectors and metrics leave,
+            // padded so the metrics stay in one column down the pane
+            let budget = width
+                .saturating_sub(r.prefix.chars().count() + metrics.chars().count() + 6)
+                .max(8);
+            let name = truncate_chars(&r.obs.name, budget);
+            let line = Line::from(vec![
+                Span::raw(if is_sel { ">" } else { " " }),
+                Span::styled(fold.to_string(), Style::default().fg(Color::DarkGray)),
+                Span::styled(r.prefix.clone(), Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("{} ", obs_glyph(r.obs))),
+                Span::styled(format!("{name:<budget$}"), obs_style(r.obs)),
+                Span::styled(metrics, Style::default().fg(Color::DarkGray)),
+            ]);
+            let item = ListItem::new(line);
+            if is_sel && browser.focused == BrowserPane::Detail {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items), area);
+}
+
+/// Time, proportional to the turn: an axis, then one bar per observation.
+fn draw_observation_timeline(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
+    let turn = browser.turns.get(browser.selected_turn);
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    let window = trace_view::window(
+        turn.map(|t| t.start_ns).unwrap_or(0),
+        turn.and_then(|t| t.end_ns),
+        &browser.observations,
+        now_ns,
+    );
+    // label column, then the track
+    let label_cols = usize::from(area.width).saturating_sub(4).clamp(6, 22);
+    let track_cols = usize::from(area.width).saturating_sub(label_cols + 1);
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::raw(" ".repeat(label_cols + 1)),
+        Span::styled(
+            trace_view::axis(&window, track_cols),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])];
+    let height = usize::from(area.height).saturating_sub(1);
+    let start = sidebar_window(
+        browser.selected_observation,
+        browser.observations.len(),
+        height,
+    );
+    let end = (start + height.max(1)).min(browser.observations.len());
+    for (i, o) in browser.observations[start..end].iter().enumerate() {
+        let i = start + i;
+        let is_sel = i == browser.selected_observation;
+        let Bar {
+            offset,
+            width,
+            running,
+            instant,
+        } = trace_view::bar(o.start_ns, o.end_ns, &window, track_cols);
+        let indent = "  ".repeat(o.depth.min(3));
+        let label = format!(
+            "{}{}{}",
+            if is_sel { ">" } else { " " },
+            indent,
+            truncate_chars(&o.name, label_cols.saturating_sub(indent.len() + 1))
+        );
+        let bar_body = if instant {
+            "▏".to_string()
+        } else if running {
+            format!("{}▶", "█".repeat(width.saturating_sub(1)))
+        } else {
+            "█".repeat(width)
+        };
+        let mut spans = vec![
+            Span::styled(format!("{label:<label_cols$} "), obs_style(o)),
+            Span::styled("░".repeat(offset), Style::default().fg(Color::DarkGray)),
+            Span::styled(bar_body, obs_style(o)),
+        ];
+        if is_sel && browser.focused == BrowserPane::Detail {
+            spans = spans
+                .into_iter()
+                .map(|s| {
+                    let style = s.style.add_modifier(Modifier::REVERSED);
+                    s.style(style)
+                })
+                .collect();
+        }
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_confirm(f: &mut Frame, message: &str) {
@@ -1293,22 +1519,33 @@ mod tests {
 
     #[test]
     fn trace_badge_shapes() {
-        assert_eq!(trace_badge(None, true), "[● TRACE]");
+        use crate::config::Backend;
+        assert_eq!(trace_badge(None, true, Backend::Local), "[● TRACE]");
+        assert_eq!(trace_badge(None, true, Backend::Langfuse), "[◆ TRACE]");
         let stats = LaunchStats {
             turns: 3,
             total_tokens: Some(12_000),
             cost_usd: Some(0.42),
             running_tool: Some("Bash".into()),
         };
-        assert_eq!(trace_badge(Some(&stats), false), "[● 3t $0.42]");
-        assert_eq!(trace_badge(Some(&stats), true), "[● 3t $0.42 ▸ Bash]");
+        assert_eq!(
+            trace_badge(Some(&stats), false, Backend::Local),
+            "[● 3t $0.42]"
+        );
+        assert_eq!(
+            trace_badge(Some(&stats), true, Backend::Both),
+            "[◈ 3t $0.42 ▸ Bash]"
+        );
         let unpriced = LaunchStats {
             turns: 1,
             total_tokens: Some(12_000),
             cost_usd: None,
             running_tool: None,
         };
-        assert_eq!(trace_badge(Some(&unpriced), true), "[● 1t 12k tok]");
+        assert_eq!(
+            trace_badge(Some(&unpriced), true, Backend::Local),
+            "[● 1t 12k tok]"
+        );
     }
 
     #[test]
@@ -1410,5 +1647,155 @@ mod tests {
         // tracing off: the browser explains instead of panicking
         let off = crate::app::TraceBrowserState::new(None, None);
         assert!(off.error.as_deref().unwrap_or("").contains("off"));
+    }
+
+    #[test]
+    fn tree_and_timeline_views_render_their_own_shapes() {
+        use crate::app::DetailView;
+        use crate::tracing::store::query::ObservationView;
+        let view = |id: &str, name: &str, depth: usize, start_ns: i64, end_ns: Option<i64>| {
+            ObservationView {
+                id: id.into(),
+                trace_id: "trace-1".into(),
+                parent_id: None,
+                depth,
+                obs_type: if depth == 0 && id == "a" {
+                    "agent".into()
+                } else {
+                    "tool".into()
+                },
+                name: name.into(),
+                kind: None,
+                start_ns,
+                end_ns,
+                level: "DEFAULT".into(),
+                status_message: None,
+                model: None,
+                model_id: None,
+                input: None,
+                output: None,
+                thinking: None,
+                usage: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+                total_tokens: Some(1_000),
+                total_cost_usd: Some(0.01),
+                tool_id: None,
+                tool_name: None,
+                skill: None,
+                mcp_server: None,
+                path: None,
+                is_error: false,
+                metadata: "{}".into(),
+            }
+        };
+        // real traces carry epoch nanos, and a running row is compared
+        // against the clock: anchor the fixture just before now
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        let base = now_ns - 4_000_000_000;
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(Config::default_profiles(), None, tx);
+        let mut browser = crate::app::TraceBrowserState::new(None, None);
+        browser.error = None;
+        browser.turns = vec![crate::tracing::store::query::TraceStat {
+            id: "trace-1".into(),
+            session_key: "claude:s".into(),
+            launch_id: None,
+            ordinal: 1,
+            name: "Claude Code: do it".into(),
+            status: "open".into(),
+            start_ns: base,
+            // still open, so the running row below is measured against now
+            end_ns: None,
+            latency_ms: 4_000,
+            input: None,
+            output: None,
+            thinking: None,
+            skills: "[]".into(),
+            reported_duration_ms: None,
+            session_cost_usd: None,
+            closed_by: None,
+            observation_count: 4,
+            generation_count: 0,
+            tool_count: 3,
+            error_count: 0,
+            open_count: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: Some(4_000),
+            total_cost_usd: Some(0.04),
+            unpriced_generations: 0,
+            models: None,
+        }];
+        browser.observations = vec![
+            view("a", "agent: Explore", 0, base, Some(base + 2_000_000_000)),
+            view("g", "Grep", 1, base + 200_000_000, Some(base + 900_000_000)),
+            view(
+                "r",
+                "Read",
+                1,
+                base + 1_000_000_000,
+                Some(base + 1_800_000_000),
+            ),
+            view("b", "Bash", 0, base + 2_100_000_000, None),
+        ];
+        browser.focused = BrowserPane::Detail;
+        browser.detail_view = DetailView::Tree;
+        app.mode = crate::app::Mode::TraceBrowser(Box::new(browser));
+        let mut terminal = Terminal::new(TestBackend::new(180, 30)).unwrap();
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("tree"), "the title names the view: {text}");
+        assert!(text.contains("├─"), "connectors: {text}");
+        assert!(text.contains("└─"), "connectors: {text}");
+        assert!(
+            text.contains("▾"),
+            "an expanded parent shows a fold mark: {text}"
+        );
+        assert!(text.contains("[v] view"), "footer: {text}");
+
+        // folded: the children go away and the parent reports the subtree
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.selected_observation = 0;
+            b.toggle_collapsed();
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("▸"), "a folded parent flips its mark: {text}");
+        assert!(text.contains("+2"), "it says what it hid: {text}");
+        assert!(!text.contains("Grep"), "children are hidden: {text}");
+
+        // timeline: an axis, bars, and a cap on the running row
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.collapsed.clear();
+            b.detail_view = DetailView::Timeline;
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("timeline"),
+            "the title names the view: {text}"
+        );
+        assert!(text.contains("0ms"), "axis: {text}");
+        assert!(text.contains("█"), "bars: {text}");
+        assert!(text.contains("░"), "lead-in before a later bar: {text}");
+        assert!(text.contains("▶"), "the running row is capped: {text}");
+        assert!(text.contains("Grep"), "every row is listed: {text}");
+
+        // a cramped terminal must not panic in either view
+        let mut tiny = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        tiny.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.detail_view = DetailView::Tree;
+        }
+        tiny.draw(|f| draw(f, &app, Instant::now())).unwrap();
     }
 }
