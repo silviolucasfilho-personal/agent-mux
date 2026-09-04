@@ -1080,7 +1080,11 @@ impl TurnAssembler {
         let status_message = if unpaired {
             Some("no result observed".to_string())
         } else if is_error {
-            Some("tool error".to_string())
+            // say what failed, not just that something did — a red row
+            // whose message is "tool error" explains nothing, and in
+            // metadata mode the body that would have explained it is not
+            // stored at all
+            Some(error_summary(content).unwrap_or_else(|| "tool error".to_string()))
         } else {
             None
         };
@@ -1890,6 +1894,20 @@ enum HookTarget {
     None,
 }
 
+/// A short reason for a failed tool call, taken from the result's own
+/// exit line. Only derived facts travel — never a slice of the body — so
+/// this is safe to store in metadata mode, where content is dropped.
+fn error_summary(content: Option<&Value>) -> Option<String> {
+    let text = match content? {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    text.lines()
+        .take(20)
+        .find_map(|l| crate::transcript::exit_code_of(l.trim()))
+        .map(|code| format!("exit code {code}"))
+}
+
 fn apply_tool_pins(row: &mut ObservationRow, state: &ToolHookState) {
     if let Some(start) = state.start_ns {
         row.start_ns = start;
@@ -2499,7 +2517,36 @@ mod tests {
         let tool = find_obs(&ops, "Bash");
         assert_eq!(tool.level, Level::Error);
         assert!(tool.is_error);
-        assert_eq!(tool.status_message.as_deref(), Some("tool error"));
+        assert_eq!(
+            tool.status_message.as_deref(),
+            Some("tool error"),
+            "no exit line in the body: the generic label stands"
+        );
+
+        // when the result reports one, the row says which code it was
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), None, "test");
+        let _ = asm.feed(user("build it", "2026-08-30T10:00:00Z"), 0);
+        let _ = asm.feed(
+            tool_use(
+                "t9",
+                "Bash",
+                serde_json::json!({"command": "cargo test"}),
+                "2026-08-30T10:00:01Z",
+            ),
+            0,
+        );
+        let ops = asm.feed(
+            tool_result(
+                "t9",
+                Value::from("Exit code 101\nthread panicked"),
+                true,
+                "2026-08-30T10:00:02Z",
+            ),
+            0,
+        );
+        let failed = find_obs(&ops, "Bash");
+        assert!(failed.is_error);
+        assert_eq!(failed.status_message.as_deref(), Some("exit code 101"));
     }
 
     #[test]

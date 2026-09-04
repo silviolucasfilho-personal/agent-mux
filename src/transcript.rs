@@ -500,6 +500,40 @@ fn extract_antigravity_model(raw: &str) -> Option<String> {
     None
 }
 
+/// Did an Antigravity tool result fail?
+///
+/// Antigravity reports results as free text and its `status` field only
+/// ever says `DONE` or `RUNNING`, so a command's own exit line is the one
+/// reliable signal. Matching the word "error" anywhere in the body — what
+/// this used to do — flags every read of a file that merely mentions
+/// error handling; on the machine where this was found, 423 successful
+/// results contained the word. Precision is the right trade: a missed
+/// failure still shows its output on a normal row, while a false one
+/// paints a red span with nothing to explain it. Failures that print no
+/// exit code arrive through the hook channel, which carries an explicit
+/// `error` field.
+fn antigravity_failed(content: &str) -> bool {
+    content
+        .lines()
+        .find_map(|l| exit_code_of(l.trim()))
+        .is_some_and(|code| code != 0)
+}
+
+/// The exit code a result line reports, for the two phrasings seen:
+/// Antigravity's `The command exited with code 1.` and the `Exit code 1`
+/// header on Claude's Bash results.
+pub fn exit_code_of(line: &str) -> Option<i64> {
+    let rest = line
+        .strip_prefix("The command exited with code ")
+        .or_else(|| line.strip_prefix("Exit code "))?;
+    let digits: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '-')
+        .collect();
+    digits.parse().ok()
+}
+
 pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
     let Some(v) = parse_json_line(line) else {
         return Vec::new();
@@ -584,8 +618,7 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
         }
         "GENERIC" => {
             if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                let is_error = content.contains("error")
-                    || content.contains("Exit code") && !content.contains("Exit code 0");
+                let is_error = antigravity_failed(content);
                 events.push(TranscriptEvent::ToolResult {
                     id: String::new(),
                     content: Value::String(content.to_string()),
@@ -1142,6 +1175,40 @@ mod tests {
             &events[0],
             TranscriptEvent::ToolResult { is_error: true, .. }
         ));
+    }
+
+    /// Antigravity has no failure status (`status` is only DONE or
+    /// RUNNING), so the exit line decides. Reading a file that discusses
+    /// errors is not an error.
+    #[test]
+    fn antigravity_results_fail_only_on_a_nonzero_exit_code() {
+        let flagged = |line: &str| match &parse_antigravity_line(line)[0] {
+            TranscriptEvent::ToolResult { is_error, .. } => *is_error,
+            other => panic!("expected a ToolResult, got {other:?}"),
+        };
+        // a viewed file whose text mentions errors
+        assert!(!flagged(
+            r#"{"type": "GENERIC", "created_at": "2026-09-04T12:00:00Z", "status": "DONE", "content": "Created At: 2026-09-04T09:27:41-03:00\nCompleted At: 2026-09-04T09:27:41-03:00\nFile Path: `file:///proj/docs/design.md`\nTotal Lines: 152\n1: # design\n2: Errors are reported with an error level.\n"}"#
+        ));
+        // a command that succeeded while printing the word
+        assert!(!flagged(
+            r#"{"type": "GENERIC", "created_at": "2026-09-04T12:00:00Z", "status": "DONE", "content": "Created At: 2026-09-03T12:31:52-03:00\nThe command exited with code 0.\nOutput:\nwarning: this error path is untested\n"}"#
+        ));
+        // a command that actually failed
+        assert!(flagged(
+            r#"{"type": "GENERIC", "created_at": "2026-09-04T12:00:00Z", "status": "DONE", "content": "Created At: 2026-09-03T12:33:37-03:00\nThe command exited with code 101.\nOutput:\nthread panicked\n"}"#
+        ));
+        // still running: nothing to judge yet
+        assert!(!flagged(
+            r#"{"type": "GENERIC", "created_at": "2026-09-04T12:00:00Z", "status": "DONE", "content": "Created At: 2026-08-31T15:17:04-03:00\nTool is running as a background task with task id: ec2f\n"}"#
+        ));
+
+        assert_eq!(exit_code_of("The command exited with code 101."), Some(101));
+        assert_eq!(exit_code_of("Exit code 2"), Some(2));
+        assert_eq!(exit_code_of("Exit code 0"), Some(0));
+        assert_eq!(exit_code_of("  Exit code 7  "), None, "the caller trims");
+        assert_eq!(exit_code_of("no code here"), None);
+        assert_eq!(exit_code_of("The command exited with code X."), None);
     }
 
     // -- Codex fixtures (source-derived from openai/codex rollout schema) --
