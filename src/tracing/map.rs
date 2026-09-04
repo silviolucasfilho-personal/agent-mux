@@ -10,6 +10,7 @@
 
 use crate::config::ContentMode;
 use crate::tracing::agy_usage::GenUsage;
+use crate::tracing::hooks::HookEvent;
 use crate::tracing::ids;
 use crate::tracing::store::model::{
     LaunchRow, Level, ObservationRow, ObservationType, SessionRow, StoreOp, TraceRow, TraceStatus,
@@ -17,6 +18,7 @@ use crate::tracing::store::model::{
 use crate::tracing::usage;
 use crate::transcript::{Provider, TranscriptEvent, TurnBoundaryKind, parse_rfc3339_nanos};
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// Everything the assembler needs to know about one launch's mapping.
 #[derive(Debug, Clone)]
@@ -181,6 +183,13 @@ struct OpenTurn {
     /// True for the turn left open when the prime pass ended: it is history
     /// and must not be emitted, and live events never join it.
     stale: bool,
+    /// Hook-delivered facts: the prompt key, the exact end, the last
+    /// message when the transcript gave none, and extra metadata
+    /// (compaction, API errors).
+    hook_turn_key: Option<String>,
+    hook_end_ns: Option<i64>,
+    hook_last_message: Option<String>,
+    extra_metadata: serde_json::Map<String, Value>,
 }
 
 impl OpenTurn {
@@ -203,6 +212,24 @@ struct StepGen {
     end_ns: i64,
 }
 
+/// Timing and outcome a hook reported for one tool call, by tool use id.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ToolHookState {
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+    is_error: bool,
+    error: Option<String>,
+}
+
+/// A subagent known only from `SubagentStart`/`SubagentStop` hooks: its
+/// own observation row, plus the turn it belongs to for eviction.
+#[derive(Debug, Clone)]
+struct HookAgent {
+    row: ObservationRow,
+    ordinal: u64,
+    trace_key: String,
+}
+
 pub struct TurnAssembler {
     settings: MapSettings,
     session_id: Option<String>,
@@ -222,6 +249,19 @@ pub struct TurnAssembler {
     step_gens: std::collections::HashMap<u64, StepGen>,
     /// Usage that arrived before its generation was emitted.
     pending_step_usage: std::collections::HashMap<u64, GenUsage>,
+    /// Hook pins by tool use id, applied to rows whenever they are built.
+    hook_tools: HashMap<String, ToolHookState>,
+    /// The last emitted row per tool use id (with its turn ordinal), so a
+    /// hook arriving afterwards can re-emit it pinned.
+    emitted_tools: std::collections::HashMap<String, (u64, ObservationRow)>,
+    /// The last closed turns' rows, so a late `Stop` can still pin them.
+    recent_traces: std::collections::HashMap<u64, TraceRow>,
+    /// A `UserPromptSubmit` seen before its turn opened.
+    pending_prompt: Option<(Option<String>, i64)>,
+    /// Subagents announced by hooks, by agent id.
+    hook_agents: HashMap<String, HookAgent>,
+    /// Tool calls made *inside* a subagent (hook-only rows), by tool id.
+    hook_agent_tools: HashMap<String, (u64, ObservationRow)>,
 }
 
 /// The CLI's own running session totals (Claude `cost-state`), surfaced on
@@ -255,6 +295,12 @@ impl TurnAssembler {
             cost: None,
             step_gens: std::collections::HashMap::new(),
             pending_step_usage: std::collections::HashMap::new(),
+            hook_tools: std::collections::HashMap::new(),
+            emitted_tools: std::collections::HashMap::new(),
+            recent_traces: std::collections::HashMap::new(),
+            pending_prompt: None,
+            hook_agents: HashMap::new(),
+            hook_agent_tools: HashMap::new(),
         }
     }
 
@@ -395,7 +441,29 @@ impl TurnAssembler {
             any_ts_approx: false,
             aborted: false,
             stale: false,
+            hook_turn_key: None,
+            hook_end_ns: None,
+            hook_last_message: None,
+            extra_metadata: serde_json::Map::new(),
         });
+        // a prompt hook that preceded this turn's transcript line pins its start
+        if let Some((key, ts)) = self.pending_prompt.take()
+            && let Some(turn) = self.turn.as_mut()
+        {
+            let start = clamp_ns(turn.start_nanos);
+            if prompt_pins(ts, start) {
+                turn.start_nanos = i128::from(ts.min(start));
+                turn.hook_turn_key = key;
+            }
+        }
+        let current = self.ordinal;
+        self.emitted_tools
+            .retain(|_, (ordinal, _)| *ordinal + 1 >= current);
+        self.recent_traces
+            .retain(|ordinal, _| *ordinal + 2 >= current);
+        self.hook_agents.retain(|_, a| a.ordinal + 2 >= current);
+        self.hook_agent_tools
+            .retain(|_, (ordinal, _)| *ordinal + 2 >= current);
     }
 
     /// A stale (primed-history) turn never receives live events: it is
@@ -430,6 +498,16 @@ impl TurnAssembler {
         if self.correlation == "heuristic" {
             metadata.insert("correlation".into(), Value::from("heuristic"));
         }
+        if let Some(key) = &turn.hook_turn_key {
+            metadata.insert("turn_key".into(), Value::from(key.clone()));
+        }
+        for (k, v) in &turn.extra_metadata {
+            metadata.insert(k.clone(), v.clone());
+        }
+        let end_ns = closed.then(|| {
+            let last = clamp_ns(turn.last_nanos);
+            turn.hook_end_ns.map_or(last, |h| h.max(last))
+        });
         TraceRow {
             id: turn.trace_id.clone(),
             session_key: self.session_key(),
@@ -440,12 +518,19 @@ impl TurnAssembler {
             name: self.turn_name(turn),
             status,
             start_ns: clamp_ns(turn.start_nanos),
-            end_ns: closed.then_some(clamp_ns(turn.last_nanos)),
+            end_ns,
             input: turn.user_text.as_ref().and_then(|t| self.full_content(t)),
             output: turn
                 .last_assistant_text
                 .as_ref()
-                .and_then(|t| self.full_content(t)),
+                .and_then(|t| self.full_content(t))
+                .or_else(|| {
+                    if closed {
+                        turn.hook_last_message.clone()
+                    } else {
+                        None
+                    }
+                }),
             thinking: if closed && !turn.pending_thinking.is_empty() {
                 self.full_content(&turn.pending_thinking.join("\n"))
             } else {
@@ -624,15 +709,10 @@ impl TurnAssembler {
         // Unpaired tools close with the turn.
         let unpaired: Vec<OpenTool> = std::mem::take(&mut turn.open_tools);
         for tool in &unpaired {
-            ops.push(StoreOp::Observation(self.tool_row(
-                &turn,
-                tool,
-                Some(end_nanos),
-                None,
-                None,
-                false,
-                true,
-            )));
+            let mut row = self.tool_row(&turn, tool, Some(end_nanos), None, None, false, true);
+            let relinked = self.finish_tool_row(&mut row, turn.ordinal);
+            ops.push(StoreOp::Observation(row));
+            ops.extend(relinked.map(StoreOp::Observation));
         }
 
         let status = if turn.aborted {
@@ -640,8 +720,242 @@ impl TurnAssembler {
         } else {
             TraceStatus::Closed
         };
-        ops.push(StoreOp::Trace(self.trace_row(&turn, status)));
+        let row = self.trace_row(&turn, status);
+        self.recent_traces.insert(turn.ordinal, row.clone());
+        ops.push(StoreOp::Trace(row));
         ops
+    }
+
+    /// Applies hook pins (exact start/end, failure) to a freshly built tool
+    /// row and remembers it so a later hook can re-emit it.
+    /// Applies any hook pins to a transcript tool row and remembers it.
+    /// When the row is the transcript's view of a subagent the hooks
+    /// already announced, the hook-created agent row is re-parented under
+    /// it and returned so the caller can emit that update too.
+    fn finish_tool_row(
+        &mut self,
+        row: &mut ObservationRow,
+        ordinal: u64,
+    ) -> Option<ObservationRow> {
+        let id = row.tool_id.clone()?;
+        if let Some(state) = self.hook_tools.get(&id) {
+            apply_tool_pins(row, state);
+        }
+        self.emitted_tools.insert(id, (ordinal, row.clone()));
+        let agent_id = row.metadata.get("agent_id")?.as_str()?;
+        let agent = self.hook_agents.get_mut(agent_id)?;
+        if agent.row.trace_id != row.trace_id || agent.row.parent_id.as_deref() == Some(&row.id) {
+            return None;
+        }
+        agent.row.parent_id = Some(row.id.clone());
+        Some(agent.row.clone())
+    }
+
+    /// The turn a hook at `ts_ns` belongs to, as (ordinal, trace_key,
+    /// trace_id).
+    fn hook_turn_ids(&self, ts_ns: i64) -> Option<(u64, String, String)> {
+        match self.turn_for_ts(ts_ns) {
+            HookTarget::Open => {
+                let turn = self.turn.as_ref()?;
+                Some((turn.ordinal, turn.trace_key.clone(), turn.trace_id.clone()))
+            }
+            HookTarget::Closed(ordinal) => {
+                let key = self.trace_key_for_ordinal(ordinal);
+                let id = ids::trace_id_hex(&key);
+                Some((ordinal, key, id))
+            }
+            HookTarget::None => None,
+        }
+    }
+
+    /// `SubagentStart` / `SubagentStop`: an agent row of the hooks' own,
+    /// parented under the transcript's Task row once that is known.
+    fn subagent_hook(&mut self, ev: &HookEvent, ops: &mut Vec<StoreOp>) {
+        let Some(agent_id) = ev.agent_id.clone() else {
+            return;
+        };
+        let stopping = ev.event == "SubagentStop";
+        if !self.hook_agents.contains_key(&agent_id) {
+            let Some((ordinal, trace_key, trace_id)) = self.hook_turn_ids(ev.ts_ns) else {
+                return;
+            };
+            let parent_id = self
+                .emitted_tools
+                .values()
+                .find(|(_, row)| {
+                    row.trace_id == trace_id
+                        && row.metadata.get("agent_id").and_then(|v| v.as_str()) == Some(&agent_id)
+                })
+                .map(|(_, row)| row.id.clone());
+            let agent_type = ev.agent_type.clone();
+            let mut metadata = serde_json::Map::new();
+            metadata.insert("agent_id".into(), Value::from(agent_id.clone()));
+            if let Some(t) = &agent_type {
+                metadata.insert("agent_type".into(), Value::from(t.clone()));
+            }
+            metadata.insert("source".into(), Value::from("hook"));
+            metadata.insert("hook_timed".into(), Value::Bool(true));
+            let row = ObservationRow {
+                id: ids::span_id_hex(&format!("{trace_key}|agent|{agent_id}")),
+                trace_id,
+                parent_id,
+                obs_type: ObservationType::Agent,
+                name: format!("agent: {}", agent_type.as_deref().unwrap_or("subagent")),
+                kind: Some("agent_invocation".into()),
+                start_ns: ev.ts_ns,
+                end_ns: None,
+                level: Level::Default,
+                status_message: None,
+                model: None,
+                input: None,
+                output: None,
+                thinking: None,
+                usage_raw: None,
+                usage: None,
+                tool_id: None,
+                tool_name: None,
+                skill: None,
+                mcp_server: None,
+                path: None,
+                is_error: false,
+                ts_approx: false,
+                metadata,
+            };
+            self.hook_agents.insert(
+                agent_id.clone(),
+                HookAgent {
+                    row,
+                    ordinal,
+                    trace_key,
+                },
+            );
+        }
+        let agent = self.hook_agents.get_mut(&agent_id).expect("just inserted");
+        if let Some(path) = ev
+            .payload
+            .get("agent_transcript_path")
+            .and_then(|v| v.as_str())
+        {
+            agent
+                .row
+                .metadata
+                .insert("agent_transcript_path".into(), Value::from(path));
+        }
+        if stopping {
+            agent.row.end_ns = Some(ev.ts_ns.max(agent.row.start_ns));
+            if agent.row.output.is_none() {
+                agent.row.output = ev
+                    .payload
+                    .get("last_assistant_message")
+                    .or_else(|| ev.payload.get("result"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+            }
+            if let Some(reason) = ev.payload.get("stop_reason").and_then(|v| v.as_str()) {
+                agent
+                    .row
+                    .metadata
+                    .insert("stop_reason".into(), Value::from(reason));
+            }
+        }
+        if self.emitting {
+            ops.push(StoreOp::Observation(agent.row.clone()));
+        }
+    }
+
+    /// A tool event carrying an `agent_id`: a call made inside a subagent,
+    /// which the parent transcript never shows. Hook-only row under the
+    /// agent row.
+    fn subagent_tool_hook(&mut self, ev: &HookEvent, ops: &mut Vec<StoreOp>) {
+        let (Some(agent_id), Some(tool_id)) = (ev.agent_id.clone(), ev.tool_use_id.clone()) else {
+            return;
+        };
+        let Some(agent) = self.hook_agents.get(&agent_id) else {
+            return;
+        };
+        let (ordinal, parent_row) = (agent.ordinal, agent.row.clone());
+        let trace_key = agent.trace_key.clone();
+        let full = self.settings.content_mode == ContentMode::Full;
+        let entry = self
+            .hook_agent_tools
+            .entry(tool_id.clone())
+            .or_insert_with(|| {
+                let name = ev.tool_name.clone().unwrap_or_else(|| "tool".into());
+                let mut metadata = serde_json::Map::new();
+                metadata.insert("agent_id".into(), Value::from(agent_id.clone()));
+                metadata.insert("source".into(), Value::from("hook"));
+                metadata.insert("hook_timed".into(), Value::Bool(true));
+                let (display, mcp_server) = match split_mcp_name(&name) {
+                    Some((server, tool)) => (format!("mcp: {server}/{tool}"), Some(server)),
+                    None => (name.clone(), None),
+                };
+                (
+                    ordinal,
+                    ObservationRow {
+                        id: ids::span_id_hex(&format!(
+                            "{trace_key}|agent|{agent_id}|tool|{tool_id}"
+                        )),
+                        trace_id: parent_row.trace_id.clone(),
+                        parent_id: Some(parent_row.id.clone()),
+                        obs_type: ObservationType::Tool,
+                        name: display,
+                        kind: None,
+                        start_ns: ev.ts_ns,
+                        end_ns: None,
+                        level: Level::Default,
+                        status_message: None,
+                        model: None,
+                        input: None,
+                        output: None,
+                        thinking: None,
+                        usage_raw: None,
+                        usage: None,
+                        tool_id: Some(tool_id.clone()),
+                        tool_name: Some(name),
+                        skill: None,
+                        mcp_server,
+                        path: None,
+                        is_error: false,
+                        ts_approx: false,
+                        metadata,
+                    },
+                )
+            });
+        let row = &mut entry.1;
+        let as_text = |v: &Value| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        match ev.event.as_str() {
+            "PreToolUse" => {
+                row.start_ns = ev.ts_ns;
+                if let Some(end) = row.end_ns
+                    && end < row.start_ns
+                {
+                    row.end_ns = Some(row.start_ns);
+                }
+            }
+            _ => {
+                row.end_ns = Some(ev.ts_ns.max(row.start_ns));
+                if ev.is_error {
+                    row.is_error = true;
+                    row.level = Level::Error;
+                    row.status_message = Some("tool error".into());
+                    if let Some(err) = ev.payload.get("tool_error").and_then(|v| v.as_str()) {
+                        row.metadata.insert("tool_error".into(), Value::from(err));
+                    }
+                }
+                if full && row.output.is_none() {
+                    row.output = ev.payload.get("tool_response").map(as_text);
+                }
+            }
+        }
+        if full && row.input.is_none() {
+            row.input = ev.payload.get("tool_input").map(as_text);
+        }
+        if self.emitting {
+            ops.push(StoreOp::Observation(row.clone()));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1090,14 +1404,21 @@ impl TurnAssembler {
                     turn.any_ts_approx |= approx;
                 }
                 // the in-flight row: visible while the tool runs
-                if self.emitting
-                    && let Some(turn) = self.turn.as_ref()
-                    && !turn.stale
-                    && let Some(tool) = turn.open_tools.last()
-                {
-                    ops.push(StoreOp::Observation(
-                        self.tool_row(turn, tool, None, None, None, false, false),
-                    ));
+                let built = match self.turn.as_ref() {
+                    Some(turn) if self.emitting && !turn.stale => {
+                        turn.open_tools.last().map(|tool| {
+                            (
+                                turn.ordinal,
+                                self.tool_row(turn, tool, None, None, None, false, false),
+                            )
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some((ordinal, mut row)) = built {
+                    let relinked = self.finish_tool_row(&mut row, ordinal);
+                    ops.push(StoreOp::Observation(row));
+                    ops.extend(relinked.map(StoreOp::Observation));
                 }
             }
             TranscriptEvent::ToolResult {
@@ -1142,23 +1463,28 @@ impl TurnAssembler {
                         ),
                     });
                 }
-                if let (Some((tool, orphan)), Some(turn)) = (popped.as_ref(), self.turn.as_ref())
-                    && self.emitting
-                    && !turn.stale
-                {
-                    let mut row = self.tool_row(
-                        turn,
-                        tool,
-                        Some(nanos),
-                        Some(&content),
-                        structured.as_ref(),
-                        is_error,
-                        false,
-                    );
-                    if *orphan {
-                        row.status_message = Some("unpaired result".to_string());
+                let built = match (popped.as_ref(), self.turn.as_ref()) {
+                    (Some((tool, orphan)), Some(turn)) if self.emitting && !turn.stale => {
+                        let mut row = self.tool_row(
+                            turn,
+                            tool,
+                            Some(nanos),
+                            Some(&content),
+                            structured.as_ref(),
+                            is_error,
+                            false,
+                        );
+                        if *orphan {
+                            row.status_message = Some("unpaired result".to_string());
+                        }
+                        Some((turn.ordinal, row))
                     }
+                    _ => None,
+                };
+                if let Some((ordinal, mut row)) = built {
+                    let relinked = self.finish_tool_row(&mut row, ordinal);
                     ops.push(StoreOp::Observation(row));
+                    ops.extend(relinked.map(StoreOp::Observation));
                 }
             }
             TranscriptEvent::Thinking { text, ts } => {
@@ -1343,10 +1669,251 @@ impl TurnAssembler {
         }
     }
 
+    /// Which turn a turn-level hook belongs to: the open turn when it
+    /// started before the hook fired, else the latest recently closed turn
+    /// that did. Hooks are polled after the transcript is tailed, so a
+    /// `Stop` for turn N can arrive after the transcript opened turn N+1;
+    /// the timestamp keeps it on N.
+    fn turn_for_ts(&self, ts_ns: i64) -> HookTarget {
+        if let Some(turn) = self.turn.as_ref().filter(|t| !t.stale)
+            && clamp_ns(turn.start_nanos) <= ts_ns
+        {
+            return HookTarget::Open;
+        }
+        self.recent_traces
+            .iter()
+            .filter(|(_, row)| row.start_ns <= ts_ns)
+            .map(|(ordinal, _)| *ordinal)
+            .max()
+            .map_or(HookTarget::None, HookTarget::Closed)
+    }
+
+    /// Attaches one hook event: exact tool start/end and failures by tool
+    /// use id, prompt and turn-end times by turn, API failures and
+    /// interrupts as aborted turns, compaction and model switches as
+    /// metadata. Rows the transcript has not produced yet are pinned when
+    /// they appear; rows already emitted are re-emitted with the pin.
+    pub fn attach_hook_event(&mut self, ev: &HookEvent) -> Vec<StoreOp> {
+        let mut ops = Vec::new();
+        match ev.event.as_str() {
+            "SubagentStart" | "SubagentStop" => self.subagent_hook(ev, &mut ops),
+            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" if ev.agent_id.is_some() => {
+                self.subagent_tool_hook(ev, &mut ops)
+            }
+            "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
+                let Some(id) = ev.tool_use_id.clone() else {
+                    return ops;
+                };
+                let state = self.hook_tools.entry(id.clone()).or_default();
+                match ev.event.as_str() {
+                    "PreToolUse" => state.start_ns = Some(ev.ts_ns),
+                    _ => {
+                        state.end_ns = Some(ev.ts_ns);
+                        if ev.is_error {
+                            state.is_error = true;
+                            state.error = ev
+                                .payload
+                                .get("tool_error")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                        }
+                    }
+                }
+                let state = state.clone();
+                if self.emitting
+                    && let Some((_, row)) = self.emitted_tools.get(&id)
+                {
+                    let mut pinned = row.clone();
+                    apply_tool_pins(&mut pinned, &state);
+                    if let Some(entry) = self.emitted_tools.get_mut(&id) {
+                        entry.1 = pinned.clone();
+                    }
+                    ops.push(StoreOp::Observation(pinned));
+                }
+            }
+            "UserPromptSubmit" => {
+                let key = ev.turn_key.clone();
+                let ts = ev.ts_ns;
+                let mut pinned_open = false;
+                if let Some(turn) = self.turn.as_mut()
+                    && !turn.stale
+                    && turn.user_text.is_some()
+                    && turn.hook_turn_key.is_none()
+                {
+                    let start = clamp_ns(turn.start_nanos);
+                    if prompt_pins(ts, start) {
+                        turn.start_nanos = i128::from(ts.min(start));
+                        turn.hook_turn_key = key.clone();
+                        pinned_open = true;
+                    }
+                }
+                if pinned_open {
+                    self.push_trace_op(&mut ops, TraceStatus::Open);
+                } else {
+                    self.pending_prompt = Some((key, ts));
+                }
+            }
+            "Stop" | "TurnComplete" => {
+                let turn_number = ev.payload.get("turn_number").and_then(|v| v.as_i64());
+                let last_message = ev
+                    .payload
+                    .get("last_assistant_message")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                match self.turn_for_ts(ev.ts_ns) {
+                    HookTarget::Open => {
+                        let turn = self.turn.as_mut().expect("open turn");
+                        turn.hook_end_ns =
+                            Some(turn.hook_end_ns.map_or(ev.ts_ns, |e| e.max(ev.ts_ns)));
+                        if turn.hook_last_message.is_none() {
+                            turn.hook_last_message = last_message;
+                        }
+                        if let Some(n) = turn_number
+                            && n != turn.ordinal as i64
+                        {
+                            turn.extra_metadata
+                                .insert("turn_number_hook".into(), Value::from(n));
+                        }
+                    }
+                    HookTarget::Closed(ordinal) if self.emitting => {
+                        // the transcript closed the turn first: pin its end
+                        let row = self.recent_traces.get_mut(&ordinal).expect("recent trace");
+                        row.end_ns = Some(row.end_ns.map_or(ev.ts_ns, |e| e.max(ev.ts_ns)));
+                        if row.output.is_none() {
+                            row.output = last_message;
+                        }
+                        if let Some(n) = turn_number
+                            && n != row.ordinal
+                        {
+                            let mut meta = row
+                                .metadata
+                                .as_ref()
+                                .and_then(|m| m.as_object().cloned())
+                                .unwrap_or_default();
+                            meta.insert("turn_number_hook".into(), Value::from(n));
+                            row.metadata = Some(Value::Object(meta));
+                        }
+                        ops.push(StoreOp::Trace(row.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            "StopFailure" | "Interrupt" => {
+                let key = if ev.event == "Interrupt" {
+                    "interrupted"
+                } else {
+                    "api_error"
+                };
+                let value = if ev.event == "Interrupt" {
+                    Value::Bool(true)
+                } else {
+                    Value::from(
+                        ev.payload
+                            .get("error_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown"),
+                    )
+                };
+                match self.turn_for_ts(ev.ts_ns) {
+                    HookTarget::Open => {
+                        let turn = self.turn.as_mut().expect("open turn");
+                        turn.aborted = true;
+                        turn.hook_end_ns = Some(ev.ts_ns);
+                        turn.extra_metadata.insert(key.into(), value);
+                        ops.extend(self.close_turn());
+                    }
+                    HookTarget::Closed(ordinal) if self.emitting => {
+                        let row = self.recent_traces.get_mut(&ordinal).expect("recent trace");
+                        row.status = TraceStatus::Aborted;
+                        let mut meta = row
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.as_object().cloned())
+                            .unwrap_or_default();
+                        meta.insert(key.into(), value);
+                        row.metadata = Some(Value::Object(meta));
+                        ops.push(StoreOp::Trace(row.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            "PostCompact" => {
+                if let Some(turn) = self.turn.as_mut().filter(|t| !t.stale) {
+                    turn.extra_metadata
+                        .insert("compacted".into(), Value::Bool(true));
+                    self.push_trace_op(&mut ops, TraceStatus::Open);
+                }
+            }
+            "PostModelSwitch" => {
+                if let Some(model) = &ev.model {
+                    self.last_known_model = Some(model.clone());
+                    if let Some(entry) = self.session_extra.iter_mut().find(|(k, _)| k == "model") {
+                        entry.1 = model.clone();
+                    } else {
+                        self.session_extra.push(("model".into(), model.clone()));
+                    }
+                    if self.emitting && self.session_id.is_some() {
+                        ops.push(StoreOp::Session(self.session_row(ev.ts_ns)));
+                    }
+                }
+            }
+            // SessionStart / SessionEnd are launch-level (pipeline);
+            // subagent and agy invocation events land in later tasks
+            _ => {}
+        }
+        ops
+    }
+
     /// Closes any open turn (session over).
     pub fn finalize(&mut self) -> Vec<StoreOp> {
         self.close_turn()
     }
+}
+
+/// A prompt hook may precede its transcript line by at most this much.
+const PROMPT_PIN_WINDOW_NS: i64 = 60 * 1_000_000_000;
+/// A prompt hook normally precedes the transcript's user line, but a
+/// CLI that stamps the line first (or a coarse clock) lands it a moment
+/// later; the pin still applies within this slack.
+const PROMPT_PIN_SLACK_NS: i64 = 2_000_000_000;
+
+/// True when a `UserPromptSubmit` at `ts` belongs to a turn starting at
+/// `start`: at most a minute before it, or within the slack after it.
+fn prompt_pins(ts: i64, start: i64) -> bool {
+    ts <= start + PROMPT_PIN_SLACK_NS && start.saturating_sub(ts) <= PROMPT_PIN_WINDOW_NS
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookTarget {
+    Open,
+    Closed(u64),
+    None,
+}
+
+fn apply_tool_pins(row: &mut ObservationRow, state: &ToolHookState) {
+    if let Some(start) = state.start_ns {
+        row.start_ns = start;
+        if let Some(end) = row.end_ns
+            && end < start
+        {
+            row.end_ns = Some(start);
+        }
+    }
+    if let Some(end) = state.end_ns {
+        row.end_ns = Some(row.end_ns.map_or(end, |e| e.max(end)).max(row.start_ns));
+    }
+    if state.is_error {
+        row.is_error = true;
+        row.level = Level::Error;
+        if row.status_message.is_none() {
+            row.status_message = Some("tool error".into());
+        }
+        if let Some(err) = &state.error {
+            row.metadata
+                .insert("tool_error".into(), Value::from(err.clone()));
+        }
+    }
+    row.metadata.insert("hook_timed".into(), Value::Bool(true));
 }
 
 fn clean_json_str(val: &Value) -> Option<String> {
@@ -1608,7 +2175,20 @@ pub fn launch_started(settings: &MapSettings, known_session_id: Option<&str>) ->
         release: settings.release.clone(),
         environment: settings.environment.clone(),
         tags: launch_tags(settings),
+        metadata: None,
     }
+}
+
+/// The launch row carrying hook-delivered facts only (merged into
+/// `launches.metadata`).
+pub fn launch_metadata(
+    settings: &MapSettings,
+    session_id: Option<&str>,
+    metadata: Value,
+) -> LaunchRow {
+    let mut row = launch_started(settings, session_id);
+    row.metadata = Some(metadata);
+    row
 }
 
 /// The launch row at adoption: the outcome of correlation and the session.
@@ -2997,6 +3577,441 @@ mod tests {
                 ..Default::default()
             })
             .is_empty()
+        );
+    }
+
+    fn hook(event: &str, ts_ns: i64, tool_use_id: Option<&str>, payload: Value) -> HookEvent {
+        HookEvent {
+            provider: Provider::Claude,
+            session_id: "sess-1".into(),
+            launch_id: Some("launch-1".into()),
+            event: event.into(),
+            ts_ns,
+            cwd: None,
+            transcript_path: None,
+            turn_key: Some("prompt-1".into()),
+            tool_use_id: tool_use_id.map(str::to_string),
+            tool_name: tool_use_id.map(|_| "Bash".to_string()),
+            agent_id: None,
+            agent_type: None,
+            step_index: None,
+            model: None,
+            is_error: event == "PostToolUseFailure" || event == "StopFailure",
+            payload: payload.as_object().cloned().unwrap_or_default(),
+        }
+    }
+
+    #[test]
+    fn subagent_hooks_nest_child_tools_under_the_agent_row() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("sess-1".into()),
+            "announced",
+        );
+        let _ = asm.feed(user("audit the ui", "2026-08-30T10:00:00Z"), 0);
+        let _ = asm.feed(
+            tool_use(
+                "task-1",
+                "Task",
+                serde_json::json!({"subagent_type": "Explore", "description": "Audit the UI", "prompt": "look"}),
+                "2026-08-30T10:00:01Z",
+            ),
+            0,
+        );
+        let trace_key = asm.turn.as_ref().unwrap().trace_key.clone();
+        let trace_id = asm.turn.as_ref().unwrap().trace_id.clone();
+        let agent_hook = |event: &str, ts: i64, payload: Value| {
+            let mut ev = hook(event, ts, None, payload);
+            ev.agent_id = Some("a1".into());
+            ev.agent_type = Some("Explore".into());
+            ev
+        };
+        let t_start = ns("2026-08-30T10:00:01.200Z");
+        let ops =
+            asm.attach_hook_event(&agent_hook("SubagentStart", t_start, serde_json::json!({})));
+        let agent_row = match &ops[..] {
+            [StoreOp::Observation(row)] => row.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            agent_row.id,
+            ids::span_id_hex(&format!("{trace_key}|agent|a1"))
+        );
+        assert_eq!(agent_row.trace_id, trace_id);
+        assert_eq!(agent_row.obs_type, ObservationType::Agent);
+        assert_eq!(agent_row.name, "agent: Explore");
+        assert_eq!(agent_row.start_ns, t_start);
+        assert!(
+            agent_row.parent_id.is_none(),
+            "the Task row has no agent id yet"
+        );
+
+        // a tool call inside the subagent: Post before Pre, still one row
+        let mut post = hook(
+            "PostToolUse",
+            ns("2026-08-30T10:00:03Z"),
+            Some("toolu_c1"),
+            serde_json::json!({"tool_input": {"pattern": "fn draw"}, "tool_response": "3 hits"}),
+        );
+        post.agent_id = Some("a1".into());
+        post.tool_name = Some("Grep".into());
+        let mut pre = post.clone();
+        pre.event = "PreToolUse".into();
+        pre.ts_ns = ns("2026-08-30T10:00:02Z");
+        let ops = asm.attach_hook_event(&post);
+        let child = match &ops[..] {
+            [StoreOp::Observation(row)] => row.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            child.id,
+            ids::span_id_hex(&format!("{trace_key}|agent|a1|tool|toolu_c1"))
+        );
+        assert_eq!(child.parent_id.as_deref(), Some(agent_row.id.as_str()));
+        assert_eq!(child.name, "Grep");
+        assert_eq!(child.output.as_deref(), Some("3 hits"));
+        assert_eq!(child.input.as_deref(), Some(r#"{"pattern":"fn draw"}"#));
+        assert_eq!(child.end_ns, Some(ns("2026-08-30T10:00:03Z")));
+        let ops = asm.attach_hook_event(&pre);
+        let child = match &ops[..] {
+            [StoreOp::Observation(row)] => row.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(child.start_ns, ns("2026-08-30T10:00:02Z"));
+        assert_eq!(child.end_ns, Some(ns("2026-08-30T10:00:03Z")));
+
+        let ops = asm.attach_hook_event(&agent_hook(
+            "SubagentStop",
+            ns("2026-08-30T10:00:04Z"),
+            serde_json::json!({"last_assistant_message": "found 3 draw fns", "agent_transcript_path": "/tmp/agent-a1.jsonl"}),
+        ));
+        let stopped = match &ops[..] {
+            [StoreOp::Observation(row)] => row.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(stopped.id, agent_row.id);
+        assert_eq!(stopped.end_ns, Some(ns("2026-08-30T10:00:04Z")));
+        assert_eq!(stopped.output.as_deref(), Some("found 3 draw fns"));
+        assert_eq!(
+            stopped
+                .metadata
+                .get("agent_transcript_path")
+                .and_then(|v| v.as_str()),
+            Some("/tmp/agent-a1.jsonl")
+        );
+
+        // the transcript's Task result names the agent: the hook row is
+        // re-parented under it
+        let ops = asm.feed(
+            TranscriptEvent::ToolResult {
+                structured: Some(serde_json::json!({"agentId": "a1", "status": "completed"})),
+                id: "task-1".into(),
+                content: Value::from("done"),
+                is_error: false,
+                ts: Some("2026-08-30T10:00:05Z".into()),
+            },
+            0,
+        );
+        let rows: Vec<&ObservationRow> = ops
+            .iter()
+            .filter_map(|op| match op {
+                StoreOp::Observation(row) => Some(row),
+                _ => None,
+            })
+            .collect();
+        let task = rows
+            .iter()
+            .find(|r| r.tool_id.as_deref() == Some("task-1"))
+            .expect("task row");
+        let relinked = rows
+            .iter()
+            .find(|r| r.id == agent_row.id)
+            .expect("re-parented agent row");
+        assert_eq!(relinked.parent_id.as_deref(), Some(task.id.as_str()));
+        assert_eq!(relinked.end_ns, Some(ns("2026-08-30T10:00:04Z")));
+        // a stray agent id without a known turn is ignored
+        assert!(asm.hook_agent_tools.contains_key("toolu_c1"));
+    }
+
+    #[test]
+    fn hook_tool_pins_apply_in_either_order() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("sess-1".into()),
+            "announced",
+        );
+        let _ = asm.feed(user("go", "2026-08-30T10:00:00Z"), 0);
+        let pre = ns("2026-08-30T10:00:00.900Z");
+        let post = ns("2026-08-30T10:00:06.500Z");
+        // hook first: parked, applied when the transcript row appears
+        assert!(
+            asm.attach_hook_event(&hook("PreToolUse", pre, Some("t1"), Value::Null))
+                .is_empty()
+        );
+        let ops = asm.feed(
+            tool_use(
+                "t1",
+                "Bash",
+                serde_json::json!({"command": "ls"}),
+                "2026-08-30T10:00:01Z",
+            ),
+            0,
+        );
+        let open = observations(&ops)[0];
+        assert_eq!(open.start_ns, pre, "in-flight row pinned to the hook start");
+        assert_eq!(open.metadata.get("hook_timed"), Some(&Value::Bool(true)));
+        let ops = asm.feed(
+            tool_result(
+                "t1",
+                Value::String("ok".into()),
+                false,
+                "2026-08-30T10:00:05Z",
+            ),
+            0,
+        );
+        let closed_row = observations(&ops)[0];
+        assert_eq!(closed_row.start_ns, pre);
+        assert_eq!(closed_row.end_ns, Some(ns("2026-08-30T10:00:05Z")));
+        // hook after: the emitted row is re-emitted with the exact end
+        let ops = asm.attach_hook_event(&hook("PostToolUse", post, Some("t1"), Value::Null));
+        let pinned = observations(&ops);
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].id, closed_row.id);
+        assert_eq!(pinned[0].end_ns, Some(post));
+        assert_eq!(
+            pinned[0].output.as_deref(),
+            Some("ok"),
+            "content survives the re-emit"
+        );
+        // transcript first, then a failure hook: level flips, error kept
+        let _ = asm.feed(
+            tool_use("t2", "Bash", Value::Null, "2026-08-30T10:00:07Z"),
+            0,
+        );
+        let _ = asm.feed(
+            tool_result("t2", Value::Null, false, "2026-08-30T10:00:08Z"),
+            0,
+        );
+        let ops = asm.attach_hook_event(&hook(
+            "PostToolUseFailure",
+            ns("2026-08-30T10:00:08.200Z"),
+            Some("t2"),
+            serde_json::json!({"tool_error": "exit status 2"}),
+        ));
+        let failed = observations(&ops)[0];
+        assert!(failed.is_error);
+        assert_eq!(failed.level, Level::Error);
+        assert_eq!(failed.status_message.as_deref(), Some("tool error"));
+        assert_eq!(
+            failed.metadata.get("tool_error"),
+            Some(&Value::from("exit status 2"))
+        );
+        // an id the transcript never produces stays parked
+        assert!(
+            asm.attach_hook_event(&hook("PreToolUse", 1, Some("never"), Value::Null))
+                .is_empty()
+        );
+        assert!(asm.finalize().iter().all(
+            |op| !matches!(op, StoreOp::Observation(o) if o.tool_id.as_deref() == Some("never"))
+        ));
+    }
+
+    #[test]
+    fn prompt_hook_pins_turn_start_in_either_order() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("sess-1".into()),
+            "announced",
+        );
+        // hook first
+        let early = ns("2026-08-30T09:59:59Z");
+        assert!(
+            asm.attach_hook_event(&hook("UserPromptSubmit", early, None, Value::Null))
+                .is_empty()
+        );
+        let ops = asm.feed(user("first", "2026-08-30T10:00:00Z"), 0);
+        let open = traces(&ops)[0];
+        assert_eq!(open.start_ns, early);
+        assert_eq!(
+            open.metadata.as_ref().and_then(|m| m.get("turn_key")),
+            Some(&Value::from("prompt-1"))
+        );
+        // transcript first, hook later
+        let ops = asm.feed(user("second", "2026-08-30T10:05:00Z"), 0);
+        let open2 = traces(&ops)
+            .into_iter()
+            .find(|t| t.status == TraceStatus::Open)
+            .unwrap();
+        assert_eq!(open2.start_ns, ns("2026-08-30T10:05:00Z"));
+        let ops = asm.attach_hook_event(&hook(
+            "UserPromptSubmit",
+            ns("2026-08-30T10:04:58Z"),
+            None,
+            Value::Null,
+        ));
+        let pinned = traces(&ops)[0];
+        assert_eq!(pinned.id, open2.id);
+        assert_eq!(pinned.start_ns, ns("2026-08-30T10:04:58Z"));
+        // a hook far outside the window does not move the turn
+        let ops = asm.feed(user("third", "2026-08-30T11:00:00Z"), 0);
+        let open3 = traces(&ops)
+            .into_iter()
+            .find(|t| t.status == TraceStatus::Open)
+            .unwrap();
+        assert!(
+            asm.attach_hook_event(&hook(
+                "UserPromptSubmit",
+                ns("2026-08-30T10:30:00Z"),
+                None,
+                Value::Null
+            ))
+            .is_empty()
+        );
+        let close = asm.finalize();
+        assert_eq!(closed(&close)[0].start_ns, open3.start_ns);
+    }
+
+    #[test]
+    fn stop_hooks_pin_turn_end_cross_check_and_abort() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("sess-1".into()),
+            "announced",
+        );
+        let _ = asm.feed(user("go", "2026-08-30T10:00:00Z"), 0);
+        let _ = asm.feed(assistant("working", "2026-08-30T10:00:05Z", vec![]), 0);
+        let stop = ns("2026-08-30T10:00:05.800Z");
+        assert!(
+            asm.attach_hook_event(&hook(
+                "Stop",
+                stop,
+                None,
+                serde_json::json!({"turn_number": 1, "last_assistant_message": "working"})
+            ))
+            .is_empty()
+        );
+        let ops = asm.feed(user("next", "2026-08-30T10:01:00Z"), 0);
+        let first = closed(&ops)[0];
+        assert_eq!(
+            first.end_ns,
+            Some(stop),
+            "hook end beats the transcript's last line"
+        );
+        assert!(
+            first
+                .metadata
+                .as_ref()
+                .is_none_or(|m| m.get("turn_number_hook").is_none())
+        );
+        // late Stop for the already-closed second turn, with a mismatching number
+        let _ = asm.feed(assistant("done", "2026-08-30T10:01:04Z", vec![]), 0);
+        let ops = asm.feed(user("third", "2026-08-30T10:02:00Z"), 0);
+        let second = closed(&ops)[0];
+        assert_eq!(second.ordinal, 2);
+        let late = ns("2026-08-30T10:01:04.700Z");
+        let ops = asm.attach_hook_event(&hook(
+            "Stop",
+            late,
+            None,
+            serde_json::json!({"turn_number": 7}),
+        ));
+        let pinned = traces(&ops)[0];
+        assert_eq!(pinned.id, second.id);
+        assert_eq!(pinned.end_ns, Some(late));
+        assert_eq!(
+            pinned
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("turn_number_hook")),
+            Some(&Value::from(7))
+        );
+        // StopFailure aborts the open third turn right away
+        let ops = asm.attach_hook_event(&hook(
+            "StopFailure",
+            ns("2026-08-30T10:02:03Z"),
+            None,
+            serde_json::json!({"error_type": "rate_limit"}),
+        ));
+        let aborted = closed(&ops)[0];
+        assert_eq!(aborted.ordinal, 3);
+        assert_eq!(aborted.status, TraceStatus::Aborted);
+        assert_eq!(
+            aborted.metadata.as_ref().and_then(|m| m.get("api_error")),
+            Some(&Value::from("rate_limit"))
+        );
+        assert!(asm.finalize().is_empty(), "already closed");
+    }
+
+    #[test]
+    fn compaction_model_switch_and_primed_turns() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Metadata),
+            Some("sess-1".into()),
+            "announced",
+        );
+        let _ = asm.feed(user("go", "2026-08-30T10:00:00Z"), 0);
+        let ops = asm.attach_hook_event(&hook(
+            "PostCompact",
+            ns("2026-08-30T10:00:02Z"),
+            None,
+            serde_json::json!({"compaction_trigger": "auto"}),
+        ));
+        assert_eq!(
+            traces(&ops)[0]
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("compacted")),
+            Some(&Value::Bool(true))
+        );
+        let mut switch = hook(
+            "PostModelSwitch",
+            ns("2026-08-30T10:00:03Z"),
+            None,
+            Value::Null,
+        );
+        switch.model = Some("claude-opus-5".into());
+        let ops = asm.attach_hook_event(&switch);
+        assert!(ops.iter().any(|op| matches!(op, StoreOp::Session(s) if s.extra.as_ref().unwrap()["model"] == "claude-opus-5")));
+        let ops = asm.feed(
+            TranscriptEvent::Assistant {
+                skill: None,
+                text: "hi".into(),
+                model: None,
+                thinking: None,
+                usage: vec![],
+                msg_id: None,
+                step_index: None,
+                ts: Some("2026-08-30T10:00:04Z".into()),
+            },
+            0,
+        );
+        assert_eq!(
+            find_obs(&ops, "assistant").model.as_deref(),
+            Some("claude-opus-5")
+        );
+        // primed history never gets hook rows
+        let mut primed = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("sess-1".into()),
+            "announced",
+        );
+        primed.set_emitting(false);
+        let _ = primed.feed(user("old", "2026-08-30T09:00:00Z"), 0);
+        primed.set_emitting(true);
+        assert!(
+            primed
+                .attach_hook_event(&hook("Stop", ns("2026-08-30T09:00:05Z"), None, Value::Null))
+                .is_empty()
+        );
+        assert!(
+            primed
+                .attach_hook_event(&hook(
+                    "PostCompact",
+                    ns("2026-08-30T09:00:06Z"),
+                    None,
+                    Value::Null
+                ))
+                .is_empty()
         );
     }
 

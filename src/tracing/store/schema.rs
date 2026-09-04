@@ -1,9 +1,9 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
-pub const MIGRATIONS: &[&str] = &[V1];
+pub const MIGRATIONS: &[&str] = &[V1, V2];
 
 const V1: &str = r#"
 CREATE TABLE meta (
@@ -221,4 +221,32 @@ SELECT s.*,
        (SELECT MAX(reported_cost_usd) FROM launches l WHERE l.session_key = s.key) AS reported_cost_usd
 FROM sessions s LEFT JOIN trace_stats ts ON ts.session_key = s.key
 GROUP BY s.key;
+"#;
+
+/// Hook channel: one row per CLI lifecycle hook invocation.
+const V2: &str = r#"
+ALTER TABLE launches ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';
+CREATE TABLE hook_events (
+  id              INTEGER PRIMARY KEY,
+  key             TEXT NOT NULL UNIQUE,
+  provider        TEXT NOT NULL,
+  session_id      TEXT NOT NULL,
+  launch_id       TEXT,
+  event           TEXT NOT NULL,
+  ts_ns           INTEGER NOT NULL,
+  cwd             TEXT,
+  transcript_path TEXT,
+  turn_key        TEXT,
+  tool_use_id     TEXT,
+  tool_name       TEXT,
+  agent_id        TEXT,
+  agent_type      TEXT,
+  step_index      INTEGER,
+  model           TEXT,
+  is_error        INTEGER NOT NULL DEFAULT 0,
+  payload         TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX hook_events_launch  ON hook_events (launch_id, id);
+CREATE INDEX hook_events_session ON hook_events (provider, session_id, id);
+CREATE INDEX hook_events_ts      ON hook_events (ts_ns DESC);
 "#;

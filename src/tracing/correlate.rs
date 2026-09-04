@@ -456,3 +456,66 @@ pub fn poll(
         }
     }
 }
+
+/// The rollout file for a Codex thread id, wherever it sits under the
+/// sessions tree (`YYYY/MM/DD/rollout-<ts>-<thread-id>.jsonl`). A hook or
+/// `notify` payload names the thread; this finds its transcript without
+/// the cwd heuristic.
+pub fn codex_rollout_by_thread(sessions_dir: &Path, thread_id: &str) -> Option<PathBuf> {
+    fn walk(dir: &Path, suffix: &str, depth: usize) -> Option<PathBuf> {
+        if depth > 4 {
+            return None;
+        }
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        // newest date directories first
+        entries.sort();
+        entries.reverse();
+        for path in entries {
+            if path.is_dir() {
+                if let Some(found) = walk(&path, suffix, depth + 1) {
+                    return Some(found);
+                }
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("rollout-") && n.ends_with(suffix))
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+    if thread_id.is_empty() {
+        return None;
+    }
+    walk(sessions_dir, &format!("-{thread_id}.jsonl"), 0)
+}
+
+#[cfg(test)]
+mod thread_lookup_tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_rollout_for_a_thread_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let day = dir.path().join("2026").join("09").join("03");
+        std::fs::create_dir_all(&day).unwrap();
+        let wanted = day.join("rollout-2026-09-03T10-00-00-thread-abc.jsonl");
+        std::fs::write(&wanted, "{}\n").unwrap();
+        std::fs::write(
+            day.join("rollout-2026-09-03T09-00-00-thread-other.jsonl"),
+            "{}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            codex_rollout_by_thread(dir.path(), "thread-abc"),
+            Some(wanted)
+        );
+        assert_eq!(codex_rollout_by_thread(dir.path(), "nope"), None);
+        assert_eq!(codex_rollout_by_thread(dir.path(), ""), None);
+    }
+}

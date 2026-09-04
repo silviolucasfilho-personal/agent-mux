@@ -34,6 +34,9 @@ pub struct LaunchRow {
     pub release: Option<String>,
     pub environment: Option<String>,
     pub tags: Vec<String>,
+    /// Merged with `json_patch`: hook-delivered facts (session start
+    /// source, end reason, …).
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

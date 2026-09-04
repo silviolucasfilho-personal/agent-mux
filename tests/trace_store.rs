@@ -56,6 +56,7 @@ fn launch(id: &str) -> LaunchRow {
         release: None,
         environment: None,
         tags: vec![],
+        metadata: None,
     }
 }
 
@@ -234,4 +235,63 @@ fn finish_honors_the_deadline_while_the_write_lock_is_held() {
         started.elapsed()
     );
     blocker.execute_batch("ROLLBACK;").unwrap();
+}
+
+/// A stored session reads back as the ops that produced it, in emission
+/// order, so it can be replayed through another sink.
+#[test]
+fn stored_sessions_read_back_as_ops_for_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = spawn_writer(
+        store(dir.path(), "run-1"),
+        WriterConfig::new(30),
+        Box::new(|_, _| {}),
+        None,
+    );
+    handle.tx.try_send(StoreOp::Launch(launch("l1"))).unwrap();
+    handle.tx.try_send(StoreOp::Trace(trace("t1", 1))).unwrap();
+    handle
+        .tx
+        .try_send(StoreOp::Observation(generation("g1", "t1")))
+        .unwrap();
+    handle.tx.try_send(StoreOp::Trace(trace("t2", 2))).unwrap();
+    assert!(handle.finish(Duration::from_secs(5)));
+    let conn = open_ro(&dir.path().join("traces.db")).unwrap();
+    let ops = agent_mux::tracing::store::read_session_ops(&conn, "claude:s1").unwrap();
+    assert_eq!(ops.len(), 4, "{ops:?}");
+    let StoreOp::Session(s) = &ops[0] else {
+        panic!("session first: {:?}", ops[0]);
+    };
+    assert_eq!(s.key, "claude:s1");
+    assert_eq!(s.provider, "claude");
+    let StoreOp::Trace(t1) = &ops[1] else {
+        panic!("{:?}", ops[1]);
+    };
+    let expected = trace("t1", 1);
+    assert_eq!(t1.id, expected.id);
+    assert_eq!(t1.ordinal, 1);
+    assert_eq!(t1.name, expected.name);
+    assert_eq!(t1.status, expected.status);
+    assert_eq!(t1.start_ns, expected.start_ns);
+    assert_eq!(t1.end_ns, expected.end_ns);
+    assert_eq!(t1.input, expected.input);
+    assert_eq!(t1.session_id, "s1");
+    let StoreOp::Observation(g) = &ops[2] else {
+        panic!("{:?}", ops[2]);
+    };
+    let expected = generation("g1", "t1");
+    assert_eq!(g.id, expected.id);
+    assert_eq!(g.trace_id, expected.trace_id);
+    assert_eq!(g.obs_type, expected.obs_type);
+    assert_eq!(g.model, expected.model);
+    assert_eq!(g.usage, expected.usage, "normalized usage survives the round trip");
+    assert_eq!(g.output, expected.output);
+    let StoreOp::Trace(t2) = &ops[3] else {
+        panic!("{:?}", ops[3]);
+    };
+    assert_eq!(t2.ordinal, 2);
+    assert!(
+        agent_mux::tracing::store::read_session_ops(&conn, "claude:missing").is_err(),
+        "unknown sessions are an error, not an empty replay"
+    );
 }

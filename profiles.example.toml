@@ -25,13 +25,23 @@
 # the transcript. Cost needs a price row for the model (`agent-mux trace
 # doctor` lists unpriced ones; Gemini rows are not bundled).
 #
-# The old `[langfuse]` section is accepted as an alias for one release
-# (host/keys are ignored); rename it to `[tracing]`.
+# The old `[langfuse]` section is accepted as an alias for one release;
+# its host/keys are used as [tracing.langfuse] credentials. Rename it to
+# `[tracing]`.
 #
 # [tracing]
 # enabled = true
 # db_path = "~/.agent-mux/traces.db"
 # content_mode = "full"
+# backend = "local"           # where a launch's traces go: "local" (SQLite, default), "langfuse",
+#                             # or "both". The launch dialog's Backend field overrides it per session;
+#                             # Langfuse is offered only when [tracing.langfuse] (or $LANGFUSE_*) resolves.
+# hooks = "auto"              # "auto" (default): every claude launch gets the trace hooks through an
+#                             # inline --settings and every codex launch a per-launch notify override;
+#                             # nothing in ~/.claude or ~/.codex is modified. "off": no per-launch
+#                             # registration and hook rows are ignored. "installed": same as auto
+#                             # (the opt-in installers, `agent-mux trace hooks install codex|agy`,
+#                             # work in either mode).
 # user_id = "me"                        # default: $USER / $USERNAME
 # release = "rollout-1"                 # free-form labels stored on every launch
 # tags = ["agent-mux"]
@@ -46,6 +56,15 @@
 # claude_dir = "/custom/.claude"        # dir overrides (mostly for tests)
 # codex_dir = "/custom/.codex"
 # antigravity_dir = "/custom/.gemini/antigravity-cli"   # the antigravity-cli ROOT (brain/ and presence/ live under it)
+#
+# Langfuse credentials, for backend = "langfuse" | "both". Keys fall back to
+# $LANGFUSE_PUBLIC_KEY / $LANGFUSE_SECRET_KEY / $LANGFUSE_HOST; prefer the
+# environment for secret_key — this file is easy to commit by accident.
+# [tracing.langfuse]
+# host = "https://cloud.langfuse.com"   # or https://us.cloud.langfuse.com / self-hosted
+# public_key = "pk-lf-..."
+# secret_key = "sk-lf-..."
+# flush_interval_ms = 3000
 #
 # Price overrides / additions, USD per 1M tokens. `match` entries are
 # lowercase; a trailing '*' is a prefix match; model names are normalized
@@ -73,6 +92,8 @@ args = []
 # enabled = true
 # provider = "claude"          # force CLI-kind detection for wrapper commands; "none" = never trace
 # content_mode = "metadata"    # dial one profile down
+# hooks = "off"               # no per-launch hook registration for this profile only
+# backend = "langfuse"        # this profile's default destination (the dialog can still change it)
 # inject_session_id = false    # never add --session-id. The flag needs claude >= 1.0.34 (mid-2025);
 #                              # `agent-mux trace doctor` checks your installed version.
 

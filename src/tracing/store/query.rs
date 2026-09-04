@@ -184,6 +184,10 @@ pub fn find_trace(conn: &Connection, needle: &str) -> rusqlite::Result<Option<Tr
 pub struct ObservationView {
     pub id: String,
     pub trace_id: String,
+    pub parent_id: Option<String>,
+    /// Nesting depth in the tree returned by `list_observations` (0 for a
+    /// top-level row).
+    pub depth: usize,
     pub obs_type: String,
     pub name: String,
     pub kind: Option<String>,
@@ -217,6 +221,8 @@ fn observation_from_row(r: &Row) -> rusqlite::Result<ObservationView> {
     Ok(ObservationView {
         id: r.get("id")?,
         trace_id: r.get("trace_id")?,
+        parent_id: r.get("parent_id")?,
+        depth: 0,
         obs_type: r.get("type")?,
         name: r.get("name")?,
         kind: r.get("kind")?,
@@ -247,6 +253,8 @@ fn observation_from_row(r: &Row) -> rusqlite::Result<ObservationView> {
     })
 }
 
+/// A turn's observations in tree order: parents first, each followed by
+/// its children (recursively), siblings by start time.
 pub fn list_observations(
     conn: &Connection,
     trace_id: &str,
@@ -254,7 +262,60 @@ pub fn list_observations(
     let mut stmt =
         conn.prepare("SELECT * FROM observations WHERE trace_id = ?1 ORDER BY start_ns, rid")?;
     let rows = stmt.query_map(params![trace_id], observation_from_row)?;
-    rows.collect()
+    Ok(nest_observations(rows.collect::<Result<Vec<_>, _>>()?))
+}
+
+/// Reorders rows so children follow their parent, setting `depth`. A
+/// parent that is not in the list (or a cycle) leaves the row at the top
+/// level.
+pub fn nest_observations(rows: Vec<ObservationView>) -> Vec<ObservationView> {
+    use std::collections::{HashMap, HashSet};
+    let ids: HashSet<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut roots: Vec<usize> = Vec::new();
+    for (i, r) in rows.iter().enumerate() {
+        match r.parent_id.as_deref() {
+            Some(p) if ids.contains(p) && p != r.id => children.entry(p).or_default().push(i),
+            _ => roots.push(i),
+        }
+    }
+    let mut order: Vec<(usize, usize)> = Vec::with_capacity(rows.len());
+    let mut placed = vec![false; rows.len()];
+    fn walk(
+        i: usize,
+        depth: usize,
+        rows: &[ObservationView],
+        children: &HashMap<&str, Vec<usize>>,
+        placed: &mut [bool],
+        order: &mut Vec<(usize, usize)>,
+    ) {
+        if placed[i] {
+            return;
+        }
+        placed[i] = true;
+        order.push((i, depth));
+        if let Some(kids) = children.get(rows[i].id.as_str()) {
+            for &k in kids {
+                walk(k, depth + 1, rows, children, placed, order);
+            }
+        }
+    }
+    for &i in &roots {
+        walk(i, 0, &rows, &children, &mut placed, &mut order);
+    }
+    // rows only reachable through a cycle
+    for i in 0..rows.len() {
+        walk(i, 0, &rows, &children, &mut placed, &mut order);
+    }
+    let mut out: Vec<Option<ObservationView>> = rows.into_iter().map(Some).collect();
+    order
+        .into_iter()
+        .map(|(i, depth)| {
+            let mut r = out[i].take().expect("each row once");
+            r.depth = depth;
+            r
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -385,4 +446,73 @@ pub fn session_project_slugs(conn: &Connection) -> rusqlite::Result<Vec<String>>
         conn.prepare("SELECT DISTINCT project_slug FROM sessions WHERE project_slug IS NOT NULL")?;
     let rows = stmt.query_map([], |r| r.get(0))?;
     rows.collect()
+}
+
+#[cfg(test)]
+mod nest_tests {
+    use super::*;
+
+    fn view(id: &str, parent: Option<&str>, start: i64) -> ObservationView {
+        ObservationView {
+            id: id.into(),
+            trace_id: "t".into(),
+            parent_id: parent.map(str::to_string),
+            depth: 0,
+            obs_type: "tool".into(),
+            name: id.into(),
+            kind: None,
+            start_ns: start,
+            end_ns: None,
+            level: "DEFAULT".into(),
+            status_message: None,
+            model: None,
+            model_id: None,
+            input: None,
+            output: None,
+            thinking: None,
+            usage: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: None,
+            total_cost_usd: None,
+            tool_id: None,
+            tool_name: None,
+            skill: None,
+            mcp_server: None,
+            path: None,
+            is_error: false,
+            metadata: "{}".into(),
+        }
+    }
+
+    #[test]
+    fn children_follow_their_parent_with_depth() {
+        // start-time order: gen, task, agent(child of task), grep(child of agent), later
+        let rows = vec![
+            view("gen", None, 1),
+            view("grep", Some("agent"), 2),
+            view("task", None, 3),
+            view("agent", Some("task"), 4),
+            view("later", None, 5),
+            view("orphan", Some("missing"), 6),
+            view("loop", Some("loop"), 7),
+        ];
+        let nested = nest_observations(rows);
+        let order: Vec<(&str, usize)> = nested.iter().map(|r| (r.id.as_str(), r.depth)).collect();
+        assert_eq!(
+            order,
+            vec![
+                ("gen", 0),
+                ("task", 0),
+                ("agent", 1),
+                ("grep", 2),
+                ("later", 0),
+                ("orphan", 0),
+                ("loop", 0),
+            ]
+        );
+    }
 }
