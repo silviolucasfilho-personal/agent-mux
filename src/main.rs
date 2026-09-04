@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     let mut startup_notices: Vec<String> = Vec::new();
     if cfg.legacy_langfuse_section {
         startup_notices.push(
-            "tracing: [langfuse] is now [tracing] — local SQLite store; host/keys are ignored"
+            "tracing: [langfuse] is now [tracing]; its host/keys serve as [tracing.langfuse] credentials"
                 .into(),
         );
     }

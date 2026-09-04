@@ -44,11 +44,32 @@ pub struct TracingConfig {
     /// Price overrides / additions (`[[tracing.models]]`).
     #[serde(default)]
     pub models: Vec<ModelPriceConfig>,
-    // Deprecated Langfuse keys: still parsed so an old `[langfuse]` section
-    // loads, ignored otherwise. Their presence drives a one-time notice.
+    /// "auto" (default): per-launch hook registrations that touch no user
+    /// files; "off": never register or read hooks; "installed": like auto
+    /// (installer-managed hooks work either way).
+    pub hooks: Option<String>,
+    /// Default destination for a launch's rows: "local" (default) |
+    /// "langfuse" | "both". The launch dialog and `[profiles.tracing]`
+    /// override it per launch.
+    pub backend: Option<String>,
+    /// Langfuse credentials (`[tracing.langfuse]`); keys fall back to
+    /// `$LANGFUSE_PUBLIC_KEY` / `$LANGFUSE_SECRET_KEY` / `$LANGFUSE_HOST`.
+    pub langfuse: Option<LangfuseConfig>,
+    // Legacy Langfuse keys (an old `[langfuse]` section, or these keys
+    // inside `[tracing]`): adopted as credentials when `[tracing.langfuse]`
+    // is absent. Their presence drives a one-time notice.
     pub host: Option<String>,
     pub public_key: Option<String>,
     pub secret_key: Option<String>,
+}
+
+/// `[tracing.langfuse]`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct LangfuseConfig {
+    pub host: Option<String>,
+    pub public_key: Option<String>,
+    pub secret_key: Option<String>,
+    pub flush_interval_ms: Option<u64>,
 }
 
 /// One `[[tracing.models]]` row. Prices are USD per 1M tokens.
@@ -81,6 +102,10 @@ pub struct ProfileTracing {
     pub provider: Option<String>,
     pub content_mode: Option<String>,
     pub inject_session_id: Option<bool>,
+    /// "off" disables per-launch hook registration for this profile.
+    pub hooks: Option<String>,
+    /// "local" | "langfuse" | "both": this profile's default destination.
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
@@ -102,6 +127,143 @@ pub struct Config {
 pub enum ContentMode {
     Metadata,
     Full,
+}
+
+/// `[tracing] hooks`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookMode {
+    Auto,
+    Off,
+    Installed,
+}
+
+impl HookMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HookMode::Auto => "auto",
+            HookMode::Off => "off",
+            HookMode::Installed => "installed",
+        }
+    }
+
+    /// Per-launch registrations happen in every mode but `off`.
+    pub fn registers(&self) -> bool {
+        *self != HookMode::Off
+    }
+}
+
+/// Where a launch's session, trace, and observation rows go. Launch rows
+/// always stay in the local store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backend {
+    #[default]
+    Local,
+    Langfuse,
+    Both,
+}
+
+impl Backend {
+    pub fn parse(s: &str) -> Option<Backend> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "local" | "sqlite" => Some(Backend::Local),
+            "langfuse" => Some(Backend::Langfuse),
+            "both" => Some(Backend::Both),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Backend::Local => "local",
+            Backend::Langfuse => "langfuse",
+            Backend::Both => "both",
+        }
+    }
+
+    /// Rows reach the SQLite store.
+    pub fn local(&self) -> bool {
+        matches!(self, Backend::Local | Backend::Both)
+    }
+
+    /// Rows reach the Langfuse exporter.
+    pub fn langfuse(&self) -> bool {
+        matches!(self, Backend::Langfuse | Backend::Both)
+    }
+
+    /// The next choice in the dialog's cycle.
+    pub fn next(&self) -> Backend {
+        match self {
+            Backend::Local => Backend::Langfuse,
+            Backend::Langfuse => Backend::Both,
+            Backend::Both => Backend::Local,
+        }
+    }
+}
+
+/// Langfuse credentials after fallbacks. `None` (see `resolve_langfuse`)
+/// means the Langfuse backend is unavailable and launches run local.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedLangfuse {
+    /// Normalized: no trailing `/` and no trailing `/api/public`.
+    pub host: String,
+    pub public_key: String,
+    pub secret_key: String,
+    pub flush_interval_ms: u64,
+    /// The secret came from the config file rather than the environment:
+    /// drives the commit-hazard warning.
+    pub secret_from_file: bool,
+    /// Credentials came from legacy keys (an old `[langfuse]` section or
+    /// keys inside `[tracing]`) rather than `[tracing.langfuse]`.
+    pub legacy_keys: bool,
+}
+
+/// Resolves Langfuse credentials: `[tracing.langfuse]`, then legacy keys,
+/// then the environment. Both keys must resolve; the host defaults to
+/// Langfuse Cloud. Never errors.
+pub fn resolve_langfuse(
+    lf: &TracingConfig,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<ResolvedLangfuse> {
+    let non_empty = |v: &Option<String>| v.clone().filter(|s| !s.trim().is_empty());
+    let section = lf.langfuse.as_ref();
+    let legacy_present = [&lf.host, &lf.public_key, &lf.secret_key]
+        .iter()
+        .any(|v| non_empty(v).is_some());
+    let legacy_keys = section.is_none() && legacy_present;
+    let from_file = |pick: fn(&LangfuseConfig) -> &Option<String>, legacy: &Option<String>| {
+        section.and_then(|c| non_empty(pick(c))).or_else(|| {
+            if section.is_none() {
+                non_empty(legacy)
+            } else {
+                None
+            }
+        })
+    };
+    let public_key = from_file(|c| &c.public_key, &lf.public_key)
+        .or_else(|| env("LANGFUSE_PUBLIC_KEY").filter(|s| !s.trim().is_empty()))?;
+    let secret_file = from_file(|c| &c.secret_key, &lf.secret_key);
+    let secret_from_file = secret_file.is_some();
+    let secret_key =
+        secret_file.or_else(|| env("LANGFUSE_SECRET_KEY").filter(|s| !s.trim().is_empty()))?;
+    let raw_host = from_file(|c| &c.host, &lf.host)
+        .or_else(|| env("LANGFUSE_HOST").filter(|s| !s.trim().is_empty()))
+        .or_else(|| env("LANGFUSE_BASE_URL").filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "https://cloud.langfuse.com".into());
+    let mut host = raw_host.trim().trim_end_matches('/').to_string();
+    if let Some(stripped) = host.strip_suffix("/api/public") {
+        host = stripped.to_string();
+    }
+    Some(ResolvedLangfuse {
+        host,
+        public_key: public_key.trim().to_string(),
+        secret_key: secret_key.trim().to_string(),
+        flush_interval_ms: section
+            .and_then(|c| c.flush_interval_ms)
+            .unwrap_or(3000)
+            .max(1),
+        secret_from_file,
+        legacy_keys,
+    })
 }
 
 impl ContentMode {
@@ -135,6 +297,14 @@ pub struct ResolvedTracing {
     pub codex_dir: Option<PathBuf>,
     pub antigravity_dir: Option<PathBuf>,
     pub models: Vec<ModelPriceConfig>,
+    pub hooks: HookMode,
+    /// The user's home as resolved from the environment: baked into hook
+    /// registrations so hooks find this configuration from any cwd.
+    pub home: PathBuf,
+    /// Default destination for a launch's rows.
+    pub backend: Backend,
+    /// Langfuse credentials when they resolve; `None` disables that backend.
+    pub langfuse: Option<ResolvedLangfuse>,
     /// True when deprecated `host` / `public_key` / `secret_key` keys were
     /// present (an old Langfuse section).
     pub legacy_langfuse_keys: bool,
@@ -216,6 +386,18 @@ pub fn resolve_tracing(
             .filter(|m| !m.id.trim().is_empty() && m.input >= 0.0 && m.output >= 0.0)
             .cloned()
             .collect(),
+        hooks: match lf.hooks.as_deref().map(str::trim) {
+            Some("off") => HookMode::Off,
+            Some("installed") => HookMode::Installed,
+            _ => HookMode::Auto,
+        },
+        home: home_dir(env).unwrap_or_else(|| PathBuf::from(".")),
+        backend: lf
+            .backend
+            .as_deref()
+            .and_then(Backend::parse)
+            .unwrap_or_default(),
+        langfuse: resolve_langfuse(lf, env),
         legacy_langfuse_keys,
     })
 }
@@ -283,6 +465,28 @@ pub fn load() -> anyhow::Result<Config> {
                 return Ok(cfg);
             }
         }
+    }
+    Ok(Config {
+        profiles: Config::default_profiles(),
+        tracing: None,
+        loaded_from: None,
+        legacy_langfuse_section: false,
+    })
+}
+
+/// Loads only `<home>/.agent-mux/profiles.toml` (no cwd-relative file):
+/// the hook command runs in the CLI's own working directory and must see
+/// the same configuration as the TUI that registered it.
+pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
+    let path = home.join(".agent-mux").join("profiles.toml");
+    if path.is_file() {
+        let text = std::fs::read_to_string(&path)?;
+        let mut cfg = parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+        if cfg.profiles.is_empty() {
+            cfg.profiles = Config::default_profiles();
+        }
+        cfg.loaded_from = Some(path);
+        return Ok(cfg);
     }
     Ok(Config {
         profiles: Config::default_profiles(),
@@ -465,6 +669,81 @@ mod tests {
         let cfg = parse("[tracing]\ndb_path = \"/explicit.db\"").unwrap();
         let resolved = resolve_tracing(cfg.tracing.as_ref(), &env).unwrap();
         assert_eq!(resolved.db_path, PathBuf::from("/explicit.db"));
+    }
+
+    #[test]
+    fn backend_and_langfuse_credentials_resolve_by_precedence() {
+        let no_env = |_: &str| None;
+        // the sub-table wins, the host is normalized, the secret is flagged
+        let cfg = parse(
+            r#"
+            [tracing]
+            backend = "both"
+            [tracing.langfuse]
+            host = "https://lf.example.com/api/public/"
+            public_key = "pk-lf-file"
+            secret_key = "sk-lf-file"
+            flush_interval_ms = 100
+            [[profiles]]
+            name = "C"
+            command = "claude"
+            [profiles.tracing]
+            backend = "langfuse"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.profiles[0].tracing.as_ref().unwrap().backend.as_deref(),
+            Some("langfuse")
+        );
+        let resolved = resolve_tracing(cfg.tracing.as_ref(), &no_env).unwrap();
+        assert_eq!(resolved.backend, Backend::Both);
+        let lf = resolved.langfuse.unwrap();
+        assert_eq!(lf.host, "https://lf.example.com");
+        assert_eq!(lf.public_key, "pk-lf-file");
+        assert_eq!(lf.flush_interval_ms, 100);
+        assert!(lf.secret_from_file && !lf.legacy_keys);
+        assert!(!resolved.legacy_langfuse_keys);
+
+        // environment alone makes Langfuse available (nothing is sent
+        // unless a launch chooses it)
+        let env = |k: &str| match k {
+            "LANGFUSE_PUBLIC_KEY" => Some("pk-env".to_string()),
+            "LANGFUSE_SECRET_KEY" => Some("sk-env".to_string()),
+            _ => None,
+        };
+        let resolved = resolve_tracing(None, &env).unwrap();
+        assert_eq!(resolved.backend, Backend::Local);
+        let lf = resolved.langfuse.unwrap();
+        assert_eq!(lf.host, "https://cloud.langfuse.com");
+        assert!(!lf.secret_from_file);
+        // a missing key means no backend, never an error
+        let half = |k: &str| (k == "LANGFUSE_PUBLIC_KEY").then(|| "pk".to_string());
+        assert!(resolve_tracing(None, &half).unwrap().langfuse.is_none());
+
+        // legacy keys are adopted, unknown backends fall back to local
+        let cfg = parse(
+            r#"
+            [langfuse]
+            backend = "elsewhere"
+            host = "https://legacy.example.com/"
+            public_key = "pk-legacy"
+            secret_key = "sk-legacy"
+            "#,
+        )
+        .unwrap();
+        let resolved = resolve_tracing(cfg.tracing.as_ref(), &no_env).unwrap();
+        assert_eq!(resolved.backend, Backend::Local);
+        assert!(resolved.legacy_langfuse_keys);
+        let lf = resolved.langfuse.unwrap();
+        assert!(lf.legacy_keys);
+        assert_eq!(lf.host, "https://legacy.example.com");
+        assert_eq!(lf.secret_key, "sk-legacy");
+        assert_eq!(Backend::parse("SQLite"), Some(Backend::Local));
+        assert_eq!(Backend::Local.next(), Backend::Langfuse);
+        assert_eq!(Backend::Both.next(), Backend::Local);
+        assert!(Backend::Both.local() && Backend::Both.langfuse());
+        assert!(Backend::Langfuse.langfuse() && !Backend::Langfuse.local());
     }
 
     #[test]
