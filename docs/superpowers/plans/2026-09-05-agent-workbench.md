@@ -62,17 +62,17 @@ Spec: `../specs/2026-09-05-agent-workbench-design.md`. Four phases, each shippab
 
 ### Task 9: Scores (`src/tracing/store/mod.rs`, `src/tracing/cli.rs`, `src/app.rs`, `src/tracing/langfuse/map.rs`)
 
-- [ ] **Step 1:** Tests: `trace score <turn> good --note x` stores a row; `s` in the browser toggles good/bad on the selected turn; a score exports as a `score-create` event with the trace id and is accepted by the fake server; `trace experiments` shows scores per variant.
-- [ ] **Step 2:** Implement.
+- [x] **Step 1:** Tests: scores record, the latest verdict wins, clear removes; `s` in the browser cycles none → good → bad → cleared with a status-bar notice and marks (`✓`/`✗`) on the Turns pane; a score posts to `/api/public/ingestion` as a `score-create` batch with the trace id, basic auth, and `NUMERIC` type, and a per-item error inside a 207 or a 401 is reported; the experiment summary averages trace-level scores under a launch.
+- [x] **Step 2:** Implement. `src/tracing/scores.rs`; `trace score <turn|session|launch> [good|bad|<n>] [--name] [--note]` (no value lists the scores); Langfuse scores attach to traces, so a session or launch score is posted once per turn under it. The browser posts in the background and never blocks on the network.
 
 ### Task 10: Budget guard (`src/tracing/hooks/mod.rs`, `src/tracing/cli.rs`, `src/tracing/mod.rs`)
 
 **Interfaces:** `--max-cost USD` / `--max-turns N` on `run` and in the dialog; the launch row records the limits; the hook binary, on `PreToolUse`, reads the launch's current spend from the store and answers with the harness's refusal (Claude: a `decision` reply; Codex: exit 2) once the limit is passed, with a message naming the limit and the spend; a status-bar notice; agy not registered.
 
-- [ ] **Step 1:** Tests: under the limit the hook answers permit; over it the reply is the refusal shape verified against each installed CLI; the store lookup respects the hook's 150 ms budget and permits on any error (fail-open).
-- [ ] **Step 2:** Implement.
+- [x] **Step 1:** Tests: over the cost or turn limit the hook refuses with `hookSpecificOutput.permissionDecision = "deny"` and a reason, and the stored event carries the block for the pipeline; the same launch without `--guard`, an unguarded launch, a `PostToolUse`, a missing launch id, a missing launch row and a missing store all permit; the lookup goes through the hook's 150 ms busy cap; the guarded Claude registration makes `PreToolUse` synchronous with `--guard` and leaves every other event async; the Codex installer's `PreToolUse` is synchronous with `--guard`; config parses `[profiles.tracing] max_cost_usd / max_turns`; the dialog's Max cost / Max turns fields parse or refuse.
+- [x] **Step 2:** Implement. **Verified live on the installed Claude CLI** (2026-09-05): a synchronous `PreToolUse` answering that JSON blocked `Bash` and the model reported the reason verbatim. Codex: its binary accepts the same keys (`permissionDecision`, `permissionDecisionReason`, `decision`) and the installed `PreToolUse` now waits for the answer, but the block was **not exercised live** — Codex runs a non-managed hook only after it is trusted interactively (`/hooks`). The guard rides on the launch row (`launches.metadata.guard`), so the hook needs nothing but the launch id it already gets; the planner says on the status bar when a guard cannot be enforced (hooks off, Codex without installed hooks, agy). Spend lags the store's flush interval (≤ 250 ms by default).
 
 ### Task 11: Loop warnings (`src/tracing/loops.rs`, `src/tracing/mod.rs`)
 
-- [ ] **Step 1:** Tests: tool storm, ping-pong and no-progress each detected at the default threshold and not below it; a flagged turn carries the pattern in metadata; one notice per launch per pattern.
-- [ ] **Step 2:** Implement; thresholds in `[tracing.loops]` with documented defaults; spec status.
+- [x] **Step 1:** Tests: tool storm, ping-pong and no-progress fire one past their thresholds and not at them, an interruption resets a no-progress run, disabled thresholds are silent; the assembler flags the closed turn (`metadata.loop_warnings`) and hands each pattern out once; a blocked guard call flags the turn (`metadata.guard_blocked`) and warns; `[tracing.loops]` parses with defaults for the rest.
+- [x] **Step 2:** Implement; thresholds default to 25 / 6 / 3 and are documented in `profiles.example.toml`. The pipeline puts one status line per pattern per launch. Ping-pong needs the tool input (full content mode) to know the file; in metadata mode it cannot be measured and stays silent rather than guessing. `trace loops` and the browser's loop view show the warnings; the Turns pane marks a warned turn with `⚠`.

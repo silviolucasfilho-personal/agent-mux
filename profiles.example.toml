@@ -101,6 +101,9 @@ args = []
 # provider = "claude"          # force CLI-kind detection for wrapper commands; "none" = never trace
 # content_mode = "metadata"    # dial one profile down
 # hooks = "off"               # no per-launch hook registration for this profile only
+# max_cost_usd = 2.0           # budget guard: past this spend the next tool call is refused through the
+#                              # CLI's PreToolUse hook (Claude per launch; Codex after `trace hooks install codex`)
+# max_turns = 40               # …or past this many turns. The launch dialog overrides both per launch.
 # backend = "langfuse"        # this profile's default destination (the dialog can still change it)
 # inject_session_id = false    # never add --session-id. The flag needs claude >= 1.0.34 (mid-2025);
 #                              # `agent-mux trace doctor` checks your installed version.
@@ -114,3 +117,11 @@ args = []
 name = "Antigravity"
 command = "agy"
 args = []
+
+# Loop warnings: a status-bar notice and a flag on the turn (never an
+# intervention) when a turn shows a pattern. Each threshold is "more than
+# N"; 0 disables that pattern.
+# [tracing.loops]
+# tool_storm = 25              # calls of one tool in a single turn
+# ping_pong = 6                # read/edit alternations on one file in a single turn
+# no_progress = 3              # consecutive turns with an identical tool sequence

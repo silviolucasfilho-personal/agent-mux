@@ -384,6 +384,10 @@ fn draw_help(f: &mut Frame) {
             "K",
             "skills pane: inventory joined to the store; Enter filters turns",
         ),
+        row(
+            "s",
+            "verdict on the selected turn: good → bad → cleared (sent to Langfuse too)",
+        ),
         row("r", "resume the selected session"),
         Line::raw(""),
         Line::styled("  [Esc] or [?] to close", dim),
@@ -413,6 +417,11 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
     let width = 72.min(f.area().width.saturating_sub(4)).max(40);
     // the launch options add six rows when the profile runs a known CLI
     let options_rows = if dialog.harness.is_some() { 6 } else { 0 }
+        + if dialog.fields().contains(&DialogField::MaxCost) {
+            4
+        } else {
+            0
+        }
         + if dialog.fields().contains(&DialogField::Experiment) {
             4
         } else {
@@ -463,6 +472,11 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
         let fixed_rows = app.profiles.len()
             + 12
             + if dialog.harness.is_some() { 6 } else { 0 }
+            + if dialog.fields().contains(&DialogField::MaxCost) {
+                4
+            } else {
+                0
+            }
             + if dialog.fields().contains(&DialogField::Experiment) {
                 4
             } else {
@@ -657,6 +671,38 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
                 },
                 dim,
             ),
+        ]));
+    }
+
+    // Budget guard, when the CLI's PreToolUse hook can enforce one
+    if dialog.fields().contains(&DialogField::MaxCost) {
+        let focused = |f: DialogField| {
+            if dialog.field == f {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            }
+        };
+        let dim = Style::default().fg(Color::DarkGray);
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("── budget guard ──", dim));
+        let text = |value: &str, field: DialogField| {
+            if value.is_empty() {
+                ("(none)".to_string(), focused(field).fg(Color::DarkGray))
+            } else {
+                (value.to_string(), focused(field).fg(Color::Yellow))
+            }
+        };
+        let (cost, cost_style) = text(&dialog.max_cost, DialogField::MaxCost);
+        lines.push(Line::from(vec![
+            Span::raw("Max cost (USD):   "),
+            Span::styled(cost, cost_style),
+            Span::styled(" (blocks the next tool call past it)", dim),
+        ]));
+        let (turns, turns_style) = text(&dialog.max_turns, DialogField::MaxTurns);
+        lines.push(Line::from(vec![
+            Span::raw("Max turns:        "),
+            Span::styled(turns, turns_style),
         ]));
     }
 
@@ -1150,6 +1196,22 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                         },
                         Style::default().fg(Color::Magenta),
                     ),
+                    // loop warnings and the guard, then the verdict
+                    Span::styled(
+                        if crate::tracing::loops::warning_kinds(&t.metadata).is_empty() {
+                            String::new()
+                        } else {
+                            " ⚠".to_string()
+                        },
+                        Style::default().fg(Color::Magenta),
+                    ),
+                    match browser.scores.get(&t.id) {
+                        Some(v) if *v >= 0.5 => {
+                            Span::styled(" ✓", Style::default().fg(Color::Green))
+                        }
+                        Some(_) => Span::styled(" ✗", Style::default().fg(Color::Red)),
+                        None => Span::raw(""),
+                    },
                     errors,
                     Span::raw(format!(" {}", truncate_chars(&name, 48))),
                 ]);
@@ -1289,7 +1351,7 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             Style::default().fg(Color::Black).bg(Color::Yellow),
         ),
         None => Line::styled(
-            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [K] skills  [a] all  [r] resume  [Esc] close",
+            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [K] skills  [s] score  [a] all  [r] resume  [Esc] close",
             Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
     };
@@ -1389,6 +1451,20 @@ fn draw_loop_view(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
             .unwrap_or_else(|| "-".to_string()),
     ));
     lines.push(kv("compactions", m.compactions.to_string()));
+    let warnings = crate::tracing::loops::warnings_of(&turn.metadata);
+    if !warnings.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(head("warnings"));
+        for (kind, detail) in warnings {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  ⚠ {kind:<13}"),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::raw(detail),
+            ]));
+        }
+    }
 
     lines.push(Line::raw(""));
     lines.push(head("subagents"));

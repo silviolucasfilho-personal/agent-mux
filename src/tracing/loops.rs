@@ -208,6 +208,231 @@ pub fn loop_metrics(turn: &TraceStat, obs: &[ObservationView]) -> LoopMetrics {
     }
 }
 
+// ---------------------------------------------------------------- patterns
+
+/// Thresholds for the loop-pattern warnings (`[tracing.loops]`). Each is
+/// "more than N"; 0 disables that pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopThresholds {
+    /// Calls of one tool in a single turn.
+    pub tool_storm: usize,
+    /// Read↔edit alternations on one file in a single turn.
+    pub ping_pong: usize,
+    /// Consecutive turns with an identical tool sequence (at least 2).
+    pub no_progress: usize,
+}
+
+impl Default for LoopThresholds {
+    fn default() -> Self {
+        LoopThresholds {
+            tool_storm: 25,
+            ping_pong: 6,
+            no_progress: 3,
+        }
+    }
+}
+
+pub const TOOL_STORM: &str = "tool storm";
+pub const PING_PONG: &str = "ping-pong";
+pub const NO_PROGRESS: &str = "no progress";
+pub const BUDGET_GUARD: &str = "budget guard";
+
+/// One tool call as the pattern check sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCall {
+    pub name: String,
+    /// The file it was about, when its input named one.
+    pub path: Option<String>,
+}
+
+/// A detected pattern: a notice and a metadata flag, never an intervention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pattern {
+    pub kind: &'static str,
+    pub detail: String,
+}
+
+impl Pattern {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({ "kind": self.kind, "detail": self.detail })
+    }
+}
+
+fn is_read(name: &str) -> bool {
+    matches!(
+        name,
+        "Read"
+            | "NotebookRead"
+            | "view_file"
+            | "view_code_item"
+            | "view_file_outline"
+            | "read_file"
+    )
+}
+
+fn is_edit(name: &str) -> bool {
+    matches!(
+        name,
+        "Edit"
+            | "MultiEdit"
+            | "Write"
+            | "NotebookEdit"
+            | "write_to_file"
+            | "replace_file_content"
+            | "multi_replace_file_content"
+            | "edit_file"
+            | "apply_patch"
+    )
+}
+
+/// The file a tool call is about, from its JSON input, when it names one.
+pub fn path_in_tool_input(input: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(input).ok()?;
+    for key in [
+        "file_path",
+        "path",
+        "AbsolutePath",
+        "target_file",
+        "TargetFile",
+        "filePath",
+        "notebook_path",
+    ] {
+        if let Some(p) = v.get(key).and_then(|p| p.as_str())
+            && !p.is_empty()
+        {
+            return Some(p.to_string());
+        }
+    }
+    None
+}
+
+fn short_path(p: &str) -> String {
+    std::path::Path::new(p)
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.to_string())
+}
+
+/// Patterns in one closed turn's tool calls (in time order), given the
+/// tool-name sequences of the turns before it, oldest first.
+pub fn patterns(calls: &[ToolCall], previous: &[Vec<String>], th: &LoopThresholds) -> Vec<Pattern> {
+    let mut out = Vec::new();
+    // tool storm: more than N calls of one tool in the turn
+    if th.tool_storm > 0 {
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for c in calls {
+            match counts.iter_mut().find(|(n, _)| *n == c.name) {
+                Some((_, k)) => *k += 1,
+                None => counts.push((&c.name, 1)),
+            }
+        }
+        for (name, k) in counts {
+            if k > th.tool_storm {
+                out.push(Pattern {
+                    kind: TOOL_STORM,
+                    detail: format!("{k}× {name} in one turn"),
+                });
+            }
+        }
+    }
+    // ping-pong: the same file read and edited alternately more than N times
+    if th.ping_pong > 0 {
+        let mut per_path: Vec<(&str, Vec<bool>)> = Vec::new();
+        for c in calls {
+            let Some(p) = &c.path else { continue };
+            let edit = if is_edit(&c.name) {
+                true
+            } else if is_read(&c.name) {
+                false
+            } else {
+                continue;
+            };
+            match per_path.iter_mut().find(|(pp, _)| *pp == p.as_str()) {
+                Some((_, kinds)) => kinds.push(edit),
+                None => per_path.push((p, vec![edit])),
+            }
+        }
+        for (path, kinds) in per_path {
+            let alternations = kinds.windows(2).filter(|w| w[0] != w[1]).count();
+            if alternations > th.ping_pong {
+                out.push(Pattern {
+                    kind: PING_PONG,
+                    detail: format!(
+                        "{alternations} read/edit alternations on {}",
+                        short_path(path)
+                    ),
+                });
+            }
+        }
+    }
+    // no progress: N consecutive turns with the same tool sequence
+    if th.no_progress >= 2 && !calls.is_empty() {
+        let seq: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+        let same_before = previous
+            .iter()
+            .rev()
+            .take_while(|p| p.len() == seq.len() && p.iter().zip(&seq).all(|(a, b)| a == b))
+            .count();
+        if same_before + 1 >= th.no_progress {
+            out.push(Pattern {
+                kind: NO_PROGRESS,
+                detail: format!(
+                    "{} consecutive turns with the same {}-call tool sequence",
+                    same_before + 1,
+                    seq.len()
+                ),
+            });
+        }
+    }
+    out
+}
+
+/// The warning kinds a stored turn carries (`metadata.loop_warnings`,
+/// plus `guard_blocked`), for the views.
+pub fn warning_kinds(metadata: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(metadata) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = v
+        .get("loop_warnings")
+        .and_then(|w| w.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|w| w.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if v.get("guard_blocked").is_some() {
+        out.push(BUDGET_GUARD.to_string());
+    }
+    out
+}
+
+/// The warnings a stored turn carries, kind and detail.
+pub fn warnings_of(metadata: &str) -> Vec<(String, String)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(metadata) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, String)> = v
+        .get("loop_warnings")
+        .and_then(|w| w.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|w| {
+                    Some((
+                        w.get("kind")?.as_str()?.to_string(),
+                        w.get("detail")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(reason) = v.get("guard_blocked").and_then(|g| g.as_str()) {
+        out.push((BUDGET_GUARD.to_string(), reason.to_string()));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +647,89 @@ mod tests {
         assert_eq!(turn_end_ns(&open, &rows), 40_000_000);
         let m = loop_metrics(&open, &rows);
         assert_eq!((m.tool_ms, m.idle_ms), (30, 10));
+    }
+
+    fn call(name: &str, path: Option<&str>) -> ToolCall {
+        ToolCall {
+            name: name.into(),
+            path: path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn patterns_fire_past_their_thresholds_and_not_below() {
+        let th = LoopThresholds {
+            tool_storm: 3,
+            ping_pong: 2,
+            no_progress: 3,
+        };
+        // exactly the threshold: quiet; one more: a storm
+        let three: Vec<ToolCall> = (0..3).map(|_| call("Bash", None)).collect();
+        assert!(patterns(&three, &[], &th).is_empty());
+        let four: Vec<ToolCall> = (0..4).map(|_| call("Bash", None)).collect();
+        let found = patterns(&four, &[], &th);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, TOOL_STORM);
+        assert_eq!(found[0].detail, "4× Bash in one turn");
+
+        // read/edit alternating on one file: 3 alternations > 2
+        let pp = vec![
+            call("Read", Some("/p/a.rs")),
+            call("Edit", Some("/p/a.rs")),
+            call("Read", Some("/p/a.rs")),
+            call("Edit", Some("/p/a.rs")),
+            call("Read", Some("/p/b.rs")), // another file, no alternation
+            call("Bash", None),
+        ];
+        let found = patterns(&pp, &[], &th);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, PING_PONG);
+        assert_eq!(found[0].detail, "3 read/edit alternations on a.rs");
+        // two alternations only: quiet
+        assert!(patterns(&pp[..3], &[], &th).is_empty());
+
+        // no progress: this turn plus two identical ones before it
+        let seq = vec![call("Grep", None), call("Read", Some("/p/a.rs"))];
+        let same = vec!["Grep".to_string(), "Read".to_string()];
+        let other = vec!["Bash".to_string()];
+        assert!(
+            patterns(&seq, std::slice::from_ref(&same), &th).is_empty(),
+            "only two in a row"
+        );
+        let found = patterns(&seq, &[other.clone(), same.clone(), same.clone()], &th);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, NO_PROGRESS);
+        assert!(found[0].detail.starts_with("3 consecutive turns"));
+        // an interruption resets the run
+        assert!(patterns(&seq, &[same.clone(), other, same], &th).is_empty());
+        // disabled thresholds are silent
+        let off = LoopThresholds {
+            tool_storm: 0,
+            ping_pong: 0,
+            no_progress: 0,
+        };
+        assert!(patterns(&four, &[], &off).is_empty());
+
+        assert_eq!(
+            path_in_tool_input(r#"{"file_path":"/p/a.rs","x":1}"#).as_deref(),
+            Some("/p/a.rs")
+        );
+        assert_eq!(
+            path_in_tool_input(r#"{"AbsolutePath":"/p/b.rs"}"#).as_deref(),
+            Some("/p/b.rs")
+        );
+        assert_eq!(path_in_tool_input(r#"{"command":"ls"}"#), None);
+        assert_eq!(path_in_tool_input("not json"), None);
+
+        let meta = r#"{"loop_warnings":[{"kind":"tool storm","detail":"30× Bash in one turn"}],"guard_blocked":"over budget"}"#;
+        assert_eq!(warning_kinds(meta), vec!["tool storm", "budget guard"]);
+        assert_eq!(
+            warnings_of(meta),
+            vec![
+                ("tool storm".to_string(), "30× Bash in one turn".to_string()),
+                ("budget guard".to_string(), "over budget".to_string())
+            ]
+        );
+        assert!(warning_kinds("{}").is_empty());
     }
 }

@@ -159,7 +159,10 @@ pub fn experiment_summary(conn: &Connection, name: &str) -> rusqlite::Result<Vec
         "SELECT r.variant, r.outcome, l.started_ns, l.ended_ns,
                 (SELECT COUNT(*) FROM traces t WHERE t.launch_id = r.launch_id),
                 (SELECT SUM(ts.total_cost_usd) FROM trace_stats ts WHERE ts.launch_id = r.launch_id),
-                (SELECT AVG(s.value) FROM scores s WHERE s.target = 'launch' AND s.target_id = r.launch_id)
+                (SELECT AVG(s.value) FROM scores s
+                  WHERE (s.target = 'launch' AND s.target_id = r.launch_id)
+                     OR (s.target = 'trace' AND s.target_id IN
+                         (SELECT id FROM traces WHERE launch_id = r.launch_id)))
          FROM experiment_runs r
          JOIN launches l ON l.id = r.launch_id
          JOIN experiments e ON e.id = r.experiment_id
@@ -447,6 +450,9 @@ pub struct RunSpec {
     pub check: Option<String>,
     pub repeat: u32,
     pub max_wait: Duration,
+    /// Budget guard for each run (`--max-cost`, `--max-turns`).
+    pub max_cost_usd: Option<f64>,
+    pub max_turns: Option<u32>,
 }
 
 /// The profile a run launches: the named one, else the first whose
@@ -547,6 +553,12 @@ pub async fn run_once(
         profile
             .args
             .extend(["--session-id".to_string(), uuid::Uuid::new_v4().to_string()]);
+    }
+    if spec.max_cost_usd.is_some() || spec.max_turns.is_some() {
+        let mut t = profile.tracing.take().unwrap_or_default();
+        t.max_cost_usd = spec.max_cost_usd.or(t.max_cost_usd);
+        t.max_turns = spec.max_turns.or(t.max_turns);
+        profile.tracing = Some(t);
     }
     let idx = app.launch(profile, spec.cwd.clone())?;
     let launch_id = app.sessions[idx]
@@ -704,6 +716,7 @@ pub const RUN_USAGE: &str =
     "usage: agent-mux run --experiment <name> --variant <label> --prompt <text>
             [--harness claude|codex|agy] [--profile <name>] [--model <id>] [--bypass]
             [--cwd <dir>] [--check <command>] [--repeat <n>] [--timeout <secs>]
+            [--max-cost <usd>] [--max-turns <n>]
 
 Runs the prompt non-interactively through the named harness (or profile) as a
 traced launch labelled with the experiment and variant, judges it with --check
@@ -755,6 +768,16 @@ pub fn parse_run_args(raw: &[String]) -> anyhow::Result<RunSpec> {
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
     Ok(RunSpec {
+        max_cost_usd: values
+            .get("max-cost")
+            .map(|v| v.parse::<f64>())
+            .transpose()?
+            .filter(|c| *c > 0.0),
+        max_turns: values
+            .get("max-turns")
+            .map(|v| v.parse::<u32>())
+            .transpose()?
+            .filter(|n| *n > 0),
         experiment: required("experiment")?,
         variant: required("variant")?,
         prompt: required("prompt")?,
@@ -810,6 +833,8 @@ mod tests {
     #[test]
     fn a_run_profile_composes_the_prompt_and_options_for_its_harness() {
         let spec = RunSpec {
+            max_cost_usd: None,
+            max_turns: None,
             experiment: "e".into(),
             variant: "v".into(),
             prompt: "fix the failing test".into(),

@@ -272,6 +272,10 @@ pub enum DialogField {
     Experiment,
     /// The variant label within that experiment; blank = "interactive".
     Variant,
+    /// Budget guard: refuse tool calls past this spend (USD); blank = none.
+    MaxCost,
+    /// Budget guard: refuse tool calls past this many turns; blank = none.
+    MaxTurns,
 }
 
 #[derive(Debug)]
@@ -368,6 +372,9 @@ pub struct DialogState {
     pub variant: String,
     /// True when a trace store is open to record the link into.
     pub experiments_available: bool,
+    /// Budget guard for this launch, as typed; blank = no limit.
+    pub max_cost: String,
+    pub max_turns: String,
 }
 
 impl DialogState {
@@ -414,7 +421,50 @@ impl DialogState {
             experiment: String::new(),
             variant: String::new(),
             experiments_available: false,
+            max_cost: first
+                .and_then(|p| p.tracing.as_ref())
+                .and_then(|t| t.max_cost_usd)
+                .map(|c| format!("{c}"))
+                .unwrap_or_default(),
+            max_turns: first
+                .and_then(|p| p.tracing.as_ref())
+                .and_then(|t| t.max_turns)
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
         }
+    }
+
+    /// The guard fields show where the CLI's PreToolUse hook can refuse a
+    /// call: Claude and Codex, on a traced launch.
+    fn guard_available(&self) -> bool {
+        self.tracing_enabled
+            && matches!(
+                self.harness,
+                Some(crate::harness::Harness::Claude) | Some(crate::harness::Harness::Codex)
+            )
+    }
+
+    /// The typed limits, or the reason one cannot be read.
+    pub fn budget(&self) -> Result<(Option<f64>, Option<u32>), String> {
+        let cost = match self.max_cost.trim() {
+            "" => None,
+            s => Some(
+                s.parse::<f64>()
+                    .ok()
+                    .filter(|c| c.is_finite() && *c > 0.0)
+                    .ok_or_else(|| format!("max cost must be a positive number, not {s:?}"))?,
+            ),
+        };
+        let turns = match self.max_turns.trim() {
+            "" => None,
+            s => Some(
+                s.parse::<u32>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| format!("max turns must be a positive count, not {s:?}"))?,
+            ),
+        };
+        Ok((cost, turns))
     }
 
     /// The fields `Tab` walks, in order. A profile whose command is not a
@@ -435,6 +485,9 @@ impl DialogState {
                 DialogField::Resume,
                 DialogField::OneShot,
             ]);
+        }
+        if self.guard_available() {
+            fields.extend([DialogField::MaxCost, DialogField::MaxTurns]);
         }
         if self.experiments_available && self.tracing_enabled {
             fields.extend([DialogField::Experiment, DialogField::Variant]);
@@ -749,6 +802,22 @@ impl DialogState {
                 }
                 _ => {}
             },
+            DialogField::MaxCost => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(c) => self.max_cost.push(c),
+                KeyCode::Backspace => {
+                    self.max_cost.pop();
+                }
+                _ => {}
+            },
+            DialogField::MaxTurns => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(c) => self.max_turns.push(c),
+                KeyCode::Backspace => {
+                    self.max_turns.pop();
+                }
+                _ => {}
+            },
             DialogField::ContentMode => match key.code {
                 KeyCode::Enter => return DialogResult::Submit,
                 KeyCode::Char(' ')
@@ -924,6 +993,11 @@ pub struct TraceBrowserState {
     pub selected_skill: usize,
     cwd: Option<std::path::PathBuf>,
     home: Option<std::path::PathBuf>,
+    /// The store, for the browser's own writes (scores).
+    db_path: Option<std::path::PathBuf>,
+    /// Latest verdict per turn id, for the marks in the Turns pane.
+    pub scores: std::collections::HashMap<String, f64>,
+    langfuse: Option<crate::config::ResolvedLangfuse>,
 }
 
 impl std::fmt::Debug for TraceBrowserState {
@@ -981,9 +1055,63 @@ impl TraceBrowserState {
             home: std::env::var_os("HOME")
                 .or_else(|| std::env::var_os("USERPROFILE"))
                 .map(std::path::PathBuf::from),
+            db_path: db_path.map(std::path::Path::to_path_buf),
+            scores: std::collections::HashMap::new(),
+            langfuse: None,
         };
         state.reload_sessions();
         state
+    }
+    /// Where the browser's writes go (scores), and to Langfuse when set.
+    pub fn with_langfuse(mut self, lf: Option<crate::config::ResolvedLangfuse>) -> Self {
+        self.langfuse = lf;
+        self
+    }
+
+    fn refresh_scores(&mut self) {
+        if let Some(conn) = &self.conn {
+            self.scores =
+                crate::tracing::scores::latest_trace_scores(conn, crate::tracing::scores::VERDICT)
+                    .unwrap_or_default();
+        }
+    }
+
+    /// `s`: the selected turn's verdict cycles none → good → bad → none.
+    /// A verdict also goes to Langfuse, in the background, when configured.
+    pub fn cycle_score(&mut self) -> Result<String, String> {
+        use crate::tracing::scores;
+        let Some(turn) = self.turns.get(self.selected_turn) else {
+            return Err("no turn selected".into());
+        };
+        let Some(db) = self.db_path.clone() else {
+            return Err("no trace store open".into());
+        };
+        let conn = crate::tracing::store::open_aux(&db)?;
+        let (trace_id, ordinal) = (turn.id.clone(), turn.ordinal);
+        let next = match self.scores.get(&trace_id) {
+            None => Some(1.0),
+            Some(v) if *v >= 0.5 => Some(0.0),
+            Some(_) => None,
+        };
+        let message = match next {
+            Some(value) => {
+                let score = scores::record(&conn, "trace", &trace_id, scores::VERDICT, value, None)
+                    .map_err(|e| e.to_string())?;
+                if let Some(lf) = self.langfuse.clone() {
+                    std::thread::spawn(move || {
+                        let _ = scores::export(&lf, &score, &trace_id);
+                    });
+                }
+                format!("turn #{ordinal}: {}", scores::label(value))
+            }
+            None => {
+                scores::clear(&conn, "trace", &trace_id, scores::VERDICT)
+                    .map_err(|e| e.to_string())?;
+                format!("turn #{ordinal}: verdict cleared")
+            }
+        };
+        self.refresh_scores();
+        Ok(message)
     }
     /// Where the Skills pane reads the user's home definitions from.
     pub fn with_home(mut self, home: Option<std::path::PathBuf>) -> Self {
@@ -1132,6 +1260,7 @@ impl TraceBrowserState {
         self.expanded = false;
         self.scroll_offset = 0;
         self.collapsed.clear();
+        self.refresh_scores();
         self.rebuild_detail();
     }
 
@@ -2048,9 +2177,11 @@ impl App {
                     .map(|s| s.dir.clone())
                     .or_else(|| std::env::current_dir().ok());
                 let home = self.tracing.as_ref().map(|rt| rt.home().to_path_buf());
+                let langfuse = self.tracing.as_ref().and_then(|rt| rt.langfuse().cloned());
                 self.mode = Mode::TraceBrowser(Box::new(
                     TraceBrowserState::new(self.trace_db_path.as_deref(), cur_dir.as_deref())
-                        .with_home(home),
+                        .with_home(home)
+                        .with_langfuse(langfuse),
                 ));
             }
             Action::BrowserKey => self.handle_browser_key(key),
@@ -2115,6 +2246,21 @@ impl App {
                     None => return,
                 };
                 let mut p_tracing = profile.tracing.unwrap_or_default();
+                if dialog.guard_available() {
+                    match dialog.budget() {
+                        Ok((cost, turns)) => {
+                            p_tracing.max_cost_usd = cost;
+                            p_tracing.max_turns = turns;
+                        }
+                        Err(e) => {
+                            let Mode::NewSession(dialog) = &mut self.mode else {
+                                return;
+                            };
+                            dialog.error = Some(e);
+                            return;
+                        }
+                    }
+                }
                 p_tracing.enabled = Some(dialog.tracing_enabled);
                 p_tracing.content_mode = Some(dialog.content_mode.to_string());
                 p_tracing.backend = Some(dialog.backend.as_str().to_string());
@@ -2155,6 +2301,18 @@ impl App {
     }
 
     fn handle_browser_key(&mut self, key: &KeyEvent) {
+        // `s` scores the selected turn; the outcome is a status-bar notice
+        if key.code == KeyCode::Char('s')
+            && let Mode::TraceBrowser(browser) = &mut self.mode
+            && browser.search_input.is_none()
+        {
+            let outcome = browser.cycle_score();
+            self.notice = Some(match outcome {
+                Ok(message) => Notice::info(message),
+                Err(e) => Notice::error(format!("score: {e}")),
+            });
+            return;
+        }
         let Mode::TraceBrowser(browser) = &mut self.mode else {
             return;
         };
@@ -3019,6 +3177,9 @@ mod dialog_tests {
                 DialogField::Approvals,
                 DialogField::Resume,
                 DialogField::OneShot,
+                // the budget guard: Claude's PreToolUse hook can refuse a call
+                DialogField::MaxCost,
+                DialogField::MaxTurns,
             ]
         );
         // the profile's own defaults pre-fill the fields
@@ -3032,13 +3193,30 @@ mod dialog_tests {
             DialogField::Approvals,
             DialogField::Resume,
             DialogField::OneShot,
+            DialogField::MaxCost,
+            DialogField::MaxTurns,
             DialogField::Profile,
         ] {
             d.handle_key(&key(KeyCode::Tab), &ps);
             assert_eq!(d.field, expected);
         }
         d.handle_key(&key(KeyCode::BackTab), &ps);
-        assert_eq!(d.field, DialogField::OneShot);
+        assert_eq!(d.field, DialogField::MaxTurns);
+        // the guard fields go with tracing: off, and they are gone
+        d.tracing_enabled = false;
+        assert!(!d.fields().contains(&DialogField::MaxCost));
+        d.tracing_enabled = true;
+        // typed limits parse, or say why not
+        d.max_cost = "2.5".into();
+        d.max_turns = "40".into();
+        assert_eq!(d.budget(), Ok((Some(2.5), Some(40))));
+        d.max_turns = "lots".into();
+        assert!(d.budget().unwrap_err().contains("max turns"));
+        d.max_turns.clear();
+        d.max_cost = "-1".into();
+        assert!(d.budget().unwrap_err().contains("max cost"));
+        d.max_cost = "  ".into();
+        assert_eq!(d.budget(), Ok((None, None)));
 
         // switching profile re-reads its defaults
         d.handle_key(&key(KeyCode::Tab), &ps);

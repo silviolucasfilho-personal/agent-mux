@@ -1,6 +1,6 @@
 # agent-mux as a workbench for skills, agents, and loop engineering
 
-**Status:** Proposed (plan: `../plans/2026-09-05-agent-workbench.md`)
+**Status:** Implemented (plan: `../plans/2026-09-05-agent-workbench.md`, Tasks 1–11 landed on `feature/agent-workbench`). One deviation from Phase 4 is recorded in the plan: the Codex budget-guard refusal is wired and its reply keys are present in the Codex binary, but the block was not exercised live because Codex only runs a non-managed hook after interactive trust.
 **Request (2026-09-05):** "transform the agent-mux in a valuable tool for helping people developing skills, agents and loop engineering"
 **Builds on:** the SQLite trace store, the hook channel, the Langfuse backend, the tree and timeline views, the per-harness launch options and `src/harness.rs`.
 

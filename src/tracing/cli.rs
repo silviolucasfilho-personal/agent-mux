@@ -8,7 +8,7 @@ use crate::tracing::store::query::{self, SessionFilter};
 use crate::tracing::store::{self, Store};
 use crate::tracing::{ids, price_table};
 use crate::transcript::{self, Provider};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 const USAGE: &str = "usage: agent-mux trace <command> [options]
@@ -39,6 +39,8 @@ commands:
   skills lint [name]           what stops a skill, agent or command working: frontmatter, tools, model
   agents [--json]              what each subagent type did: invocations, latency, cost, failures
   compare <a> <b>              two turns or sessions side by side: loop metrics and the tool path
+  score <t> [good|bad|<n>]     a verdict on a turn, session or launch (--name, --note); sent to Langfuse too
+                               with no value: the scores on it
   experiments [name]           the experiment registry, or one experiment's variants
   (see also: agent-mux run --experiment <name> --variant <label> --prompt <text> …)
   hook <claude|codex|codex-notify|agy> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
@@ -235,6 +237,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         "skills" => skills(&args),
         "agents" => agents(&args),
         "compare" => compare(&args),
+        "score" => score(&args),
         "experiments" => experiments(&args),
         "hooks" => hooks_cmd(&args),
         "hook" => {
@@ -386,7 +389,14 @@ fn loops(args: &Args) -> anyhow::Result<()> {
                 .unwrap_or_else(|| "-".into()),
             m.subagents,
             fmt_cost(t.total_cost_usd),
-            truncate_display(&name, 40)
+            {
+                let kinds = super::loops::warning_kinds(&t.metadata);
+                if kinds.is_empty() {
+                    truncate_display(&name, 40)
+                } else {
+                    format!("{}  ⚠ {}", truncate_display(&name, 40), kinds.join(", "))
+                }
+            }
         );
     }
     Ok(())
@@ -779,6 +789,98 @@ fn compare(args: &Args) -> anyhow::Result<()> {
     );
     for (mark, name) in diff(&left.tools, &right.tools) {
         println!("  {mark} {name}");
+    }
+    Ok(())
+}
+
+/// `trace score <turn|session|launch> [good|bad|<n>] [--name N] [--note TEXT]`:
+/// records a verdict (and sends it to Langfuse when configured), or lists
+/// the scores on the target when no value is given.
+fn score(args: &Args) -> anyhow::Result<()> {
+    use super::scores;
+    let Some(needle) = args.positional.first() else {
+        anyhow::bail!(
+            "usage: agent-mux trace score <turn|session|launch> [good|bad|<number>] [--name N] [--note TEXT]"
+        );
+    };
+    let (_, resolved) = resolved()?;
+    let ro = open_ro(&resolved)?;
+    // a turn first, then a session, then a launch id prefix
+    let (target, target_id, label, trace_ids): (&str, String, String, Vec<String>) =
+        if let Some(t) = query::find_trace(&ro, needle)? {
+            let label = format!("turn #{} {}", t.ordinal, &t.id[..8.min(t.id.len())]);
+            ("trace", t.id.clone(), label, vec![t.id])
+        } else if let Some(s) = query::find_session(&ro, needle)? {
+            let ids = query::list_traces(&ro, &s.key)?
+                .into_iter()
+                .map(|t| t.id)
+                .collect();
+            (
+                "session",
+                s.key.clone(),
+                format!("session {}", &s.session_id[..8.min(s.session_id.len())]),
+                ids,
+            )
+        } else {
+            let mut stmt =
+                ro.prepare("SELECT id FROM launches WHERE id = ?1 OR id LIKE ?1 || '%' LIMIT 1")?;
+            let launch: Option<String> = stmt.query_row([needle], |r| r.get(0)).optional()?;
+            let Some(launch) = launch else {
+                anyhow::bail!("nothing matches {needle:?}: not a turn, session or launch");
+            };
+            let mut ts =
+                ro.prepare("SELECT id FROM traces WHERE launch_id = ?1 ORDER BY ordinal")?;
+            let ids: Vec<String> = ts
+                .query_map([&launch], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            (
+                "launch",
+                launch.clone(),
+                format!("launch {}", &launch[..8.min(launch.len())]),
+                ids,
+            )
+        };
+    let Some(raw) = args.positional.get(1) else {
+        let list = scores::for_target(&ro, target, &target_id)?;
+        if list.is_empty() {
+            println!("no scores on {label}");
+        }
+        for s in list {
+            println!(
+                "{}  {:<12} {:>6}  {}",
+                fmt_time(s.created_ns),
+                s.name,
+                format!("{:.2}", s.value),
+                s.comment.unwrap_or_default()
+            );
+        }
+        return Ok(());
+    };
+    let Some(value) = scores::parse_value(raw) else {
+        anyhow::bail!("a score is good, bad or a number, not {raw:?}");
+    };
+    let name = args.value("name").unwrap_or(scores::VERDICT);
+    let conn = super::store::open_aux(&resolved.db_path).map_err(|e| anyhow::anyhow!(e))?;
+    let score = scores::record(&conn, target, &target_id, name, value, args.value("note"))?;
+    println!(
+        "scored {label}: {name} = {value} ({})",
+        scores::label(value)
+    );
+    if let Some(lf) = &resolved.langfuse {
+        // Langfuse scores attach to traces: one per turn under the target
+        let mut sent = 0;
+        for trace_id in &trace_ids {
+            match scores::export(lf, &score, trace_id) {
+                Ok(()) => sent += 1,
+                Err(e) => {
+                    eprintln!("{e}");
+                    break;
+                }
+            }
+        }
+        if sent > 0 {
+            println!("sent to langfuse on {sent} trace(s)");
+        }
     }
     Ok(())
 }
@@ -2169,6 +2271,8 @@ fn sql(args: &Args) -> anyhow::Result<()> {
 #[derive(Debug, Default)]
 pub struct HookOutcome {
     pub inserted: bool,
+    /// The budget guard refused the call (the reason the model sees).
+    pub blocked: Option<String>,
     /// What agy expects on stdout (`None` for the other sources).
     pub response: Option<String>,
     pub error: Option<String>,
@@ -2177,7 +2281,7 @@ pub struct HookOutcome {
 /// Longest the hook waits for the store's write lock before giving up.
 pub const HOOK_BUSY_CAP: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// `trace hook <source> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]`.
+/// `trace hook <source> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [--guard] [payload]`.
 /// `stdin_override` lets tests supply the payload without a pipe.
 pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
     use crate::tracing::hooks::{self, ContentPolicy, HookSource};
@@ -2252,7 +2356,7 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
         .map(str::to_string)
         .or_else(|| std::env::var("AGENT_MUX_SESSION_ID").ok())
         .filter(|s| !s.is_empty());
-    let Some(ev) = hooks::parse(
+    let Some(mut ev) = hooks::parse(
         source,
         event.as_deref(),
         &payload,
@@ -2263,6 +2367,21 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
         outcome.error = Some("event not stored".into());
         return outcome;
     };
+    // the budget guard: only on a PreToolUse registered with --guard, and
+    // only ever a refusal past the launch's own limits (fail-open)
+    if args.has("guard")
+        && ev.event == "PreToolUse"
+        && let Some(id) = ev.launch_id.clone()
+        && let hooks::guard::Verdict::Block(reason) =
+            hooks::guard::check(&resolved.db_path, &id, HOOK_BUSY_CAP)
+    {
+        ev.payload.insert(
+            "agent_mux_guard".into(),
+            serde_json::json!({ "blocked": true, "reason": reason }),
+        );
+        outcome.response = Some(hooks::guard::deny_json(&reason));
+        outcome.blocked = Some(reason);
+    }
     match store::open_hook_sink(&resolved.db_path, HOOK_BUSY_CAP) {
         Ok(conn) => match store::insert_hook_event(&conn, &ev) {
             Ok(inserted) => outcome.inserted = inserted,

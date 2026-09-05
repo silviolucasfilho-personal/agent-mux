@@ -89,6 +89,8 @@ async fn runs_are_judged_recorded_summarised_and_comparable() {
     let resolved = config::resolve_tracing(cfg.tracing.as_ref(), &|_| None).unwrap();
 
     let spec = |variant: &str, check: &str| RunSpec {
+        max_cost_usd: None,
+        max_turns: None,
         experiment: "touch-file".into(),
         variant: variant.into(),
         prompt: "create done.txt".into(),
@@ -223,6 +225,34 @@ async fn runs_are_judged_recorded_summarised_and_comparable() {
     let same = diff(&left.tools, &right.tools);
     assert_eq!(same, vec![(' ', "Bash".to_string())]);
     assert!(resolve_side(&ro, "no-such-thing").unwrap().is_none());
+
+    // a verdict on one of the first run's turns reaches the variant summary
+    let first_turn: String = ro
+        .query_row(
+            "SELECT id FROM traces WHERE launch_id = ?1 ORDER BY ordinal LIMIT 1",
+            [&first.launch_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    agent_mux::tracing::scores::record(
+        &conn,
+        "trace",
+        &first_turn,
+        agent_mux::tracing::scores::VERDICT,
+        1.0,
+        None,
+    )
+    .unwrap();
+    let rows = experiment_summary(&conn, "touch-file").unwrap();
+    let baseline = rows.iter().find(|r| r.variant == "baseline").unwrap();
+    let strict = rows.iter().find(|r| r.variant == "strict").unwrap();
+    assert_eq!(baseline.mean_score, Some(1.0));
+    assert_eq!(strict.mean_score, None);
+    assert!(
+        summary_lines(&rows)
+            .iter()
+            .any(|l| l.starts_with("baseline") && l.trim_end().ends_with("1.00"))
+    );
 }
 
 /// The dialog's Experiment field: an interactive launch that names an
