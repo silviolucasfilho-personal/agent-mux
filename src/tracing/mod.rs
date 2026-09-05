@@ -14,11 +14,15 @@
 pub mod agy_usage;
 pub mod cli;
 pub mod correlate;
+pub mod experiments;
 pub mod hooks;
 pub mod ids;
+pub mod inventory;
 pub mod langfuse;
+pub mod loops;
 pub mod map;
 pub mod pricing;
+pub mod scores;
 pub mod store;
 pub mod tail;
 pub mod usage;
@@ -98,6 +102,9 @@ pub struct LaunchPlan {
     /// The backend the profile or dialog asked for when it could not be
     /// honored (Langfuse not configured): recorded on the launch row.
     pub backend_requested: Option<Backend>,
+    /// The budget guard asked for, recorded on the launch row and enforced
+    /// through a synchronous `PreToolUse` hook where the CLI has one.
+    pub guard: Option<hooks::guard::Guard>,
     profile_name: String,
     dir: PathBuf,
 }
@@ -284,6 +291,14 @@ impl TraceRuntime {
         &self.settings.db_path
     }
 
+    pub fn home(&self) -> &Path {
+        &self.settings.home
+    }
+
+    pub fn langfuse(&self) -> Option<&crate::config::ResolvedLangfuse> {
+        self.settings.langfuse.as_ref()
+    }
+
     /// True when Langfuse credentials resolved and the exporter is running.
     pub fn langfuse_configured(&self) -> bool {
         self.exporter.is_some()
@@ -457,6 +472,7 @@ impl TraceRuntime {
             hooks_registered: false,
             backend,
             backend_requested,
+            guard: None,
             profile_name: profile.name.clone(),
             dir: dir.to_path_buf(),
         })
@@ -596,6 +612,29 @@ impl TraceRuntime {
                 .lock()
                 .map(|s| s.contains(&profile.name))
                 .unwrap_or(false);
+        // a budget guard rides on the launch row; the hook that enforces it
+        // exists only where the CLI's PreToolUse can wait for an answer
+        let guard = hooks::guard::Guard::from_tracing(profile.tracing.as_ref());
+        if let Some(g) = &guard {
+            let why = match provider {
+                Provider::Claude if hooks_wanted => None,
+                Provider::Claude => Some("hooks are off for this launch"),
+                Provider::Codex
+                    if hooks::install::codex_hooks_path(&self.settings.home).is_file() =>
+                {
+                    None
+                }
+                Provider::Codex => Some("Codex needs `agent-mux trace hooks install codex`"),
+                Provider::Antigravity => Some("agy's PreToolUse hook is not registered"),
+            };
+            if let Some(why) = why {
+                let _ = self.status_tx.try_send(AppEvent::TraceStatus(format!(
+                    "budget guard ({}) not enforced for '{}': {why}",
+                    g.describe(),
+                    profile.name
+                )));
+            }
+        }
         let mut hooks_registered = false;
         let mut extra_env = vec![
             ("AGENT_MUX".to_string(), "1".to_string()),
@@ -607,6 +646,7 @@ impl TraceRuntime {
                 exe,
                 home: self.settings.home.clone(),
                 content_mode,
+                guard: guard.is_some(),
             };
             match provider {
                 Provider::Claude => {
@@ -650,6 +690,7 @@ impl TraceRuntime {
             hooks_registered,
             backend,
             backend_requested,
+            guard,
             profile_name: profile.name.clone(),
             dir: dir.to_path_buf(),
         })
@@ -744,6 +785,9 @@ impl TraceRuntime {
                 serde_json::Value::from(wanted.as_str()),
             );
         }
+        if let Some(g) = &plan.guard {
+            meta.insert("guard".into(), g.to_json());
+        }
         launch.metadata = Some(serde_json::Value::Object(meta));
         self.send(StoreOp::Launch(launch));
         let phase_tx = watch::Sender::new(Phase::Running);
@@ -774,6 +818,7 @@ impl TraceRuntime {
             fast_failures: Arc::clone(&self.fast_failures),
             drop_warned: Arc::clone(&self.drop_warned),
             map_settings,
+            loops: self.settings.loops,
             correlation: plan.correlation,
             correlation_label: plan.correlation_label,
             known_session_id: plan.known_session_id,
@@ -852,6 +897,8 @@ struct PipelineCtx {
     fast_failures: Arc<Mutex<std::collections::HashMap<String, u32>>>,
     drop_warned: Arc<std::sync::atomic::AtomicBool>,
     map_settings: MapSettings,
+    /// Loop-pattern thresholds for the assembler.
+    loops: loops::LoopThresholds,
     correlation: CorrelationSpec,
     correlation_label: &'static str,
     known_session_id: Option<String>,
@@ -876,9 +923,24 @@ struct Pipeline {
     hook_events: u64,
     parse_errors: u64,
     started: Instant,
+    /// Warning kinds already put on the status bar for this launch.
+    warned: HashSet<&'static str>,
 }
 
 impl Pipeline {
+    /// Loop patterns and guard blocks the assembler noticed: one status
+    /// line per kind per launch, never an intervention.
+    fn flush_warnings(&mut self) {
+        for w in self.assembler.take_warnings() {
+            if self.warned.insert(w.kind) {
+                let _ = self.ctx.status_tx.try_send(AppEvent::TraceStatus(format!(
+                    "loops: {} — {} ('{}')",
+                    w.kind, w.detail, self.ctx.profile_name
+                )));
+            }
+        }
+    }
+
     fn send_ops(&self, ops: Vec<StoreOp>) {
         for op in ops {
             let (local, remote) = sink_targets(&op, self.ctx.backend);
@@ -918,6 +980,7 @@ impl Pipeline {
             ops.extend(self.assembler.feed(event, recv));
         }
         self.send_ops(ops);
+        self.flush_warnings();
     }
 
     /// Prime (no emission) an existing transcript for Known resumes; always
@@ -992,6 +1055,7 @@ impl Pipeline {
             ops.extend(self.assembler.attach_step_usage(record));
         }
         self.send_ops(ops);
+        self.flush_warnings();
     }
 
     /// A hook that named this launch's session (and transcript) wins over
@@ -1058,6 +1122,7 @@ impl Pipeline {
             }
         }
         self.send_ops(ops);
+        self.flush_warnings();
     }
 
     fn tick(&mut self) {
@@ -1099,6 +1164,7 @@ impl Pipeline {
                         Some(session_id),
                         correlation,
                     );
+                    fresh.set_loop_thresholds(self.ctx.loops);
                     fresh.set_transcript_path(&path.to_string_lossy());
                     fresh.mark_backfill_truncated();
                     self.assembler = fresh;
@@ -1154,6 +1220,7 @@ impl Pipeline {
         }
         ops.push(StoreOp::Launch(ended));
         self.send_ops(ops);
+        self.flush_warnings();
         self.claim_guard = None;
         // Fast-failure tracking for injected --session-id launches: two
         // consecutive immediate nonzero exits disable injection for the
@@ -1206,7 +1273,7 @@ async fn run_pipeline(
     mut phase_rx: watch::Receiver<Phase>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let assembler = TurnAssembler::new(
+    let mut assembler = TurnAssembler::new(
         ctx.map_settings.clone(),
         ctx.known_session_id.clone(),
         if ctx.known_session_id.is_some() {
@@ -1215,6 +1282,7 @@ async fn run_pipeline(
             "none"
         },
     );
+    assembler.set_loop_thresholds(ctx.loops);
     let poll_interval = ctx.poll_interval;
     let hook_feed = HookFeed::new(&ctx.db_path, ctx.provider, &ctx.map_settings.launch_id);
     let mut pipeline = Pipeline {
@@ -1227,6 +1295,7 @@ async fn run_pipeline(
         hook_feed,
         hook_events: 0,
         parse_errors: 0,
+        warned: HashSet::new(),
         started: Instant::now(),
     };
     loop {

@@ -62,6 +62,8 @@ pub struct TracingConfig {
     /// Langfuse credentials (`[tracing.langfuse]`); keys fall back to
     /// `$LANGFUSE_PUBLIC_KEY` / `$LANGFUSE_SECRET_KEY` / `$LANGFUSE_HOST`.
     pub langfuse: Option<LangfuseConfig>,
+    /// Loop-warning thresholds (`[tracing.loops]`).
+    pub loops: Option<LoopsConfig>,
     // Legacy Langfuse keys (an old `[langfuse]` section, or these keys
     // inside `[tracing]`): adopted as credentials when `[tracing.langfuse]`
     // is absent. Their presence drives a one-time notice.
@@ -113,6 +115,21 @@ pub struct ProfileTracing {
     pub hooks: Option<String>,
     /// "local" | "langfuse" | "both": this profile's default destination.
     pub backend: Option<String>,
+    /// Budget guard for this profile's launches: past either limit the
+    /// next tool call is refused through the hook channel (Claude per
+    /// launch; Codex with the installed hooks). The dialog overrides both.
+    pub max_cost_usd: Option<f64>,
+    pub max_turns: Option<u32>,
+}
+
+/// `[tracing.loops]`: thresholds for the loop warnings, each "more than
+/// N" per turn (tool_storm, ping_pong) or consecutive turns (no_progress);
+/// 0 disables one. Defaults: 25, 6, 3.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct LoopsConfig {
+    pub tool_storm: Option<usize>,
+    pub ping_pong: Option<usize>,
+    pub no_progress: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
@@ -305,6 +322,7 @@ pub struct ResolvedTracing {
     pub antigravity_dir: Option<PathBuf>,
     pub models: Vec<ModelPriceConfig>,
     pub hooks: HookMode,
+    pub loops: crate::tracing::loops::LoopThresholds,
     /// The user's home as resolved from the environment: baked into hook
     /// registrations so hooks find this configuration from any cwd.
     pub home: PathBuf,
@@ -399,6 +417,17 @@ pub fn resolve_tracing(
             _ => HookMode::Auto,
         },
         home: home_dir(env).unwrap_or_else(|| PathBuf::from(".")),
+        loops: {
+            let d = crate::tracing::loops::LoopThresholds::default();
+            match &lf.loops {
+                Some(l) => crate::tracing::loops::LoopThresholds {
+                    tool_storm: l.tool_storm.unwrap_or(d.tool_storm),
+                    ping_pong: l.ping_pong.unwrap_or(d.ping_pong),
+                    no_progress: l.no_progress.unwrap_or(d.no_progress),
+                },
+                None => d,
+            }
+        },
         backend: lf
             .backend
             .as_deref()

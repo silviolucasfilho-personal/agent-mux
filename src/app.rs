@@ -268,6 +268,14 @@ pub enum DialogField {
     Resume,
     /// A prompt to run non-interactively; blank launches interactively.
     OneShot,
+    /// Name of an experiment to record this launch under; blank = none.
+    Experiment,
+    /// The variant label within that experiment; blank = "interactive".
+    Variant,
+    /// Budget guard: refuse tool calls past this spend (USD); blank = none.
+    MaxCost,
+    /// Budget guard: refuse tool calls past this many turns; blank = none.
+    MaxTurns,
 }
 
 #[derive(Debug)]
@@ -359,6 +367,14 @@ pub struct DialogState {
     /// False when no Langfuse credentials resolved: the field cannot leave
     /// local and says why.
     pub langfuse_available: bool,
+    /// Experiment link for this launch; blank experiment = not linked.
+    pub experiment: String,
+    pub variant: String,
+    /// True when a trace store is open to record the link into.
+    pub experiments_available: bool,
+    /// Budget guard for this launch, as typed; blank = no limit.
+    pub max_cost: String,
+    pub max_turns: String,
 }
 
 impl DialogState {
@@ -402,7 +418,53 @@ impl DialogState {
             resume_last: false,
             one_shot: String::new(),
             langfuse_available: false,
+            experiment: String::new(),
+            variant: String::new(),
+            experiments_available: false,
+            max_cost: first
+                .and_then(|p| p.tracing.as_ref())
+                .and_then(|t| t.max_cost_usd)
+                .map(|c| format!("{c}"))
+                .unwrap_or_default(),
+            max_turns: first
+                .and_then(|p| p.tracing.as_ref())
+                .and_then(|t| t.max_turns)
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
         }
+    }
+
+    /// The guard fields show where the CLI's PreToolUse hook can refuse a
+    /// call: Claude and Codex, on a traced launch.
+    fn guard_available(&self) -> bool {
+        self.tracing_enabled
+            && matches!(
+                self.harness,
+                Some(crate::harness::Harness::Claude) | Some(crate::harness::Harness::Codex)
+            )
+    }
+
+    /// The typed limits, or the reason one cannot be read.
+    pub fn budget(&self) -> Result<(Option<f64>, Option<u32>), String> {
+        let cost = match self.max_cost.trim() {
+            "" => None,
+            s => Some(
+                s.parse::<f64>()
+                    .ok()
+                    .filter(|c| c.is_finite() && *c > 0.0)
+                    .ok_or_else(|| format!("max cost must be a positive number, not {s:?}"))?,
+            ),
+        };
+        let turns = match self.max_turns.trim() {
+            "" => None,
+            s => Some(
+                s.parse::<u32>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| format!("max turns must be a positive count, not {s:?}"))?,
+            ),
+        };
+        Ok((cost, turns))
     }
 
     /// The fields `Tab` walks, in order. A profile whose command is not a
@@ -424,7 +486,38 @@ impl DialogState {
                 DialogField::OneShot,
             ]);
         }
+        if self.guard_available() {
+            fields.extend([DialogField::MaxCost, DialogField::MaxTurns]);
+        }
+        if self.experiments_available && self.tracing_enabled {
+            fields.extend([DialogField::Experiment, DialogField::Variant]);
+        }
         fields
+    }
+
+    /// Whether the launch can be recorded as an experiment run: only with
+    /// a trace store open, since the run row hangs off the launch row.
+    pub fn with_experiments(mut self, available: bool) -> Self {
+        self.experiments_available = available;
+        self
+    }
+
+    /// The experiment this launch records itself under, if one is named.
+    pub fn experiment_link(&self) -> Option<crate::tracing::experiments::ExperimentLink> {
+        let experiment = self.experiment.trim();
+        if experiment.is_empty() || !self.experiments_available || !self.tracing_enabled {
+            return None;
+        }
+        let variant = self.variant.trim();
+        Some(crate::tracing::experiments::ExperimentLink {
+            experiment: experiment.to_string(),
+            variant: if variant.is_empty() {
+                "interactive".to_string()
+            } else {
+                variant.to_string()
+            },
+            prompt: self.one_shot.trim().to_string(),
+        })
     }
 
     fn step_field(&mut self, delta: isize) {
@@ -693,6 +786,38 @@ impl DialogState {
                 }
                 _ => {}
             },
+            DialogField::Experiment => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(c) => self.experiment.push(c),
+                KeyCode::Backspace => {
+                    self.experiment.pop();
+                }
+                _ => {}
+            },
+            DialogField::Variant => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(c) => self.variant.push(c),
+                KeyCode::Backspace => {
+                    self.variant.pop();
+                }
+                _ => {}
+            },
+            DialogField::MaxCost => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(c) => self.max_cost.push(c),
+                KeyCode::Backspace => {
+                    self.max_cost.pop();
+                }
+                _ => {}
+            },
+            DialogField::MaxTurns => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(c) => self.max_turns.push(c),
+                KeyCode::Backspace => {
+                    self.max_turns.pop();
+                }
+                _ => {}
+            },
             DialogField::ContentMode => match key.code {
                 KeyCode::Enter => return DialogResult::Submit,
                 KeyCode::Char(' ')
@@ -805,6 +930,8 @@ pub enum DetailView {
     Tree,
     /// Bars over the turn's own time window.
     Timeline,
+    /// The loop's numbers: calls, retries, where the time went, context.
+    Loop,
 }
 
 impl DetailView {
@@ -812,7 +939,8 @@ impl DetailView {
         match self {
             DetailView::List => DetailView::Tree,
             DetailView::Tree => DetailView::Timeline,
-            DetailView::Timeline => DetailView::List,
+            DetailView::Timeline => DetailView::Loop,
+            DetailView::Loop => DetailView::List,
         }
     }
 
@@ -821,6 +949,7 @@ impl DetailView {
             DetailView::List => "list",
             DetailView::Tree => "tree",
             DetailView::Timeline => "timeline",
+            DetailView::Loop => "loop",
         }
     }
 }
@@ -858,6 +987,17 @@ pub struct TraceBrowserState {
     /// Detail-pane interior height, written back by the renderer.
     pub viewport_rows: std::cell::Cell<usize>,
     last_refresh: Instant,
+    /// `K`: the left column lists skills instead of sessions.
+    pub skills_pane: bool,
+    pub skills: Vec<crate::tracing::inventory::SkillReport>,
+    pub selected_skill: usize,
+    cwd: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+    /// The store, for the browser's own writes (scores).
+    db_path: Option<std::path::PathBuf>,
+    /// Latest verdict per turn id, for the marks in the Turns pane.
+    pub scores: std::collections::HashMap<String, f64>,
+    langfuse: Option<crate::config::ResolvedLangfuse>,
 }
 
 impl std::fmt::Debug for TraceBrowserState {
@@ -908,9 +1048,154 @@ impl TraceBrowserState {
             search_query: None,
             viewport_rows: std::cell::Cell::new(30),
             last_refresh: Instant::now(),
+            skills_pane: false,
+            skills: Vec::new(),
+            selected_skill: 0,
+            cwd: current_dir.map(std::path::Path::to_path_buf),
+            home: std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(std::path::PathBuf::from),
+            db_path: db_path.map(std::path::Path::to_path_buf),
+            scores: std::collections::HashMap::new(),
+            langfuse: None,
         };
         state.reload_sessions();
         state
+    }
+    /// Where the browser's writes go (scores), and to Langfuse when set.
+    pub fn with_langfuse(mut self, lf: Option<crate::config::ResolvedLangfuse>) -> Self {
+        self.langfuse = lf;
+        self
+    }
+
+    fn refresh_scores(&mut self) {
+        if let Some(conn) = &self.conn {
+            self.scores =
+                crate::tracing::scores::latest_trace_scores(conn, crate::tracing::scores::VERDICT)
+                    .unwrap_or_default();
+        }
+    }
+
+    /// `s`: the selected turn's verdict cycles none → good → bad → none.
+    /// A verdict also goes to Langfuse, in the background, when configured.
+    pub fn cycle_score(&mut self) -> Result<String, String> {
+        use crate::tracing::scores;
+        let Some(turn) = self.turns.get(self.selected_turn) else {
+            return Err("no turn selected".into());
+        };
+        let Some(db) = self.db_path.clone() else {
+            return Err("no trace store open".into());
+        };
+        let conn = crate::tracing::store::open_aux(&db)?;
+        let (trace_id, ordinal) = (turn.id.clone(), turn.ordinal);
+        let next = match self.scores.get(&trace_id) {
+            None => Some(1.0),
+            Some(v) if *v >= 0.5 => Some(0.0),
+            Some(_) => None,
+        };
+        let message = match next {
+            Some(value) => {
+                let score = scores::record(&conn, "trace", &trace_id, scores::VERDICT, value, None)
+                    .map_err(|e| e.to_string())?;
+                if let Some(lf) = self.langfuse.clone() {
+                    std::thread::spawn(move || {
+                        let _ = scores::export(&lf, &score, &trace_id);
+                    });
+                }
+                format!("turn #{ordinal}: {}", scores::label(value))
+            }
+            None => {
+                scores::clear(&conn, "trace", &trace_id, scores::VERDICT)
+                    .map_err(|e| e.to_string())?;
+                format!("turn #{ordinal}: verdict cleared")
+            }
+        };
+        self.refresh_scores();
+        Ok(message)
+    }
+    /// Where the Skills pane reads the user's home definitions from.
+    pub fn with_home(mut self, home: Option<std::path::PathBuf>) -> Self {
+        if home.is_some() {
+            self.home = home;
+        }
+        self
+    }
+
+    /// `K`: the left column shows the skill inventory joined to the store
+    /// instead of sessions, and back.
+    pub fn toggle_skills_pane(&mut self) {
+        self.skills_pane = !self.skills_pane;
+        if self.skills_pane {
+            self.load_skills();
+            self.focused = BrowserPane::Sessions;
+        }
+    }
+
+    pub fn load_skills(&mut self) {
+        use crate::tracing::inventory::{inventory_all, skill_reports};
+        let cwd = self
+            .cwd
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let home = self
+            .home
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let defs = inventory_all(&cwd, &home);
+        let (stats, prompts) = match &self.conn {
+            Some(conn) => (
+                crate::tracing::store::query::skill_stats(conn).unwrap_or_default(),
+                crate::tracing::store::query::prompt_rows(conn, 5000).unwrap_or_default(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        self.skills = skill_reports(&defs, &stats, &prompts);
+        self.selected_skill = self.selected_skill.min(self.skills.len().saturating_sub(1));
+    }
+
+    pub fn step_skill(&mut self, delta: isize) {
+        if self.skills.is_empty() {
+            return;
+        }
+        let max = self.skills.len() as isize - 1;
+        self.selected_skill = (self.selected_skill as isize + delta).clamp(0, max) as usize;
+    }
+
+    /// `Enter` on a skill: the Turns pane shows the turns that loaded it.
+    pub fn filter_by_skill(&mut self) {
+        let Some(report) = self.skills.get(self.selected_skill) else {
+            return;
+        };
+        let Some(conn) = &self.conn else {
+            return;
+        };
+        let names = report
+            .def
+            .as_ref()
+            .map(|d| d.store_names())
+            .unwrap_or_else(|| vec![report.name.clone()]);
+        let label = report.name.clone();
+        let mut turns = Vec::new();
+        for name in names {
+            if let Ok(found) = crate::tracing::store::query::traces_with_skill(conn, &name, 200) {
+                for t in found {
+                    if !turns
+                        .iter()
+                        .any(|u: &crate::tracing::store::query::TraceStat| u.id == t.id)
+                    {
+                        turns.push(t);
+                    }
+                }
+            }
+        }
+        turns.sort_by_key(|t| std::cmp::Reverse(t.start_ns));
+        self.turns = turns;
+        self.selected_turn = 0;
+        self.search_query = Some(format!("skill: {label}"));
+        self.focused = BrowserPane::Turns;
+        self.error = None;
+        self.load_observations();
     }
 
     fn filter(&self) -> crate::tracing::store::query::SessionFilter {
@@ -975,6 +1260,7 @@ impl TraceBrowserState {
         self.expanded = false;
         self.scroll_offset = 0;
         self.collapsed.clear();
+        self.refresh_scores();
         self.rebuild_detail();
     }
 
@@ -1255,6 +1541,10 @@ pub struct App {
     /// this to `false` so `cargo test` never touches the real system
     /// clipboard.
     pub clipboard_enabled: bool,
+    /// Launches the dialog linked to an experiment, by session id, until
+    /// the session ends and the run is recorded.
+    pub experiment_links:
+        std::collections::HashMap<usize, crate::tracing::experiments::ExperimentLink>,
     drag_owner: Option<DragOwner>,
     just_detached: bool,
     next_id: usize,
@@ -1285,6 +1575,7 @@ impl App {
             drag_owner: None,
             just_detached: false,
             next_id: 0,
+            experiment_links: std::collections::HashMap::new(),
             tx,
             tracing,
             trace_db_path,
@@ -1336,6 +1627,17 @@ impl App {
 
     /// Hands the runtime back to `main` for the post-`kill_all` bounded
     /// shutdown flush.
+    /// Spawns a session from a ready profile, the way the dialog does, and
+    /// returns its index. The headless runner's entry point.
+    pub fn launch(&mut self, profile: Profile, dir: std::path::PathBuf) -> anyhow::Result<usize> {
+        let id = self.next_id;
+        let session = self.spawn_traced(id, profile, dir)?;
+        self.next_id += 1;
+        self.sessions.push(session);
+        self.selected = self.sessions.len() - 1;
+        Ok(self.selected)
+    }
+
     pub fn take_tracing(&mut self) -> Option<crate::tracing::TraceRuntime> {
         self.tracing.take()
     }
@@ -1836,12 +2138,11 @@ impl App {
                     Some(rt) => (rt.default_backend(), rt.langfuse_configured()),
                     None => (crate::config::Backend::Local, false),
                 };
-                self.mode =
-                    Mode::NewSession(DialogState::new(&self.profiles).with_backend_options(
-                        default,
-                        available,
-                        &self.profiles,
-                    ));
+                self.mode = Mode::NewSession(
+                    DialogState::new(&self.profiles)
+                        .with_backend_options(default, available, &self.profiles)
+                        .with_experiments(self.tracing.is_some()),
+                );
             }
             Action::OpenHelp => self.mode = Mode::Help,
             Action::EnterConfirmKill => self.mode = Mode::ConfirmKill,
@@ -1875,10 +2176,13 @@ impl App {
                     .get(self.selected)
                     .map(|s| s.dir.clone())
                     .or_else(|| std::env::current_dir().ok());
-                self.mode = Mode::TraceBrowser(Box::new(TraceBrowserState::new(
-                    self.trace_db_path.as_deref(),
-                    cur_dir.as_deref(),
-                )));
+                let home = self.tracing.as_ref().map(|rt| rt.home().to_path_buf());
+                let langfuse = self.tracing.as_ref().and_then(|rt| rt.langfuse().cloned());
+                self.mode = Mode::TraceBrowser(Box::new(
+                    TraceBrowserState::new(self.trace_db_path.as_deref(), cur_dir.as_deref())
+                        .with_home(home)
+                        .with_langfuse(langfuse),
+                ));
             }
             Action::BrowserKey => self.handle_browser_key(key),
             Action::RespawnSelected => {
@@ -1942,6 +2246,21 @@ impl App {
                     None => return,
                 };
                 let mut p_tracing = profile.tracing.unwrap_or_default();
+                if dialog.guard_available() {
+                    match dialog.budget() {
+                        Ok((cost, turns)) => {
+                            p_tracing.max_cost_usd = cost;
+                            p_tracing.max_turns = turns;
+                        }
+                        Err(e) => {
+                            let Mode::NewSession(dialog) = &mut self.mode else {
+                                return;
+                            };
+                            dialog.error = Some(e);
+                            return;
+                        }
+                    }
+                }
                 p_tracing.enabled = Some(dialog.tracing_enabled);
                 p_tracing.content_mode = Some(dialog.content_mode.to_string());
                 p_tracing.backend = Some(dialog.backend.as_str().to_string());
@@ -1958,6 +2277,7 @@ impl App {
                     }
                 }
                 let dir = resolve_working_dir(&dialog.dir);
+                let link = dialog.experiment_link();
                 let id = self.next_id;
                 match self.spawn_traced(id, profile, dir) {
                     Ok(session) => {
@@ -1965,6 +2285,9 @@ impl App {
                         self.sessions.push(session);
                         self.selected = self.sessions.len() - 1;
                         self.mode = Mode::Control;
+                        if let Some(link) = link {
+                            self.experiment_links.insert(id, link);
+                        }
                     }
                     Err(e) => {
                         let Mode::NewSession(dialog) = &mut self.mode else {
@@ -1978,6 +2301,18 @@ impl App {
     }
 
     fn handle_browser_key(&mut self, key: &KeyEvent) {
+        // `s` scores the selected turn; the outcome is a status-bar notice
+        if key.code == KeyCode::Char('s')
+            && let Mode::TraceBrowser(browser) = &mut self.mode
+            && browser.search_input.is_none()
+        {
+            let outcome = browser.cycle_score();
+            self.notice = Some(match outcome {
+                Ok(message) => Notice::info(message),
+                Err(e) => Notice::error(format!("score: {e}")),
+            });
+            return;
+        }
         let Mode::TraceBrowser(browser) = &mut self.mode else {
             return;
         };
@@ -2030,6 +2365,7 @@ impl App {
             }
             KeyCode::Char('/') => browser.search_input = Some(String::new()),
             KeyCode::Char('v') | KeyCode::Char('V') => browser.cycle_detail_view(),
+            KeyCode::Char('K') => browser.toggle_skills_pane(),
             KeyCode::Char(' ') => browser.toggle_collapsed(),
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 browser.all_projects = !browser.all_projects;
@@ -2041,11 +2377,13 @@ impl App {
                 }
             }
             KeyCode::Enter => match browser.focused {
+                BrowserPane::Sessions if browser.skills_pane => browser.filter_by_skill(),
                 BrowserPane::Sessions => browser.focused = BrowserPane::Turns,
                 BrowserPane::Turns => browser.focused = BrowserPane::Detail,
                 BrowserPane::Detail => browser.toggle_expanded(),
             },
             KeyCode::Down | KeyCode::Char('j') => match browser.focused {
+                BrowserPane::Sessions if browser.skills_pane => browser.step_skill(1),
                 BrowserPane::Sessions => {
                     if !browser.sessions.is_empty() {
                         let next = (browser.selected_session + 1).min(browser.sessions.len() - 1);
@@ -2077,6 +2415,7 @@ impl App {
                 }
             },
             KeyCode::Up | KeyCode::Char('k') => match browser.focused {
+                BrowserPane::Sessions if browser.skills_pane => browser.step_skill(-1),
                 BrowserPane::Sessions => {
                     if browser.selected_session > 0 {
                         browser.selected_session -= 1;
@@ -2362,6 +2701,7 @@ impl App {
                 };
                 trace.mark_exited(code);
             }
+            self.record_experiment_link(i);
             // if we were attached to it, drop back to Control
             if self.attached() == Some(i) {
                 self.mode = Mode::Control;
@@ -2388,6 +2728,37 @@ impl App {
         // child, so calling it again here is harmless.
         for s in &mut self.sessions {
             s.kill();
+        }
+        for i in 0..self.sessions.len() {
+            self.record_experiment_link(i);
+        }
+    }
+
+    /// Writes the experiment run for a session that named one, once it is
+    /// over (or is being killed with the app): the launch row is in the
+    /// store by then, and the exit code is as known as it will get.
+    fn record_experiment_link(&mut self, i: usize) {
+        let Some(link) = self.experiment_links.remove(&self.sessions[i].id) else {
+            return;
+        };
+        let (Some(rt), Some(trace)) = (&self.tracing, &self.sessions[i].trace) else {
+            return;
+        };
+        let code = match self.sessions[i].status(Instant::now()) {
+            Status::Exited(code) => code,
+            _ => None,
+        };
+        if let Err(e) = crate::tracing::experiments::link_launch(
+            rt.db_path(),
+            &trace.launch_id,
+            &link,
+            &self.sessions[i].dir,
+            code,
+        ) {
+            self.notice = Some(Notice::error(format!(
+                "experiment {}: {e}",
+                link.experiment
+            )));
         }
     }
 }
@@ -2806,6 +3177,9 @@ mod dialog_tests {
                 DialogField::Approvals,
                 DialogField::Resume,
                 DialogField::OneShot,
+                // the budget guard: Claude's PreToolUse hook can refuse a call
+                DialogField::MaxCost,
+                DialogField::MaxTurns,
             ]
         );
         // the profile's own defaults pre-fill the fields
@@ -2819,13 +3193,30 @@ mod dialog_tests {
             DialogField::Approvals,
             DialogField::Resume,
             DialogField::OneShot,
+            DialogField::MaxCost,
+            DialogField::MaxTurns,
             DialogField::Profile,
         ] {
             d.handle_key(&key(KeyCode::Tab), &ps);
             assert_eq!(d.field, expected);
         }
         d.handle_key(&key(KeyCode::BackTab), &ps);
-        assert_eq!(d.field, DialogField::OneShot);
+        assert_eq!(d.field, DialogField::MaxTurns);
+        // the guard fields go with tracing: off, and they are gone
+        d.tracing_enabled = false;
+        assert!(!d.fields().contains(&DialogField::MaxCost));
+        d.tracing_enabled = true;
+        // typed limits parse, or say why not
+        d.max_cost = "2.5".into();
+        d.max_turns = "40".into();
+        assert_eq!(d.budget(), Ok((Some(2.5), Some(40))));
+        d.max_turns = "lots".into();
+        assert!(d.budget().unwrap_err().contains("max turns"));
+        d.max_turns.clear();
+        d.max_cost = "-1".into();
+        assert!(d.budget().unwrap_err().contains("max cost"));
+        d.max_cost = "  ".into();
+        assert_eq!(d.budget(), Ok((None, None)));
 
         // switching profile re-reads its defaults
         d.handle_key(&key(KeyCode::Tab), &ps);
@@ -2841,6 +3232,48 @@ mod dialog_tests {
         assert_eq!(d.fields().len(), 5);
         d.handle_key(&key(KeyCode::Tab), &ps);
         assert_eq!(d.field, DialogField::Dir, "tab skips what is not shown");
+    }
+
+    #[test]
+    fn experiment_fields_appear_only_with_a_store_and_link_the_launch() {
+        let ps = harness_profiles();
+        // no store: the fields are not offered and Tab never lands on them
+        let mut d = DialogState::new(&ps);
+        assert!(!d.fields().contains(&DialogField::Experiment));
+        d.experiment = "x".into();
+        assert_eq!(d.experiment_link(), None, "no store, no link");
+
+        let mut d = DialogState::new(&ps).with_experiments(true);
+        let fields = d.fields();
+        assert_eq!(
+            &fields[fields.len() - 2..],
+            &[DialogField::Experiment, DialogField::Variant]
+        );
+        assert_eq!(d.experiment_link(), None, "blank experiment = not linked");
+        d.field = DialogField::Experiment;
+        for c in "touch file".chars() {
+            d.handle_key(&key(KeyCode::Char(c)), &ps);
+        }
+        d.handle_key(&key(KeyCode::Backspace), &ps);
+        assert_eq!(d.experiment, "touch fil");
+        let link = d.experiment_link().unwrap();
+        assert_eq!(link.experiment, "touch fil");
+        assert_eq!(link.variant, "interactive", "blank variant gets a label");
+        assert_eq!(link.prompt, "", "no one-shot: a conversation");
+        d.field = DialogField::Variant;
+        for c in "b".chars() {
+            d.handle_key(&key(KeyCode::Char(c)), &ps);
+        }
+        d.one_shot = " fix it ".into();
+        let link = d.experiment_link().unwrap();
+        assert_eq!(
+            (link.variant.as_str(), link.prompt.as_str()),
+            ("b", "fix it")
+        );
+        // tracing off for this launch: nothing to record into
+        d.tracing_enabled = false;
+        assert!(!d.fields().contains(&DialogField::Variant));
+        assert_eq!(d.experiment_link(), None);
     }
 
     #[test]
@@ -3142,6 +3575,9 @@ mod history_tests {
         b.cycle_detail_view();
         assert_eq!(b.detail_view, DetailView::Timeline);
         assert_eq!(b.visible_rows().len(), 5, "the timeline hides nothing");
+        b.cycle_detail_view();
+        assert_eq!(b.detail_view, DetailView::Loop);
+        assert_eq!(b.visible_rows().len(), 5, "nor does the loop view");
         b.cycle_detail_view();
         assert_eq!(b.detail_view, DetailView::List);
     }

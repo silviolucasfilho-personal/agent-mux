@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
         let args: Vec<String> = std::env::args().collect();
         match args.get(1).map(String::as_str) {
             Some("trace") => return agent_mux::tracing::cli::run(&args[2..]),
+            Some("run") => return agent_mux::tracing::experiments::run_cli(&args[2..]).await,
             Some("langfuse") => {
                 eprintln!(
                     "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\

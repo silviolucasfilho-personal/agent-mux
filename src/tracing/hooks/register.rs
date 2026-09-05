@@ -12,6 +12,9 @@ pub struct Registration {
     pub exe: PathBuf,
     pub home: PathBuf,
     pub content_mode: ContentMode,
+    /// A budget guard is set: `PreToolUse` waits for the hook's answer
+    /// (`--guard`) instead of running async.
+    pub guard: bool,
 }
 
 /// The running binary, for hook commands. `None` when the OS cannot say.
@@ -38,16 +41,26 @@ pub const CLAUDE_EVENTS: &[(&str, bool, bool)] = &[
     ("SessionEnd", false, false),
 ];
 
-fn handler(reg: &Registration, is_async: bool) -> Value {
+fn handler(reg: &Registration, event: &str, is_async: bool) -> Value {
+    let guarded = reg.guard && event == "PreToolUse";
+    let is_async = is_async && !guarded;
+    let mut args = vec![
+        "trace".to_string(),
+        "hook".to_string(),
+        "claude".to_string(),
+        "--home".to_string(),
+        reg.home.to_string_lossy().into_owned(),
+        "--content-mode".to_string(),
+        reg.content_mode.as_str().to_string(),
+    ];
+    if guarded {
+        args.push("--guard".to_string());
+    }
     let mut h = json!({
         "type": "command",
         "command": reg.exe.to_string_lossy(),
-        "args": [
-            "trace", "hook", "claude",
-            "--home", reg.home.to_string_lossy(),
-            "--content-mode", reg.content_mode.as_str(),
-        ],
-        "timeout": if is_async { 5 } else { 1 },
+        "args": args,
+        "timeout": if is_async { 5 } else if guarded { 2 } else { 1 },
     });
     if is_async {
         h["async"] = Value::Bool(true);
@@ -63,7 +76,10 @@ pub fn claude_hooks(reg: &Registration) -> Map<String, Value> {
         if *matcher {
             group.insert("matcher".into(), Value::from(""));
         }
-        group.insert("hooks".into(), Value::Array(vec![handler(reg, *is_async)]));
+        group.insert(
+            "hooks".into(),
+            Value::Array(vec![handler(reg, event, *is_async)]),
+        );
         hooks.insert(event.to_string(), Value::Array(vec![Value::Object(group)]));
     }
     hooks
@@ -178,6 +194,7 @@ mod tests {
             exe: PathBuf::from("/opt/agent-mux"),
             home: PathBuf::from("/home/me"),
             content_mode: ContentMode::Full,
+            guard: false,
         }
     }
 
@@ -268,6 +285,7 @@ mod tests {
             exe: PathBuf::from(r"C:\Program Files\agent-mux.exe"),
             home: PathBuf::from(r"C:\Users\me"),
             content_mode: ContentMode::Metadata,
+            guard: false,
         };
         let value = codex_notify_override(&windows, "l", None);
         let doc: toml::Value = toml::from_str(&value).unwrap();
@@ -291,6 +309,38 @@ mod tests {
         assert_eq!(
             codex_user_notify(dir.path()),
             Some(vec!["python3".to_string(), "/x/notify.py".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_guarded_registration_makes_pre_tool_use_wait_for_the_answer() {
+        let mut guarded = reg();
+        guarded.guard = true;
+        let text = claude_settings_json(&guarded, &[]);
+        let v: Value = serde_json::from_str(&text).unwrap();
+        let pre = &v["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert!(pre.get("async").is_none(), "must wait: {pre}");
+        assert_eq!(pre["timeout"], 2);
+        assert!(
+            pre["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == "--guard"),
+            "{pre}"
+        );
+        // every other event is still async, and an unguarded PreToolUse too
+        let post = &v["hooks"]["PostToolUse"][0]["hooks"][0];
+        assert_eq!(post["async"], true);
+        let plain: Value = serde_json::from_str(&claude_settings_json(&reg(), &[])).unwrap();
+        let pre = &plain["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert_eq!(pre["async"], true);
+        assert!(
+            !pre["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == "--guard")
         );
     }
 }

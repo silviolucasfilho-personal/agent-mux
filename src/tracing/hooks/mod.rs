@@ -9,6 +9,7 @@
 //! are not stored.
 
 pub mod feed;
+pub mod guard;
 pub mod install;
 pub mod register;
 

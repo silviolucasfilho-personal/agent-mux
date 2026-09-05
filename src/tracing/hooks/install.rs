@@ -13,13 +13,14 @@ const AGY_MARK: &str = "trace hook agy";
 pub const PLUGIN_NAME: &str = "agent-mux";
 
 /// Codex events registered by the installer. `Interrupt` and `SessionEnd`
-/// run synchronously inside their one-second default budget; the rest are
-/// async so Codex never waits.
+/// run synchronously inside their one-second default budget, and so does
+/// `PreToolUse`, which carries the budget guard (`--guard`) and must be
+/// able to refuse a call; the rest are async so Codex never waits.
 pub const CODEX_EVENTS: &[(&str, bool, bool)] = &[
     // (event, matcher group, async)
     ("SessionStart", false, true),
     ("UserPromptSubmit", false, true),
-    ("PreToolUse", true, true),
+    ("PreToolUse", true, false),
     ("PostToolUse", true, true),
     ("SubagentStart", false, true),
     ("SubagentStop", false, true),
@@ -95,6 +96,7 @@ fn command_line(
     home: &Path,
     source: &str,
     event: Option<&str>,
+    extra: &[&str],
     quote: fn(&str) -> String,
 ) -> String {
     let mut parts = vec![
@@ -109,6 +111,7 @@ fn command_line(
     }
     parts.push("--home".into());
     parts.push(quote(&home.to_string_lossy()));
+    parts.extend(extra.iter().map(|e| e.to_string()));
     parts.join(" ")
 }
 
@@ -164,11 +167,16 @@ fn write_json(path: &Path, value: &Value) -> Result<(), String> {
 
 // ---------------------------------------------------------------- codex
 
-pub fn codex_handler(exe: &Path, home: &Path, is_async: bool) -> Value {
+pub fn codex_handler(exe: &Path, home: &Path, event: &str, is_async: bool) -> Value {
+    let extra: &[&str] = if event == "PreToolUse" {
+        &["--guard"]
+    } else {
+        &[]
+    };
     let mut h = json!({
         "type": "command",
-        "command": command_line(exe, home, "codex", None, sh_quote),
-        "commandWindows": command_line(exe, home, "codex", None, cmd_quote),
+        "command": command_line(exe, home, "codex", None, extra, sh_quote),
+        "commandWindows": command_line(exe, home, "codex", None, extra, cmd_quote),
         "timeout": if is_async { 5 } else { 1 },
         "statusMessage": "agent-mux trace",
     });
@@ -223,7 +231,7 @@ pub fn codex_merge(existing: Option<Value>, exe: &Path, home: &Path) -> Value {
         }
         group.insert(
             "hooks".into(),
-            Value::Array(vec![codex_handler(exe, home, *is_async)]),
+            Value::Array(vec![codex_handler(exe, home, event, *is_async)]),
         );
         groups.push(Value::Object(group));
         hooks.insert(event.to_string(), Value::Array(groups));
@@ -370,7 +378,7 @@ pub fn codex_status(home: &Path, current_exe: Option<&Path>) -> Status {
 fn agy_handler(exe: &Path, home: &Path, event: &str) -> Value {
     json!({
         "type": "command",
-        "command": command_line(exe, home, "agy", Some(event), sh_quote),
+        "command": command_line(exe, home, "agy", Some(event), &[], sh_quote),
         "timeout": 5,
     })
 }
@@ -526,10 +534,17 @@ mod tests {
             assert_eq!(ours.len(), 1, "{event}: exactly one of ours");
             assert_eq!(ours[0].get("matcher").is_some(), *matcher, "{event}");
             let h = &ours[0]["hooks"][0];
+            // PreToolUse carries the budget guard and waits for the answer
+            let guard = if *event == "PreToolUse" {
+                " --guard"
+            } else {
+                ""
+            };
             assert_eq!(
                 h["command"],
                 "'/opt/agent-mux' trace hook codex --home ".to_string()
                     + &sh_quote(&home.to_string_lossy())
+                    + guard
             );
             assert!(
                 h["commandWindows"]
@@ -636,7 +651,7 @@ mod tests {
     #[test]
     fn quoting_and_exe_extraction_round_trip() {
         let odd = Path::new("/opt/my tools/it's/agent-mux");
-        let line = command_line(odd, Path::new("/home/me"), "codex", None, sh_quote);
+        let line = command_line(odd, Path::new("/home/me"), "codex", None, &[], sh_quote);
         assert_eq!(command_exe(&line).as_deref(), Some(odd));
         assert!(
             line.starts_with(
@@ -648,6 +663,7 @@ mod tests {
             Path::new(r"C:\Users\me"),
             "codex",
             None,
+            &[],
             cmd_quote,
         );
         assert_eq!(
