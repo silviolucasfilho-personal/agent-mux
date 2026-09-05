@@ -918,6 +918,12 @@ pub struct TraceBrowserState {
     /// Detail-pane interior height, written back by the renderer.
     pub viewport_rows: std::cell::Cell<usize>,
     last_refresh: Instant,
+    /// `K`: the left column lists skills instead of sessions.
+    pub skills_pane: bool,
+    pub skills: Vec<crate::tracing::inventory::SkillReport>,
+    pub selected_skill: usize,
+    cwd: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for TraceBrowserState {
@@ -968,9 +974,100 @@ impl TraceBrowserState {
             search_query: None,
             viewport_rows: std::cell::Cell::new(30),
             last_refresh: Instant::now(),
+            skills_pane: false,
+            skills: Vec::new(),
+            selected_skill: 0,
+            cwd: current_dir.map(std::path::Path::to_path_buf),
+            home: std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(std::path::PathBuf::from),
         };
         state.reload_sessions();
         state
+    }
+    /// Where the Skills pane reads the user's home definitions from.
+    pub fn with_home(mut self, home: Option<std::path::PathBuf>) -> Self {
+        if home.is_some() {
+            self.home = home;
+        }
+        self
+    }
+
+    /// `K`: the left column shows the skill inventory joined to the store
+    /// instead of sessions, and back.
+    pub fn toggle_skills_pane(&mut self) {
+        self.skills_pane = !self.skills_pane;
+        if self.skills_pane {
+            self.load_skills();
+            self.focused = BrowserPane::Sessions;
+        }
+    }
+
+    pub fn load_skills(&mut self) {
+        use crate::tracing::inventory::{inventory_all, skill_reports};
+        let cwd = self
+            .cwd
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let home = self
+            .home
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let defs = inventory_all(&cwd, &home);
+        let (stats, prompts) = match &self.conn {
+            Some(conn) => (
+                crate::tracing::store::query::skill_stats(conn).unwrap_or_default(),
+                crate::tracing::store::query::prompt_rows(conn, 5000).unwrap_or_default(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        self.skills = skill_reports(&defs, &stats, &prompts);
+        self.selected_skill = self.selected_skill.min(self.skills.len().saturating_sub(1));
+    }
+
+    pub fn step_skill(&mut self, delta: isize) {
+        if self.skills.is_empty() {
+            return;
+        }
+        let max = self.skills.len() as isize - 1;
+        self.selected_skill = (self.selected_skill as isize + delta).clamp(0, max) as usize;
+    }
+
+    /// `Enter` on a skill: the Turns pane shows the turns that loaded it.
+    pub fn filter_by_skill(&mut self) {
+        let Some(report) = self.skills.get(self.selected_skill) else {
+            return;
+        };
+        let Some(conn) = &self.conn else {
+            return;
+        };
+        let names = report
+            .def
+            .as_ref()
+            .map(|d| d.store_names())
+            .unwrap_or_else(|| vec![report.name.clone()]);
+        let label = report.name.clone();
+        let mut turns = Vec::new();
+        for name in names {
+            if let Ok(found) = crate::tracing::store::query::traces_with_skill(conn, &name, 200) {
+                for t in found {
+                    if !turns
+                        .iter()
+                        .any(|u: &crate::tracing::store::query::TraceStat| u.id == t.id)
+                    {
+                        turns.push(t);
+                    }
+                }
+            }
+        }
+        turns.sort_by_key(|t| std::cmp::Reverse(t.start_ns));
+        self.turns = turns;
+        self.selected_turn = 0;
+        self.search_query = Some(format!("skill: {label}"));
+        self.focused = BrowserPane::Turns;
+        self.error = None;
+        self.load_observations();
     }
 
     fn filter(&self) -> crate::tracing::store::query::SessionFilter {
@@ -1950,10 +2047,11 @@ impl App {
                     .get(self.selected)
                     .map(|s| s.dir.clone())
                     .or_else(|| std::env::current_dir().ok());
-                self.mode = Mode::TraceBrowser(Box::new(TraceBrowserState::new(
-                    self.trace_db_path.as_deref(),
-                    cur_dir.as_deref(),
-                )));
+                let home = self.tracing.as_ref().map(|rt| rt.home().to_path_buf());
+                self.mode = Mode::TraceBrowser(Box::new(
+                    TraceBrowserState::new(self.trace_db_path.as_deref(), cur_dir.as_deref())
+                        .with_home(home),
+                ));
             }
             Action::BrowserKey => self.handle_browser_key(key),
             Action::RespawnSelected => {
@@ -2109,6 +2207,7 @@ impl App {
             }
             KeyCode::Char('/') => browser.search_input = Some(String::new()),
             KeyCode::Char('v') | KeyCode::Char('V') => browser.cycle_detail_view(),
+            KeyCode::Char('K') => browser.toggle_skills_pane(),
             KeyCode::Char(' ') => browser.toggle_collapsed(),
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 browser.all_projects = !browser.all_projects;
@@ -2120,11 +2219,13 @@ impl App {
                 }
             }
             KeyCode::Enter => match browser.focused {
+                BrowserPane::Sessions if browser.skills_pane => browser.filter_by_skill(),
                 BrowserPane::Sessions => browser.focused = BrowserPane::Turns,
                 BrowserPane::Turns => browser.focused = BrowserPane::Detail,
                 BrowserPane::Detail => browser.toggle_expanded(),
             },
             KeyCode::Down | KeyCode::Char('j') => match browser.focused {
+                BrowserPane::Sessions if browser.skills_pane => browser.step_skill(1),
                 BrowserPane::Sessions => {
                     if !browser.sessions.is_empty() {
                         let next = (browser.selected_session + 1).min(browser.sessions.len() - 1);
@@ -2156,6 +2257,7 @@ impl App {
                 }
             },
             KeyCode::Up | KeyCode::Char('k') => match browser.focused {
+                BrowserPane::Sessions if browser.skills_pane => browser.step_skill(-1),
                 BrowserPane::Sessions => {
                     if browser.selected_session > 0 {
                         browser.selected_session -= 1;

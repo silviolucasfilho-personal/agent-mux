@@ -17,6 +17,7 @@ pub mod correlate;
 pub mod experiments;
 pub mod hooks;
 pub mod ids;
+pub mod inventory;
 pub mod langfuse;
 pub mod loops;
 pub mod map;
@@ -284,6 +285,10 @@ impl TraceRuntime {
 
     pub fn db_path(&self) -> &Path {
         &self.settings.db_path
+    }
+
+    pub fn home(&self) -> &Path {
+        &self.settings.home
     }
 
     /// True when Langfuse credentials resolved and the exporter is running.

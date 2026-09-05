@@ -35,6 +35,8 @@ commands:
   sql <select ...> [--json]    read-only query
   loops [session] [--json]     per-turn loop metrics: calls, retries, where the time went, context
   skills [--json]              what each skill did across the store (loaded vs. attributed)
+  skills [--json] [--harness H] skills on disk joined to what ran: loaded, unused, missed triggers
+  skills lint [name]           what stops a skill, agent or command working: frontmatter, tools, model
   agents [--json]              what each subagent type did: invocations, latency, cost, failures
   compare <a> <b>              two turns or sessions side by side: loop metrics and the tool path
   experiments [name]           the experiment registry, or one experiment's variants
@@ -390,46 +392,204 @@ fn loops(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `trace skills`: what each skill did across the store.
+/// The store's provider key for a harness.
+fn provider_key(h: crate::harness::Harness) -> &'static str {
+    match h {
+        crate::harness::Harness::Claude => "claude",
+        crate::harness::Harness::Codex => "codex",
+        crate::harness::Harness::Antigravity => "antigravity",
+    }
+}
+
+/// `--harness claude|codex|agy` narrows the inventory.
+fn harness_filter(args: &Args) -> anyhow::Result<Option<crate::harness::Harness>> {
+    match args.value("harness") {
+        None => Ok(None),
+        Some(h) => crate::harness::Harness::detect(h)
+            .or_else(|| (h == "antigravity").then_some(crate::harness::Harness::Antigravity))
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("unknown harness {h:?}: claude, codex or agy")),
+    }
+}
+
+fn definitions(args: &Args, home: &Path) -> anyhow::Result<Vec<super::inventory::Definition>> {
+    let cwd = std::env::current_dir()?;
+    Ok(match harness_filter(args)? {
+        Some(h) => super::inventory::inventory(h, &cwd, home),
+        None => super::inventory::inventory_all(&cwd, home),
+    })
+}
+
+/// `trace skills [--json] [--harness H]`: the inventory joined to what
+/// the store says ran; `trace skills lint [name]` checks definitions.
 fn skills(args: &Args) -> anyhow::Result<()> {
+    use super::inventory::skill_reports;
+    if args.positional.first().map(String::as_str) == Some("lint") {
+        return skills_lint(args);
+    }
     let (_, resolved) = resolved()?;
-    let conn = open_ro(&resolved)?;
-    let stats = query::skill_stats(&conn)?;
+    let defs = definitions(args, &resolved.home)?;
+    // the store is optional here: an inventory is worth listing alone
+    let (stats, prompts) = match open_ro(&resolved) {
+        Ok(conn) => (query::skill_stats(&conn)?, query::prompt_rows(&conn, 5000)?),
+        Err(_) => (Vec::new(), Vec::new()),
+    };
+    let reports = skill_reports(&defs, &stats, &prompts);
     if args.has("json") {
-        let v: Vec<serde_json::Value> = stats
+        let v: Vec<serde_json::Value> = reports
             .iter()
-            .map(|s| {
+            .map(|r| {
                 serde_json::json!({
-                    "skill": s.skill, "turns_loaded": s.turns_loaded, "turns_unused": s.turns_unused,
-                    "generations": s.generations, "tools": s.tools, "tokens": s.tokens,
-                    "cost_usd": s.cost, "first_ns": s.first_ns, "last_ns": s.last_ns,
+                    "skill": r.name,
+                    "harness": r.def.as_ref().map(|d| d.harness.as_str()),
+                    "scope": r.def.as_ref().map(|d| d.scope.label()),
+                    "path": r.def.as_ref().map(|d| d.path.display().to_string()),
+                    "triggers": r.def.as_ref().map(|d| d.triggers.clone()).unwrap_or_default(),
+                    "turns_loaded": r.stat.as_ref().map(|s| s.turns_loaded).unwrap_or(0),
+                    "turns_unused": r.stat.as_ref().map(|s| s.turns_unused).unwrap_or(0),
+                    "missed": r.missed,
+                    "generations": r.stat.as_ref().map(|s| s.generations).unwrap_or(0),
+                    "tools": r.stat.as_ref().map(|s| s.tools).unwrap_or(0),
+                    "tokens": r.stat.as_ref().and_then(|s| s.tokens),
+                    "cost_usd": r.stat.as_ref().and_then(|s| s.cost),
+                    "last_ns": r.stat.as_ref().map(|s| s.last_ns),
+                    "note": r.note(),
                 })
             })
             .collect();
         println!("{}", serde_json::Value::Array(v));
         return Ok(());
     }
-    if stats.is_empty() {
-        println!("no skills recorded — skill loads are attributed from Claude transcripts");
+    if reports.is_empty() {
+        println!(
+            "no skills on disk under {} or {}, and none recorded in the store",
+            std::env::current_dir()?.display(),
+            resolved.home.display()
+        );
+        return Ok(());
+    }
+    for line in skills_lines(&reports) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The `trace skills` table, one row per skill on disk or in the store.
+pub fn skills_lines(reports: &[super::inventory::SkillReport]) -> Vec<String> {
+    let mut out = vec![format!(
+        "{:<28} {:<7} {:<16} {:>6} {:>6} {:>6} {:>9}  {:<16} note",
+        "skill", "harness", "scope", "loaded", "unused", "missed", "cost", "last used"
+    )];
+    for r in reports {
+        let (harness, scope) = match &r.def {
+            Some(d) => (d.harness.as_str().to_string(), d.scope.label()),
+            None => ("-".into(), "-".into()),
+        };
+        let (loaded, unused, cost, last) = match &r.stat {
+            Some(s) => (
+                s.turns_loaded.to_string(),
+                s.turns_unused.to_string(),
+                fmt_cost(s.cost),
+                fmt_time(s.last_ns),
+            ),
+            None => ("0".into(), "-".into(), "-".into(), "-".into()),
+        };
+        out.push(format!(
+            "{:<28} {:<7} {:<16} {:>6} {:>6} {:>6} {:>9}  {:<16} {}",
+            truncate_display(&r.name, 28),
+            harness,
+            truncate_display(&scope, 16),
+            loaded,
+            unused,
+            if r.def.as_ref().is_some_and(|d| d.triggers.is_empty()) {
+                "-".to_string()
+            } else {
+                r.missed.to_string()
+            },
+            cost,
+            truncate_display(&last, 16),
+            r.note()
+        ));
+    }
+    out
+}
+
+/// `trace skills lint [name] [--json] [--harness H]`.
+fn skills_lint(args: &Args) -> anyhow::Result<()> {
+    use super::inventory::{Level, LintContext, known_tools, lint};
+    let (_, resolved) = resolved()?;
+    let mut defs = definitions(args, &resolved.home)?;
+    if let Some(name) = args.positional.get(1) {
+        defs.retain(|d| d.name == *name);
+        if defs.is_empty() {
+            anyhow::bail!("no skill, agent or command named {name:?} on disk");
+        }
+    }
+    let conn = open_ro(&resolved).ok();
+    let prices = crate::tracing::price_table(&resolved);
+    let mut known: std::collections::HashMap<
+        crate::harness::Harness,
+        std::collections::HashSet<String>,
+    > = std::collections::HashMap::new();
+    for h in [
+        crate::harness::Harness::Claude,
+        crate::harness::Harness::Codex,
+        crate::harness::Harness::Antigravity,
+    ] {
+        let seen = conn
+            .as_ref()
+            .and_then(|c| query::tool_names(c, provider_key(h)).ok())
+            .unwrap_or_default();
+        known.insert(h, known_tools(h, seen));
+    }
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    let mut json = Vec::new();
+    for d in &defs {
+        let ctx = LintContext {
+            known_tools: &known[&d.harness],
+            prices: Some(&prices),
+        };
+        let findings = lint(d, &ctx);
+        errors += findings.iter().filter(|f| f.level == Level::Error).count();
+        warnings += findings.iter().filter(|f| f.level == Level::Warn).count();
+        if args.has("json") {
+            json.push(serde_json::json!({
+                "name": d.name, "kind": d.kind.as_str(), "harness": d.harness.as_str(),
+                "scope": d.scope.label(), "path": d.path.display().to_string(),
+                "findings": findings.iter().map(|f| serde_json::json!({
+                    "level": f.level.as_str(), "rule": f.rule, "message": f.message,
+                })).collect::<Vec<_>>(),
+            }));
+            continue;
+        }
+        let mark = if findings.iter().any(|f| f.level == Level::Error) {
+            "✗"
+        } else if findings.is_empty() {
+            "✓"
+        } else {
+            "!"
+        };
+        println!(
+            "{mark} {} {} ({}, {})  {}",
+            d.kind.as_str(),
+            d.name,
+            d.harness.as_str(),
+            d.scope.label(),
+            d.path.display()
+        );
+        for f in &findings {
+            println!("    {:<5} {:<20} {}", f.level.as_str(), f.rule, f.message);
+        }
+    }
+    if args.has("json") {
+        println!("{}", serde_json::Value::Array(json));
         return Ok(());
     }
     println!(
-        "{:<32} {:>6} {:>6} {:>5} {:>5} {:>8} {:>9}  last used",
-        "skill", "loaded", "unused", "gens", "tools", "tokens", "cost"
+        "\n{} definition(s): {errors} error(s), {warnings} warning(s)",
+        defs.len()
     );
-    for s in &stats {
-        println!(
-            "{:<32} {:>6} {:>6} {:>5} {:>5} {:>8} {:>9}  {}",
-            truncate_display(&s.skill, 32),
-            s.turns_loaded,
-            s.turns_unused,
-            s.generations,
-            s.tools,
-            fmt_tokens(s.tokens),
-            fmt_cost(s.cost),
-            fmt_time(s.last_ns)
-        );
-    }
     Ok(())
 }
 
@@ -472,6 +632,35 @@ fn agents(args: &Args) -> anyhow::Result<()> {
             fmt_cost(Some(a.cost).filter(|c| *c > 0.0)),
             a.failures
         );
+    }
+    // the agents on disk, with what the store attributes to each by name
+    let defs: Vec<super::inventory::Definition> = definitions(args, &resolved.home)?
+        .into_iter()
+        .filter(|d| d.kind == super::inventory::Kind::Agent)
+        .collect();
+    if !defs.is_empty() {
+        println!(
+            "\n{:<28} {:<7} {:<16} {:<18} {:>5} {:>6}  path",
+            "defined agent", "harness", "scope", "model", "tools", "runs"
+        );
+        for d in &defs {
+            let names = d.store_names();
+            let runs = stats
+                .iter()
+                .filter(|s| names.contains(&s.agent_type))
+                .map(|s| s.invocations)
+                .sum::<i64>();
+            println!(
+                "{:<28} {:<7} {:<16} {:<18} {:>5} {:>6}  {}",
+                truncate_display(&d.name, 28),
+                d.harness.as_str(),
+                truncate_display(&d.scope.label(), 16),
+                truncate_display(d.model.as_deref().unwrap_or("-"), 18),
+                d.tools.len(),
+                runs,
+                d.path.display()
+            );
+        }
     }
     Ok(())
 }

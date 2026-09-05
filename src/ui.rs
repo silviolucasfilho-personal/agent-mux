@@ -380,6 +380,10 @@ fn draw_help(f: &mut Frame) {
         row("Enter", "drill in / expand an observation"),
         row("/", "full-text search (full mode content)"),
         row("a", "toggle this project / all projects"),
+        row(
+            "K",
+            "skills pane: inventory joined to the store; Enter filters turns",
+        ),
         row("r", "resume the selected session"),
         Line::raw(""),
         Line::styled("  [Esc] or [?] to close", dim),
@@ -909,6 +913,74 @@ fn provider_badge(provider: &str) -> Span<'static> {
     }
 }
 
+/// The left column as the skill inventory: each row a skill on disk or
+/// in the store, with what the store attributes to it.
+fn draw_skills_pane(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(browser.focused == BrowserPane::Sessions))
+        .title(format!(" Skills ({}) [K: sessions] ", browser.skills.len()));
+    if browser.skills.is_empty() {
+        let p = Paragraph::new(
+            "\n  No skills on disk for this project\n  or your home, and none recorded.\n\n  `agent-mux trace skills` lists the roots.",
+        )
+        .style(Style::default().fg(Color::DarkGray))
+        .block(block);
+        f.render_widget(p, area);
+        return;
+    }
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = sidebar_window(browser.selected_skill, browser.skills.len(), visible);
+    let end = (start + visible.max(1)).min(browser.skills.len());
+    let items: Vec<ListItem> = browser.skills[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, r)| {
+            let i = start + offset;
+            let is_sel = i == browser.selected_skill;
+            let (loaded, unused, cost) = match &r.stat {
+                Some(s) => (s.turns_loaded, s.turns_unused, fmt_cost(s.cost)),
+                None => (0, 0, "-".to_string()),
+            };
+            let tag = match r.note() {
+                "" => r
+                    .def
+                    .as_ref()
+                    .map(|d| format!("{} {}", d.harness.as_str(), d.scope.label()))
+                    .unwrap_or_default(),
+                note => note.to_string(),
+            };
+            let line = Line::from(vec![
+                Span::raw(if is_sel { "> " } else { "  " }),
+                Span::raw(truncate_chars(&r.name, 22)),
+                Span::styled(
+                    format!(" {loaded}↑{unused}↓"),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    if r.missed > 0 {
+                        format!(" {}?", r.missed)
+                    } else {
+                        String::new()
+                    },
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::styled(format!(" {cost} "), Style::default().fg(Color::DarkGray)),
+                Span::styled(tag, Style::default().fg(Color::DarkGray)),
+            ]);
+            let item = ListItem::new(line);
+            if is_sel && browser.focused == BrowserPane::Sessions {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else if is_sel {
+                item.style(Style::default().fg(Color::Yellow))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
 fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
     let width = (f.area().width * 96 / 100).clamp(60, 200);
     let height = (f.area().height * 92 / 100).clamp(18, 60);
@@ -935,7 +1007,9 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             " Sessions ({}) [a: {scope}] ",
             browser.sessions.len()
         ));
-    if let Some(err) = &browser.error {
+    if browser.skills_pane {
+        draw_skills_pane(f, browser, left);
+    } else if let Some(err) = &browser.error {
         let p = Paragraph::new(vec![
             Line::raw(""),
             Line::styled(format!("  {err}"), Style::default().fg(Color::Red)),
@@ -1215,7 +1289,7 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             Style::default().fg(Color::Black).bg(Color::Yellow),
         ),
         None => Line::styled(
-            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [a] all  [r] resume  [Esc] close",
+            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [K] skills  [a] all  [r] resume  [Esc] close",
             Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
     };

@@ -526,6 +526,62 @@ mod nest_tests {
     }
 }
 
+/// A turn's prompt with the skills it loaded, for trigger matching.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptRow {
+    pub trace_id: String,
+    pub input: String,
+    pub skills: Vec<String>,
+}
+
+/// The newest `limit` prompts that were stored (metadata mode keeps none).
+pub fn prompt_rows(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<PromptRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, input, skills FROM traces
+         WHERE input IS NOT NULL AND input != ''
+         ORDER BY start_ns DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |r| {
+        let skills: Option<String> = r.get(2)?;
+        Ok(PromptRow {
+            trace_id: r.get(0)?,
+            input: r.get(1)?,
+            skills: skills
+                .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                .unwrap_or_default(),
+        })
+    })?;
+    rows.collect()
+}
+
+/// Turns that loaded a skill, newest first.
+pub fn traces_with_skill(
+    conn: &Connection,
+    skill: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<TraceStat>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM trace_stats
+         WHERE EXISTS (SELECT 1 FROM json_each(trace_stats.skills) j WHERE j.value = ?1)
+         ORDER BY start_ns DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![skill, limit as i64], trace_from_row)?;
+    rows.collect()
+}
+
+/// Every tool name the store has seen a provider call.
+pub fn tool_names(conn: &Connection, provider: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT o.name FROM observations o
+         JOIN traces t ON t.id = o.trace_id
+         JOIN sessions s ON s.key = t.session_key
+         WHERE s.provider = ?1 AND o.type = 'tool' AND o.name NOT LIKE 'skill: %'
+         ORDER BY o.name",
+    )?;
+    let rows = stmt.query_map(params![provider], |r| r.get(0))?;
+    rows.collect()
+}
+
 /// One row of the `skill_stats` view: what a skill did across the store.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillStat {

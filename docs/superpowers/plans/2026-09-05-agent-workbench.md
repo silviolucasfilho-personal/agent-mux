@@ -50,13 +50,13 @@ Spec: `../specs/2026-09-05-agent-workbench-design.md`. Four phases, each shippab
 
 **Interfaces:** `Definition { harness, kind: Skill|Agent|Command, name, path, description, tools, model, triggers: Vec<String> }`; `inventory(harness, cwd, home) -> Vec<Definition>`; frontmatter parsing tolerant of missing fields; the root list per harness verified against the installed CLIs before it is written down.
 
-- [ ] **Step 1:** Tests: fixture trees per harness; a skill with no frontmatter still lists with its directory name; project roots shadow home roots of the same name; trigger phrases split from the description.
-- [ ] **Step 2:** Implement.
+- [x] **Step 1:** Tests: fixture trees per harness (Claude project/home/plugin via `installed_plugins.json`, Codex `AGENTS.md`/home/plugin cache with two versions, agy project/workflows/home/plugins); a skill with no frontmatter lists by directory name; project shadows home shadows plugin; trigger phrases split from the description; frontmatter shapes (scalar, `|` block, `- ` list, multi-line `[ … ]`).
+- [x] **Step 2:** Implement. Roots verified on the installed CLIs and written into the module header. Two additions to the interface: `Kind::Instructions` for a repository's `AGENTS.md` (listed, never linted — it is not a trigger), and `Scope { Project, Home, Plugin(name) }` on every definition, since a plugin skill is recorded by the store as `plugin:name` and the join has to know both spellings. Codex plugins keep several versions in the cache; the newest directory stands for the plugin.
 
 ### Task 8: Attribution join and lint (`src/tracing/inventory.rs`, `src/tracing/cli.rs`, `src/app.rs`, `src/ui.rs`)
 
-- [ ] **Step 1:** Tests: `trace skills` joins inventory to `skill_stats` and reports `never triggered` and `missed` (prompt matched a trigger phrase, skill not loaded) from a seeded store; lint flags empty description, unknown tool, unknown model, and passes a well-formed skill; the browser's Skills pane (`K`) lists definitions and `Enter` filters Turns.
-- [ ] **Step 2:** Implement.
+- [x] **Step 1:** Tests: the join over a seeded store reports `missed` (two prompts naming a trigger phrase in turns that did not load the skill), `never triggered` and `not on disk`; `traces_with_skill` and `tool_names`; lint flags no frontmatter, empty/one-word/over-long description, name mismatch, no trigger phrases, unknown tool, unknown model, and passes a well-formed skill — and stays quiet on tools when no known list exists; the browser's `K` pane lists, `j`/`k` clamp, `Enter` filters Turns to the skill, and works without a store.
+- [x] **Step 2:** Implement. The known-tool set is measured, not recalled: Claude's floor list plus every tool name the store has seen that CLI call; Codex and agy have no floor, so only what was measured counts, and with nothing measured the rule is skipped. `trace agents` gained a "defined agents" section joined to `agent_stats` by name. On this machine: 13 definitions, 0 findings; one stored prompt already matched `agent-development`'s trigger phrase without loading it.
 
 ## Phase 4 — Feedback and guards
 
