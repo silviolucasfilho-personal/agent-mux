@@ -144,6 +144,7 @@ struct OpenTool {
     event_index: u64,
 }
 
+#[derive(Clone)]
 struct PendingGen {
     text: String,
     model: Option<String>,
@@ -169,6 +170,10 @@ struct OpenTurn {
     /// Codex only: generations buffered until turn close so the late
     /// per-turn `token_count` usage can attach to the final one.
     pending_generations: Vec<PendingGen>,
+    /// The last generation emitted in this turn, by index. A model-
+    /// attributed token count that follows it belongs to *that* API call,
+    /// so the usage joins the row instead of minting a second one.
+    last_gen: Option<(usize, PendingGen)>,
     pending_turn_usage: Vec<(String, i64)>,
     pending_thinking: Vec<String>,
     seen_usage_msg_ids: std::collections::HashSet<String>,
@@ -429,6 +434,7 @@ impl TurnAssembler {
             last_assistant_text: None,
             open_tools: Vec::new(),
             pending_generations: Vec::new(),
+            last_gen: None,
             pending_turn_usage: Vec::new(),
             pending_thinking: Vec::new(),
             seen_usage_msg_ids: std::collections::HashSet::new(),
@@ -1399,6 +1405,7 @@ impl TurnAssembler {
                     } else {
                         let index = turn.gen_count;
                         turn.gen_count += 1;
+                        turn.last_gen = Some((index, generation.clone()));
                         emit_now = Some((index, generation));
                     }
                     if !text.is_empty() {
@@ -1571,7 +1578,36 @@ impl TurnAssembler {
                         // Claude tool_use-only message): mint a generation
                         // so it is priced. Codex's per-turn counts keep the
                         // buffered path.
-                        if self.settings.provider != Provider::Codex
+                        // Claude reports an API call's usage on the line
+                        // after the message it belongs to. If the last
+                        // generation is still waiting for its usage, this
+                        // is it: one call stays one row, carrying both its
+                        // text and its tokens. Minting a second row here
+                        // is what left text rows looking empty and their
+                        // twins textless.
+                        let joins_last = self.settings.provider != Provider::Codex
+                            && model.is_some()
+                            && turn
+                                .last_gen
+                                .as_ref()
+                                .is_some_and(|(_, g)| g.usage.is_empty());
+                        if joins_last {
+                            let (index, mut generation) =
+                                turn.last_gen.take().expect("checked above");
+                            generation.usage = usage;
+                            if generation.model.is_none() {
+                                generation.model = model;
+                            }
+                            if generation.thinking.is_none() && !turn.pending_thinking.is_empty() {
+                                generation.thinking = Some(turn.pending_thinking.join("\n"));
+                                turn.pending_thinking.clear();
+                            }
+                            generation.tool_calls.extend(tool_calls);
+                            // the call finished when its count arrived
+                            generation.end_nanos = generation.end_nanos.max(nanos);
+                            turn.last_gen = Some((index, generation.clone()));
+                            emit_now = Some((index, generation));
+                        } else if self.settings.provider != Provider::Codex
                             && let Some(model_name) = model
                         {
                             let start = if prev_nanos > 0 && prev_nanos <= nanos {
@@ -1598,6 +1634,7 @@ impl TurnAssembler {
                             };
                             let index = turn.gen_count;
                             turn.gen_count += 1;
+                            turn.last_gen = Some((index, generation.clone()));
                             emit_now = Some((index, generation));
                         } else {
                             accumulate_usage(&mut turn.pending_turn_usage, &usage);
@@ -3363,6 +3400,76 @@ mod tests {
             Some("/tmp/tasks/abc123.output")
         );
         assert_eq!(meta_str(agent, "summary"), Some("Audit the UI"));
+    }
+
+    /// The pairing that made half the store's generations look empty: a
+    /// text message and its own token count are one API call.
+    #[test]
+    fn a_token_count_joins_the_message_it_belongs_to() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("s".into()),
+            "deterministic",
+        );
+        let _ = asm.feed(user("go", "2026-09-04T10:00:00Z"), 0);
+        let ops = asm.feed(
+            assistant("here is the plan", "2026-09-04T10:00:05Z", vec![]),
+            0,
+        );
+        let first = observations(&ops)[0].clone();
+        assert_eq!(first.name, "assistant");
+        assert!(
+            first.usage.is_none(),
+            "the message line carries no usage yet"
+        );
+
+        // the count that follows belongs to that same call
+        let ops = asm.feed(
+            TranscriptEvent::TokenCount {
+                usage: vec![("input_tokens".into(), 12), ("output_tokens".into(), 35)],
+                msg_id: Some("msg_1".into()),
+                model: Some("claude-opus-5".into()),
+                ts: Some("2026-09-04T10:00:06Z".into()),
+            },
+            0,
+        );
+        let rows = observations(&ops);
+        assert_eq!(rows.len(), 1, "one call stays one row: {ops:?}");
+        let joined = rows[0];
+        assert_eq!(joined.id, first.id, "the same row, updated");
+        assert_eq!(joined.name, "assistant", "it keeps its text identity");
+        assert_eq!(joined.output.as_deref(), Some("here is the plan"));
+        assert_eq!(joined.usage.as_ref().unwrap().input, Some(12));
+        assert_eq!(joined.usage.as_ref().unwrap().output, Some(35));
+        assert_eq!(
+            joined.model.as_deref(),
+            Some("claude-fable-5"),
+            "the message's own model wins; the count does not override it"
+        );
+        assert_eq!(
+            joined.end_ns,
+            Some(ns("2026-09-04T10:00:06Z")),
+            "the call ended when its count arrived"
+        );
+
+        // a second count is a separate call and still gets its own row
+        let ops = asm.feed(
+            TranscriptEvent::TokenCount {
+                usage: vec![("input_tokens".into(), 900), ("output_tokens".into(), 5)],
+                msg_id: Some("msg_2".into()),
+                model: Some("claude-opus-5".into()),
+                ts: Some("2026-09-04T10:00:09Z".into()),
+            },
+            0,
+        );
+        let rows = observations(&ops);
+        assert_eq!(rows.len(), 1);
+        assert_ne!(
+            rows[0].id, first.id,
+            "a genuine tool-only call is its own row"
+        );
+        assert_eq!(rows[0].name, "assistant (tool use)");
+        assert_eq!(rows[0].usage.as_ref().unwrap().input, Some(900));
     }
 
     #[test]
