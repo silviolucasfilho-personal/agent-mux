@@ -12,6 +12,13 @@ pub struct Profile {
     /// pre-SQLite `[profiles.langfuse]` name is accepted as an alias).
     #[serde(alias = "langfuse")]
     pub tracing: Option<ProfileTracing>,
+    /// Default model for this profile's launches (`--model`). Unset
+    /// passes no flag at all, leaving the CLI its own default. The launch
+    /// dialog pre-fills from this and can override it per launch.
+    pub model: Option<String>,
+    /// Skip the CLI's approval prompts by default
+    /// (`--dangerously-skip-permissions`, or `--yolo` on Codex).
+    pub bypass_approvals: Option<bool>,
 }
 
 /// Global `[tracing]` table (alias: `[langfuse]`). All-optional so a
@@ -411,6 +418,8 @@ impl Config {
                 args: vec![],
                 default_dir: None,
                 tracing: None,
+                model: None,
+                bypass_approvals: None,
             },
             Profile {
                 name: "Codex".into(),
@@ -418,6 +427,8 @@ impl Config {
                 args: vec![],
                 default_dir: None,
                 tracing: None,
+                model: None,
+                bypass_approvals: None,
             },
             Profile {
                 name: "Antigravity".into(),
@@ -425,6 +436,8 @@ impl Config {
                 args: vec![],
                 default_dir: None,
                 tracing: None,
+                model: None,
+                bypass_approvals: None,
             },
         ]
     }
@@ -506,6 +519,29 @@ pub fn is_wsl_drive_mount(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_option_defaults_are_optional_and_per_profile() {
+        let cfg = parse(
+            r#"
+            [[profiles]]
+            name = "Claude Code"
+            command = "claude"
+            model = "claude-opus-5"
+            bypass_approvals = true
+
+            [[profiles]]
+            name = "Codex"
+            command = "codex"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.profiles[0].model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(cfg.profiles[0].bypass_approvals, Some(true));
+        // a profile that says nothing passes nothing
+        assert_eq!(cfg.profiles[1].model, None);
+        assert_eq!(cfg.profiles[1].bypass_approvals, None);
+    }
 
     #[test]
     fn parses_full_profile() {

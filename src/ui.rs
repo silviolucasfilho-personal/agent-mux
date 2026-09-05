@@ -407,7 +407,9 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 
 fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
     let width = 72.min(f.area().width.saturating_sub(4)).max(40);
-    let height = (app.profiles.len() as u16 + 20)
+    // the launch options add six rows when the profile runs a known CLI
+    let options_rows = if dialog.harness.is_some() { 6 } else { 0 };
+    let height = (app.profiles.len() as u16 + 20 + options_rows)
         .min(f.area().height.saturating_sub(2))
         .max(18);
     let area = centered(f.area(), width, height);
@@ -447,7 +449,10 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
             Style::default().fg(Color::DarkGray),
         ));
     } else {
-        let max_visible = 4;
+        // the subfolder list is the flexible part: on a short terminal it
+        // shrinks so the fields below it stay on screen
+        let fixed_rows = app.profiles.len() + 12 + if dialog.harness.is_some() { 6 } else { 0 };
+        let max_visible = usize::from(height).saturating_sub(fixed_rows).clamp(1, 4);
         let selected = dialog.dir_selected_idx.unwrap_or(0);
         let start = if selected >= max_visible {
             selected + 1 - max_visible
@@ -536,6 +541,108 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
         Span::styled(mode_desc, mode_style.fg(Color::Yellow)),
         Span::styled(" (Space to toggle)", Style::default().fg(Color::DarkGray)),
     ]));
+
+    // Launch options, only for a command we know how to pass them to
+    if let Some(harness) = dialog.harness {
+        let focused = |f: DialogField| {
+            if dialog.field == f {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            }
+        };
+        let dim = Style::default().fg(Color::DarkGray);
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!("── {} options ──", harness.as_str()),
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        let model = if dialog.model.is_empty() {
+            "(the CLI's default)".to_string()
+        } else {
+            dialog.model.clone()
+        };
+        let model_style = if dialog.model.is_empty() {
+            focused(DialogField::Model).fg(Color::DarkGray)
+        } else {
+            focused(DialogField::Model).fg(Color::Yellow)
+        };
+        lines.push(Line::from(vec![
+            Span::raw("Model:            "),
+            Span::styled(model, model_style),
+            Span::styled(" (--model, blank = unset)", dim),
+        ]));
+
+        let (approvals, approvals_color) = if dialog.bypass_approvals {
+            ("[!] bypass", Color::Red)
+        } else {
+            ("[●] normal", Color::Green)
+        };
+        lines.push(Line::from(vec![
+            Span::raw("Approvals:        "),
+            Span::styled(
+                approvals,
+                focused(DialogField::Approvals).fg(approvals_color),
+            ),
+            Span::styled(
+                if dialog.bypass_approvals {
+                    match harness {
+                        crate::harness::Harness::Codex => " (--yolo)",
+                        _ => " (--dangerously-skip-permissions)",
+                    }
+                } else {
+                    " (Space to toggle)"
+                },
+                dim,
+            ),
+        ]));
+
+        lines.push(Line::from(vec![
+            Span::raw("Resume:           "),
+            Span::styled(
+                if dialog.resume_last {
+                    "[Last session]"
+                } else {
+                    "[Off]"
+                },
+                focused(DialogField::Resume).fg(Color::Yellow),
+            ),
+            Span::styled(
+                if dialog.resume_last {
+                    match harness {
+                        crate::harness::Harness::Codex => " (resume --last)",
+                        _ => " (--continue)",
+                    }
+                } else {
+                    " (Space to toggle)"
+                },
+                dim,
+            ),
+        ]));
+
+        let one_shot = if dialog.one_shot.is_empty() {
+            "(interactive)".to_string()
+        } else {
+            truncate_chars(&dialog.one_shot, 44)
+        };
+        let one_shot_style = if dialog.one_shot.is_empty() {
+            focused(DialogField::OneShot).fg(Color::DarkGray)
+        } else {
+            focused(DialogField::OneShot).fg(Color::Yellow)
+        };
+        lines.push(Line::from(vec![
+            Span::raw("One-shot prompt:  "),
+            Span::styled(one_shot, one_shot_style),
+            Span::styled(
+                match harness {
+                    crate::harness::Harness::Codex => " (codex exec)",
+                    _ => " (-p, blank = unset)",
+                },
+                dim,
+            ),
+        ]));
+    }
 
     if let Some(err) = &dialog.error {
         lines.push(Line::styled(err.clone(), Style::default().fg(Color::Red)));
@@ -1481,6 +1588,77 @@ mod tests {
         assert!(text.contains("Claude Code"), "got: {text}");
         assert!(text.contains("Tracing:"), "got: {text}");
         assert!(text.contains("Content Mode:"), "got: {text}");
+        // the default profiles run real CLIs, so the options show
+        assert!(text.contains("claude options"), "got: {text}");
+        assert!(text.contains("Model:"), "got: {text}");
+        assert!(text.contains("Approvals:"), "got: {text}");
+        assert!(text.contains("Resume:"), "got: {text}");
+        assert!(text.contains("One-shot prompt:"), "got: {text}");
+    }
+
+    #[test]
+    fn launch_options_render_their_values_and_hide_for_a_plain_command() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let profiles = vec![
+            crate::config::Profile {
+                name: "Codex".into(),
+                command: "codex".into(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            },
+            crate::config::Profile {
+                name: "Shell".into(),
+                command: "bash".into(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            },
+        ];
+        let mut app = App::new(profiles.clone(), None, tx);
+        let mut dialog = crate::app::DialogState::new(&profiles);
+        dialog.model = "gpt-5.6".into();
+        dialog.bypass_approvals = true;
+        dialog.resume_last = true;
+        dialog.one_shot = "fix the failing test".into();
+        app.mode = crate::app::Mode::NewSession(dialog);
+        let mut terminal = Terminal::new(TestBackend::new(90, 26)).unwrap();
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("codex options"), "got: {text}");
+        assert!(text.contains("gpt-5.6"), "got: {text}");
+        // the hints name the flag this CLI actually uses
+        assert!(text.contains("--yolo"), "got: {text}");
+        assert!(text.contains("resume --last"), "got: {text}");
+        assert!(text.contains("codex exec"), "got: {text}");
+        assert!(text.contains("fix the failing test"), "got: {text}");
+
+        // an unset model reads as the CLI's default, not as a blank
+        if let crate::app::Mode::NewSession(d) = &mut app.mode {
+            d.model.clear();
+            d.one_shot.clear();
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("(the CLI's default)"), "got: {text}");
+        assert!(text.contains("(interactive)"), "got: {text}");
+
+        // a profile that is not a known CLI shows no options at all
+        if let crate::app::Mode::NewSession(d) = &mut app.mode {
+            *d = crate::app::DialogState::new(&profiles[1..]);
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("Approvals:"), "got: {text}");
+        assert!(!text.contains("One-shot"), "got: {text}");
+        assert!(
+            text.contains("Content Mode:"),
+            "the rest still renders: {text}"
+        );
     }
 
     #[test]

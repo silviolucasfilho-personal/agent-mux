@@ -18,6 +18,8 @@ pub fn shell_profile() -> Profile {
         args: vec![],
         default_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
         tracing: None,
+        model: None,
+        bypass_approvals: None,
     }
 }
 

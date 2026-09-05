@@ -81,6 +81,14 @@
 # cache_write_1h = 4.00         # 1-hour cache writes
 # reasoning = 14.0              # optional; otherwise reasoning tokens bill as output
 
+# Launch defaults per profile. Both are optional: an unset key passes no
+# flag at all, so each CLI keeps its own default. The new-session dialog
+# pre-fills from these and can override them for a single launch, and it
+# also offers resume and a one-shot prompt, which are per-launch only.
+#
+#   model            --model <id>      (claude, codex, agy)
+#   bypass_approvals --dangerously-skip-permissions (claude, agy), --yolo (codex)
+
 [[profiles]]
 name = "Claude Code"
 command = "claude"
