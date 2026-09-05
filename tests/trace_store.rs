@@ -298,3 +298,91 @@ fn stored_sessions_read_back_as_ops_for_replay() {
         "unknown sessions are an error, not an empty replay"
     );
 }
+
+/// The workbench views: a skill loaded in two turns and used in one, and
+/// an agent with a failing child.
+#[test]
+fn skill_and_agent_views_roll_up_attribution() {
+    use agent_mux::tracing::store::query::{agent_stats, skill_stats};
+    let dir = tempfile::tempdir().unwrap();
+    let handle = spawn_writer(
+        store(dir.path(), "run-1"),
+        WriterConfig::new(30),
+        Box::new(|_, _| {}),
+        None,
+    );
+    handle.tx.try_send(StoreOp::Launch(launch("l1"))).unwrap();
+    // turn 1 loads "superpowers" and a generation is attributed to it
+    let mut t1 = trace("t1", 1);
+    t1.skills = Some(vec!["superpowers".into(), "unused-skill".into()]);
+    handle.tx.try_send(StoreOp::Trace(t1)).unwrap();
+    let mut g1 = generation("g1", "t1");
+    g1.skill = Some("superpowers".into());
+    handle.tx.try_send(StoreOp::Observation(g1)).unwrap();
+    // turn 2 loads it too, but nothing is attributed
+    let mut t2 = trace("t2", 2);
+    t2.skills = Some(vec!["superpowers".into()]);
+    handle.tx.try_send(StoreOp::Trace(t2)).unwrap();
+    handle
+        .tx
+        .try_send(StoreOp::Observation(generation("g2", "t2")))
+        .unwrap();
+    // two Explore agents, one with a failing child
+    for (i, failed) in [(1, false), (2, true), (3, false), (4, false), (5, false)] {
+        let mut agent = generation(&format!("a{i}"), "t2");
+        agent.obs_type = ObservationType::Agent;
+        agent.name = "agent: Explore".into();
+        agent.model = None;
+        agent.usage = None;
+        agent.usage_raw = None;
+        agent.metadata = serde_json::json!({"agent_type": "Explore"})
+            .as_object()
+            .cloned()
+            .unwrap();
+        agent.start_ns = 1_000_000_000;
+        agent.end_ns = Some(1_000_000_000 + i as i64 * 100_000_000); // 100..500 ms
+        handle.tx.try_send(StoreOp::Observation(agent)).unwrap();
+        let mut child = generation(&format!("c{i}"), "t2");
+        child.obs_type = ObservationType::Tool;
+        child.name = "Grep".into();
+        child.parent_id = Some(format!("a{i}"));
+        child.model = None;
+        child.usage = None;
+        child.usage_raw = None;
+        child.is_error = failed;
+        handle.tx.try_send(StoreOp::Observation(child)).unwrap();
+    }
+    assert!(handle.finish(Duration::from_secs(5)));
+    let conn = open_ro(&dir.path().join("traces.db")).unwrap();
+
+    let skills = skill_stats(&conn).unwrap();
+    let sp = skills.iter().find(|s| s.skill == "superpowers").unwrap();
+    assert_eq!(sp.turns_loaded, 2);
+    assert_eq!(sp.generations, 1);
+    assert_eq!(
+        sp.turns_unused, 1,
+        "loaded in turn 2, nothing attributed there"
+    );
+    assert!(sp.tokens.unwrap() > 0);
+    let unused = skills.iter().find(|s| s.skill == "unused-skill").unwrap();
+    assert_eq!((unused.turns_loaded, unused.turns_unused), (1, 1));
+
+    let agents = agent_stats(&conn).unwrap();
+    assert_eq!(agents.len(), 1);
+    let explore = &agents[0];
+    assert_eq!(explore.agent_type, "Explore");
+    assert_eq!(explore.invocations, 5);
+    assert_eq!(explore.failures, 1, "a failing child fails the invocation");
+    assert!((explore.mean_ms - 300.0).abs() < 1e-9);
+    assert_eq!(explore.max_ms, 500);
+    assert_eq!(explore.p90_ms, 500, "nearest-rank p90 of 100..500");
+
+    let (calls, distinct): (i64, i64) = conn
+        .query_row(
+            "SELECT tool_calls, distinct_tools FROM loop_stats WHERE trace_id = 't2'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((calls, distinct), (5, 1));
+}

@@ -267,6 +267,14 @@ pub struct TurnAssembler {
     hook_agents: HashMap<String, HookAgent>,
     /// Tool calls made *inside* a subagent (hook-only rows), by tool id.
     hook_agent_tools: HashMap<String, (u64, ObservationRow)>,
+    /// Loop-pattern thresholds, and the tool calls of open turns
+    /// (ordinal, tool id, start, call) for the check at close.
+    loops: crate::tracing::loops::LoopThresholds,
+    turn_tools: Vec<(u64, String, i64, crate::tracing::loops::ToolCall)>,
+    /// Tool-name sequences of the last closed turns, oldest first.
+    recent_tool_seqs: std::collections::VecDeque<Vec<String>>,
+    /// Patterns and guard blocks noticed since the last `take_warnings`.
+    warnings: Vec<crate::tracing::loops::Pattern>,
 }
 
 /// The CLI's own running session totals (Claude `cost-state`), surfaced on
@@ -306,6 +314,10 @@ impl TurnAssembler {
             pending_prompt: None,
             hook_agents: HashMap::new(),
             hook_agent_tools: HashMap::new(),
+            loops: crate::tracing::loops::LoopThresholds::default(),
+            turn_tools: Vec::new(),
+            recent_tool_seqs: std::collections::VecDeque::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -678,6 +690,16 @@ impl TurnAssembler {
         row
     }
 
+    /// Thresholds for the loop-pattern check at turn close.
+    pub fn set_loop_thresholds(&mut self, th: crate::tracing::loops::LoopThresholds) {
+        self.loops = th;
+    }
+
+    /// Patterns and guard blocks noticed since the last call.
+    pub fn take_warnings(&mut self) -> Vec<crate::tracing::loops::Pattern> {
+        std::mem::take(&mut self.warnings)
+    }
+
     fn close_turn(&mut self) -> Vec<StoreOp> {
         let Some(mut turn) = self.turn.take() else {
             return Vec::new();
@@ -726,6 +748,33 @@ impl TurnAssembler {
         } else {
             TraceStatus::Closed
         };
+        // Loop patterns over this turn's tool calls, in time order; the
+        // flag rides on the trace row, the notice goes to the status bar.
+        let mut calls: Vec<(i64, crate::tracing::loops::ToolCall)> = self
+            .turn_tools
+            .iter()
+            .filter(|(o, ..)| *o == turn.ordinal)
+            .map(|(_, _, start, call)| (*start, call.clone()))
+            .collect();
+        calls.sort_by_key(|(start, _)| *start);
+        let calls: Vec<crate::tracing::loops::ToolCall> =
+            calls.into_iter().map(|(_, c)| c).collect();
+        let previous: Vec<Vec<String>> = self.recent_tool_seqs.iter().cloned().collect();
+        let found = crate::tracing::loops::patterns(&calls, &previous, &self.loops);
+        if !found.is_empty() {
+            turn.extra_metadata.insert(
+                "loop_warnings".into(),
+                Value::Array(found.iter().map(|p| p.json()).collect()),
+            );
+            self.warnings.extend(found);
+        }
+        self.recent_tool_seqs
+            .push_back(calls.iter().map(|c| c.name.clone()).collect());
+        while self.recent_tool_seqs.len() > 8 {
+            self.recent_tool_seqs.pop_front();
+        }
+        self.turn_tools.retain(|(o, ..)| *o > turn.ordinal);
+
         let row = self.trace_row(&turn, status);
         self.recent_traces.insert(turn.ordinal, row.clone());
         ops.push(StoreOp::Trace(row));
@@ -743,6 +792,26 @@ impl TurnAssembler {
         row: &mut ObservationRow,
         ordinal: u64,
     ) -> Option<ObservationRow> {
+        // remembered for the loop-pattern check when the turn closes
+        let key = row.tool_id.clone().unwrap_or_else(|| row.id.clone());
+        if !self
+            .turn_tools
+            .iter()
+            .any(|(o, k, ..)| *o == ordinal && *k == key)
+        {
+            self.turn_tools.push((
+                ordinal,
+                key,
+                row.start_ns,
+                crate::tracing::loops::ToolCall {
+                    name: row.name.clone(),
+                    path: row
+                        .input
+                        .as_deref()
+                        .and_then(crate::tracing::loops::path_in_tool_input),
+                },
+            ));
+        }
         let id = row.tool_id.clone()?;
         if let Some(state) = self.hook_tools.get(&id) {
             apply_tool_pins(row, state);
@@ -1787,6 +1856,25 @@ impl TurnAssembler {
     /// they appear; rows already emitted are re-emitted with the pin.
     pub fn attach_hook_event(&mut self, ev: &HookEvent) -> Vec<StoreOp> {
         let mut ops = Vec::new();
+        // the budget guard refused this call: flag the turn, tell the user
+        if ev.event == "PreToolUse"
+            && let Some(guard) = ev.payload.get("agent_mux_guard")
+            && guard.get("blocked").and_then(|b| b.as_bool()) == Some(true)
+        {
+            let reason = guard
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("over budget")
+                .to_string();
+            if let Some(turn) = self.turn.as_mut() {
+                turn.extra_metadata
+                    .insert("guard_blocked".into(), Value::from(reason.clone()));
+            }
+            self.warnings.push(crate::tracing::loops::Pattern {
+                kind: crate::tracing::loops::BUDGET_GUARD,
+                detail: reason,
+            });
+        }
         match ev.event.as_str() {
             "SubagentStart" | "SubagentStop" => self.subagent_hook(ev, &mut ops),
             "PreToolUse" | "PostToolUse" | "PostToolUseFailure" if ev.agent_id.is_some() => {
@@ -4428,5 +4516,128 @@ mod tests {
         assert_eq!(row.key, "codex:rollout-1");
         assert_eq!(row.extra.as_ref().unwrap()["cli_version"], "0.9");
         assert_eq!(asm.session_id(), Some("rollout-1"));
+    }
+
+    #[test]
+    fn loop_patterns_flag_the_closed_turn_and_report_once() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("sess-1".into()),
+            "deterministic",
+        );
+        asm.set_loop_thresholds(crate::tracing::loops::LoopThresholds {
+            tool_storm: 3,
+            ping_pong: 2,
+            no_progress: 3,
+        });
+        let mut ops = Vec::new();
+        ops.extend(asm.feed(user("loop", "2026-08-30T10:00:00Z"), 0));
+        let mut sec = 1;
+        let mut call = |asm: &mut TurnAssembler, id: &str, name: &str, args: Value| {
+            let mut ops = asm.feed(
+                tool_use(id, name, args, &format!("2026-08-30T10:00:{sec:02}Z")),
+                0,
+            );
+            sec += 1;
+            ops.extend(asm.feed(
+                tool_result(
+                    id,
+                    serde_json::json!("ok"),
+                    false,
+                    &format!("2026-08-30T10:00:{sec:02}Z"),
+                ),
+                0,
+            ));
+            sec += 1;
+            ops
+        };
+        for i in 0..4 {
+            ops.extend(call(
+                &mut asm,
+                &format!("b{i}"),
+                "Bash",
+                serde_json::json!({"command": "ls"}),
+            ));
+        }
+        for (i, name) in ["Read", "Edit", "Read", "Edit"].iter().enumerate() {
+            ops.extend(call(
+                &mut asm,
+                &format!("f{i}"),
+                name,
+                serde_json::json!({"file_path": "/p/a.rs"}),
+            ));
+        }
+        ops.extend(asm.feed(user("again", "2026-08-30T10:01:00Z"), 0));
+        let closed_turns = closed(&ops);
+        assert_eq!(closed_turns.len(), 1);
+        let meta = closed_turns[0]
+            .metadata
+            .as_ref()
+            .expect("warnings ride on the turn");
+        let kinds: Vec<&str> = meta["loop_warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["tool storm", "ping-pong"]);
+        assert_eq!(meta["loop_warnings"][0]["detail"], "4× Bash in one turn");
+        let warned = asm.take_warnings();
+        assert_eq!(warned.len(), 2);
+        assert!(asm.take_warnings().is_empty(), "drained");
+
+        // three turns with the same single call: the third is "no progress"
+        for (minute, turn) in (2..).zip(0..3) {
+            ops.extend(call(
+                &mut asm,
+                &format!("n{turn}"),
+                "Grep",
+                serde_json::json!({"pattern": "x"}),
+            ));
+            ops.extend(asm.feed(user("next", &format!("2026-08-30T10:{minute:02}:00Z")), 0));
+        }
+        let closed_turns = closed(&ops);
+        assert_eq!(closed_turns.len(), 4);
+        let last = closed_turns[3].metadata.as_ref().unwrap();
+        assert_eq!(last["loop_warnings"][0]["kind"], "no progress");
+        assert!(
+            closed_turns[2]
+                .metadata
+                .as_ref()
+                .is_none_or(|m| m.get("loop_warnings").is_none())
+        );
+        let warned = asm.take_warnings();
+        assert_eq!(warned.len(), 1);
+        assert_eq!(warned[0].kind, "no progress");
+    }
+
+    #[test]
+    fn a_blocked_pre_tool_hook_marks_the_turn_and_warns() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("sess-1".into()),
+            "deterministic",
+        );
+        let mut ops = Vec::new();
+        ops.extend(asm.feed(user("spend", "2026-08-30T10:00:00Z"), 0));
+        let reason = "agent-mux budget: $1.20 spent, over the $1.00 limit for this launch";
+        let ev = hook(
+            "PreToolUse",
+            ns("2026-08-30T10:00:03Z"),
+            Some("t9"),
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "agent_mux_guard": {"blocked": true, "reason": reason}
+            }),
+        );
+        asm.attach_hook_event(&ev);
+        let warned = asm.take_warnings();
+        assert_eq!(warned.len(), 1);
+        assert_eq!(warned[0].kind, "budget guard");
+        assert_eq!(warned[0].detail, reason);
+        ops.extend(asm.feed(user("next", "2026-08-30T10:01:00Z"), 0));
+        let meta = closed(&ops)[0].metadata.clone().unwrap();
+        assert_eq!(meta["guard_blocked"], reason);
     }
 }

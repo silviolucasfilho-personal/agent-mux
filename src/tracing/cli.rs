@@ -8,7 +8,7 @@ use crate::tracing::store::query::{self, SessionFilter};
 use crate::tracing::store::{self, Store};
 use crate::tracing::{ids, price_table};
 use crate::transcript::{self, Provider};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 const USAGE: &str = "usage: agent-mux trace <command> [options]
@@ -33,6 +33,16 @@ commands:
                                delete old rows; --vacuum reclaims space
   recost                       recompute cost from usage and the current price table
   sql <select ...> [--json]    read-only query
+  loops [session] [--json]     per-turn loop metrics: calls, retries, where the time went, context
+  skills [--json]              what each skill did across the store (loaded vs. attributed)
+  skills [--json] [--harness H] skills on disk joined to what ran: loaded, unused, missed triggers
+  skills lint [name]           what stops a skill, agent or command working: frontmatter, tools, model
+  agents [--json]              what each subagent type did: invocations, latency, cost, failures
+  compare <a> <b>              two turns or sessions side by side: loop metrics and the tool path
+  score <t> [good|bad|<n>]     a verdict on a turn, session or launch (--name, --note); sent to Langfuse too
+                               with no value: the scores on it
+  experiments [name]           the experiment registry, or one experiment's variants
+  (see also: agent-mux run --experiment <name> --variant <label> --prompt <text> …)
   hook <claude|codex|codex-notify|agy> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
                                hook entry point invoked by the CLIs (reads the payload from stdin or the last argument)
   hooks install|uninstall|status [codex|agy]
@@ -178,6 +188,14 @@ fn resolved() -> anyhow::Result<(config::Config, ResolvedTracing)> {
 }
 
 fn open_ro(resolved: &ResolvedTracing) -> anyhow::Result<Connection> {
+    // a store last written by an older binary lacks the newer views; bring
+    // it up first so every read-only command sees the same schema
+    if let Ok(true) = store::migrate_in_place(&resolved.db_path) {
+        eprintln!(
+            "trace store migrated to schema v{}",
+            store::schema::SCHEMA_VERSION
+        );
+    }
     store::open_ro(&resolved.db_path).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -215,6 +233,12 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         "prune" => prune(&args),
         "recost" => recost(),
         "sql" => sql(&args),
+        "loops" => loops(&args),
+        "skills" => skills(&args),
+        "agents" => agents(&args),
+        "compare" => compare(&args),
+        "score" => score(&args),
+        "experiments" => experiments(&args),
         "hooks" => hooks_cmd(&args),
         "hook" => {
             let outcome = hook_run(&raw[1..], None);
@@ -281,6 +305,627 @@ fn dir_status(path: Option<&Path>) -> (bool, String) {
         Some(p) => (false, format!("{} (missing)", p.display())),
         None => (false, "unresolvable (no HOME?)".to_string()),
     }
+}
+
+/// `trace loops [session]`: one row per turn with its loop metrics.
+fn loops(args: &Args) -> anyhow::Result<()> {
+    use super::loops::loop_metrics;
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    let json = args.has("json");
+    let session = match args.positional.first() {
+        Some(needle) => query::find_session(&conn, needle)?
+            .ok_or_else(|| anyhow::anyhow!("no session matches {needle:?}"))?,
+        None => query::list_sessions(&conn, &SessionFilter::default())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no sessions in the store"))?,
+    };
+    let turns = query::list_traces(&conn, &session.key)?;
+    let mut rows = Vec::new();
+    for t in &turns {
+        let obs = query::list_observations(&conn, &t.id)?;
+        rows.push((t, loop_metrics(t, &obs)));
+    }
+    if json {
+        let v: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(t, m)| {
+                serde_json::json!({
+                    "trace_id": t.id, "ordinal": t.ordinal, "name": t.name,
+                    "tool_calls": m.tool_calls, "distinct_tools": m.distinct_tools,
+                    "retries": m.retries, "retried_tools": m.retried_tools,
+                    "tool_errors": m.tool_errors, "declined": m.declined,
+                    "model_ms": m.model_ms, "tool_ms": m.tool_ms, "idle_ms": m.idle_ms,
+                    "context_first": m.context_first, "context_last": m.context_last,
+                    "cache_ratio": m.cache_ratio, "compactions": m.compactions,
+                    "subagents": m.subagents, "subagent_tokens": m.subagent_tokens,
+                    "subagent_cost_usd": m.subagent_cost, "total_cost_usd": t.total_cost_usd,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::Value::Array(v));
+        return Ok(());
+    }
+    println!("session {}  {} turn(s)", session.session_id, turns.len());
+    println!(
+        "{:>4} {:>5} {:>4} {:>3} {:>4} {:>8} {:>8} {:>8} {:>15} {:>5} {:>4} {:>8}  name",
+        "turn",
+        "calls",
+        "rtry",
+        "err",
+        "decl",
+        "model",
+        "tools",
+        "idle",
+        "context",
+        "cache",
+        "sub",
+        "cost"
+    );
+    for (t, m) in &rows {
+        let context = match (m.context_first, m.context_last) {
+            (Some(a), Some(b)) => format!("{}→{}", fmt_tokens(Some(a)), fmt_tokens(Some(b))),
+            _ => "-".to_string(),
+        };
+        let name = t
+            .name
+            .split_once(": ")
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| t.name.clone());
+        println!(
+            "{:>4} {:>5} {:>4} {:>3} {:>4} {:>8} {:>8} {:>8} {:>15} {:>5} {:>4} {:>8}  {}",
+            t.ordinal,
+            m.tool_calls,
+            m.retries,
+            m.tool_errors,
+            m.declined,
+            fmt_ms(m.model_ms),
+            fmt_ms(m.tool_ms),
+            fmt_ms(m.idle_ms),
+            context,
+            m.cache_ratio
+                .map(|r| format!("{:.0}%", r * 100.0))
+                .unwrap_or_else(|| "-".into()),
+            m.subagents,
+            fmt_cost(t.total_cost_usd),
+            {
+                let kinds = super::loops::warning_kinds(&t.metadata);
+                if kinds.is_empty() {
+                    truncate_display(&name, 40)
+                } else {
+                    format!("{}  ⚠ {}", truncate_display(&name, 40), kinds.join(", "))
+                }
+            }
+        );
+    }
+    Ok(())
+}
+
+/// The store's provider key for a harness.
+fn provider_key(h: crate::harness::Harness) -> &'static str {
+    match h {
+        crate::harness::Harness::Claude => "claude",
+        crate::harness::Harness::Codex => "codex",
+        crate::harness::Harness::Antigravity => "antigravity",
+    }
+}
+
+/// `--harness claude|codex|agy` narrows the inventory.
+fn harness_filter(args: &Args) -> anyhow::Result<Option<crate::harness::Harness>> {
+    match args.value("harness") {
+        None => Ok(None),
+        Some(h) => crate::harness::Harness::detect(h)
+            .or_else(|| (h == "antigravity").then_some(crate::harness::Harness::Antigravity))
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("unknown harness {h:?}: claude, codex or agy")),
+    }
+}
+
+fn definitions(args: &Args, home: &Path) -> anyhow::Result<Vec<super::inventory::Definition>> {
+    let cwd = std::env::current_dir()?;
+    Ok(match harness_filter(args)? {
+        Some(h) => super::inventory::inventory(h, &cwd, home),
+        None => super::inventory::inventory_all(&cwd, home),
+    })
+}
+
+/// `trace skills [--json] [--harness H]`: the inventory joined to what
+/// the store says ran; `trace skills lint [name]` checks definitions.
+fn skills(args: &Args) -> anyhow::Result<()> {
+    use super::inventory::skill_reports;
+    if args.positional.first().map(String::as_str) == Some("lint") {
+        return skills_lint(args);
+    }
+    let (_, resolved) = resolved()?;
+    let defs = definitions(args, &resolved.home)?;
+    // the store is optional here: an inventory is worth listing alone
+    let (stats, prompts) = match open_ro(&resolved) {
+        Ok(conn) => (query::skill_stats(&conn)?, query::prompt_rows(&conn, 5000)?),
+        Err(_) => (Vec::new(), Vec::new()),
+    };
+    let reports = skill_reports(&defs, &stats, &prompts);
+    if args.has("json") {
+        let v: Vec<serde_json::Value> = reports
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "skill": r.name,
+                    "harness": r.def.as_ref().map(|d| d.harness.as_str()),
+                    "scope": r.def.as_ref().map(|d| d.scope.label()),
+                    "path": r.def.as_ref().map(|d| d.path.display().to_string()),
+                    "triggers": r.def.as_ref().map(|d| d.triggers.clone()).unwrap_or_default(),
+                    "turns_loaded": r.stat.as_ref().map(|s| s.turns_loaded).unwrap_or(0),
+                    "turns_unused": r.stat.as_ref().map(|s| s.turns_unused).unwrap_or(0),
+                    "missed": r.missed,
+                    "generations": r.stat.as_ref().map(|s| s.generations).unwrap_or(0),
+                    "tools": r.stat.as_ref().map(|s| s.tools).unwrap_or(0),
+                    "tokens": r.stat.as_ref().and_then(|s| s.tokens),
+                    "cost_usd": r.stat.as_ref().and_then(|s| s.cost),
+                    "last_ns": r.stat.as_ref().map(|s| s.last_ns),
+                    "note": r.note(),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::Value::Array(v));
+        return Ok(());
+    }
+    if reports.is_empty() {
+        println!(
+            "no skills on disk under {} or {}, and none recorded in the store",
+            std::env::current_dir()?.display(),
+            resolved.home.display()
+        );
+        return Ok(());
+    }
+    for line in skills_lines(&reports) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The `trace skills` table, one row per skill on disk or in the store.
+pub fn skills_lines(reports: &[super::inventory::SkillReport]) -> Vec<String> {
+    let mut out = vec![format!(
+        "{:<28} {:<7} {:<16} {:>6} {:>6} {:>6} {:>9}  {:<16} note",
+        "skill", "harness", "scope", "loaded", "unused", "missed", "cost", "last used"
+    )];
+    for r in reports {
+        let (harness, scope) = match &r.def {
+            Some(d) => (d.harness.as_str().to_string(), d.scope.label()),
+            None => ("-".into(), "-".into()),
+        };
+        let (loaded, unused, cost, last) = match &r.stat {
+            Some(s) => (
+                s.turns_loaded.to_string(),
+                s.turns_unused.to_string(),
+                fmt_cost(s.cost),
+                fmt_time(s.last_ns),
+            ),
+            None => ("0".into(), "-".into(), "-".into(), "-".into()),
+        };
+        out.push(format!(
+            "{:<28} {:<7} {:<16} {:>6} {:>6} {:>6} {:>9}  {:<16} {}",
+            truncate_display(&r.name, 28),
+            harness,
+            truncate_display(&scope, 16),
+            loaded,
+            unused,
+            if r.def.as_ref().is_some_and(|d| d.triggers.is_empty()) {
+                "-".to_string()
+            } else {
+                r.missed.to_string()
+            },
+            cost,
+            truncate_display(&last, 16),
+            r.note()
+        ));
+    }
+    out
+}
+
+/// `trace skills lint [name] [--json] [--harness H]`.
+fn skills_lint(args: &Args) -> anyhow::Result<()> {
+    use super::inventory::{Level, LintContext, known_tools, lint};
+    let (_, resolved) = resolved()?;
+    let mut defs = definitions(args, &resolved.home)?;
+    if let Some(name) = args.positional.get(1) {
+        defs.retain(|d| d.name == *name);
+        if defs.is_empty() {
+            anyhow::bail!("no skill, agent or command named {name:?} on disk");
+        }
+    }
+    let conn = open_ro(&resolved).ok();
+    let prices = crate::tracing::price_table(&resolved);
+    let mut known: std::collections::HashMap<
+        crate::harness::Harness,
+        std::collections::HashSet<String>,
+    > = std::collections::HashMap::new();
+    for h in [
+        crate::harness::Harness::Claude,
+        crate::harness::Harness::Codex,
+        crate::harness::Harness::Antigravity,
+    ] {
+        let seen = conn
+            .as_ref()
+            .and_then(|c| query::tool_names(c, provider_key(h)).ok())
+            .unwrap_or_default();
+        known.insert(h, known_tools(h, seen));
+    }
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    let mut json = Vec::new();
+    for d in &defs {
+        let ctx = LintContext {
+            known_tools: &known[&d.harness],
+            prices: Some(&prices),
+        };
+        let findings = lint(d, &ctx);
+        errors += findings.iter().filter(|f| f.level == Level::Error).count();
+        warnings += findings.iter().filter(|f| f.level == Level::Warn).count();
+        if args.has("json") {
+            json.push(serde_json::json!({
+                "name": d.name, "kind": d.kind.as_str(), "harness": d.harness.as_str(),
+                "scope": d.scope.label(), "path": d.path.display().to_string(),
+                "findings": findings.iter().map(|f| serde_json::json!({
+                    "level": f.level.as_str(), "rule": f.rule, "message": f.message,
+                })).collect::<Vec<_>>(),
+            }));
+            continue;
+        }
+        let mark = if findings.iter().any(|f| f.level == Level::Error) {
+            "✗"
+        } else if findings.is_empty() {
+            "✓"
+        } else {
+            "!"
+        };
+        println!(
+            "{mark} {} {} ({}, {})  {}",
+            d.kind.as_str(),
+            d.name,
+            d.harness.as_str(),
+            d.scope.label(),
+            d.path.display()
+        );
+        for f in &findings {
+            println!("    {:<5} {:<20} {}", f.level.as_str(), f.rule, f.message);
+        }
+    }
+    if args.has("json") {
+        println!("{}", serde_json::Value::Array(json));
+        return Ok(());
+    }
+    println!(
+        "\n{} definition(s): {errors} error(s), {warnings} warning(s)",
+        defs.len()
+    );
+    Ok(())
+}
+
+/// `trace agents`: what each subagent type did.
+fn agents(args: &Args) -> anyhow::Result<()> {
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    let stats = query::agent_stats(&conn)?;
+    if args.has("json") {
+        let v: Vec<serde_json::Value> = stats
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "agent_type": a.agent_type, "invocations": a.invocations, "mean_ms": a.mean_ms,
+                    "p90_ms": a.p90_ms, "max_ms": a.max_ms, "tokens": a.tokens,
+                    "cost_usd": a.cost, "failures": a.failures,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::Value::Array(v));
+        return Ok(());
+    }
+    if stats.is_empty() {
+        println!("no subagent invocations recorded");
+        return Ok(());
+    }
+    println!(
+        "{:<24} {:>5} {:>8} {:>8} {:>8} {:>8} {:>9} {:>5}",
+        "agent", "runs", "mean", "p90", "max", "tokens", "cost", "fail"
+    );
+    for a in &stats {
+        println!(
+            "{:<24} {:>5} {:>8} {:>8} {:>8} {:>8} {:>9} {:>5}",
+            truncate_display(&a.agent_type, 24),
+            a.invocations,
+            fmt_ms(a.mean_ms as i64),
+            fmt_ms(a.p90_ms),
+            fmt_ms(a.max_ms),
+            fmt_tokens(Some(a.tokens).filter(|t| *t > 0)),
+            fmt_cost(Some(a.cost).filter(|c| *c > 0.0)),
+            a.failures
+        );
+    }
+    // the agents on disk, with what the store attributes to each by name
+    let defs: Vec<super::inventory::Definition> = definitions(args, &resolved.home)?
+        .into_iter()
+        .filter(|d| d.kind == super::inventory::Kind::Agent)
+        .collect();
+    if !defs.is_empty() {
+        println!(
+            "\n{:<28} {:<7} {:<16} {:<18} {:>5} {:>6}  path",
+            "defined agent", "harness", "scope", "model", "tools", "runs"
+        );
+        for d in &defs {
+            let names = d.store_names();
+            let runs = stats
+                .iter()
+                .filter(|s| names.contains(&s.agent_type))
+                .map(|s| s.invocations)
+                .sum::<i64>();
+            println!(
+                "{:<28} {:<7} {:<16} {:<18} {:>5} {:>6}  {}",
+                truncate_display(&d.name, 28),
+                d.harness.as_str(),
+                truncate_display(&d.scope.label(), 16),
+                truncate_display(d.model.as_deref().unwrap_or("-"), 18),
+                d.tools.len(),
+                runs,
+                d.path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `trace compare <a> <b>`: two turns or sessions side by side.
+fn compare(args: &Args) -> anyhow::Result<()> {
+    use super::experiments::{diff, resolve_side};
+    let (Some(a), Some(b)) = (args.positional.first(), args.positional.get(1)) else {
+        anyhow::bail!("usage: agent-mux trace compare <turn|session> <turn|session>");
+    };
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    let left = resolve_side(&conn, a)?.ok_or_else(|| anyhow::anyhow!("nothing matches {a:?}"))?;
+    let right = resolve_side(&conn, b)?.ok_or_else(|| anyhow::anyhow!("nothing matches {b:?}"))?;
+    println!(
+        "{:<16} {:>22} {:>22} {:>10}",
+        "", left.label, right.label, "delta"
+    );
+    let row = |name: &str, l: String, r: String, d: String| {
+        println!("{name:<16} {l:>22} {r:>22} {d:>10}");
+    };
+    let signed = |d: i64| {
+        if d > 0 {
+            format!("+{d}")
+        } else {
+            d.to_string()
+        }
+    };
+    let (lm, rm) = (&left.metrics, &right.metrics);
+    row(
+        "turns",
+        left.turns.to_string(),
+        right.turns.to_string(),
+        signed(right.turns - left.turns),
+    );
+    row(
+        "tool calls",
+        lm.tool_calls.to_string(),
+        rm.tool_calls.to_string(),
+        signed(rm.tool_calls - lm.tool_calls),
+    );
+    row(
+        "distinct tools",
+        lm.distinct_tools.to_string(),
+        rm.distinct_tools.to_string(),
+        signed(rm.distinct_tools - lm.distinct_tools),
+    );
+    row(
+        "retries",
+        lm.retries.to_string(),
+        rm.retries.to_string(),
+        signed(rm.retries - lm.retries),
+    );
+    row(
+        "errors",
+        lm.tool_errors.to_string(),
+        rm.tool_errors.to_string(),
+        signed(rm.tool_errors - lm.tool_errors),
+    );
+    row(
+        "declined",
+        lm.declined.to_string(),
+        rm.declined.to_string(),
+        signed(rm.declined - lm.declined),
+    );
+    row(
+        "model time",
+        fmt_ms(lm.model_ms),
+        fmt_ms(rm.model_ms),
+        signed(rm.model_ms - lm.model_ms) + "ms",
+    );
+    row(
+        "tool time",
+        fmt_ms(lm.tool_ms),
+        fmt_ms(rm.tool_ms),
+        signed(rm.tool_ms - lm.tool_ms) + "ms",
+    );
+    row(
+        "idle time",
+        fmt_ms(lm.idle_ms),
+        fmt_ms(rm.idle_ms),
+        signed(rm.idle_ms - lm.idle_ms) + "ms",
+    );
+    let ctx = |m: &super::loops::LoopMetrics| match (m.context_first, m.context_last) {
+        (Some(a), Some(b)) => format!("{}→{}", fmt_tokens(Some(a)), fmt_tokens(Some(b))),
+        _ => "-".to_string(),
+    };
+    row("context", ctx(lm), ctx(rm), String::new());
+    row(
+        "subagents",
+        lm.subagents.to_string(),
+        rm.subagents.to_string(),
+        signed(rm.subagents - lm.subagents),
+    );
+    row(
+        "tokens",
+        fmt_tokens(left.tokens),
+        fmt_tokens(right.tokens),
+        match (left.tokens, right.tokens) {
+            (Some(a), Some(b)) => signed(b - a),
+            _ => String::new(),
+        },
+    );
+    row(
+        "cost",
+        fmt_cost(left.cost),
+        fmt_cost(right.cost),
+        match (left.cost, right.cost) {
+            (Some(a), Some(b)) => format!("{}{:.4}", if b >= a { "+" } else { "" }, b - a),
+            _ => String::new(),
+        },
+    );
+    println!(
+        "\ntool sequence ('-' only in {}, '+' only in {}):",
+        left.label, right.label
+    );
+    for (mark, name) in diff(&left.tools, &right.tools) {
+        println!("  {mark} {name}");
+    }
+    Ok(())
+}
+
+/// `trace score <turn|session|launch> [good|bad|<n>] [--name N] [--note TEXT]`:
+/// records a verdict (and sends it to Langfuse when configured), or lists
+/// the scores on the target when no value is given.
+fn score(args: &Args) -> anyhow::Result<()> {
+    use super::scores;
+    let Some(needle) = args.positional.first() else {
+        anyhow::bail!(
+            "usage: agent-mux trace score <turn|session|launch> [good|bad|<number>] [--name N] [--note TEXT]"
+        );
+    };
+    let (_, resolved) = resolved()?;
+    let ro = open_ro(&resolved)?;
+    // a turn first, then a session, then a launch id prefix
+    let (target, target_id, label, trace_ids): (&str, String, String, Vec<String>) =
+        if let Some(t) = query::find_trace(&ro, needle)? {
+            let label = format!("turn #{} {}", t.ordinal, &t.id[..8.min(t.id.len())]);
+            ("trace", t.id.clone(), label, vec![t.id])
+        } else if let Some(s) = query::find_session(&ro, needle)? {
+            let ids = query::list_traces(&ro, &s.key)?
+                .into_iter()
+                .map(|t| t.id)
+                .collect();
+            (
+                "session",
+                s.key.clone(),
+                format!("session {}", &s.session_id[..8.min(s.session_id.len())]),
+                ids,
+            )
+        } else {
+            let mut stmt =
+                ro.prepare("SELECT id FROM launches WHERE id = ?1 OR id LIKE ?1 || '%' LIMIT 1")?;
+            let launch: Option<String> = stmt.query_row([needle], |r| r.get(0)).optional()?;
+            let Some(launch) = launch else {
+                anyhow::bail!("nothing matches {needle:?}: not a turn, session or launch");
+            };
+            let mut ts =
+                ro.prepare("SELECT id FROM traces WHERE launch_id = ?1 ORDER BY ordinal")?;
+            let ids: Vec<String> = ts
+                .query_map([&launch], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            (
+                "launch",
+                launch.clone(),
+                format!("launch {}", &launch[..8.min(launch.len())]),
+                ids,
+            )
+        };
+    let Some(raw) = args.positional.get(1) else {
+        let list = scores::for_target(&ro, target, &target_id)?;
+        if list.is_empty() {
+            println!("no scores on {label}");
+        }
+        for s in list {
+            println!(
+                "{}  {:<12} {:>6}  {}",
+                fmt_time(s.created_ns),
+                s.name,
+                format!("{:.2}", s.value),
+                s.comment.unwrap_or_default()
+            );
+        }
+        return Ok(());
+    };
+    let Some(value) = scores::parse_value(raw) else {
+        anyhow::bail!("a score is good, bad or a number, not {raw:?}");
+    };
+    let name = args.value("name").unwrap_or(scores::VERDICT);
+    let conn = super::store::open_aux(&resolved.db_path).map_err(|e| anyhow::anyhow!(e))?;
+    let score = scores::record(&conn, target, &target_id, name, value, args.value("note"))?;
+    println!(
+        "scored {label}: {name} = {value} ({})",
+        scores::label(value)
+    );
+    if let Some(lf) = &resolved.langfuse {
+        // Langfuse scores attach to traces: one per turn under the target
+        let mut sent = 0;
+        for trace_id in &trace_ids {
+            match scores::export(lf, &score, trace_id) {
+                Ok(()) => sent += 1,
+                Err(e) => {
+                    eprintln!("{e}");
+                    break;
+                }
+            }
+        }
+        if sent > 0 {
+            println!("sent to langfuse on {sent} trace(s)");
+        }
+    }
+    Ok(())
+}
+
+/// `trace experiments [name]`: the registry, or one experiment's variants.
+fn experiments(args: &Args) -> anyhow::Result<()> {
+    use super::experiments::{experiment_summary, list_experiments, summary_lines};
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    if let Some(name) = args.positional.first() {
+        let rows = experiment_summary(&conn, name)?;
+        if rows.is_empty() {
+            anyhow::bail!("no runs recorded for experiment {name:?}");
+        }
+        for line in summary_lines(&rows) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    let list = list_experiments(&conn)?;
+    if list.is_empty() {
+        println!(
+            "no experiments yet — `agent-mux run --experiment <name> --variant <label> --prompt …`"
+        );
+        return Ok(());
+    }
+    println!(
+        "{:<24} {:>5} {:>8}  {:<19}  prompt",
+        "experiment", "runs", "variants", "created"
+    );
+    for e in &list {
+        println!(
+            "{:<24} {:>5} {:>8}  {}  {}",
+            truncate_display(&e.name, 24),
+            e.runs,
+            e.variants,
+            fmt_time(e.created_ns),
+            if e.prompt.is_empty() {
+                "(interactive)".to_string()
+            } else {
+                truncate_display(&e.prompt.replace('\n', " "), 60)
+            }
+        );
+    }
+    Ok(())
 }
 
 /// `trace hooks install|uninstall|status [codex|agy]`.
@@ -1626,6 +2271,8 @@ fn sql(args: &Args) -> anyhow::Result<()> {
 #[derive(Debug, Default)]
 pub struct HookOutcome {
     pub inserted: bool,
+    /// The budget guard refused the call (the reason the model sees).
+    pub blocked: Option<String>,
     /// What agy expects on stdout (`None` for the other sources).
     pub response: Option<String>,
     pub error: Option<String>,
@@ -1634,7 +2281,7 @@ pub struct HookOutcome {
 /// Longest the hook waits for the store's write lock before giving up.
 pub const HOOK_BUSY_CAP: std::time::Duration = std::time::Duration::from_millis(150);
 
-/// `trace hook <source> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]`.
+/// `trace hook <source> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [--guard] [payload]`.
 /// `stdin_override` lets tests supply the payload without a pipe.
 pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
     use crate::tracing::hooks::{self, ContentPolicy, HookSource};
@@ -1709,7 +2356,7 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
         .map(str::to_string)
         .or_else(|| std::env::var("AGENT_MUX_SESSION_ID").ok())
         .filter(|s| !s.is_empty());
-    let Some(ev) = hooks::parse(
+    let Some(mut ev) = hooks::parse(
         source,
         event.as_deref(),
         &payload,
@@ -1720,6 +2367,21 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
         outcome.error = Some("event not stored".into());
         return outcome;
     };
+    // the budget guard: only on a PreToolUse registered with --guard, and
+    // only ever a refusal past the launch's own limits (fail-open)
+    if args.has("guard")
+        && ev.event == "PreToolUse"
+        && let Some(id) = ev.launch_id.clone()
+        && let hooks::guard::Verdict::Block(reason) =
+            hooks::guard::check(&resolved.db_path, &id, HOOK_BUSY_CAP)
+    {
+        ev.payload.insert(
+            "agent_mux_guard".into(),
+            serde_json::json!({ "blocked": true, "reason": reason }),
+        );
+        outcome.response = Some(hooks::guard::deny_json(&reason));
+        outcome.blocked = Some(reason);
+    }
     match store::open_hook_sink(&resolved.db_path, HOOK_BUSY_CAP) {
         Ok(conn) => match store::insert_hook_event(&conn, &ev) {
             Ok(inserted) => outcome.inserted = inserted,
@@ -1821,6 +2483,9 @@ mod tests {
             total_cost_usd: None,
             unpriced_generations: 0,
             models: None,
+            metadata: "{}".into(),
+            retries: 0,
+            declined: 0,
         }
     }
 

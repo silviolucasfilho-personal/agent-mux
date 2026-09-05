@@ -128,6 +128,12 @@ pub struct TraceStat {
     pub total_cost_usd: Option<f64>,
     pub unpriced_generations: i64,
     pub models: Option<String>,
+    /// The turn's own metadata JSON (compaction, interruption, hook facts).
+    pub metadata: String,
+    /// Tool calls repeated with identical input inside the turn.
+    pub retries: i64,
+    /// Tool calls the user declined.
+    pub declined: i64,
 }
 
 fn trace_from_row(r: &Row) -> rusqlite::Result<TraceStat> {
@@ -161,6 +167,9 @@ fn trace_from_row(r: &Row) -> rusqlite::Result<TraceStat> {
         total_cost_usd: r.get("total_cost_usd")?,
         unpriced_generations: r.get("unpriced_generations")?,
         models: r.get("models")?,
+        metadata: r.get("metadata")?,
+        retries: r.get("retries")?,
+        declined: r.get("declined")?,
     })
 }
 
@@ -515,4 +524,150 @@ mod nest_tests {
             ]
         );
     }
+}
+
+/// A turn's prompt with the skills it loaded, for trigger matching.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptRow {
+    pub trace_id: String,
+    pub input: String,
+    pub skills: Vec<String>,
+}
+
+/// The newest `limit` prompts that were stored (metadata mode keeps none).
+pub fn prompt_rows(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<PromptRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, input, skills FROM traces
+         WHERE input IS NOT NULL AND input != ''
+         ORDER BY start_ns DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |r| {
+        let skills: Option<String> = r.get(2)?;
+        Ok(PromptRow {
+            trace_id: r.get(0)?,
+            input: r.get(1)?,
+            skills: skills
+                .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                .unwrap_or_default(),
+        })
+    })?;
+    rows.collect()
+}
+
+/// Turns that loaded a skill, newest first.
+pub fn traces_with_skill(
+    conn: &Connection,
+    skill: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<TraceStat>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM trace_stats
+         WHERE EXISTS (SELECT 1 FROM json_each(trace_stats.skills) j WHERE j.value = ?1)
+         ORDER BY start_ns DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![skill, limit as i64], trace_from_row)?;
+    rows.collect()
+}
+
+/// Every tool name the store has seen a provider call.
+pub fn tool_names(conn: &Connection, provider: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT o.name FROM observations o
+         JOIN traces t ON t.id = o.trace_id
+         JOIN sessions s ON s.key = t.session_key
+         WHERE s.provider = ?1 AND o.type = 'tool' AND o.name NOT LIKE 'skill: %'
+         ORDER BY o.name",
+    )?;
+    let rows = stmt.query_map(params![provider], |r| r.get(0))?;
+    rows.collect()
+}
+
+/// One row of the `skill_stats` view: what a skill did across the store.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillStat {
+    pub skill: String,
+    pub turns_loaded: i64,
+    pub generations: i64,
+    pub tools: i64,
+    pub tokens: Option<i64>,
+    pub cost: Option<f64>,
+    /// Turns where the skill was loaded and nothing was attributed to it.
+    pub turns_unused: i64,
+    pub first_ns: i64,
+    pub last_ns: i64,
+}
+
+pub fn skill_stats(conn: &Connection) -> rusqlite::Result<Vec<SkillStat>> {
+    let mut stmt = conn.prepare(
+        "SELECT skill, turns_loaded, generations, tools, tokens, cost, turns_unused, first_ns, last_ns
+         FROM skill_stats ORDER BY turns_loaded DESC, skill",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(SkillStat {
+            skill: r.get(0)?,
+            turns_loaded: r.get(1)?,
+            generations: r.get(2)?,
+            tools: r.get(3)?,
+            tokens: r.get(4)?,
+            cost: r.get(5)?,
+            turns_unused: r.get(6)?,
+            first_ns: r.get(7)?,
+            last_ns: r.get(8)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// One agent type across the store. `p90_ms` is computed here from the
+/// per-invocation durations, since the view carries mean and max only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentStat {
+    pub agent_type: String,
+    pub invocations: i64,
+    pub mean_ms: f64,
+    pub p90_ms: i64,
+    pub max_ms: i64,
+    pub tokens: i64,
+    pub cost: f64,
+    /// Invocations where the agent row or any child failed.
+    pub failures: i64,
+}
+
+pub fn agent_stats(conn: &Connection) -> rusqlite::Result<Vec<AgentStat>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_type, invocations, mean_ms, max_ms, tokens, cost, failures
+         FROM agent_stats ORDER BY invocations DESC, agent_type",
+    )?;
+    let mut stats: Vec<AgentStat> = stmt
+        .query_map([], |r| {
+            Ok(AgentStat {
+                agent_type: r.get(0)?,
+                invocations: r.get(1)?,
+                mean_ms: r.get::<_, f64>(2)?,
+                p90_ms: 0,
+                max_ms: r.get(3)?,
+                tokens: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                cost: r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+                failures: r.get(6)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut durations = conn.prepare(
+        "SELECT COALESCE(json_extract(metadata, '$.agent_type'), name) AS agent_type,
+                (COALESCE(end_ns, start_ns) - start_ns) / 1000000 AS dur_ms
+         FROM observations WHERE type = 'agent' ORDER BY agent_type, dur_ms",
+    )?;
+    let mut by_type: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+    for row in durations.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+        let (t, d) = row?;
+        by_type.entry(t).or_default().push(d);
+    }
+    for stat in &mut stats {
+        if let Some(d) = by_type.get(&stat.agent_type) {
+            // nearest-rank p90 over the sorted durations
+            let rank = ((d.len() as f64) * 0.9).ceil() as usize;
+            stat.p90_ms = d[rank.clamp(1, d.len()) - 1];
+        }
+    }
+    Ok(stats)
 }

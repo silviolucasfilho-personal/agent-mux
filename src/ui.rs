@@ -380,6 +380,14 @@ fn draw_help(f: &mut Frame) {
         row("Enter", "drill in / expand an observation"),
         row("/", "full-text search (full mode content)"),
         row("a", "toggle this project / all projects"),
+        row(
+            "K",
+            "skills pane: inventory joined to the store; Enter filters turns",
+        ),
+        row(
+            "s",
+            "verdict on the selected turn: good → bad → cleared (sent to Langfuse too)",
+        ),
         row("r", "resume the selected session"),
         Line::raw(""),
         Line::styled("  [Esc] or [?] to close", dim),
@@ -408,7 +416,17 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
     let width = 72.min(f.area().width.saturating_sub(4)).max(40);
     // the launch options add six rows when the profile runs a known CLI
-    let options_rows = if dialog.harness.is_some() { 6 } else { 0 };
+    let options_rows = if dialog.harness.is_some() { 6 } else { 0 }
+        + if dialog.fields().contains(&DialogField::MaxCost) {
+            4
+        } else {
+            0
+        }
+        + if dialog.fields().contains(&DialogField::Experiment) {
+            4
+        } else {
+            0
+        };
     let height = (app.profiles.len() as u16 + 20 + options_rows)
         .min(f.area().height.saturating_sub(2))
         .max(18);
@@ -451,7 +469,19 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
     } else {
         // the subfolder list is the flexible part: on a short terminal it
         // shrinks so the fields below it stay on screen
-        let fixed_rows = app.profiles.len() + 12 + if dialog.harness.is_some() { 6 } else { 0 };
+        let fixed_rows = app.profiles.len()
+            + 12
+            + if dialog.harness.is_some() { 6 } else { 0 }
+            + if dialog.fields().contains(&DialogField::MaxCost) {
+                4
+            } else {
+                0
+            }
+            + if dialog.fields().contains(&DialogField::Experiment) {
+                4
+            } else {
+                0
+            };
         let max_visible = usize::from(height).saturating_sub(fixed_rows).clamp(1, 4);
         let selected = dialog.dir_selected_idx.unwrap_or(0);
         let start = if selected >= max_visible {
@@ -641,6 +671,83 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
                 },
                 dim,
             ),
+        ]));
+    }
+
+    // Budget guard, when the CLI's PreToolUse hook can enforce one
+    if dialog.fields().contains(&DialogField::MaxCost) {
+        let focused = |f: DialogField| {
+            if dialog.field == f {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            }
+        };
+        let dim = Style::default().fg(Color::DarkGray);
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("── budget guard ──", dim));
+        let text = |value: &str, field: DialogField| {
+            if value.is_empty() {
+                ("(none)".to_string(), focused(field).fg(Color::DarkGray))
+            } else {
+                (value.to_string(), focused(field).fg(Color::Yellow))
+            }
+        };
+        let (cost, cost_style) = text(&dialog.max_cost, DialogField::MaxCost);
+        lines.push(Line::from(vec![
+            Span::raw("Max cost (USD):   "),
+            Span::styled(cost, cost_style),
+            Span::styled(" (blocks the next tool call past it)", dim),
+        ]));
+        let (turns, turns_style) = text(&dialog.max_turns, DialogField::MaxTurns);
+        lines.push(Line::from(vec![
+            Span::raw("Max turns:        "),
+            Span::styled(turns, turns_style),
+        ]));
+    }
+
+    // Experiment link, when a store is there to record it
+    if dialog.fields().contains(&DialogField::Experiment) {
+        let focused = |f: DialogField| {
+            if dialog.field == f {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            }
+        };
+        let dim = Style::default().fg(Color::DarkGray);
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("── experiment ──", dim));
+        let (experiment, experiment_style) = if dialog.experiment.is_empty() {
+            (
+                "(none)".to_string(),
+                focused(DialogField::Experiment).fg(Color::DarkGray),
+            )
+        } else {
+            (
+                truncate_chars(&dialog.experiment, 32),
+                focused(DialogField::Experiment).fg(Color::Yellow),
+            )
+        };
+        lines.push(Line::from(vec![
+            Span::raw("Experiment:       "),
+            Span::styled(experiment, experiment_style),
+            Span::styled(" (records this launch as a run)", dim),
+        ]));
+        let (variant, variant_style) = if dialog.variant.is_empty() {
+            (
+                "interactive".to_string(),
+                focused(DialogField::Variant).fg(Color::DarkGray),
+            )
+        } else {
+            (
+                truncate_chars(&dialog.variant, 32),
+                focused(DialogField::Variant).fg(Color::Yellow),
+            )
+        };
+        lines.push(Line::from(vec![
+            Span::raw("Variant:          "),
+            Span::styled(variant, variant_style),
         ]));
     }
 
@@ -852,6 +959,74 @@ fn provider_badge(provider: &str) -> Span<'static> {
     }
 }
 
+/// The left column as the skill inventory: each row a skill on disk or
+/// in the store, with what the store attributes to it.
+fn draw_skills_pane(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(browser.focused == BrowserPane::Sessions))
+        .title(format!(" Skills ({}) [K: sessions] ", browser.skills.len()));
+    if browser.skills.is_empty() {
+        let p = Paragraph::new(
+            "\n  No skills on disk for this project\n  or your home, and none recorded.\n\n  `agent-mux trace skills` lists the roots.",
+        )
+        .style(Style::default().fg(Color::DarkGray))
+        .block(block);
+        f.render_widget(p, area);
+        return;
+    }
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = sidebar_window(browser.selected_skill, browser.skills.len(), visible);
+    let end = (start + visible.max(1)).min(browser.skills.len());
+    let items: Vec<ListItem> = browser.skills[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, r)| {
+            let i = start + offset;
+            let is_sel = i == browser.selected_skill;
+            let (loaded, unused, cost) = match &r.stat {
+                Some(s) => (s.turns_loaded, s.turns_unused, fmt_cost(s.cost)),
+                None => (0, 0, "-".to_string()),
+            };
+            let tag = match r.note() {
+                "" => r
+                    .def
+                    .as_ref()
+                    .map(|d| format!("{} {}", d.harness.as_str(), d.scope.label()))
+                    .unwrap_or_default(),
+                note => note.to_string(),
+            };
+            let line = Line::from(vec![
+                Span::raw(if is_sel { "> " } else { "  " }),
+                Span::raw(truncate_chars(&r.name, 22)),
+                Span::styled(
+                    format!(" {loaded}↑{unused}↓"),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    if r.missed > 0 {
+                        format!(" {}?", r.missed)
+                    } else {
+                        String::new()
+                    },
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::styled(format!(" {cost} "), Style::default().fg(Color::DarkGray)),
+                Span::styled(tag, Style::default().fg(Color::DarkGray)),
+            ]);
+            let item = ListItem::new(line);
+            if is_sel && browser.focused == BrowserPane::Sessions {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else if is_sel {
+                item.style(Style::default().fg(Color::Yellow))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
 fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
     let width = (f.area().width * 96 / 100).clamp(60, 200);
     let height = (f.area().height * 92 / 100).clamp(18, 60);
@@ -878,7 +1053,9 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             " Sessions ({}) [a: {scope}] ",
             browser.sessions.len()
         ));
-    if let Some(err) = &browser.error {
+    if browser.skills_pane {
+        draw_skills_pane(f, browser, left);
+    } else if let Some(err) = &browser.error {
         let p = Paragraph::new(vec![
             Line::raw(""),
             Line::styled(format!("  {err}"), Style::default().fg(Color::Red)),
@@ -1010,6 +1187,31 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                         ),
                         Style::default().fg(Color::Yellow),
                     ),
+                    // the loop line: retries, only when there were any
+                    Span::styled(
+                        if t.retries > 0 {
+                            format!(" {}↻", t.retries)
+                        } else {
+                            String::new()
+                        },
+                        Style::default().fg(Color::Magenta),
+                    ),
+                    // loop warnings and the guard, then the verdict
+                    Span::styled(
+                        if crate::tracing::loops::warning_kinds(&t.metadata).is_empty() {
+                            String::new()
+                        } else {
+                            " ⚠".to_string()
+                        },
+                        Style::default().fg(Color::Magenta),
+                    ),
+                    match browser.scores.get(&t.id) {
+                        Some(v) if *v >= 0.5 => {
+                            Span::styled(" ✓", Style::default().fg(Color::Green))
+                        }
+                        Some(_) => Span::styled(" ✗", Style::default().fg(Color::Red)),
+                        None => Span::raw(""),
+                    },
                     errors,
                     Span::raw(format!(" {}", truncate_chars(&name, 48))),
                 ]);
@@ -1080,6 +1282,8 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
         draw_observation_tree(f, browser, inner_right);
     } else if browser.detail_view == crate::app::DetailView::Timeline {
         draw_observation_timeline(f, browser, inner_right);
+    } else if browser.detail_view == crate::app::DetailView::Loop {
+        draw_loop_view(f, browser, inner_right);
     } else {
         let visible = usize::from(inner_right.height);
         let start = sidebar_window(
@@ -1147,11 +1351,133 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             Style::default().fg(Color::Black).bg(Color::Yellow),
         ),
         None => Line::styled(
-            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [a] all  [r] resume  [Esc] close",
+            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [K] skills  [s] score  [a] all  [r] resume  [Esc] close",
             Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
     };
     f.render_widget(Paragraph::new(footer_text), footer);
+}
+
+/// The loop's numbers for the selected turn, on one screen.
+fn draw_loop_view(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
+    let Some(turn) = browser.turns.get(browser.selected_turn) else {
+        return;
+    };
+    let m = crate::tracing::loops::loop_metrics(turn, &browser.observations);
+    let dim = Style::default().fg(Color::DarkGray);
+    let head = |s: &str| Line::styled(format!("── {s} ──"), Style::default().fg(Color::Yellow));
+    let kv = |k: &str, v: String| {
+        Line::from(vec![Span::styled(format!("  {k:<14}"), dim), Span::raw(v)])
+    };
+    let pct = |part: i64, whole: i64| {
+        if whole > 0 {
+            format!("{:>3}%", part * 100 / whole)
+        } else {
+            "  -%".to_string()
+        }
+    };
+    let mut lines = vec![head("calls")];
+    lines.push(kv(
+        "tool calls",
+        format!("{} ({} distinct)", m.tool_calls, m.distinct_tools),
+    ));
+    lines.push(kv(
+        "retries",
+        if m.retried_tools.is_empty() {
+            "0".to_string()
+        } else {
+            let named: Vec<String> = m
+                .retried_tools
+                .iter()
+                .map(|(n, c)| format!("{n} ×{c}"))
+                .collect();
+            format!("{}  ({})", m.retries, named.join(", "))
+        },
+    ));
+    lines.push(kv("errors", m.tool_errors.to_string()));
+    lines.push(kv("declined", m.declined.to_string()));
+
+    lines.push(Line::raw(""));
+    lines.push(head("time"));
+    let total = m.model_ms + m.tool_ms + m.idle_ms;
+    let track = usize::from(area.width).saturating_sub(20).clamp(10, 60);
+    let cells = |part: i64| {
+        if total > 0 {
+            ((part as f64 / total as f64) * track as f64).round() as usize
+        } else {
+            0
+        }
+    };
+    let (mc, tc) = (cells(m.model_ms), cells(m.tool_ms));
+    let ic = track.saturating_sub(mc + tc);
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("█".repeat(mc), Style::default().fg(Color::Blue)),
+        Span::styled("▓".repeat(tc), Style::default()),
+        Span::styled("░".repeat(ic), dim),
+    ]));
+    lines.push(kv(
+        "model",
+        format!("{:>8} {}", fmt_ms(m.model_ms), pct(m.model_ms, total)),
+    ));
+    lines.push(kv(
+        "tools",
+        format!("{:>8} {}", fmt_ms(m.tool_ms), pct(m.tool_ms, total)),
+    ));
+    lines.push(kv(
+        "idle",
+        format!("{:>8} {}", fmt_ms(m.idle_ms), pct(m.idle_ms, total)),
+    ));
+
+    lines.push(Line::raw(""));
+    lines.push(head("context"));
+    lines.push(kv(
+        "first → last",
+        match (m.context_first, m.context_last) {
+            (Some(a), Some(b)) => format!(
+                "{} → {}  ({}{})",
+                fmt_tokens(Some(a)),
+                fmt_tokens(Some(b)),
+                if b >= a { "+" } else { "" },
+                fmt_tokens(Some(b - a))
+            ),
+            _ => "no usage reported".to_string(),
+        },
+    ));
+    lines.push(kv(
+        "cache ratio",
+        m.cache_ratio
+            .map(|r| format!("{:.0}%", r * 100.0))
+            .unwrap_or_else(|| "-".to_string()),
+    ));
+    lines.push(kv("compactions", m.compactions.to_string()));
+    let warnings = crate::tracing::loops::warnings_of(&turn.metadata);
+    if !warnings.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(head("warnings"));
+        for (kind, detail) in warnings {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  ⚠ {kind:<13}"),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::raw(detail),
+            ]));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(head("subagents"));
+    lines.push(kv(
+        "invocations",
+        format!(
+            "{}  ·  {} tok  ·  {}",
+            m.subagents,
+            fmt_tokens(Some(m.subagent_tokens).filter(|t| *t > 0)),
+            fmt_cost(Some(m.subagent_cost).filter(|c| *c > 0.0))
+        ),
+    ));
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Colour for an observation row, shared by both new views.
@@ -1912,6 +2238,9 @@ mod tests {
             total_cost_usd: Some(0.04),
             unpriced_generations: 0,
             models: None,
+            metadata: "{}".into(),
+            retries: 0,
+            declined: 0,
         }];
         browser.observations = vec![
             view("a", "agent: Explore", 0, base, Some(base + 2_000_000_000)),
@@ -1967,6 +2296,30 @@ mod tests {
         assert!(text.contains("░"), "lead-in before a later bar: {text}");
         assert!(text.contains("▶"), "the running row is capped: {text}");
         assert!(text.contains("Grep"), "every row is listed: {text}");
+
+        // loop: the numbers, with retries named and the time bar drawn
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.detail_view = DetailView::Loop;
+            // a second Grep with the same input is a retry
+            let mut again = b.observations[1].clone();
+            again.id = "g2".into();
+            again.input = Some("fn draw".into());
+            b.observations[1].input = Some("fn draw".into());
+            b.observations.push(again);
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("── calls ──"), "{text}");
+        assert!(text.contains("tool calls"), "{text}");
+        assert!(
+            text.contains("Grep ×1"),
+            "the retried tool is named: {text}"
+        );
+        assert!(
+            text.contains("── time ──") && text.contains("idle"),
+            "{text}"
+        );
+        assert!(text.contains("cache ratio"), "{text}");
 
         // a cramped terminal must not panic in either view
         let mut tiny = Terminal::new(TestBackend::new(40, 10)).unwrap();
