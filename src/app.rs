@@ -805,6 +805,8 @@ pub enum DetailView {
     Tree,
     /// Bars over the turn's own time window.
     Timeline,
+    /// The loop's numbers: calls, retries, where the time went, context.
+    Loop,
 }
 
 impl DetailView {
@@ -812,7 +814,8 @@ impl DetailView {
         match self {
             DetailView::List => DetailView::Tree,
             DetailView::Tree => DetailView::Timeline,
-            DetailView::Timeline => DetailView::List,
+            DetailView::Timeline => DetailView::Loop,
+            DetailView::Loop => DetailView::List,
         }
     }
 
@@ -821,6 +824,7 @@ impl DetailView {
             DetailView::List => "list",
             DetailView::Tree => "tree",
             DetailView::Timeline => "timeline",
+            DetailView::Loop => "loop",
         }
     }
 }
@@ -3142,6 +3146,9 @@ mod history_tests {
         b.cycle_detail_view();
         assert_eq!(b.detail_view, DetailView::Timeline);
         assert_eq!(b.visible_rows().len(), 5, "the timeline hides nothing");
+        b.cycle_detail_view();
+        assert_eq!(b.detail_view, DetailView::Loop);
+        assert_eq!(b.visible_rows().len(), 5, "nor does the loop view");
         b.cycle_detail_view();
         assert_eq!(b.detail_view, DetailView::List);
     }

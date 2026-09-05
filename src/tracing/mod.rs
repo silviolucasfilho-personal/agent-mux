@@ -17,6 +17,7 @@ pub mod correlate;
 pub mod hooks;
 pub mod ids;
 pub mod langfuse;
+pub mod loops;
 pub mod map;
 pub mod pricing;
 pub mod store;

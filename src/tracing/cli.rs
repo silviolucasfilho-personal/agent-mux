@@ -33,6 +33,9 @@ commands:
                                delete old rows; --vacuum reclaims space
   recost                       recompute cost from usage and the current price table
   sql <select ...> [--json]    read-only query
+  loops [session] [--json]     per-turn loop metrics: calls, retries, where the time went, context
+  skills [--json]              what each skill did across the store (loaded vs. attributed)
+  agents [--json]              what each subagent type did: invocations, latency, cost, failures
   hook <claude|codex|codex-notify|agy> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
                                hook entry point invoked by the CLIs (reads the payload from stdin or the last argument)
   hooks install|uninstall|status [codex|agy]
@@ -178,6 +181,14 @@ fn resolved() -> anyhow::Result<(config::Config, ResolvedTracing)> {
 }
 
 fn open_ro(resolved: &ResolvedTracing) -> anyhow::Result<Connection> {
+    // a store last written by an older binary lacks the newer views; bring
+    // it up first so every read-only command sees the same schema
+    if let Ok(true) = store::migrate_in_place(&resolved.db_path) {
+        eprintln!(
+            "trace store migrated to schema v{}",
+            store::schema::SCHEMA_VERSION
+        );
+    }
     store::open_ro(&resolved.db_path).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -215,6 +226,9 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         "prune" => prune(&args),
         "recost" => recost(),
         "sql" => sql(&args),
+        "loops" => loops(&args),
+        "skills" => skills(&args),
+        "agents" => agents(&args),
         "hooks" => hooks_cmd(&args),
         "hook" => {
             let outcome = hook_run(&raw[1..], None);
@@ -281,6 +295,180 @@ fn dir_status(path: Option<&Path>) -> (bool, String) {
         Some(p) => (false, format!("{} (missing)", p.display())),
         None => (false, "unresolvable (no HOME?)".to_string()),
     }
+}
+
+/// `trace loops [session]`: one row per turn with its loop metrics.
+fn loops(args: &Args) -> anyhow::Result<()> {
+    use super::loops::loop_metrics;
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    let json = args.has("json");
+    let session = match args.positional.first() {
+        Some(needle) => query::find_session(&conn, needle)?
+            .ok_or_else(|| anyhow::anyhow!("no session matches {needle:?}"))?,
+        None => query::list_sessions(&conn, &SessionFilter::default())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no sessions in the store"))?,
+    };
+    let turns = query::list_traces(&conn, &session.key)?;
+    let mut rows = Vec::new();
+    for t in &turns {
+        let obs = query::list_observations(&conn, &t.id)?;
+        rows.push((t, loop_metrics(t, &obs)));
+    }
+    if json {
+        let v: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(t, m)| {
+                serde_json::json!({
+                    "trace_id": t.id, "ordinal": t.ordinal, "name": t.name,
+                    "tool_calls": m.tool_calls, "distinct_tools": m.distinct_tools,
+                    "retries": m.retries, "retried_tools": m.retried_tools,
+                    "tool_errors": m.tool_errors, "declined": m.declined,
+                    "model_ms": m.model_ms, "tool_ms": m.tool_ms, "idle_ms": m.idle_ms,
+                    "context_first": m.context_first, "context_last": m.context_last,
+                    "cache_ratio": m.cache_ratio, "compactions": m.compactions,
+                    "subagents": m.subagents, "subagent_tokens": m.subagent_tokens,
+                    "subagent_cost_usd": m.subagent_cost, "total_cost_usd": t.total_cost_usd,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::Value::Array(v));
+        return Ok(());
+    }
+    println!("session {}  {} turn(s)", session.session_id, turns.len());
+    println!(
+        "{:>4} {:>5} {:>4} {:>3} {:>4} {:>8} {:>8} {:>8} {:>15} {:>5} {:>4} {:>8}  name",
+        "turn",
+        "calls",
+        "rtry",
+        "err",
+        "decl",
+        "model",
+        "tools",
+        "idle",
+        "context",
+        "cache",
+        "sub",
+        "cost"
+    );
+    for (t, m) in &rows {
+        let context = match (m.context_first, m.context_last) {
+            (Some(a), Some(b)) => format!("{}→{}", fmt_tokens(Some(a)), fmt_tokens(Some(b))),
+            _ => "-".to_string(),
+        };
+        let name = t
+            .name
+            .split_once(": ")
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| t.name.clone());
+        println!(
+            "{:>4} {:>5} {:>4} {:>3} {:>4} {:>8} {:>8} {:>8} {:>15} {:>5} {:>4} {:>8}  {}",
+            t.ordinal,
+            m.tool_calls,
+            m.retries,
+            m.tool_errors,
+            m.declined,
+            fmt_ms(m.model_ms),
+            fmt_ms(m.tool_ms),
+            fmt_ms(m.idle_ms),
+            context,
+            m.cache_ratio
+                .map(|r| format!("{:.0}%", r * 100.0))
+                .unwrap_or_else(|| "-".into()),
+            m.subagents,
+            fmt_cost(t.total_cost_usd),
+            truncate_display(&name, 40)
+        );
+    }
+    Ok(())
+}
+
+/// `trace skills`: what each skill did across the store.
+fn skills(args: &Args) -> anyhow::Result<()> {
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    let stats = query::skill_stats(&conn)?;
+    if args.has("json") {
+        let v: Vec<serde_json::Value> = stats
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "skill": s.skill, "turns_loaded": s.turns_loaded, "turns_unused": s.turns_unused,
+                    "generations": s.generations, "tools": s.tools, "tokens": s.tokens,
+                    "cost_usd": s.cost, "first_ns": s.first_ns, "last_ns": s.last_ns,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::Value::Array(v));
+        return Ok(());
+    }
+    if stats.is_empty() {
+        println!("no skills recorded — skill loads are attributed from Claude transcripts");
+        return Ok(());
+    }
+    println!(
+        "{:<32} {:>6} {:>6} {:>5} {:>5} {:>8} {:>9}  last used",
+        "skill", "loaded", "unused", "gens", "tools", "tokens", "cost"
+    );
+    for s in &stats {
+        println!(
+            "{:<32} {:>6} {:>6} {:>5} {:>5} {:>8} {:>9}  {}",
+            truncate_display(&s.skill, 32),
+            s.turns_loaded,
+            s.turns_unused,
+            s.generations,
+            s.tools,
+            fmt_tokens(s.tokens),
+            fmt_cost(s.cost),
+            fmt_time(s.last_ns)
+        );
+    }
+    Ok(())
+}
+
+/// `trace agents`: what each subagent type did.
+fn agents(args: &Args) -> anyhow::Result<()> {
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    let stats = query::agent_stats(&conn)?;
+    if args.has("json") {
+        let v: Vec<serde_json::Value> = stats
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "agent_type": a.agent_type, "invocations": a.invocations, "mean_ms": a.mean_ms,
+                    "p90_ms": a.p90_ms, "max_ms": a.max_ms, "tokens": a.tokens,
+                    "cost_usd": a.cost, "failures": a.failures,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::Value::Array(v));
+        return Ok(());
+    }
+    if stats.is_empty() {
+        println!("no subagent invocations recorded");
+        return Ok(());
+    }
+    println!(
+        "{:<24} {:>5} {:>8} {:>8} {:>8} {:>8} {:>9} {:>5}",
+        "agent", "runs", "mean", "p90", "max", "tokens", "cost", "fail"
+    );
+    for a in &stats {
+        println!(
+            "{:<24} {:>5} {:>8} {:>8} {:>8} {:>8} {:>9} {:>5}",
+            truncate_display(&a.agent_type, 24),
+            a.invocations,
+            fmt_ms(a.mean_ms as i64),
+            fmt_ms(a.p90_ms),
+            fmt_ms(a.max_ms),
+            fmt_tokens(Some(a.tokens).filter(|t| *t > 0)),
+            fmt_cost(Some(a.cost).filter(|c| *c > 0.0)),
+            a.failures
+        );
+    }
+    Ok(())
 }
 
 /// `trace hooks install|uninstall|status [codex|agy]`.
@@ -1821,6 +2009,9 @@ mod tests {
             total_cost_usd: None,
             unpriced_generations: 0,
             models: None,
+            metadata: "{}".into(),
+            retries: 0,
+            declined: 0,
         }
     }
 

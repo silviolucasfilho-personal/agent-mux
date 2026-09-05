@@ -1010,6 +1010,15 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                         ),
                         Style::default().fg(Color::Yellow),
                     ),
+                    // the loop line: retries, only when there were any
+                    Span::styled(
+                        if t.retries > 0 {
+                            format!(" {}↻", t.retries)
+                        } else {
+                            String::new()
+                        },
+                        Style::default().fg(Color::Magenta),
+                    ),
                     errors,
                     Span::raw(format!(" {}", truncate_chars(&name, 48))),
                 ]);
@@ -1080,6 +1089,8 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
         draw_observation_tree(f, browser, inner_right);
     } else if browser.detail_view == crate::app::DetailView::Timeline {
         draw_observation_timeline(f, browser, inner_right);
+    } else if browser.detail_view == crate::app::DetailView::Loop {
+        draw_loop_view(f, browser, inner_right);
     } else {
         let visible = usize::from(inner_right.height);
         let start = sidebar_window(
@@ -1152,6 +1163,114 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
         ),
     };
     f.render_widget(Paragraph::new(footer_text), footer);
+}
+
+/// The loop's numbers for the selected turn, on one screen.
+fn draw_loop_view(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
+    let Some(turn) = browser.turns.get(browser.selected_turn) else {
+        return;
+    };
+    let m = crate::tracing::loops::loop_metrics(turn, &browser.observations);
+    let dim = Style::default().fg(Color::DarkGray);
+    let head = |s: &str| Line::styled(format!("── {s} ──"), Style::default().fg(Color::Yellow));
+    let kv = |k: &str, v: String| {
+        Line::from(vec![Span::styled(format!("  {k:<14}"), dim), Span::raw(v)])
+    };
+    let pct = |part: i64, whole: i64| {
+        if whole > 0 {
+            format!("{:>3}%", part * 100 / whole)
+        } else {
+            "  -%".to_string()
+        }
+    };
+    let mut lines = vec![head("calls")];
+    lines.push(kv(
+        "tool calls",
+        format!("{} ({} distinct)", m.tool_calls, m.distinct_tools),
+    ));
+    lines.push(kv(
+        "retries",
+        if m.retried_tools.is_empty() {
+            "0".to_string()
+        } else {
+            let named: Vec<String> = m
+                .retried_tools
+                .iter()
+                .map(|(n, c)| format!("{n} ×{c}"))
+                .collect();
+            format!("{}  ({})", m.retries, named.join(", "))
+        },
+    ));
+    lines.push(kv("errors", m.tool_errors.to_string()));
+    lines.push(kv("declined", m.declined.to_string()));
+
+    lines.push(Line::raw(""));
+    lines.push(head("time"));
+    let total = m.model_ms + m.tool_ms + m.idle_ms;
+    let track = usize::from(area.width).saturating_sub(20).clamp(10, 60);
+    let cells = |part: i64| {
+        if total > 0 {
+            ((part as f64 / total as f64) * track as f64).round() as usize
+        } else {
+            0
+        }
+    };
+    let (mc, tc) = (cells(m.model_ms), cells(m.tool_ms));
+    let ic = track.saturating_sub(mc + tc);
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("█".repeat(mc), Style::default().fg(Color::Blue)),
+        Span::styled("▓".repeat(tc), Style::default()),
+        Span::styled("░".repeat(ic), dim),
+    ]));
+    lines.push(kv(
+        "model",
+        format!("{:>8} {}", fmt_ms(m.model_ms), pct(m.model_ms, total)),
+    ));
+    lines.push(kv(
+        "tools",
+        format!("{:>8} {}", fmt_ms(m.tool_ms), pct(m.tool_ms, total)),
+    ));
+    lines.push(kv(
+        "idle",
+        format!("{:>8} {}", fmt_ms(m.idle_ms), pct(m.idle_ms, total)),
+    ));
+
+    lines.push(Line::raw(""));
+    lines.push(head("context"));
+    lines.push(kv(
+        "first → last",
+        match (m.context_first, m.context_last) {
+            (Some(a), Some(b)) => format!(
+                "{} → {}  ({}{})",
+                fmt_tokens(Some(a)),
+                fmt_tokens(Some(b)),
+                if b >= a { "+" } else { "" },
+                fmt_tokens(Some(b - a))
+            ),
+            _ => "no usage reported".to_string(),
+        },
+    ));
+    lines.push(kv(
+        "cache ratio",
+        m.cache_ratio
+            .map(|r| format!("{:.0}%", r * 100.0))
+            .unwrap_or_else(|| "-".to_string()),
+    ));
+    lines.push(kv("compactions", m.compactions.to_string()));
+
+    lines.push(Line::raw(""));
+    lines.push(head("subagents"));
+    lines.push(kv(
+        "invocations",
+        format!(
+            "{}  ·  {} tok  ·  {}",
+            m.subagents,
+            fmt_tokens(Some(m.subagent_tokens).filter(|t| *t > 0)),
+            fmt_cost(Some(m.subagent_cost).filter(|c| *c > 0.0))
+        ),
+    ));
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Colour for an observation row, shared by both new views.
@@ -1912,6 +2031,9 @@ mod tests {
             total_cost_usd: Some(0.04),
             unpriced_generations: 0,
             models: None,
+            metadata: "{}".into(),
+            retries: 0,
+            declined: 0,
         }];
         browser.observations = vec![
             view("a", "agent: Explore", 0, base, Some(base + 2_000_000_000)),
@@ -1967,6 +2089,30 @@ mod tests {
         assert!(text.contains("░"), "lead-in before a later bar: {text}");
         assert!(text.contains("▶"), "the running row is capped: {text}");
         assert!(text.contains("Grep"), "every row is listed: {text}");
+
+        // loop: the numbers, with retries named and the time bar drawn
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.detail_view = DetailView::Loop;
+            // a second Grep with the same input is a retry
+            let mut again = b.observations[1].clone();
+            again.id = "g2".into();
+            again.input = Some("fn draw".into());
+            b.observations[1].input = Some("fn draw".into());
+            b.observations.push(again);
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("── calls ──"), "{text}");
+        assert!(text.contains("tool calls"), "{text}");
+        assert!(
+            text.contains("Grep ×1"),
+            "the retried tool is named: {text}"
+        );
+        assert!(
+            text.contains("── time ──") && text.contains("idle"),
+            "{text}"
+        );
+        assert!(text.contains("cache ratio"), "{text}");
 
         // a cramped terminal must not panic in either view
         let mut tiny = Terminal::new(TestBackend::new(40, 10)).unwrap();

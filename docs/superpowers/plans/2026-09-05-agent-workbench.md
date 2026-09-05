@@ -8,20 +8,20 @@ Spec: `../specs/2026-09-05-agent-workbench-design.md`. Four phases, each shippab
 
 **Interfaces:** `LoopMetrics { tool_calls, distinct_tools, tool_errors, declined, retries, model_ms, tool_ms, idle_ms, context_first, context_last, cache_ratio, compactions, subagents, subagent_cost }`; `loop_metrics(turn: &TraceStat, obs: &[ObservationView]) -> LoopMetrics` (pure); `retries(obs) -> Vec<(name, count)>`; `time_split(turn_start, turn_end, obs) -> (model_ms, tool_ms, idle_ms)` using span unions; a `loop_stats` view for the SQL-only parts (counts, tokens, cost).
 
-- [ ] **Step 1:** Tests: retries count byte-identical tool inputs only; overlapping tool spans are unioned, not summed (subagent children inside their parent); idle is never negative; context growth from first/last generation; cache ratio with no cache reads is 0; an empty turn yields zeros.
-- [ ] **Step 2:** Implement.
+- [x] **Step 1:** Tests: retries count byte-identical tool inputs only; overlapping tool spans are unioned, not summed (subagent children inside their parent); idle is never negative; context growth from first/last generation; cache ratio with no cache reads is 0; an empty turn yields zeros.
+- [x] **Step 2:** Implement. Views live only in migrations here, so phase 1 carries a small V3 after all: `loop_stats`, `skill_stats`, `agent_stats`, and `trace_stats` recreated with `retries` and `declined`. Read-only CLI commands migrate an older store in place first (`store::migrate_in_place`), without opening a run.
 
 ### Task 2: Skill and agent rollups (`src/tracing/store/query.rs`, schema views)
 
 **Interfaces:** `skill_stats` view (skill, turns_loaded, generations, tools, tokens, cost, turns_unused); `agent_stats` view (agent_type, invocations, mean_ms, p90_ms, tokens, cost, error_rate); `query::skill_stats(conn, filter)`, `query::agent_stats(conn, filter)`.
 
-- [ ] **Step 1:** Tests over a seeded store: a skill loaded in two turns and attributed in one reports `turns_unused = 1`; agent p90 over five invocations; an agent with one failed child counts one error.
-- [ ] **Step 2:** Implement.
+- [x] **Step 1:** Tests over a seeded store: a skill loaded in two turns and attributed in one reports `turns_unused = 1`; agent p90 over five invocations; an agent with one failed child counts one error.
+- [x] **Step 2:** Implement; p90 is nearest-rank over per-invocation durations, computed in Rust beside the view.
 
 ### Task 3: Surfaces (`src/tracing/cli.rs`, `src/app.rs`, `src/ui.rs`)
 
-- [ ] **Step 1:** Tests: `trace loops` prints one row per turn with the metric columns; `trace skills` and `trace agents` shapes; the browser's `loop` detail view renders the numbers and names each retried tool; the Turns pane line shows `N🔧 R↻ E!` and hides the zero parts.
-- [ ] **Step 2:** Implement; `v` cycles list → tree → timeline → loop.
+- [x] **Step 1:** Tests: `trace loops` prints one row per turn with the metric columns; `trace skills` and `trace agents` shapes; the browser's `loop` detail view renders the numbers and names each retried tool; the Turns pane line shows `N🔧 R↻ E!` and hides the zero parts.
+- [x] **Step 2:** Implement; `v` cycles list → tree → timeline → loop.
 
 ## Phase 2 — Make variants comparable
 

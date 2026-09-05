@@ -1,9 +1,9 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 const V1: &str = r#"
 CREATE TABLE meta (
@@ -249,4 +249,94 @@ CREATE TABLE hook_events (
 CREATE INDEX hook_events_launch  ON hook_events (launch_id, id);
 CREATE INDEX hook_events_session ON hook_events (provider, session_id, id);
 CREATE INDEX hook_events_ts      ON hook_events (ts_ns DESC);
+"#;
+
+/// Workbench, phase 1: derived views over existing rows. Nothing is
+/// stored that a trace does not already say.
+const V3: &str = r#"
+DROP VIEW trace_stats;
+CREATE VIEW trace_stats AS
+SELECT t.*,
+       datetime(t.start_ns / 1000000000, 'unixepoch') AS started_at,
+       (COALESCE(t.end_ns, MAX(COALESCE(o.end_ns, o.start_ns)), t.start_ns) - t.start_ns) / 1000000 AS latency_ms,
+       COUNT(o.rid)                                   AS observation_count,
+       COALESCE(SUM(o.type = 'generation'), 0)        AS generation_count,
+       COALESCE(SUM(o.type IN ('tool','agent')), 0)   AS tool_count,
+       COALESCE(SUM(o.is_error), 0)                   AS error_count,
+       COALESCE(SUM(o.end_ns IS NULL), 0)             AS open_count,
+       SUM(o.input_tokens)                            AS input_tokens,
+       SUM(o.output_tokens)                           AS output_tokens,
+       SUM(o.cache_read_tokens)                       AS cache_read_tokens,
+       SUM(o.cache_write_tokens)                      AS cache_write_tokens,
+       SUM(o.total_tokens)                            AS total_tokens,
+       SUM(o.total_cost_usd)                          AS total_cost_usd,
+       COALESCE(SUM(o.type = 'generation' AND o.usage IS NOT NULL AND o.total_cost_usd IS NULL), 0) AS unpriced_generations,
+       GROUP_CONCAT(DISTINCT o.model)                 AS models,
+       COALESCE(SUM(o.type = 'tool' AND trim(COALESCE(o.input, '')) <> ''), 0)
+         - COUNT(DISTINCT CASE WHEN o.type = 'tool' AND trim(COALESCE(o.input, '')) <> ''
+                               THEN o.name || char(0) || o.input END) AS retries,
+       COALESCE(SUM(o.status_message = 'declined by the user'), 0) AS declined
+FROM traces t LEFT JOIN observations o ON o.trace_id = t.id
+GROUP BY t.rid;
+
+CREATE VIEW loop_stats AS
+SELECT t.id                                             AS trace_id,
+       t.session_key,
+       t.ordinal,
+       COALESCE(SUM(o.type = 'tool'), 0)                AS tool_calls,
+       COUNT(DISTINCT CASE WHEN o.type = 'tool' THEN o.name END) AS distinct_tools,
+       COALESCE(SUM(o.type = 'tool' AND o.is_error), 0) AS tool_errors,
+       COALESCE(SUM(o.status_message = 'declined by the user'), 0) AS declined,
+       COALESCE(SUM(o.type = 'agent'), 0)               AS subagents,
+       COALESCE(json_extract(t.metadata, '$.compacted'), 0) AS compacted,
+       SUM(CASE WHEN o.type = 'generation' THEN o.input_tokens END)      AS input_tokens,
+       SUM(CASE WHEN o.type = 'generation' THEN o.cache_read_tokens END) AS cache_read_tokens
+FROM traces t LEFT JOIN observations o ON o.trace_id = t.id
+GROUP BY t.rid;
+
+CREATE VIEW skill_stats AS
+WITH loaded AS (
+  SELECT t.id AS trace_id, t.start_ns, j.value AS skill
+  FROM traces t, json_each(t.skills) j
+),
+used AS (
+  SELECT o.trace_id, o.skill,
+         SUM(o.type = 'generation')          AS generations,
+         SUM(o.type IN ('tool', 'agent'))    AS tools,
+         SUM(o.total_tokens)                 AS tokens,
+         SUM(o.total_cost_usd)               AS cost
+  FROM observations o WHERE o.skill IS NOT NULL
+  GROUP BY o.trace_id, o.skill
+)
+SELECT l.skill,
+       COUNT(DISTINCT l.trace_id)            AS turns_loaded,
+       COALESCE(SUM(u.generations), 0)       AS generations,
+       COALESCE(SUM(u.tools), 0)             AS tools,
+       SUM(u.tokens)                         AS tokens,
+       SUM(u.cost)                           AS cost,
+       COALESCE(SUM(u.trace_id IS NULL), 0)  AS turns_unused,
+       MIN(l.start_ns)                       AS first_ns,
+       MAX(l.start_ns)                       AS last_ns
+FROM loaded l LEFT JOIN used u ON u.trace_id = l.trace_id AND u.skill = l.skill
+GROUP BY l.skill;
+
+CREATE VIEW agent_stats AS
+SELECT agent_type,
+       COUNT(*)      AS invocations,
+       AVG(dur_ms)   AS mean_ms,
+       MAX(dur_ms)   AS max_ms,
+       SUM(tokens)   AS tokens,
+       SUM(cost)     AS cost,
+       SUM(failed)   AS failures
+FROM (
+  SELECT COALESCE(json_extract(a.metadata, '$.agent_type'), a.name) AS agent_type,
+         (COALESCE(a.end_ns, a.start_ns) - a.start_ns) / 1000000     AS dur_ms,
+         COALESCE(a.total_tokens, 0)
+           + COALESCE((SELECT SUM(c.total_tokens) FROM observations c WHERE c.parent_id = a.id), 0) AS tokens,
+         COALESCE(a.total_cost_usd, 0)
+           + COALESCE((SELECT SUM(c.total_cost_usd) FROM observations c WHERE c.parent_id = a.id), 0) AS cost,
+         (a.is_error OR EXISTS (SELECT 1 FROM observations c WHERE c.parent_id = a.id AND c.is_error)) AS failed
+  FROM observations a WHERE a.type = 'agent'
+)
+GROUP BY agent_type;
 "#;

@@ -91,6 +91,24 @@ fn migrate(conn: &Connection) -> Result<bool, String> {
     Ok(fresh)
 }
 
+/// Brings an existing store up to this binary's schema without opening a
+/// run: what the read-only CLI commands do first, so `trace loops` on a
+/// store last written by an older agent-mux finds the views it expects.
+/// A missing file is left alone (nothing to migrate) and reported `Ok`.
+pub fn migrate_in_place(path: &Path) -> Result<bool, String> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let conn = Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|e| e.to_string())?;
+    let before: i32 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    migrate(&conn)?;
+    Ok(before < schema::SCHEMA_VERSION)
+}
+
 /// Opens (creating if needed) the store read-write. Errors are messages
 /// suitable for a status-bar notice; the caller runs untraced on `Err`.
 pub fn open_rw(path: &Path, opts: OpenOptions) -> Result<Store, String> {
@@ -1093,7 +1111,7 @@ mod tests {
             meta_value(store.conn(), "schema_version")
                 .unwrap()
                 .as_deref(),
-            Some("2")
+            Some("3")
         );
         let runs: i64 = store
             .conn()
@@ -1171,7 +1189,17 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(
+            version,
+            schema::SCHEMA_VERSION,
+            "a v1 store migrates all the way up"
+        );
+        // and the read-only path migrates in place without a run row
+        assert!(
+            !migrate_in_place(&path).unwrap(),
+            "already current: nothing to do"
+        );
+        assert!(!migrate_in_place(Path::new("/nonexistent/traces.db")).unwrap());
         drop(store);
         let sink = open_hook_sink(&path, Duration::from_millis(50)).unwrap();
         let ev = crate::tracing::hooks::parse(
