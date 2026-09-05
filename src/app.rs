@@ -268,6 +268,10 @@ pub enum DialogField {
     Resume,
     /// A prompt to run non-interactively; blank launches interactively.
     OneShot,
+    /// Name of an experiment to record this launch under; blank = none.
+    Experiment,
+    /// The variant label within that experiment; blank = "interactive".
+    Variant,
 }
 
 #[derive(Debug)]
@@ -359,6 +363,11 @@ pub struct DialogState {
     /// False when no Langfuse credentials resolved: the field cannot leave
     /// local and says why.
     pub langfuse_available: bool,
+    /// Experiment link for this launch; blank experiment = not linked.
+    pub experiment: String,
+    pub variant: String,
+    /// True when a trace store is open to record the link into.
+    pub experiments_available: bool,
 }
 
 impl DialogState {
@@ -402,6 +411,9 @@ impl DialogState {
             resume_last: false,
             one_shot: String::new(),
             langfuse_available: false,
+            experiment: String::new(),
+            variant: String::new(),
+            experiments_available: false,
         }
     }
 
@@ -424,7 +436,35 @@ impl DialogState {
                 DialogField::OneShot,
             ]);
         }
+        if self.experiments_available && self.tracing_enabled {
+            fields.extend([DialogField::Experiment, DialogField::Variant]);
+        }
         fields
+    }
+
+    /// Whether the launch can be recorded as an experiment run: only with
+    /// a trace store open, since the run row hangs off the launch row.
+    pub fn with_experiments(mut self, available: bool) -> Self {
+        self.experiments_available = available;
+        self
+    }
+
+    /// The experiment this launch records itself under, if one is named.
+    pub fn experiment_link(&self) -> Option<crate::tracing::experiments::ExperimentLink> {
+        let experiment = self.experiment.trim();
+        if experiment.is_empty() || !self.experiments_available || !self.tracing_enabled {
+            return None;
+        }
+        let variant = self.variant.trim();
+        Some(crate::tracing::experiments::ExperimentLink {
+            experiment: experiment.to_string(),
+            variant: if variant.is_empty() {
+                "interactive".to_string()
+            } else {
+                variant.to_string()
+            },
+            prompt: self.one_shot.trim().to_string(),
+        })
     }
 
     fn step_field(&mut self, delta: isize) {
@@ -690,6 +730,22 @@ impl DialogState {
                 KeyCode::Char(c) => self.one_shot.push(c),
                 KeyCode::Backspace => {
                     self.one_shot.pop();
+                }
+                _ => {}
+            },
+            DialogField::Experiment => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(c) => self.experiment.push(c),
+                KeyCode::Backspace => {
+                    self.experiment.pop();
+                }
+                _ => {}
+            },
+            DialogField::Variant => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(c) => self.variant.push(c),
+                KeyCode::Backspace => {
+                    self.variant.pop();
                 }
                 _ => {}
             },
@@ -1259,6 +1315,10 @@ pub struct App {
     /// this to `false` so `cargo test` never touches the real system
     /// clipboard.
     pub clipboard_enabled: bool,
+    /// Launches the dialog linked to an experiment, by session id, until
+    /// the session ends and the run is recorded.
+    pub experiment_links:
+        std::collections::HashMap<usize, crate::tracing::experiments::ExperimentLink>,
     drag_owner: Option<DragOwner>,
     just_detached: bool,
     next_id: usize,
@@ -1289,6 +1349,7 @@ impl App {
             drag_owner: None,
             just_detached: false,
             next_id: 0,
+            experiment_links: std::collections::HashMap::new(),
             tx,
             tracing,
             trace_db_path,
@@ -1340,6 +1401,17 @@ impl App {
 
     /// Hands the runtime back to `main` for the post-`kill_all` bounded
     /// shutdown flush.
+    /// Spawns a session from a ready profile, the way the dialog does, and
+    /// returns its index. The headless runner's entry point.
+    pub fn launch(&mut self, profile: Profile, dir: std::path::PathBuf) -> anyhow::Result<usize> {
+        let id = self.next_id;
+        let session = self.spawn_traced(id, profile, dir)?;
+        self.next_id += 1;
+        self.sessions.push(session);
+        self.selected = self.sessions.len() - 1;
+        Ok(self.selected)
+    }
+
     pub fn take_tracing(&mut self) -> Option<crate::tracing::TraceRuntime> {
         self.tracing.take()
     }
@@ -1840,12 +1912,11 @@ impl App {
                     Some(rt) => (rt.default_backend(), rt.langfuse_configured()),
                     None => (crate::config::Backend::Local, false),
                 };
-                self.mode =
-                    Mode::NewSession(DialogState::new(&self.profiles).with_backend_options(
-                        default,
-                        available,
-                        &self.profiles,
-                    ));
+                self.mode = Mode::NewSession(
+                    DialogState::new(&self.profiles)
+                        .with_backend_options(default, available, &self.profiles)
+                        .with_experiments(self.tracing.is_some()),
+                );
             }
             Action::OpenHelp => self.mode = Mode::Help,
             Action::EnterConfirmKill => self.mode = Mode::ConfirmKill,
@@ -1962,6 +2033,7 @@ impl App {
                     }
                 }
                 let dir = resolve_working_dir(&dialog.dir);
+                let link = dialog.experiment_link();
                 let id = self.next_id;
                 match self.spawn_traced(id, profile, dir) {
                     Ok(session) => {
@@ -1969,6 +2041,9 @@ impl App {
                         self.sessions.push(session);
                         self.selected = self.sessions.len() - 1;
                         self.mode = Mode::Control;
+                        if let Some(link) = link {
+                            self.experiment_links.insert(id, link);
+                        }
                     }
                     Err(e) => {
                         let Mode::NewSession(dialog) = &mut self.mode else {
@@ -2366,6 +2441,7 @@ impl App {
                 };
                 trace.mark_exited(code);
             }
+            self.record_experiment_link(i);
             // if we were attached to it, drop back to Control
             if self.attached() == Some(i) {
                 self.mode = Mode::Control;
@@ -2392,6 +2468,37 @@ impl App {
         // child, so calling it again here is harmless.
         for s in &mut self.sessions {
             s.kill();
+        }
+        for i in 0..self.sessions.len() {
+            self.record_experiment_link(i);
+        }
+    }
+
+    /// Writes the experiment run for a session that named one, once it is
+    /// over (or is being killed with the app): the launch row is in the
+    /// store by then, and the exit code is as known as it will get.
+    fn record_experiment_link(&mut self, i: usize) {
+        let Some(link) = self.experiment_links.remove(&self.sessions[i].id) else {
+            return;
+        };
+        let (Some(rt), Some(trace)) = (&self.tracing, &self.sessions[i].trace) else {
+            return;
+        };
+        let code = match self.sessions[i].status(Instant::now()) {
+            Status::Exited(code) => code,
+            _ => None,
+        };
+        if let Err(e) = crate::tracing::experiments::link_launch(
+            rt.db_path(),
+            &trace.launch_id,
+            &link,
+            &self.sessions[i].dir,
+            code,
+        ) {
+            self.notice = Some(Notice::error(format!(
+                "experiment {}: {e}",
+                link.experiment
+            )));
         }
     }
 }
@@ -2845,6 +2952,48 @@ mod dialog_tests {
         assert_eq!(d.fields().len(), 5);
         d.handle_key(&key(KeyCode::Tab), &ps);
         assert_eq!(d.field, DialogField::Dir, "tab skips what is not shown");
+    }
+
+    #[test]
+    fn experiment_fields_appear_only_with_a_store_and_link_the_launch() {
+        let ps = harness_profiles();
+        // no store: the fields are not offered and Tab never lands on them
+        let mut d = DialogState::new(&ps);
+        assert!(!d.fields().contains(&DialogField::Experiment));
+        d.experiment = "x".into();
+        assert_eq!(d.experiment_link(), None, "no store, no link");
+
+        let mut d = DialogState::new(&ps).with_experiments(true);
+        let fields = d.fields();
+        assert_eq!(
+            &fields[fields.len() - 2..],
+            &[DialogField::Experiment, DialogField::Variant]
+        );
+        assert_eq!(d.experiment_link(), None, "blank experiment = not linked");
+        d.field = DialogField::Experiment;
+        for c in "touch file".chars() {
+            d.handle_key(&key(KeyCode::Char(c)), &ps);
+        }
+        d.handle_key(&key(KeyCode::Backspace), &ps);
+        assert_eq!(d.experiment, "touch fil");
+        let link = d.experiment_link().unwrap();
+        assert_eq!(link.experiment, "touch fil");
+        assert_eq!(link.variant, "interactive", "blank variant gets a label");
+        assert_eq!(link.prompt, "", "no one-shot: a conversation");
+        d.field = DialogField::Variant;
+        for c in "b".chars() {
+            d.handle_key(&key(KeyCode::Char(c)), &ps);
+        }
+        d.one_shot = " fix it ".into();
+        let link = d.experiment_link().unwrap();
+        assert_eq!(
+            (link.variant.as_str(), link.prompt.as_str()),
+            ("b", "fix it")
+        );
+        // tracing off for this launch: nothing to record into
+        d.tracing_enabled = false;
+        assert!(!d.fields().contains(&DialogField::Variant));
+        assert_eq!(d.experiment_link(), None);
     }
 
     #[test]

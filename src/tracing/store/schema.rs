@@ -1,9 +1,9 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 const V1: &str = r#"
 CREATE TABLE meta (
@@ -339,4 +339,37 @@ FROM (
   FROM observations a WHERE a.type = 'agent'
 )
 GROUP BY agent_type;
+"#;
+
+/// Workbench, phase 2: experiments (a task run under variants, each run a
+/// labelled launch) and scores (a person's verdict on a turn or launch).
+const V4: &str = r#"
+CREATE TABLE experiments (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,
+  prompt     TEXT NOT NULL,
+  cwd        TEXT,
+  check_cmd  TEXT,
+  created_ns INTEGER NOT NULL,
+  notes      TEXT
+);
+CREATE TABLE experiment_runs (
+  launch_id     TEXT PRIMARY KEY REFERENCES launches (id),
+  experiment_id TEXT NOT NULL REFERENCES experiments (id),
+  variant       TEXT NOT NULL,
+  outcome       TEXT NOT NULL CHECK (outcome IN ('pass','fail','unknown')),
+  detail        TEXT NOT NULL DEFAULT '{}',
+  recorded_ns   INTEGER NOT NULL
+);
+CREATE INDEX experiment_runs_by_experiment ON experiment_runs (experiment_id, variant);
+CREATE TABLE scores (
+  id         INTEGER PRIMARY KEY,
+  target     TEXT NOT NULL CHECK (target IN ('trace','session','launch')),
+  target_id  TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  value      REAL NOT NULL,
+  comment    TEXT,
+  created_ns INTEGER NOT NULL
+);
+CREATE INDEX scores_by_target ON scores (target, target_id);
 "#;

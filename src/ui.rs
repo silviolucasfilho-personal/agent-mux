@@ -408,7 +408,12 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
     let width = 72.min(f.area().width.saturating_sub(4)).max(40);
     // the launch options add six rows when the profile runs a known CLI
-    let options_rows = if dialog.harness.is_some() { 6 } else { 0 };
+    let options_rows = if dialog.harness.is_some() { 6 } else { 0 }
+        + if dialog.fields().contains(&DialogField::Experiment) {
+            4
+        } else {
+            0
+        };
     let height = (app.profiles.len() as u16 + 20 + options_rows)
         .min(f.area().height.saturating_sub(2))
         .max(18);
@@ -451,7 +456,14 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
     } else {
         // the subfolder list is the flexible part: on a short terminal it
         // shrinks so the fields below it stay on screen
-        let fixed_rows = app.profiles.len() + 12 + if dialog.harness.is_some() { 6 } else { 0 };
+        let fixed_rows = app.profiles.len()
+            + 12
+            + if dialog.harness.is_some() { 6 } else { 0 }
+            + if dialog.fields().contains(&DialogField::Experiment) {
+                4
+            } else {
+                0
+            };
         let max_visible = usize::from(height).saturating_sub(fixed_rows).clamp(1, 4);
         let selected = dialog.dir_selected_idx.unwrap_or(0);
         let start = if selected >= max_visible {
@@ -641,6 +653,51 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
                 },
                 dim,
             ),
+        ]));
+    }
+
+    // Experiment link, when a store is there to record it
+    if dialog.fields().contains(&DialogField::Experiment) {
+        let focused = |f: DialogField| {
+            if dialog.field == f {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            }
+        };
+        let dim = Style::default().fg(Color::DarkGray);
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("── experiment ──", dim));
+        let (experiment, experiment_style) = if dialog.experiment.is_empty() {
+            (
+                "(none)".to_string(),
+                focused(DialogField::Experiment).fg(Color::DarkGray),
+            )
+        } else {
+            (
+                truncate_chars(&dialog.experiment, 32),
+                focused(DialogField::Experiment).fg(Color::Yellow),
+            )
+        };
+        lines.push(Line::from(vec![
+            Span::raw("Experiment:       "),
+            Span::styled(experiment, experiment_style),
+            Span::styled(" (records this launch as a run)", dim),
+        ]));
+        let (variant, variant_style) = if dialog.variant.is_empty() {
+            (
+                "interactive".to_string(),
+                focused(DialogField::Variant).fg(Color::DarkGray),
+            )
+        } else {
+            (
+                truncate_chars(&dialog.variant, 32),
+                focused(DialogField::Variant).fg(Color::Yellow),
+            )
+        };
+        lines.push(Line::from(vec![
+            Span::raw("Variant:          "),
+            Span::styled(variant, variant_style),
         ]));
     }
 

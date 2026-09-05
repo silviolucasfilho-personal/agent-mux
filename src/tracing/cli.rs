@@ -36,6 +36,9 @@ commands:
   loops [session] [--json]     per-turn loop metrics: calls, retries, where the time went, context
   skills [--json]              what each skill did across the store (loaded vs. attributed)
   agents [--json]              what each subagent type did: invocations, latency, cost, failures
+  compare <a> <b>              two turns or sessions side by side: loop metrics and the tool path
+  experiments [name]           the experiment registry, or one experiment's variants
+  (see also: agent-mux run --experiment <name> --variant <label> --prompt <text> …)
   hook <claude|codex|codex-notify|agy> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
                                hook entry point invoked by the CLIs (reads the payload from stdin or the last argument)
   hooks install|uninstall|status [codex|agy]
@@ -229,6 +232,8 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         "loops" => loops(&args),
         "skills" => skills(&args),
         "agents" => agents(&args),
+        "compare" => compare(&args),
+        "experiments" => experiments(&args),
         "hooks" => hooks_cmd(&args),
         "hook" => {
             let outcome = hook_run(&raw[1..], None);
@@ -466,6 +471,167 @@ fn agents(args: &Args) -> anyhow::Result<()> {
             fmt_tokens(Some(a.tokens).filter(|t| *t > 0)),
             fmt_cost(Some(a.cost).filter(|c| *c > 0.0)),
             a.failures
+        );
+    }
+    Ok(())
+}
+
+/// `trace compare <a> <b>`: two turns or sessions side by side.
+fn compare(args: &Args) -> anyhow::Result<()> {
+    use super::experiments::{diff, resolve_side};
+    let (Some(a), Some(b)) = (args.positional.first(), args.positional.get(1)) else {
+        anyhow::bail!("usage: agent-mux trace compare <turn|session> <turn|session>");
+    };
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    let left = resolve_side(&conn, a)?.ok_or_else(|| anyhow::anyhow!("nothing matches {a:?}"))?;
+    let right = resolve_side(&conn, b)?.ok_or_else(|| anyhow::anyhow!("nothing matches {b:?}"))?;
+    println!(
+        "{:<16} {:>22} {:>22} {:>10}",
+        "", left.label, right.label, "delta"
+    );
+    let row = |name: &str, l: String, r: String, d: String| {
+        println!("{name:<16} {l:>22} {r:>22} {d:>10}");
+    };
+    let signed = |d: i64| {
+        if d > 0 {
+            format!("+{d}")
+        } else {
+            d.to_string()
+        }
+    };
+    let (lm, rm) = (&left.metrics, &right.metrics);
+    row(
+        "turns",
+        left.turns.to_string(),
+        right.turns.to_string(),
+        signed(right.turns - left.turns),
+    );
+    row(
+        "tool calls",
+        lm.tool_calls.to_string(),
+        rm.tool_calls.to_string(),
+        signed(rm.tool_calls - lm.tool_calls),
+    );
+    row(
+        "distinct tools",
+        lm.distinct_tools.to_string(),
+        rm.distinct_tools.to_string(),
+        signed(rm.distinct_tools - lm.distinct_tools),
+    );
+    row(
+        "retries",
+        lm.retries.to_string(),
+        rm.retries.to_string(),
+        signed(rm.retries - lm.retries),
+    );
+    row(
+        "errors",
+        lm.tool_errors.to_string(),
+        rm.tool_errors.to_string(),
+        signed(rm.tool_errors - lm.tool_errors),
+    );
+    row(
+        "declined",
+        lm.declined.to_string(),
+        rm.declined.to_string(),
+        signed(rm.declined - lm.declined),
+    );
+    row(
+        "model time",
+        fmt_ms(lm.model_ms),
+        fmt_ms(rm.model_ms),
+        signed(rm.model_ms - lm.model_ms) + "ms",
+    );
+    row(
+        "tool time",
+        fmt_ms(lm.tool_ms),
+        fmt_ms(rm.tool_ms),
+        signed(rm.tool_ms - lm.tool_ms) + "ms",
+    );
+    row(
+        "idle time",
+        fmt_ms(lm.idle_ms),
+        fmt_ms(rm.idle_ms),
+        signed(rm.idle_ms - lm.idle_ms) + "ms",
+    );
+    let ctx = |m: &super::loops::LoopMetrics| match (m.context_first, m.context_last) {
+        (Some(a), Some(b)) => format!("{}→{}", fmt_tokens(Some(a)), fmt_tokens(Some(b))),
+        _ => "-".to_string(),
+    };
+    row("context", ctx(lm), ctx(rm), String::new());
+    row(
+        "subagents",
+        lm.subagents.to_string(),
+        rm.subagents.to_string(),
+        signed(rm.subagents - lm.subagents),
+    );
+    row(
+        "tokens",
+        fmt_tokens(left.tokens),
+        fmt_tokens(right.tokens),
+        match (left.tokens, right.tokens) {
+            (Some(a), Some(b)) => signed(b - a),
+            _ => String::new(),
+        },
+    );
+    row(
+        "cost",
+        fmt_cost(left.cost),
+        fmt_cost(right.cost),
+        match (left.cost, right.cost) {
+            (Some(a), Some(b)) => format!("{}{:.4}", if b >= a { "+" } else { "" }, b - a),
+            _ => String::new(),
+        },
+    );
+    println!(
+        "\ntool sequence ('-' only in {}, '+' only in {}):",
+        left.label, right.label
+    );
+    for (mark, name) in diff(&left.tools, &right.tools) {
+        println!("  {mark} {name}");
+    }
+    Ok(())
+}
+
+/// `trace experiments [name]`: the registry, or one experiment's variants.
+fn experiments(args: &Args) -> anyhow::Result<()> {
+    use super::experiments::{experiment_summary, list_experiments, summary_lines};
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    if let Some(name) = args.positional.first() {
+        let rows = experiment_summary(&conn, name)?;
+        if rows.is_empty() {
+            anyhow::bail!("no runs recorded for experiment {name:?}");
+        }
+        for line in summary_lines(&rows) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    let list = list_experiments(&conn)?;
+    if list.is_empty() {
+        println!(
+            "no experiments yet — `agent-mux run --experiment <name> --variant <label> --prompt …`"
+        );
+        return Ok(());
+    }
+    println!(
+        "{:<24} {:>5} {:>8}  {:<19}  prompt",
+        "experiment", "runs", "variants", "created"
+    );
+    for e in &list {
+        println!(
+            "{:<24} {:>5} {:>8}  {}  {}",
+            truncate_display(&e.name, 24),
+            e.runs,
+            e.variants,
+            fmt_time(e.created_ns),
+            if e.prompt.is_empty() {
+                "(interactive)".to_string()
+            } else {
+                truncate_display(&e.prompt.replace('\n', " "), 60)
+            }
         );
     }
     Ok(())

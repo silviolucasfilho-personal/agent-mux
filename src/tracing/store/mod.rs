@@ -109,6 +109,26 @@ pub fn migrate_in_place(path: &Path) -> Result<bool, String> {
     Ok(before < schema::SCHEMA_VERSION)
 }
 
+/// A plain read-write connection for the small tables the CLI and the
+/// runner write directly — experiments, runs, scores — beside the writer
+/// thread rather than through it. Brings the store up to date first.
+pub fn open_aux(path: &Path) -> Result<Connection, String> {
+    migrate_in_place(path)?;
+    if !path.is_file() {
+        return Err(format!("no trace store at {}", path.display()));
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("open {}: {e}", path.display()))?;
+    conn.busy_timeout(Duration::from_secs(2))
+        .map_err(|e| e.to_string())?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
 /// Opens (creating if needed) the store read-write. Errors are messages
 /// suitable for a status-bar notice; the caller runs untraced on `Err`.
 pub fn open_rw(path: &Path, opts: OpenOptions) -> Result<Store, String> {
@@ -1111,7 +1131,7 @@ mod tests {
             meta_value(store.conn(), "schema_version")
                 .unwrap()
                 .as_deref(),
-            Some("3")
+            Some(schema::SCHEMA_VERSION.to_string().as_str())
         );
         let runs: i64 = store
             .conn()

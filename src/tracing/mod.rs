@@ -14,6 +14,7 @@
 pub mod agy_usage;
 pub mod cli;
 pub mod correlate;
+pub mod experiments;
 pub mod hooks;
 pub mod ids;
 pub mod langfuse;

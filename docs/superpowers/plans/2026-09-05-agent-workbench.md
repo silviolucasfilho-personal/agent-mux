@@ -29,20 +29,20 @@ Spec: `../specs/2026-09-05-agent-workbench-design.md`. Four phases, each shippab
 
 **Interfaces:** tables `experiments`, `experiment_runs`, `scores` (created here, used in Phase 4); `Experiment { id, name, prompt, cwd, check_cmd }`; `Run { launch_id, variant, outcome: Outcome, detail }`; `Outcome { Pass, Fail, Unknown }`; `store::upsert_experiment`, `store::record_run`, `query::experiment_summary(name) -> Vec<VariantSummary { variant, runs, pass_rate, mean_cost, p50_cost, mean_turns, mean_wall_ms, scores }>`.
 
-- [ ] **Step 1:** Tests: v2 store migrates to v3 and keeps every row; a run links to its launch; summary math over seeded runs; a variant with no check reports `Unknown`, never `Pass`.
-- [ ] **Step 2:** Implement.
+- [x] **Step 1:** Tests: the v1 fixture migrates all the way to the current version; a run links to its launch and re-recording replaces rather than duplicates; summary math over two real runs; a variant with no check reports `Unknown` and no pass rate.
+- [x] **Step 2:** Implement. Phase 1 already took v3 for the views, so this is **V4**: `experiments`, `experiment_runs`, `scores`. The registry lives in `src/tracing/experiments.rs` rather than `store`/`query`, beside the runner that fills it; `store::open_aux` is the plain read-write connection those writes use, outside the writer thread.
 
 ### Task 5: The runner (`src/main.rs`, `src/tracing/experiments.rs`)
 
 **Interfaces:** `agent-mux run --experiment E --variant V --prompt P [--harness H] [--model M] [--bypass] [--cwd DIR] [--check CMD] [--repeat N]`; builds a `Profile` for the harness, renders `LaunchOptions { one_shot: P, model, bypass_approvals }` through `harness::compose`, launches through the trace runtime headlessly (no TUI), waits for exit, runs the check in `cwd`, records the run; the help text states that variants which edit files need separate checkouts.
 
-- [ ] **Step 1:** Tests: the composed argv per harness; a fake `claude` script drives a run end to end and the run row carries exit code, check outcome and the final message; `--repeat 3` records three runs under one variant.
-- [ ] **Step 2:** Implement; the dialog gains optional Experiment and Variant fields that link an interactive launch the same way.
+- [x] **Step 1:** Tests: the composed argv per harness; a fake `claude` drives two runs end to end (one passing check, one failing) and the rows carry exit code, outcome and the final message; the dialog's Experiment/Variant fields record an interactive launch at exit. `--repeat` reuses the single-run path, so it is covered by the runner test plus the arg parser rather than a three-run fixture.
+- [x] **Step 2:** Implement. One rule added while testing: a Claude one-shot skips the planner's `--session-id` injection (the hook channel normally announces it), so the runner pins a fresh session id per run itself and correlates whether or not hooks are on. Interactive links are recorded when the session ends (or the app quits), since the run row hangs off the launch row and that row reaches the store through the writer thread.
 
 ### Task 6: Compare and summarise (`src/tracing/cli.rs`)
 
-- [ ] **Step 1:** Tests: `trace compare A B` prints two metric columns with signed deltas and a tool-sequence diff with `+`/`-`/` ` lines; `trace experiments E` prints one row per variant.
-- [ ] **Step 2:** Implement.
+- [x] **Step 1:** Tests: two sessions resolve as sides with loop metrics and tool paths, the LCS diff marks `+`/`-`/` `; `summary_lines` prints one row per variant; the smoke on the real store shows unpriced sides as `-`, never `$0.00`.
+- [x] **Step 2:** Implement.
 
 ## Phase 3 — Skills and agents as first-class objects
 
