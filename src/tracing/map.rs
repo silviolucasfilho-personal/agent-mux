@@ -144,6 +144,7 @@ struct OpenTool {
     event_index: u64,
 }
 
+#[derive(Clone)]
 struct PendingGen {
     text: String,
     model: Option<String>,
@@ -169,6 +170,10 @@ struct OpenTurn {
     /// Codex only: generations buffered until turn close so the late
     /// per-turn `token_count` usage can attach to the final one.
     pending_generations: Vec<PendingGen>,
+    /// The last generation emitted in this turn, by index. A model-
+    /// attributed token count that follows it belongs to *that* API call,
+    /// so the usage joins the row instead of minting a second one.
+    last_gen: Option<(usize, PendingGen)>,
     pending_turn_usage: Vec<(String, i64)>,
     pending_thinking: Vec<String>,
     seen_usage_msg_ids: std::collections::HashSet<String>,
@@ -429,6 +434,7 @@ impl TurnAssembler {
             last_assistant_text: None,
             open_tools: Vec::new(),
             pending_generations: Vec::new(),
+            last_gen: None,
             pending_turn_usage: Vec::new(),
             pending_thinking: Vec::new(),
             seen_usage_msg_ids: std::collections::HashSet::new(),
@@ -768,6 +774,14 @@ impl TurnAssembler {
         }
     }
 
+    /// True when a transcript row already names this agent, so a hook
+    /// row for it has something to attach to.
+    fn knows_agent(&self, agent_id: &str) -> bool {
+        self.emitted_tools
+            .values()
+            .any(|(_, row)| row.metadata.get("agent_id").and_then(|v| v.as_str()) == Some(agent_id))
+    }
+
     /// `SubagentStart` / `SubagentStop`: an agent row of the hooks' own,
     /// parented under the transcript's Task row once that is known.
     fn subagent_hook(&mut self, ev: &HookEvent, ops: &mut Vec<StoreOp>) {
@@ -775,6 +789,30 @@ impl TurnAssembler {
             return;
         };
         let stopping = ev.event == "SubagentStop";
+        // Claude fires SubagentStop but never SubagentStart, and its
+        // payload can be empty: no type, no result. A stop for an agent
+        // nothing else mentions — no Task row, no child tool calls — has
+        // nothing to show, and inventing a zero-length nameless span for
+        // it only adds noise to the turn it happened to land in. Count it
+        // on the turn instead.
+        if stopping && !self.hook_agents.contains_key(&agent_id) && !self.knows_agent(&agent_id) {
+            let bare = ev.agent_type.is_none()
+                && !ev.payload.contains_key("result")
+                && !ev.payload.contains_key("last_assistant_message");
+            if bare {
+                if let Some(turn) = self.turn.as_mut() {
+                    let seen = turn
+                        .extra_metadata
+                        .get("subagent_stops")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    turn.extra_metadata
+                        .insert("subagent_stops".into(), Value::from(seen + 1));
+                    self.push_trace_op(ops, TraceStatus::Open);
+                }
+                return;
+            }
+        }
         if !self.hook_agents.contains_key(&agent_id) {
             let Some((ordinal, trace_key, trace_id)) = self.hook_turn_ids(ev.ts_ns) else {
                 return;
@@ -870,6 +908,15 @@ impl TurnAssembler {
         let (Some(agent_id), Some(tool_id)) = (ev.agent_id.clone(), ev.tool_use_id.clone()) else {
             return;
         };
+        if !self.hook_agents.contains_key(&agent_id) {
+            // a tool ran inside an agent we have not heard of: the child
+            // is real, so give it a parent rather than dropping it
+            let mut start = ev.clone();
+            start.event = "SubagentStart".into();
+            let mut ignored = Vec::new();
+            self.subagent_hook(&start, &mut ignored);
+            ops.append(&mut ignored);
+        }
         let Some(agent) = self.hook_agents.get(&agent_id) else {
             return;
         };
@@ -1077,8 +1124,16 @@ impl TurnAssembler {
         } else {
             (None, None)
         };
+        // a tool the user declined is a decision, not a failure: Claude
+        // marks the result `is_error`, but showing it red beside real
+        // crashes (and counting it in the turn's error total) misreads
+        // what happened
+        let declined = is_error && content.is_some_and(user_declined);
+        let is_error = is_error && !declined;
         let status_message = if unpaired {
             Some("no result observed".to_string())
+        } else if declined {
+            Some("declined by the user".to_string())
         } else if is_error {
             // say what failed, not just that something did — a red row
             // whose message is "tool error" explains nothing, and in
@@ -1099,6 +1154,8 @@ impl TurnAssembler {
             end_ns: end_nanos.map(clamp_ns),
             level: if is_error {
                 Level::Error
+            } else if declined {
+                Level::Warning
             } else {
                 Level::Default
             },
@@ -1348,6 +1405,7 @@ impl TurnAssembler {
                     } else {
                         let index = turn.gen_count;
                         turn.gen_count += 1;
+                        turn.last_gen = Some((index, generation.clone()));
                         emit_now = Some((index, generation));
                     }
                     if !text.is_empty() {
@@ -1520,7 +1578,36 @@ impl TurnAssembler {
                         // Claude tool_use-only message): mint a generation
                         // so it is priced. Codex's per-turn counts keep the
                         // buffered path.
-                        if self.settings.provider != Provider::Codex
+                        // Claude reports an API call's usage on the line
+                        // after the message it belongs to. If the last
+                        // generation is still waiting for its usage, this
+                        // is it: one call stays one row, carrying both its
+                        // text and its tokens. Minting a second row here
+                        // is what left text rows looking empty and their
+                        // twins textless.
+                        let joins_last = self.settings.provider != Provider::Codex
+                            && model.is_some()
+                            && turn
+                                .last_gen
+                                .as_ref()
+                                .is_some_and(|(_, g)| g.usage.is_empty());
+                        if joins_last {
+                            let (index, mut generation) =
+                                turn.last_gen.take().expect("checked above");
+                            generation.usage = usage;
+                            if generation.model.is_none() {
+                                generation.model = model;
+                            }
+                            if generation.thinking.is_none() && !turn.pending_thinking.is_empty() {
+                                generation.thinking = Some(turn.pending_thinking.join("\n"));
+                                turn.pending_thinking.clear();
+                            }
+                            generation.tool_calls.extend(tool_calls);
+                            // the call finished when its count arrived
+                            generation.end_nanos = generation.end_nanos.max(nanos);
+                            turn.last_gen = Some((index, generation.clone()));
+                            emit_now = Some((index, generation));
+                        } else if self.settings.provider != Provider::Codex
                             && let Some(model_name) = model
                         {
                             let start = if prev_nanos > 0 && prev_nanos <= nanos {
@@ -1547,6 +1634,7 @@ impl TurnAssembler {
                             };
                             let index = turn.gen_count;
                             turn.gen_count += 1;
+                            turn.last_gen = Some((index, generation.clone()));
                             emit_now = Some((index, generation));
                         } else {
                             accumulate_usage(&mut turn.pending_turn_usage, &usage);
@@ -1892,6 +1980,32 @@ enum HookTarget {
     Open,
     Closed(u64),
     None,
+}
+
+/// Did the user decline this tool call rather than the tool failing?
+///
+/// Claude reports a rejection as a tool result with `is_error` set, whose
+/// body is one of its own fixed sentences. Matching those at the start of
+/// the body — not anywhere within it — keeps this from catching a tool
+/// whose output merely quotes one.
+fn user_declined(content: &Value) -> bool {
+    const DECLINED: &[&str] = &[
+        "The user doesn't want to proceed with this tool use",
+        "The user doesn't want to take this action",
+        "[Request interrupted by user",
+        "Tool use was rejected",
+    ];
+    let text = match content {
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|i| i.get("text").and_then(|t| t.as_str()))
+            .unwrap_or_default()
+            .to_string(),
+        _ => return false,
+    };
+    let text = text.trim_start();
+    DECLINED.iter().any(|p| text.starts_with(p))
 }
 
 /// A short reason for a failed tool call, taken from the result's own
@@ -3288,6 +3402,76 @@ mod tests {
         assert_eq!(meta_str(agent, "summary"), Some("Audit the UI"));
     }
 
+    /// The pairing that made half the store's generations look empty: a
+    /// text message and its own token count are one API call.
+    #[test]
+    fn a_token_count_joins_the_message_it_belongs_to() {
+        let mut asm = TurnAssembler::new(
+            settings(ContentMode::Full),
+            Some("s".into()),
+            "deterministic",
+        );
+        let _ = asm.feed(user("go", "2026-09-04T10:00:00Z"), 0);
+        let ops = asm.feed(
+            assistant("here is the plan", "2026-09-04T10:00:05Z", vec![]),
+            0,
+        );
+        let first = observations(&ops)[0].clone();
+        assert_eq!(first.name, "assistant");
+        assert!(
+            first.usage.is_none(),
+            "the message line carries no usage yet"
+        );
+
+        // the count that follows belongs to that same call
+        let ops = asm.feed(
+            TranscriptEvent::TokenCount {
+                usage: vec![("input_tokens".into(), 12), ("output_tokens".into(), 35)],
+                msg_id: Some("msg_1".into()),
+                model: Some("claude-opus-5".into()),
+                ts: Some("2026-09-04T10:00:06Z".into()),
+            },
+            0,
+        );
+        let rows = observations(&ops);
+        assert_eq!(rows.len(), 1, "one call stays one row: {ops:?}");
+        let joined = rows[0];
+        assert_eq!(joined.id, first.id, "the same row, updated");
+        assert_eq!(joined.name, "assistant", "it keeps its text identity");
+        assert_eq!(joined.output.as_deref(), Some("here is the plan"));
+        assert_eq!(joined.usage.as_ref().unwrap().input, Some(12));
+        assert_eq!(joined.usage.as_ref().unwrap().output, Some(35));
+        assert_eq!(
+            joined.model.as_deref(),
+            Some("claude-fable-5"),
+            "the message's own model wins; the count does not override it"
+        );
+        assert_eq!(
+            joined.end_ns,
+            Some(ns("2026-09-04T10:00:06Z")),
+            "the call ended when its count arrived"
+        );
+
+        // a second count is a separate call and still gets its own row
+        let ops = asm.feed(
+            TranscriptEvent::TokenCount {
+                usage: vec![("input_tokens".into(), 900), ("output_tokens".into(), 5)],
+                msg_id: Some("msg_2".into()),
+                model: Some("claude-opus-5".into()),
+                ts: Some("2026-09-04T10:00:09Z".into()),
+            },
+            0,
+        );
+        let rows = observations(&ops);
+        assert_eq!(rows.len(), 1);
+        assert_ne!(
+            rows[0].id, first.id,
+            "a genuine tool-only call is its own row"
+        );
+        assert_eq!(rows[0].name, "assistant (tool use)");
+        assert_eq!(rows[0].usage.as_ref().unwrap().input, Some(900));
+    }
+
     #[test]
     fn token_count_with_model_mints_a_costed_generation() {
         let mut asm = TurnAssembler::new(
@@ -3646,6 +3830,159 @@ mod tests {
             is_error: event == "PostToolUseFailure" || event == "StopFailure",
             payload: payload.as_object().cloned().unwrap_or_default(),
         }
+    }
+
+    #[test]
+    fn a_declined_tool_call_is_a_warning_not_a_failure() {
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), None, "test");
+        let _ = asm.feed(user("ask me", "2026-09-04T15:43:00Z"), 0);
+        let _ = asm.feed(
+            tool_use(
+                "q1",
+                "AskUserQuestion",
+                serde_json::json!({"questions": []}),
+                "2026-09-04T15:43:10Z",
+            ),
+            0,
+        );
+        let ops = asm.feed(
+            tool_result(
+                "q1",
+                Value::from(
+                    "The user doesn't want to proceed with this tool use. The tool use was rejected",
+                ),
+                true,
+                "2026-09-04T15:43:17Z",
+            ),
+            0,
+        );
+        let declined = find_obs(&ops, "AskUserQuestion");
+        assert!(!declined.is_error, "a decision, not a failure");
+        assert_eq!(declined.level, Level::Warning);
+        assert_eq!(
+            declined.status_message.as_deref(),
+            Some("declined by the user")
+        );
+
+        // an interrupt reads the same way
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), None, "test");
+        let _ = asm.feed(user("go", "2026-09-04T15:44:00Z"), 0);
+        let _ = asm.feed(
+            tool_use("b1", "Bash", serde_json::json!({}), "2026-09-04T15:44:01Z"),
+            0,
+        );
+        let ops = asm.feed(
+            tool_result(
+                "b1",
+                Value::from("[Request interrupted by user for tool use]"),
+                true,
+                "2026-09-04T15:44:02Z",
+            ),
+            0,
+        );
+        assert!(!find_obs(&ops, "Bash").is_error);
+
+        // a genuine failure still is one, and a body that merely quotes
+        // the sentence is not a decline
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), None, "test");
+        let _ = asm.feed(user("go", "2026-09-04T15:45:00Z"), 0);
+        let _ = asm.feed(
+            tool_use("b2", "Bash", serde_json::json!({}), "2026-09-04T15:45:01Z"),
+            0,
+        );
+        let ops = asm.feed(
+            tool_result(
+                "b2",
+                Value::from("Exit code 1\nlog said: The user doesn't want to proceed"),
+                true,
+                "2026-09-04T15:45:02Z",
+            ),
+            0,
+        );
+        let failed = find_obs(&ops, "Bash");
+        assert!(failed.is_error);
+        assert_eq!(failed.status_message.as_deref(), Some("exit code 1"));
+    }
+
+    #[test]
+    fn a_subagent_stop_with_nothing_to_show_is_counted_not_drawn() {
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), None, "test");
+        let _ = asm.feed(user("nao faca mais nada", "2026-09-04T15:44:00Z"), 0);
+        // Claude sends no SubagentStart and an empty SubagentStop payload
+        let mut stop = hook(
+            "SubagentStop",
+            ns("2026-09-04T15:44:15Z"),
+            None,
+            serde_json::json!({}),
+        );
+        stop.agent_id = Some("a6d905f43532ba3f7".into());
+        stop.agent_type = None;
+        let ops = asm.attach_hook_event(&stop);
+        assert!(
+            observations(&ops).is_empty(),
+            "no nameless empty span: {ops:?}"
+        );
+        let rows = traces(&ops);
+        let turn = rows.last().expect("the turn is updated");
+        assert_eq!(
+            turn.metadata
+                .as_ref()
+                .and_then(|m| m.get("subagent_stops"))
+                .and_then(|v| v.as_i64()),
+            Some(1),
+            "the fact is kept on the turn"
+        );
+        // a second one counts up rather than drawing again
+        let mut other = stop.clone();
+        other.agent_id = Some("ad595df9150e2c055".into());
+        other.ts_ns = ns("2026-09-04T15:44:20Z");
+        let ops = asm.attach_hook_event(&other);
+        assert!(observations(&ops).is_empty());
+        let rows = traces(&ops);
+        assert_eq!(
+            rows.last()
+                .and_then(|t| t.metadata.as_ref())
+                .and_then(|m| m.get("subagent_stops"))
+                .and_then(|v| v.as_i64()),
+            Some(2)
+        );
+
+        // but a stop that carries a result still gets its span
+        let mut told = stop.clone();
+        told.agent_id = Some("informative".into());
+        told.agent_type = Some("Explore".into());
+        told.ts_ns = ns("2026-09-04T15:44:25Z");
+        let ops = asm.attach_hook_event(&told);
+        assert_eq!(observations(&ops).len(), 1, "{ops:?}");
+        assert_eq!(observations(&ops)[0].name, "agent: Explore");
+    }
+
+    #[test]
+    fn a_child_tool_call_gives_its_agent_a_row_even_without_a_start() {
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), None, "test");
+        let _ = asm.feed(user("audit", "2026-09-04T16:00:00Z"), 0);
+        // the first thing heard about this agent is a tool running inside it
+        let mut child = hook(
+            "PostToolUse",
+            ns("2026-09-04T16:00:05Z"),
+            Some("toolu_c9"),
+            serde_json::json!({"tool_response": "3 hits"}),
+        );
+        child.agent_id = Some("a1".into());
+        child.tool_name = Some("Grep".into());
+        let ops = asm.attach_hook_event(&child);
+        let rows = observations(&ops);
+        assert_eq!(rows.len(), 2, "the agent and its child: {ops:?}");
+        let agent = rows
+            .iter()
+            .find(|r| r.obs_type == ObservationType::Agent)
+            .unwrap();
+        let tool = rows
+            .iter()
+            .find(|r| r.obs_type == ObservationType::Tool)
+            .unwrap();
+        assert_eq!(tool.parent_id.as_deref(), Some(agent.id.as_str()));
+        assert_eq!(tool.name, "Grep");
     }
 
     #[test]

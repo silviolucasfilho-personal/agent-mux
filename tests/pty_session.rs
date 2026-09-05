@@ -19,6 +19,8 @@ fn shell_profile(args: &[&str]) -> Profile {
         args: all,
         default_dir: None,
         tracing: None,
+        model: None,
+        bypass_approvals: None,
     }
 }
 
@@ -106,6 +108,8 @@ async fn spawn_with_nonexistent_command_fails_without_creating_session() {
         args: vec![],
         default_dir: None,
         tracing: None,
+        model: None,
+        bypass_approvals: None,
     };
     let result = Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx, &[], &[]);
     assert!(result.is_err());

@@ -253,13 +253,21 @@ impl std::fmt::Display for DialogContentMode {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialogField {
     Profile,
     Dir,
     Tracing,
     Backend,
     ContentMode,
+    /// `--model <id>`; blank leaves the CLI its own default.
+    Model,
+    /// Skip the CLI's approval prompts.
+    Approvals,
+    /// Pick up the most recent conversation.
+    Resume,
+    /// A prompt to run non-interactively; blank launches interactively.
+    OneShot,
 }
 
 #[derive(Debug)]
@@ -339,6 +347,15 @@ pub struct DialogState {
     pub content_mode: DialogContentMode,
     /// Where this launch's traces go.
     pub backend: crate::config::Backend,
+    /// The CLI this profile runs, when it is one we know how to pass
+    /// options to. `None` hides the four option fields.
+    pub harness: Option<crate::harness::Harness>,
+    /// `--model <id>`; blank means the flag is not passed at all.
+    pub model: String,
+    pub bypass_approvals: bool,
+    pub resume_last: bool,
+    /// A one-shot prompt; blank launches interactively.
+    pub one_shot: String,
     /// False when no Langfuse credentials resolved: the field cannot leave
     /// local and says why.
     pub langfuse_available: bool,
@@ -379,7 +396,56 @@ impl DialogState {
             tracing_enabled,
             content_mode,
             backend,
+            harness: first.and_then(|p| crate::harness::Harness::detect(&p.command)),
+            model: first.and_then(|p| p.model.clone()).unwrap_or_default(),
+            bypass_approvals: first.and_then(|p| p.bypass_approvals).unwrap_or(false),
+            resume_last: false,
+            one_shot: String::new(),
             langfuse_available: false,
+        }
+    }
+
+    /// The fields `Tab` walks, in order. A profile whose command is not a
+    /// known CLI has nothing to render options into, so those four are
+    /// left out entirely rather than shown dead.
+    pub fn fields(&self) -> Vec<DialogField> {
+        let mut fields = vec![
+            DialogField::Profile,
+            DialogField::Dir,
+            DialogField::Tracing,
+            DialogField::Backend,
+            DialogField::ContentMode,
+        ];
+        if self.harness.is_some() {
+            fields.extend([
+                DialogField::Model,
+                DialogField::Approvals,
+                DialogField::Resume,
+                DialogField::OneShot,
+            ]);
+        }
+        fields
+    }
+
+    fn step_field(&mut self, delta: isize) {
+        let fields = self.fields();
+        let at = fields.iter().position(|f| *f == self.field).unwrap_or(0) as isize;
+        let len = fields.len() as isize;
+        self.field = fields[((at + delta).rem_euclid(len)) as usize];
+    }
+
+    /// The options this dialog asks for, ready to render for a harness.
+    /// Blank text fields become `None`, so nothing empty is ever passed.
+    pub fn launch_options(&self) -> crate::harness::LaunchOptions {
+        crate::harness::LaunchOptions {
+            model: Some(self.model.trim().to_string()).filter(|m| !m.is_empty()),
+            bypass_approvals: self.bypass_approvals,
+            resume: if self.resume_last {
+                crate::harness::Resume::Last
+            } else {
+                crate::harness::Resume::Off
+            },
+            one_shot: Some(self.one_shot.trim().to_string()).filter(|p| !p.is_empty()),
         }
     }
 
@@ -421,6 +487,19 @@ impl DialogState {
 
     fn set_profile(&mut self, idx: usize, profiles: &[Profile]) {
         self.profile_idx = idx;
+        if let Some(p) = profiles.get(idx) {
+            self.harness = crate::harness::Harness::detect(&p.command);
+            self.model = p.model.clone().unwrap_or_default();
+            self.bypass_approvals = p.bypass_approvals.unwrap_or(false);
+            if self.harness.is_none() {
+                // the option fields are gone: do not leave focus on one
+                self.resume_last = false;
+                self.one_shot.clear();
+                if !self.fields().contains(&self.field) {
+                    self.field = DialogField::Profile;
+                }
+            }
+        }
         if let Some(p) = profiles.get(idx)
             && let Some(over) = &p.tracing
         {
@@ -472,24 +551,12 @@ impl DialogState {
         match key.code {
             KeyCode::Esc => return DialogResult::Cancel,
             KeyCode::Tab => {
-                self.field = match self.field {
-                    DialogField::Profile => DialogField::Dir,
-                    DialogField::Dir => DialogField::Tracing,
-                    DialogField::Tracing => DialogField::Backend,
-                    DialogField::Backend => DialogField::ContentMode,
-                    DialogField::ContentMode => DialogField::Profile,
-                };
+                self.step_field(1);
                 self.dir_selected_idx = None;
                 return DialogResult::Consumed;
             }
             KeyCode::BackTab => {
-                self.field = match self.field {
-                    DialogField::Profile => DialogField::ContentMode,
-                    DialogField::Dir => DialogField::Profile,
-                    DialogField::Tracing => DialogField::Dir,
-                    DialogField::Backend => DialogField::Tracing,
-                    DialogField::ContentMode => DialogField::Backend,
-                };
+                self.step_field(-1);
                 self.dir_selected_idx = None;
                 return DialogResult::Consumed;
             }
@@ -593,6 +660,36 @@ impl DialogState {
                     if self.langfuse_available =>
                 {
                     self.backend = self.backend.next();
+                }
+                _ => {}
+            },
+            DialogField::Model => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(c) => self.model.push(c),
+                KeyCode::Backspace => {
+                    self.model.pop();
+                }
+                _ => {}
+            },
+            DialogField::Approvals => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
+                    self.bypass_approvals = !self.bypass_approvals;
+                }
+                _ => {}
+            },
+            DialogField::Resume => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
+                    self.resume_last = !self.resume_last;
+                }
+                _ => {}
+            },
+            DialogField::OneShot => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(c) => self.one_shot.push(c),
+                KeyCode::Backspace => {
+                    self.one_shot.pop();
                 }
                 _ => {}
             },
@@ -1849,6 +1946,17 @@ impl App {
                 p_tracing.content_mode = Some(dialog.content_mode.to_string());
                 p_tracing.backend = Some(dialog.backend.as_str().to_string());
                 profile.tracing = Some(p_tracing);
+                // options become real arguments before planning, so the
+                // trace planner sees --continue / -p / --resume and can
+                // decide about session-id injection on the same command
+                // line the CLI will get
+                if let Some(harness) = dialog.harness {
+                    let options = dialog.launch_options();
+                    if !options.is_empty() {
+                        profile.args =
+                            crate::harness::compose(&profile.args, &options.render(harness));
+                    }
+                }
                 let dir = resolve_working_dir(&dialog.dir);
                 let id = self.next_id;
                 match self.spawn_traced(id, profile, dir) {
@@ -2006,9 +2114,10 @@ impl App {
     /// Resumes a session picked in the trace browser through the same path
     /// the history viewer uses.
     fn resume_traced_session(&mut self, session: &crate::tracing::store::query::SessionStat) {
-        let provider = match session.provider.as_str() {
-            "claude" => crate::history::AgentProvider::Claude,
-            "antigravity" => crate::history::AgentProvider::Antigravity,
+        let harness = match session.provider.as_str() {
+            "claude" => crate::harness::Harness::Claude,
+            "codex" => crate::harness::Harness::Codex,
+            "antigravity" => crate::harness::Harness::Antigravity,
             other => {
                 self.notice = Some(Notice::warn(format!(
                     "resume is not supported for {other} sessions"
@@ -2016,20 +2125,11 @@ impl App {
                 return;
             }
         };
-        let summary = SessionSummary {
-            session_id: session.session_id.clone(),
-            title: session.title.clone().unwrap_or_default(),
-            modified: std::time::SystemTime::UNIX_EPOCH,
-            file_path: std::path::PathBuf::from(
-                session.transcript_path.clone().unwrap_or_default(),
-            ),
-            turn_count: session.turn_count as usize,
-            project_slug: session.project_slug.clone().unwrap_or_default(),
-            timestamp_str: String::new(),
-            provider,
-            cwd: session.cwd.as_ref().map(std::path::PathBuf::from),
-        };
-        self.resume_history_session(&summary);
+        self.resume_conversation(
+            harness,
+            &session.session_id,
+            session.cwd.as_ref().map(std::path::PathBuf::from),
+        );
     }
 
     fn handle_history_key(&mut self, key: &KeyEvent) {
@@ -2110,56 +2210,54 @@ impl App {
     }
 
     fn resume_history_session(&mut self, summary: &SessionSummary) {
-        let profile = match summary.provider {
-            crate::history::AgentProvider::Claude => {
-                let p = self
-                    .profiles
-                    .iter()
-                    .find(|p| p.command == "claude" || p.name.to_lowercase().contains("claude"))
-                    .cloned()
-                    .unwrap_or_else(|| Profile {
-                        name: "Claude Code".into(),
-                        command: "claude".into(),
-                        args: vec![],
-                        default_dir: None,
-                        tracing: None,
-                    });
-                let mut resume_profile = p;
-                resume_profile.args = vec!["--resume".into(), summary.session_id.clone()];
-                resume_profile
-            }
-            crate::history::AgentProvider::Antigravity => {
-                let p = self
-                    .profiles
-                    .iter()
-                    .find(|p| {
-                        p.command == "agy"
-                            || p.name.to_lowercase().contains("antigravity")
-                            || p.name.to_lowercase().contains("agy")
-                    })
-                    .cloned()
-                    .unwrap_or_else(|| Profile {
-                        name: "Antigravity".into(),
-                        command: "agy".into(),
-                        args: vec![],
-                        default_dir: None,
-                        tracing: None,
-                    });
-                // `agy` alone starts a NEW conversation; resuming requires
-                // the id (this also makes resume correlation deterministic
-                // for tracing).
-                let mut resume_profile = p;
-                resume_profile.args = vec!["--conversation".into(), summary.session_id.clone()];
-                resume_profile
-            }
+        let harness = match summary.provider {
+            crate::history::AgentProvider::Claude => crate::harness::Harness::Claude,
+            crate::history::AgentProvider::Antigravity => crate::harness::Harness::Antigravity,
         };
+        self.resume_conversation(harness, &summary.session_id, summary.cwd.clone());
+    }
+
+    /// Spawns a resume of one recorded conversation. The flags come from
+    /// the harness mapping, so the history viewer and the trace browser
+    /// cannot drift apart — and Codex, which spells resume as a
+    /// subcommand rather than a flag, works through the same path.
+    fn resume_conversation(
+        &mut self,
+        harness: crate::harness::Harness,
+        session_id: &str,
+        cwd: Option<std::path::PathBuf>,
+    ) {
+        let command = harness.as_str();
+        let label = match harness {
+            crate::harness::Harness::Claude => "claude",
+            crate::harness::Harness::Codex => "codex",
+            crate::harness::Harness::Antigravity => "antigravity",
+        };
+        let mut profile = self
+            .profiles
+            .iter()
+            .find(|p| {
+                crate::harness::Harness::detect(&p.command) == Some(harness)
+                    || p.name.to_lowercase().contains(label)
+            })
+            .cloned()
+            .unwrap_or_else(|| Profile {
+                name: command.to_string(),
+                command: command.to_string(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            });
+        // a resume replaces the profile's arguments: resuming an id and
+        // whatever the profile said about starting fresh cannot both hold
+        profile.args = crate::harness::resume_args(harness, session_id);
 
         // The resumed session must run where it originally ran — the
         // transcript records it. Only if that is unknown (or gone) fall
         // back to the selected session's dir / the current dir.
-        let dir = summary
-            .cwd
-            .clone()
+        let dir = cwd
             .filter(|p| p.is_dir())
             .or_else(|| self.sessions.get(self.selected).map(|s| s.dir.clone()))
             .or_else(|| std::env::current_dir().ok())
@@ -2563,6 +2661,8 @@ mod dialog_tests {
                 args: vec![],
                 default_dir: Some("C:\\one".into()),
                 tracing: None,
+                model: None,
+                bypass_approvals: None,
             },
             Profile {
                 name: "B".into(),
@@ -2570,6 +2670,8 @@ mod dialog_tests {
                 args: vec![],
                 default_dir: Some("C:\\two".into()),
                 tracing: None,
+                model: None,
+                bypass_approvals: None,
             },
         ]
     }
@@ -2654,6 +2756,136 @@ mod dialog_tests {
         assert_eq!(d.content_mode, DialogContentMode::Full);
     }
 
+    /// Profiles that run a real CLI, so the option fields appear.
+    fn harness_profiles() -> Vec<Profile> {
+        vec![
+            Profile {
+                name: "Claude Code".into(),
+                command: "claude".into(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: Some("claude-opus-5".into()),
+                bypass_approvals: Some(true),
+            },
+            Profile {
+                name: "Codex".into(),
+                command: "codex".into(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            },
+            Profile {
+                name: "Shell".into(),
+                command: "bash".into(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn launch_option_fields_appear_only_for_a_known_cli() {
+        let ps = harness_profiles();
+        let mut d = DialogState::new(&ps);
+        assert_eq!(d.harness, Some(crate::harness::Harness::Claude));
+        assert_eq!(
+            d.fields(),
+            vec![
+                DialogField::Profile,
+                DialogField::Dir,
+                DialogField::Tracing,
+                DialogField::Backend,
+                DialogField::ContentMode,
+                DialogField::Model,
+                DialogField::Approvals,
+                DialogField::Resume,
+                DialogField::OneShot,
+            ]
+        );
+        // the profile's own defaults pre-fill the fields
+        assert_eq!(d.model, "claude-opus-5");
+        assert!(d.bypass_approvals);
+
+        // Tab reaches them and wraps back round
+        d.field = DialogField::ContentMode;
+        for expected in [
+            DialogField::Model,
+            DialogField::Approvals,
+            DialogField::Resume,
+            DialogField::OneShot,
+            DialogField::Profile,
+        ] {
+            d.handle_key(&key(KeyCode::Tab), &ps);
+            assert_eq!(d.field, expected);
+        }
+        d.handle_key(&key(KeyCode::BackTab), &ps);
+        assert_eq!(d.field, DialogField::OneShot);
+
+        // switching profile re-reads its defaults
+        d.handle_key(&key(KeyCode::Tab), &ps);
+        assert_eq!(d.field, DialogField::Profile);
+        d.handle_key(&key(KeyCode::Down), &ps);
+        assert_eq!(d.harness, Some(crate::harness::Harness::Codex));
+        assert_eq!(d.model, "", "codex profile sets no default model");
+        assert!(!d.bypass_approvals);
+
+        // a profile that is not a known CLI hides the four fields
+        d.handle_key(&key(KeyCode::Down), &ps);
+        assert_eq!(d.harness, None);
+        assert_eq!(d.fields().len(), 5);
+        d.handle_key(&key(KeyCode::Tab), &ps);
+        assert_eq!(d.field, DialogField::Dir, "tab skips what is not shown");
+    }
+
+    #[test]
+    fn launch_options_leave_blank_fields_out_entirely() {
+        use crate::harness::{Harness, Resume};
+        let ps = harness_profiles();
+        let mut d = DialogState::new(&ps);
+        d.model.clear();
+        d.bypass_approvals = false;
+        // nothing chosen: nothing is passed
+        let o = d.launch_options();
+        assert!(o.is_empty());
+        assert!(o.render(Harness::Claude).trailing.is_empty());
+
+        // typing fills the two text fields
+        d.field = DialogField::Model;
+        for c in "gpt-5.6".chars() {
+            d.handle_key(&key(KeyCode::Char(c)), &ps);
+        }
+        d.handle_key(&key(KeyCode::Backspace), &ps);
+        assert_eq!(d.model, "gpt-5.");
+        d.field = DialogField::OneShot;
+        for c in "fix it".chars() {
+            d.handle_key(&key(KeyCode::Char(c)), &ps);
+        }
+        assert_eq!(d.one_shot, "fix it", "space is text here, not a toggle");
+
+        // and the toggles toggle
+        d.field = DialogField::Approvals;
+        d.handle_key(&key(KeyCode::Char(' ')), &ps);
+        assert!(d.bypass_approvals);
+        d.field = DialogField::Resume;
+        d.handle_key(&key(KeyCode::Char(' ')), &ps);
+        assert!(d.resume_last);
+
+        let o = d.launch_options();
+        assert_eq!(o.model.as_deref(), Some("gpt-5."));
+        assert_eq!(o.one_shot.as_deref(), Some("fix it"));
+        assert_eq!(o.resume, Resume::Last);
+        assert!(o.bypass_approvals);
+        // whitespace alone still counts as unset
+        d.model = "   ".into();
+        assert_eq!(d.launch_options().model, None);
+    }
+
     #[test]
     fn dialog_backend_cycles_only_when_langfuse_is_available() {
         use crate::config::Backend;
@@ -2736,6 +2968,8 @@ mod dialog_tests {
             args: vec![],
             default_dir: None,
             tracing: None,
+            model: None,
+            bypass_approvals: None,
         }];
         let d = DialogState::new(&profiles);
         assert_eq!(d.profile_idx, 0);
@@ -2773,6 +3007,8 @@ mod dialog_tests {
             args: vec![],
             default_dir: Some(root.to_string_lossy().into_owned()),
             tracing: None,
+            model: None,
+            bypass_approvals: None,
         }];
 
         let mut d = DialogState::new(&profiles);

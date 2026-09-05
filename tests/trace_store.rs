@@ -284,7 +284,10 @@ fn stored_sessions_read_back_as_ops_for_replay() {
     assert_eq!(g.trace_id, expected.trace_id);
     assert_eq!(g.obs_type, expected.obs_type);
     assert_eq!(g.model, expected.model);
-    assert_eq!(g.usage, expected.usage, "normalized usage survives the round trip");
+    assert_eq!(
+        g.usage, expected.usage,
+        "normalized usage survives the round trip"
+    );
     assert_eq!(g.output, expected.output);
     let StoreOp::Trace(t2) = &ops[3] else {
         panic!("{:?}", ops[3]);

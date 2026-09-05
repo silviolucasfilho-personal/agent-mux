@@ -1528,6 +1528,8 @@ mod plan_tests {
             args: args.iter().map(|s| s.to_string()).collect(),
             default_dir: None,
             tracing: None,
+            model: None,
+            bypass_approvals: None,
         }
     }
 
