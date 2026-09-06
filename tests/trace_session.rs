@@ -299,3 +299,168 @@ async fn toggle_tracing_attaches_and_stops_on_demand() {
         "nothing to adopt for a script that writes no transcript"
     );
 }
+
+/// A Claude session that forks or continues writes a `continued-in` line
+/// and then keeps talking in a NEW transcript. Before this was followed,
+/// the launch stayed live against a file that had stopped growing: the
+/// open turn never closed and none of the successor's work was recorded.
+#[tokio::test]
+async fn a_continued_session_is_followed_into_its_successor_transcript() {
+    const NEXT: &str = "b2d35ace-0000-4000-8000-000000000002";
+    let temp = tempfile::tempdir().unwrap();
+    let claude_dir = temp.path().join("claude-home");
+    let workdir = temp.path().join("proj");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let db_path = temp.path().join("store").join("traces.db");
+    let projects_dir = claude_dir
+        .join("projects")
+        .join(agent_mux::history::project_slug(&workdir));
+    std::fs::create_dir_all(&projects_dir).unwrap();
+
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script_path = bin_dir.join("claude");
+    // The successor file repeats the whole conversation (that is what a
+    // fork does), then carries the new work. It is written in full before
+    // the hand-off line so the test does not race the prime pass.
+    let script = format!(
+        r#"#!/bin/sh
+sid=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--session-id" ]; then sid="$a"; fi
+  prev="$a"
+done
+[ -n "$sid" ] || exit 3
+out="{proj}/$sid.jsonl"
+next="{proj}/{next}.jsonl"
+printf '%s\n' '{{"type":"user","timestamp":"2026-09-06T10:00:00Z","cwd":"{cwd}","message":{{"role":"user","content":[{{"type":"text","text":"first prompt"}}]}}}}' >> "$out"
+printf '%s\n' '{{"type":"assistant","timestamp":"2026-09-06T10:00:01Z","message":{{"role":"assistant","model":"claude-haiku-4-5-20251001","usage":{{"input_tokens":10,"output_tokens":2}},"content":[{{"type":"text","text":"answering"}}]}}}}' >> "$out"
+sleep 0.8
+# the fork's own file: the copied history, verbatim but re-keyed
+printf '%s\n' '{{"type":"user","timestamp":"2026-09-06T10:00:00Z","cwd":"{cwd}","message":{{"role":"user","content":[{{"type":"text","text":"first prompt"}}]}}}}' >> "$next"
+printf '%s\n' '{{"type":"assistant","timestamp":"2026-09-06T10:00:01Z","message":{{"role":"assistant","model":"claude-haiku-4-5-20251001","usage":{{"input_tokens":10,"output_tokens":2}},"content":[{{"type":"text","text":"answering"}}]}}}}' >> "$next"
+sleep 0.3
+printf '%s\n' '{{"type":"continued-in","timestamp":"2026-09-06T10:00:02Z","sessionId":"'"$sid"'","continuedInSessionId":"{next}"}}' >> "$out"
+sleep 0.9
+# work that only ever exists in the successor
+printf '%s\n' '{{"type":"user","timestamp":"2026-09-06T10:00:10Z","cwd":"{cwd}","message":{{"role":"user","content":[{{"type":"text","text":"second prompt"}}]}}}}' >> "$next"
+printf '%s\n' '{{"type":"assistant","timestamp":"2026-09-06T10:00:11Z","message":{{"role":"assistant","model":"claude-haiku-4-5-20251001","usage":{{"input_tokens":20,"output_tokens":4}},"content":[{{"type":"text","text":"still here"}},{{"type":"tool_use","id":"t9","name":"Bash","input":{{"command":"echo hi"}}}}]}}}}' >> "$next"
+printf '%s\n' '{{"type":"user","timestamp":"2026-09-06T10:00:12Z","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"t9","content":"hi","is_error":false}}]}}}}' >> "$next"
+sleep 0.9
+exit 0
+"#,
+        proj = projects_dir.display(),
+        cwd = workdir.display(),
+        next = NEXT,
+    );
+    std::fs::write(&script_path, script).unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let toml = format!(
+        r#"
+        [tracing]
+        db_path = "{db}"
+        content_mode = "full"
+        poll_interval_ms = 60
+        flush_interval_ms = 40
+        claude_dir = "{claude}"
+
+        [[profiles]]
+        name = "Claude Code"
+        command = "{cmd}"
+        args = []
+        default_dir = "{dir}"
+        "#,
+        db = db_path.display(),
+        claude = claude_dir.display(),
+        cmd = script_path.display(),
+        dir = workdir.display(),
+    );
+    let cfg = config::parse(&toml).unwrap();
+    let resolved = config::resolve_tracing(cfg.tracing.as_ref(), &|_| None).unwrap();
+
+    let (tx, mut rx) = mpsc::channel(1024);
+    let runtime = TraceRuntime::new(resolved, tx.clone()).unwrap();
+    let mut app = App::new(cfg.profiles, Some(runtime), tx);
+    app.clipboard_enabled = false;
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(matches!(app.mode, Mode::Control), "spawn: {:?}", app.notice);
+
+    let exited = pump_until(&mut rx, &mut app, Duration::from_secs(20), |a| {
+        matches!(a.sessions[0].status(Instant::now()), Status::Exited(_))
+    })
+    .await;
+    assert!(exited, "fake claude never exited");
+
+    app.kill_all();
+    let rt = app.take_tracing().unwrap();
+    rt.shutdown(Duration::from_secs(5)).await;
+
+    let conn = open_ro(&db_path).unwrap();
+
+    // the launch now points at the session actually being written
+    let session_key: String = conn
+        .query_row("SELECT session_key FROM launches", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        session_key,
+        format!("claude:{NEXT}"),
+        "launch follows the successor"
+    );
+
+    // both sessions are on record, not just the one that ended
+    let sessions: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(sessions, 2, "predecessor and successor both stored");
+
+    // the predecessor's turn is closed and says where the talk went
+    let (status, continued): (String, Option<String>) = conn
+        .query_row(
+            "SELECT t.status, json_extract(t.metadata, '$.continued_in')
+             FROM traces t WHERE t.session_key != ?1",
+            [&session_key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "closed", "the handed-off turn does not stay open");
+    assert_eq!(continued.as_deref(), Some(NEXT));
+
+    // the successor's new turn is recorded, and its copied history is not
+    // re-exported as a second one
+    let successor_turns: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM traces WHERE session_key = ?1",
+            [&session_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        successor_turns, 1,
+        "primed history is replayed, not re-recorded"
+    );
+    let (input, output): (String, String) = conn
+        .query_row(
+            "SELECT input, output FROM traces WHERE session_key = ?1",
+            [&session_key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(input, "second prompt");
+    assert_eq!(output, "still here");
+
+    // and the work inside it lands, which is the whole point
+    let tool_output: String = conn
+        .query_row(
+            "SELECT o.output FROM observations o JOIN traces t ON t.id = o.trace_id
+             WHERE t.session_key = ?1 AND o.name = 'Bash'",
+            [&session_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tool_output, "hi");
+}

@@ -275,6 +275,9 @@ pub struct TurnAssembler {
     recent_tool_seqs: std::collections::VecDeque<Vec<String>>,
     /// Patterns and guard blocks noticed since the last `take_warnings`.
     warnings: Vec<crate::tracing::loops::Pattern>,
+    /// The successor session a `continued-in` line named, for the pipeline
+    /// to follow. Taken once; the transcript this assembler reads is over.
+    continued_in: Option<String>,
 }
 
 /// The CLI's own running session totals (Claude `cost-state`), surfaced on
@@ -318,11 +321,23 @@ impl TurnAssembler {
             turn_tools: Vec::new(),
             recent_tool_seqs: std::collections::VecDeque::new(),
             warnings: Vec::new(),
+            continued_in: None,
         }
     }
 
     pub fn cost_snapshot(&self) -> Option<CostSnapshot> {
         self.cost
+    }
+
+    /// The successor session this transcript handed off to, if it said so.
+    /// Taken once so the pipeline follows a hop a single time; a successor
+    /// naming the session already being read is ignored as a self-loop.
+    pub fn take_continuation(&mut self) -> Option<String> {
+        let next = self.continued_in.take()?;
+        if self.session_id.as_deref() == Some(next.as_str()) {
+            return None;
+        }
+        Some(next)
     }
 
     pub fn set_session_id(&mut self, id: &str, correlation: &str) {
@@ -1742,6 +1757,21 @@ impl TurnAssembler {
                     total_lines_added,
                     total_lines_removed,
                 });
+            }
+            TranscriptEvent::ContinuedIn { session_id, ts } => {
+                let _ = self.event_nanos(&ts, recv_nanos);
+                // Record the hop on the turn that was open when it
+                // happened, so a reader of this session can see where the
+                // conversation went instead of finding a turn that just
+                // stops.
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.extra_metadata
+                        .insert("continued_in".into(), Value::from(session_id.clone()));
+                    self.push_trace_op(&mut ops, TraceStatus::Open);
+                }
+                self.session_extra
+                    .push(("continued_in".to_string(), session_id.clone()));
+                self.continued_in = Some(session_id);
             }
         }
         ops
@@ -4639,5 +4669,55 @@ mod tests {
         ops.extend(asm.feed(user("next", "2026-08-30T10:01:00Z"), 0));
         let meta = closed(&ops)[0].metadata.clone().unwrap();
         assert_eq!(meta["guard_blocked"], reason);
+    }
+
+    #[test]
+    fn a_continued_in_line_marks_the_turn_and_offers_the_successor_once() {
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), Some("s1".into()), "watched");
+        let mut ops = Vec::new();
+        ops.extend(asm.feed(user("go", "2026-09-06T10:00:00Z"), 0));
+        ops.extend(asm.feed(
+            TranscriptEvent::ContinuedIn {
+                session_id: "s2".into(),
+                ts: Some("2026-09-06T10:00:05Z".into()),
+            },
+            0,
+        ));
+        // the turn that was open when the hand-off happened says where the
+        // conversation went, so this session does not just stop
+        let last = traces(&ops).into_iter().next_back().expect("a trace op");
+        assert_eq!(
+            last.metadata
+                .as_ref()
+                .and_then(|m| m.get("continued_in"))
+                .and_then(|v| v.as_str()),
+            Some("s2"),
+        );
+        // and the session row carries it too, for a reader of the store
+        let row = asm.session_row(1);
+        assert_eq!(
+            row.extra
+                .as_ref()
+                .and_then(|e| e.get("continued_in"))
+                .and_then(|v| v.as_str()),
+            Some("s2"),
+        );
+        // the pipeline is handed the successor exactly once
+        assert_eq!(asm.take_continuation().as_deref(), Some("s2"));
+        assert_eq!(asm.take_continuation(), None);
+    }
+
+    #[test]
+    fn a_continuation_naming_the_session_being_read_is_not_followed() {
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), Some("s1".into()), "watched");
+        let _ = asm.feed(user("go", "2026-09-06T10:00:00Z"), 0);
+        let _ = asm.feed(
+            TranscriptEvent::ContinuedIn {
+                session_id: "s1".into(),
+                ts: Some("2026-09-06T10:00:05Z".into()),
+            },
+            0,
+        );
+        assert_eq!(asm.take_continuation(), None, "self-loop refused");
     }
 }

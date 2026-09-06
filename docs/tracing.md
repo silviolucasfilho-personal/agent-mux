@@ -72,6 +72,17 @@ usual Claude settings files are merged into this inline settings document;
 nothing in `~/.claude` is modified. Hook announcements take precedence over
 watch-based correlation and provide precise tool/subagent timing.
 
+A session that forks or is continued ends its transcript with a
+`continued-in` line naming a successor id, and every later message is
+written to the successor's file instead. agent-mux follows the hand-off:
+it closes the turn that was open, notes the successor on that turn and on
+the session row, re-points the claim, the hook feed and the launch's
+session key, and primes the successor's transcript so the conversation it
+inherits is replayed for state without being recorded twice. Chains are
+followed hop by hop, and a successor already visited is not re-entered.
+Without this the launch would stay live against a file that had stopped
+growing, and none of the successor's work would be recorded.
+
 Claude transcript usage is read from assistant-message usage records. Its
 uncached input, cache reads, cache writes (including 5-minute and 1-hour
 breakdowns), and output are kept as separate billable buckets.
