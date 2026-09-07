@@ -126,6 +126,14 @@ pub enum TranscriptEvent {
         kind: TurnBoundaryKind,
         ts: Option<String>,
     },
+    /// Claude `continued-in` line: this session handed its conversation to
+    /// a successor (a `--fork-session` or a continuation), and every later
+    /// message is written to the successor's transcript instead. The file
+    /// this appears in stops growing.
+    ContinuedIn {
+        session_id: String,
+        ts: Option<String>,
+    },
     /// Codex rollout `session_meta` (always the first line of a rollout).
     SessionMeta {
         session_id: Option<String>,
@@ -455,6 +463,18 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
                 events.push(TranscriptEvent::TurnDuration {
                     duration_ms,
                     message_count: v.get("messageCount").and_then(|m| m.as_i64()),
+                    ts: ts.clone(),
+                });
+            }
+        }
+        "continued-in" => {
+            if let Some(next) = v
+                .get("continuedInSessionId")
+                .and_then(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                events.push(TranscriptEvent::ContinuedIn {
+                    session_id: next.to_string(),
                     ts: ts.clone(),
                 });
             }
@@ -1335,5 +1355,24 @@ mod tests {
         assert!(parse_codex_line(unknown).is_empty());
         let unknown_line = r#"{"timestamp":"t","type":"world_state","payload":{}}"#;
         assert!(parse_codex_line(unknown_line).is_empty());
+    }
+
+    #[test]
+    fn claude_continued_in_names_the_successor_session() {
+        let line = r#"{"type":"continued-in","timestamp":"2026-09-06T13:39:42.498Z","sessionId":"8f5055c0-42b8-4042-9e39-93e4721f3e70","continuedInSessionId":"b2d35ace-d877-4e6e-b992-14f2c1eb745c"}"#;
+        let events = parse_claude_line(line);
+        assert!(
+            matches!(
+                &events[0],
+                TranscriptEvent::ContinuedIn { session_id, .. }
+                    if session_id == "b2d35ace-d877-4e6e-b992-14f2c1eb745c"
+            ),
+            "got: {events:?}"
+        );
+        // a hand-off with no successor named is not one
+        let bare = r#"{"type":"continued-in","timestamp":"t","sessionId":"a"}"#;
+        assert!(parse_claude_line(bare).is_empty());
+        let empty = r#"{"type":"continued-in","timestamp":"t","continuedInSessionId":""}"#;
+        assert!(parse_claude_line(empty).is_empty());
     }
 }

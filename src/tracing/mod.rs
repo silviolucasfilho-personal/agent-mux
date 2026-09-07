@@ -24,6 +24,7 @@ pub mod map;
 pub mod pricing;
 pub mod scores;
 pub mod store;
+pub mod subagents;
 pub mod tail;
 pub mod usage;
 pub mod view;
@@ -925,6 +926,12 @@ struct Pipeline {
     started: Instant,
     /// Warning kinds already put on the status bar for this launch.
     warned: HashSet<&'static str>,
+    /// A successor session named by `continued-in` that has not been
+    /// followed yet: the file usually appears a tick or two later.
+    pending_continuation: Option<String>,
+    /// Sessions this launch has already followed into, so a chain that
+    /// loops back cannot make the pipeline ping-pong between two files.
+    followed: HashSet<String>,
 }
 
 impl Pipeline {
@@ -1136,8 +1143,118 @@ impl Pipeline {
             }
         }
         self.tick_tail();
+        self.follow_continuation();
         self.poll_agy_usage();
         self.poll_hooks();
+    }
+
+    /// Claude ends a forked or continued session with a `continued-in`
+    /// line and writes every later message to the successor's transcript.
+    /// Without following it the launch stays "live" while its transcript
+    /// is finished: turns never close, tool rows never appear, and the
+    /// hook pins for the successor's calls pile up against rows that will
+    /// never be built. Following re-points the tail, the claim, the hook
+    /// feed and the launch's session key at the successor.
+    fn follow_continuation(&mut self) {
+        if let Some(next) = self.assembler.take_continuation() {
+            self.pending_continuation = Some(next);
+        }
+        let Some(next) = self.pending_continuation.clone() else {
+            return;
+        };
+        let Some(adopted) = self.adopted.as_ref() else {
+            return;
+        };
+        // A successor already visited means the chain looped; stop rather
+        // than swap back and forth re-priming both files forever.
+        if self.followed.contains(&next) {
+            self.pending_continuation = None;
+            return;
+        }
+        // Claude names the successor by id only: it is a sibling file in
+        // the same project directory.
+        let Some(dir) = adopted.path.parent() else {
+            self.pending_continuation = None;
+            return;
+        };
+        let path = dir.join(format!("{next}.jsonl"));
+        if !path.is_file() {
+            // written a moment after the hand-off: retry on the next tick
+            return;
+        }
+        if !correlate::try_claim(&self.ctx.claims, self.ctx.provider, &next) {
+            // another pipeline is already recording the successor
+            self.pending_continuation = None;
+            return;
+        }
+        self.pending_continuation = None;
+        self.followed.insert(next.clone());
+        let correlation = adopted.correlation;
+
+        // Close out the transcript that just ended, then start clean: the
+        // successor's file repeats the whole conversation, so its turns
+        // are its own and must not continue the predecessor's ordinals.
+        let closing = self.assembler.finalize();
+        self.send_ops(closing);
+
+        let mut fresh = TurnAssembler::new(
+            self.ctx.map_settings.clone(),
+            Some(next.clone()),
+            correlation,
+        );
+        fresh.set_loop_thresholds(self.ctx.loops);
+        fresh.set_transcript_path(&path.to_string_lossy());
+        self.assembler = fresh;
+        // The successor carries the predecessor's history verbatim. Prime
+        // it so state is rebuilt without re-exporting turns already
+        // recorded under the old session.
+        match Tailer::prime(&path, self.ctx.backfill_max_bytes) {
+            Ok((tailer, lines, truncated)) => {
+                self.assembler.set_emitting(false);
+                if truncated {
+                    self.assembler.mark_backfill_truncated();
+                }
+                let recv = now_nanos();
+                for line in &lines {
+                    for event in crate::transcript::parse_line(self.ctx.provider, line) {
+                        let _ = self.assembler.feed(event, recv);
+                    }
+                }
+                self.assembler.set_emitting(true);
+                self.tailer = Some(tailer);
+            }
+            Err(_) => self.tailer = Some(Tailer::new(&path)),
+        }
+
+        // Re-point everything keyed by session: the claim (dropping the
+        // old guard releases the predecessor), the hook feed's session
+        // filter, and the launch's session key.
+        self.claim_guard = Some(correlate::ClaimGuard::new(
+            Arc::clone(&self.ctx.claims),
+            self.ctx.provider,
+            &next,
+        ));
+        self.hook_feed.set_session(&next);
+        let now = now_ns();
+        self.send_ops(vec![
+            StoreOp::Session(self.assembler.session_row(now)),
+            StoreOp::Launch(map::launch_adopted(
+                &self.ctx.map_settings,
+                &next,
+                correlation,
+            )),
+        ]);
+        self.adopted = Some(correlate::Adopted {
+            session_id: next.clone(),
+            path,
+            correlation,
+            resume_prime: true,
+        });
+        let _ = self.ctx.status_tx.try_send(AppEvent::TraceStatus(format!(
+            "tracing: '{}' continued into session {} — following it",
+            self.ctx.profile_name,
+            next.chars().take(8).collect::<String>()
+        )));
     }
 
     fn tick_tail(&mut self) {
@@ -1297,6 +1414,8 @@ async fn run_pipeline(
         parse_errors: 0,
         warned: HashSet::new(),
         started: Instant::now(),
+        pending_continuation: None,
+        followed: HashSet::new(),
     };
     loop {
         pipeline.tick();

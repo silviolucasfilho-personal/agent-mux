@@ -142,6 +142,11 @@ struct OpenTool {
     /// The event index at ToolUse time — the tool's identity in id
     /// derivation (the emission-time counter would collide).
     event_index: u64,
+    /// The generation whose assistant message issued this call, by its
+    /// index in the turn. This is the tool's parent in the tree: the
+    /// transcript states it by putting the `tool_use` block inside that
+    /// message, and the assembler sees the message first.
+    gen_index: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -275,6 +280,9 @@ pub struct TurnAssembler {
     recent_tool_seqs: std::collections::VecDeque<Vec<String>>,
     /// Patterns and guard blocks noticed since the last `take_warnings`.
     warnings: Vec<crate::tracing::loops::Pattern>,
+    /// The successor session a `continued-in` line named, for the pipeline
+    /// to follow. Taken once; the transcript this assembler reads is over.
+    continued_in: Option<String>,
 }
 
 /// The CLI's own running session totals (Claude `cost-state`), surfaced on
@@ -318,11 +326,23 @@ impl TurnAssembler {
             turn_tools: Vec::new(),
             recent_tool_seqs: std::collections::VecDeque::new(),
             warnings: Vec::new(),
+            continued_in: None,
         }
     }
 
     pub fn cost_snapshot(&self) -> Option<CostSnapshot> {
         self.cost
+    }
+
+    /// The successor session this transcript handed off to, if it said so.
+    /// Taken once so the pipeline follows a hop a single time; a successor
+    /// naming the session already being read is ignored as a self-loop.
+    pub fn take_continuation(&mut self) -> Option<String> {
+        let next = self.continued_in.take()?;
+        if self.session_id.as_deref() == Some(next.as_str()) {
+            return None;
+        }
+        Some(next)
     }
 
     pub fn set_session_id(&mut self, id: &str, correlation: &str) {
@@ -787,6 +807,185 @@ impl TurnAssembler {
     /// When the row is the transcript's view of a subagent the hooks
     /// already announced, the hook-created agent row is re-parented under
     /// it and returned so the caller can emit that update too.
+    /// The observations of one subagent's own conversation, parented under
+    /// the tool call that launched it.
+    ///
+    /// Claude writes a subagent's whole exchange to a sidecar transcript
+    /// rather than into the parent, so without reading it an agent row has
+    /// no children, no tokens and no cost — which is why the tree showed a
+    /// bare "agent:" row and the rollups summed zero. Recursion follows the
+    /// same rule one level down, bounded so a malformed cycle cannot spin.
+    fn subagent_rows(&self, agent_row: &ObservationRow, depth: usize) -> Vec<ObservationRow> {
+        const MAX_DEPTH: usize = 4;
+        if depth >= MAX_DEPTH || !self.emitting {
+            return Vec::new();
+        }
+        let Some(agent_id) = agent_row
+            .metadata
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            return Vec::new();
+        };
+        let Some(dir) = self
+            .transcript_path
+            .as_deref()
+            .and_then(crate::tracing::subagents::dir_for)
+        else {
+            return Vec::new();
+        };
+        let lines = crate::tracing::subagents::lines(&dir, &agent_id);
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        let meta = crate::tracing::subagents::load(&dir, &agent_id);
+        let prefix = format!("{}|sub|{agent_id}", agent_row.id);
+        let fallback_ns = agent_row.start_ns;
+
+        let mut rows: Vec<ObservationRow> = Vec::new();
+        let mut gen_index = 0usize;
+        let mut tool_index = 0usize;
+        let mut last_gen: Option<String> = None;
+        let mut open: HashMap<String, (String, Value, i64)> = HashMap::new();
+
+        for line in &lines {
+            for event in crate::transcript::parse_line(self.settings.provider, line) {
+                match event {
+                    TranscriptEvent::Assistant {
+                        text,
+                        model,
+                        thinking,
+                        usage,
+                        ts,
+                        ..
+                    } => {
+                        let ns = sub_nanos(&ts, fallback_ns);
+                        let id = ids::span_id_hex(&format!("{prefix}|gen|{gen_index}"));
+                        let (usage_raw, usage_norm) = if usage.is_empty() {
+                            (None, None)
+                        } else {
+                            (
+                                Some(usage.clone()),
+                                Some(usage::normalize(self.settings.provider, &usage)),
+                            )
+                        };
+                        let mut metadata = serde_json::Map::new();
+                        metadata.insert("agent_id".into(), Value::from(agent_id.clone()));
+                        metadata.insert("source".into(), Value::from("subagent"));
+                        if let Some(m) = meta.as_ref().and_then(|m| m.agent_type.clone()) {
+                            metadata.insert("agent_type".into(), Value::from(m));
+                        }
+                        if let Some(d) = meta.as_ref().and_then(|m| m.spawn_depth) {
+                            metadata.insert("spawn_depth".into(), Value::from(d));
+                        }
+                        rows.push(ObservationRow {
+                            id: id.clone(),
+                            trace_id: agent_row.trace_id.clone(),
+                            parent_id: Some(agent_row.id.clone()),
+                            obs_type: ObservationType::Generation,
+                            name: if text.is_empty() {
+                                "subagent assistant (tool use)".into()
+                            } else {
+                                "subagent assistant".into()
+                            },
+                            kind: None,
+                            start_ns: ns,
+                            end_ns: Some(ns),
+                            level: Level::Default,
+                            status_message: None,
+                            model: model.or_else(|| meta.as_ref().and_then(|m| m.model.clone())),
+                            input: None,
+                            output: self.full_content(&text),
+                            thinking: thinking.as_deref().and_then(|t| self.full_content(t)),
+                            usage_raw,
+                            usage: usage_norm,
+                            tool_id: None,
+                            tool_name: None,
+                            skill: None,
+                            mcp_server: None,
+                            path: None,
+                            is_error: false,
+                            ts_approx: false,
+                            metadata,
+                        });
+                        last_gen = Some(id);
+                        gen_index += 1;
+                    }
+                    TranscriptEvent::ToolUse {
+                        id, name, args, ts, ..
+                    } => {
+                        open.insert(id, (name, args, sub_nanos(&ts, fallback_ns)));
+                    }
+                    TranscriptEvent::ToolResult {
+                        id,
+                        content,
+                        is_error,
+                        structured,
+                        ts,
+                    } => {
+                        let end = sub_nanos(&ts, fallback_ns);
+                        let (name, args, start) = open
+                            .remove(&id)
+                            .unwrap_or_else(|| ("unknown".to_string(), Value::Null, end));
+                        let mut metadata = serde_json::Map::new();
+                        metadata.insert("agent_id".into(), Value::from(agent_id.clone()));
+                        metadata.insert("source".into(), Value::from("subagent"));
+                        if let Some(s) = structured.as_ref() {
+                            self.push_structured_result(&mut metadata, s);
+                        }
+                        let row = ObservationRow {
+                            id: ids::span_id_hex(&format!(
+                                "{prefix}|tool|{name}|{id}|{tool_index}"
+                            )),
+                            trace_id: agent_row.trace_id.clone(),
+                            parent_id: last_gen.clone().or_else(|| Some(agent_row.id.clone())),
+                            obs_type: ObservationType::Tool,
+                            name: normalize_tool_name(&name).to_string(),
+                            kind: None,
+                            start_ns: start.min(end),
+                            end_ns: Some(end),
+                            level: if is_error {
+                                Level::Error
+                            } else {
+                                Level::Default
+                            },
+                            status_message: if is_error {
+                                Some(
+                                    error_summary(Some(&content))
+                                        .unwrap_or_else(|| "tool error".to_string()),
+                                )
+                            } else {
+                                None
+                            },
+                            model: None,
+                            input: clean_json_str(&args).and_then(|a| self.full_content(&a)),
+                            output: clean_json_str(&content).and_then(|c| self.full_content(&c)),
+                            thinking: None,
+                            usage_raw: None,
+                            usage: None,
+                            tool_id: Some(id),
+                            tool_name: Some(name),
+                            skill: None,
+                            mcp_server: None,
+                            path: None,
+                            is_error,
+                            ts_approx: false,
+                            metadata,
+                        };
+                        // an agent that launched its own agent nests again
+                        let nested = self.subagent_rows(&row, depth + 1);
+                        tool_index += 1;
+                        rows.push(row);
+                        rows.extend(nested);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        rows
+    }
+
     fn finish_tool_row(
         &mut self,
         row: &mut ObservationRow,
@@ -1215,7 +1414,11 @@ impl TurnAssembler {
         ObservationRow {
             id: ids::span_id_hex(&span_key),
             trace_id: turn.trace_id.clone(),
-            parent_id: None,
+            // The generation that issued the call. Without this every row
+            // in a turn is a root and the tree view is a flat list.
+            parent_id: tool
+                .gen_index
+                .map(|index| ids::span_id_hex(&format!("{}|gen|{index}", turn.trace_key))),
             obs_type,
             name,
             kind,
@@ -1522,6 +1725,7 @@ impl TurnAssembler {
                     turn.note_skill(&skill);
                     turn.tools_since_gen.push(name.clone());
                     turn.event_index += 1;
+                    let gen_index = turn.last_gen.as_ref().map(|(index, _)| *index);
                     turn.open_tools.push(OpenTool {
                         id,
                         name,
@@ -1530,6 +1734,7 @@ impl TurnAssembler {
                         start_nanos: nanos,
                         ts_approx: approx,
                         event_index: turn.event_index,
+                        gen_index,
                     });
                     turn.last_nanos = nanos;
                     turn.any_ts_approx |= approx;
@@ -1589,6 +1794,9 @@ impl TurnAssembler {
                                 start_nanos: nanos,
                                 ts_approx: approx,
                                 event_index: turn_ref.event_index,
+                                // an orphan result names no issuing
+                                // message, so it stays a root
+                                gen_index: None,
                             },
                             true,
                         ),
@@ -1614,8 +1822,13 @@ impl TurnAssembler {
                 };
                 if let Some((ordinal, mut row)) = built {
                     let relinked = self.finish_tool_row(&mut row, ordinal);
+                    // A Task call names the subagent it launched; the
+                    // agent's own conversation is a sidecar transcript
+                    // beside this one, and its work belongs under this row.
+                    let children = self.subagent_rows(&row, 0);
                     ops.push(StoreOp::Observation(row));
                     ops.extend(relinked.map(StoreOp::Observation));
+                    ops.extend(children.into_iter().map(StoreOp::Observation));
                 }
             }
             TranscriptEvent::Thinking { text, ts } => {
@@ -1742,6 +1955,21 @@ impl TurnAssembler {
                     total_lines_added,
                     total_lines_removed,
                 });
+            }
+            TranscriptEvent::ContinuedIn { session_id, ts } => {
+                let _ = self.event_nanos(&ts, recv_nanos);
+                // Record the hop on the turn that was open when it
+                // happened, so a reader of this session can see where the
+                // conversation went instead of finding a turn that just
+                // stops.
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.extra_metadata
+                        .insert("continued_in".into(), Value::from(session_id.clone()));
+                    self.push_trace_op(&mut ops, TraceStatus::Open);
+                }
+                self.session_extra
+                    .push(("continued_in".to_string(), session_id.clone()));
+                self.continued_in = Some(session_id);
             }
         }
         ops
@@ -2434,6 +2662,15 @@ pub fn launch_ended(settings: &MapSettings, end: &SessionEnd, now_ns: i64) -> La
         row.reported_lines_removed = cost.total_lines_removed;
     }
     row
+}
+
+/// A subagent line's timestamp, falling back to the launching call's start
+/// so a row is never stamped at the epoch.
+fn sub_nanos(ts: &Option<String>, fallback_ns: i64) -> i64 {
+    ts.as_deref()
+        .and_then(crate::transcript::parse_rfc3339_nanos)
+        .map(clamp_ns)
+        .unwrap_or(fallback_ns)
 }
 
 #[cfg(test)]
@@ -4639,5 +4876,122 @@ mod tests {
         ops.extend(asm.feed(user("next", "2026-08-30T10:01:00Z"), 0));
         let meta = closed(&ops)[0].metadata.clone().unwrap();
         assert_eq!(meta["guard_blocked"], reason);
+    }
+
+    #[test]
+    fn a_continued_in_line_marks_the_turn_and_offers_the_successor_once() {
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), Some("s1".into()), "watched");
+        let mut ops = Vec::new();
+        ops.extend(asm.feed(user("go", "2026-09-06T10:00:00Z"), 0));
+        ops.extend(asm.feed(
+            TranscriptEvent::ContinuedIn {
+                session_id: "s2".into(),
+                ts: Some("2026-09-06T10:00:05Z".into()),
+            },
+            0,
+        ));
+        // the turn that was open when the hand-off happened says where the
+        // conversation went, so this session does not just stop
+        let last = traces(&ops).into_iter().next_back().expect("a trace op");
+        assert_eq!(
+            last.metadata
+                .as_ref()
+                .and_then(|m| m.get("continued_in"))
+                .and_then(|v| v.as_str()),
+            Some("s2"),
+        );
+        // and the session row carries it too, for a reader of the store
+        let row = asm.session_row(1);
+        assert_eq!(
+            row.extra
+                .as_ref()
+                .and_then(|e| e.get("continued_in"))
+                .and_then(|v| v.as_str()),
+            Some("s2"),
+        );
+        // the pipeline is handed the successor exactly once
+        assert_eq!(asm.take_continuation().as_deref(), Some("s2"));
+        assert_eq!(asm.take_continuation(), None);
+    }
+
+    #[test]
+    fn a_continuation_naming_the_session_being_read_is_not_followed() {
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), Some("s1".into()), "watched");
+        let _ = asm.feed(user("go", "2026-09-06T10:00:00Z"), 0);
+        let _ = asm.feed(
+            TranscriptEvent::ContinuedIn {
+                session_id: "s1".into(),
+                ts: Some("2026-09-06T10:00:05Z".into()),
+            },
+            0,
+        );
+        assert_eq!(asm.take_continuation(), None, "self-loop refused");
+    }
+    #[test]
+    fn tool_calls_are_parented_to_the_generation_that_issued_them() {
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), Some("s1".into()), "watched");
+        let mut ops = Vec::new();
+        ops.extend(asm.feed(user("go", "2026-09-07T10:00:00Z"), 0));
+        // first assistant message issues two calls
+        ops.extend(asm.feed(
+            assistant("thinking about it", "2026-09-07T10:00:01Z", vec![]),
+            0,
+        ));
+        ops.extend(asm.feed(
+            tool_use("t1", "Bash", Value::Null, "2026-09-07T10:00:02Z"),
+            0,
+        ));
+        ops.extend(asm.feed(
+            tool_use("t2", "Read", Value::Null, "2026-09-07T10:00:03Z"),
+            0,
+        ));
+        ops.extend(asm.feed(
+            tool_result("t1", Value::from("ok"), false, "2026-09-07T10:00:04Z"),
+            0,
+        ));
+        ops.extend(asm.feed(
+            tool_result("t2", Value::from("ok"), false, "2026-09-07T10:00:05Z"),
+            0,
+        ));
+        // a second message issues a third
+        ops.extend(asm.feed(assistant("and again", "2026-09-07T10:00:06Z", vec![]), 0));
+        ops.extend(asm.feed(
+            tool_use("t3", "Grep", Value::Null, "2026-09-07T10:00:07Z"),
+            0,
+        ));
+        ops.extend(asm.feed(
+            tool_result("t3", Value::from("ok"), false, "2026-09-07T10:00:08Z"),
+            0,
+        ));
+        ops.extend(asm.finalize());
+
+        let gens: Vec<&ObservationRow> = observations(&ops)
+            .into_iter()
+            .filter(|o| o.obs_type == ObservationType::Generation)
+            .collect();
+        let gen0 = gens.first().expect("first generation").id.clone();
+        let gen1 = gens
+            .iter()
+            .find(|o| o.id != gen0)
+            .expect("second generation")
+            .id
+            .clone();
+
+        let parent_of = |tool: &str| -> Option<String> {
+            observations(&ops)
+                .into_iter()
+                .rev()
+                .find(|o| o.tool_id.as_deref() == Some(tool))
+                .and_then(|o| o.parent_id.clone())
+        };
+        assert_eq!(parent_of("t1").as_deref(), Some(gen0.as_str()));
+        assert_eq!(parent_of("t2").as_deref(), Some(gen0.as_str()));
+        assert_eq!(
+            parent_of("t3").as_deref(),
+            Some(gen1.as_str()),
+            "a later message owns the calls it issues"
+        );
+        // a generation is a root of the turn, not a child of anything
+        assert!(gens.iter().all(|g| g.parent_id.is_none()));
     }
 }
