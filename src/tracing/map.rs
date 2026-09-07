@@ -142,6 +142,11 @@ struct OpenTool {
     /// The event index at ToolUse time — the tool's identity in id
     /// derivation (the emission-time counter would collide).
     event_index: u64,
+    /// The generation whose assistant message issued this call, by its
+    /// index in the turn. This is the tool's parent in the tree: the
+    /// transcript states it by putting the `tool_use` block inside that
+    /// message, and the assembler sees the message first.
+    gen_index: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -1230,7 +1235,11 @@ impl TurnAssembler {
         ObservationRow {
             id: ids::span_id_hex(&span_key),
             trace_id: turn.trace_id.clone(),
-            parent_id: None,
+            // The generation that issued the call. Without this every row
+            // in a turn is a root and the tree view is a flat list.
+            parent_id: tool
+                .gen_index
+                .map(|index| ids::span_id_hex(&format!("{}|gen|{index}", turn.trace_key))),
             obs_type,
             name,
             kind,
@@ -1537,6 +1546,7 @@ impl TurnAssembler {
                     turn.note_skill(&skill);
                     turn.tools_since_gen.push(name.clone());
                     turn.event_index += 1;
+                    let gen_index = turn.last_gen.as_ref().map(|(index, _)| *index);
                     turn.open_tools.push(OpenTool {
                         id,
                         name,
@@ -1545,6 +1555,7 @@ impl TurnAssembler {
                         start_nanos: nanos,
                         ts_approx: approx,
                         event_index: turn.event_index,
+                        gen_index,
                     });
                     turn.last_nanos = nanos;
                     turn.any_ts_approx |= approx;
@@ -1604,6 +1615,9 @@ impl TurnAssembler {
                                 start_nanos: nanos,
                                 ts_approx: approx,
                                 event_index: turn_ref.event_index,
+                                // an orphan result names no issuing
+                                // message, so it stays a root
+                                gen_index: None,
                             },
                             true,
                         ),
@@ -4719,5 +4733,72 @@ mod tests {
             0,
         );
         assert_eq!(asm.take_continuation(), None, "self-loop refused");
+    }
+    #[test]
+    fn tool_calls_are_parented_to_the_generation_that_issued_them() {
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), Some("s1".into()), "watched");
+        let mut ops = Vec::new();
+        ops.extend(asm.feed(user("go", "2026-09-07T10:00:00Z"), 0));
+        // first assistant message issues two calls
+        ops.extend(asm.feed(
+            assistant("thinking about it", "2026-09-07T10:00:01Z", vec![]),
+            0,
+        ));
+        ops.extend(asm.feed(
+            tool_use("t1", "Bash", Value::Null, "2026-09-07T10:00:02Z"),
+            0,
+        ));
+        ops.extend(asm.feed(
+            tool_use("t2", "Read", Value::Null, "2026-09-07T10:00:03Z"),
+            0,
+        ));
+        ops.extend(asm.feed(
+            tool_result("t1", Value::from("ok"), false, "2026-09-07T10:00:04Z"),
+            0,
+        ));
+        ops.extend(asm.feed(
+            tool_result("t2", Value::from("ok"), false, "2026-09-07T10:00:05Z"),
+            0,
+        ));
+        // a second message issues a third
+        ops.extend(asm.feed(assistant("and again", "2026-09-07T10:00:06Z", vec![]), 0));
+        ops.extend(asm.feed(
+            tool_use("t3", "Grep", Value::Null, "2026-09-07T10:00:07Z"),
+            0,
+        ));
+        ops.extend(asm.feed(
+            tool_result("t3", Value::from("ok"), false, "2026-09-07T10:00:08Z"),
+            0,
+        ));
+        ops.extend(asm.finalize());
+
+        let gens: Vec<&ObservationRow> = observations(&ops)
+            .into_iter()
+            .filter(|o| o.obs_type == ObservationType::Generation)
+            .collect();
+        let gen0 = gens.first().expect("first generation").id.clone();
+        let gen1 = gens
+            .iter()
+            .find(|o| o.id != gen0)
+            .expect("second generation")
+            .id
+            .clone();
+
+        let parent_of = |tool: &str| -> Option<String> {
+            observations(&ops)
+                .into_iter()
+                .rev()
+                .find(|o| o.tool_id.as_deref() == Some(tool))
+                .and_then(|o| o.parent_id.clone())
+        };
+        assert_eq!(parent_of("t1").as_deref(), Some(gen0.as_str()));
+        assert_eq!(parent_of("t2").as_deref(), Some(gen0.as_str()));
+        assert_eq!(
+            parent_of("t3").as_deref(),
+            Some(gen1.as_str()),
+            "a later message owns the calls it issues"
+        );
+        // a generation is a root of the turn, not a child of anything
+        assert!(gens.iter().all(|g| g.parent_id.is_none()));
     }
 }
