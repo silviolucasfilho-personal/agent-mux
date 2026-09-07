@@ -24,6 +24,7 @@ pub mod map;
 pub mod pricing;
 pub mod scores;
 pub mod store;
+pub mod subagents;
 pub mod tail;
 pub mod usage;
 pub mod view;

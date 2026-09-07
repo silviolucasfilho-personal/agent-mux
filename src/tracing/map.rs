@@ -807,6 +807,185 @@ impl TurnAssembler {
     /// When the row is the transcript's view of a subagent the hooks
     /// already announced, the hook-created agent row is re-parented under
     /// it and returned so the caller can emit that update too.
+    /// The observations of one subagent's own conversation, parented under
+    /// the tool call that launched it.
+    ///
+    /// Claude writes a subagent's whole exchange to a sidecar transcript
+    /// rather than into the parent, so without reading it an agent row has
+    /// no children, no tokens and no cost — which is why the tree showed a
+    /// bare "agent:" row and the rollups summed zero. Recursion follows the
+    /// same rule one level down, bounded so a malformed cycle cannot spin.
+    fn subagent_rows(&self, agent_row: &ObservationRow, depth: usize) -> Vec<ObservationRow> {
+        const MAX_DEPTH: usize = 4;
+        if depth >= MAX_DEPTH || !self.emitting {
+            return Vec::new();
+        }
+        let Some(agent_id) = agent_row
+            .metadata
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            return Vec::new();
+        };
+        let Some(dir) = self
+            .transcript_path
+            .as_deref()
+            .and_then(crate::tracing::subagents::dir_for)
+        else {
+            return Vec::new();
+        };
+        let lines = crate::tracing::subagents::lines(&dir, &agent_id);
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        let meta = crate::tracing::subagents::load(&dir, &agent_id);
+        let prefix = format!("{}|sub|{agent_id}", agent_row.id);
+        let fallback_ns = agent_row.start_ns;
+
+        let mut rows: Vec<ObservationRow> = Vec::new();
+        let mut gen_index = 0usize;
+        let mut tool_index = 0usize;
+        let mut last_gen: Option<String> = None;
+        let mut open: HashMap<String, (String, Value, i64)> = HashMap::new();
+
+        for line in &lines {
+            for event in crate::transcript::parse_line(self.settings.provider, line) {
+                match event {
+                    TranscriptEvent::Assistant {
+                        text,
+                        model,
+                        thinking,
+                        usage,
+                        ts,
+                        ..
+                    } => {
+                        let ns = sub_nanos(&ts, fallback_ns);
+                        let id = ids::span_id_hex(&format!("{prefix}|gen|{gen_index}"));
+                        let (usage_raw, usage_norm) = if usage.is_empty() {
+                            (None, None)
+                        } else {
+                            (
+                                Some(usage.clone()),
+                                Some(usage::normalize(self.settings.provider, &usage)),
+                            )
+                        };
+                        let mut metadata = serde_json::Map::new();
+                        metadata.insert("agent_id".into(), Value::from(agent_id.clone()));
+                        metadata.insert("source".into(), Value::from("subagent"));
+                        if let Some(m) = meta.as_ref().and_then(|m| m.agent_type.clone()) {
+                            metadata.insert("agent_type".into(), Value::from(m));
+                        }
+                        if let Some(d) = meta.as_ref().and_then(|m| m.spawn_depth) {
+                            metadata.insert("spawn_depth".into(), Value::from(d));
+                        }
+                        rows.push(ObservationRow {
+                            id: id.clone(),
+                            trace_id: agent_row.trace_id.clone(),
+                            parent_id: Some(agent_row.id.clone()),
+                            obs_type: ObservationType::Generation,
+                            name: if text.is_empty() {
+                                "subagent assistant (tool use)".into()
+                            } else {
+                                "subagent assistant".into()
+                            },
+                            kind: None,
+                            start_ns: ns,
+                            end_ns: Some(ns),
+                            level: Level::Default,
+                            status_message: None,
+                            model: model.or_else(|| meta.as_ref().and_then(|m| m.model.clone())),
+                            input: None,
+                            output: self.full_content(&text),
+                            thinking: thinking.as_deref().and_then(|t| self.full_content(t)),
+                            usage_raw,
+                            usage: usage_norm,
+                            tool_id: None,
+                            tool_name: None,
+                            skill: None,
+                            mcp_server: None,
+                            path: None,
+                            is_error: false,
+                            ts_approx: false,
+                            metadata,
+                        });
+                        last_gen = Some(id);
+                        gen_index += 1;
+                    }
+                    TranscriptEvent::ToolUse {
+                        id, name, args, ts, ..
+                    } => {
+                        open.insert(id, (name, args, sub_nanos(&ts, fallback_ns)));
+                    }
+                    TranscriptEvent::ToolResult {
+                        id,
+                        content,
+                        is_error,
+                        structured,
+                        ts,
+                    } => {
+                        let end = sub_nanos(&ts, fallback_ns);
+                        let (name, args, start) = open
+                            .remove(&id)
+                            .unwrap_or_else(|| ("unknown".to_string(), Value::Null, end));
+                        let mut metadata = serde_json::Map::new();
+                        metadata.insert("agent_id".into(), Value::from(agent_id.clone()));
+                        metadata.insert("source".into(), Value::from("subagent"));
+                        if let Some(s) = structured.as_ref() {
+                            self.push_structured_result(&mut metadata, s);
+                        }
+                        let row = ObservationRow {
+                            id: ids::span_id_hex(&format!(
+                                "{prefix}|tool|{name}|{id}|{tool_index}"
+                            )),
+                            trace_id: agent_row.trace_id.clone(),
+                            parent_id: last_gen.clone().or_else(|| Some(agent_row.id.clone())),
+                            obs_type: ObservationType::Tool,
+                            name: normalize_tool_name(&name).to_string(),
+                            kind: None,
+                            start_ns: start.min(end),
+                            end_ns: Some(end),
+                            level: if is_error {
+                                Level::Error
+                            } else {
+                                Level::Default
+                            },
+                            status_message: if is_error {
+                                Some(
+                                    error_summary(Some(&content))
+                                        .unwrap_or_else(|| "tool error".to_string()),
+                                )
+                            } else {
+                                None
+                            },
+                            model: None,
+                            input: clean_json_str(&args).and_then(|a| self.full_content(&a)),
+                            output: clean_json_str(&content).and_then(|c| self.full_content(&c)),
+                            thinking: None,
+                            usage_raw: None,
+                            usage: None,
+                            tool_id: Some(id),
+                            tool_name: Some(name),
+                            skill: None,
+                            mcp_server: None,
+                            path: None,
+                            is_error,
+                            ts_approx: false,
+                            metadata,
+                        };
+                        // an agent that launched its own agent nests again
+                        let nested = self.subagent_rows(&row, depth + 1);
+                        tool_index += 1;
+                        rows.push(row);
+                        rows.extend(nested);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        rows
+    }
+
     fn finish_tool_row(
         &mut self,
         row: &mut ObservationRow,
@@ -1643,8 +1822,13 @@ impl TurnAssembler {
                 };
                 if let Some((ordinal, mut row)) = built {
                     let relinked = self.finish_tool_row(&mut row, ordinal);
+                    // A Task call names the subagent it launched; the
+                    // agent's own conversation is a sidecar transcript
+                    // beside this one, and its work belongs under this row.
+                    let children = self.subagent_rows(&row, 0);
                     ops.push(StoreOp::Observation(row));
                     ops.extend(relinked.map(StoreOp::Observation));
+                    ops.extend(children.into_iter().map(StoreOp::Observation));
                 }
             }
             TranscriptEvent::Thinking { text, ts } => {
@@ -2478,6 +2662,15 @@ pub fn launch_ended(settings: &MapSettings, end: &SessionEnd, now_ns: i64) -> La
         row.reported_lines_removed = cost.total_lines_removed;
     }
     row
+}
+
+/// A subagent line's timestamp, falling back to the launching call's start
+/// so a row is never stamped at the epoch.
+fn sub_nanos(ts: &Option<String>, fallback_ns: i64) -> i64 {
+    ts.as_deref()
+        .and_then(crate::transcript::parse_rfc3339_nanos)
+        .map(clamp_ns)
+        .unwrap_or(fallback_ns)
 }
 
 #[cfg(test)]
