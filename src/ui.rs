@@ -1482,7 +1482,7 @@ fn draw_loop_view(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
 
 /// Colour for an observation row, shared by both new views.
 fn obs_style(o: &crate::tracing::store::query::ObservationView) -> Style {
-    if o.is_error || o.level == "ERROR" {
+    if o.level == "ERROR" {
         return Style::default().fg(Color::Red);
     }
     match o.level.as_str() {
@@ -2092,7 +2092,6 @@ mod tests {
                     reported_message_count: None,
                     session_cost_usd: None,
                     timing_approx: false,
-                    ordinal_salted: false,
                     metadata: None,
                 }),
                 StoreOp::Observation(ObservationRow {
@@ -2117,7 +2116,6 @@ mod tests {
                     skill: None,
                     mcp_server: None,
                     path: None,
-                    is_error: false,
                     ts_approx: false,
                     metadata: serde_json::Map::new(),
                 }),
@@ -2192,7 +2190,6 @@ mod tests {
                 skill: None,
                 mcp_server: None,
                 path: None,
-                is_error: false,
                 metadata: "{}".into(),
             }
         };

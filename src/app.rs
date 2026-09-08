@@ -1347,7 +1347,10 @@ impl TraceBrowserState {
                 lines.push(Line::raw(o.metadata.clone()));
             }
             if o.input.is_none() && o.output.is_none() {
-                lines.push(Line::styled("(no content stored — metadata mode)", dim));
+                lines.push(Line::styled(
+                    "(no content available — not captured, metadata-only, or still pending)",
+                    dim,
+                ));
             }
         }
         self.detail_lines = lines;
@@ -3534,7 +3537,6 @@ mod history_tests {
             skill: None,
             mcp_server: None,
             path: None,
-            is_error: false,
             metadata: "{}".into(),
         };
         let mut browser = TraceBrowserState::new(None, None);

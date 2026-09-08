@@ -151,6 +151,7 @@ struct OpenTool {
 
 #[derive(Clone)]
 struct PendingGen {
+    msg_id: Option<String>,
     text: String,
     model: Option<String>,
     thinking: Option<String>,
@@ -164,6 +165,9 @@ struct PendingGen {
 }
 
 struct OpenTurn {
+    generation_inputs: HashMap<usize, Vec<Value>>,
+    generation_keys: HashMap<usize, String>,
+    messages: HashMap<String, (usize, PendingGen)>,
     ordinal: u64,
     trace_key: String,
     trace_id: String,
@@ -241,13 +245,23 @@ struct HookAgent {
 }
 
 pub struct TurnAssembler {
+    resume_native: bool,
+    resume_snapshot: bool,
+    next_source_turn: Option<String>,
+    trace_keys: HashMap<u64, String>,
+    child_sources: HashMap<String, (ObservationRow, std::path::PathBuf)>,
+    child_captures: HashMap<String, ChildCapture>,
+    child_depth: usize,
+    sidecar_dir: Option<std::path::PathBuf>,
+    capture_tools: HashMap<String, ObservationRow>,
+    codex_children: HashMap<String, ObservationRow>,
+    lifecycle: HashMap<String, (Value, Option<String>)>,
     settings: MapSettings,
     session_id: Option<String>,
     /// "deterministic" | "watched" | "heuristic" | "none"
     correlation: String,
     transcript_path: Option<String>,
     ordinal: u64,
-    ordinal_salted: bool,
     emitting: bool,
     explicit_boundaries: bool,
     turn: Option<OpenTurn>,
@@ -285,6 +299,14 @@ pub struct TurnAssembler {
     continued_in: Option<String>,
 }
 
+struct ChildCapture {
+    assembler: Box<TurnAssembler>,
+    tailer: crate::tracing::tail::Tailer,
+    parent: ObservationRow,
+    fingerprints: HashMap<String, uuid::Uuid>,
+    blocked: bool,
+}
+
 /// The CLI's own running session totals (Claude `cost-state`), surfaced on
 /// the launch row.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -301,12 +323,22 @@ pub fn session_key(provider: Provider, session_id: &str) -> String {
 impl TurnAssembler {
     pub fn new(settings: MapSettings, session_id: Option<String>, correlation: &str) -> Self {
         TurnAssembler {
+            resume_native: false,
+            resume_snapshot: false,
+            next_source_turn: None,
+            trace_keys: HashMap::new(),
+            child_sources: HashMap::new(),
+            child_captures: HashMap::new(),
+            child_depth: 0,
+            sidecar_dir: None,
+            capture_tools: HashMap::new(),
+            codex_children: HashMap::new(),
+            lifecycle: HashMap::new(),
             settings,
             session_id,
             correlation: correlation.to_string(),
             transcript_path: None,
             ordinal: 0,
-            ordinal_salted: false,
             emitting: true,
             explicit_boundaries: false,
             turn: None,
@@ -370,16 +402,24 @@ impl TurnAssembler {
             && !self.emitting
             && let Some(turn) = self.turn.as_mut()
         {
-            turn.stale = true;
+            if self.resume_native && turn.trace_key.starts_with("amx2|") {
+                self.resume_snapshot = true;
+            } else {
+                turn.stale = true;
+            }
         }
         self.emitting = emitting;
     }
 
-    /// Marks the prime pass as byte-truncated: ordinals no longer count from
-    /// file start, so trace ids get the launch salt.
-    pub fn mark_backfill_truncated(&mut self) {
-        self.ordinal_salted = true;
+    /// Only resume into a native turn when the destination already uses
+    /// that identity scheme. Legacy sessions retain their old prime policy.
+    pub fn set_resume_native(&mut self, enabled: bool) {
+        self.resume_native = enabled;
     }
+
+    /// Kept for callers that detect a truncated prime pass. Content-derived
+    /// ids do not require a launch-specific salt.
+    pub fn mark_backfill_truncated(&mut self) {}
 
     fn full_content(&self, text: &str) -> Option<String> {
         match self.settings.content_mode {
@@ -403,16 +443,15 @@ impl TurnAssembler {
     }
 
     fn trace_key_for_ordinal(&self, ordinal: u64) -> String {
+        if let Some(key) = self.trace_keys.get(&ordinal) {
+            return key.clone();
+        }
         let base = format!(
             "amx1|{}|{}|turn|{ordinal}",
             self.settings.provider.as_str(),
             self.session_id_or_launch()
         );
-        if self.ordinal_salted {
-            format!("{base}|{}", self.settings.launch_id)
-        } else {
-            base
-        }
+        base
     }
 
     /// The session row as this assembler knows it (adoption facts plus
@@ -454,9 +493,24 @@ impl TurnAssembler {
 
     fn open_turn(&mut self, start_nanos: i128) {
         self.ordinal += 1;
+        let source_turn = self.next_source_turn.take();
+        if let Some(id) = &source_turn {
+            self.trace_keys.insert(
+                self.ordinal,
+                format!(
+                    "amx2|{}|{}|turn|{}",
+                    self.settings.provider.as_str(),
+                    self.session_id_or_launch(),
+                    id
+                ),
+            );
+        }
         let trace_key = self.trace_key_for_ordinal(self.ordinal);
         let trace_id = ids::trace_id_hex(&trace_key);
         self.turn = Some(OpenTurn {
+            generation_inputs: HashMap::new(),
+            generation_keys: HashMap::new(),
+            messages: HashMap::new(),
             ordinal: self.ordinal,
             trace_key,
             trace_id,
@@ -484,6 +538,12 @@ impl TurnAssembler {
             hook_last_message: None,
             extra_metadata: serde_json::Map::new(),
         });
+        if let (Some(id), Some(turn)) = (source_turn, self.turn.as_mut()) {
+            turn.extra_metadata
+                .insert("native_turn_id".into(), Value::String(id));
+            turn.extra_metadata
+                .insert("identity_version".into(), Value::from(2));
+        }
         // a prompt hook that preceded this turn's transcript line pins its start
         if let Some((key, ts)) = self.pending_prompt.take()
             && let Some(turn) = self.turn.as_mut()
@@ -586,7 +646,6 @@ impl TurnAssembler {
             // previous event's timestamp (transcript lines are written at
             // completion), so any turn containing a generation is flagged.
             timing_approx: turn.any_ts_approx || (closed && turn.gen_count > 0),
-            ordinal_salted: self.ordinal_salted,
             metadata: (!metadata.is_empty()).then_some(Value::Object(metadata)),
         }
     }
@@ -628,8 +687,15 @@ impl TurnAssembler {
     }
 
     fn gen_row(&self, turn: &OpenTurn, index: usize, generation: &PendingGen) -> ObservationRow {
-        let span_key = format!("{}|gen|{index}", turn.trace_key);
+        let span_key = turn
+            .generation_keys
+            .get(&index)
+            .cloned()
+            .unwrap_or_else(|| format!("{}|gen|{index}", turn.trace_key));
         let mut metadata = serde_json::Map::new();
+        if let Some(id) = &generation.msg_id {
+            metadata.insert("native_message_id".into(), Value::from(id.clone()));
+        }
         if !generation.tool_calls.is_empty() {
             metadata.insert(
                 "tool_calls".into(),
@@ -643,6 +709,21 @@ impl TurnAssembler {
                 Some(generation.usage.clone()),
                 Some(usage::normalize(self.settings.provider, &generation.usage)),
             )
+        };
+        if !usage::valid(self.settings.provider, &generation.usage) {
+            metadata.insert("usage_invalid".into(), Value::Bool(true));
+        }
+        let input = if index == 0 {
+            metadata.insert("input_scope".into(), Value::from("turn_prompt"));
+            turn.user_text.as_ref().and_then(|t| self.full_content(t))
+        } else if let Some(results) = turn.generation_inputs.get(&index) {
+            metadata.insert("input_scope".into(), Value::from("preceding_tool_results"));
+            self.full_content(
+                &serde_json::json!({"role":"tool", "tool_results":results}).to_string(),
+            )
+        } else {
+            metadata.insert("input_scope".into(), Value::from("unavailable"));
+            None
         };
         ObservationRow {
             id: ids::span_id_hex(&span_key),
@@ -660,7 +741,7 @@ impl TurnAssembler {
             level: Level::Default,
             status_message: None,
             model: generation.model.clone(),
-            input: turn.user_text.as_ref().and_then(|t| self.full_content(t)),
+            input,
             output: if generation.text.is_empty() {
                 None
             } else {
@@ -677,8 +758,7 @@ impl TurnAssembler {
             skill: generation.skill.clone(),
             mcp_server: None,
             path: None,
-            is_error: false,
-            ts_approx: generation.ts_approx,
+            ts_approx: generation.ts_approx || generation.start_nanos != generation.end_nanos,
             metadata,
         }
     }
@@ -692,6 +772,7 @@ impl TurnAssembler {
         usage: &[(String, i64)],
     ) -> ObservationRow {
         let generation = PendingGen {
+            msg_id: None,
             text: String::new(),
             model: self.last_known_model.clone(),
             thinking: None,
@@ -801,196 +882,32 @@ impl TurnAssembler {
         ops
     }
 
-    /// Applies hook pins (exact start/end, failure) to a freshly built tool
-    /// row and remembers it so a later hook can re-emit it.
-    /// Applies any hook pins to a transcript tool row and remembers it.
-    /// When the row is the transcript's view of a subagent the hooks
-    /// already announced, the hook-created agent row is re-parented under
-    /// it and returned so the caller can emit that update too.
-    /// The observations of one subagent's own conversation, parented under
-    /// the tool call that launched it.
-    ///
-    /// Claude writes a subagent's whole exchange to a sidecar transcript
-    /// rather than into the parent, so without reading it an agent row has
-    /// no children, no tokens and no cost — which is why the tree showed a
-    /// bare "agent:" row and the rollups summed zero. Recursion follows the
-    /// same rule one level down, bounded so a malformed cycle cannot spin.
-    fn subagent_rows(&self, agent_row: &ObservationRow, depth: usize) -> Vec<ObservationRow> {
-        const MAX_DEPTH: usize = 4;
-        if depth >= MAX_DEPTH || !self.emitting {
-            return Vec::new();
-        }
-        let Some(agent_id) = agent_row
-            .metadata
-            .get("agent_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-        else {
-            return Vec::new();
-        };
-        let Some(dir) = self
-            .transcript_path
-            .as_deref()
-            .and_then(crate::tracing::subagents::dir_for)
-        else {
-            return Vec::new();
-        };
-        let lines = crate::tracing::subagents::lines(&dir, &agent_id);
-        if lines.is_empty() {
-            return Vec::new();
-        }
-        let meta = crate::tracing::subagents::load(&dir, &agent_id);
-        let prefix = format!("{}|sub|{agent_id}", agent_row.id);
-        let fallback_ns = agent_row.start_ns;
-
-        let mut rows: Vec<ObservationRow> = Vec::new();
-        let mut gen_index = 0usize;
-        let mut tool_index = 0usize;
-        let mut last_gen: Option<String> = None;
-        let mut open: HashMap<String, (String, Value, i64)> = HashMap::new();
-
-        for line in &lines {
-            for event in crate::transcript::parse_line(self.settings.provider, line) {
-                match event {
-                    TranscriptEvent::Assistant {
-                        text,
-                        model,
-                        thinking,
-                        usage,
-                        ts,
-                        ..
-                    } => {
-                        let ns = sub_nanos(&ts, fallback_ns);
-                        let id = ids::span_id_hex(&format!("{prefix}|gen|{gen_index}"));
-                        let (usage_raw, usage_norm) = if usage.is_empty() {
-                            (None, None)
-                        } else {
-                            (
-                                Some(usage.clone()),
-                                Some(usage::normalize(self.settings.provider, &usage)),
-                            )
-                        };
-                        let mut metadata = serde_json::Map::new();
-                        metadata.insert("agent_id".into(), Value::from(agent_id.clone()));
-                        metadata.insert("source".into(), Value::from("subagent"));
-                        if let Some(m) = meta.as_ref().and_then(|m| m.agent_type.clone()) {
-                            metadata.insert("agent_type".into(), Value::from(m));
-                        }
-                        if let Some(d) = meta.as_ref().and_then(|m| m.spawn_depth) {
-                            metadata.insert("spawn_depth".into(), Value::from(d));
-                        }
-                        rows.push(ObservationRow {
-                            id: id.clone(),
-                            trace_id: agent_row.trace_id.clone(),
-                            parent_id: Some(agent_row.id.clone()),
-                            obs_type: ObservationType::Generation,
-                            name: if text.is_empty() {
-                                "subagent assistant (tool use)".into()
-                            } else {
-                                "subagent assistant".into()
-                            },
-                            kind: None,
-                            start_ns: ns,
-                            end_ns: Some(ns),
-                            level: Level::Default,
-                            status_message: None,
-                            model: model.or_else(|| meta.as_ref().and_then(|m| m.model.clone())),
-                            input: None,
-                            output: self.full_content(&text),
-                            thinking: thinking.as_deref().and_then(|t| self.full_content(t)),
-                            usage_raw,
-                            usage: usage_norm,
-                            tool_id: None,
-                            tool_name: None,
-                            skill: None,
-                            mcp_server: None,
-                            path: None,
-                            is_error: false,
-                            ts_approx: false,
-                            metadata,
-                        });
-                        last_gen = Some(id);
-                        gen_index += 1;
-                    }
-                    TranscriptEvent::ToolUse {
-                        id, name, args, ts, ..
-                    } => {
-                        open.insert(id, (name, args, sub_nanos(&ts, fallback_ns)));
-                    }
-                    TranscriptEvent::ToolResult {
-                        id,
-                        content,
-                        is_error,
-                        structured,
-                        ts,
-                    } => {
-                        let end = sub_nanos(&ts, fallback_ns);
-                        let (name, args, start) = open
-                            .remove(&id)
-                            .unwrap_or_else(|| ("unknown".to_string(), Value::Null, end));
-                        let mut metadata = serde_json::Map::new();
-                        metadata.insert("agent_id".into(), Value::from(agent_id.clone()));
-                        metadata.insert("source".into(), Value::from("subagent"));
-                        if let Some(s) = structured.as_ref() {
-                            self.push_structured_result(&mut metadata, s);
-                        }
-                        let row = ObservationRow {
-                            id: ids::span_id_hex(&format!(
-                                "{prefix}|tool|{name}|{id}|{tool_index}"
-                            )),
-                            trace_id: agent_row.trace_id.clone(),
-                            parent_id: last_gen.clone().or_else(|| Some(agent_row.id.clone())),
-                            obs_type: ObservationType::Tool,
-                            name: normalize_tool_name(&name).to_string(),
-                            kind: None,
-                            start_ns: start.min(end),
-                            end_ns: Some(end),
-                            level: if is_error {
-                                Level::Error
-                            } else {
-                                Level::Default
-                            },
-                            status_message: if is_error {
-                                Some(
-                                    error_summary(Some(&content))
-                                        .unwrap_or_else(|| "tool error".to_string()),
-                                )
-                            } else {
-                                None
-                            },
-                            model: None,
-                            input: clean_json_str(&args).and_then(|a| self.full_content(&a)),
-                            output: clean_json_str(&content).and_then(|c| self.full_content(&c)),
-                            thinking: None,
-                            usage_raw: None,
-                            usage: None,
-                            tool_id: Some(id),
-                            tool_name: Some(name),
-                            skill: None,
-                            mcp_server: None,
-                            path: None,
-                            is_error,
-                            ts_approx: false,
-                            metadata,
-                        };
-                        // an agent that launched its own agent nests again
-                        let nested = self.subagent_rows(&row, depth + 1);
-                        tool_index += 1;
-                        rows.push(row);
-                        rows.extend(nested);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        rows
-    }
-
+    /// Retain lifecycle enrichment and hook pins on transcript updates,
+    /// remember calls for child discovery, and link hook-created agents.
     fn finish_tool_row(
         &mut self,
         row: &mut ObservationRow,
         ordinal: u64,
     ) -> Option<ObservationRow> {
+        if let Some(previous) = row
+            .tool_id
+            .as_ref()
+            .and_then(|id| self.capture_tools.get(id))
+            && previous.metadata.get("lifecycle_observed") == Some(&Value::Bool(true))
+        {
+            row.name = previous.name.clone();
+            row.mcp_server = previous.mcp_server.clone();
+            row.end_ns = previous.end_ns.or(row.end_ns);
+            row.level = previous.level;
+            row.status_message = previous.status_message.clone();
+            if row.output.is_none() {
+                row.output = previous.output.clone();
+            }
+            row.metadata.extend(previous.metadata.clone());
+        }
+        if let Some(id) = &row.tool_id {
+            self.capture_tools.insert(id.clone(), row.clone());
+        }
         // remembered for the loop-pattern check when the turn closes
         let key = row.tool_id.clone().unwrap_or_else(|| row.id.clone());
         if !self
@@ -1123,7 +1040,6 @@ impl TurnAssembler {
                 skill: None,
                 mcp_server: None,
                 path: None,
-                is_error: false,
                 ts_approx: false,
                 metadata,
             };
@@ -1230,7 +1146,6 @@ impl TurnAssembler {
                         skill: None,
                         mcp_server,
                         path: None,
-                        is_error: false,
                         ts_approx: false,
                         metadata,
                     },
@@ -1253,7 +1168,6 @@ impl TurnAssembler {
             _ => {
                 row.end_ns = Some(ev.ts_ns.max(row.start_ns));
                 if ev.is_error {
-                    row.is_error = true;
                     row.level = Level::Error;
                     row.status_message = Some("tool error".into());
                     if let Some(err) = ev.payload.get("tool_error").and_then(|v| v.as_str()) {
@@ -1286,10 +1200,14 @@ impl TurnAssembler {
     ) -> ObservationRow {
         // Keyed to the ToolUse event's own index (+ call id): stable for the
         // open/closed writes of one call, distinct for same-name tools.
-        let span_key = format!(
-            "{}|tool|{}|{}|{}",
-            turn.trace_key, tool.name, tool.id, tool.event_index
-        );
+        let span_key = if !tool.id.is_empty() && turn.trace_key.starts_with("amx2|") {
+            format!("{}|tool|{}", turn.trace_key, tool.id)
+        } else {
+            format!(
+                "{}|tool|{}|{}|{}",
+                turn.trace_key, tool.name, tool.id, tool.event_index
+            )
+        };
         let mut metadata = serde_json::Map::new();
         let mut name = tool.name.clone();
         let mut obs_type = ObservationType::Tool;
@@ -1416,9 +1334,15 @@ impl TurnAssembler {
             trace_id: turn.trace_id.clone(),
             // The generation that issued the call. Without this every row
             // in a turn is a root and the tree view is a flat list.
-            parent_id: tool
-                .gen_index
-                .map(|index| ids::span_id_hex(&format!("{}|gen|{index}", turn.trace_key))),
+            parent_id: tool.gen_index.map(|index| {
+                ids::span_id_hex(
+                    &turn
+                        .generation_keys
+                        .get(&index)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}|gen|{index}", turn.trace_key)),
+                )
+            }),
             obs_type,
             name,
             kind,
@@ -1443,7 +1367,6 @@ impl TurnAssembler {
             skill: tool.skill.clone(),
             mcp_server,
             path,
-            is_error,
             ts_approx: tool.ts_approx,
             metadata,
         }
@@ -1456,6 +1379,11 @@ impl TurnAssembler {
     fn push_structured_result(&self, meta: &mut serde_json::Map<String, Value>, s: &Value) {
         fn put(meta: &mut serde_json::Map<String, Value>, key: &str, value: Value) {
             meta.entry(key.to_string()).or_insert(value);
+        }
+        if s.get("isAsync").and_then(Value::as_bool) == Some(true)
+            || s.get("status").and_then(Value::as_str) == Some("async_launched")
+        {
+            put(meta, "agent_async", Value::Bool(true));
         }
         if let Some(stdout) = s.get("stdout").and_then(|v| v.as_str()) {
             put(meta, "stdout_bytes", Value::from(stdout.len() as i64));
@@ -1527,8 +1455,202 @@ impl TurnAssembler {
     /// Feeds one event. `recv_nanos` is the wall-clock fallback for events
     /// with a missing/unparseable timestamp.
     pub fn feed(&mut self, event: TranscriptEvent, recv_nanos: i128) -> Vec<StoreOp> {
+        let replay_call = match &event {
+            TranscriptEvent::ToolUse { id, .. } | TranscriptEvent::ToolResult { id, .. } => {
+                Some(id.clone())
+            }
+            _ => None,
+        };
         let mut ops = Vec::new();
+        if self.emitting
+            && std::mem::take(&mut self.resume_snapshot)
+            && let Some(turn) = self.turn.as_ref()
+        {
+            ops.push(StoreOp::Trace(self.trace_row(turn, TraceStatus::Open)));
+            for (index, generation) in turn.messages.values() {
+                ops.push(StoreOp::Observation(self.gen_row(turn, *index, generation)));
+            }
+            if self.settings.provider == Provider::Codex
+                && let Some((index, generation)) = &turn.last_gen
+            {
+                ops.push(StoreOp::Observation(self.gen_row(turn, *index, generation)));
+            }
+            let tools: Vec<_> = turn
+                .open_tools
+                .iter()
+                .map(|tool| {
+                    (
+                        turn.ordinal,
+                        self.tool_row(turn, tool, None, None, None, false, false),
+                    )
+                })
+                .collect();
+            for (ordinal, mut row) in tools {
+                self.finish_tool_row(&mut row, ordinal);
+                ops.push(StoreOp::Observation(row));
+            }
+        }
         match event {
+            TranscriptEvent::SourceTurn { id } => self.next_source_turn = Some(id),
+            TranscriptEvent::Activity { payload, ts } => {
+                ops.extend(self.activity(payload, ts, recv_nanos));
+            }
+            TranscriptEvent::Record { kind, payload, ts } => {
+                let (nanos, _) = self.event_nanos(&ts, recv_nanos);
+                match kind.as_str() {
+                    "ai-title" => {
+                        if self.emitting
+                            && let Some(title) = payload.get("title").and_then(Value::as_str)
+                            && !title.trim().is_empty()
+                        {
+                            let mut row = self.session_row(clamp_ns(nanos));
+                            row.title = Some(
+                                mask_secrets(title, &self.settings.redact_literals)
+                                    .chars()
+                                    .take(120)
+                                    .collect(),
+                            );
+                            let mut extra = row
+                                .extra
+                                .take()
+                                .unwrap_or_else(|| Value::Object(Default::default()));
+                            if let Some(obj) = extra.as_object_mut() {
+                                obj.insert("title_source".into(), Value::from("ai-title"));
+                            }
+                            row.extra = Some(extra);
+                            ops.push(StoreOp::Session(row));
+                        }
+                    }
+                    "compact_boundary" => {
+                        // A boundary belongs to the current logical turn. It
+                        // is a real event row so its timing is visible, while
+                        // the compact metadata also feeds the loop/context UI.
+                        if let Some(turn) = self.turn.as_mut() {
+                            turn.last_nanos = nanos;
+                            turn.event_index += 1;
+                            let compact = payload
+                                .get("compactMetadata")
+                                .cloned()
+                                .unwrap_or_else(|| payload.clone());
+                            let mut facts = serde_json::Map::new();
+                            for (from, to) in [
+                                ("trigger", "compact_trigger"),
+                                ("preTokens", "compact_pre_tokens"),
+                                ("postTokens", "compact_post_tokens"),
+                                ("cumulativeDroppedTokens", "compact_dropped_tokens"),
+                                ("logicalParentUuid", "compact_logical_parent_uuid"),
+                            ] {
+                                if let Some(value) = compact.get(from).or_else(|| payload.get(from))
+                                {
+                                    facts.insert(to.into(), value.clone());
+                                    turn.extra_metadata.insert(to.into(), value.clone());
+                                }
+                            }
+                            turn.extra_metadata
+                                .insert("compacted".into(), Value::Bool(true));
+                            if self.emitting && !turn.stale {
+                                let key = payload
+                                    .get("uuid")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| turn.event_index.to_string());
+                                ops.push(StoreOp::Observation(ObservationRow {
+                                    id: ids::span_id_hex(&format!(
+                                        "{}|event|compact|{key}",
+                                        turn.trace_key
+                                    )),
+                                    trace_id: turn.trace_id.clone(),
+                                    parent_id: None,
+                                    obs_type: ObservationType::Event,
+                                    name: "context compacted".into(),
+                                    kind: Some("compact_boundary".into()),
+                                    start_ns: clamp_ns(nanos),
+                                    end_ns: Some(clamp_ns(nanos)),
+                                    level: Level::Default,
+                                    status_message: None,
+                                    model: None,
+                                    input: None,
+                                    output: None,
+                                    thinking: None,
+                                    usage_raw: None,
+                                    usage: None,
+                                    tool_id: None,
+                                    tool_name: None,
+                                    skill: None,
+                                    mcp_server: None,
+                                    path: None,
+                                    ts_approx: false,
+                                    metadata: facts,
+                                }));
+                                self.push_trace_op(&mut ops, TraceStatus::Open);
+                            }
+                        }
+                    }
+                    "pr-link" | "file-history-snapshot" | "file-history-delta" => {
+                        if let Some(turn) = self.turn.as_mut() {
+                            turn.last_nanos = nanos;
+                            turn.extra_metadata.insert(kind, payload);
+                            self.push_trace_op(&mut ops, TraceStatus::Open);
+                        }
+                    }
+                    "skill_listing" => {
+                        let mut names = Vec::new();
+                        fn collect(value: &Value, names: &mut Vec<String>) {
+                            match value {
+                                Value::Array(values) => {
+                                    values.iter().for_each(|v| collect(v, names))
+                                }
+                                Value::Object(map) => {
+                                    if let Some(name) = map.get("name").and_then(Value::as_str)
+                                        && !name.is_empty()
+                                    {
+                                        names.push(name.into());
+                                    }
+                                    for key in ["skills", "skillListing", "items"] {
+                                        if let Some(value) = map.get(key) {
+                                            collect(value, names);
+                                        }
+                                    }
+                                }
+                                Value::String(name) if !name.is_empty() => names.push(name.clone()),
+                                _ => {}
+                            }
+                        }
+                        collect(&payload, &mut names);
+                        names.sort();
+                        names.dedup();
+                        if !names.is_empty() {
+                            self.session_extra
+                                .retain(|(key, _)| key != "skill_inventory");
+                            self.session_extra
+                                .push(("skill_inventory".into(), Value::from(names).to_string()));
+                            if self.emitting {
+                                ops.push(StoreOp::Session(self.session_row(clamp_ns(nanos))));
+                            }
+                        }
+                    }
+                    "remote_session_change" => {
+                        let url = ["url", "webSessionUrl", "sessionUrl"]
+                            .iter()
+                            .find_map(|key| {
+                                payload
+                                    .get(*key)
+                                    .or_else(|| payload.pointer(&format!("/attachment/{key}")))
+                            })
+                            .and_then(Value::as_str);
+                        if let Some(url) = url {
+                            self.session_extra
+                                .retain(|(key, _)| key != "remote_session_url");
+                            self.session_extra
+                                .push(("remote_session_url".into(), url.into()));
+                            if self.emitting {
+                                ops.push(StoreOp::Session(self.session_row(clamp_ns(nanos))));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             TranscriptEvent::SessionMeta {
                 session_id,
                 cwd: _,
@@ -1628,7 +1750,7 @@ impl TurnAssembler {
                 text,
                 model,
                 thinking,
-                mut usage,
+                usage,
                 msg_id,
                 skill,
                 step_index,
@@ -1645,9 +1767,8 @@ impl TurnAssembler {
                     // line; charge each API message id exactly once.
                     if !usage.is_empty()
                         && let Some(id) = &msg_id
-                        && !turn.seen_usage_msg_ids.insert(id.clone())
                     {
-                        usage.clear();
+                        turn.seen_usage_msg_ids.insert(id.clone());
                     }
                     let start = if prev_nanos > 0 && prev_nanos <= nanos {
                         prev_nanos
@@ -1661,6 +1782,7 @@ impl TurnAssembler {
                     }
                     let tool_only = text.is_empty();
                     let generation = PendingGen {
+                        msg_id: msg_id.clone(),
                         text: text.clone(),
                         model: model.or_else(|| self.last_known_model.clone()),
                         thinking,
@@ -1673,15 +1795,75 @@ impl TurnAssembler {
                         ts_approx: approx,
                     };
                     if self.settings.provider == Provider::Codex {
-                        turn.pending_generations.push(generation);
+                        if let Some(previous) = turn.pending_generations.last_mut() {
+                            if !generation.text.is_empty() {
+                                if !previous.text.is_empty() {
+                                    previous.text.push('\n');
+                                }
+                                previous.text.push_str(&generation.text);
+                            }
+                            if generation.thinking.is_some() {
+                                previous.thinking = generation.thinking;
+                            }
+                            previous.end_nanos = nanos;
+                            previous.tool_only = previous.text.is_empty();
+                        } else {
+                            turn.pending_generations.push(generation);
+                        }
                     } else {
-                        let index = turn.gen_count;
-                        turn.gen_count += 1;
+                        let existing = msg_id
+                            .as_ref()
+                            .and_then(|id| turn.messages.get(id))
+                            .cloned();
+                        let (index, generation) = if let Some((index, mut previous)) = existing {
+                            if !generation.text.is_empty() {
+                                if !previous.text.is_empty() {
+                                    previous.text.push('\n');
+                                }
+                                previous.text.push_str(&generation.text);
+                            }
+                            if let Some(thinking) = generation.thinking {
+                                let value = previous.thinking.get_or_insert_with(String::new);
+                                if !value.is_empty() {
+                                    value.push('\n');
+                                }
+                                value.push_str(&thinking);
+                            }
+                            if !generation.usage.is_empty() {
+                                previous.usage = generation.usage;
+                            }
+                            previous.end_nanos = previous.end_nanos.max(nanos);
+                            previous.tool_only = previous.text.is_empty();
+                            (index, previous)
+                        } else {
+                            let index = turn.gen_count;
+                            turn.gen_count += 1;
+                            (index, generation)
+                        };
+                        if let Some(id) = &msg_id {
+                            if turn.trace_key.starts_with("amx2|") {
+                                turn.generation_keys
+                                    .insert(index, format!("{}|message|{id}", turn.trace_key));
+                            }
+                            turn.messages
+                                .insert(id.clone(), (index, generation.clone()));
+                        }
                         turn.last_gen = Some((index, generation.clone()));
                         emit_now = Some((index, generation));
                     }
                     if !text.is_empty() {
-                        turn.last_assistant_text = Some(text);
+                        turn.last_assistant_text =
+                            Some(if self.settings.provider == Provider::Codex {
+                                turn.pending_generations
+                                    .last()
+                                    .map(|g| g.text.clone())
+                                    .unwrap_or(text)
+                            } else {
+                                turn.last_gen
+                                    .as_ref()
+                                    .map(|(_, g)| g.text.clone())
+                                    .unwrap_or(text)
+                            });
                     }
                     turn.last_nanos = nanos;
                     turn.any_ts_approx |= approx;
@@ -1721,11 +1903,41 @@ impl TurnAssembler {
             } => {
                 let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
                 self.ensure_live_turn(nanos, &mut ops);
+                if !id.is_empty()
+                    && self
+                        .turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.open_tools.iter().any(|tool| tool.id == id))
+                {
+                    return ops;
+                }
                 if let Some(turn) = self.turn.as_mut() {
                     turn.note_skill(&skill);
                     turn.tools_since_gen.push(name.clone());
                     turn.event_index += 1;
-                    let gen_index = turn.last_gen.as_ref().map(|(index, _)| *index);
+                    if self.settings.provider == Provider::Codex
+                        && turn.pending_generations.is_empty()
+                    {
+                        turn.pending_generations.push(PendingGen {
+                            msg_id: None,
+                            text: String::new(),
+                            model: self.last_known_model.clone(),
+                            thinking: (!turn.pending_thinking.is_empty())
+                                .then(|| std::mem::take(&mut turn.pending_thinking).join("\n")),
+                            usage: Vec::new(),
+                            skill: None,
+                            tool_calls: Vec::new(),
+                            tool_only: true,
+                            start_nanos: nanos,
+                            end_nanos: nanos,
+                            ts_approx: true,
+                        });
+                    }
+                    let gen_index = if self.settings.provider == Provider::Codex {
+                        Some(turn.gen_count + turn.pending_generations.len().saturating_sub(1))
+                    } else {
+                        turn.last_gen.as_ref().map(|(index, _)| *index)
+                    };
                     turn.open_tools.push(OpenTool {
                         id,
                         name,
@@ -1766,8 +1978,16 @@ impl TurnAssembler {
             } => {
                 let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
                 self.ensure_live_turn(nanos, &mut ops);
+                let captured = self.full_content(&match &content {
+                    Value::String(s) => s.clone(),
+                    value => value.to_string(),
+                });
                 let mut popped: Option<(OpenTool, bool)> = None; // (tool, orphan)
                 if let Some(turn_ref) = self.turn.as_mut() {
+                    if let Some(output) = captured {
+                        let next = turn_ref.gen_count + turn_ref.pending_generations.len();
+                        turn_ref.generation_inputs.entry(next).or_default().push(serde_json::json!({"tool_use_id":id,"output":output,"is_error":is_error}));
+                    }
                     turn_ref.last_nanos = nanos;
                     turn_ref.any_ts_approx |= approx;
                     turn_ref.event_index += 1;
@@ -1825,10 +2045,8 @@ impl TurnAssembler {
                     // A Task call names the subagent it launched; the
                     // agent's own conversation is a sidecar transcript
                     // beside this one, and its work belongs under this row.
-                    let children = self.subagent_rows(&row, 0);
                     ops.push(StoreOp::Observation(row));
                     ops.extend(relinked.map(StoreOp::Observation));
-                    ops.extend(children.into_iter().map(StoreOp::Observation));
                 }
             }
             TranscriptEvent::Thinking { text, ts } => {
@@ -1849,6 +2067,57 @@ impl TurnAssembler {
                 let prev_nanos = self.last_event_nanos;
                 let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
                 self.ensure_live_turn(nanos, &mut ops);
+                if self.settings.provider == Provider::Codex {
+                    if self.turn.as_ref().is_some_and(|turn| {
+                        turn.pending_generations.is_empty()
+                            && turn.last_gen.is_some()
+                            && turn.pending_thinking.is_empty()
+                    }) {
+                        return ops;
+                    }
+                    if let Some(turn) = self.turn.as_mut() {
+                        let mut generation = turn.pending_generations.pop().unwrap_or(PendingGen {
+                            msg_id: None,
+                            text: String::new(),
+                            model: self.last_known_model.clone(),
+                            thinking: None,
+                            usage: Vec::new(),
+                            skill: None,
+                            tool_calls: Vec::new(),
+                            tool_only: true,
+                            start_nanos: nanos,
+                            end_nanos: nanos,
+                            ts_approx: true,
+                        });
+                        generation.usage = usage;
+                        generation.end_nanos = generation.end_nanos.max(nanos);
+                        generation.tool_calls = std::mem::take(&mut turn.tools_since_gen);
+                        if generation.thinking.is_none() && !turn.pending_thinking.is_empty() {
+                            generation.thinking =
+                                Some(std::mem::take(&mut turn.pending_thinking).join("\n"));
+                        }
+                        let index = turn.gen_count;
+                        turn.gen_count += 1;
+                        turn.last_gen = Some((index, generation));
+                        turn.last_nanos = nanos;
+                    }
+                    if self.emitting
+                        && let Some(turn) = self.turn.as_ref().filter(|t| !t.stale)
+                        && let Some((index, generation)) = &turn.last_gen
+                    {
+                        let mut row = self.gen_row(turn, *index, generation);
+                        if generation.text.is_empty()
+                            && generation.tool_calls.is_empty()
+                            && generation.thinking.is_none()
+                        {
+                            row.name = "assistant (usage only)".into();
+                            row.kind = Some("usage_only".into());
+                            row.input = None;
+                        }
+                        ops.push(StoreOp::Observation(row));
+                    }
+                    return ops;
+                }
                 let mut emit_now: Option<(usize, PendingGen)> = None;
                 if let Some(turn) = self.turn.as_mut() {
                     let already_charged = msg_id
@@ -1903,6 +2172,7 @@ impl TurnAssembler {
                                 turn.pending_thinking.clear();
                             }
                             let generation = PendingGen {
+                                msg_id: msg_id.clone(),
                                 text: String::new(),
                                 model: Some(model_name),
                                 thinking,
@@ -1949,12 +2219,20 @@ impl TurnAssembler {
                 total_lines_removed,
                 ts,
             } => {
-                let _ = self.event_nanos(&ts, recv_nanos);
+                let (nanos, _) = self.event_nanos(&ts, recv_nanos);
                 self.cost = Some(CostSnapshot {
                     total_cost_usd,
                     total_lines_added,
                     total_lines_removed,
                 });
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.last_nanos = turn.last_nanos.max(nanos);
+                    if let Some(total) = total_cost_usd {
+                        turn.extra_metadata
+                            .insert("provided_cost".into(), serde_json::json!({"total": total}));
+                    }
+                    self.push_trace_op(&mut ops, TraceStatus::Open);
+                }
             }
             TranscriptEvent::ContinuedIn { session_id, ts } => {
                 let _ = self.event_nanos(&ts, recv_nanos);
@@ -1971,6 +2249,11 @@ impl TurnAssembler {
                     .push(("continued_in".to_string(), session_id.clone()));
                 self.continued_in = Some(session_id);
             }
+        }
+        if self.emitting
+            && let Some((payload, ts)) = replay_call.and_then(|id| self.lifecycle.get(&id).cloned())
+        {
+            ops.extend(self.activity(payload, ts, recv_nanos));
         }
         ops
     }
@@ -2052,7 +2335,6 @@ impl TurnAssembler {
             skill: None,
             mcp_server: None,
             path: None,
-            is_error: false,
             ts_approx: false,
             metadata,
         }
@@ -2274,7 +2556,425 @@ impl TurnAssembler {
 
     /// Closes any open turn (session over).
     pub fn finalize(&mut self) -> Vec<StoreOp> {
-        self.close_turn()
+        let mut ops = self.poll_children();
+        ops.extend(self.close_turn());
+        ops
+    }
+
+    fn activity(&mut self, payload: Value, ts: Option<String>, recv: i128) -> Vec<StoreOp> {
+        let kind = payload.get("type").and_then(Value::as_str).unwrap_or("");
+        let nanos = ts.as_deref().and_then(parse_rfc3339_nanos).unwrap_or(recv);
+        let child = if kind == "collab_agent_spawn_end" {
+            payload.get("new_thread_id").and_then(Value::as_str)
+        } else if kind == "sub_agent_activity"
+            && payload.get("kind").and_then(Value::as_str) == Some("started")
+        {
+            payload.get("agent_thread_id").and_then(Value::as_str)
+        } else {
+            None
+        };
+        let call_id = payload
+            .get("call_id")
+            .or_else(|| payload.get("event_id"))
+            .and_then(Value::as_str);
+        let mut ops = Vec::new();
+        if matches!(kind, "web_search_begin" | "web_search_end")
+            && let Some(id) = call_id
+            && !self.capture_tools.contains_key(id)
+        {
+            ops.extend(self.feed(
+                TranscriptEvent::ToolUse {
+                    id: id.into(),
+                    name: "web_search".into(),
+                    args: payload.get("action").cloned().unwrap_or(Value::Null),
+                    skill: None,
+                    ts: ts.clone(),
+                },
+                recv,
+            ));
+        }
+        if kind == "user_message"
+            && let Some(text) = payload.get("message").and_then(Value::as_str)
+        {
+            self.ensure_live_turn(nanos, &mut ops);
+            if let Some(turn) = self.turn.as_mut() {
+                turn.user_text = Some(text.into());
+            }
+            self.push_trace_op(&mut ops, TraceStatus::Open);
+        }
+        if kind == "task_notification" {
+            let resolved = call_id.map(str::to_owned).or_else(|| {
+                let agent = payload.get("agent_id")?.as_str()?;
+                let dir = self.sidecar_dir.clone().or_else(|| {
+                    self.transcript_path
+                        .as_deref()
+                        .and_then(crate::tracing::subagents::dir_for)
+                })?;
+                crate::tracing::subagents::load(&dir, agent)?.tool_use_id
+            });
+            if let Some(mut row) = resolved
+                .as_ref()
+                .and_then(|id| self.capture_tools.get(id))
+                .cloned()
+            {
+                row.metadata
+                    .insert("child_complete".into(), Value::Bool(true));
+                row.metadata
+                    .insert("child_completed_ns".into(), Value::from(clamp_ns(nanos)));
+                if let Some(result) = payload
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .and_then(|s| self.full_content(s))
+                {
+                    row.metadata
+                        .insert("child_result".into(), Value::from(result));
+                }
+                if payload.get("status").and_then(Value::as_str) == Some("failed") {
+                    row.metadata
+                        .insert("child_failed".into(), Value::Bool(true));
+                }
+                self.capture_tools.insert(resolved.unwrap(), row.clone());
+                ops.push(StoreOp::Observation(row));
+            }
+            return ops;
+        }
+        if let Some(id) = call_id
+            && (kind.ends_with("_begin") || kind.ends_with("_end"))
+        {
+            self.lifecycle
+                .insert(id.into(), (payload.clone(), ts.clone()));
+        }
+        if let Some(child) = child.filter(|id| *id != self.session_id_or_launch())
+            && !self.codex_children.contains_key(child)
+            && let Some(parent) = call_id
+                .and_then(|id| self.capture_tools.get(id))
+                .cloned()
+                .or_else(|| {
+                    let turn = self.turn.as_ref()?;
+                    let mut row = self.usage_only_row(turn, turn.gen_count, &[]);
+                    row.id = ids::span_id_hex(&format!("{}|child|{child}", turn.trace_key));
+                    row.name = "subagent".into();
+                    row.obs_type = ObservationType::Agent;
+                    row.start_ns = clamp_ns(nanos);
+                    row.end_ns = None;
+                    row.model = None;
+                    row.usage = None;
+                    row.usage_raw = None;
+                    Some(row)
+                })
+        {
+            // With no launching call, retain an explicit turn-level
+            // placeholder rather than guessing the latest tool.
+            if parent.tool_id.is_none() {
+                ops.push(StoreOp::Observation(parent.clone()));
+            }
+            self.codex_children.insert(child.into(), parent);
+        }
+        if let Some(id) = call_id
+            && let Some(mut row) = self.capture_tools.get(id).cloned()
+        {
+            if kind.ends_with("_end") {
+                row.metadata
+                    .insert("lifecycle_observed".into(), Value::Bool(true));
+                row.end_ns = Some(clamp_ns(nanos).max(row.start_ns));
+                let status = payload.get("status").and_then(Value::as_str);
+                let failed = status == Some("failed")
+                    || payload
+                        .get("exit_code")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|n| n != 0);
+                let declined = status == Some("declined");
+                if failed || declined {
+                    row.level = if failed { Level::Error } else { Level::Warning };
+                    row.status_message = Some(if declined {
+                        "declined by the user".into()
+                    } else {
+                        payload
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .and_then(|s| self.full_content(s))
+                            .unwrap_or_else(|| "tool execution failed".into())
+                    });
+                }
+                if let Some(output) = payload
+                    .get("aggregated_output")
+                    .or_else(|| payload.get("stdout"))
+                    .or_else(|| payload.get("result"))
+                {
+                    row.output = self.full_content(&match output {
+                        Value::String(s) => s.clone(),
+                        v => v.to_string(),
+                    });
+                }
+                if let Some(exit) = payload.get("exit_code").and_then(Value::as_i64) {
+                    row.metadata.insert("exit_code".into(), Value::from(exit));
+                }
+            }
+            if let (Some(server), Some(tool)) = (
+                payload
+                    .pointer("/invocation/server")
+                    .and_then(Value::as_str),
+                payload.pointer("/invocation/tool").and_then(Value::as_str),
+            ) {
+                row.name = format!("{server}.{tool}");
+                row.mcp_server = Some(server.into());
+            }
+            self.capture_tools.insert(id.into(), row.clone());
+            if let Some((_, stored)) = self.emitted_tools.get_mut(id) {
+                *stored = row.clone();
+            }
+            ops.push(StoreOp::Observation(row));
+        }
+        ops
+    }
+
+    /// Poll child transcripts even when the main transcript has stopped
+    /// growing. Every child uses the same parser/assembler as its parent.
+    pub fn poll_children(&mut self) -> Vec<StoreOp> {
+        if !self.emitting || self.child_depth >= 8 {
+            return Vec::new();
+        }
+        let Some(path) = self.transcript_path.clone() else {
+            return Vec::new();
+        };
+        if self.settings.provider == Provider::Claude {
+            if let Some(dir) = self
+                .sidecar_dir
+                .clone()
+                .or_else(|| crate::tracing::subagents::dir_for(&path))
+            {
+                let metas = crate::tracing::subagents::all(&dir);
+                let mut counts = HashMap::new();
+                for meta in &metas {
+                    if let Some(id) = &meta.tool_use_id {
+                        *counts.entry(id.clone()).or_insert(0usize) += 1;
+                    }
+                }
+                for meta in metas {
+                    if let Some(id) = meta
+                        .tool_use_id
+                        .as_ref()
+                        .filter(|id| counts.get(*id) == Some(&1))
+                        && let Some(parent) = self.capture_tools.get(id)
+                    {
+                        self.child_sources.insert(
+                            meta.agent_id.clone(),
+                            (
+                                parent.clone(),
+                                crate::tracing::subagents::transcript_for(&dir, &meta.agent_id),
+                            ),
+                        );
+                    }
+                }
+                // Structured results can identify an agent before its meta
+                // file exists. A later metadata discovery converges on id.
+                for parent in self.capture_tools.values() {
+                    if let Some(id) = parent
+                        .metadata
+                        .get("agent_id")
+                        .and_then(Value::as_str)
+                        .filter(|id| crate::tracing::subagents::plain_id(id))
+                    {
+                        self.child_sources.entry(id.into()).or_insert_with(|| {
+                            (
+                                parent.clone(),
+                                crate::tracing::subagents::transcript_for(&dir, id),
+                            )
+                        });
+                    }
+                    if let Some(run) = parent
+                        .metadata
+                        .get("workflow_run_id")
+                        .and_then(Value::as_str)
+                        && crate::tracing::subagents::plain_id(run)
+                    {
+                        let run_dir = dir.join("workflows").join(run);
+                        let results = crate::tracing::subagents::workflow_results(&run_dir);
+                        for meta in crate::tracing::subagents::all(&run_dir) {
+                            let mut parent = parent.clone();
+                            if let Some(result) = results.get(&meta.agent_id) {
+                                parent
+                                    .metadata
+                                    .insert("child_complete".into(), Value::Bool(true));
+                                if let Some(text) = self.full_content(&result.to_string()) {
+                                    parent
+                                        .metadata
+                                        .insert("child_result".into(), Value::from(text));
+                                }
+                            }
+                            self.child_sources.insert(
+                                format!("{run}/{}", meta.agent_id),
+                                (
+                                    parent.clone(),
+                                    crate::tracing::subagents::transcript_for(
+                                        &run_dir,
+                                        &meta.agent_id,
+                                    ),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        } else if self.settings.provider == Provider::Codex {
+            for (id, parent) in &self.codex_children {
+                if !self.child_sources.contains_key(id)
+                    && let Some(file) = crate::tracing::subagents::codex_rollout(&path, id)
+                {
+                    self.child_sources
+                        .insert(id.clone(), (parent.clone(), file));
+                }
+            }
+        }
+        let mut ops = Vec::new();
+        for (id, (parent, path)) in &self.child_sources {
+            if !self.child_captures.contains_key(id) {
+                let mut child = TurnAssembler::new(
+                    self.settings.clone(),
+                    Some(format!("{}|agent|{id}", self.session_id_or_launch())),
+                    "deterministic",
+                );
+                child.child_depth = self.child_depth + 1;
+                child.set_transcript_path(&path.to_string_lossy());
+                // Classic nested Claude sidecars share the top-level directory.
+                if self.settings.provider == Provider::Claude {
+                    child.sidecar_dir = path.parent().map(std::path::Path::to_path_buf);
+                }
+                self.child_captures.insert(
+                    id.clone(),
+                    ChildCapture {
+                        assembler: Box::new(child),
+                        tailer: crate::tracing::tail::Tailer::new(path),
+                        parent: parent.clone(),
+                        fingerprints: HashMap::new(),
+                        blocked: false,
+                    },
+                );
+            }
+            let capture = self.child_captures.get_mut(id).expect("inserted");
+            if capture.blocked {
+                continue;
+            }
+            capture.parent = parent
+                .tool_id
+                .as_ref()
+                .and_then(|id| self.capture_tools.get(id))
+                .cloned()
+                .unwrap_or_else(|| parent.clone());
+            capture.parent.metadata.extend(parent.metadata.clone());
+            let mut child_ops = Vec::new();
+            match capture.tailer.poll() {
+                crate::tracing::tail::TailPoll::Lines(lines) => {
+                    for line in lines {
+                        for event in crate::transcript::parse_line(self.settings.provider, &line) {
+                            child_ops
+                                .extend(capture.assembler.feed(event, i128::from(parent.start_ns)));
+                        }
+                    }
+                }
+                crate::tracing::tail::TailPoll::Truncated => {
+                    // Do not silently append a rewritten source to old state.
+                    let mut row = parent.clone();
+                    row.metadata.insert(
+                        "capture_incomplete".into(),
+                        Value::from("child transcript truncated"),
+                    );
+                    ops.push(StoreOp::Observation(row));
+                    capture.blocked = true;
+                    continue;
+                }
+                _ => {}
+            }
+            child_ops.extend(capture.assembler.poll_children());
+            // Materialize the trailing turn without closing it: Stop and
+            // parent completion do not prove a background child is finished.
+            if let Some(turn) = capture.assembler.turn.as_ref() {
+                let completed = capture.parent.metadata.get("child_complete")
+                    == Some(&Value::Bool(true))
+                    || (self.settings.provider == Provider::Claude
+                        && capture.parent.end_ns.is_some()
+                        && capture.parent.metadata.get("agent_async") != Some(&Value::Bool(true))
+                        && capture.parent.status_message.as_deref() != Some("no result observed"));
+                child_ops.push(StoreOp::Trace(capture.assembler.trace_row(
+                    turn,
+                    if completed {
+                        TraceStatus::Closed
+                    } else {
+                        TraceStatus::Open
+                    },
+                )));
+            }
+            for op in child_ops
+                .into_iter()
+                .filter_map(|op| child_op(op, &capture.parent, id))
+            {
+                if let StoreOp::Observation(row) = &op {
+                    let fingerprint =
+                        uuid::Uuid::new_v5(&ids::AMX_NS, format!("{row:?}").as_bytes());
+                    if capture.fingerprints.insert(row.id.clone(), fingerprint) == Some(fingerprint)
+                    {
+                        continue;
+                    }
+                }
+                ops.push(op);
+            }
+        }
+        ops
+    }
+}
+
+fn child_op(op: StoreOp, parent: &ObservationRow, agent: &str) -> Option<StoreOp> {
+    let remap = |id: &str| ids::span_id_hex(&format!("{}|child|{agent}|{id}", parent.id));
+    match op {
+        StoreOp::Trace(t) => {
+            let mut row = parent.clone();
+            row.id = remap(&t.id);
+            row.parent_id = Some(parent.id.clone());
+            row.obs_type = ObservationType::Agent;
+            row.name = format!("agent {agent}: {}", t.name);
+            row.start_ns = t.start_ns;
+            row.end_ns = t.end_ns;
+            row.input = t.input;
+            row.output = t.output;
+            if let Some(result) = parent.metadata.get("child_result").and_then(Value::as_str) {
+                row.output = Some(result.into());
+            }
+            row.thinking = t.thinking;
+            row.tool_id = None;
+            row.tool_name = None;
+            row.kind = Some("subagent_turn".into());
+            row.model = None;
+            row.usage = None;
+            row.usage_raw = None;
+            row.level = if parent.metadata.get("child_failed") == Some(&Value::Bool(true)) {
+                Level::Error
+            } else if t.status == TraceStatus::Aborted {
+                Level::Warning
+            } else {
+                Level::Default
+            };
+            row.status_message = None;
+            row.metadata = t
+                .metadata
+                .and_then(|m| m.as_object().cloned())
+                .unwrap_or_default();
+            row.metadata.insert("agent_id".into(), Value::from(agent));
+            row.metadata
+                .insert("source".into(), Value::from("subagent"));
+            row.metadata
+                .insert("status".into(), Value::from(t.status.as_str()));
+            Some(StoreOp::Observation(row))
+        }
+        StoreOp::Observation(mut row) => {
+            row.id = remap(&row.id);
+            row.parent_id = Some(remap(row.parent_id.as_deref().unwrap_or(&row.trace_id)));
+            row.trace_id = parent.trace_id.clone();
+            row.metadata
+                .insert("source".into(), Value::from("subagent"));
+            row.metadata.insert("agent_id".into(), Value::from(agent));
+            Some(StoreOp::Observation(row))
+        }
+        _ => None,
     }
 }
 
@@ -2351,7 +3051,6 @@ fn apply_tool_pins(row: &mut ObservationRow, state: &ToolHookState) {
         row.end_ns = Some(row.end_ns.map_or(end, |e| e.max(end)).max(row.start_ns));
     }
     if state.is_error {
-        row.is_error = true;
         row.level = Level::Error;
         if row.status_message.is_none() {
             row.status_message = Some("tool error".into());
@@ -2664,15 +3363,6 @@ pub fn launch_ended(settings: &MapSettings, end: &SessionEnd, now_ns: i64) -> La
     row
 }
 
-/// A subagent line's timestamp, falling back to the launching call's start
-/// so a row is never stamped at the epoch.
-fn sub_nanos(ts: &Option<String>, fallback_ns: i64) -> i64 {
-    ts.as_deref()
-        .and_then(crate::transcript::parse_rfc3339_nanos)
-        .map(clamp_ns)
-        .unwrap_or(fallback_ns)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2955,7 +3645,7 @@ mod tests {
         assert_eq!(generation.usage.as_ref().unwrap().output, Some(5));
         let tool = find_obs(&ops, "Bash");
         assert_eq!(tool.level, Level::Error);
-        assert!(tool.is_error);
+        assert_eq!(tool.level, Level::Error);
         assert_eq!(
             tool.status_message.as_deref(),
             Some("tool error"),
@@ -2984,7 +3674,7 @@ mod tests {
             0,
         );
         let failed = find_obs(&ops, "Bash");
-        assert!(failed.is_error);
+        assert_eq!(failed.level, Level::Error);
         assert_eq!(failed.status_message.as_deref(), Some("exit code 101"));
     }
 
@@ -3175,7 +3865,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_truncation_salts_trace_ids_with_launch() {
+    fn backfill_truncation_keeps_content_identity() {
         let mut asm = TurnAssembler::new(
             settings(ContentMode::Full),
             Some("sess-1".into()),
@@ -3185,11 +3875,7 @@ mod tests {
         let _ = asm.feed(user("turn", "2026-08-30T10:00:00Z"), 0);
         let close = asm.finalize();
         let root = closed(&close)[0];
-        assert!(root.ordinal_salted);
-        assert_eq!(
-            root.id,
-            ids::trace_id_hex("amx1|claude|sess-1|turn|1|launch-1")
-        );
+        assert_eq!(root.id, ids::trace_id_hex("amx1|claude|sess-1|turn|1"));
     }
 
     #[test]
@@ -3315,8 +4001,12 @@ mod tests {
             ));
         }
         ops.extend(asm.finalize());
-        let total: i64 = observations(&ops)
-            .iter()
+        let stored: HashMap<_, _> = observations(&ops)
+            .into_iter()
+            .map(|o| (o.id.clone(), o))
+            .collect();
+        let total: i64 = stored
+            .values()
             .filter_map(|o| o.usage.as_ref().and_then(|u| u.input))
             .sum();
         // 100 (msg_1, once) + 50 + 25 (usage-only generation); never 200, never +999
@@ -4182,7 +4872,7 @@ mod tests {
             0,
         );
         let declined = find_obs(&ops, "AskUserQuestion");
-        assert!(!declined.is_error, "a decision, not a failure");
+        assert_eq!(declined.level, Level::Warning, "a decision, not a failure");
         assert_eq!(declined.level, Level::Warning);
         assert_eq!(
             declined.status_message.as_deref(),
@@ -4205,7 +4895,7 @@ mod tests {
             ),
             0,
         );
-        assert!(!find_obs(&ops, "Bash").is_error);
+        assert_ne!(find_obs(&ops, "Bash").level, Level::Error);
 
         // a genuine failure still is one, and a body that merely quotes
         // the sentence is not a decline
@@ -4225,7 +4915,7 @@ mod tests {
             0,
         );
         let failed = find_obs(&ops, "Bash");
-        assert!(failed.is_error);
+        assert_eq!(failed.level, Level::Error);
         assert_eq!(failed.status_message.as_deref(), Some("exit code 1"));
     }
 
@@ -4508,7 +5198,7 @@ mod tests {
             serde_json::json!({"tool_error": "exit status 2"}),
         ));
         let failed = observations(&ops)[0];
-        assert!(failed.is_error);
+        assert_eq!(failed.level, Level::Error);
         assert_eq!(failed.level, Level::Error);
         assert_eq!(failed.status_message.as_deref(), Some("tool error"));
         assert_eq!(

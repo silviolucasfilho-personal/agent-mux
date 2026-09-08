@@ -94,7 +94,6 @@ pub struct TraceRow {
     pub reported_message_count: Option<i64>,
     pub session_cost_usd: Option<f64>,
     pub timing_approx: bool,
-    pub ordinal_salted: bool,
     pub metadata: Option<Value>,
 }
 
@@ -162,7 +161,6 @@ pub struct ObservationRow {
     pub skill: Option<String>,
     pub mcp_server: Option<String>,
     pub path: Option<String>,
-    pub is_error: bool,
     pub ts_approx: bool,
     pub metadata: serde_json::Map<String, Value>,
 }

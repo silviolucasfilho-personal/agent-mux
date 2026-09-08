@@ -131,10 +131,10 @@ pub fn usage_details(u: &NormalizedUsage) -> Map<String, Value> {
     put(&mut m, "input", u.input);
     put(&mut m, "output", u.output);
     put(&mut m, "total", u.total);
-    put(&mut m, "input_cache_read", u.cache_read);
-    put(&mut m, "input_cache_write", u.cache_write);
-    put(&mut m, "input_cache_write_1h", u.cache_write_1h);
-    put(&mut m, "output_reasoning", u.reasoning);
+    put(&mut m, "cache_read_input_tokens", u.cache_read);
+    put(&mut m, "input_cache_creation_5m", u.cache_write);
+    put(&mut m, "input_cache_creation_1h", u.cache_write_1h);
+    put(&mut m, "output_reasoning_tokens", u.reasoning);
     m
 }
 
@@ -143,8 +143,8 @@ pub fn cost_details(c: &Cost) -> Map<String, Value> {
     let mut m = Map::new();
     put(&mut m, "input", c.input);
     put(&mut m, "output", c.output);
-    put(&mut m, "input_cache_read", c.cache_read);
-    put(&mut m, "input_cache_write", c.cache_write);
+    put(&mut m, "cache_read_input_tokens", c.cache_read);
+    put(&mut m, "input_cache_creation_5m", c.cache_write);
     put(&mut m, "total", c.total);
     m
 }
@@ -314,7 +314,7 @@ fn observation_span(o: &ObservationRow, ctx: &MapCtx) -> Event {
         metadata.insert("usage_raw".into(), Value::Object(m));
     }
 
-    let level = if o.is_error { Level::Error } else { o.level };
+    let level = o.level;
     let mut attrs = common_attrs(ctx);
     attrs.push(attr(OBSERVATION_TYPE, any_str(kind)));
     attrs.push(attr(OBSERVATION_LEVEL, any_str(level.as_str())));
@@ -351,7 +351,7 @@ fn observation_span(o: &ObservationRow, ctx: &MapCtx) -> Event {
         o.start_ns,
         o.end_ns.unwrap_or(o.start_ns),
         attrs,
-        o.is_error
+        matches!(o.level, Level::Error)
             .then_some(o.status_message.clone().or(Some("error".to_string()))),
     );
     Event {
@@ -455,7 +455,6 @@ mod tests {
             reported_message_count: None,
             session_cost_usd: None,
             timing_approx: false,
-            ordinal_salted: false,
             metadata: Some(json!({"turn_key": "p1"})),
         }
     }
@@ -494,7 +493,6 @@ mod tests {
             skill: None,
             mcp_server: None,
             path: None,
-            is_error: false,
             ts_approx: false,
             metadata: Map::new(),
         }
@@ -605,7 +603,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             usage,
-            json!({"input": 10, "output": 5, "total": 115, "input_cache_read": 100})
+            json!({"input": 10, "output": 5, "total": 115, "cache_read_input_tokens": 100})
         );
         let cost: Value =
             serde_json::from_str(attr_str(&s, "langfuse.observation.cost_details").unwrap())
@@ -622,7 +620,7 @@ mod tests {
         child.parent_id = Some("0011223344556677".into());
         child.name = "Bash".into();
         child.tool_id = Some("toolu_1".into());
-        child.is_error = true;
+        child.level = Level::Error;
         child.status_message = Some("tool error".into());
         let e = event_for(&StoreOp::Observation(child), &ctx()).unwrap();
         assert_eq!(e.kind, "tool");

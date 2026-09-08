@@ -52,9 +52,40 @@ fn sum_present(parts: [Option<i64>; 4]) -> Option<i64> {
     }
 }
 
-/// Normalizes the raw integer usage keys of one API call.
+/// Reject contradictory source counts before deriving billable buckets.
+pub fn valid(provider: Provider, raw: &[(String, i64)]) -> bool {
+    if raw.iter().any(|(_, value)| *value < 0) {
+        return false;
+    }
+    if provider == Provider::Codex {
+        if let (Some(input), Some(cached)) =
+            (get(raw, "input_tokens"), get(raw, "cached_input_tokens"))
+            && cached > input
+        {
+            return false;
+        }
+        if let (Some(output), Some(reasoning)) = (
+            get(raw, "output_tokens"),
+            get(raw, "reasoning_output_tokens"),
+        ) && reasoning > output
+        {
+            return false;
+        }
+        if let (Some(input), Some(output), Some(total)) = (
+            get(raw, "input_tokens"),
+            get(raw, "output_tokens"),
+            get(raw, "total_tokens"),
+        ) && input.checked_add(output) != Some(total)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Normalizes valid raw integer usage keys of one API call.
 pub fn normalize(provider: Provider, raw: &[(String, i64)]) -> NormalizedUsage {
-    if raw.is_empty() {
+    if raw.is_empty() || !valid(provider, raw) {
         return NormalizedUsage::default();
     }
     match provider {
@@ -204,12 +235,13 @@ mod tests {
             ]),
         );
         assert_eq!(u.total, Some(60 + 40 + 10));
-        // cached larger than input (should not happen) floors at 0
+        // Invalid source usage stays unknown instead of being priced after
+        // silently clamping one bucket.
         let u = normalize(
             Provider::Codex,
             &raw(&[("input_tokens", 5), ("cached_input_tokens", 9)]),
         );
-        assert_eq!(u.input, Some(0));
+        assert!(u.is_empty());
     }
 
     #[test]

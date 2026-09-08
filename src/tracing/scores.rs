@@ -17,7 +17,10 @@ pub struct Score {
     pub target: String,
     pub target_id: String,
     pub name: String,
-    pub value: f64,
+    pub data_type: String,
+    pub source: String,
+    pub value: Option<f64>,
+    pub string_value: Option<String>,
     pub comment: Option<String>,
     pub created_ns: i64,
 }
@@ -43,18 +46,46 @@ pub fn record(
     value: f64,
     comment: Option<&str>,
 ) -> rusqlite::Result<Score> {
+    record_typed(
+        conn,
+        target,
+        target_id,
+        name,
+        "numeric",
+        "annotation",
+        Some(value),
+        None,
+        comment,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn record_typed(
+    conn: &Connection,
+    target: &str,
+    target_id: &str,
+    name: &str,
+    data_type: &str,
+    source: &str,
+    value: Option<f64>,
+    string_value: Option<&str>,
+    comment: Option<&str>,
+) -> rusqlite::Result<Score> {
     let created_ns = crate::tracing::store::now_ns();
     conn.execute(
-        "INSERT INTO scores (target, target_id, name, value, comment, created_ns)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![target, target_id, name, value, comment, created_ns],
+        "INSERT INTO scores (target, target_id, name, data_type, source, value, string_value, comment, created_ns)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![target, target_id, name, data_type, source, value, string_value, comment, created_ns],
     )?;
     Ok(Score {
         id: conn.last_insert_rowid(),
         target: target.into(),
         target_id: target_id.into(),
         name: name.into(),
+        data_type: data_type.into(),
+        source: source.into(),
         value,
+        string_value: string_value.map(str::to_string),
         comment: comment.map(str::to_string),
         created_ns,
     })
@@ -79,7 +110,7 @@ pub fn for_target(
     target_id: &str,
 ) -> rusqlite::Result<Vec<Score>> {
     let mut stmt = conn.prepare(
-        "SELECT id, target, target_id, name, value, comment, created_ns FROM scores
+        "SELECT id, target, target_id, name, data_type, source, value, string_value, comment, created_ns FROM scores
          WHERE target = ?1 AND target_id = ?2 ORDER BY created_ns",
     )?;
     let rows = stmt.query_map(params![target, target_id], |r| {
@@ -88,9 +119,12 @@ pub fn for_target(
             target: r.get(1)?,
             target_id: r.get(2)?,
             name: r.get(3)?,
-            value: r.get(4)?,
-            comment: r.get(5)?,
-            created_ns: r.get(6)?,
+            data_type: r.get(4)?,
+            source: r.get(5)?,
+            value: r.get(6)?,
+            string_value: r.get(7)?,
+            comment: r.get(8)?,
+            created_ns: r.get(9)?,
         })
     })?;
     rows.collect()
@@ -151,7 +185,9 @@ pub fn langfuse_body(score: &Score, trace_id: &str) -> String {
                 "name": score.name,
                 "value": score.value,
                 "comment": score.comment,
-                "dataType": "NUMERIC",
+                "dataType": score.data_type.to_ascii_uppercase(),
+                "source": score.source.to_ascii_uppercase(),
+                "stringValue": score.string_value,
             }
         }],
         "metadata": { "sdk_name": "agent-mux", "sdk_version": env!("CARGO_PKG_VERSION") }
@@ -223,7 +259,10 @@ mod tests {
             target: "trace".into(),
             target_id: "abc".into(),
             name: VERDICT.into(),
-            value: 1.0,
+            data_type: "numeric".into(),
+            source: "annotation".into(),
+            value: Some(1.0),
+            string_value: None,
             comment: Some("nice".into()),
             created_ns: 1_756_548_000_123_000_000, // 2025-08-30T10:00:00.123Z
         };

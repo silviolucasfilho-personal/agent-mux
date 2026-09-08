@@ -222,7 +222,6 @@ pub struct ObservationView {
     pub skill: Option<String>,
     pub mcp_server: Option<String>,
     pub path: Option<String>,
-    pub is_error: bool,
     pub metadata: String,
 }
 
@@ -257,7 +256,6 @@ fn observation_from_row(r: &Row) -> rusqlite::Result<ObservationView> {
         skill: r.get("skill")?,
         mcp_server: r.get("mcp_server")?,
         path: r.get("path")?,
-        is_error: r.get::<_, i64>("is_error")? != 0,
         metadata: r.get("metadata")?,
     })
 }
@@ -492,7 +490,6 @@ mod nest_tests {
             skill: None,
             mcp_server: None,
             path: None,
-            is_error: false,
             metadata: "{}".into(),
         }
     }

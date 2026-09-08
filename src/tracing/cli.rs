@@ -133,15 +133,23 @@ fn since_ns(args: &Args, key: &str) -> anyhow::Result<Option<i64>> {
 
 pub fn fmt_time(ns: i64) -> String {
     match time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ns)) {
-        Ok(t) => format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            t.year(),
-            u8::from(t.month()),
-            t.day(),
-            t.hour(),
-            t.minute(),
-            t.second()
-        ),
+        Ok(t) => {
+            // `current_local_offset` can fail in constrained containers; UTC
+            // remains a sound fallback, but normal CLI and TUI rendering use
+            // the machine's local offset exactly once here.
+            let t = time::UtcOffset::current_local_offset()
+                .map(|offset| t.to_offset(offset))
+                .unwrap_or(t);
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                t.year(),
+                u8::from(t.month()),
+                t.day(),
+                t.hour(),
+                t.minute(),
+                t.second()
+            )
+        }
         Err(_) => ns.to_string(),
     }
 }
@@ -793,14 +801,14 @@ fn compare(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `trace score <turn|session|launch> [good|bad|<n>] [--name N] [--note TEXT]`:
+/// `trace score <turn|observation|session|launch> [good|bad|<n>] [--name N] [--note TEXT]`:
 /// records a verdict (and sends it to Langfuse when configured), or lists
 /// the scores on the target when no value is given.
 fn score(args: &Args) -> anyhow::Result<()> {
     use super::scores;
     let Some(needle) = args.positional.first() else {
         anyhow::bail!(
-            "usage: agent-mux trace score <turn|session|launch> [good|bad|<number>] [--name N] [--note TEXT]"
+            "usage: agent-mux trace score <turn|observation|session|launch> [good|bad|<number>] [--name N] [--note TEXT]"
         );
     };
     let (_, resolved) = resolved()?;
@@ -810,6 +818,20 @@ fn score(args: &Args) -> anyhow::Result<()> {
         if let Some(t) = query::find_trace(&ro, needle)? {
             let label = format!("turn #{} {}", t.ordinal, &t.id[..8.min(t.id.len())]);
             ("trace", t.id.clone(), label, vec![t.id])
+        } else if let Some((id, trace_id, name)) = ro
+            .query_row(
+                "SELECT id, trace_id, name FROM observations WHERE id = ?1 OR id LIKE ?1 || '%' LIMIT 1",
+                [needle],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            )
+            .optional()?
+        {
+            (
+                "observation",
+                id.clone(),
+                format!("observation {} {}", &id[..8.min(id.len())], name),
+                vec![trace_id],
+            )
         } else if let Some(s) = query::find_session(&ro, needle)? {
             let ids = query::list_traces(&ro, &s.key)?
                 .into_iter()
@@ -850,7 +872,10 @@ fn score(args: &Args) -> anyhow::Result<()> {
                 "{}  {:<12} {:>6}  {}",
                 fmt_time(s.created_ns),
                 s.name,
-                format!("{:.2}", s.value),
+                s.value
+                    .map(|value| format!("{value:.2}"))
+                    .or(s.string_value)
+                    .unwrap_or_else(|| "-".into()),
                 s.comment.unwrap_or_default()
             );
         }
@@ -1529,7 +1554,11 @@ fn tree_lines(observations: &[query::ObservationView]) -> Vec<String> {
                 duration,
                 fmt_tokens(r.obs.total_tokens),
                 fmt_cost(r.obs.total_cost_usd),
-                if r.obs.is_error { "  ERROR" } else { "" }
+                if r.obs.level == "ERROR" {
+                    "  ERROR"
+                } else {
+                    ""
+                }
             )
         })
         .collect()
@@ -1597,7 +1626,7 @@ fn observation_json(o: &query::ObservationView) -> serde_json::Value {
         "cache_read_tokens": o.cache_read_tokens, "cache_write_tokens": o.cache_write_tokens,
         "reasoning_tokens": o.reasoning_tokens, "total_tokens": o.total_tokens,
         "total_cost_usd": o.total_cost_usd, "tool_id": o.tool_id, "tool_name": o.tool_name,
-        "skill": o.skill, "mcp_server": o.mcp_server, "path": o.path, "is_error": o.is_error,
+        "skill": o.skill, "mcp_server": o.mcp_server, "path": o.path, "is_error": o.level == "ERROR",
         "metadata": serde_json::from_str::<serde_json::Value>(&o.metadata).unwrap_or(serde_json::Value::Null),
     })
 }
@@ -1879,6 +1908,15 @@ pub fn import_transcript(
     let provider = provider_override.unwrap_or_else(|| transcript::detect_provider(first));
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (session_id, cwd) = identify_transcript(&text, &abs, provider);
+    let legacy: bool = store.conn().query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE key = ?1 AND json_extract(extra, '$.legacy_capture') = 1)",
+        [map::session_key(provider, &session_id)], |r| r.get(0),
+    )?;
+    if legacy && provider != Provider::Antigravity {
+        anyhow::bail!(
+            "session {session_id} contains legacy capture rows; import into a separate trace database to rebuild without replacing existing traces or annotations"
+        );
+    }
     let cwd = cwd.unwrap_or_else(|| ".".into());
     let launch_id = uuid::Uuid::new_v5(
         &ids::AMX_NS,
@@ -2447,7 +2485,6 @@ mod tests {
             skill: None,
             mcp_server: None,
             path: None,
-            is_error: false,
             metadata: "{}".into(),
         }
     }
@@ -2579,6 +2616,6 @@ mod tests {
         assert_eq!(fmt_cost(Some(0.0012)), "$0.0012");
         assert_eq!(fmt_ms(75_000), "1m15s");
         assert_eq!(fmt_ms(1_500), "1.5s");
-        assert_eq!(fmt_time(0), "1970-01-01 00:00:00");
+        assert_eq!(fmt_time(0).len(), "1970-01-01 00:00:00".len());
     }
 }
