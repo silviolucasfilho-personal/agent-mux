@@ -324,6 +324,27 @@ impl Store {
         Ok(())
     }
 
+    /// Remove capture-derived rows for one session before a deterministic
+    /// historical rebuild. Scores intentionally remain: their target ids are
+    /// stable for native/content-derived imports and may be reattached by a
+    /// subsequent upsert.
+    pub fn replace_session_capture(&mut self, session_key: &str) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM observations WHERE trace_id IN (SELECT id FROM traces WHERE session_key = ?1)",
+            params![session_key],
+        )?;
+        tx.execute(
+            "DELETE FROM traces WHERE session_key = ?1",
+            params![session_key],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET extra = json_remove(COALESCE(extra, '{}'), '$.legacy_capture') WHERE key = ?1",
+            params![session_key],
+        )?;
+        tx.commit()
+    }
+
     /// Closes what a crashed run left open. Guarded by heartbeats so a
     /// live second process is never touched.
     pub fn recovery_sweep(&self, now: i64) -> rusqlite::Result<()> {

@@ -39,7 +39,8 @@ commands:
   skills lint [name]           what stops a skill, agent or command working: frontmatter, tools, model
   agents [--json]              what each subagent type did: invocations, latency, cost, failures
   compare <a> <b>              two turns or sessions side by side: loop metrics and the tool path
-  score <t> [good|bad|<n>]     a verdict on a turn, session or launch (--name, --note); sent to Langfuse too
+  score <t> [good|bad|<n>|text] typed score on a turn, observation, session or launch
+                               (--name, --note, --type numeric|categorical|boolean, --source annotation|api); sent to Langfuse too
                                with no value: the scores on it
   experiments [name]           the experiment registry, or one experiment's variants
   (see also: agent-mux run --experiment <name> --variant <label> --prompt <text> …)
@@ -134,10 +135,10 @@ fn since_ns(args: &Args, key: &str) -> anyhow::Result<Option<i64>> {
 pub fn fmt_time(ns: i64) -> String {
     match time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ns)) {
         Ok(t) => {
-            // `current_local_offset` can fail in constrained containers; UTC
-            // remains a sound fallback, but normal CLI and TUI rendering use
-            // the machine's local offset exactly once here.
-            let t = time::UtcOffset::current_local_offset()
+            // Resolve the machine offset at the event instant.  Using the
+            // current offset renders historical rows incorrectly across a
+            // daylight-saving boundary.
+            let t = time::UtcOffset::local_offset_at(t)
                 .map(|offset| t.to_offset(offset))
                 .unwrap_or(t);
             format!(
@@ -801,14 +802,14 @@ fn compare(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `trace score <turn|observation|session|launch> [good|bad|<n>] [--name N] [--note TEXT]`:
+/// `trace score <turn|observation|session|launch> [value] [--type T] [--source S]`:
 /// records a verdict (and sends it to Langfuse when configured), or lists
 /// the scores on the target when no value is given.
 fn score(args: &Args) -> anyhow::Result<()> {
     use super::scores;
     let Some(needle) = args.positional.first() else {
         anyhow::bail!(
-            "usage: agent-mux trace score <turn|observation|session|launch> [good|bad|<number>] [--name N] [--note TEXT]"
+            "usage: agent-mux trace score <turn|observation|session|launch> [good|bad|<number>|text] [--name N] [--note TEXT] [--type numeric|categorical|boolean] [--source annotation|api]"
         );
     };
     let (_, resolved) = resolved()?;
@@ -869,9 +870,10 @@ fn score(args: &Args) -> anyhow::Result<()> {
         }
         for s in list {
             println!(
-                "{}  {:<12} {:>6}  {}",
+                "{}  {:<12} {:<11} {:>6}  {}",
                 fmt_time(s.created_ns),
                 s.name,
+                format!("{}/{}", s.data_type, s.source),
                 s.value
                     .map(|value| format!("{value:.2}"))
                     .or(s.string_value)
@@ -881,15 +883,49 @@ fn score(args: &Args) -> anyhow::Result<()> {
         }
         return Ok(());
     };
-    let Some(value) = scores::parse_value(raw) else {
-        anyhow::bail!("a score is good, bad or a number, not {raw:?}");
-    };
     let name = args.value("name").unwrap_or(scores::VERDICT);
+    let data_type = args.value("type").unwrap_or("numeric").to_ascii_lowercase();
+    if !matches!(data_type.as_str(), "numeric" | "categorical" | "boolean") {
+        anyhow::bail!("--type must be numeric, categorical or boolean");
+    }
+    let source = args
+        .value("source")
+        .unwrap_or("annotation")
+        .to_ascii_lowercase();
+    if !matches!(source.as_str(), "annotation" | "api" | "eval") {
+        anyhow::bail!("--source must be annotation, api or eval");
+    }
+    let (value, string_value) = if data_type == "numeric" {
+        let Some(value) = scores::parse_value(raw) else {
+            anyhow::bail!("a {data_type} score is good, bad or a number, not {raw:?}");
+        };
+        (Some(value), None)
+    } else if data_type == "boolean" {
+        let Some(value) = scores::parse_value(raw) else {
+            anyhow::bail!("a boolean score is good, bad or a number, not {raw:?}");
+        };
+        (None, Some(if value >= 0.5 { "true" } else { "false" }))
+    } else {
+        (None, Some(raw.as_str()))
+    };
     let conn = super::store::open_aux(&resolved.db_path).map_err(|e| anyhow::anyhow!(e))?;
-    let score = scores::record(&conn, target, &target_id, name, value, args.value("note"))?;
+    let score = scores::record_typed(
+        &conn,
+        target,
+        &target_id,
+        name,
+        &data_type,
+        &source,
+        value,
+        string_value,
+        args.value("note"),
+    )?;
     println!(
-        "scored {label}: {name} = {value} ({})",
-        scores::label(value)
+        "scored {label}: {name} = {} ({data_type}/{source})",
+        value
+            .map(|v| v.to_string())
+            .or(string_value.map(str::to_string))
+            .unwrap_or_default()
     );
     if let Some(lf) = &resolved.langfuse {
         // Langfuse scores attach to traces: one per turn under the target
@@ -1908,14 +1944,16 @@ pub fn import_transcript(
     let provider = provider_override.unwrap_or_else(|| transcript::detect_provider(first));
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (session_id, cwd) = identify_transcript(&text, &abs, provider);
+    let session_key = map::session_key(provider, &session_id);
     let legacy: bool = store.conn().query_row(
         "SELECT EXISTS(SELECT 1 FROM sessions WHERE key = ?1 AND json_extract(extra, '$.legacy_capture') = 1)",
-        [map::session_key(provider, &session_id)], |r| r.get(0),
+        [&session_key], |r| r.get(0),
     )?;
-    if legacy && provider != Provider::Antigravity {
-        anyhow::bail!(
-            "session {session_id} contains legacy capture rows; import into a separate trace database to rebuild without replacing existing traces or annotations"
-        );
+    if legacy {
+        // v5 marked rows written by the pre-normalized capture pipeline.
+        // Replacing just this session is transactional and leaves unrelated
+        // sessions (and score records) untouched.
+        store.replace_session_capture(&session_key)?;
     }
     let cwd = cwd.unwrap_or_else(|| ".".into());
     let launch_id = uuid::Uuid::new_v5(

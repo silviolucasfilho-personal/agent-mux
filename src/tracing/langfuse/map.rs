@@ -149,6 +149,27 @@ pub fn cost_details(c: &Cost) -> Map<String, Value> {
     m
 }
 
+/// Provider-reported cost is authoritative.  Keep it distinct from local
+/// pricing, but serialize it through the same Langfuse cost-details field so
+/// an export faithfully represents the source rather than silently replacing
+/// it with the current local price table.
+fn provided_cost_details(metadata: &Map<String, Value>) -> Option<Map<String, Value>> {
+    let source = metadata.get("provided_cost")?.as_object()?;
+    let mut details = Map::new();
+    for (from, to) in [
+        ("input", "input"),
+        ("output", "output"),
+        ("cache_read_input_tokens", "cache_read_input_tokens"),
+        ("input_cache_creation_5m", "input_cache_creation_5m"),
+        ("total", "total"),
+    ] {
+        if let Some(value) = source.get(from).filter(|v| v.is_number()) {
+            details.insert(to.into(), value.clone());
+        }
+    }
+    (!details.is_empty()).then_some(details)
+}
+
 /// Nanoseconds as the decimal string OTLP/JSON requires.
 fn nanos(ns: i64) -> String {
     u64::try_from(ns).unwrap_or(0).to_string()
@@ -327,7 +348,9 @@ fn observation_span(o: &ObservationRow, ctx: &MapCtx) -> Event {
     push_str_attr(&mut attrs, OBSERVATION_OUTPUT, o.output.clone());
     if o.obs_type == ObservationType::Generation {
         push_str_attr(&mut attrs, OBSERVATION_MODEL, o.model.clone());
-        if let Some(usage) = &o.usage {
+        if let Some(cost) = provided_cost_details(&o.metadata) {
+            push_json_attr(&mut attrs, OBSERVATION_COST_DETAILS, cost);
+        } else if let Some(usage) = &o.usage {
             push_json_attr(&mut attrs, OBSERVATION_USAGE_DETAILS, usage_details(usage));
             if let Some(price) = o.model.as_deref().and_then(|m| ctx.prices.find(m)) {
                 push_json_attr(
@@ -657,6 +680,19 @@ mod tests {
         let meta: Value =
             serde_json::from_str(attr_str(&s, "langfuse.observation.metadata").unwrap()).unwrap();
         assert_eq!(meta["running"], true);
+    }
+
+    #[test]
+    fn provider_cost_wins_over_local_price_on_export() {
+        let mut row = observation(ObservationType::Generation);
+        row.metadata
+            .insert("provided_cost".into(), json!({"total": 0.42, "input": 0.1}));
+        let span = parsed(&event_for(&StoreOp::Observation(row), &ctx()).unwrap());
+        let cost: Value = serde_json::from_str(
+            attr_str(&span, "langfuse.observation.cost_details").expect("cost details"),
+        )
+        .unwrap();
+        assert_eq!(cost, json!({"input": 0.1, "total": 0.42}));
     }
 
     #[test]

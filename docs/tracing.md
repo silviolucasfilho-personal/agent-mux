@@ -238,11 +238,13 @@ the persisted observation `is_error` flag have been removed; an error is
 `level = ERROR` plus its status message. Scores now support numeric,
 categorical, boolean, text, and correction data and can target an observation
 as well as a turn, session, or launch. Sessions with pre-v5
-rows are marked `legacy_capture`; importing those sessions into the same
-database is refused because the old IDs cannot be safely matched to every
-new source ID. To rebuild historical capture, select a separate unused
-`[tracing].db_path` and import the transcripts there. The original database
-remains readable with its annotations intact.
+rows are marked `legacy_capture`; importing one replaces only that session's
+capture rows in a transaction, then rebuilds it with deterministic native or
+timestamp fallback IDs. Other sessions and score records remain intact.
+
+`trace score` accepts `--type numeric|categorical|boolean` and
+`--source annotation|api|eval`; categorical values are retained as text and
+are exported to Langfuse with their type and source.
 
 All timestamps shown by the CLI, TUI, and SQLite summary views use local time.
 

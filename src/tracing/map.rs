@@ -168,6 +168,11 @@ struct OpenTurn {
     generation_inputs: HashMap<usize, Vec<Value>>,
     generation_keys: HashMap<usize, String>,
     messages: HashMap<String, (usize, PendingGen)>,
+    /// Claude's transcript UUID graph.  `message.id` is an API identifier;
+    /// these are the persisted conversation-node identifiers used by tool
+    /// results to name the assistant that issued their call.
+    source_generations: HashMap<String, usize>,
+    active_source_generation: Option<String>,
     ordinal: u64,
     trace_key: String,
     trace_id: String,
@@ -248,6 +253,7 @@ pub struct TurnAssembler {
     resume_native: bool,
     resume_snapshot: bool,
     next_source_turn: Option<String>,
+    pending_dag: Option<Value>,
     trace_keys: HashMap<u64, String>,
     child_sources: HashMap<String, (ObservationRow, std::path::PathBuf)>,
     child_captures: HashMap<String, ChildCapture>,
@@ -326,6 +332,7 @@ impl TurnAssembler {
             resume_native: false,
             resume_snapshot: false,
             next_source_turn: None,
+            pending_dag: None,
             trace_keys: HashMap::new(),
             child_sources: HashMap::new(),
             child_captures: HashMap::new(),
@@ -446,12 +453,14 @@ impl TurnAssembler {
         if let Some(key) = self.trace_keys.get(&ordinal) {
             return key.clone();
         }
-        let base = format!(
-            "amx1|{}|{}|turn|{ordinal}",
+        // This only covers an incomplete hook-only turn.  Normal turns put
+        // a native id or a timestamp-derived fallback in `trace_keys` when
+        // they open; ordinal is deliberately not part of durable identity.
+        format!(
+            "amx2|{}|{}|turn|unresolved-{ordinal}",
             self.settings.provider.as_str(),
             self.session_id_or_launch()
-        );
-        base
+        )
     }
 
     /// The session row as this assembler knows it (adoption facts plus
@@ -494,23 +503,28 @@ impl TurnAssembler {
     fn open_turn(&mut self, start_nanos: i128) {
         self.ordinal += 1;
         let source_turn = self.next_source_turn.take();
-        if let Some(id) = &source_turn {
-            self.trace_keys.insert(
-                self.ordinal,
-                format!(
-                    "amx2|{}|{}|turn|{}",
-                    self.settings.provider.as_str(),
-                    self.session_id_or_launch(),
-                    id
-                ),
-            );
-        }
+        let identity = source_turn.clone().unwrap_or_else(|| {
+            // Some historical formats have no turn UUID. Their recorded
+            // timestamp is stable across reimports, unlike an ordinal.
+            format!("at-{}", clamp_ns(start_nanos))
+        });
+        self.trace_keys.insert(
+            self.ordinal,
+            format!(
+                "amx2|{}|{}|turn|{}",
+                self.settings.provider.as_str(),
+                self.session_id_or_launch(),
+                identity
+            ),
+        );
         let trace_key = self.trace_key_for_ordinal(self.ordinal);
         let trace_id = ids::trace_id_hex(&trace_key);
         self.turn = Some(OpenTurn {
             generation_inputs: HashMap::new(),
             generation_keys: HashMap::new(),
             messages: HashMap::new(),
+            source_generations: HashMap::new(),
+            active_source_generation: None,
             ordinal: self.ordinal,
             trace_key,
             trace_id,
@@ -1498,6 +1512,13 @@ impl TurnAssembler {
             TranscriptEvent::Record { kind, payload, ts } => {
                 let (nanos, _) = self.event_nanos(&ts, recv_nanos);
                 match kind.as_str() {
+                    "transcript_dag" => {
+                        // The next conversational event came from this
+                        // persisted Claude node.  Keep it separate from the
+                        // public API-message id so tool-result ancestry can
+                        // follow `sourceToolAssistantUUID` exactly.
+                        self.pending_dag = Some(payload);
+                    }
                     "ai-title" => {
                         if self.emitting
                             && let Some(title) = payload.get("title").and_then(Value::as_str)
@@ -1709,6 +1730,9 @@ impl TurnAssembler {
             }
             TranscriptEvent::User { text, meta, ts } => {
                 let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
+                // A user node starts a new graph branch; it is not an
+                // assistant/tool parent, so do not leak its DAG record.
+                self.pending_dag = None;
                 if meta {
                     // Harness chatter written as a user line belongs to
                     // whatever turn is running and never opens/closes one.
@@ -1759,6 +1783,10 @@ impl TurnAssembler {
                 let prev_nanos = self.last_event_nanos;
                 let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
                 self.ensure_live_turn(nanos, &mut ops);
+                let source_uuid = self
+                    .pending_dag
+                    .take()
+                    .and_then(|dag| dag.get("uuid").and_then(Value::as_str).map(str::to_owned));
                 let mut emit_now: Option<(usize, PendingGen)> = None;
                 if let Some(turn) = self.turn.as_mut() {
                     turn.note_skill(&skill);
@@ -1849,6 +1877,10 @@ impl TurnAssembler {
                                 .insert(id.clone(), (index, generation.clone()));
                         }
                         turn.last_gen = Some((index, generation.clone()));
+                        if let Some(source_uuid) = &source_uuid {
+                            turn.source_generations.insert(source_uuid.clone(), index);
+                            turn.active_source_generation = Some(source_uuid.clone());
+                        }
                         emit_now = Some((index, generation));
                     }
                     if !text.is_empty() {
@@ -1936,7 +1968,11 @@ impl TurnAssembler {
                     let gen_index = if self.settings.provider == Provider::Codex {
                         Some(turn.gen_count + turn.pending_generations.len().saturating_sub(1))
                     } else {
-                        turn.last_gen.as_ref().map(|(index, _)| *index)
+                        turn.active_source_generation
+                            .as_ref()
+                            .and_then(|uuid| turn.source_generations.get(uuid))
+                            .copied()
+                            .or_else(|| turn.last_gen.as_ref().map(|(index, _)| *index))
                     };
                     turn.open_tools.push(OpenTool {
                         id,
@@ -1978,6 +2014,11 @@ impl TurnAssembler {
             } => {
                 let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
                 self.ensure_live_turn(nanos, &mut ops);
+                let source_tool_assistant = self.pending_dag.take().and_then(|dag| {
+                    dag.get("sourceToolAssistantUUID")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                });
                 let captured = self.full_content(&match &content {
                     Value::String(s) => s.clone(),
                     value => value.to_string(),
@@ -2002,7 +2043,15 @@ impl TurnAssembler {
                         turn_ref.open_tools.iter().position(|t| t.id == id)
                     };
                     popped = Some(match idx {
-                        Some(i) => (turn_ref.open_tools.remove(i), false),
+                        Some(i) => {
+                            let mut tool = turn_ref.open_tools.remove(i);
+                            if let Some(source) = &source_tool_assistant
+                                && let Some(index) = turn_ref.source_generations.get(source)
+                            {
+                                tool.gen_index = Some(*index);
+                            }
+                            (tool, false)
+                        }
                         // orphan result: synthesize a zero-duration row
                         // rather than dropping the data
                         None => (
@@ -2757,10 +2806,28 @@ impl TurnAssembler {
                         .filter(|id| counts.get(*id) == Some(&1))
                         && let Some(parent) = self.capture_tools.get(id)
                     {
+                        let mut parent = parent.clone();
+                        for (key, value) in [
+                            ("agent_type", meta.agent_type.clone().map(Value::from)),
+                            (
+                                "agent_description",
+                                meta.description.clone().map(Value::from),
+                            ),
+                            ("agent_model", meta.model.clone().map(Value::from)),
+                            (
+                                "parent_agent_id",
+                                meta.parent_agent_id.clone().map(Value::from),
+                            ),
+                            ("spawn_depth", meta.spawn_depth.map(Value::from)),
+                        ] {
+                            if let Some(value) = value {
+                                parent.metadata.insert(key.into(), value);
+                            }
+                        }
                         self.child_sources.insert(
                             meta.agent_id.clone(),
                             (
-                                parent.clone(),
+                                parent,
                                 crate::tracing::subagents::transcript_for(&dir, &meta.agent_id),
                             ),
                         );
@@ -2961,6 +3028,20 @@ fn child_op(op: StoreOp, parent: &ObservationRow, agent: &str) -> Option<StoreOp
             row.metadata.insert("agent_id".into(), Value::from(agent));
             row.metadata
                 .insert("source".into(), Value::from("subagent"));
+            // Sidecar metadata describes the agent itself, not the tool that
+            // happened to launch it.  Carry it onto the structural wrapper
+            // so the agents view and exports can distinguish nested roles.
+            for key in [
+                "agent_type",
+                "agent_description",
+                "agent_model",
+                "parent_agent_id",
+                "spawn_depth",
+            ] {
+                if let Some(value) = parent.metadata.get(key) {
+                    row.metadata.insert(key.into(), value.clone());
+                }
+            }
             row.metadata
                 .insert("status".into(), Value::from(t.status.as_str()));
             Some(StoreOp::Observation(row))
@@ -3573,7 +3654,13 @@ mod tests {
             .find(|t| t.status == TraceStatus::Open)
             .unwrap();
         assert_ne!(t2.id, root.id);
-        assert_eq!(t2.id, ids::trace_id_hex("amx1|claude|sess-1|turn|2"));
+        assert_eq!(
+            t2.id,
+            ids::trace_id_hex(&format!(
+                "amx2|claude|sess-1|turn|at-{}",
+                ns("2026-08-30T10:01:00Z")
+            ))
+        );
     }
 
     #[test]
@@ -3859,7 +3946,13 @@ mod tests {
         let open = traces(&ops);
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].ordinal, 3);
-        assert_eq!(open[0].id, ids::trace_id_hex("amx1|claude|sess-1|turn|3"));
+        assert_eq!(
+            open[0].id,
+            ids::trace_id_hex(&format!(
+                "amx2|claude|sess-1|turn|at-{}",
+                ns("2026-08-30T10:00:00Z")
+            ))
+        );
         let close = asm.finalize();
         assert_eq!(closed(&close)[0].ordinal, 3);
     }
@@ -3875,7 +3968,13 @@ mod tests {
         let _ = asm.feed(user("turn", "2026-08-30T10:00:00Z"), 0);
         let close = asm.finalize();
         let root = closed(&close)[0];
-        assert_eq!(root.id, ids::trace_id_hex("amx1|claude|sess-1|turn|1"));
+        assert_eq!(
+            root.id,
+            ids::trace_id_hex(&format!(
+                "amx2|claude|sess-1|turn|at-{}",
+                ns("2026-08-30T10:00:00Z")
+            ))
+        );
     }
 
     #[test]
@@ -5683,5 +5782,42 @@ mod tests {
         );
         // a generation is a root of the turn, not a child of anything
         assert!(gens.iter().all(|g| g.parent_id.is_none()));
+    }
+
+    #[test]
+    fn claude_dag_source_tool_assistant_uuid_overrides_interleaved_messages() {
+        let mut asm = TurnAssembler::new(settings(ContentMode::Full), Some("s1".into()), "watched");
+        let mut ops = asm.feed(user("go", "2026-09-07T10:00:00Z"), 0);
+        let dag = |uuid: &str, source: Option<&str>| TranscriptEvent::Record {
+            kind: "transcript_dag".into(),
+            payload: serde_json::json!({"uuid": uuid, "sourceToolAssistantUUID": source}),
+            ts: None,
+        };
+        ops.extend(asm.feed(dag("assistant-a", None), 0));
+        ops.extend(asm.feed(assistant("first", "2026-09-07T10:00:01Z", vec![]), 0));
+        ops.extend(asm.feed(
+            tool_use("t1", "Bash", Value::Null, "2026-09-07T10:00:02Z"),
+            0,
+        ));
+        // The result is written after another assistant node. Its graph link,
+        // rather than the current/last generation, remains authoritative.
+        ops.extend(asm.feed(dag("assistant-b", None), 0));
+        ops.extend(asm.feed(assistant("second", "2026-09-07T10:00:03Z", vec![]), 0));
+        ops.extend(asm.feed(dag("result", Some("assistant-a")), 0));
+        ops.extend(asm.feed(
+            tool_result("t1", Value::from("ok"), false, "2026-09-07T10:00:04Z"),
+            0,
+        ));
+        let generations: Vec<_> = observations(&ops)
+            .into_iter()
+            .filter(|row| row.obs_type == ObservationType::Generation)
+            .collect();
+        let first = generations.first().expect("first generation").id.clone();
+        let tool = observations(&ops)
+            .into_iter()
+            .rev()
+            .find(|row| row.tool_id.as_deref() == Some("t1"))
+            .expect("finished tool");
+        assert_eq!(tool.parent_id.as_deref(), Some(first.as_str()));
     }
 }
