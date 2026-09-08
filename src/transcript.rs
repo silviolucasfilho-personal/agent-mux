@@ -902,6 +902,41 @@ fn codex_content_text(content: Option<&Value>) -> String {
         .join("")
 }
 
+/// Codex reasoning is either a string, a Responses content array, or a
+/// summary array depending on rollout version. Encrypted-only content has no
+/// printable text and is deliberately ignored.
+fn codex_reasoning_text(payload: &Value) -> String {
+    if let Some(text) = payload.get("content").and_then(Value::as_str) {
+        return text.to_string();
+    }
+    let collect = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| match item {
+                Value::String(text) => Some(text.clone()),
+                Value::Object(_) => item.get("text").and_then(Value::as_str).map(str::to_owned),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let content = collect(payload.get("content"));
+    if content.is_empty() {
+        collect(payload.get("summary"))
+    } else {
+        content
+    }
+}
+
+fn codex_args(value: Option<&Value>) -> Value {
+    match value.cloned().unwrap_or(Value::Null) {
+        Value::String(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        other => other,
+    }
+}
+
 pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
     let Some(v) = parse_json_line(line) else {
         return Vec::new();
@@ -919,7 +954,14 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
     match line_type {
         "session_meta" => {
             let mut extra = serde_json::Map::new();
-            for key in ["cli_version", "model_provider", "originator", "git"] {
+            for key in [
+                "cli_version",
+                "model_provider",
+                "originator",
+                "git",
+                "parent_thread_id",
+                "thread_source",
+            ] {
                 if let Some(val) = payload.get(key) {
                     extra.insert(key.to_string(), val.clone());
                 }
@@ -954,9 +996,17 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                         .and_then(|s| s.as_str())
                         .map(|s| s.to_string()),
                     extra: Value::Object(extra),
-                    ts,
+                    ts: ts.clone(),
                 });
             }
+            // Keep execution settings on the active turn rather than making
+            // them session-global. They are safe metadata (not prompt body)
+            // and mirror the Codex Langfuse plugin's invocation parameters.
+            events.push(TranscriptEvent::Record {
+                kind: "codex_turn_context".into(),
+                payload: payload.clone(),
+                ts,
+            });
         }
         "response_item" => {
             let item_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -992,7 +1042,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                     }
                 }
                 "reasoning" => {
-                    let text = codex_content_text(payload.get("summary"));
+                    let text = codex_reasoning_text(payload);
                     if !text.is_empty() {
                         events.push(TranscriptEvent::Thinking { text, ts });
                     }
@@ -1033,7 +1083,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                             .and_then(|n| n.as_str())
                             .unwrap_or("unknown")
                             .to_string(),
-                        args: payload.get("input").cloned().unwrap_or(Value::Null),
+                        args: codex_args(payload.get("input")),
                         skill: None,
                         ts,
                     });
@@ -1042,6 +1092,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                     events.push(TranscriptEvent::ToolUse {
                         id: payload
                             .get("call_id")
+                            .or_else(|| payload.get("id"))
                             .and_then(|c| c.as_str())
                             .unwrap_or("")
                             .to_string(),
@@ -1055,6 +1106,7 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
                     events.push(TranscriptEvent::ToolUse {
                         id: payload
                             .get("call_id")
+                            .or_else(|| payload.get("id"))
                             .and_then(|c| c.as_str())
                             .unwrap_or("")
                             .to_string(),
@@ -1519,6 +1571,10 @@ mod tests {
         );
         let system = r#"{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"system","content":[{"type":"input_text","text":"instructions"}]}}"#;
         assert!(parse_codex_line(system).is_empty());
+        let modern_reasoning = r#"{"timestamp":"t","type":"response_item","payload":{"type":"reasoning","content":"thinking from content"}}"#;
+        assert!(
+            matches!(&parse_codex_line(modern_reasoning)[0], TranscriptEvent::Thinking { text, .. } if text == "thinking from content")
+        );
         let reasoning = r#"{"timestamp":"t","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking..."}],"encrypted_content":"xxx"}}"#;
         assert!(
             matches!(&parse_codex_line(reasoning)[0], TranscriptEvent::Thinking { text, .. } if text == "thinking...")
@@ -1533,6 +1589,14 @@ mod tests {
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }
+        let web = r#"{"timestamp":"t","type":"response_item","payload":{"type":"web_search_call","id":"web-1","action":{"type":"search","query":"sqlite"}}}"#;
+        assert!(
+            matches!(&parse_codex_line(web)[0], TranscriptEvent::ToolUse { id, name, args, .. } if id == "web-1" && name == "web_search" && args["query"] == "sqlite")
+        );
+        let custom = r#"{"timestamp":"t","type":"response_item","payload":{"type":"custom_tool_call","call_id":"custom-1","name":"shell","input":"{\"command\":\"pwd\"}"}}"#;
+        assert!(
+            matches!(&parse_codex_line(custom)[0], TranscriptEvent::ToolUse { args, .. } if args["command"] == "pwd")
+        );
         let unparseable = r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"not json","call_id":"c2"}}"#;
         match &parse_codex_line(unparseable)[0] {
             TranscriptEvent::ToolUse { args, .. } => {
