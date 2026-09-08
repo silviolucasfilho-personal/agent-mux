@@ -53,6 +53,9 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
 /// unreadable — a missing sidecar is a normal state (an agent that has not
 /// started writing yet), never an error.
 pub fn load(dir: &Path, agent_id: &str) -> Option<Sidecar> {
+    if !plain_id(agent_id) {
+        return None;
+    }
     let raw = std::fs::read_to_string(dir.join(format!("agent-{agent_id}.meta.json"))).ok()?;
     let v: Value = serde_json::from_str(&raw).ok()?;
     Some(Sidecar {
@@ -71,11 +74,67 @@ pub fn transcript_for(dir: &Path, agent_id: &str) -> PathBuf {
     dir.join(format!("agent-{agent_id}.jsonl"))
 }
 
+pub fn plain_id(id: &str) -> bool {
+    !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\'])
+}
+
+/// Workflow journals provide per-agent completion, independently of when
+/// the parent consumes the workflow's final notification.
+pub fn workflow_results(dir: &Path) -> std::collections::HashMap<String, Value> {
+    let mut results = std::collections::HashMap::new();
+    let Ok(body) = std::fs::read_to_string(dir.join("journal.jsonl")) else {
+        return results;
+    };
+    for line in body.lines() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if row.get("type").and_then(Value::as_str) == Some("result")
+            && let Some(id) = row
+                .get("agentId")
+                .and_then(Value::as_str)
+                .filter(|id| plain_id(id))
+        {
+            results.insert(id.into(), row.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+    results
+}
+
+/// Search only the rollout date hierarchy, never arbitrary parent folders.
+pub fn codex_rollout(parent: &str, thread: &str) -> Option<PathBuf> {
+    if !plain_id(thread) {
+        return None;
+    }
+    let root = Path::new(parent).parent()?.parent()?.parent()?.parent()?;
+    if root.file_name()?.to_str()? != "sessions" {
+        return None;
+    }
+    fn walk(dir: &Path, suffix: &str, depth: usize) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let ty = entry.file_type().ok()?;
+            let path = entry.path();
+            if ty.is_dir() && depth < 3 {
+                if let Some(found) = walk(&path, suffix, depth + 1) {
+                    return Some(found);
+                }
+            } else if ty.is_file()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|s| s.starts_with("rollout-") && s.ends_with(suffix))
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+    walk(root, &format!("-{thread}.jsonl"), 0)
+}
+
 /// The subagent's transcript lines, or an empty vector when it has not been
-/// written yet. Reading is one shot: a sync agent finishes before its tool
-/// result reaches the parent, so by the time this is called the file is
-/// complete. An async agent still running yields what exists, and a later
-/// `trace import` picks up the rest.
+/// written yet. This inspection utility is one-shot; live child capture
+/// uses `Tailer` to consume later appends independently of the parent.
 pub fn lines(dir: &Path, agent_id: &str) -> Vec<String> {
     match std::fs::read_to_string(transcript_for(dir, agent_id)) {
         Ok(body) => body.lines().map(str::to_string).collect(),

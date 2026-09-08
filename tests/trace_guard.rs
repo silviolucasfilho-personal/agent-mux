@@ -69,7 +69,6 @@ fn trace(id: &str, ordinal: i64, launch_id: &str) -> TraceRow {
         reported_message_count: None,
         session_cost_usd: None,
         timing_approx: false,
-        ordinal_salted: false,
         metadata: None,
     }
 }
@@ -103,7 +102,6 @@ fn generation(id: &str, trace_id: &str) -> ObservationRow {
         skill: None,
         mcp_server: None,
         path: None,
-        is_error: false,
         ts_approx: false,
         metadata: serde_json::Map::new(),
     }

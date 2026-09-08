@@ -60,6 +60,54 @@ fn launch(id: &str) -> LaunchRow {
     }
 }
 
+#[test]
+fn late_parent_assignment_is_persisted_but_cycles_and_cross_trace_links_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = store(dir.path(), "run-1");
+    assert_eq!(
+        db.apply(&[
+            StoreOp::Launch(launch("l1")),
+            StoreOp::Trace(trace("t1", 1)),
+            StoreOp::Trace(trace("t2", 2)),
+            StoreOp::Observation(generation("parent", "t1")),
+            StoreOp::Observation(generation("child", "t1"))
+        ])
+        .unwrap(),
+        0
+    );
+    let mut child = generation("child", "t1");
+    child.parent_id = Some("parent".into());
+    assert_eq!(db.apply(&[StoreOp::Observation(child)]).unwrap(), 0);
+    let parent: String = db
+        .conn()
+        .query_row(
+            "SELECT parent_id FROM observations WHERE id='child'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(parent, "parent");
+    let mut cycle = generation("parent", "t1");
+    cycle.parent_id = Some("child".into());
+    let mut cross = generation("cross", "t2");
+    cross.parent_id = Some("parent".into());
+    assert_eq!(
+        db.apply(&[StoreOp::Observation(cycle), StoreOp::Observation(cross)])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.conn()
+            .query_row(
+                "SELECT COUNT(*) FROM observations WHERE id='cross'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
 fn trace(id: &str, ordinal: i64) -> TraceRow {
     TraceRow {
         id: id.into(),
@@ -80,7 +128,6 @@ fn trace(id: &str, ordinal: i64) -> TraceRow {
         reported_message_count: None,
         session_cost_usd: None,
         timing_approx: false,
-        ordinal_salted: false,
         metadata: None,
     }
 }
@@ -116,7 +163,6 @@ fn generation(id: &str, trace_id: &str) -> ObservationRow {
         skill: None,
         mcp_server: None,
         path: None,
-        is_error: false,
         ts_approx: false,
         metadata: serde_json::Map::new(),
     }
@@ -349,7 +395,7 @@ fn skill_and_agent_views_roll_up_attribution() {
         child.model = None;
         child.usage = None;
         child.usage_raw = None;
-        child.is_error = failed;
+        child.level = if failed { Level::Error } else { Level::Default };
         handle.tx.try_send(StoreOp::Observation(child)).unwrap();
     }
     assert!(handle.finish(Duration::from_secs(5)));

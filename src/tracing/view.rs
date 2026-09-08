@@ -264,7 +264,6 @@ mod tests {
             skill: None,
             mcp_server: None,
             path: None,
-            is_error: false,
             metadata: "{}".into(),
         }
     }

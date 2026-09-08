@@ -188,7 +188,7 @@ pub fn loop_metrics(turn: &TraceStat, obs: &[ObservationView]) -> LoopMetrics {
     LoopMetrics {
         tool_calls: tools.len() as i64,
         distinct_tools: names.len() as i64,
-        tool_errors: tools.iter().filter(|o| o.is_error).count() as i64,
+        tool_errors: tools.iter().filter(|o| o.level == "ERROR").count() as i64,
         declined: obs
             .iter()
             .filter(|o| o.status_message.as_deref() == Some(DECLINED))
@@ -474,7 +474,6 @@ mod tests {
             skill: None,
             mcp_server: None,
             path: None,
-            is_error: false,
             metadata: "{}".into(),
         }
     }
@@ -605,7 +604,7 @@ mod tests {
     #[test]
     fn counts_cover_errors_declines_subagents_and_compaction() {
         let mut failed = tool("f", "Bash", "cargo test", 0, 10);
-        failed.is_error = true;
+        failed.level = "ERROR".into();
         let mut declined = tool("d", "AskUserQuestion", "{}", 20, 21);
         declined.status_message = Some(DECLINED.into());
         let mut agent = obs("a", "agent", "agent: Explore", 30, Some(90));

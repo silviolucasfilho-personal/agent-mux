@@ -42,6 +42,20 @@ pub enum TurnBoundaryKind {
 /// file (`timestamp` / `created_at` / rollout `timestamp`), if present.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptEvent {
+    /// Native identity of the next prompt/boundary (tracing adapter only).
+    SourceTurn { id: String },
+    /// Provider lifecycle facts that enrich calls or identify child threads.
+    Activity { payload: Value, ts: Option<String> },
+    /// A provider-authored record which is not part of the conversational
+    /// message stream, but carries capture metadata (Claude titles,
+    /// compaction, skill inventory, links, and file-history facts).  Keeping
+    /// the original object makes this forward-compatible: the assembler
+    /// selects stable fields and safely ignores the rest.
+    Record {
+        kind: String,
+        payload: Value,
+        ts: Option<String>,
+    },
     User {
         text: String,
         /// Harness/system chatter written as a user line (Claude
@@ -156,11 +170,171 @@ pub fn detect_provider(first_line: &str) -> Provider {
 }
 
 pub fn parse_line(provider: Provider, line: &str) -> Vec<TranscriptEvent> {
-    match provider {
+    let mut events = match provider {
         Provider::Claude => parse_claude_line(line),
         Provider::Codex => parse_codex_line(line),
         Provider::Antigravity => parse_antigravity_line(line),
+    };
+    let Some(v) = parse_json_line(line) else {
+        return events;
+    };
+    let ts = v
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if provider == Provider::Codex {
+        for event in &mut events {
+            if let TranscriptEvent::ToolUse { id, .. } = event
+                && id.is_empty()
+                && let Some(native) = v.pointer("/payload/id").and_then(Value::as_str)
+            {
+                *id = native.into();
+            }
+        }
     }
+    if provider == Provider::Claude && v.get("type").and_then(Value::as_str) == Some("user") {
+        let texts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                TranscriptEvent::User {
+                    text, meta: false, ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        if texts.len() > 1 {
+            events.retain(|e| !matches!(e, TranscriptEvent::User { meta: false, .. }));
+            events.insert(
+                0,
+                TranscriptEvent::User {
+                    text: texts.join("\n"),
+                    meta: false,
+                    ts: ts.clone(),
+                },
+            );
+        }
+        let text = match v.pointer("/message/content") {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(blocks)) => blocks
+                .iter()
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        };
+        if text.trim_start().starts_with("<task-notification>") {
+            let tag = |name: &str| {
+                text.split_once(&format!("<{name}>"))?
+                    .1
+                    .split_once(&format!("</{name}>"))
+                    .map(|(s, _)| s.to_owned())
+            };
+            events.push(TranscriptEvent::Activity { payload: serde_json::json!({"type":"task_notification", "call_id":tag("tool-use-id"), "agent_id":tag("task-id"), "result":tag("result"), "status":tag("status")}), ts: ts.clone() });
+        }
+        for event in &mut events {
+            if let TranscriptEvent::ToolResult {
+                content,
+                structured,
+                ..
+            } = event
+            {
+                let async_text = content.to_string();
+                if async_text.contains("Async agent launched")
+                    || async_text.contains("launched in background")
+                {
+                    let value = structured.get_or_insert_with(|| serde_json::json!({}));
+                    value["isAsync"] = Value::Bool(true);
+                }
+            }
+        }
+    }
+    let native = match provider {
+        Provider::Claude
+            if events
+                .iter()
+                .any(|e| matches!(e, TranscriptEvent::User { meta: false, .. })) =>
+        {
+            v.get("uuid")
+        }
+        Provider::Codex
+            if v.pointer("/payload/type").and_then(Value::as_str) == Some("task_started") =>
+        {
+            v.pointer("/payload/turn_id")
+        }
+        _ => None,
+    };
+    if let Some(id) = native.and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        events.insert(0, TranscriptEvent::SourceTurn { id: id.into() });
+    }
+    if provider == Provider::Claude {
+        let mut dag = serde_json::Map::new();
+        for key in ["uuid", "parentUuid", "sourceToolAssistantUUID"] {
+            if let Some(value) = v.get(key).filter(|value| !value.is_null()) {
+                dag.insert(key.into(), value.clone());
+            }
+        }
+        if !dag.is_empty() {
+            events.insert(
+                0,
+                TranscriptEvent::Record {
+                    kind: "transcript_dag".into(),
+                    payload: Value::Object(dag),
+                    ts: ts.clone(),
+                },
+            );
+        }
+    }
+    // The history viewer keeps its original per-block adapter. Tracing
+    // needs one logical assistant fragment, before its tool-use blocks,
+    // including messages containing only thinking or tool calls.
+    if provider == Provider::Claude && v.get("type").and_then(Value::as_str) == Some("assistant") {
+        if let Some(msg) = v.get("message") {
+            let blocks = msg.get("content").and_then(Value::as_array);
+            let text = |kind: &str, field: &str| -> String {
+                blocks
+                    .into_iter()
+                    .flatten()
+                    .filter(|b| b.get("type").and_then(Value::as_str) == Some(kind))
+                    .filter_map(|b| b.get(field).and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let thinking = text("thinking", "thinking");
+            events.retain(|e| {
+                !matches!(
+                    e,
+                    TranscriptEvent::Assistant { .. }
+                        | TranscriptEvent::Thinking { .. }
+                        | TranscriptEvent::TokenCount { .. }
+                )
+            });
+            events.insert(
+                0,
+                TranscriptEvent::Assistant {
+                    text: text("text", "text"),
+                    thinking: (!thinking.is_empty()).then_some(thinking),
+                    model: msg.get("model").and_then(Value::as_str).map(str::to_owned),
+                    msg_id: msg.get("id").and_then(Value::as_str).map(str::to_owned),
+                    usage: integer_usage(msg.get("usage")),
+                    skill: v
+                        .get("attributionSkill")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    step_index: None,
+                    ts,
+                },
+            );
+        }
+    } else if provider == Provider::Codex
+        && v.get("type").and_then(Value::as_str) == Some("event_msg")
+        && let Some(payload) = v.get("payload")
+    {
+        events.push(TranscriptEvent::Activity {
+            payload: payload.clone(),
+            ts,
+        });
+    }
+    events
 }
 
 /// RFC3339 (offsets and fractional seconds included) -> unix epoch
@@ -310,6 +484,20 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
     }
 
     match event_type {
+        "ai-title" => {
+            if let Some(title) = v
+                .get("aiTitle")
+                .or_else(|| v.get("title"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+            {
+                events.push(TranscriptEvent::Record {
+                    kind: "ai-title".into(),
+                    payload: serde_json::json!({"title": title}),
+                    ts: ts.clone(),
+                });
+            }
+        }
         "user" => {
             if let Some(msg) = v.get("message") {
                 // The rich structured result (top-level, beside `message`);
@@ -463,6 +651,42 @@ pub fn parse_claude_line(line: &str) -> Vec<TranscriptEvent> {
                 events.push(TranscriptEvent::TurnDuration {
                     duration_ms,
                     message_count: v.get("messageCount").and_then(|m| m.as_i64()),
+                    ts: ts.clone(),
+                });
+            }
+            if v.get("subtype").and_then(Value::as_str) == Some("compact_boundary") {
+                events.push(TranscriptEvent::Record {
+                    kind: "compact_boundary".into(),
+                    payload: v.clone(),
+                    ts: ts.clone(),
+                });
+            }
+        }
+        "pr-link" | "file-history-snapshot" | "file-history-delta" => {
+            events.push(TranscriptEvent::Record {
+                kind: event_type.into(),
+                payload: v.clone(),
+                ts: ts.clone(),
+            });
+        }
+        "attachment" => {
+            // Claude has used both a top-level `attachmentType` and a nested
+            // `attachment.type` over time.  Preserve only the two attachment
+            // kinds that have stable capture semantics.
+            let attachment_type = v
+                .get("attachmentType")
+                .or_else(|| v.pointer("/attachment/type"))
+                .or_else(|| v.get("subtype"))
+                .and_then(Value::as_str);
+            let kind = match attachment_type {
+                Some("skill_listing") => Some("skill_listing"),
+                Some("remote_session_change") => Some("remote_session_change"),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                events.push(TranscriptEvent::Record {
+                    kind: kind.into(),
+                    payload: v.clone(),
                     ts: ts.clone(),
                 });
             }
@@ -1374,5 +1598,39 @@ mod tests {
         assert!(parse_claude_line(bare).is_empty());
         let empty = r#"{"type":"continued-in","timestamp":"t","continuedInSessionId":""}"#;
         assert!(parse_claude_line(empty).is_empty());
+    }
+
+    #[test]
+    fn claude_capture_records_are_surfaced_for_the_store() {
+        let title = parse_claude_line(r#"{"type":"ai-title","aiTitle":"Build migrations"}"#);
+        assert!(
+            matches!(&title[0], TranscriptEvent::Record { kind, payload, .. } if kind == "ai-title" && payload["title"] == "Build migrations")
+        );
+        let compact = parse_claude_line(
+            r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":12}}"#,
+        );
+        assert!(
+            matches!(&compact[0], TranscriptEvent::Record { kind, payload, .. } if kind == "compact_boundary" && payload["compactMetadata"]["preTokens"] == 12)
+        );
+        let skills = parse_claude_line(
+            r#"{"type":"attachment","attachmentType":"skill_listing","skills":[{"name":"git"}]}"#,
+        );
+        assert!(
+            matches!(&skills[0], TranscriptEvent::Record { kind, .. } if kind == "skill_listing")
+        );
+        let remote = parse_claude_line(
+            r#"{"type":"attachment","attachment":{"type":"remote_session_change","url":"https://claude.ai/chat/x"}}"#,
+        );
+        assert!(
+            matches!(&remote[0], TranscriptEvent::Record { kind, .. } if kind == "remote_session_change")
+        );
+        let dag = parse_line(
+            Provider::Claude,
+            r#"{"type":"user","uuid":"u1","parentUuid":"p1","sourceToolAssistantUUID":"m1","message":{"content":"go"}}"#,
+        );
+        assert!(matches!(
+            dag.iter().find(|event| matches!(event, TranscriptEvent::Record { kind, .. } if kind == "transcript_dag")),
+            Some(TranscriptEvent::Record { payload, .. }) if payload["uuid"] == "u1" && payload["parentUuid"] == "p1" && payload["sourceToolAssistantUUID"] == "m1"
+        ));
     }
 }

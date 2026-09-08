@@ -1003,6 +1003,11 @@ impl Pipeline {
         self.assembler
             .set_transcript_path(&adopted.path.to_string_lossy());
         self.hook_feed.set_session(&adopted.session_id);
+        let resume_native = store::open_ro(&self.ctx.db_path).ok().and_then(|conn| conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM traces WHERE session_key = ?1 AND json_extract(metadata,'$.identity_version') = 2)",
+            [map::session_key(self.ctx.provider, &adopted.session_id)], |r| r.get::<_, bool>(0),
+        ).ok()).unwrap_or(false);
+        self.assembler.set_resume_native(resume_native);
         if adopted.resume_prime {
             match Tailer::prime(&adopted.path, self.ctx.backfill_max_bytes) {
                 Ok((tailer, lines, truncated)) => {
@@ -1146,6 +1151,8 @@ impl Pipeline {
         self.follow_continuation();
         self.poll_agy_usage();
         self.poll_hooks();
+        let children = self.assembler.poll_children();
+        self.send_ops(children);
     }
 
     /// Claude ends a forked or continued session with a `continued-in`

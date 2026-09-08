@@ -324,6 +324,27 @@ impl Store {
         Ok(())
     }
 
+    /// Remove capture-derived rows for one session before a deterministic
+    /// historical rebuild. Scores intentionally remain: their target ids are
+    /// stable for native/content-derived imports and may be reattached by a
+    /// subsequent upsert.
+    pub fn replace_session_capture(&mut self, session_key: &str) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM observations WHERE trace_id IN (SELECT id FROM traces WHERE session_key = ?1)",
+            params![session_key],
+        )?;
+        tx.execute(
+            "DELETE FROM traces WHERE session_key = ?1",
+            params![session_key],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET extra = json_remove(COALESCE(extra, '{}'), '$.legacy_capture') WHERE key = ?1",
+            params![session_key],
+        )?;
+        tx.commit()
+    }
+
     /// Closes what a crashed run left open. Guarded by heartbeats so a
     /// live second process is never touched.
     pub fn recovery_sweep(&self, now: i64) -> rusqlite::Result<()> {
@@ -507,6 +528,56 @@ fn price(
     }
 }
 
+fn usage_details_json(usage: &NormalizedUsage) -> String {
+    let mut map = serde_json::Map::new();
+    for (key, value) in [
+        ("input", usage.input),
+        ("output", usage.output),
+        ("cache_read_input_tokens", usage.cache_read),
+        ("input_cache_creation_5m", usage.cache_write),
+        ("input_cache_creation_1h", usage.cache_write_1h),
+        ("output_reasoning_tokens", usage.reasoning),
+        ("total", usage.total),
+    ] {
+        if let Some(value) = value {
+            map.insert(key.into(), serde_json::Value::from(value));
+        }
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
+fn cost_details_json(cost: &Cost) -> String {
+    let mut map = serde_json::Map::new();
+    for (key, value) in [
+        ("input", cost.input),
+        ("output", cost.output),
+        ("cache_read_input_tokens", cost.cache_read),
+        ("input_cache_creation_5m", cost.cache_write),
+        ("total", cost.total),
+    ] {
+        if let Some(value) = value {
+            map.insert(key.into(), serde_json::Value::from(value));
+        }
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
+/// A source can provide a cost map in observation metadata. Its mere
+/// presence suppresses all local pricing — cost buckets must never be mixed
+/// between provider and agent-mux calculations.
+fn provided_cost(metadata: &serde_json::Map<String, serde_json::Value>) -> Option<Cost> {
+    let value = metadata.get("provided_cost")?;
+    let object = value.as_object()?;
+    let get = |key: &str| object.get(key).and_then(serde_json::Value::as_f64);
+    Some(Cost {
+        input: get("input"),
+        output: get("output"),
+        cache_read: get("cache_read_input_tokens").or_else(|| get("input_cache_read")),
+        cache_write: get("input_cache_creation_5m").or_else(|| get("input_cache_write")),
+        total: get("total"),
+    })
+}
+
 fn apply_op(tx: &Transaction, op: &StoreOp, prices: &PriceTable) -> rusqlite::Result<()> {
     match op {
         StoreOp::Launch(l) => upsert_launch(tx, l),
@@ -596,7 +667,11 @@ fn upsert_session(tx: &Transaction, s: &SessionRow) -> rusqlite::Result<()> {
            cwd = COALESCE(excluded.cwd, cwd),
            project_slug = COALESCE(excluded.project_slug, project_slug),
            transcript_path = COALESCE(excluded.transcript_path, transcript_path),
-           title = COALESCE(title, excluded.title),
+           -- The first user prompt is a fallback title. Claude's later
+           -- ai-title record is authoritative and intentionally replaces it.
+           title = CASE WHEN json_extract(excluded.extra, '$.title_source') = 'ai-title'
+                        THEN COALESCE(excluded.title, title)
+                        ELSE COALESCE(title, excluded.title) END,
            first_seen_ns = MIN(first_seen_ns, excluded.first_seen_ns),
            last_seen_ns = MAX(last_seen_ns, excluded.last_seen_ns),
            extra = json_patch(extra, excluded.extra)",
@@ -631,8 +706,8 @@ fn upsert_trace(tx: &Transaction, t: &TraceRow) -> rusqlite::Result<()> {
     let metadata = t.metadata.as_ref().map(|v| v.to_string());
     tx.prepare_cached(
         "INSERT INTO traces (id, session_key, launch_id, ordinal, name, status, start_ns, end_ns, input, output, thinking,
-           skills, reported_duration_ms, reported_message_count, session_cost_usd, timing_approx, ordinal_salted, metadata)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, COALESCE(?12, '[]'), ?13, ?14, ?15, ?16, ?17, COALESCE(?18, '{}'))
+           skills, reported_duration_ms, reported_message_count, session_cost_usd, timing_approx, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, COALESCE(?12, '[]'), ?13, ?14, ?15, ?16, COALESCE(?17, '{}'))
          ON CONFLICT(id) DO UPDATE SET
            launch_id = COALESCE(excluded.launch_id, launch_id),
            name = excluded.name,
@@ -647,7 +722,6 @@ fn upsert_trace(tx: &Transaction, t: &TraceRow) -> rusqlite::Result<()> {
            reported_message_count = COALESCE(excluded.reported_message_count, reported_message_count),
            session_cost_usd = COALESCE(excluded.session_cost_usd, session_cost_usd),
            timing_approx = MAX(timing_approx, excluded.timing_approx),
-           ordinal_salted = excluded.ordinal_salted,
            closed_by = CASE WHEN excluded.status = 'open' THEN closed_by ELSE NULL END,
            metadata = json_patch(metadata, excluded.metadata)",
     )?
@@ -668,7 +742,6 @@ fn upsert_trace(tx: &Transaction, t: &TraceRow) -> rusqlite::Result<()> {
         t.reported_message_count,
         t.session_cost_usd,
         t.timing_approx,
-        t.ordinal_salted,
         metadata,
     ])?;
     Ok(())
@@ -679,9 +752,32 @@ fn upsert_observation(
     o: &ObservationRow,
     prices: &PriceTable,
 ) -> rusqlite::Result<()> {
+    let invalid: bool = tx.query_row(
+        "WITH RECURSIVE ancestors(id) AS (
+           SELECT ?2 WHERE ?2 IS NOT NULL UNION
+           SELECT o.parent_id FROM observations o JOIN ancestors a ON o.id = a.id WHERE o.parent_id IS NOT NULL
+         ) SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ?1)
+           OR EXISTS(SELECT 1 FROM observations WHERE id = ?1 AND trace_id != ?3)
+           OR EXISTS(SELECT 1 FROM observations WHERE id = ?2 AND trace_id != ?3)
+           OR EXISTS(SELECT 1 FROM observations WHERE parent_id = ?1 AND trace_id != ?3)",
+        params![o.id, o.parent_id, o.trace_id], |r| r.get(0),
+    )?;
+    if invalid {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "invalid observation parent or trace ownership".into(),
+        ));
+    }
     let usage = o.usage.clone().unwrap_or_default();
-    let (model_id, cost) = price(prices, o.model.as_deref(), &usage);
+    let provided_cost = provided_cost(&o.metadata);
+    let (model_id, cost) = if provided_cost.is_some() {
+        (None, Cost::default())
+    } else {
+        price(prices, o.model.as_deref(), &usage)
+    };
     let usage_json = o.usage_raw.as_ref().map(|raw| usage_raw_json(raw));
+    let usage_details = (!usage.is_empty()).then(|| usage_details_json(&usage));
+    let provided_cost_json = provided_cost.as_ref().map(cost_details_json);
+    let cost_details = (!cost_details_json(&cost).eq("{}")).then(|| cost_details_json(&cost));
     let metadata = if o.metadata.is_empty() {
         None
     } else {
@@ -691,11 +787,13 @@ fn upsert_observation(
         "INSERT INTO observations (id, trace_id, parent_id, type, name, kind, start_ns, end_ns, level, status_message, model, model_id,
            input, output, thinking, usage, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cache_write_1h_tokens,
            reasoning_tokens, total_tokens, input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_write_cost_usd, total_cost_usd,
-           tool_id, tool_name, skill, mcp_server, path, is_error, ts_approx, metadata)
+           tool_id, tool_name, skill, mcp_server, path, ts_approx, metadata,
+           provided_usage, provided_cost, usage_details, cost_details)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25,
-           ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, COALESCE(?36, '{}'))
+           ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, COALESCE(?35, '{}'), ?36, ?37, ?38, ?39)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
+           parent_id = COALESCE(parent_id, excluded.parent_id),
            kind = COALESCE(excluded.kind, kind),
            start_ns = excluded.start_ns,
            end_ns = COALESCE(excluded.end_ns, end_ns),
@@ -724,9 +822,12 @@ fn upsert_observation(
            skill = COALESCE(excluded.skill, skill),
            mcp_server = COALESCE(excluded.mcp_server, mcp_server),
            path = COALESCE(excluded.path, path),
-           is_error = MAX(is_error, excluded.is_error),
            ts_approx = MAX(ts_approx, excluded.ts_approx),
-           metadata = json_patch(metadata, excluded.metadata)",
+           metadata = json_patch(metadata, excluded.metadata),
+           provided_usage = COALESCE(excluded.provided_usage, provided_usage),
+           provided_cost = COALESCE(excluded.provided_cost, provided_cost),
+           usage_details = COALESCE(excluded.usage_details, usage_details),
+           cost_details = COALESCE(excluded.cost_details, cost_details)",
     )?
     .execute(params![
         o.id,
@@ -762,9 +863,12 @@ fn upsert_observation(
         o.skill,
         o.mcp_server,
         o.path,
-        o.is_error,
         o.ts_approx,
         metadata,
+        usage_json,
+        provided_cost_json,
+        usage_details,
+        cost_details,
     ])?;
     Ok(())
 }
@@ -873,14 +977,14 @@ pub fn read_session_ops(conn: &Connection, session_key: &str) -> rusqlite::Resul
     let mut traces = conn.prepare(
         "SELECT id, launch_id, ordinal, name, status, start_ns, end_ns, input, output, thinking,
                 skills, reported_duration_ms, reported_message_count, session_cost_usd,
-                timing_approx, ordinal_salted, metadata
+                timing_approx, metadata
          FROM traces WHERE session_key = ?1 ORDER BY ordinal, rid",
     )?;
     let trace_rows: Vec<TraceRow> = traces
         .query_map(params![session_key], |r| {
             let status: String = r.get(4)?;
             let skills: String = r.get(10)?;
-            let metadata: String = r.get(16)?;
+            let metadata: String = r.get(15)?;
             Ok(TraceRow {
                 id: r.get(0)?,
                 session_key: session_key.to_string(),
@@ -906,7 +1010,6 @@ pub fn read_session_ops(conn: &Connection, session_key: &str) -> rusqlite::Resul
                 reported_message_count: r.get(12)?,
                 session_cost_usd: r.get(13)?,
                 timing_approx: r.get::<_, i64>(14)? != 0,
-                ordinal_salted: r.get::<_, i64>(15)? != 0,
                 metadata: serde_json::from_str::<serde_json::Value>(&metadata)
                     .ok()
                     .filter(|v| v.as_object().is_some_and(|m| !m.is_empty())),
@@ -917,7 +1020,7 @@ pub fn read_session_ops(conn: &Connection, session_key: &str) -> rusqlite::Resul
         "SELECT id, parent_id, type, name, kind, start_ns, end_ns, level, status_message, model,
                 input, output, thinking, usage, input_tokens, output_tokens, cache_read_tokens,
                 cache_write_tokens, cache_write_1h_tokens, reasoning_tokens, total_tokens,
-                tool_id, tool_name, skill, mcp_server, path, is_error, ts_approx, metadata
+                tool_id, tool_name, skill, mcp_server, path, ts_approx, metadata
          FROM observations WHERE trace_id = ?1 ORDER BY start_ns, rid",
     )?;
     for trace in trace_rows {
@@ -927,7 +1030,7 @@ pub fn read_session_ops(conn: &Connection, session_key: &str) -> rusqlite::Resul
             let obs_type: String = r.get(2)?;
             let level: String = r.get(7)?;
             let usage_raw: Option<String> = r.get(13)?;
-            let metadata: String = r.get(28)?;
+            let metadata: String = r.get(27)?;
             let usage = NormalizedUsage {
                 input: r.get(14)?,
                 output: r.get(15)?,
@@ -977,8 +1080,7 @@ pub fn read_session_ops(conn: &Connection, session_key: &str) -> rusqlite::Resul
                 skill: r.get(23)?,
                 mcp_server: r.get(24)?,
                 path: r.get(25)?,
-                is_error: r.get::<_, i64>(26)? != 0,
-                ts_approx: r.get::<_, i64>(27)? != 0,
+                ts_approx: r.get::<_, i64>(26)? != 0,
                 metadata: serde_json::from_str(&metadata).unwrap_or_default(),
             })
         })?;
@@ -1061,7 +1163,6 @@ mod tests {
             reported_message_count: None,
             session_cost_usd: None,
             timing_approx: false,
-            ordinal_salted: false,
             metadata: None,
         }
     }
@@ -1097,7 +1198,6 @@ mod tests {
             skill: None,
             mcp_server: None,
             path: None,
-            is_error: false,
             ts_approx: false,
             metadata: serde_json::Map::new(),
         }

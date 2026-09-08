@@ -131,10 +131,10 @@ pub fn usage_details(u: &NormalizedUsage) -> Map<String, Value> {
     put(&mut m, "input", u.input);
     put(&mut m, "output", u.output);
     put(&mut m, "total", u.total);
-    put(&mut m, "input_cache_read", u.cache_read);
-    put(&mut m, "input_cache_write", u.cache_write);
-    put(&mut m, "input_cache_write_1h", u.cache_write_1h);
-    put(&mut m, "output_reasoning", u.reasoning);
+    put(&mut m, "cache_read_input_tokens", u.cache_read);
+    put(&mut m, "input_cache_creation_5m", u.cache_write);
+    put(&mut m, "input_cache_creation_1h", u.cache_write_1h);
+    put(&mut m, "output_reasoning_tokens", u.reasoning);
     m
 }
 
@@ -143,10 +143,31 @@ pub fn cost_details(c: &Cost) -> Map<String, Value> {
     let mut m = Map::new();
     put(&mut m, "input", c.input);
     put(&mut m, "output", c.output);
-    put(&mut m, "input_cache_read", c.cache_read);
-    put(&mut m, "input_cache_write", c.cache_write);
+    put(&mut m, "cache_read_input_tokens", c.cache_read);
+    put(&mut m, "input_cache_creation_5m", c.cache_write);
     put(&mut m, "total", c.total);
     m
+}
+
+/// Provider-reported cost is authoritative.  Keep it distinct from local
+/// pricing, but serialize it through the same Langfuse cost-details field so
+/// an export faithfully represents the source rather than silently replacing
+/// it with the current local price table.
+fn provided_cost_details(metadata: &Map<String, Value>) -> Option<Map<String, Value>> {
+    let source = metadata.get("provided_cost")?.as_object()?;
+    let mut details = Map::new();
+    for (from, to) in [
+        ("input", "input"),
+        ("output", "output"),
+        ("cache_read_input_tokens", "cache_read_input_tokens"),
+        ("input_cache_creation_5m", "input_cache_creation_5m"),
+        ("total", "total"),
+    ] {
+        if let Some(value) = source.get(from).filter(|v| v.is_number()) {
+            details.insert(to.into(), value.clone());
+        }
+    }
+    (!details.is_empty()).then_some(details)
 }
 
 /// Nanoseconds as the decimal string OTLP/JSON requires.
@@ -314,7 +335,7 @@ fn observation_span(o: &ObservationRow, ctx: &MapCtx) -> Event {
         metadata.insert("usage_raw".into(), Value::Object(m));
     }
 
-    let level = if o.is_error { Level::Error } else { o.level };
+    let level = o.level;
     let mut attrs = common_attrs(ctx);
     attrs.push(attr(OBSERVATION_TYPE, any_str(kind)));
     attrs.push(attr(OBSERVATION_LEVEL, any_str(level.as_str())));
@@ -327,7 +348,9 @@ fn observation_span(o: &ObservationRow, ctx: &MapCtx) -> Event {
     push_str_attr(&mut attrs, OBSERVATION_OUTPUT, o.output.clone());
     if o.obs_type == ObservationType::Generation {
         push_str_attr(&mut attrs, OBSERVATION_MODEL, o.model.clone());
-        if let Some(usage) = &o.usage {
+        if let Some(cost) = provided_cost_details(&o.metadata) {
+            push_json_attr(&mut attrs, OBSERVATION_COST_DETAILS, cost);
+        } else if let Some(usage) = &o.usage {
             push_json_attr(&mut attrs, OBSERVATION_USAGE_DETAILS, usage_details(usage));
             if let Some(price) = o.model.as_deref().and_then(|m| ctx.prices.find(m)) {
                 push_json_attr(
@@ -351,7 +374,7 @@ fn observation_span(o: &ObservationRow, ctx: &MapCtx) -> Event {
         o.start_ns,
         o.end_ns.unwrap_or(o.start_ns),
         attrs,
-        o.is_error
+        matches!(o.level, Level::Error)
             .then_some(o.status_message.clone().or(Some("error".to_string()))),
     );
     Event {
@@ -455,7 +478,6 @@ mod tests {
             reported_message_count: None,
             session_cost_usd: None,
             timing_approx: false,
-            ordinal_salted: false,
             metadata: Some(json!({"turn_key": "p1"})),
         }
     }
@@ -494,7 +516,6 @@ mod tests {
             skill: None,
             mcp_server: None,
             path: None,
-            is_error: false,
             ts_approx: false,
             metadata: Map::new(),
         }
@@ -605,7 +626,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             usage,
-            json!({"input": 10, "output": 5, "total": 115, "input_cache_read": 100})
+            json!({"input": 10, "output": 5, "total": 115, "cache_read_input_tokens": 100})
         );
         let cost: Value =
             serde_json::from_str(attr_str(&s, "langfuse.observation.cost_details").unwrap())
@@ -622,7 +643,7 @@ mod tests {
         child.parent_id = Some("0011223344556677".into());
         child.name = "Bash".into();
         child.tool_id = Some("toolu_1".into());
-        child.is_error = true;
+        child.level = Level::Error;
         child.status_message = Some("tool error".into());
         let e = event_for(&StoreOp::Observation(child), &ctx()).unwrap();
         assert_eq!(e.kind, "tool");
@@ -659,6 +680,19 @@ mod tests {
         let meta: Value =
             serde_json::from_str(attr_str(&s, "langfuse.observation.metadata").unwrap()).unwrap();
         assert_eq!(meta["running"], true);
+    }
+
+    #[test]
+    fn provider_cost_wins_over_local_price_on_export() {
+        let mut row = observation(ObservationType::Generation);
+        row.metadata
+            .insert("provided_cost".into(), json!({"total": 0.42, "input": 0.1}));
+        let span = parsed(&event_for(&StoreOp::Observation(row), &ctx()).unwrap());
+        let cost: Value = serde_json::from_str(
+            attr_str(&span, "langfuse.observation.cost_details").expect("cost details"),
+        )
+        .unwrap();
+        assert_eq!(cost, json!({"input": 0.1, "total": 0.42}));
     }
 
     #[test]

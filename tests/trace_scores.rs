@@ -66,7 +66,6 @@ fn trace(id: &str, ordinal: i64) -> TraceRow {
         reported_message_count: None,
         session_cost_usd: None,
         timing_approx: false,
-        ordinal_salted: false,
         metadata: None,
     }
 }
@@ -114,7 +113,7 @@ fn scores_record_latest_wins_and_clear() {
     );
     assert_eq!(
         scores::for_target(&conn, "trace", "t2").unwrap()[0].value,
-        0.8
+        Some(0.8)
     );
 }
 
@@ -193,7 +192,10 @@ fn a_score_is_posted_to_langfuse_as_a_score_create_batch() {
         target: "trace".into(),
         target_id: "t1".into(),
         name: VERDICT.into(),
-        value: 1.0,
+        data_type: "numeric".into(),
+        source: "annotation".into(),
+        value: Some(1.0),
+        string_value: None,
         comment: None,
         created_ns: 1_756_548_000_000_000_000,
     };

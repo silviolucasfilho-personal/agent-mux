@@ -242,7 +242,6 @@ fn trace(n: u8, status: TraceStatus) -> StoreOp {
         reported_message_count: None,
         session_cost_usd: None,
         timing_approx: false,
-        ordinal_salted: false,
         metadata: None,
     })
 }
@@ -278,7 +277,6 @@ fn generation(n: u8, trace_n: u8, tokens: i64) -> StoreOp {
         skill: None,
         mcp_server: None,
         path: None,
-        is_error: false,
         ts_approx: false,
         metadata: serde_json::Map::new(),
     })

@@ -87,6 +87,21 @@ Claude transcript usage is read from assistant-message usage records. Its
 uncached input, cache reads, cache writes (including 5-minute and 1-hour
 breakdowns), and output are kept as separate billable buckets.
 
+The tracing adapter merges assistant fragments sharing `message.id` into
+one generation, including thinking-only and tool-only messages. Tools keep
+their issuing generation as parent even if their result arrives after another
+generation. A user row's `uuid` supplies the turn identity when available;
+ordinals remain display positions. The history viewer retains its separate
+per-block rendering.
+
+Subagent sidecars are discovered by `toolUseId` and tailed independently of
+the parent transcript. Their own turns, generations and tools appear below
+the launching call, recursively up to eight child levels. Nested classic
+agents share the parent's sidecar directory. Workflow children are read from
+`subagents/workflows/<runId>/`, with per-agent completion/results from the
+workflow journal. Delivered task notifications can complete background
+agents without moving their work into a later user turn.
+
 If an injected launch flag causes two immediate nonzero exits for the same
 profile, agent-mux disables session-id and hook argument injection for that
 profile for the rest of the run and reports the condition in the status bar.
@@ -111,6 +126,20 @@ reasoning, function/shell calls and outputs, model context, explicit task turn
 boundaries, and `token_count` events. Codex reports cached input as part of
 input and reasoning as part of output, so the tracer normalizes them into
 disjoint cost buckets before pricing.
+
+Capture also reads execution and MCP lifecycle events, including exit codes,
+errors and clean server/tool names. `collab_agent_spawn_end` and
+`sub_agent_activity` with kind `started` discover child rollouts; reporting
+the same child through both formats does not duplicate it. An interaction
+with an existing child does not attach that child to the interacting turn.
+Child files that appear later are retried while the launch remains active.
+Each `token_count` closes a model step, rather than attaching all usage to
+the final assistant response. Native `turn_id` values supply turn identity
+when present.
+
+Inconsistent token counts are retained as raw usage and marked
+`usage_invalid`; normalized usage and calculated cost stay unknown. Cached
+input and reasoning must not exceed the inclusive counts they belong to.
 
 ## Antigravity (`agy`)
 
@@ -171,6 +200,62 @@ agent-mux trace show <trace-id> --timeline
 See `profiles.example.toml` for the complete configuration surface, including
 custom storage locations, provider directories, hook controls, price overrides,
 and retention.
+
+## SQLite capture version 9
+
+New captures use native turn/message/tool identities when the source supplies
+them, so replaying a partial transcript does not renumber those identities.
+Older source formats without native turn IDs retain the ordinal fallback.
+An unfinished native turn already recorded locally can be reconstructed on
+resume and extended under its existing ID. Hook-only and legacy sessions
+retain the previous priming behavior.
+
+The generation inspector labels `input_scope`: the first generation carries
+the turn prompt; later generations carry the preceding tool results when
+available. This is incremental input, not a claim to contain the model's full
+context. If no such input is available, the field is absent. Thinking and
+tool bodies continue to obey the configured content mode and redaction.
+
+The store accepts late assignment of an unknown parent and rejects cycles
+and cross-trace parent links. Trace latency includes recorded child work
+that finishes after the turn, and is clamped to zero. Agent containers carry
+no duplicated billable usage; their generations supply the totals.
+
+Claude capture also retains Claude-authored `ai-title`, compaction boundaries,
+PR/file-history facts, skill inventories, and remote-session links. The title
+record replaces the prompt fallback when it arrives. Compaction is both an
+event observation and turn metadata, so it is visible in the timeline and
+the Loop context summary.
+
+Each generation stores provider usage separately from agent-mux's normalized
+usage and computed cost maps. A provider-supplied cost map suppresses local
+pricing altogether; agent-mux never blends individual cost buckets from two
+sources. Langfuse exports use its price-key vocabulary for cache lifetime and
+reasoning buckets.
+
+Migration preserves existing traces and score targets. `ordinal_salted` and
+the persisted observation `is_error` flag have been removed; an error is
+`level = ERROR` plus its status message. Scores now support numeric,
+categorical, boolean, text, and correction data and can target an observation
+as well as a turn, session, or launch. Sessions with pre-v5
+rows are marked `legacy_capture`; importing one replaces only that session's
+capture rows in a transaction, then rebuilds it with deterministic native or
+timestamp fallback IDs. Other sessions and score records remain intact.
+
+`trace score` accepts `--type numeric|categorical|boolean` and
+`--source annotation|api|eval`; categorical values are retained as text and
+are exported to Langfuse with their type and source.
+
+All timestamps shown by the CLI, TUI, and SQLite summary views use local time.
+
+Capture remains best effort. Child offsets are in memory; there is no
+transactional ingestion checkpoint or write-acknowledged replay queue yet.
+Work written after the launch stops requires a later import. A child file
+that shrinks is marked incomplete and its capture is stopped for that launch;
+reimport reconstructs it from the source. Missing child files contribute
+unknown usage, not zero. Full conversation replay, media inspection, timeline
+zoom and richer evaluation controls are later work; this version improves
+the data used by the existing list/tree/timeline/loop views.
 
 ## Code map
 
