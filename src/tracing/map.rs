@@ -49,6 +49,16 @@ pub struct MapSettings {
 /// "task-123" survives while "sk-live-..." is masked.
 const SECRET_PREFIXES: [&str; 6] = ["sk-", "pk-lf-", "AKIA", "ghp_", "xox", "Bearer "];
 
+/// Codex repeats environment and instruction preambles as user-shaped
+/// records. They are model context, never the user's turn prompt.
+fn is_codex_context(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("<user_instructions>")
+        || text.starts_with("<environment_context>")
+        || text.starts_with("<turn_context>")
+        || text.starts_with("# AGENTS.md instructions for")
+}
+
 fn is_boundary(prev: Option<char>) -> bool {
     match prev {
         None => true,
@@ -552,11 +562,21 @@ impl TurnAssembler {
             hook_last_message: None,
             extra_metadata: serde_json::Map::new(),
         });
+        let codex_thread = (self.settings.provider == Provider::Codex)
+            .then(|| self.session_id_or_launch().to_string());
         if let (Some(id), Some(turn)) = (source_turn, self.turn.as_mut()) {
             turn.extra_metadata
                 .insert("native_turn_id".into(), Value::String(id));
             turn.extra_metadata
                 .insert("identity_version".into(), Value::from(2));
+            if let Some(thread) = codex_thread {
+                turn.extra_metadata.insert(
+                    "codex_turn_id".into(),
+                    turn.extra_metadata["native_turn_id"].clone(),
+                );
+                turn.extra_metadata
+                    .insert("codex_thread_id".into(), Value::from(thread));
+            }
         }
         // a prompt hook that preceded this turn's transcript line pins its start
         if let Some((key, ts)) = self.pending_prompt.take()
@@ -887,6 +907,16 @@ impl TurnAssembler {
             .push_back(calls.iter().map(|c| c.name.clone()).collect());
         while self.recent_tool_seqs.len() > 8 {
             self.recent_tool_seqs.pop_front();
+        }
+        if self.settings.provider == Provider::Codex {
+            turn.extra_metadata.insert(
+                "codex_tool_call_count".into(),
+                Value::from(calls.len() as u64),
+            );
+            if turn.aborted {
+                turn.extra_metadata
+                    .insert("codex_aborted".into(), Value::Bool(true));
+            }
         }
         self.turn_tools.retain(|(o, ..)| *o > turn.ordinal);
 
@@ -1518,6 +1548,29 @@ impl TurnAssembler {
                         // public API-message id so tool-result ancestry can
                         // follow `sourceToolAssistantUUID` exactly.
                         self.pending_dag = Some(payload);
+                    }
+                    "codex_turn_context" => {
+                        let model = payload
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        if let Some(model) = &model {
+                            self.last_known_model = Some(model.clone());
+                        }
+                        if let Some(turn) = self.turn.as_mut() {
+                            for (from, to) in [
+                                ("model", "codex_model"),
+                                ("effort", "codex_effort"),
+                                ("approval_policy", "codex_approval_policy"),
+                                ("sandbox_mode", "codex_sandbox_mode"),
+                            ] {
+                                if let Some(value) = payload.get(from) {
+                                    turn.extra_metadata.insert(to.into(), value.clone());
+                                }
+                            }
+                            turn.last_nanos = turn.last_nanos.max(nanos);
+                            self.push_trace_op(&mut ops, TraceStatus::Open);
+                        }
                     }
                     "ai-title" => {
                         if self.emitting
@@ -2635,7 +2688,13 @@ impl TurnAssembler {
                 TranscriptEvent::ToolUse {
                     id: id.into(),
                     name: "web_search".into(),
-                    args: payload.get("action").cloned().unwrap_or(Value::Null),
+                    args: payload.get("action").cloned().unwrap_or_else(|| {
+                        payload
+                            .get("query")
+                            .and_then(Value::as_str)
+                            .map(|query| serde_json::json!({"query": query}))
+                            .unwrap_or(Value::Null)
+                    }),
                     skill: None,
                     ts: ts.clone(),
                 },
@@ -2648,6 +2707,31 @@ impl TurnAssembler {
             self.ensure_live_turn(nanos, &mut ops);
             if let Some(turn) = self.turn.as_mut() {
                 turn.user_text = Some(text.into());
+            }
+            self.push_trace_op(&mut ops, TraceStatus::Open);
+        }
+        if kind == "item_completed"
+            && let Some(parts) = payload.pointer("/item/content")
+            && let Some(text) = parts
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .find(|text| !is_codex_context(text))
+        {
+            self.ensure_live_turn(nanos, &mut ops);
+            if let Some(turn) = self.turn.as_mut().filter(|turn| turn.user_text.is_none()) {
+                turn.user_text = Some(text.into());
+            }
+            self.push_trace_op(&mut ops, TraceStatus::Open);
+        }
+        if kind == "agent_message"
+            && let Some(text) = payload.get("message").and_then(Value::as_str)
+        {
+            self.ensure_live_turn(nanos, &mut ops);
+            if let Some(turn) = self.turn.as_mut() {
+                turn.last_assistant_text = Some(text.into());
+                turn.last_nanos = turn.last_nanos.max(nanos);
             }
             self.push_trace_op(&mut ops, TraceStatus::Open);
         }
@@ -2740,7 +2824,9 @@ impl TurnAssembler {
                     } else {
                         payload
                             .get("error")
+                            .or_else(|| payload.get("codex_error_info"))
                             .and_then(Value::as_str)
+                            .or_else(|| payload.get("stderr").and_then(Value::as_str))
                             .and_then(|s| self.full_content(s))
                             .unwrap_or_else(|| "tool execution failed".into())
                     });
@@ -2748,6 +2834,7 @@ impl TurnAssembler {
                 if let Some(output) = payload
                     .get("aggregated_output")
                     .or_else(|| payload.get("stdout"))
+                    .or_else(|| payload.get("stderr"))
                     .or_else(|| payload.get("result"))
                 {
                     row.output = self.full_content(&match output {
