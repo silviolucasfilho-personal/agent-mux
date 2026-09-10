@@ -1320,10 +1320,7 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::raw(format!("{glyph} ")),
-                    Span::raw(truncate_chars(
-                        &crate::tracing::cli::indent(o.depth, &o.name),
-                        28,
-                    )),
+                    Span::raw(truncate_chars(&obs_display_name(o), 28)),
                     Span::styled(
                         format!(
                             " {:>7} {:>6} {:>7}",
@@ -1504,10 +1501,24 @@ fn obs_glyph(o: &crate::tracing::store::query::ObservationView) -> &'static str 
     }
 }
 
+/// A Task/Agent invocation and the transcript produced by that subagent are
+/// separate observations. Name them distinctly so they do not look like a
+/// duplicate event in the browser.
+fn obs_display_name(o: &crate::tracing::store::query::ObservationView) -> String {
+    if o.obs_type != "agent" {
+        return o.name.clone();
+    }
+    match o.name.strip_prefix("agent: ") {
+        Some(name) => format!("launch agent: {name}"),
+        None => format!("subagent: {}", o.name),
+    }
+}
+
 /// The hierarchy: connectors from the depth sequence, folded subtrees
 /// reporting what they hide.
 fn draw_observation_tree(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
-    let rows = trace_view::tree_rows(&browser.observations, &browser.collapsed);
+    let tree = crate::tracing::store::query::nest_observations(browser.observations.clone());
+    let rows = trace_view::tree_rows(&tree, &browser.collapsed);
     let selected = rows
         .iter()
         .position(|r| r.obs.id == browser.observations[browser.selected_observation].id)
@@ -1552,7 +1563,7 @@ fn draw_observation_tree(f: &mut Frame, browser: &TraceBrowserState, area: Rect)
             let budget = width
                 .saturating_sub(r.prefix.chars().count() + metrics.chars().count() + 6)
                 .max(8);
-            let name = truncate_chars(&r.obs.name, budget);
+            let name = truncate_chars(&obs_display_name(r.obs), budget);
             let line = Line::from(vec![
                 Span::raw(if is_sel { ">" } else { " " }),
                 Span::styled(fold.to_string(), Style::default().fg(Color::DarkGray)),
@@ -1616,7 +1627,10 @@ fn draw_observation_timeline(f: &mut Frame, browser: &TraceBrowserState, area: R
             "{}{}{}",
             if is_sel { ">" } else { " " },
             indent,
-            truncate_chars(&o.name, label_cols.saturating_sub(indent.len() + 1))
+            truncate_chars(
+                &obs_display_name(o),
+                label_cols.saturating_sub(indent.len() + 1),
+            )
         );
         let bar_body = if instant {
             "▏".to_string()
@@ -2251,6 +2265,8 @@ mod tests {
             ),
             view("b", "Bash", 0, base + 2_100_000_000, None),
         ];
+        browser.observations[1].parent_id = Some("a".into());
+        browser.observations[2].parent_id = Some("a".into());
         browser.focused = BrowserPane::Detail;
         browser.detail_view = DetailView::Tree;
         app.mode = crate::app::Mode::TraceBrowser(Box::new(browser));

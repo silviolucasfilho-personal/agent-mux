@@ -260,8 +260,8 @@ fn observation_from_row(r: &Row) -> rusqlite::Result<ObservationView> {
     })
 }
 
-/// A turn's observations in tree order: parents first, each followed by
-/// its children (recursively), siblings by start time.
+/// A turn's observations in chronological order. This is the canonical event
+/// sequence for lists and timelines; hierarchy is derived only for tree views.
 pub fn list_observations(
     conn: &Connection,
     trace_id: &str,
@@ -269,7 +269,16 @@ pub fn list_observations(
     let mut stmt =
         conn.prepare("SELECT * FROM observations WHERE trace_id = ?1 ORDER BY start_ns, rid")?;
     let rows = stmt.query_map(params![trace_id], observation_from_row)?;
-    Ok(nest_observations(rows.collect::<Result<Vec<_>, _>>()?))
+    rows.collect()
+}
+
+/// A turn's observations in parent-first depth-first order, for hierarchy
+/// renderers only. Do not use this for a time-ordered event list.
+pub fn list_observations_tree(
+    conn: &Connection,
+    trace_id: &str,
+) -> rusqlite::Result<Vec<ObservationView>> {
+    Ok(nest_observations(list_observations(conn, trace_id)?))
 }
 
 /// Reorders rows so children follow their parent, setting `depth`. A

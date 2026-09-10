@@ -1762,7 +1762,8 @@ fn show(args: &Args) -> anyhow::Result<()> {
             anyhow::bail!("--tree and --timeline are two views of the same turn: pick one");
         }
         if tree {
-            for line in tree_lines(&observations) {
+            let tree_observations = query::list_observations_tree(&conn, &trace.id)?;
+            for line in tree_lines(&tree_observations) {
                 println!("{line}");
             }
         }
