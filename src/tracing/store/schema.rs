@@ -1,9 +1,9 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 9;
+pub const SCHEMA_VERSION: i32 = 10;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
 // uses a separate database rather than silently replacing its history.
@@ -147,6 +147,15 @@ FROM (
          (a.level = 'ERROR' OR EXISTS (SELECT 1 FROM observations c WHERE c.parent_id = a.id AND c.level = 'ERROR')) AS failed
   FROM observations a WHERE a.type = 'agent'
 ) GROUP BY agent_type;
+"#;
+
+// v10 was issued by the discarded workbench editor experiment.  It added
+// tables unrelated to trace capture, while leaving every tracing table,
+// view, and index at the v9 shape.  Treat it as a compatibility marker so a
+// trace-only build can continue using an existing v10 store without either
+// downgrading it or recreating the user's trace history.
+const V10: &str = r#"
+SELECT 1;
 "#;
 
 const V1: &str = r#"

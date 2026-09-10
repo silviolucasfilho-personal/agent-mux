@@ -1287,6 +1287,33 @@ mod tests {
     }
 
     #[test]
+    fn v10_store_is_accepted_when_its_trace_schema_matches_v9() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        {
+            let mut store = open_temp(dir.path());
+            store.apply(&[StoreOp::Launch(launch("v10"))]).unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 10;").unwrap();
+        drop(conn);
+
+        let store = open_temp(dir.path());
+        let launches: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM launches WHERE id = 'v10'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(launches, 1, "existing trace data remains readable");
+        let version: i32 = store
+            .conn()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+    }
+
+    #[test]
     fn v1_store_migrates_to_v2_and_accepts_hook_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.db");

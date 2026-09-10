@@ -261,7 +261,7 @@ fn v4_migration_preserves_legacy_traces_and_annotations() {
         db.conn()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        9
+        i64::from(store::schema::SCHEMA_VERSION)
     );
     let (id, score): (String, f64) = db
         .conn()
