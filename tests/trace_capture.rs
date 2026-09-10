@@ -458,7 +458,7 @@ fn nested_claude_children_use_the_shared_sidecar_directory() {
         .conn()
         .query_row("SELECT id FROM traces", [], |r| r.get(0))
         .unwrap();
-    let rows = store::query::list_observations(db.conn(), &trace).unwrap();
+    let rows = store::query::list_observations_tree(db.conn(), &trace).unwrap();
     let inner = rows
         .iter()
         .find(|o| o.output.as_deref() == Some("inner answer"))

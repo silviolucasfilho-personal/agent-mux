@@ -947,8 +947,8 @@ impl DetailView {
     pub fn label(self) -> &'static str {
         match self {
             DetailView::List => "list",
-            DetailView::Tree => "tree",
-            DetailView::Timeline => "timeline",
+            DetailView::Tree => "tree (hierarchy)",
+            DetailView::Timeline => "timeline (time)",
             DetailView::Loop => "loop",
         }
     }
@@ -1239,8 +1239,10 @@ impl TraceBrowserState {
             Some(s) => crate::tracing::store::query::list_traces(conn, &s.key).unwrap_or_default(),
             None => Vec::new(),
         };
-        // open at the newest turn
-        self.selected_turn = self.turns.len().saturating_sub(1);
+        // The browser lists newest turns first, while the store query remains
+        // chronological for callers that need replay order.
+        self.turns.reverse();
+        self.selected_turn = 0;
         self.load_observations();
     }
 
@@ -1385,7 +1387,9 @@ impl TraceBrowserState {
     pub fn visible_rows(&self) -> Vec<usize> {
         match self.detail_view {
             DetailView::Tree => {
-                let rows = crate::tracing::view::tree_rows(&self.observations, &self.collapsed);
+                let tree =
+                    crate::tracing::store::query::nest_observations(self.observations.clone());
+                let rows = crate::tracing::view::tree_rows(&tree, &self.collapsed);
                 let visible: std::collections::HashSet<&str> =
                     rows.iter().map(|r| r.obs.id.as_str()).collect();
                 self.observations
@@ -1446,7 +1450,8 @@ impl TraceBrowserState {
             return;
         };
         let id = o.id.clone();
-        let has_children = crate::tracing::view::tree_rows(&self.observations, &Default::default())
+        let tree = crate::tracing::store::query::nest_observations(self.observations.clone());
+        let has_children = crate::tracing::view::tree_rows(&tree, &Default::default())
             .iter()
             .any(|r| r.obs.id == id && r.has_children);
         if !has_children {
@@ -1493,9 +1498,10 @@ impl TraceBrowserState {
         {
             self.selected_session = idx;
             self.turns = crate::tracing::store::query::list_traces(conn, &key).unwrap_or_default();
+            self.turns.reverse();
             self.selected_turn = selected_turn_id
                 .and_then(|id| self.turns.iter().position(|t| t.id == id))
-                .unwrap_or(self.turns.len().saturating_sub(1));
+                .unwrap_or(0);
             if let Some(t) = self.turns.get(self.selected_turn) {
                 self.observations = crate::tracing::store::query::list_observations(conn, &t.id)
                     .unwrap_or_default();
@@ -3548,6 +3554,8 @@ mod history_tests {
             obs("read", 1),
             obs("bash", 0),
         ];
+        browser.observations[2].parent_id = Some("agent".into());
+        browser.observations[3].parent_id = Some("agent".into());
         browser.error = None;
         browser
     }
