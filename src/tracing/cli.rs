@@ -1462,19 +1462,16 @@ fn print_sessions(rows: &[query::SessionStat]) {
         return;
     }
     println!(
-        "{:<19} {:<11} {:<12} {:>5} {:>8} {:>9} {:>9}  title",
-        "last seen", "provider", "session", "turns", "tokens", "cost", "reported"
+        "{:<19} {:<11} {:<12} {:>5} {:>8} {:>9} {:>9}  {:<36}  title",
+        "last seen", "provider", "session", "turns", "tokens", "cost", "reported", "directory"
     );
     for s in rows {
         let short: String = s.session_id.chars().take(12).collect();
-        let title = s
-            .title
-            .clone()
-            .or_else(|| s.cwd.clone())
-            .unwrap_or_default();
+        let directory = truncate_path_display(s.cwd.as_deref().unwrap_or("-"), 36);
+        let title = s.title.clone().unwrap_or_default();
         let title: String = title.chars().take(60).collect();
         println!(
-            "{:<19} {:<11} {:<12} {:>5} {:>8} {:>9} {:>9}  {}",
+            "{:<19} {:<11} {:<12} {:>5} {:>8} {:>9} {:>9}  {:<36}  {}",
             fmt_time(s.last_seen_ns),
             s.provider,
             short,
@@ -1482,6 +1479,7 @@ fn print_sessions(rows: &[query::SessionStat]) {
             fmt_tokens(s.total_tokens),
             fmt_cost(s.total_cost_usd),
             fmt_cost(s.reported_cost_usd),
+            directory,
             title
         );
     }
@@ -1640,6 +1638,21 @@ fn truncate_display(s: &str, max: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
+}
+
+fn truncate_path_display(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let suffix: String = s
+        .chars()
+        .rev()
+        .take(max.saturating_sub(1))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{suffix}")
 }
 
 /// A nested observation's name, indented under its parent.
@@ -1931,6 +1944,42 @@ pub struct ImportSummary {
     pub rejected: usize,
 }
 
+/// The clock an offline import should use in place of a live receive time.
+///
+/// A live tailer can timestamp source records that omit their own timestamp
+/// when it receives them. Reusing the import wall clock for that purpose makes
+/// every historical import look newly active, and `sessions.last_seen_ns`
+/// keeps that value because session upserts take the maximum. Start from the
+/// transcript's first timestamp instead, advancing as timestamped lines are
+/// encountered. File mtime is only a last-resort clock for formats with no
+/// timestamps at all.
+fn import_start_ns(text: &str, path: &Path) -> i64 {
+    let from_transcript = text.lines().find_map(import_line_ns);
+    let from_mtime = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| i128::try_from(d.as_nanos()).unwrap_or(i128::MAX));
+    clamp_import_ns(
+        from_transcript
+            .or(from_mtime)
+            .unwrap_or_else(|| i128::from(store::now_ns())),
+    )
+}
+
+fn import_line_ns(line: &str) -> Option<i128> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    value
+        .get("timestamp")
+        .or_else(|| value.get("created_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(transcript::parse_rfc3339_nanos)
+}
+
+fn clamp_import_ns(ns: i128) -> i64 {
+    ns.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
 /// Runs one transcript through the assembler into the store. Idempotent:
 /// the launch id derives from the path, the trace ids from the session.
 pub fn import_transcript(
@@ -1962,7 +2011,7 @@ pub fn import_transcript(
         format!("amx1|import|{}", abs.display()).as_bytes(),
     )
     .to_string();
-    let started_ns = store::now_ns();
+    let started_ns = import_start_ns(&text, &abs);
     let settings = MapSettings {
         provider,
         content_mode,
@@ -2002,10 +2051,15 @@ pub fn import_transcript(
         )),
         crate::tracing::store::model::StoreOp::Session(assembler.session_row(started_ns)),
     ];
-    let recv = i128::from(started_ns);
+    let mut recv = i128::from(started_ns);
+    let mut ended_ns = started_ns;
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
+        }
+        if let Some(line_ns) = import_line_ns(line) {
+            recv = line_ns;
+            ended_ns = ended_ns.max(clamp_import_ns(line_ns));
         }
         for event in transcript::parse_line(provider, line) {
             ops.extend(assembler.feed(event, recv));
@@ -2033,13 +2087,17 @@ pub fn import_transcript(
         cost: assembler.cost_snapshot(),
     };
     ops.push(crate::tracing::store::model::StoreOp::Launch(
-        map::launch_ended(&settings, &end, store::now_ns()),
+        map::launch_ended(&settings, &end, ended_ns),
     ));
     let mut rejected = 0usize;
     let total = ops.len();
     for chunk in ops.chunks(512) {
         rejected += store.apply(chunk)?;
     }
+    // Older importers seeded sessions and launches with the import wall
+    // clock. Re-importing is expected to be corrective as well as
+    // idempotent, so derive the session summary from the rows just rebuilt.
+    store.recompute_session_bounds(&session_key)?;
     Ok(ImportSummary {
         session_id,
         turns,
@@ -2645,6 +2703,106 @@ mod tests {
     }
 
     #[test]
+    fn import_uses_transcript_time_for_session_and_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript_path = temp.path().join("rollout-historical.jsonl");
+        let transcript = [
+            r#"{"timestamp":"2024-01-02T03:04:05Z","type":"session_meta","payload":{"id":"historical","cwd":"/repo"}}"#,
+            r#"{"timestamp":"2024-01-02T03:04:10Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}"#,
+            r#"{"timestamp":"2024-01-02T03:04:11Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect"}]}}"#,
+            r#"{"timestamp":"2024-01-02T03:04:12Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+        ]
+        .join("\n");
+        std::fs::write(&transcript_path, transcript).unwrap();
+
+        let db_path = temp.path().join("traces.db");
+        let resolved = config::resolve_tracing(None, &|key| match key {
+            "AGENT_MUX_TRACE_DB" => Some(db_path.to_string_lossy().into_owned()),
+            "HOME" => Some(temp.path().to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let mut store = open_rw(&resolved).unwrap();
+        let summary = import_transcript(
+            &mut store,
+            &resolved,
+            &transcript_path,
+            Some(Provider::Codex),
+            ContentMode::Full,
+        )
+        .unwrap();
+        assert_eq!(summary.turns, 1);
+
+        let expected_start =
+            clamp_import_ns(transcript::parse_rfc3339_nanos("2024-01-02T03:04:05Z").unwrap());
+        let expected_end =
+            clamp_import_ns(transcript::parse_rfc3339_nanos("2024-01-02T03:04:12Z").unwrap());
+        let session_times: (i64, i64) = store
+            .conn()
+            .query_row(
+                "SELECT first_seen_ns, last_seen_ns FROM sessions WHERE key = 'codex:historical'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let launch_times: (i64, i64) = store
+            .conn()
+            .query_row(
+                "SELECT started_ns, ended_ns FROM launches WHERE session_key = 'codex:historical'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(session_times, (expected_start, expected_end));
+        assert_eq!(launch_times, (expected_start, expected_end));
+
+        // Re-import also repairs rows written by the old wall-clock-based
+        // importer instead of preserving its artificially recent maximum.
+        let contaminated =
+            clamp_import_ns(transcript::parse_rfc3339_nanos("2030-01-01T00:00:00Z").unwrap());
+        store
+            .conn()
+            .execute(
+                "UPDATE sessions SET first_seen_ns = ?1, last_seen_ns = ?1 WHERE key = 'codex:historical'",
+                [contaminated],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE launches SET started_ns = ?1, ended_ns = ?1 WHERE session_key = 'codex:historical'",
+                [contaminated],
+            )
+            .unwrap();
+        import_transcript(
+            &mut store,
+            &resolved,
+            &transcript_path,
+            Some(Provider::Codex),
+            ContentMode::Full,
+        )
+        .unwrap();
+        let repaired_session: (i64, i64) = store
+            .conn()
+            .query_row(
+                "SELECT first_seen_ns, last_seen_ns FROM sessions WHERE key = 'codex:historical'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let repaired_launch: (i64, i64) = store
+            .conn()
+            .query_row(
+                "SELECT started_ns, ended_ns FROM launches WHERE session_key = 'codex:historical'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(repaired_session, (expected_start, expected_end));
+        assert_eq!(repaired_launch, (expected_start, expected_end));
+    }
+
+    #[test]
     fn formatting_helpers() {
         assert_eq!(fmt_tokens(Some(999)), "999");
         assert_eq!(fmt_tokens(Some(1_500)), "1.5k");
@@ -2656,5 +2814,9 @@ mod tests {
         assert_eq!(fmt_ms(75_000), "1m15s");
         assert_eq!(fmt_ms(1_500), "1.5s");
         assert_eq!(fmt_time(0).len(), "1970-01-01 00:00:00".len());
+        assert_eq!(
+            truncate_path_display("/home/silvio/workspace/agent-mux", 20),
+            "…workspace/agent-mux"
+        );
     }
 }

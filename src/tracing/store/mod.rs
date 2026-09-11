@@ -345,6 +345,31 @@ impl Store {
         tx.commit()
     }
 
+    /// Rebuilds a session's visible time range from its durable capture rows.
+    /// This is primarily useful after an idempotent offline import, whose
+    /// historical bounds may need to replace timestamps written by an older
+    /// importer that used the wall clock.
+    pub fn recompute_session_bounds(&self, session_key: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "WITH bounds AS (
+               SELECT MIN(start_ns) AS first_ns, MAX(end_ns) AS last_ns
+               FROM (
+                 SELECT start_ns, COALESCE(end_ns, start_ns) AS end_ns
+                 FROM traces WHERE session_key = ?1
+                 UNION ALL
+                 SELECT started_ns, COALESCE(ended_ns, started_ns) AS end_ns
+                 FROM launches WHERE session_key = ?1
+               )
+             )
+             UPDATE sessions
+             SET first_seen_ns = COALESCE((SELECT first_ns FROM bounds), first_seen_ns),
+                 last_seen_ns = COALESCE((SELECT last_ns FROM bounds), last_seen_ns)
+             WHERE key = ?1",
+            params![session_key],
+        )?;
+        Ok(())
+    }
+
     /// Closes what a crashed run left open. Guarded by heartbeats so a
     /// live second process is never touched.
     pub fn recovery_sweep(&self, now: i64) -> rusqlite::Result<()> {
@@ -615,6 +640,7 @@ fn upsert_launch(tx: &Transaction, l: &LaunchRow) -> rusqlite::Result<()> {
            correlation = COALESCE(excluded.correlation, correlation),
            session_key = COALESCE(excluded.session_key, session_key),
            attached = MAX(attached, excluded.attached),
+           started_ns = MIN(started_ns, excluded.started_ns),
            ended_ns = COALESCE(excluded.ended_ns, ended_ns),
            termination = COALESCE(excluded.termination, termination),
            exit_code = COALESCE(excluded.exit_code, exit_code),
