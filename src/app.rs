@@ -1786,6 +1786,8 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         enum Chord {
+            LineUp,
+            LineDown,
             PageUp,
             PageDown,
             Top,
@@ -1795,6 +1797,8 @@ impl App {
             OpenSearch,
         }
         let chord = match (key.code, shift, ctrl) {
+            (KeyCode::Up, true, _) => Chord::LineUp,
+            (KeyCode::Down, true, _) => Chord::LineDown,
             (KeyCode::PageUp, true, _) => Chord::PageUp,
             (KeyCode::PageDown, true, _) => Chord::PageDown,
             (KeyCode::Home, true, _) => Chord::Top,
@@ -1812,6 +1816,8 @@ impl App {
         };
         let page = i32::from(self.pane_size.0.saturating_sub(1).max(1));
         match chord {
+            Chord::LineUp => self.scroll_selected(3),
+            Chord::LineDown => self.scroll_selected(-3),
             Chord::PageUp => self.scroll_selected(page),
             Chord::PageDown => self.scroll_selected(-page),
             Chord::Top => {
@@ -1979,9 +1985,29 @@ impl App {
                 ev.kind,
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
             );
-        let (lcol, lrow) = match ui::pane_local(ev.column, ev.row, self.pane_size) {
+        let pane_pos = ui::pane_local(ev.column, ev.row, self.pane_size);
+        let (lcol, lrow) = match pane_pos {
             Some(p) => p,
             None if finalizing_drag => ui::pane_clamped(ev.column, ev.row, self.pane_size),
+            // Wheel gestures should scroll the selected session even when
+            // the pointer is over the sidebar. This is especially important
+            // for macOS trackpads: the pointer often stays parked over the
+            // session list while the user performs a two-finger scroll.
+            // Child mouse protocols remain pane-scoped, so an out-of-pane
+            // wheel is always handled locally.
+            None if matches!(
+                ev.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            ) =>
+            {
+                let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
+                    3
+                } else {
+                    -3
+                };
+                self.scroll_selected(delta);
+                return;
+            }
             None => return,
         };
         let attached = matches!(self.mode, Mode::Attached);

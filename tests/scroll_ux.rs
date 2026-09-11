@@ -265,7 +265,7 @@ async fn wheel_scrolls_control_preview_locally() {
 }
 
 #[tokio::test]
-async fn wheel_outside_pane_is_ignored() {
+async fn wheel_over_sidebar_scrolls_selected_session_locally() {
     let (mut app, _rx) = app_with_history(100).await;
     let ev = MouseEvent {
         kind: MouseEventKind::ScrollUp,
@@ -274,7 +274,7 @@ async fn wheel_outside_pane_is_ignored() {
         modifiers: KeyModifiers::NONE,
     };
     app.handle_mouse(ev, Instant::now());
-    assert_eq!(app.sessions[0].scrolled(), 0);
+    assert_eq!(app.sessions[0].scrolled(), 3);
 }
 
 #[tokio::test]
@@ -290,6 +290,15 @@ async fn shift_paging_and_home_end() {
     assert_eq!(app.sessions[0].scrolled(), 0);
     app.handle_key(&shift_key(KeyCode::PageUp), Instant::now());
     app.handle_key(&shift_key(KeyCode::PageDown), Instant::now());
+    assert_eq!(app.sessions[0].scrolled(), 0);
+}
+
+#[tokio::test]
+async fn shift_arrows_scroll_for_macos_keyboards() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.handle_key(&shift_key(KeyCode::Up), Instant::now());
+    assert_eq!(app.sessions[0].scrolled(), 3);
+    app.handle_key(&shift_key(KeyCode::Down), Instant::now());
     assert_eq!(app.sessions[0].scrolled(), 0);
 }
 
