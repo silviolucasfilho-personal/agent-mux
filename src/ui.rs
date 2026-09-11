@@ -327,7 +327,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     } else {
         match app.mode {
             Mode::Attached => Line::raw(
-                "ATTACHED — Ctrl+Q detach · Shift+PgUp/PgDn scroll · Ctrl+Shift+C/V copy/paste · Ctrl+Shift+F search",
+                "ATTACHED — Ctrl+Q detach · Shift+↑/↓ or PgUp/PgDn scroll · Ctrl+Shift+C/V copy/paste · Ctrl+Shift+F search",
             ),
             _ => Line::raw(
                 "[j/k] select  [Enter] attach  [n] new  [l] logs  [t] trace  [T] traces  [x] kill  [?] help  [q] quit",
@@ -376,6 +376,7 @@ fn draw_help(f: &mut Frame) {
         row("Ctrl+Q Ctrl+Q", "send a literal Ctrl+Q to the agent"),
         Line::raw(""),
         Line::styled("Scrollback, selection & search", head),
+        row("Shift+↑/↓", "scroll three lines"),
         row("Shift+PgUp/PgDn", "scroll one page"),
         row("Shift+Home/End", "jump to top / back to live"),
         row(
