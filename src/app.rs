@@ -1390,13 +1390,14 @@ impl TraceBrowserState {
                 let tree =
                     crate::tracing::store::query::nest_observations(self.observations.clone());
                 let rows = crate::tracing::view::tree_rows(&tree, &self.collapsed);
-                let visible: std::collections::HashSet<&str> =
-                    rows.iter().map(|r| r.obs.id.as_str()).collect();
-                self.observations
+                let indexes: std::collections::HashMap<&str, usize> = self
+                    .observations
                     .iter()
                     .enumerate()
-                    .filter(|(_, o)| visible.contains(o.id.as_str()))
-                    .map(|(i, _)| i)
+                    .map(|(i, o)| (o.id.as_str(), i))
+                    .collect();
+                rows.iter()
+                    .filter_map(|r| indexes.get(r.obs.id.as_str()).copied())
                     .collect()
             }
             _ => (0..self.observations.len()).collect(),
@@ -1427,15 +1428,33 @@ impl TraceBrowserState {
         self.scroll_offset = 0;
         let rows = self.visible_rows();
         if !rows.is_empty() && !rows.contains(&self.selected_observation) {
-            // the selection fell inside a folded subtree: land on its
-            // nearest visible ancestor
-            let fallback = rows
+            // The selection fell inside a folded subtree. Follow parent ids
+            // rather than numeric indexes: chronology and tree order are
+            // intentionally different views of the same observations.
+            let visible: std::collections::HashSet<usize> = rows.iter().copied().collect();
+            let indexes: std::collections::HashMap<&str, usize> = self
+                .observations
                 .iter()
-                .rev()
-                .find(|&&i| i < self.selected_observation)
-                .copied()
-                .unwrap_or(rows[0]);
-            self.selected_observation = fallback;
+                .enumerate()
+                .map(|(i, o)| (o.id.as_str(), i))
+                .collect();
+            let mut cursor = self.selected_observation;
+            let mut fallback = None;
+            let mut visited = std::collections::HashSet::new();
+            while visited.insert(cursor) {
+                let Some(parent) = self.observations[cursor].parent_id.as_deref() else {
+                    break;
+                };
+                let Some(&parent_idx) = indexes.get(parent) else {
+                    break;
+                };
+                if visible.contains(&parent_idx) {
+                    fallback = Some(parent_idx);
+                    break;
+                }
+                cursor = parent_idx;
+            }
+            self.selected_observation = fallback.unwrap_or(rows[0]);
         }
         self.rebuild_detail();
     }
@@ -3621,6 +3640,40 @@ mod history_tests {
             "selection is never left on a hidden row"
         );
         assert_eq!(b.observations[b.selected_observation].id, "agent");
+    }
+
+    #[test]
+    fn tree_arrows_follow_render_order_when_chronology_differs() {
+        let mut b = browser_with_tree();
+        let mut by_id: std::collections::HashMap<String, _> = std::mem::take(&mut b.observations)
+            .into_iter()
+            .map(|o| (o.id.clone(), o))
+            .collect();
+        // This is chronological order: a child can start before the agent
+        // container is observed. The tree renderer moves both children below
+        // that parent, so keyboard navigation must make the same move.
+        b.observations = ["gen", "grep", "bash", "agent", "read"]
+            .into_iter()
+            .map(|id| by_id.remove(id).unwrap())
+            .collect();
+        b.detail_view = DetailView::Tree;
+
+        let rendered: Vec<&str> = b
+            .visible_rows()
+            .iter()
+            .map(|&i| b.observations[i].id.as_str())
+            .collect();
+        assert_eq!(rendered, ["gen", "bash", "agent", "grep", "read"]);
+
+        b.selected_observation = 0;
+        for expected in ["bash", "agent", "grep", "read"] {
+            b.step_observation(1);
+            assert_eq!(b.observations[b.selected_observation].id, expected);
+        }
+        for expected in ["grep", "agent", "bash", "gen"] {
+            b.step_observation(-1);
+            assert_eq!(b.observations[b.selected_observation].id, expected);
+        }
     }
 
     #[test]

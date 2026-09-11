@@ -41,6 +41,22 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
+/// Keep the project end of a long working directory visible.
+fn truncate_path_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let suffix: String = s
+        .chars()
+        .rev()
+        .take(max.saturating_sub(1))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("…{suffix}")
+}
+
 pub fn status_label_style(status: Status) -> (String, Style) {
     match status {
         Status::Working => ("working".into(), Style::default().fg(Color::Green)),
@@ -1123,12 +1139,20 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             browser.turns.len()
         ),
         None => match browser.sessions.get(browser.selected_session) {
-            Some(s) => format!(
-                " Turns ({})  {} tok  {} ",
-                browser.turns.len(),
-                fmt_tokens(s.total_tokens),
-                fmt_cost(s.total_cost_usd)
-            ),
+            Some(s) => {
+                let directory = s
+                    .cwd
+                    .as_deref()
+                    .map(|cwd| format!(" · cwd {}", truncate_path_chars(cwd, 28)))
+                    .unwrap_or_default();
+                format!(
+                    " Turns ({})  {} tok  {}{} ",
+                    browser.turns.len(),
+                    fmt_tokens(s.total_tokens),
+                    fmt_cost(s.total_cost_usd),
+                    directory
+                )
+            }
             None => " Turns ".to_string(),
         },
     };
@@ -1776,6 +1800,10 @@ mod tests {
         let out = truncate_chars(&emoji, 18);
         assert!(out.ends_with("..."));
         assert_eq!(out.chars().count(), 18);
+        assert_eq!(
+            truncate_path_chars("/home/silvio/workspace/agent-mux", 20),
+            "…workspace/agent-mux"
+        );
     }
 
     #[test]
@@ -2070,7 +2098,7 @@ mod tests {
     fn trace_browser_renders_sessions_turns_and_observations() {
         use crate::tracing::pricing::PriceTable;
         use crate::tracing::store::model::{
-            Level, ObservationRow, ObservationType, StoreOp, TraceRow, TraceStatus,
+            Level, ObservationRow, ObservationType, SessionRow, StoreOp, TraceRow, TraceStatus,
         };
         use crate::tracing::store::{OpenOptions, open_rw};
         let dir = tempfile::tempdir().unwrap();
@@ -2087,6 +2115,18 @@ mod tests {
         .unwrap();
         store
             .apply(&[
+                StoreOp::Session(SessionRow {
+                    key: "claude:s-ui".into(),
+                    provider: "claude".into(),
+                    session_id: "s-ui".into(),
+                    user_id: None,
+                    cwd: Some("/home/silvio/workspace/agent-mux".into()),
+                    project_slug: Some("-home-silvio-workspace-agent-mux".into()),
+                    transcript_path: None,
+                    title: Some("fix the widget".into()),
+                    seen_ns: 1_700_000_000_000_000_000,
+                    extra: None,
+                }),
                 StoreOp::Trace(TraceRow {
                     id: "t1".into(),
                     session_key: "claude:s-ui".into(),
@@ -2150,6 +2190,10 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Sessions (1)"), "got: {text}");
         assert!(text.contains("fix the widget"), "got: {text}");
+        assert!(
+            text.contains("cwd …/silvio/workspace/agent-mux"),
+            "got: {text}"
+        );
         assert!(text.contains("Bash"), "got: {text}");
         assert!(text.contains("[Tab] pane"), "got: {text}");
         // expanding shows the observation body
