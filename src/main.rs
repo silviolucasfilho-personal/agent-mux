@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
     let shutdown_flush = Duration::from_millis(
         tracing_resolved
             .as_ref()
-            .map(|r| r.shutdown_flush_ms)
+            .map(|r| r.shutdown_flush_ms.max(1500))
             .unwrap_or(0),
     );
     let mut startup_notices: Vec<String> = Vec::new();

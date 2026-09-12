@@ -526,7 +526,9 @@ impl TraceRuntime {
                     ["--resume", "--session-id", "--continue", "--print"]
                         .iter()
                         .any(|flag| matches_flag(a, flag))
-                        || matches!(a.as_str(), "-r" | "-c" | "-p")
+                        || a == "-r"
+                        || a == "-c"
+                        || a == "-p"
                 });
                 let inject_allowed = over.and_then(|o| o.inject_session_id).unwrap_or(true)
                     && !self
@@ -1430,6 +1432,14 @@ async fn run_pipeline(
             // app quit: kill_all already ran and the main loop is gone. A
             // session that had already exited keeps its real outcome — the
             // quit must not overwrite an exit the App reported earlier.
+            // Grace sweep: allow trailing flushes from the CLI and adopt newly launched chats.
+            for _ in 0..3 {
+                pipeline.tick();
+                if pipeline.adopted.is_some() {
+                    break;
+                }
+                tokio::time::sleep(poll_interval.min(Duration::from_millis(50))).await;
+            }
             pipeline.tick();
             match *phase_rx.borrow() {
                 Phase::Exited(code) => pipeline.finalize("exit", code),

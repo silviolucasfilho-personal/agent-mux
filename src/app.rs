@@ -1497,18 +1497,13 @@ impl TraceBrowserState {
         }
     }
 
-    /// Live sessions change under the browser: re-query at most once a
-    /// second while the selected session still has an open turn.
+    /// Live sessions change under the browser: re-query at most twice a
+    /// second to keep newly arriving chats and ongoing turns up to date.
     pub fn refresh_if_live(&mut self, now: Instant) {
-        if now.duration_since(self.last_refresh) < std::time::Duration::from_secs(1) {
+        if now.duration_since(self.last_refresh) < std::time::Duration::from_millis(500) {
             return;
         }
-        let live = self
-            .sessions
-            .get(self.selected_session)
-            .is_some_and(|s| s.open_turns > 0)
-            || self.turns.iter().any(|t| t.status == "open");
-        if !live || self.search_query.is_some() {
+        if self.search_query.is_some() {
             return;
         }
         self.last_refresh = now;
@@ -1528,15 +1523,40 @@ impl TraceBrowserState {
         if let Ok(rows) = crate::tracing::store::query::list_sessions(conn, &filter) {
             self.sessions = rows;
         }
-        if let Some(key) = selected_key
-            && let Some(idx) = self.sessions.iter().position(|s| s.key == key)
+        if self.sessions.is_empty() {
+            self.turns.clear();
+            self.observations.clear();
+            self.rebuild_detail();
+            return;
+        }
+        // If the user is focused on the Sessions list at row 0 (the newest session),
+        // keep them at row 0 so newest chats/activity are reflected immediately.
+        // If they navigated to an older session (> 0) or are focused on another pane,
+        // stay locked to the session they were inspecting.
+        let target_idx = if self.focused == BrowserPane::Sessions && self.selected_session == 0 {
+            0
+        } else if let Some(key) = &selected_key
+            && let Some(idx) = self.sessions.iter().position(|s| &s.key == key)
         {
-            self.selected_session = idx;
-            self.turns = crate::tracing::store::query::list_traces(conn, &key).unwrap_or_default();
+            idx
+        } else {
+            self.selected_session.min(self.sessions.len().saturating_sub(1))
+        };
+        self.selected_session = target_idx;
+        if let Some(s) = self.sessions.get(self.selected_session) {
+            let key = &s.key;
+            self.turns = crate::tracing::store::query::list_traces(conn, key).unwrap_or_default();
             self.turns.reverse();
-            self.selected_turn = selected_turn_id
-                .and_then(|id| self.turns.iter().position(|t| t.id == id))
-                .unwrap_or(0);
+            // If the user was viewing the newest turn (0), keep newest turn (0) so live
+            // execution streams in real time. Otherwise preserve selected turn id.
+            let target_turn = if self.selected_turn == 0 {
+                0
+            } else {
+                selected_turn_id
+                    .and_then(|id| self.turns.iter().position(|t| t.id == id))
+                    .unwrap_or(0)
+            };
+            self.selected_turn = target_turn.min(self.turns.len().saturating_sub(1));
             if let Some(t) = self.turns.get(self.selected_turn) {
                 self.observations = crate::tracing::store::query::list_observations(conn, &t.id)
                     .unwrap_or_default();
@@ -1544,8 +1564,12 @@ impl TraceBrowserState {
                     .and_then(|id| self.observations.iter().position(|o| o.id == id))
                     .unwrap_or(self.observations.len().saturating_sub(1));
                 let keep_scroll = self.scroll_offset;
+                self.refresh_scores();
                 self.rebuild_detail();
                 self.scroll_offset = keep_scroll.min(self.max_scroll());
+            } else {
+                self.observations.clear();
+                self.rebuild_detail();
             }
         }
     }
@@ -3897,4 +3921,130 @@ mod history_tests {
         app.handle_key(&key(KeyCode::Esc), Instant::now());
         assert!(matches!(app.mode, Mode::Control));
     }
+
+    #[test]
+    fn trace_browser_refresh_if_live_updates_sessions_and_tracks_selection() {
+        use crate::tracing::pricing::PriceTable;
+        use crate::tracing::store::model::{LaunchRow, StoreOp, TraceRow, TraceStatus};
+        use crate::tracing::store::{open_rw, OpenOptions};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("traces.db");
+        let mut store = open_rw(
+            &db_path,
+            OpenOptions {
+                prices: PriceTable::builtin(),
+                run_id: "run-1".into(),
+                retention_days: 0,
+                agent_mux_version: "test".into(),
+            },
+        )
+        .unwrap();
+
+        let make_launch = |id: &str, session_key: &str, started_ns: i64| LaunchRow {
+            id: id.into(),
+            run_id: "run-1".into(),
+            agent_mux_session: 0,
+            profile: "Claude Code".into(),
+            provider: "claude".into(),
+            cwd: "/proj".into(),
+            project_slug: "-proj".into(),
+            content_mode: "full".into(),
+            correlation_plan: "deterministic".into(),
+            correlation: Some("deterministic".into()),
+            session_key: Some(session_key.into()),
+            injected_session_id: true,
+            attached: false,
+            started_ns,
+            ended_ns: None,
+            termination: None,
+            exit_code: None,
+            parse_errors: None,
+            dropped_ops: None,
+            reported_cost_usd: None,
+            reported_lines_added: None,
+            reported_lines_removed: None,
+            agent_mux_version: "test".into(),
+            user_id: None,
+            release: None,
+            environment: None,
+            tags: vec![],
+            metadata: None,
+        };
+
+        let make_trace = |id: &str, session_key: &str, start_ns: i64| TraceRow {
+            id: id.into(),
+            session_key: session_key.into(),
+            provider: "claude".into(),
+            session_id: session_key.strip_prefix("claude:").unwrap_or(session_key).into(),
+            launch_id: None,
+            ordinal: 1,
+            name: "turn 1".into(),
+            status: TraceStatus::Closed,
+            start_ns,
+            end_ns: Some(start_ns + 1000),
+            input: Some("hello".into()),
+            output: None,
+            thinking: None,
+            skills: None,
+            reported_duration_ms: None,
+            reported_message_count: None,
+            session_cost_usd: None,
+            timing_approx: false,
+            metadata: None,
+        };
+
+        // Insert first session
+        store
+            .apply(&[
+                StoreOp::Launch(make_launch("l1", "claude:s1", 1_000_000)),
+                StoreOp::Trace(make_trace("t1", "claude:s1", 1_000_000)),
+            ])
+            .unwrap();
+
+        let mut browser = TraceBrowserState::new(Some(&db_path), None);
+        assert_eq!(browser.sessions.len(), 1);
+        assert_eq!(browser.sessions[0].key, "claude:s1");
+        assert_eq!(browser.selected_session, 0);
+
+        // Insert second, newer session
+        store
+            .apply(&[
+                StoreOp::Launch(make_launch("l2", "claude:s2", 2_000_000)),
+                StoreOp::Trace(make_trace("t2", "claude:s2", 2_000_000)),
+            ])
+            .unwrap();
+
+        // Focused on Sessions at row 0: refresh should keep row 0, showing newer session s2
+        browser.focused = BrowserPane::Sessions;
+        browser.selected_session = 0;
+        let t1 = Instant::now() + Duration::from_millis(600);
+        browser.refresh_if_live(t1);
+
+        assert_eq!(browser.sessions.len(), 2);
+        assert_eq!(browser.selected_session, 0);
+        assert_eq!(browser.sessions[0].key, "claude:s2");
+        assert_eq!(browser.sessions[1].key, "claude:s1");
+
+        // Now user navigates to row 1 (older session s1)
+        browser.selected_session = 1;
+
+        // Insert third session s3, even newer
+        store
+            .apply(&[
+                StoreOp::Launch(make_launch("l3", "claude:s3", 3_000_000)),
+                StoreOp::Trace(make_trace("t3", "claude:s3", 3_000_000)),
+            ])
+            .unwrap();
+
+        let t2 = t1 + Duration::from_millis(600);
+        browser.refresh_if_live(t2);
+
+        assert_eq!(browser.sessions.len(), 3);
+        // Since user was on s1 (row 1 previously), selection tracks key "claude:s1", now at index 2
+        assert_eq!(browser.selected_session, 2);
+        assert_eq!(browser.sessions[browser.selected_session].key, "claude:s1");
+    }
 }
+

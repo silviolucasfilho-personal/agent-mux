@@ -140,14 +140,65 @@ fn antigravity_transcript(brain_conv_dir: &Path) -> Option<PathBuf> {
     condensed.is_file().then_some(condensed)
 }
 
-/// First line of a file, capped so a corrupt/huge line can't balloon memory.
-fn read_first_line(path: &Path, cap: usize) -> Option<String> {
+
+/// Reads the first few lines of a file looking for Codex `session_meta`.
+fn read_codex_session_meta(path: &Path, cap: usize) -> Option<TranscriptEvent> {
     let file = std::fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file).take(cap as u64);
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    let line = line.trim_end_matches('\n');
-    (!line.is_empty()).then(|| line.to_string())
+    let reader = std::io::BufReader::new(file.take(cap as u64));
+    for line in reader.lines().take(10) {
+        let Ok(line) = line else { break };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let events = crate::transcript::parse_codex_line(line);
+        for event in events {
+            if matches!(event, TranscriptEvent::SessionMeta { .. }) {
+                return Some(event);
+            }
+        }
+    }
+    None
+}
+
+/// Discovers all `sessions/YYYY/MM/DD` date directories in reverse
+/// chronological order (newest first).
+fn all_codex_date_dirs(sessions_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let Ok(years) = std::fs::read_dir(sessions_dir) else {
+        return dirs;
+    };
+    let mut year_entries: Vec<_> = years.filter_map(|e| e.ok()).collect();
+    year_entries.sort_by_key(|e| e.file_name());
+    year_entries.reverse();
+    for y in year_entries {
+        if !y.path().is_dir() {
+            continue;
+        }
+        let Ok(months) = std::fs::read_dir(y.path()) else {
+            continue;
+        };
+        let mut month_entries: Vec<_> = months.filter_map(|e| e.ok()).collect();
+        month_entries.sort_by_key(|e| e.file_name());
+        month_entries.reverse();
+        for m in month_entries {
+            if !m.path().is_dir() {
+                continue;
+            }
+            let Ok(days) = std::fs::read_dir(m.path()) else {
+                continue;
+            };
+            let mut day_entries: Vec<_> = days.filter_map(|e| e.ok()).collect();
+            day_entries.sort_by_key(|e| e.file_name());
+            day_entries.reverse();
+            for d in day_entries {
+                if d.path().is_dir() {
+                    dirs.push(d.path());
+                }
+            }
+        }
+    }
+    dirs
 }
 
 fn mtime_in_window(path: &Path, t0: SystemTime) -> bool {
@@ -316,7 +367,13 @@ pub fn poll(
             t0,
         } => {
             let want_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
-            for date_dir in codex_date_dirs(sessions_dir, *t0) {
+            let mut date_dirs = codex_date_dirs(sessions_dir, *t0);
+            for d in all_codex_date_dirs(sessions_dir) {
+                if !date_dirs.contains(&d) {
+                    date_dirs.push(d);
+                }
+            }
+            for date_dir in date_dirs {
                 let Ok(entries) = std::fs::read_dir(&date_dir) else {
                     continue;
                 };
@@ -330,30 +387,26 @@ pub fn poll(
                     if !mtime_in_window(&path, *t0) {
                         continue;
                     }
-                    let Some(first) = read_first_line(&path, 256 * 1024) else {
-                        continue;
-                    };
-                    let events = crate::transcript::parse_codex_line(&first);
                     let Some(TranscriptEvent::SessionMeta {
                         session_id: Some(id),
                         cwd: Some(meta_cwd),
                         ..
-                    }) = events.first()
+                    }) = read_codex_session_meta(&path, 256 * 1024)
                     else {
                         continue;
                     };
-                    let meta_cwd_path = Path::new(meta_cwd);
+                    let meta_cwd_path = Path::new(&meta_cwd);
                     let meta_canon = meta_cwd_path
                         .canonicalize()
                         .unwrap_or_else(|_| meta_cwd_path.to_path_buf());
-                    if meta_canon != want_cwd {
+                    if meta_canon != want_cwd && meta_cwd_path != cwd {
                         continue;
                     }
-                    if !try_claim(claims, Provider::Codex, id) {
+                    if !try_claim(claims, Provider::Codex, &id) {
                         continue; // another session already owns it
                     }
                     return Some(Adopted {
-                        session_id: id.clone(),
+                        session_id: id,
                         path,
                         correlation: "watched",
                         resume_prime: false,
@@ -403,7 +456,7 @@ pub fn poll(
                 candidates.push(id);
             }
             candidates.sort();
-            let adopt = |id: &str, correlation: &'static str| -> Option<Adopted> {
+            let adopt = |id: &str, correlation: &'static str, resume_prime: bool| -> Option<Adopted> {
                 let path = antigravity_transcript(&brain.join(id))?;
                 if !try_claim(claims, Provider::Antigravity, id) {
                     return None;
@@ -412,7 +465,7 @@ pub fn poll(
                     session_id: id.to_string(),
                     path,
                     correlation,
-                    resume_prime: false,
+                    resume_prime,
                 })
             };
             // Tier 1: presence lock created since spawn — the strongest signal.
@@ -420,7 +473,7 @@ pub fn poll(
                 let lock = root.join("presence").join(format!("{id}.lock"));
                 if lock.is_file()
                     && mtime_in_window(&lock, *t0)
-                    && let Some(adopted) = adopt(id, "watched")
+                    && let Some(adopted) = adopt(id, "watched", false)
                 {
                     return Some(adopted);
                 }
@@ -439,18 +492,62 @@ pub fn poll(
                         })
                         .unwrap_or_default();
                     if head.contains(cwd_str.as_ref())
-                        && let Some(adopted) = adopt(id, "heuristic")
+                        && let Some(adopted) = adopt(id, "heuristic", false)
                     {
                         return Some(adopted);
                     }
                 }
             }
-            // Tier 3: one sole candidate after a generous wait.
+            // Tier 3: one sole candidate after a brief wait.
             if started.elapsed() >= ANTIGRAVITY_SOLE_CANDIDATE
                 && candidates.len() == 1
-                && let Some(adopted) = adopt(&candidates[0], "heuristic")
+                && let Some(adopted) = adopt(&candidates[0], "heuristic", false)
             {
                 return Some(adopted);
+            }
+
+            // Resumed Antigravity sessions: check existing directories whose
+            // presence lock or transcript was updated since t0.
+            let mut existing_candidates: Vec<String> = current
+                .iter()
+                .map(|e| e.to_string_lossy().into_owned())
+                .filter(|id| antigravity_transcript(&brain.join(id)).is_some())
+                .filter(|id| {
+                    claims
+                        .lock()
+                        .map(|set| !set.contains(&claim_key(Provider::Antigravity, id)))
+                        .unwrap_or(false)
+                })
+                .collect();
+            existing_candidates.sort();
+            for id in &existing_candidates {
+                let lock = root.join("presence").join(format!("{id}.lock"));
+                if lock.is_file()
+                    && mtime_in_window(&lock, *t0)
+                    && let Some(adopted) = adopt(id, "watched", true)
+                {
+                    return Some(adopted);
+                }
+            }
+            for id in &existing_candidates {
+                if let Some(path) = antigravity_transcript(&brain.join(id))
+                    && mtime_in_window(&path, *t0)
+                {
+                    let head = std::fs::File::open(&path)
+                        .ok()
+                        .map(|f| {
+                            use std::io::Read;
+                            let mut buf = String::new();
+                            let _ = f.take(64 * 1024).read_to_string(&mut buf);
+                            buf
+                        })
+                        .unwrap_or_default();
+                    if head.contains(cwd_str.as_ref())
+                        && let Some(adopted) = adopt(id, "heuristic", true)
+                    {
+                        return Some(adopted);
+                    }
+                }
             }
             None
         }

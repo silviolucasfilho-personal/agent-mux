@@ -331,3 +331,63 @@ fn antigravity_two_candidates_are_not_adopted_on_timing() {
     // ambiguous: neither is adopted
     assert_eq!(correlate::poll(&mut spec, started, &claims), None);
 }
+
+#[test]
+fn codex_adopts_past_date_dir_on_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    let cwd = dir.path().join("workdir");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    // Rollout file is located in a date dir from 2026/01/15 (in the past)
+    let past_date_dir = sessions.join("2026").join("01").join("15");
+    let past_rollout = past_date_dir.join("rollout-2026-01-15T10-00-00-resumed.jsonl");
+    write_file(&past_rollout, &(codex_meta_line("resumed-session", &cwd) + "\n"));
+
+    let claims = registry();
+    let t0 = SystemTime::now() - Duration::from_secs(2);
+    let mut spec = CorrelationSpec::WatchCodex {
+        sessions_dir: sessions,
+        cwd,
+        t0,
+    };
+    let adopted = correlate::poll(&mut spec, Instant::now(), &claims).unwrap();
+    assert_eq!(adopted.session_id, "resumed-session");
+    assert_eq!(adopted.path, past_rollout);
+    assert_eq!(adopted.correlation, "watched");
+}
+
+#[test]
+fn antigravity_adopts_resumed_conversation_with_active_presence_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let claims = registry();
+    let cwd = PathBuf::from("/home/user/my-special-project");
+
+    // Conversation already existed prior to spawn (present in snapshot)
+    agy_conv(
+        root,
+        "resumed-conv",
+        &format!("{{\"content\":\"resuming project {}\"}}\n", cwd.display()),
+    );
+
+    let t0 = SystemTime::now() - Duration::from_secs(2);
+    let mut spec = CorrelationSpec::WatchAntigravity {
+        root: root.to_path_buf(),
+        cwd: cwd.clone(),
+        t0,
+        initial: None,
+    };
+    let started = Instant::now();
+    // First poll takes snapshot containing resumed-conv
+    assert_eq!(correlate::poll(&mut spec, started, &claims), None);
+
+    // Antigravity touches/creates the presence lock upon resuming
+    write_file(&root.join("presence").join("resumed-conv.lock"), "");
+
+    let adopted = correlate::poll(&mut spec, started, &claims).unwrap();
+    assert_eq!(adopted.session_id, "resumed-conv");
+    assert_eq!(adopted.correlation, "watched");
+    assert!(adopted.resume_prime);
+}
+
