@@ -377,7 +377,7 @@ fn draw_help(f: &mut Frame) {
         Line::raw(""),
         Line::styled("Scrollback, selection & search", head),
         row("Shift+↑/↓", "scroll three lines"),
-        row("Shift+PgUp/PgDn", "scroll one page"),
+        row("PgUp/PgDn", "scroll one page (Fn+↑/↓ on macOS)"),
         row("Shift+Home/End", "jump to top / back to live"),
         row(
             "mouse wheel",
@@ -1818,7 +1818,7 @@ mod tests {
         for needle in [
             "Ctrl+Shift+C/V",
             "Ctrl+Shift+F",
-            "Shift+PgUp/PgDn",
+            "PgUp/PgDn",
             "Ctrl+Q Ctrl+Q",
             "jump to session N",
             "resume the selected session",

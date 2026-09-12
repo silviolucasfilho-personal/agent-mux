@@ -2,6 +2,7 @@ use agent_mux::app::App;
 use agent_mux::events::AppEvent;
 use agent_mux::{config, ui};
 use anyhow::Result;
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -15,7 +16,12 @@ use tokio::sync::mpsc;
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        SetCursorStyle::DefaultUserShape,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
 }
 
 /// Restores the terminal on normal exit and on unwind.
@@ -58,7 +64,12 @@ async fn main() -> Result<()> {
     // (disable_raw_mode + LeaveAlternateScreen) is harmless to run even if
     // the alternate screen was never entered.
     let _guard = TerminalGuard;
-    crossterm::execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    crossterm::execute!(
+        stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        SetCursorStyle::SteadyBlock
+    )?;
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();

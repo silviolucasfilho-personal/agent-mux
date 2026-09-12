@@ -265,6 +265,43 @@ async fn wheel_scrolls_control_preview_locally() {
 }
 
 #[tokio::test]
+async fn decstbm_with_top_margin_at_row_zero_preserves_scrollback() {
+    let mut parser = vt100::Parser::new(24, 80, 100);
+    // DECSTBM top=1, bottom=19 (rows 1..=19, leaving rows 20..=24 as a pinned
+    // composer/status area, as Codex inline mode does).
+    parser.process(b"\x1b[1;19r");
+    for i in 0..30 {
+        parser.process(format!("\x1b[19;1Hline {}\r\n", i).as_bytes());
+    }
+    parser.screen_mut().set_scrollback(usize::MAX);
+    assert_eq!(parser.screen().scrollback(), 30);
+    let top_contents = parser.screen().contents();
+    assert!(top_contents.contains("line 0"));
+}
+
+#[tokio::test]
+async fn codex_wheel_uses_the_enclosing_scrollback_even_with_mouse_capture() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.sessions[0].profile.command = "codex".into();
+    let id = app.sessions[0].id;
+    // Codex enables nested mouse reporting/alternate scrolling. Its main
+    // transcript still belongs to the host terminal's scrollback, which is
+    // agent-mux's vt100 buffer here.
+    app.handle_pty_output(id, b"\x1b[?1003h\x1b[?1006h\x1b[?1007h", Instant::now());
+    assert_ne!(
+        app.sessions[0].parser.screen().mouse_protocol_mode(),
+        vt100::MouseProtocolMode::None
+    );
+    app.mode = Mode::Attached;
+
+    app.handle_mouse(
+        wheel(MouseEventKind::ScrollUp, KeyModifiers::NONE),
+        Instant::now(),
+    );
+    assert_eq!(app.sessions[0].scrolled(), 3);
+}
+
+#[tokio::test]
 async fn wheel_over_sidebar_scrolls_selected_session_locally() {
     let (mut app, _rx) = app_with_history(100).await;
     let ev = MouseEvent {
@@ -290,6 +327,15 @@ async fn shift_paging_and_home_end() {
     assert_eq!(app.sessions[0].scrolled(), 0);
     app.handle_key(&shift_key(KeyCode::PageUp), Instant::now());
     app.handle_key(&shift_key(KeyCode::PageDown), Instant::now());
+    assert_eq!(app.sessions[0].scrolled(), 0);
+}
+
+#[tokio::test]
+async fn unmodified_page_keys_scroll_for_macos_fn_arrows() {
+    let (mut app, _rx) = app_with_history(100).await;
+    app.handle_key(&key(KeyCode::PageUp), Instant::now());
+    assert!(app.sessions[0].scrolled() > 0);
+    app.handle_key(&key(KeyCode::PageDown), Instant::now());
     assert_eq!(app.sessions[0].scrolled(), 0);
 }
 

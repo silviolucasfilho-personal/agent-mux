@@ -92,6 +92,22 @@ impl Notice {
     }
 }
 
+/// Codex normally owns an alternate screen, which leaves a containing
+/// terminal multiplexer with no transcript history to scroll. Inside
+/// agent-mux the containing terminal is our vt100 buffer, so interactive
+/// Codex sessions must use inline mode. `codex exec` is non-interactive and
+/// does not accept or need this TUI flag.
+fn prepare_nested_tui(profile: &mut Profile) {
+    let configured_provider = profile.tracing.as_ref().and_then(|t| t.provider.as_deref());
+    let is_codex = configured_provider == Some("codex")
+        || crate::harness::Harness::detect(&profile.command)
+            == Some(crate::harness::Harness::Codex);
+    let is_exec = profile.args.first().is_some_and(|arg| arg == "exec");
+    if is_codex && !is_exec && !profile.args.iter().any(|arg| arg == "--no-alt-screen") {
+        profile.args.push("--no-alt-screen".into());
+    }
+}
+
 pub struct DispatchCtx {
     pub selected_status: Option<Status>,
     pub any_working: bool,
@@ -1625,9 +1641,10 @@ impl App {
     fn spawn_traced(
         &mut self,
         id: usize,
-        profile: Profile,
+        mut profile: Profile,
         dir: std::path::PathBuf,
     ) -> anyhow::Result<Session> {
+        prepare_nested_tui(&mut profile);
         let (rows, cols) = self.pane_size;
         let plan = self
             .tracing
@@ -1799,8 +1816,11 @@ impl App {
         let chord = match (key.code, shift, ctrl) {
             (KeyCode::Up, true, _) => Chord::LineUp,
             (KeyCode::Down, true, _) => Chord::LineDown,
-            (KeyCode::PageUp, true, _) => Chord::PageUp,
-            (KeyCode::PageDown, true, _) => Chord::PageDown,
+            // macOS keyboards commonly report Fn+Up/Fn+Down as an
+            // unmodified PageUp/PageDown. These are documented app-level
+            // scroll shortcuts, so accept them with or without Shift.
+            (KeyCode::PageUp, _, _) => Chord::PageUp,
+            (KeyCode::PageDown, _, _) => Chord::PageDown,
             (KeyCode::Home, true, _) => Chord::Top,
             (KeyCode::End, true, _) => Chord::Bottom,
             (KeyCode::Char('c') | KeyCode::Char('C'), true, true) => Chord::Copy,
@@ -1918,13 +1938,50 @@ impl App {
 
     pub fn handle_mouse(&mut self, ev: MouseEvent, _now: Instant) {
         if let Mode::TraceBrowser(ref mut browser) = self.mode {
-            if matches!(ev.kind, MouseEventKind::ScrollUp) {
-                browser.scroll_offset = browser.scroll_offset.saturating_sub(3);
-            } else if matches!(ev.kind, MouseEventKind::ScrollDown) {
-                browser.scroll_offset = browser
-                    .scroll_offset
-                    .saturating_add(3)
-                    .min(browser.max_scroll());
+            let delta = match ev.kind {
+                MouseEventKind::ScrollUp => -3,
+                MouseEventKind::ScrollDown => 3,
+                _ => return,
+            };
+            if browser.expanded {
+                if delta < 0 {
+                    browser.scroll_offset = browser.scroll_offset.saturating_sub(3);
+                } else {
+                    browser.scroll_offset = browser
+                        .scroll_offset
+                        .saturating_add(3)
+                        .min(browser.max_scroll());
+                }
+                return;
+            }
+            // List views are selection-driven (sidebar_window follows the
+            // selected row), so moving detail_lines' scroll_offset had no
+            // visible effect. Scroll the focused list instead.
+            match browser.focused {
+                BrowserPane::Sessions if browser.skills_pane => browser.step_skill(delta),
+                BrowserPane::Sessions => {
+                    if !browser.sessions.is_empty() {
+                        let max = browser.sessions.len() as isize - 1;
+                        let next =
+                            (browser.selected_session as isize + delta).clamp(0, max) as usize;
+                        if next != browser.selected_session {
+                            browser.selected_session = next;
+                            browser.search_query = None;
+                            browser.load_turns();
+                        }
+                    }
+                }
+                BrowserPane::Turns => {
+                    if !browser.turns.is_empty() {
+                        let max = browser.turns.len() as isize - 1;
+                        let next = (browser.selected_turn as isize + delta).clamp(0, max) as usize;
+                        if next != browser.selected_turn {
+                            browser.selected_turn = next;
+                            browser.load_observations();
+                        }
+                    }
+                }
+                BrowserPane::Detail => browser.step_observation(delta),
             }
             return;
         }
@@ -2014,21 +2071,32 @@ impl App {
         let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
         // read child terminal state up front so no borrow is held across
         // the mutating calls below
-        let Some((mouse_mode, enc, alt, app_cursor)) = self.sessions.get(self.selected).map(|s| {
-            let sc = s.parser.screen();
-            (
-                sc.mouse_protocol_mode(),
-                sc.mouse_protocol_encoding(),
-                sc.alternate_screen(),
-                sc.application_cursor(),
-            )
-        }) else {
+        let Some((mouse_mode, enc, alt, app_cursor, codex_local_scroll)) =
+            self.sessions.get(self.selected).map(|s| {
+                let sc = s.parser.screen();
+                let configured_provider = s
+                    .profile
+                    .tracing
+                    .as_ref()
+                    .and_then(|t| t.provider.as_deref());
+                let codex = configured_provider == Some("codex")
+                    || crate::harness::Harness::detect(&s.profile.command)
+                        == Some(crate::harness::Harness::Codex);
+                (
+                    sc.mouse_protocol_mode(),
+                    sc.mouse_protocol_encoding(),
+                    sc.alternate_screen(),
+                    sc.application_cursor(),
+                    codex,
+                )
+            })
+        else {
             return;
         };
         match ev.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = matches!(ev.kind, MouseEventKind::ScrollUp);
-                match route_wheel(shift, attached, mouse_mode, alt) {
+                match route_wheel(shift, attached, mouse_mode, alt, codex_local_scroll) {
                     WheelRoute::Local => {
                         if let Some(s) = self.sessions.get_mut(self.selected) {
                             s.scroll_by(if up { 3 } else { -3 });
@@ -2874,6 +2942,37 @@ mod dispatch_tests {
     }
 
     #[test]
+    fn interactive_codex_uses_inline_scrollback_inside_the_mux() {
+        let mut codex = crate::config::Config::default_profiles()
+            .into_iter()
+            .find(|p| p.command == "codex")
+            .unwrap();
+        prepare_nested_tui(&mut codex);
+        assert_eq!(
+            codex
+                .args
+                .iter()
+                .filter(|a| *a == "--no-alt-screen")
+                .count(),
+            1
+        );
+        prepare_nested_tui(&mut codex);
+        assert_eq!(
+            codex
+                .args
+                .iter()
+                .filter(|a| *a == "--no-alt-screen")
+                .count(),
+            1,
+            "respawn preparation is idempotent"
+        );
+
+        codex.args = vec!["exec".into(), "say hello".into()];
+        prepare_nested_tui(&mut codex);
+        assert!(!codex.args.iter().any(|a| a == "--no-alt-screen"));
+    }
+
+    #[test]
     fn digits_select_sessions_and_question_mark_opens_help() {
         let c = ctx(Some(Status::Idle));
         assert!(matches!(
@@ -3666,6 +3765,33 @@ mod history_tests {
             "selection is never left on a hidden row"
         );
         assert_eq!(b.observations[b.selected_observation].id, "agent");
+    }
+
+    #[test]
+    fn trace_browser_wheel_moves_the_focused_list() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(vec![], None, tx);
+        let mut browser = browser_with_tree();
+        browser.focused = BrowserPane::Detail;
+        app.mode = Mode::TraceBrowser(Box::new(browser));
+        let wheel = |kind| MouseEvent {
+            kind,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        app.handle_mouse(wheel(MouseEventKind::ScrollDown), Instant::now());
+        let Mode::TraceBrowser(browser) = &app.mode else {
+            panic!("expected trace browser");
+        };
+        assert_eq!(browser.selected_observation, 3);
+
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp), Instant::now());
+        let Mode::TraceBrowser(browser) = &app.mode else {
+            panic!("expected trace browser");
+        };
+        assert_eq!(browser.selected_observation, 0);
     }
 
     #[test]

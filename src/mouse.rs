@@ -19,8 +19,17 @@ pub fn route_wheel(
     attached: bool,
     mode: MouseProtocolMode,
     alt_screen: bool,
+    prefer_local: bool,
 ) -> WheelRoute {
     if shift || !attached {
+        return WheelRoute::Local;
+    }
+    // Codex's inline transcript relies on its host terminal's native
+    // scrollback. When Codex is nested inside agent-mux, that host is our
+    // vt100 buffer, so wheel input must scroll locally even if Codex has
+    // enabled a terminal mouse/alternate-scroll mode. Clicks and drags are
+    // routed separately and remain unaffected.
+    if prefer_local {
         return WheelRoute::Local;
     }
     if mode != MouseProtocolMode::None {
@@ -124,31 +133,38 @@ mod tests {
     fn wheel_routing_rule_order() {
         // 1. Shift always local, even when the child wants mouse / alt screen
         assert!(matches!(
-            route_wheel(true, true, Mode::PressRelease, true),
+            route_wheel(true, true, Mode::PressRelease, true, false),
             WheelRoute::Local
         ));
         // 2. child wants mouse -> forward
         assert!(matches!(
-            route_wheel(false, true, Mode::Press, false),
+            route_wheel(false, true, Mode::Press, false, false),
             WheelRoute::Forward
         ));
         assert!(matches!(
-            route_wheel(false, true, Mode::AnyMotion, true),
+            route_wheel(false, true, Mode::AnyMotion, true, false),
             WheelRoute::Forward
         ));
         // 3. alt screen without mouse interest -> arrows
         assert!(matches!(
-            route_wheel(false, true, Mode::None, true),
+            route_wheel(false, true, Mode::None, true, false),
             WheelRoute::Arrows
         ));
         // 4. plain -> local
         assert!(matches!(
-            route_wheel(false, true, Mode::None, false),
+            route_wheel(false, true, Mode::None, false, false),
             WheelRoute::Local
         ));
         // Control-mode preview: always local regardless of child state
         assert!(matches!(
-            route_wheel(false, false, Mode::AnyMotion, true),
+            route_wheel(false, false, Mode::AnyMotion, true, false),
+            WheelRoute::Local
+        ));
+        // Codex-style inline transcripts need the enclosing terminal's
+        // scrollback even when their terminal state says mouse capture is
+        // enabled.
+        assert!(matches!(
+            route_wheel(false, true, Mode::AnyMotion, true, true),
             WheelRoute::Local
         ));
     }

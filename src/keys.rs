@@ -5,12 +5,15 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let mut buf: Vec<u8> = Vec::new();
-    if alt {
-        buf.push(0x1b);
-    }
     match key.code {
         KeyCode::Char(c) => {
+            // Meta/Option characters use the traditional ESC prefix. Arrow
+            // keys use xterm's CSI modifier parameter below instead.
+            if alt {
+                buf.push(0x1b);
+            }
             if ctrl {
                 let lower = c.to_ascii_lowercase();
                 if lower.is_ascii_lowercase() {
@@ -28,10 +31,24 @@ pub fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Tab => buf.push(b'\t'),
         KeyCode::BackTab => buf.extend_from_slice(b"\x1b[Z"),
         KeyCode::Esc => buf.push(0x1b),
-        KeyCode::Up => buf.extend_from_slice(b"\x1b[A"),
-        KeyCode::Down => buf.extend_from_slice(b"\x1b[B"),
-        KeyCode::Right => buf.extend_from_slice(b"\x1b[C"),
-        KeyCode::Left => buf.extend_from_slice(b"\x1b[D"),
+        KeyCode::Up | KeyCode::Down | KeyCode::Right | KeyCode::Left => {
+            let final_byte = match key.code {
+                KeyCode::Up => 'A',
+                KeyCode::Down => 'B',
+                KeyCode::Right => 'C',
+                KeyCode::Left => 'D',
+                _ => unreachable!(),
+            };
+            let modifier = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
+            if modifier == 1 {
+                buf.extend_from_slice(format!("\x1b[{final_byte}").as_bytes());
+            } else {
+                // Xterm modifyCursorKeys encoding. In particular, Ctrl+Left
+                // and Ctrl+Right become CSI 1;5 D/C, which readline and ZLE
+                // commonly bind to word-wise movement.
+                buf.extend_from_slice(format!("\x1b[1;{modifier}{final_byte}").as_bytes());
+            }
+        }
         KeyCode::Home => buf.extend_from_slice(b"\x1b[H"),
         KeyCode::End => buf.extend_from_slice(b"\x1b[F"),
         KeyCode::PageUp => buf.extend_from_slice(b"\x1b[5~"),
@@ -110,6 +127,16 @@ mod tests {
     fn alt_char_gets_esc_prefix() {
         let k = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
         assert_eq!(encode_key(&k), Some(b"\x1bb".to_vec()));
+    }
+
+    #[test]
+    fn modified_arrows_keep_their_modifiers() {
+        let ctrl_left = KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL);
+        let ctrl_right = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL);
+        let option_left = KeyEvent::new(KeyCode::Left, KeyModifiers::ALT);
+        assert_eq!(encode_key(&ctrl_left), Some(b"\x1b[1;5D".to_vec()));
+        assert_eq!(encode_key(&ctrl_right), Some(b"\x1b[1;5C".to_vec()));
+        assert_eq!(encode_key(&option_left), Some(b"\x1b[1;3D".to_vec()));
     }
 
     #[test]

@@ -22,3 +22,7 @@ vt100 = "0.16.2"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }
+
