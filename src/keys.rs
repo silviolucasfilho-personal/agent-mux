@@ -3,6 +3,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// Encode a key press as the bytes a terminal would send. `None` = no
 /// encoding (key is dropped). Caller must filter to KeyEventKind::Press.
 pub fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
+    encode_key_with_mode(key, false)
+}
+
+/// Like `encode_key`, but respects application cursor mode (`DECCKM`)
+/// for unmodified arrow keys and Home/End.
+pub fn encode_key_with_mode(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -19,41 +25,137 @@ pub fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
                 if lower.is_ascii_lowercase() {
                     buf.push(lower as u8 - b'a' + 1);
                 } else {
-                    return None;
+                    match c {
+                        ' ' | '@' => buf.push(0x00),
+                        '[' => buf.push(0x1b),
+                        '\\' => buf.push(0x1c),
+                        ']' => buf.push(0x1d),
+                        '^' => buf.push(0x1e),
+                        '_' => buf.push(0x1f),
+                        '?' => buf.push(0x7f),
+                        _ => return None,
+                    }
                 }
             } else {
                 let mut tmp = [0u8; 4];
                 buf.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
             }
         }
-        KeyCode::Enter => buf.push(b'\r'),
-        KeyCode::Backspace => buf.push(0x7f),
+        KeyCode::Enter => {
+            if ctrl || shift {
+                // In interactive CLIs (Claude Code, Antigravity, Codex) and terminals,
+                // Ctrl+Enter and Shift+Enter insert a newline (\n) rather than
+                // submitting the prompt (\r).
+                if alt {
+                    buf.extend_from_slice(b"\x1b\n");
+                } else {
+                    buf.push(b'\n');
+                }
+            } else if alt {
+                // Option+Enter / Alt+Enter sends ESC Enter for multiline editing.
+                buf.extend_from_slice(b"\x1b\r");
+            } else {
+                buf.push(b'\r');
+            }
+        }
+        KeyCode::Backspace => {
+            if alt {
+                // Option+Backspace: backward-kill-word
+                buf.extend_from_slice(b"\x1b\x7f");
+            } else if ctrl {
+                // Ctrl+Backspace: Ctrl+W backward-kill-word
+                buf.push(0x17);
+            } else {
+                buf.push(0x7f);
+            }
+        }
         KeyCode::Tab => buf.push(b'\t'),
         KeyCode::BackTab => buf.extend_from_slice(b"\x1b[Z"),
         KeyCode::Esc => buf.push(0x1b),
-        KeyCode::Up | KeyCode::Down | KeyCode::Right | KeyCode::Left => {
-            let final_byte = match key.code {
-                KeyCode::Up => 'A',
-                KeyCode::Down => 'B',
-                KeyCode::Right => 'C',
-                KeyCode::Left => 'D',
-                _ => unreachable!(),
-            };
-            let modifier = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
-            if modifier == 1 {
-                buf.extend_from_slice(format!("\x1b[{final_byte}").as_bytes());
+        KeyCode::Left => {
+            // Word navigation: macOS users (Ghostty, iTerm2) expect Option+Left
+            // or Ctrl+Left to move backward by word. On macOS zsh, bash, Claude Code,
+            // Codex, and readline, \x1bb is backward-word.
+            if (alt || ctrl) && !shift {
+                buf.extend_from_slice(b"\x1bb");
             } else {
-                // Xterm modifyCursorKeys encoding. In particular, Ctrl+Left
-                // and Ctrl+Right become CSI 1;5 D/C, which readline and ZLE
-                // commonly bind to word-wise movement.
-                buf.extend_from_slice(format!("\x1b[1;{modifier}{final_byte}").as_bytes());
+                let modifier = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
+                if modifier == 1 {
+                    if app_cursor {
+                        buf.extend_from_slice(b"\x1bOD");
+                    } else {
+                        buf.extend_from_slice(b"\x1b[D");
+                    }
+                } else {
+                    buf.extend_from_slice(format!("\x1b[1;{modifier}D").as_bytes());
+                }
             }
         }
-        KeyCode::Home => buf.extend_from_slice(b"\x1b[H"),
-        KeyCode::End => buf.extend_from_slice(b"\x1b[F"),
+        KeyCode::Right => {
+            // Word navigation: Option+Right or Ctrl+Right moves forward by word (\x1bf).
+            if (alt || ctrl) && !shift {
+                buf.extend_from_slice(b"\x1bf");
+            } else {
+                let modifier = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
+                if modifier == 1 {
+                    if app_cursor {
+                        buf.extend_from_slice(b"\x1bOC");
+                    } else {
+                        buf.extend_from_slice(b"\x1b[C");
+                    }
+                } else {
+                    buf.extend_from_slice(format!("\x1b[1;{modifier}C").as_bytes());
+                }
+            }
+        }
+        KeyCode::Up => {
+            let modifier = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
+            if modifier == 1 {
+                if app_cursor {
+                    buf.extend_from_slice(b"\x1bOA");
+                } else {
+                    buf.extend_from_slice(b"\x1b[A");
+                }
+            } else {
+                buf.extend_from_slice(format!("\x1b[1;{modifier}A").as_bytes());
+            }
+        }
+        KeyCode::Down => {
+            let modifier = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(ctrl);
+            if modifier == 1 {
+                if app_cursor {
+                    buf.extend_from_slice(b"\x1bOB");
+                } else {
+                    buf.extend_from_slice(b"\x1b[B");
+                }
+            } else {
+                buf.extend_from_slice(format!("\x1b[1;{modifier}B").as_bytes());
+            }
+        }
+        KeyCode::Home => {
+            if app_cursor && !ctrl && !alt && !shift {
+                buf.extend_from_slice(b"\x1bOH");
+            } else {
+                buf.extend_from_slice(b"\x1b[H");
+            }
+        }
+        KeyCode::End => {
+            if app_cursor && !ctrl && !alt && !shift {
+                buf.extend_from_slice(b"\x1bOF");
+            } else {
+                buf.extend_from_slice(b"\x1b[F");
+            }
+        }
         KeyCode::PageUp => buf.extend_from_slice(b"\x1b[5~"),
         KeyCode::PageDown => buf.extend_from_slice(b"\x1b[6~"),
-        KeyCode::Delete => buf.extend_from_slice(b"\x1b[3~"),
+        KeyCode::Delete => {
+            if alt {
+                // Option+Delete: kill-word forward
+                buf.extend_from_slice(b"\x1bd");
+            } else {
+                buf.extend_from_slice(b"\x1b[3~");
+            }
+        }
         KeyCode::Insert => buf.extend_from_slice(b"\x1b[2~"),
         KeyCode::F(n) => match n {
             1 => buf.extend_from_slice(b"\x1bOP"),
@@ -105,6 +207,18 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_punctuation() {
+        assert_eq!(
+            encode_key(&KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL)),
+            Some(vec![0x1b])
+        );
+        assert_eq!(
+            encode_key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)),
+            Some(vec![0x00])
+        );
+    }
+
+    #[test]
     fn special_keys() {
         assert_eq!(encode_key(&key(KeyCode::Enter)), Some(b"\r".to_vec()));
         assert_eq!(encode_key(&key(KeyCode::Backspace)), Some(vec![0x7f]));
@@ -124,19 +238,68 @@ mod tests {
     }
 
     #[test]
-    fn alt_char_gets_esc_prefix() {
-        let k = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
-        assert_eq!(encode_key(&k), Some(b"\x1bb".to_vec()));
+    fn enter_with_modifiers() {
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let ctrl_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL);
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        let ctrl_alt_enter =
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::ALT);
+
+        assert_eq!(encode_key(&enter), Some(b"\r".to_vec()));
+        assert_eq!(encode_key(&ctrl_enter), Some(b"\n".to_vec()));
+        assert_eq!(encode_key(&shift_enter), Some(b"\n".to_vec()));
+        assert_eq!(encode_key(&alt_enter), Some(b"\x1b\r".to_vec()));
+        assert_eq!(encode_key(&ctrl_alt_enter), Some(b"\x1b\n".to_vec()));
     }
 
     #[test]
-    fn modified_arrows_keep_their_modifiers() {
+    fn word_navigation_and_deletion() {
+        let opt_left = KeyEvent::new(KeyCode::Left, KeyModifiers::ALT);
+        let opt_right = KeyEvent::new(KeyCode::Right, KeyModifiers::ALT);
         let ctrl_left = KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL);
         let ctrl_right = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL);
-        let option_left = KeyEvent::new(KeyCode::Left, KeyModifiers::ALT);
-        assert_eq!(encode_key(&ctrl_left), Some(b"\x1b[1;5D".to_vec()));
-        assert_eq!(encode_key(&ctrl_right), Some(b"\x1b[1;5C".to_vec()));
-        assert_eq!(encode_key(&option_left), Some(b"\x1b[1;3D".to_vec()));
+        let opt_backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT);
+        let ctrl_backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL);
+        let opt_delete = KeyEvent::new(KeyCode::Delete, KeyModifiers::ALT);
+
+        assert_eq!(encode_key(&opt_left), Some(b"\x1bb".to_vec()));
+        assert_eq!(encode_key(&opt_right), Some(b"\x1bf".to_vec()));
+        assert_eq!(encode_key(&ctrl_left), Some(b"\x1bb".to_vec()));
+        assert_eq!(encode_key(&ctrl_right), Some(b"\x1bf".to_vec()));
+        assert_eq!(encode_key(&opt_backspace), Some(b"\x1b\x7f".to_vec()));
+        assert_eq!(encode_key(&ctrl_backspace), Some(vec![0x17]));
+        assert_eq!(encode_key(&opt_delete), Some(b"\x1bd".to_vec()));
+
+        // Shift modifier preserves xterm sequence for selection
+        let shift_opt_left =
+            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT);
+        assert_eq!(encode_key(&shift_opt_left), Some(b"\x1b[1;4D".to_vec()));
+    }
+
+    #[test]
+    fn application_cursor_mode() {
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        let home = KeyEvent::new(KeyCode::Home, KeyModifiers::NONE);
+        let end = KeyEvent::new(KeyCode::End, KeyModifiers::NONE);
+
+        assert_eq!(encode_key_with_mode(&up, true), Some(b"\x1bOA".to_vec()));
+        assert_eq!(encode_key_with_mode(&down, true), Some(b"\x1bOB".to_vec()));
+        assert_eq!(encode_key_with_mode(&right, true), Some(b"\x1bOC".to_vec()));
+        assert_eq!(encode_key_with_mode(&left, true), Some(b"\x1bOD".to_vec()));
+        assert_eq!(encode_key_with_mode(&home, true), Some(b"\x1bOH".to_vec()));
+        assert_eq!(encode_key_with_mode(&end, true), Some(b"\x1bOF".to_vec()));
+
+        assert_eq!(encode_key_with_mode(&up, false), Some(b"\x1b[A".to_vec()));
+    }
+
+    #[test]
+    fn alt_char_gets_esc_prefix() {
+        let k = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT);
+        assert_eq!(encode_key(&k), Some(b"\x1bb".to_vec()));
     }
 
     #[test]

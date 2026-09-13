@@ -1,7 +1,7 @@
 use crate::config::Profile;
 use crate::events::AppEvent;
 use crate::history::{self, SessionSummary};
-use crate::keys::encode_key;
+use crate::keys::encode_key_with_mode;
 use crate::mouse::{WheelRoute, encode_mouse, route_wheel};
 use crate::search::SearchState;
 use crate::selection::{self, Pos, Selection};
@@ -112,6 +112,7 @@ pub struct DispatchCtx {
     pub selected_status: Option<Status>,
     pub any_working: bool,
     pub just_detached: bool,
+    pub app_cursor: bool,
 }
 
 fn is_ctrl_q(key: &KeyEvent) -> bool {
@@ -224,7 +225,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
             if is_ctrl_q(key) {
                 Action::Detach
             } else {
-                match encode_key(key) {
+                match encode_key_with_mode(key, ctx.app_cursor) {
                     Some(bytes) => Action::ForwardBytes(bytes),
                     None => Action::None,
                 }
@@ -1746,6 +1747,20 @@ impl App {
             .map(|a| &a.sel)
     }
 
+    /// The cursor style that should currently be applied to the terminal.
+    /// When attached, follows the active session's DECSCUSR requests (or
+    /// DefaultUserShape). When detached/in dialog/in browser, uses DefaultUserShape.
+    pub fn active_cursor_style(&self) -> crossterm::cursor::SetCursorStyle {
+        if matches!(self.mode, Mode::Attached) {
+            self.sessions
+                .get(self.selected)
+                .and_then(|s| s.cursor_style())
+                .unwrap_or(crossterm::cursor::SetCursorStyle::DefaultUserShape)
+        } else {
+            crossterm::cursor::SetCursorStyle::DefaultUserShape
+        }
+    }
+
     fn copy_to_clipboard(&mut self, text: String) {
         if text.is_empty() || !self.clipboard_enabled {
             return;
@@ -1799,6 +1814,11 @@ impl App {
             self.just_detached = false;
             return;
         }
+        let app_cursor = self
+            .sessions
+            .get(self.selected)
+            .map(|s| s.parser.screen().application_cursor())
+            .unwrap_or(false);
         let ctx = DispatchCtx {
             selected_status: self.sessions.get(self.selected).map(|s| s.status(now)),
             any_working: self
@@ -1806,6 +1826,7 @@ impl App {
                 .iter()
                 .any(|s| matches!(s.status(now), Status::Working)),
             just_detached: self.just_detached,
+            app_cursor,
         };
         let action = dispatch(&self.mode, key, &ctx);
         // any Control-mode key other than the literal-send consumes the flag
@@ -2184,6 +2205,25 @@ impl App {
                     };
                     match ev.kind {
                         MouseEventKind::Down(_) => {
+                            let alt = ev.modifiers.contains(KeyModifiers::ALT);
+                            if attached && alt && offset == 0 {
+                                let (cur_row, cur_col) = s.parser.screen().cursor_position();
+                                let mut seq = Vec::new();
+                                if lrow < cur_row {
+                                    seq.extend(b"\x1b[A".repeat((cur_row - lrow) as usize));
+                                } else if lrow > cur_row {
+                                    seq.extend(b"\x1b[B".repeat((lrow - cur_row) as usize));
+                                }
+                                if lcol < cur_col {
+                                    seq.extend(b"\x1b[D".repeat((cur_col - lcol) as usize));
+                                } else if lcol > cur_col {
+                                    seq.extend(b"\x1b[C".repeat((lcol - cur_col) as usize));
+                                }
+                                if !seq.is_empty() {
+                                    self.forward_bytes(&seq);
+                                }
+                                return;
+                            }
                             self.selection = Some(ActiveSelection {
                                 session_id,
                                 sel: Selection::new(pos),
@@ -2928,6 +2968,7 @@ mod dispatch_tests {
             selected_status: selected,
             any_working: false,
             just_detached: false,
+            app_cursor: false,
         }
     }
 
@@ -3148,6 +3189,7 @@ mod confirm_modes {
             selected_status: selected,
             any_working: false,
             just_detached: false,
+            app_cursor: false,
         }
     }
 
@@ -3663,6 +3705,7 @@ mod history_tests {
             selected_status: None,
             any_working: false,
             just_detached: false,
+            app_cursor: false,
         }
     }
 

@@ -26,6 +26,7 @@ pub const ACTIVITY_WINDOW: Duration = Duration::from_secs(2);
 pub struct BellCounter {
     pub count: usize,
     pub pending_cursor_reports: usize,
+    pub cursor_style: Option<crossterm::cursor::SetCursorStyle>,
 }
 
 impl vt100::Callbacks for BellCounter {
@@ -46,6 +47,19 @@ impl vt100::Callbacks for BellCounter {
         // n` (i1 == Some(b'?')) is excluded.
         if i1.is_none() && c == 'n' && params.first().and_then(|p| p.first()) == Some(&6) {
             self.pending_cursor_reports += 1;
+        } else if i1 == Some(b' ') && c == 'q' {
+            // DECSCUSR (Set Cursor Style): CSI Ps SP q
+            let ps = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
+            self.cursor_style = Some(match ps {
+                0 => crossterm::cursor::SetCursorStyle::DefaultUserShape,
+                1 => crossterm::cursor::SetCursorStyle::BlinkingBlock,
+                2 => crossterm::cursor::SetCursorStyle::SteadyBlock,
+                3 => crossterm::cursor::SetCursorStyle::BlinkingUnderScore,
+                4 => crossterm::cursor::SetCursorStyle::SteadyUnderScore,
+                5 => crossterm::cursor::SetCursorStyle::BlinkingBar,
+                6 => crossterm::cursor::SetCursorStyle::SteadyBar,
+                _ => crossterm::cursor::SetCursorStyle::DefaultUserShape,
+            });
         }
     }
 }
@@ -222,5 +236,33 @@ mod tests {
         let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, counter);
         parser.process(b"\x1b[6n\x1b[6n"); // two queries in a single process() call
         assert_eq!(parser.callbacks().pending_cursor_reports, 2);
+    }
+
+    #[test]
+    fn decscusr_cursor_style_is_tracked() {
+        let counter = BellCounter::default();
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, counter);
+        assert_eq!(parser.callbacks().cursor_style, None);
+
+        // CSI 5 SP q -> blinking bar
+        parser.process(b"\x1b[5 q");
+        assert_eq!(
+            parser.callbacks().cursor_style,
+            Some(crossterm::cursor::SetCursorStyle::BlinkingBar)
+        );
+
+        // CSI 2 SP q -> steady block
+        parser.process(b"\x1b[2 q");
+        assert_eq!(
+            parser.callbacks().cursor_style,
+            Some(crossterm::cursor::SetCursorStyle::SteadyBlock)
+        );
+
+        // CSI 0 SP q -> default user shape
+        parser.process(b"\x1b[0 q");
+        assert_eq!(
+            parser.callbacks().cursor_style,
+            Some(crossterm::cursor::SetCursorStyle::DefaultUserShape)
+        );
     }
 }

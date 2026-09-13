@@ -290,7 +290,11 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
             .then(|| screen.cursor_position())
     };
     if let Some((row, col)) = cursor {
-        f.set_cursor_position((inner.x + col, inner.y + row));
+        if inner.width > 0 && inner.height > 0 {
+            let col = col.min(inner.width.saturating_sub(1));
+            let row = row.min(inner.height.saturating_sub(1));
+            f.set_cursor_position((inner.x + col, inner.y + row));
+        }
     }
     if let Some(sel) = app.displayed_selection() {
         let (len, offset) = session.scroll_view();
@@ -335,6 +339,11 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
         }
     };
     f.render_widget(Paragraph::new(text), area);
+    if let Some(st) = &app.search {
+        let cursor_x =
+            (area.x + 8 + st.query.len() as u16).min(area.x + area.width.saturating_sub(1));
+        f.set_cursor_position((cursor_x, area.y));
+    }
 }
 
 /// Full keybinding reference — the one place every chord (including the

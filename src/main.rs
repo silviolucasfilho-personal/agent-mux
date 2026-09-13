@@ -14,8 +14,16 @@ use std::io::stdout;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+static KEYBOARD_ENHANCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn restore_terminal() {
     let _ = disable_raw_mode();
+    if KEYBOARD_ENHANCED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::PopKeyboardEnhancementFlags
+        );
+    }
     let _ = crossterm::execute!(
         std::io::stdout(),
         SetCursorStyle::DefaultUserShape,
@@ -68,8 +76,20 @@ async fn main() -> Result<()> {
         stdout(),
         EnterAlternateScreen,
         EnableMouseCapture,
-        SetCursorStyle::SteadyBlock
+        SetCursorStyle::DefaultUserShape
     )?;
+    if matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true)) {
+        if crossterm::execute!(
+            stdout(),
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        )
+        .is_ok()
+        {
+            KEYBOARD_ENHANCED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
@@ -170,6 +190,7 @@ async fn main() -> Result<()> {
     app.set_pane_size(rows, cols);
 
     let mut draw_err = None;
+    let mut current_cursor_style = crossterm::cursor::SetCursorStyle::DefaultUserShape;
     loop {
         let Some(first) = rx.recv().await else {
             break;
@@ -187,6 +208,11 @@ async fn main() -> Result<()> {
         if let Err(e) = terminal.draw(|f| ui::draw(f, &app, Instant::now())) {
             draw_err = Some(e);
             break;
+        }
+        let needed_cursor_style = app.active_cursor_style();
+        if needed_cursor_style != current_cursor_style {
+            current_cursor_style = needed_cursor_style;
+            let _ = crossterm::execute!(stdout(), current_cursor_style);
         }
     }
 

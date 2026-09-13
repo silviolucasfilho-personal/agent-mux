@@ -314,6 +314,10 @@ impl Session {
         self.writer.flush()
     }
 
+    pub fn cursor_style(&self) -> Option<crossterm::cursor::SetCursorStyle> {
+        self.parser.callbacks().cursor_style
+    }
+
     pub fn resize(&mut self, rows: u16, cols: u16) {
         self.parser.screen_mut().set_size(rows, cols);
         let _ = self.master.resize(PtySize {
