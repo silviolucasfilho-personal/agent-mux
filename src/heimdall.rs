@@ -110,7 +110,7 @@ pub struct HeimdallAnalysis {
     pub skills: Vec<SkillAnalysisInfo>,
 }
 
-/// Information about an open / active session in agent-mux.
+/// Information about an open / active or overnight session in agent-mux.
 #[derive(Debug, Clone)]
 pub struct OpenSessionInfo {
     pub session_id: usize,
@@ -119,14 +119,27 @@ pub struct OpenSessionInfo {
     pub dir: PathBuf,
     pub status: String,
     pub is_working: bool,
-    pub running_tool: Option<String>,
-    pub running_tool_duration_ms: Option<i64>,
-    pub total_tokens: Option<i64>,
-    pub cost_usd: Option<f64>,
-    pub turns: i64,
+    pub is_live: bool,
+
+    // Executive Morning Briefing & Session Clues:
+    pub initial_goal: Option<String>,
+    pub current_clue: String,
+    pub actions_accomplished: String,
+    pub files_modified: Vec<String>,
+    pub recent_commands: Vec<String>,
+    pub tool_counts: Vec<(String, i64)>,
     pub latest_turn_prompt: Option<String>,
+    pub latest_turn_output: Option<String>,
     pub latest_turn_status: Option<String>,
     pub latest_turn_latency_ms: Option<i64>,
+    pub timing_summary: String,
+
+    // Token and Turn Metrics:
+    pub turns: i64,
+    pub total_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+    pub running_tool: Option<String>,
+    pub running_tool_duration_ms: Option<i64>,
     pub explanation: String,
 }
 
@@ -148,6 +161,358 @@ pub struct SkillAnalysisInfo {
     pub error_count: i64,
     pub bottlenecks: Vec<String>,
     pub optimizations: Vec<String>,
+}
+
+fn format_timing_summary(min_ns: Option<i64>, max_ns: Option<i64>) -> String {
+    let now_epoch_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let now_ns = now_epoch_s * 1_000_000_000;
+
+    match (min_ns, max_ns) {
+        (Some(start), Some(last)) => {
+            let ago = (now_ns.saturating_sub(last)) / 1_000_000_000;
+            let ago_str = if ago < 60 {
+                format!("{ago}s ago")
+            } else if ago < 3600 {
+                format!("{}m ago", ago / 60)
+            } else if ago < 86400 {
+                format!("{}h ago", ago / 3600)
+            } else {
+                format!("{}d ago", ago / 86400)
+            };
+            let dur_s = (last.saturating_sub(start)) / 1_000_000_000;
+            let dur_str = if dur_s < 60 {
+                format!("{dur_s}s")
+            } else if dur_s < 3600 {
+                format!("{}m", dur_s / 60)
+            } else {
+                let h = dur_s / 3600;
+                let m = (dur_s % 3600) / 60;
+                if m == 0 { format!("{h}h") } else { format!("{h}h {m}m") }
+            };
+            format!("Last active {ago_str} (duration: {dur_str})")
+        }
+        _ => "No trace activity recorded".to_string(),
+    }
+}
+
+fn parse_tool_clue(tool_name: &str, input_raw: Option<&str>, dur_ms: Option<i64>) -> String {
+    let dur_str = dur_ms.map(|d| format!(" ({d}ms)")).unwrap_or_default();
+    if let Some(raw) = input_raw {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
+            // Shell command
+            if let Some(cmd) = val.get("CommandLine").or_else(|| val.get("command")).or_else(|| val.get("cmd")).and_then(|v| v.as_str()) {
+                let first_line = cmd.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+                let short = if first_line.len() > 50 { format!("{}…", &first_line[..48]) } else { first_line.to_string() };
+                return format!("Running command: `{short}`{dur_str}");
+            }
+            // File edit/write
+            if let Some(file) = val.get("TargetFile").or_else(|| val.get("file_path")).or_else(|| val.get("path")).and_then(|v| v.as_str()) {
+                let filename = Path::new(file).file_name().and_then(|f| f.to_str()).unwrap_or(file);
+                return format!("Modifying file: `{filename}`{dur_str}");
+            }
+            // File view/read
+            if let Some(file) = val.get("AbsolutePath").and_then(|v| v.as_str()) {
+                let filename = Path::new(file).file_name().and_then(|f| f.to_str()).unwrap_or(file);
+                return format!("Reading file: `{filename}`{dur_str}");
+            }
+            // Search / grep
+            if let Some(q) = val.get("Query").or_else(|| val.get("query")).or_else(|| val.get("pattern")).and_then(|v| v.as_str()) {
+                return format!("Searching pattern: `{q}`{dur_str}");
+            }
+        }
+    }
+    format!("Executing tool '{tool_name}'{dur_str}")
+}
+
+fn format_goal_snippet(prompt: &str) -> String {
+    let first_line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    if first_line.len() > 120 {
+        format!("{}…", &first_line[..118])
+    } else {
+        first_line.to_string()
+    }
+}
+
+fn format_output_snippet(output: &str) -> String {
+    let clean = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let clean = clean.trim_start_matches('#').trim();
+    if clean.len() > 100 {
+        format!("{}…", &clean[..98])
+    } else {
+        clean.to_string()
+    }
+}
+
+fn format_actions_accomplished(turns: i64, tool_counts: &[(String, i64)], files_modified: &[String]) -> String {
+    let total_tools: i64 = tool_counts.iter().map(|(_, c)| *c).sum();
+    let mut parts = Vec::new();
+    if turns > 0 {
+        parts.push(format!("{turns} turns"));
+    }
+    if total_tools > 0 {
+        parts.push(format!("{total_tools} tool calls"));
+    }
+    if !files_modified.is_empty() {
+        parts.push(format!("{} files modified", files_modified.len()));
+    }
+    if parts.is_empty() {
+        "Session started, awaiting actions".to_string()
+    } else {
+        let mut text = parts.join(", ");
+        if !tool_counts.is_empty() {
+            let top_tools: Vec<String> = tool_counts
+                .iter()
+                .take(3)
+                .map(|(n, c)| format!("{n}: {c}"))
+                .collect();
+            text.push_str(&format!(" ({})", top_tools.join(", ")));
+        }
+        text
+    }
+}
+
+fn populate_session_recap_from_sqlite(
+    c: &Connection,
+    launch_id: Option<&str>,
+    session_key: Option<&str>,
+    open_info: &mut OpenSessionInfo,
+) {
+    let lid = launch_id.unwrap_or("");
+    let skey = session_key.unwrap_or("");
+
+    // 1. Initial Goal: first turn prompt
+    if let Ok(Some(first_prompt)) = c.query_row(
+        "SELECT input FROM traces
+         WHERE ((session_key IS NOT NULL AND session_key = ?1) OR (launch_id IS NOT NULL AND launch_id = ?2))
+           AND input IS NOT NULL AND trim(input) != ''
+         ORDER BY ordinal ASC, start_ns ASC LIMIT 1",
+        params![skey, lid],
+        |r| r.get::<_, String>(0),
+    ).optional() {
+        open_info.initial_goal = Some(format_goal_snippet(&first_prompt));
+    }
+
+    // 2. Rollup stats: turns, tokens, cost, min/max timestamps
+    if let Ok((turns, tokens, cost, min_ns, max_ns)) = c.query_row(
+        "SELECT COUNT(*), SUM(total_tokens), SUM(total_cost_usd),
+                MIN(start_ns), MAX(COALESCE(end_ns, start_ns))
+         FROM trace_stats
+         WHERE (session_key IS NOT NULL AND session_key = ?1) OR (launch_id IS NOT NULL AND launch_id = ?2)",
+        params![skey, lid],
+        |r| Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, Option<i64>>(1)?,
+            r.get::<_, Option<f64>>(2)?,
+            r.get::<_, Option<i64>>(3)?,
+            r.get::<_, Option<i64>>(4)?,
+        )),
+    ) {
+        open_info.turns = turns;
+        open_info.total_tokens = tokens;
+        open_info.cost_usd = cost;
+        open_info.timing_summary = format_timing_summary(min_ns, max_ns);
+    }
+
+    // 3. Latest turn status, prompt, and output snippet
+    if let Ok(Some((ordinal, t_status, latency, prompt, output))) = c.query_row(
+        "SELECT ordinal, status, latency_ms, input, output
+         FROM trace_stats
+         WHERE (session_key IS NOT NULL AND session_key = ?1) OR (launch_id IS NOT NULL AND launch_id = ?2)
+         ORDER BY ordinal DESC, start_ns DESC LIMIT 1",
+        params![skey, lid],
+        |r| Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, Option<String>>(4)?,
+        )),
+    ).optional() {
+        open_info.latest_turn_status = Some(t_status.clone());
+        open_info.latest_turn_latency_ms = Some(latency);
+        open_info.latest_turn_prompt = prompt.clone();
+        if let Some(out) = output {
+            if !out.trim().is_empty() {
+                open_info.latest_turn_output = Some(format_output_snippet(&out));
+            }
+        }
+
+        // 4. In-flight (open) observation or latest observation
+        let open_obs = c.query_row(
+            "SELECT o.name, o.input,
+                    (COALESCE(o.end_ns, strftime('%s','now')*1000000000) - o.start_ns) / 1000000
+             FROM observations o JOIN traces t ON t.id = o.trace_id
+             WHERE ((t.session_key IS NOT NULL AND t.session_key = ?1) OR (t.launch_id IS NOT NULL AND t.launch_id = ?2))
+               AND o.end_ns IS NULL AND o.type IN ('tool', 'agent')
+             ORDER BY o.start_ns DESC LIMIT 1",
+            params![skey, lid],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?)),
+        ).optional().unwrap_or(None);
+
+        if let Some((tool_name, tool_input, dur_ms)) = open_obs {
+            open_info.running_tool = Some(tool_name.clone());
+            open_info.running_tool_duration_ms = Some(dur_ms);
+            open_info.current_clue = parse_tool_clue(&tool_name, tool_input.as_deref(), Some(dur_ms));
+            open_info.explanation = format!("Turn #{ordinal}: {}", open_info.current_clue);
+        } else if open_info.is_working {
+            open_info.current_clue = format!("Thinking / generating response on turn #{ordinal} ({t_status})");
+            open_info.explanation = open_info.current_clue.clone();
+        } else if open_info.status == "NeedsAttention" {
+            open_info.current_clue = format!("Waiting for user approval or response on turn #{ordinal}");
+            open_info.explanation = open_info.current_clue.clone();
+        } else {
+            // Idle state: see what it finished
+            if let Some(ref out_snip) = open_info.latest_turn_output {
+                open_info.current_clue = format!("Idle, completed turn #{ordinal}. Last output: \"{out_snip}\"");
+            } else {
+                let prompt_snip = prompt.as_deref().map(format_goal_snippet).unwrap_or_else(|| "none".into());
+                open_info.current_clue = format!("Idle, completed turn #{ordinal}. Awaiting next prompt (last: \"{prompt_snip}\")");
+            }
+            open_info.explanation = open_info.current_clue.clone();
+        }
+    }
+
+    // 5. Files modified
+    if let Ok(mut stmt) = c.prepare(
+        "SELECT DISTINCT
+           COALESCE(
+             CASE WHEN json_valid(o.input) THEN json_extract(o.input, '$.TargetFile') END,
+             CASE WHEN json_valid(o.input) THEN json_extract(o.input, '$.file_path') END,
+             CASE WHEN json_valid(o.input) THEN json_extract(o.input, '$.path') END,
+             o.path
+           ) AS target_file
+         FROM observations o
+         JOIN traces t ON t.id = o.trace_id
+         WHERE ((t.session_key IS NOT NULL AND t.session_key = ?1) OR (t.launch_id IS NOT NULL AND t.launch_id = ?2))
+           AND o.type = 'tool'
+           AND (o.name IN ('write_to_file', 'replace_file_content', 'Write', 'Edit')
+                OR lower(o.name) LIKE '%edit%'
+                OR lower(o.name) LIKE '%write%')
+           AND target_file IS NOT NULL AND trim(target_file) != ''
+         ORDER BY o.start_ns DESC
+         LIMIT 8",
+    ) {
+        if let Ok(rows) = stmt.query_map(params![skey, lid], |r| r.get::<_, String>(0)) {
+            for f in rows.flatten() {
+                let clean = Path::new(&f).file_name().and_then(|n| n.to_str()).unwrap_or(&f).to_string();
+                if !open_info.files_modified.contains(&clean) {
+                    open_info.files_modified.push(clean);
+                }
+            }
+        }
+    }
+
+    // 6. Recent commands run
+    if let Ok(mut stmt) = c.prepare(
+        "SELECT DISTINCT
+           COALESCE(
+             CASE WHEN json_valid(o.input) THEN json_extract(o.input, '$.CommandLine') END,
+             CASE WHEN json_valid(o.input) THEN json_extract(o.input, '$.command') END
+           ) AS cmd
+         FROM observations o
+         JOIN traces t ON t.id = o.trace_id
+         WHERE ((t.session_key IS NOT NULL AND t.session_key = ?1) OR (t.launch_id IS NOT NULL AND t.launch_id = ?2))
+           AND o.type = 'tool'
+           AND cmd IS NOT NULL AND trim(cmd) != ''
+         ORDER BY o.start_ns DESC
+         LIMIT 5",
+    ) {
+        if let Ok(rows) = stmt.query_map(params![skey, lid], |r| r.get::<_, String>(0)) {
+            for cmd in rows.flatten() {
+                let first_line = cmd.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+                let short = if first_line.len() > 40 { format!("{}…", &first_line[..38]) } else { first_line.to_string() };
+                if !open_info.recent_commands.contains(&short) {
+                    open_info.recent_commands.push(short);
+                }
+            }
+        }
+    }
+
+    // 7. Tool breakdown counts
+    if let Ok(mut stmt) = c.prepare(
+        "SELECT o.name, COUNT(*)
+         FROM observations o
+         JOIN traces t ON t.id = o.trace_id
+         WHERE ((t.session_key IS NOT NULL AND t.session_key = ?1) OR (t.launch_id IS NOT NULL AND t.launch_id = ?2))
+           AND o.type = 'tool'
+         GROUP BY o.name
+         ORDER BY COUNT(*) DESC
+         LIMIT 5",
+    ) {
+        if let Ok(rows) = stmt.query_map(params![skey, lid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+            for pair in rows.flatten() {
+                open_info.tool_counts.push(pair);
+            }
+        }
+    }
+
+    // 8. Build actions_accomplished
+    open_info.actions_accomplished = format_actions_accomplished(
+        open_info.turns,
+        &open_info.tool_counts,
+        &open_info.files_modified,
+    );
+}
+
+fn query_overnight_sessions_fallback(c: &Connection, analysis: &mut HeimdallAnalysis) {
+    let query = "
+        SELECT s.session_id, s.title, s.provider, s.cwd, s.key, s.first_seen_ns, s.last_seen_ns
+        FROM sessions s
+        ORDER BY s.last_seen_ns DESC
+        LIMIT 5";
+
+    if let Ok(mut stmt) = c.prepare(query) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        }) {
+            for (idx, row) in rows.flatten().enumerate() {
+                let (_sid_raw, title, provider, cwd, key, first_ns, last_ns) = row;
+                let name = title.unwrap_or_else(|| format!("{provider} session"));
+                let dir = cwd.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+
+                let mut s_info = OpenSessionInfo {
+                    session_id: idx,
+                    name,
+                    harness: Some(provider),
+                    dir,
+                    status: "Finished (Overnight)".to_string(),
+                    is_working: false,
+                    is_live: false,
+                    initial_goal: None,
+                    current_clue: "Completed overnight run. Awaiting morning review.".to_string(),
+                    actions_accomplished: String::new(),
+                    files_modified: Vec::new(),
+                    recent_commands: Vec::new(),
+                    tool_counts: Vec::new(),
+                    latest_turn_prompt: None,
+                    latest_turn_output: None,
+                    latest_turn_status: Some("closed".to_string()),
+                    latest_turn_latency_ms: None,
+                    timing_summary: format_timing_summary(Some(first_ns), Some(last_ns)),
+                    turns: 0,
+                    total_tokens: None,
+                    cost_usd: None,
+                    running_tool: None,
+                    running_tool_duration_ms: None,
+                    explanation: "Completed overnight session".to_string(),
+                };
+
+                populate_session_recap_from_sqlite(c, None, Some(&key), &mut s_info);
+                analysis.open_sessions.push(s_info);
+            }
+        }
+    }
 }
 
 /// Queries the SQLite database and correlates it with live agent-mux sessions.
@@ -179,104 +544,90 @@ pub fn query_heimdall_analysis(
             .unwrap_or(0);
     }
 
-    // 1. Analyze open sessions
-    for session in sessions {
-        let name = session.profile.name.clone();
-        let harness = Harness::detect(&session.profile.command).map(|h| h.as_str().to_string());
-        let status_enum = session.status(now);
-        let is_working = matches!(status_enum, Status::Working);
-        let status_str = match status_enum {
-            Status::Working => "Working".to_string(),
-            Status::Idle => "Idle".to_string(),
-            Status::NeedsAttention => "NeedsAttention".to_string(),
-            Status::Exited(Some(code)) => format!("Exited({code})"),
-            Status::Exited(None) => "Exited".to_string(),
-        };
-
-        let mut open_info = OpenSessionInfo {
-            session_id: session.id,
-            name,
-            harness,
-            dir: session.dir.clone(),
-            status: status_str,
-            is_working,
-            running_tool: None,
-            running_tool_duration_ms: None,
-            total_tokens: None,
-            cost_usd: None,
-            turns: 0,
-            latest_turn_prompt: None,
-            latest_turn_status: None,
-            latest_turn_latency_ms: None,
-            explanation: String::new(),
-        };
-
-        if let Some(ref trace) = session.trace {
-            let launch_id = &trace.launch_id;
-            if let Some(ref c) = conn {
-                // Rollup stats
-                if let Ok((turns, tokens, cost)) = c.query_row(
-                    "SELECT COUNT(*), SUM(total_tokens), SUM(total_cost_usd) FROM trace_stats WHERE launch_id = ?1",
-                    params![launch_id],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<f64>>(2)?)),
-                ) {
-                    open_info.turns = turns;
-                    open_info.total_tokens = tokens;
-                    open_info.cost_usd = cost;
-                }
-
-                // Latest turn
-                if let Ok(Some((ordinal, t_status, latency, prompt))) = c.query_row(
-                    "SELECT ordinal, status, latency_ms, input FROM trace_stats WHERE launch_id = ?1 ORDER BY ordinal DESC LIMIT 1",
-                    params![launch_id],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<String>>(3)?)),
-                ).optional() {
-                    open_info.latest_turn_status = Some(t_status.clone());
-                    open_info.latest_turn_latency_ms = Some(latency);
-                    open_info.latest_turn_prompt = prompt.clone();
-
-                    // Check for active or latest running tool in observations
-                    let running = c.query_row(
-                        "SELECT o.name, (COALESCE(o.end_ns, strftime('%s','now')*1000000000) - o.start_ns) / 1000000
-                         FROM observations o JOIN traces t ON t.id = o.trace_id
-                         WHERE t.launch_id = ?1 AND o.end_ns IS NULL AND o.type IN ('tool', 'agent')
-                         ORDER BY o.start_ns DESC LIMIT 1",
-                        params![launch_id],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-                    ).optional().unwrap_or(None);
-
-                    if let Some((tool_name, tool_dur)) = running {
-                        open_info.running_tool = Some(tool_name.clone());
-                        open_info.running_tool_duration_ms = Some(tool_dur);
-                        open_info.explanation = format!("Executing tool '{tool_name}' (running for {tool_dur}ms) on turn #{ordinal}");
-                    } else if is_working {
-                        open_info.explanation = format!("Generating response / reasoning on turn #{ordinal} ({t_status})");
-                    } else if t_status == "open" {
-                        open_info.explanation = format!("Turn #{ordinal} is in progress, awaiting next action");
-                    } else {
-                        let prompt_snip = prompt.as_deref().map(|p| {
-                            let clean = p.lines().next().unwrap_or("").trim();
-                            if clean.len() > 30 {
-                                format!("{}…", &clean[..28])
-                            } else {
-                                clean.to_string()
-                            }
-                        }).unwrap_or_else(|| "none".into());
-                        open_info.explanation = format!("Idle, awaiting user input (last prompt: \"{prompt_snip}\")");
-                    }
-                }
-            }
+    // 1. Analyze sessions
+    if sessions.is_empty() {
+        // Fallback: If no sessions are currently open in agent-mux (e.g. user just started
+        // agent-mux in the morning), query the recent overnight sessions from SQLite.
+        if let Some(ref c) = conn {
+            query_overnight_sessions_fallback(c, &mut analysis);
         }
-
-        if open_info.explanation.is_empty() {
-            open_info.explanation = if is_working {
-                "Active session busy with work".to_string()
-            } else {
-                "Idle session waiting for command".to_string()
+    } else {
+        for session in sessions {
+            let name = session.profile.name.clone();
+            let harness = Harness::detect(&session.profile.command).map(|h| h.as_str().to_string());
+            let status_enum = session.status(now);
+            let is_working = matches!(status_enum, Status::Working);
+            let status_str = match status_enum {
+                Status::Working => "Working".to_string(),
+                Status::Idle => "Idle".to_string(),
+                Status::NeedsAttention => "NeedsAttention".to_string(),
+                Status::Exited(Some(code)) => format!("Exited({code})"),
+                Status::Exited(None) => "Exited".to_string(),
             };
-        }
 
-        analysis.open_sessions.push(open_info);
+            let mut open_info = OpenSessionInfo {
+                session_id: session.id,
+                name,
+                harness,
+                dir: session.dir.clone(),
+                status: status_str,
+                is_working,
+                is_live: true,
+                initial_goal: None,
+                current_clue: String::new(),
+                actions_accomplished: String::new(),
+                files_modified: Vec::new(),
+                recent_commands: Vec::new(),
+                tool_counts: Vec::new(),
+                latest_turn_prompt: None,
+                latest_turn_output: None,
+                latest_turn_status: None,
+                latest_turn_latency_ms: None,
+                timing_summary: "Active session".to_string(),
+                turns: 0,
+                total_tokens: None,
+                cost_usd: None,
+                running_tool: None,
+                running_tool_duration_ms: None,
+                explanation: String::new(),
+            };
+
+            if let Some(ref c) = conn {
+                // Find launch_id and session_key
+                let launch_id: Option<String> = session.trace.as_ref().map(|t| t.launch_id.clone()).or_else(|| {
+                    c.query_row(
+                        "SELECT id FROM launches WHERE agent_mux_session = ?1 ORDER BY started_ns DESC LIMIT 1",
+                        params![session.id as i64],
+                        |r| r.get::<_, String>(0),
+                    ).ok()
+                });
+
+                let session_key: Option<String> = if let Some(ref lid) = launch_id {
+                    c.query_row(
+                        "SELECT session_key FROM launches WHERE id = ?1",
+                        params![lid],
+                        |r| r.get::<_, Option<String>>(0),
+                    ).ok().flatten()
+                } else {
+                    None
+                };
+
+                populate_session_recap_from_sqlite(c, launch_id.as_deref(), session_key.as_deref(), &mut open_info);
+            }
+
+            if open_info.current_clue.is_empty() {
+                open_info.current_clue = if is_working {
+                    "Active session busy with work".to_string()
+                } else {
+                    "Idle session waiting for command".to_string()
+                };
+            }
+            if open_info.explanation.is_empty() {
+                open_info.explanation = open_info.current_clue.clone();
+            }
+
+            analysis.open_sessions.push(open_info);
+        }
     }
 
     // 2. Analyze skills from SQLite metadata
@@ -414,8 +765,8 @@ pub fn query_heimdall_analysis(
 /// Formulates the initial prompt for the Heimdall agent harness.
 pub fn generate_heimdall_prompt(analysis: &HeimdallAnalysis, db_path: &Path) -> String {
     let mut prompt = String::new();
-    prompt.push_str("You are Heimdall, the omniscient watcher and performance harness of agent-mux.\n");
-    prompt.push_str("Your purpose is to monitor and explain open sessions, analyze skill performance, identify bottlenecks, and recommend optimizations.\n");
+    prompt.push_str("You are Heimdall, the omniscient watcher and autonomous monitoring agent of agent-mux.\n");
+    prompt.push_str("Your primary duty is to provide an Executive Morning Briefing summarizing what each session accomplished overnight or while the user was away, what is executing right now, analyze skill performance & latency bottlenecks, and recommend concrete optimizations.\n");
     prompt.push_str("Everything you inspect is backed by the local agent-mux SQLite store.\n\n");
 
     prompt.push_str(&format!("SQLite Database Path: {}\n", db_path.display()));
@@ -433,27 +784,50 @@ pub fn generate_heimdall_prompt(analysis: &HeimdallAnalysis, db_path: &Path) -> 
         db_path.display()
     ));
 
-    prompt.push_str("=== LIVE OPEN SESSIONS SNAPSHOT ===\n");
+    prompt.push_str("=== EXECUTIVE MORNING BRIEFING: SESSIONS RECAP & CLUES ===\n");
     if analysis.open_sessions.is_empty() {
-        prompt.push_str("No other active sessions are currently running in agent-mux.\n");
+        prompt.push_str("No active or historical sessions recorded in traces.db.\n");
     } else {
         for s in &analysis.open_sessions {
             let toks_str = s.total_tokens.map(|t| format!("{t} tokens")).unwrap_or_else(|| "0 tokens".into());
             let cost_str = s.cost_usd.map(|c| format!("${c:.3}")).unwrap_or_else(|| "$0.00".into());
+            let harness_str = s.harness.as_deref().unwrap_or("agent");
+            let live_tag = if s.is_live { "LIVE" } else { "OVERNIGHT / HISTORY" };
+
             prompt.push_str(&format!(
-                "- Session #{} [{}]: Status='{}', Directory='{}'\n  Activity: {}\n  Usage: {} turns, {}, {}\n",
+                "### Session #{} [{}]: Harness='{}', Status='{}' [{}], Dir='{}'\n",
                 s.session_id + 1,
                 s.name,
+                harness_str,
                 s.status,
-                s.dir.display(),
-                s.explanation,
+                live_tag,
+                s.dir.display()
+            ));
+            if let Some(ref goal) = s.initial_goal {
+                prompt.push_str(&format!("  🎯 Initial Goal / Task: \"{}\"\n", goal));
+            }
+            prompt.push_str(&format!("  ⚡ Current Clue (Right Now): {}\n", s.current_clue));
+            if !s.actions_accomplished.is_empty() {
+                prompt.push_str(&format!("  📦 Work Accomplished: {}\n", s.actions_accomplished));
+            }
+            if !s.files_modified.is_empty() {
+                prompt.push_str(&format!("  📝 Files Modified: {}\n", s.files_modified.join(", ")));
+            }
+            if !s.recent_commands.is_empty() {
+                prompt.push_str(&format!("  💻 Recent Commands: {}\n", s.recent_commands.join(" | ")));
+            }
+            if let Some(ref out) = s.latest_turn_output {
+                prompt.push_str(&format!("  💬 Last Assistant Output: \"{}\"\n", out));
+            }
+            prompt.push_str(&format!(
+                "  📊 Resources & Timing: {}, {} turns, {}, {}\n\n",
+                s.timing_summary,
                 s.turns,
                 toks_str,
                 cost_str
             ));
         }
     }
-    prompt.push_str("\n");
 
     prompt.push_str("=== SKILLS & BOTTLENECK ANALYSIS SNAPSHOT ===\n");
     if analysis.skills.is_empty() {
@@ -481,9 +855,9 @@ pub fn generate_heimdall_prompt(analysis: &HeimdallAnalysis, db_path: &Path) -> 
     }
     prompt.push_str("\n");
 
-    prompt.push_str("=== YOUR BEHAVIOR ===\n");
-    prompt.push_str("1. Introduce yourself to the user as Heimdall.\n");
-    prompt.push_str("2. Explain what the open sessions are currently doing and their token consumption.\n");
+    prompt.push_str("=== YOUR BEHAVIOR AS HEIMDALL AGENT ===\n");
+    prompt.push_str("1. Greet the user with a crisp Executive Morning Briefing: summarize what each session worked on and what was accomplished overnight or while away.\n");
+    prompt.push_str("2. Give clear clues on what is executing right now (active tool, reasoning, or idle awaiting user input).\n");
     prompt.push_str("3. Present the skill bottleneck and token consumption breakdown with actionable optimization advice.\n");
     prompt.push_str("4. Offer to drill down into any specific session, skill, or run direct SQLite queries.\n");
 
@@ -545,15 +919,24 @@ mod tests {
                 dir: PathBuf::from("/workspace/my-app"),
                 status: "Working".into(),
                 is_working: true,
-                running_tool: Some("Bash".into()),
-                running_tool_duration_ms: Some(1500),
-                total_tokens: Some(45000),
-                cost_usd: Some(0.12),
-                turns: 3,
+                is_live: true,
+                initial_goal: Some("Refactor authentication pipeline".into()),
+                current_clue: "Running command: `cargo check` (1500ms)".into(),
+                actions_accomplished: "3 turns, 15 tool calls (Bash: 10, Edit: 5)".into(),
+                files_modified: vec!["auth.rs".into(), "user.rs".into()],
+                recent_commands: vec!["cargo check".into(), "cargo test".into()],
+                tool_counts: vec![("Bash".into(), 10), ("Edit".into(), 5)],
                 latest_turn_prompt: Some("run cargo check".into()),
+                latest_turn_output: Some("All 14 tests passed successfully".into()),
                 latest_turn_status: Some("open".into()),
                 latest_turn_latency_ms: Some(2500),
-                explanation: "Executing tool 'Bash' (running for 1500ms) on turn #3".into(),
+                timing_summary: "Last active 2m ago (duration 45m)".into(),
+                turns: 3,
+                total_tokens: Some(45000),
+                cost_usd: Some(0.12),
+                running_tool: Some("Bash".into()),
+                running_tool_duration_ms: Some(1500),
+                explanation: "Turn #3: Running command: `cargo check`".into(),
             }],
             skills: vec![SkillAnalysisInfo {
                 skill: "spec-wave".into(),
@@ -577,7 +960,10 @@ mod tests {
         let prompt = generate_heimdall_prompt(&analysis, &analysis.db_path);
         assert!(prompt.contains("Heimdall"));
         assert!(prompt.contains("Claude Code"));
-        assert!(prompt.contains("Executing tool 'Bash'"));
+        assert!(prompt.contains("Refactor authentication pipeline"));
+        assert!(prompt.contains("Running command: `cargo check`"));
+        assert!(prompt.contains("auth.rs"));
+        assert!(prompt.contains("All 14 tests passed"));
         assert!(prompt.contains("spec-wave"));
         assert!(prompt.contains("1200000 tokens"));
         assert!(prompt.contains("sqlite3"));

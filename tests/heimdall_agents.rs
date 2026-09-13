@@ -28,7 +28,7 @@ fn make_shell_profile(name: &str) -> Profile {
 }
 
 #[tokio::test]
-async fn test_gods_sidebar_navigation_and_launcher() {
+async fn test_agents_sidebar_navigation_and_launcher() {
     let (tx, _rx) = mpsc::channel(32);
     let mut app = App::new(vec![make_shell_profile("test-session")], None, tx);
     app.set_pane_size(24, 80);
@@ -36,11 +36,11 @@ async fn test_gods_sidebar_navigation_and_launcher() {
     // Initial state is Active
     assert_eq!(app.sidebar_section, SidebarSection::Active);
 
-    // Tab moves from Active to Gods
+    // Tab moves from Active to Agents
     app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Gods);
+    assert_eq!(app.sidebar_section, SidebarSection::Agents);
 
-    // Pressing Enter on Gods opens HeimdallLauncher mode
+    // Pressing Enter on Agents opens HeimdallLauncher mode
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(matches!(app.mode, Mode::HeimdallLauncher(_)));
 
@@ -67,19 +67,19 @@ async fn test_gods_sidebar_navigation_and_launcher() {
     // Pressing Esc cancels back to Control mode
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(matches!(app.mode, Mode::Control));
-    assert_eq!(app.sidebar_section, SidebarSection::Gods);
+    assert_eq!(app.sidebar_section, SidebarSection::Agents);
 
-    // Mouse click in Gods area selects Gods section
+    // Mouse click in Agents area selects Agents section
     app.sidebar_section = SidebarSection::Active;
-    let (_, gods_rect, _) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3);
-    let click_gods = MouseEvent {
+    let (_, agents_rect, _) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3);
+    let click_agents = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 5,
-        row: gods_rect.y + 1,
+        row: agents_rect.y + 1,
         modifiers: KeyModifiers::NONE,
     };
-    app.handle_mouse(click_gods, Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Gods);
+    app.handle_mouse(click_agents, Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Agents);
 
     app.kill_all();
 }

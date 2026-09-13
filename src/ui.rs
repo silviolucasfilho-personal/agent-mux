@@ -30,16 +30,16 @@ pub fn sidebar_window(selected: usize, len: usize, visible: usize) -> usize {
     }
 }
 
-/// Splits the sidebar height into 25% active sessions, 3 rows for Gods (Heimdall), and remaining history sessions.
+/// Splits the sidebar height into 25% active sessions, 3 rows for Agents (Heimdall), and remaining history sessions.
 pub fn sidebar_areas(total_height: u16) -> (Rect, Rect, Rect) {
     let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
-    let [active, gods, history] = Layout::vertical([
+    let [active, agents, history] = Layout::vertical([
         Constraint::Percentage(25),
         Constraint::Length(3),
         Constraint::Min(4),
     ])
     .areas(side_area);
-    (active, gods, history)
+    (active, agents, history)
 }
 
 /// Char-boundary-safe truncation with an ellipsis. Byte slicing here
@@ -244,7 +244,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let [active_area, gods_area, history_area] = Layout::vertical([
+    let [active_area, agents_area, history_area] = Layout::vertical([
         Constraint::Percentage(25),
         Constraint::Length(3),
         Constraint::Min(4),
@@ -252,7 +252,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     .areas(area);
 
     draw_active_sidebar(f, active_area, app, now);
-    draw_gods_sidebar(f, gods_area, app);
+    draw_agents_sidebar(f, agents_area, app);
     draw_history_sidebar(f, history_area, app);
 }
 
@@ -332,8 +332,8 @@ fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     f.render_widget(List::new(items).block(block), area);
 }
 
-fn draw_gods_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    let is_focused = app.sidebar_section == SidebarSection::Gods
+fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
+    let is_focused = app.sidebar_section == SidebarSection::Agents
         && matches!(app.mode, Mode::Control);
     let border_style = if is_focused {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -344,7 +344,7 @@ fn draw_gods_sidebar(f: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Span::styled(
-            " Gods ",
+            " Agents ",
             if is_focused {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
@@ -464,7 +464,7 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     if !app.sidebar_hidden
-        && app.sidebar_section == SidebarSection::Gods
+        && app.sidebar_section == SidebarSection::Agents
         && matches!(app.mode, Mode::Control)
     {
         draw_heimdall_preview(f, area, app, now);
@@ -639,7 +639,7 @@ fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         .unwrap_or_else(crate::heimdall::default_trace_db_path);
     let analysis = crate::heimdall::query_heimdall_analysis(&db_path, &app.sessions, now);
 
-    let title = " ⚡ HEIMDALL — Omniscient Monitor & Skill Optimizer [Gods] ";
+    let title = " ⚡ HEIMDALL — Omniscient Monitor & Skill Optimizer [Agents] ";
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
@@ -652,7 +652,7 @@ fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
 
     let [summary_area, sessions_area, skills_area, footer_area] = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Percentage(45),
+        Constraint::Percentage(55),
         Constraint::Min(6),
         Constraint::Length(1),
     ])
@@ -686,7 +686,7 @@ fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
             Span::styled("Live Status:  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!(
-                    "{} open session(s), {} skill(s) analyzed from SQLite metadata",
+                    "{} session(s) in review, {} skill(s) analyzed from SQLite metadata",
                     analysis.open_sessions.len(),
                     analysis.skills.len()
                 ),
@@ -696,12 +696,12 @@ fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     ];
     f.render_widget(Paragraph::new(summary_lines), summary_area);
 
-    // 2. Open Sessions
+    // 2. Open Sessions Executive Briefing
     let sessions_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Span::styled(
-            format!(" Open Sessions Activity ({}) ", analysis.open_sessions.len()),
+            format!(" Executive Briefing & Session Clues ({}) ", analysis.open_sessions.len()),
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
     let sess_inner = sessions_block.inner(sessions_area);
@@ -709,7 +709,7 @@ fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
 
     if analysis.open_sessions.is_empty() {
         let empty_msg = Paragraph::new(
-            "No active sessions are running.\nPress [n] to create a new session or [Enter] to launch Heimdall.",
+            "No active or historical sessions recorded yet in SQLite traces.db.\nPress [n] to create a new session or [Enter] to launch Heimdall.",
         )
         .style(Style::default().fg(Color::DarkGray));
         f.render_widget(empty_msg, sess_inner);
@@ -720,13 +720,21 @@ fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
             .map(|s| {
                 let status_style = if s.is_working {
                     Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                } else if s.status == "NeedsAttention" {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
                 let harness_str = s.harness.as_deref().unwrap_or("agent");
                 let toks = s.total_tokens.unwrap_or(0);
                 let cost = s.cost_usd.unwrap_or(0.0);
-                let lines = vec![
+                let live_badge = if s.is_live {
+                    Span::styled("[LIVE] ", Style::default().fg(Color::Green))
+                } else {
+                    Span::styled("[OVERNIGHT] ", Style::default().fg(Color::DarkGray))
+                };
+
+                let mut lines = vec![
                     Line::from(vec![
                         Span::styled(
                             format!("Session #{} ", s.session_id + 1),
@@ -734,22 +742,64 @@ fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
                         ),
                         Span::styled(format!("[{}] ", s.name), Style::default().fg(Color::White)),
                         Span::styled(format!("({harness_str}) "), Style::default().fg(Color::Magenta)),
+                        live_badge,
                         Span::styled(format!("[{}] ", s.status), status_style),
                         Span::styled(format!("— {}", s.dir.display()), Style::default().fg(Color::DarkGray)),
                     ]),
                     Line::from(vec![
-                        Span::styled("  Activity: ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(&s.explanation, Style::default().fg(Color::White)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("  Metrics:  ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(format!("{} turns", s.turns), Style::default().fg(Color::Yellow)),
-                        Span::raw(" | "),
-                        Span::styled(format!("{toks} tokens"), Style::default().fg(Color::Yellow)),
-                        Span::raw(" | "),
-                        Span::styled(format!("${cost:.3}"), Style::default().fg(Color::Yellow)),
+                        Span::styled("  ⚡ Right Now:  ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                        Span::styled(&s.current_clue, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
                     ]),
                 ];
+
+                if let Some(ref goal) = s.initial_goal {
+                    lines.push(Line::from(vec![
+                        Span::styled("  🎯 Goal:       ", Style::default().fg(Color::Cyan)),
+                        Span::styled(goal, Style::default().fg(Color::Gray)),
+                    ]));
+                }
+
+                if !s.actions_accomplished.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("  📦 Summary:    ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&s.actions_accomplished, Style::default().fg(Color::White)),
+                    ]));
+                }
+
+                if !s.files_modified.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("  📝 Files:      ", Style::default().fg(Color::LightCyan)),
+                        Span::styled(s.files_modified.join(", "), Style::default().fg(Color::LightCyan)),
+                    ]));
+                }
+
+                if !s.recent_commands.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("  💻 Commands:   ", Style::default().fg(Color::LightGreen)),
+                        Span::styled(s.recent_commands.join("  ·  "), Style::default().fg(Color::LightGreen)),
+                    ]));
+                }
+
+                if let Some(ref out) = s.latest_turn_output {
+                    lines.push(Line::from(vec![
+                        Span::styled("  💬 Last Out:   ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("\"{out}\""), Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+
+                lines.push(Line::from(vec![
+                    Span::styled("  📊 Metrics:    ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(&s.timing_summary, Style::default().fg(Color::Gray)),
+                    Span::raw(" | "),
+                    Span::styled(format!("{} turns", s.turns), Style::default().fg(Color::Yellow)),
+                    Span::raw(" | "),
+                    Span::styled(format!("{toks} tokens"), Style::default().fg(Color::Yellow)),
+                    Span::raw(" | "),
+                    Span::styled(format!("${cost:.3}"), Style::default().fg(Color::Yellow)),
+                ]));
+
+                lines.push(Line::raw("")); // Spacer between sessions
+
                 ListItem::new(lines)
             })
             .collect();
@@ -882,7 +932,7 @@ fn draw_heimdall_launcher(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .title(Span::styled(
-            " Launch Heimdall [Gods] ",
+            " Launch Heimdall [Agents] ",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
@@ -998,10 +1048,10 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     match app.sidebar_section {
                         SidebarSection::Active => Line::raw(
-                            "[b] sidebar  [j/k] select  [Enter] attach  [Tab] gods  [n] new  [l] logs  [t] trace  [?] help  [q] quit",
+                            "[b] sidebar  [j/k] select  [Enter] attach  [Tab] agents  [n] new  [l] logs  [t] trace  [?] help  [q] quit",
                         ),
-                        SidebarSection::Gods => Line::raw(
-                            "[b] sidebar  [j/k] select  [Enter] heimdall harness  [Tab] hist  [n] new  [?] help  [q] quit",
+                        SidebarSection::Agents => Line::raw(
+                            "[b] sidebar  [j/k] select  [Enter] heimdall agent  [Tab] hist  [n] new  [?] help  [q] quit",
                         ),
                         SidebarSection::History => Line::raw(
                             "[b] sidebar  [j/k] select  [Enter/r] restart  [Tab] active  [a] all  [n] new  [l] logs  [?] help  [q] quit",
@@ -1041,8 +1091,8 @@ fn draw_help(f: &mut Frame) {
         row("b", "toggle sidebar (hide / full harness)"),
         row("j/k, ↑/↓", "select session"),
         row("1-9", "jump to session N"),
-        row("Tab", "cycle active / gods / history sections"),
-        row("Enter", "attach (active), launch Heimdall (gods), or restart (history)"),
+        row("Tab", "cycle active / agents / history sections"),
+        row("Enter", "attach (active), launch Heimdall (agents), or restart (history)"),
         row(
             "n",
             "new session (pick the trace backend: SQLite, Langfuse, both)",

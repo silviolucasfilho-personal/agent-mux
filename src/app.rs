@@ -30,7 +30,7 @@ pub enum Mode {
 pub enum SidebarSection {
     #[default]
     Active,
-    Gods,
+    Agents,
     History,
 }
 
@@ -231,7 +231,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     } else {
                         match ctx.sidebar_section {
                             SidebarSection::Active if ctx.selected_status.is_some() => Action::Attach,
-                            SidebarSection::Gods => Action::OpenHeimdallLauncher,
+                            SidebarSection::Agents => Action::OpenHeimdallLauncher,
                             SidebarSection::History => Action::RestartHistorySession,
                             _ => Action::None,
                         }
@@ -249,13 +249,13 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                                 Some(Status::Exited(_)) => Action::RespawnSelected,
                                 _ => Action::None,
                             },
-                            SidebarSection::Gods => Action::OpenHeimdallLauncher,
+                            SidebarSection::Agents => Action::OpenHeimdallLauncher,
                             SidebarSection::History => Action::RestartHistorySession,
                         }
                     }
                 }
                 KeyCode::Char('h') | KeyCode::Char('H')
-                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Gods =>
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Agents =>
                 {
                     Action::OpenHeimdallLauncher
                 }
@@ -2271,7 +2271,7 @@ impl App {
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
-            let (active_rect, gods_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
+            let (active_rect, agents_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
             if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
                 if ev.row > active_rect.y
                     && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
@@ -2293,8 +2293,8 @@ impl App {
                     }
                 }
                 return;
-            } else if ev.row >= gods_rect.y && ev.row < gods_rect.y + gods_rect.height {
-                self.sidebar_section = SidebarSection::Gods;
+            } else if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height {
+                self.sidebar_section = SidebarSection::Agents;
                 return;
             } else if ev.row >= history_rect.y && ev.row < history_rect.y + history_rect.height {
                 if ev.row > history_rect.y
@@ -2544,10 +2544,10 @@ impl App {
                             if !self.sessions.is_empty() && self.selected + 1 < self.sessions.len() {
                                 self.selected += 1;
                             } else {
-                                self.sidebar_section = SidebarSection::Gods;
+                                self.sidebar_section = SidebarSection::Agents;
                             }
                         }
-                        SidebarSection::Gods => {
+                        SidebarSection::Agents => {
                             if !self.history_sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::History;
                                 self.selected_history = 0;
@@ -2571,7 +2571,7 @@ impl App {
                         SidebarSection::Active => {
                             self.selected = self.selected.saturating_sub(1);
                         }
-                        SidebarSection::Gods => {
+                        SidebarSection::Agents => {
                             if !self.sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::Active;
                                 self.selected = self.sessions.len() - 1;
@@ -2581,7 +2581,7 @@ impl App {
                             if self.selected_history > 0 {
                                 self.selected_history -= 1;
                             } else {
-                                self.sidebar_section = SidebarSection::Gods;
+                                self.sidebar_section = SidebarSection::Agents;
                             }
                         }
                     }
@@ -2594,8 +2594,8 @@ impl App {
                     }
                 } else {
                     self.sidebar_section = match self.sidebar_section {
-                        SidebarSection::Active => SidebarSection::Gods,
-                        SidebarSection::Gods => SidebarSection::History,
+                        SidebarSection::Active => SidebarSection::Agents,
+                        SidebarSection::Agents => SidebarSection::History,
                         SidebarSection::History => SidebarSection::Active,
                     };
                 }
@@ -3161,8 +3161,11 @@ impl App {
             crate::heimdall::HeimdallHarness::Claude => {
                 profile.args = vec![
                     "--append-system-prompt".into(),
+                    format!(
+                        "You are Heimdall, the omniscient watcher and autonomous monitoring agent of agent-mux. You inspect SQLite traces at {}. Deliver an executive morning briefing and optimize skills.",
+                        db_path.display()
+                    ),
                     prompt,
-                    "Heimdall online. Reporting status of open sessions and skills.".into(),
                 ];
             }
             crate::heimdall::HeimdallHarness::Codex => {
