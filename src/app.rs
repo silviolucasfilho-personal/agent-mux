@@ -3231,14 +3231,29 @@ impl App {
             });
 
         profile.name = target_name;
+        let custom_instructions = self
+            .agents
+            .iter()
+            .find(|a| a.id == "heimdall")
+            .map(|a| a.instructions.clone())
+            .unwrap_or_default();
+
         match harness {
             crate::heimdall::HeimdallHarness::Claude => {
-                profile.args = vec![
-                    "--append-system-prompt".into(),
+                let sys_prompt = if custom_instructions.is_empty() {
                     format!(
                         "You are Heimdall, the omniscient watcher and autonomous monitoring agent of agent-mux. You inspect SQLite traces at {}. Deliver an executive morning briefing and optimize skills.",
                         db_path.display()
-                    ),
+                    )
+                } else {
+                    format!(
+                        "{custom_instructions}\n\nYou are backed by SQLite traces at {}.",
+                        db_path.display()
+                    )
+                };
+                profile.args = vec![
+                    "--append-system-prompt".into(),
+                    sys_prompt,
                     prompt,
                 ];
             }
@@ -3277,6 +3292,10 @@ impl App {
         agent_id: &str,
         harness: crate::heimdall::HeimdallHarness,
     ) -> anyhow::Result<usize> {
+        if agent_id == "heimdall" {
+            return self.launch_heimdall(harness);
+        }
+
         let agent = self
             .agents
             .iter()

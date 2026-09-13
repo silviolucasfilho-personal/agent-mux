@@ -826,10 +826,16 @@ fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let (sess_constraint, skills_constraint) = if analysis.skills.is_empty() {
+        (Constraint::Min(8), Constraint::Length(3))
+    } else {
+        (Constraint::Percentage(55), Constraint::Min(6))
+    };
+
     let [summary_area, sessions_area, skills_area, footer_area] = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Percentage(55),
-        Constraint::Min(6),
+        sess_constraint,
+        skills_constraint,
         Constraint::Length(1),
     ])
     .areas(inner);

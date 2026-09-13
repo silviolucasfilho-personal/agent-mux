@@ -264,38 +264,124 @@ fn parse_tool_clue(tool_name: &str, input_raw: Option<&str>, dur_ms: Option<i64>
 }
 
 fn format_goal_snippet(prompt: &str) -> String {
-    let first_line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-    if first_line.len() > 120 {
-        format!("{}…", &first_line[..118])
-    } else {
-        first_line.to_string()
+    // 1. Check for XML tag <USER_REQUEST> ... </USER_REQUEST>
+    if let Some(start) = prompt.find("<USER_REQUEST>") {
+        let after = &prompt[start + "<USER_REQUEST>".len()..];
+        if let Some(end) = after.find("</USER_REQUEST>") {
+            let inner = after[..end].trim();
+            let first_line = inner.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+            if !first_line.is_empty() {
+                return if first_line.len() > 120 {
+                    format!("{}…", &first_line[..118])
+                } else {
+                    first_line.to_string()
+                };
+            }
+        }
     }
-}
 
-fn format_output_snippet(output: &str) -> String {
-    let clean = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-    let clean = clean.trim_start_matches('#').trim();
-    if clean.len() > 100 {
-        format!("{}…", &clean[..98])
+    // 2. Filter out system instructions, AGENTS.md headers, and XML tags
+    let candidate = prompt
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| {
+            !l.is_empty()
+                && !l.starts_with("# AGENTS.md")
+                && !l.starts_with("<INSTRUCTIONS>")
+                && !l.starts_with("</INSTRUCTIONS>")
+                && !l.starts_with("<system")
+                && !l.starts_with("---")
+        })
+        .unwrap_or("")
+        .trim();
+
+    // 3. Strip harness prefixes like "Antigravity: ", "Claude Code: ", "Codex: ", "User: ", "Human: "
+    let clean = candidate
+        .strip_prefix("Antigravity: ")
+        .or_else(|| candidate.strip_prefix("Claude Code: "))
+        .or_else(|| candidate.strip_prefix("Codex: "))
+        .or_else(|| candidate.strip_prefix("User: "))
+        .or_else(|| candidate.strip_prefix("Human: "))
+        .unwrap_or(candidate)
+        .trim();
+
+    if clean.len() > 120 {
+        format!("{}…", &clean[..118])
     } else {
         clean.to_string()
     }
 }
 
-fn format_actions_accomplished(turns: i64, tool_counts: &[(String, i64)], files_modified: &[String]) -> String {
+fn format_output_snippet(output: &str) -> String {
+    // Strip fenced code blocks entirely so assistant text is prioritized
+    let mut clean_text = String::new();
+    let mut in_code_block = false;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if !in_code_block && !trimmed.starts_with("<!--") && !trimmed.is_empty() {
+            clean_text.push_str(trimmed);
+            clean_text.push('\n');
+        }
+    }
+
+    let raw_lines: Vec<&str> = clean_text.lines().collect();
+    if raw_lines.is_empty() {
+        // Fallback: if output was ONLY a code block, use the lines inside
+        let fallback_lines: Vec<&str> = output
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with("```") && !l.starts_with("<!--"))
+            .collect();
+        if fallback_lines.is_empty() {
+            return String::new();
+        }
+        let first = fallback_lines[0].trim_start_matches('#').trim();
+        return if first.len() > 130 { format!("{}…", &first[..128]) } else { first.to_string() };
+    }
+
+    let is_heading = raw_lines[0].starts_with('#');
+    let first = raw_lines[0].trim_start_matches('#').trim();
+    if is_heading && raw_lines.len() > 1 && first.len() < 40 {
+        let second = raw_lines[1].trim_start_matches('#').trim();
+        let combined = format!("{first}: {second}");
+        if combined.len() > 130 {
+            format!("{}…", &combined[..128])
+        } else {
+            combined
+        }
+    } else if first.len() > 130 {
+        format!("{}…", &first[..128])
+    } else {
+        first.to_string()
+    }
+}
+
+fn format_actions_accomplished(
+    turns: i64,
+    tool_counts: &[(String, i64)],
+    files_modified: &[String],
+    recent_commands: &[String],
+) -> String {
     let total_tools: i64 = tool_counts.iter().map(|(_, c)| *c).sum();
     let mut parts = Vec::new();
     if turns > 0 {
-        parts.push(format!("{turns} turns"));
+        parts.push(format!("{turns} turn{}", if turns == 1 { "" } else { "s" }));
     }
     if total_tools > 0 {
-        parts.push(format!("{total_tools} tool calls"));
+        parts.push(format!("{total_tools} tool call{}", if total_tools == 1 { "" } else { "s" }));
     }
     if !files_modified.is_empty() {
-        parts.push(format!("{} files modified", files_modified.len()));
+        parts.push(format!("{} file{} modified", files_modified.len(), if files_modified.len() == 1 { "" } else { "s" }));
+    }
+    if !recent_commands.is_empty() {
+        parts.push(format!("{} command{} run", recent_commands.len(), if recent_commands.len() == 1 { "" } else { "s" }));
     }
     if parts.is_empty() {
-        "Session started, awaiting actions".to_string()
+        "Session active, awaiting actions".to_string()
     } else {
         let mut text = parts.join(", ");
         if !tool_counts.is_empty() {
@@ -310,11 +396,292 @@ fn format_actions_accomplished(turns: i64, tool_counts: &[(String, i64)], files_
     }
 }
 
+fn resolve_session_key(c: &Connection, session: &Session) -> (Option<String>, Option<String>) {
+    let mut launch_id: Option<String> = session.trace.as_ref().map(|t| t.launch_id.clone());
+    if launch_id.is_none() {
+        launch_id = c.query_row(
+            "SELECT id FROM launches WHERE agent_mux_session = ?1 ORDER BY started_ns DESC LIMIT 1",
+            params![session.id as i64],
+            |r| r.get::<_, String>(0),
+        ).ok();
+    }
+
+    let provider = Harness::detect(&session.profile.command)
+        .map(|h| h.as_str().to_string())
+        .unwrap_or_else(|| "agent".to_string());
+
+    let cwd_str = session.dir.to_string_lossy();
+
+    // 1. Check if launch_id already has a session_key in launches table
+    if let Some(ref lid) = launch_id {
+        if let Ok(Some(skey)) = c.query_row(
+            "SELECT session_key FROM launches WHERE id = ?1 AND session_key IS NOT NULL AND trim(session_key) != ''",
+            params![lid],
+            |r| r.get::<_, Option<String>>(0),
+        ).optional().map(|o| o.flatten()) {
+            return (launch_id, Some(skey));
+        }
+    }
+
+    // 2. Check session.profile.args for explicit session-id or conversation
+    let mut args_iter = session.profile.args.iter().peekable();
+    while let Some(arg) = args_iter.next() {
+        if arg == "--conversation" || arg == "--session-id" || arg == "--resume" || arg == "-c" || arg == "-s" {
+            if let Some(val) = args_iter.peek() {
+                if !val.starts_with('-') {
+                    let key = if val.contains(':') {
+                        (*val).clone()
+                    } else {
+                        format!("{provider}:{val}")
+                    };
+                    let exists: bool = c.query_row(
+                        "SELECT 1 FROM sessions WHERE key = ?1 UNION SELECT 1 FROM traces WHERE session_key = ?1 LIMIT 1",
+                        params![key],
+                        |_| Ok(true),
+                    ).unwrap_or(false);
+                    if exists {
+                        return (launch_id, Some(key));
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Check any previous launches for this agent_mux_session that had a session_key
+    if let Ok(Some(skey)) = c.query_row(
+        "SELECT session_key FROM launches
+         WHERE agent_mux_session = ?1 AND session_key IS NOT NULL AND trim(session_key) != ''
+         ORDER BY started_ns DESC LIMIT 1",
+        params![session.id as i64],
+        |r| r.get::<_, Option<String>>(0),
+    ).optional().map(|o| o.flatten()) {
+        return (launch_id, Some(skey));
+    }
+
+    // 4. Check launches matching cwd and provider with traces
+    if let Ok(Some(skey)) = c.query_row(
+        "SELECT l.session_key FROM launches l
+         JOIN traces t ON t.session_key = l.session_key
+         WHERE l.cwd = ?1 AND l.provider = ?2 AND l.session_key IS NOT NULL
+         GROUP BY l.session_key
+         ORDER BY MAX(t.start_ns) DESC LIMIT 1",
+        params![cwd_str.as_ref(), provider],
+        |r| r.get::<_, Option<String>>(0),
+    ).optional().map(|o| o.flatten()) {
+        return (launch_id, Some(skey));
+    }
+
+    // 5. Check launches matching cwd and provider
+    if let Ok(Some(skey)) = c.query_row(
+        "SELECT session_key FROM launches
+         WHERE cwd = ?1 AND provider = ?2 AND session_key IS NOT NULL AND trim(session_key) != ''
+         ORDER BY started_ns DESC LIMIT 1",
+        params![cwd_str.as_ref(), provider],
+        |r| r.get::<_, Option<String>>(0),
+    ).optional().map(|o| o.flatten()) {
+        return (launch_id, Some(skey));
+    }
+
+    // 6. Check sessions table directly matching cwd and provider with traces
+    if let Ok(Some(skey)) = c.query_row(
+        "SELECT s.key FROM sessions s
+         JOIN traces t ON t.session_key = s.key
+         WHERE s.cwd = ?1 AND s.provider = ?2
+         GROUP BY s.key
+         ORDER BY MAX(t.start_ns) DESC LIMIT 1",
+        params![cwd_str.as_ref(), provider],
+        |r| r.get::<_, String>(0),
+    ).optional() {
+        return (launch_id, Some(skey));
+    }
+
+    // 7. Check sessions table directly matching cwd and provider
+    if let Ok(Some(skey)) = c.query_row(
+        "SELECT key FROM sessions
+         WHERE cwd = ?1 AND provider = ?2
+         ORDER BY last_seen_ns DESC LIMIT 1",
+        params![cwd_str.as_ref(), provider],
+        |r| r.get::<_, String>(0),
+    ).optional() {
+        return (launch_id, Some(skey));
+    }
+
+    // 8. Check sessions table matching cwd only
+    if let Ok(Some(skey)) = c.query_row(
+        "SELECT key FROM sessions
+         WHERE cwd = ?1
+         ORDER BY last_seen_ns DESC LIMIT 1",
+        params![cwd_str.as_ref()],
+        |r| r.get::<_, String>(0),
+    ).optional() {
+        return (launch_id, Some(skey));
+    }
+
+    (launch_id, None)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TerminalScreenClue {
+    pub current_action: Option<String>,
+    pub last_output: Option<String>,
+    pub user_prompt: Option<String>,
+}
+
+pub fn extract_screen_clues(screen_contents: &str) -> TerminalScreenClue {
+    let raw_lines: Vec<&str> = screen_contents
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| {
+            if l.is_empty() {
+                return false;
+            }
+            let border_chars = [
+                '─', '━', '═', '-', '_', '=', '│', '┃', '║', '|', '┌', '┐', '└', '┘',
+                '╭', '╮', '╯', '╰', '┼', '├', '┤', '┬', '┴',
+            ];
+            let only_borders = l.chars().all(|c| border_chars.contains(&c) || c.is_whitespace());
+            !only_borders
+        })
+        .collect();
+
+    let mut clues = TerminalScreenClue::default();
+    if raw_lines.is_empty() {
+        return clues;
+    }
+
+    // 1. Initial / user prompt from top
+    for line in &raw_lines {
+        let stripped = line
+            .strip_prefix("> ")
+            .or_else(|| line.strip_prefix("❯ "))
+            .or_else(|| line.strip_prefix("User: "))
+            .or_else(|| line.strip_prefix("Human: "))
+            .or_else(|| line.strip_prefix("claude> "))
+            .or_else(|| line.strip_prefix("codex> "));
+        if let Some(p) = stripped {
+            let p_clean = p.trim();
+            if !p_clean.is_empty() && p_clean.len() > 3 {
+                clues.user_prompt = Some(format_goal_snippet(p_clean));
+                break;
+            }
+        }
+    }
+
+    // 2. Current action from the bottom
+    let last_lines: Vec<&str> = raw_lines.iter().rev().take(6).cloned().collect();
+    for line in &last_lines {
+        // Look for running indicators
+        if line.contains("Thinking")
+            || line.contains("thinking")
+            || line.contains("Generating")
+            || line.contains("Running")
+            || line.contains("running")
+            || line.contains("Executing")
+            || line.contains("Compiling")
+            || line.contains("Building")
+            || line.contains("Downloading")
+            || line.starts_with('⠋')
+            || line.starts_with('⠙')
+            || line.starts_with('⠹')
+            || line.starts_with('⠸')
+            || line.starts_with('⠼')
+            || line.starts_with('⠴')
+            || line.starts_with('⠦')
+            || line.starts_with('⠧')
+            || line.starts_with('⠇')
+            || line.starts_with('⠏')
+        {
+            let clean = line.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '`' && c != '[').trim();
+            clues.current_action = Some(format_goal_snippet(clean));
+            break;
+        }
+
+        // Look for prompt line at bottom
+        let is_prompt = line.starts_with('>')
+            || line.starts_with('❯')
+            || line.starts_with('$')
+            || line.starts_with('%')
+            || line.starts_with('#')
+            || line.starts_with("claude>")
+            || line.starts_with("codex>")
+            || line.starts_with("User:");
+
+        if is_prompt {
+            let remainder = line
+                .trim_start_matches(|c: char| c == '>' || c == '❯' || c == '$' || c == '%' || c == '#' || c.is_whitespace())
+                .trim();
+            if !remainder.is_empty() {
+                clues.current_action = Some(format!("At prompt: `{}`", format_goal_snippet(remainder)));
+            } else {
+                clues.current_action = Some("Awaiting user input at prompt".to_string());
+            }
+            break;
+        }
+    }
+
+    // If no specific prompt/action found, take the last non-empty line
+    if clues.current_action.is_none() {
+        if let Some(last) = raw_lines.last() {
+            let clean = format_goal_snippet(last);
+            if !clean.is_empty() {
+                clues.current_action = Some(format!("Screen: \"{clean}\""));
+            }
+        }
+    }
+
+    // 3. Last output: find the most recent assistant/command response line (not the prompt or action line)
+    for line in raw_lines.iter().rev().skip(1).take(10) {
+        if line.starts_with('>')
+            || line.starts_with('❯')
+            || line.starts_with('$')
+            || line.starts_with("User:")
+            || line.starts_with("Human:")
+        {
+            continue;
+        }
+        let clean = format_output_snippet(line);
+        if !clean.is_empty() && clean.len() > 5 {
+            clues.last_output = Some(clean);
+            break;
+        }
+    }
+
+    clues
+}
+
+fn apply_terminal_screen_fallback(session: &Session, open_info: &mut OpenSessionInfo) {
+    let screen_contents = session.parser.screen().contents();
+    let clues = extract_screen_clues(&screen_contents);
+
+    if open_info.initial_goal.is_none() {
+        if let Some(goal) = clues.user_prompt {
+            open_info.initial_goal = Some(goal);
+        }
+    }
+
+    if open_info.latest_turn_output.is_none() {
+        if let Some(out) = clues.last_output {
+            open_info.latest_turn_output = Some(out);
+        }
+    }
+
+    if open_info.current_clue.is_empty()
+        || open_info.current_clue == "Idle session waiting for command"
+        || open_info.current_clue == "Active session busy with work"
+    {
+        if let Some(act) = clues.current_action {
+            open_info.current_clue = act;
+            open_info.explanation = open_info.current_clue.clone();
+        }
+    }
+}
+
 fn populate_session_recap_from_sqlite(
     c: &Connection,
     launch_id: Option<&str>,
     session_key: Option<&str>,
     open_info: &mut OpenSessionInfo,
+    session: Option<&Session>,
 ) {
     let lid = launch_id.unwrap_or("");
     let skey = session_key.unwrap_or("");
@@ -322,13 +689,16 @@ fn populate_session_recap_from_sqlite(
     // 1. Initial Goal: first turn prompt
     if let Ok(Some(first_prompt)) = c.query_row(
         "SELECT input FROM traces
-         WHERE ((session_key IS NOT NULL AND session_key = ?1) OR (launch_id IS NOT NULL AND launch_id = ?2))
+         WHERE ((?1 != '' AND session_key = ?1) OR (?2 != '' AND launch_id = ?2))
            AND input IS NOT NULL AND trim(input) != ''
          ORDER BY ordinal ASC, start_ns ASC LIMIT 1",
         params![skey, lid],
         |r| r.get::<_, String>(0),
     ).optional() {
-        open_info.initial_goal = Some(format_goal_snippet(&first_prompt));
+        let cleaned = format_goal_snippet(&first_prompt);
+        if !cleaned.is_empty() {
+            open_info.initial_goal = Some(cleaned);
+        }
     }
 
     // 2. Rollup stats: turns, tokens, cost, min/max timestamps
@@ -336,7 +706,7 @@ fn populate_session_recap_from_sqlite(
         "SELECT COUNT(*), SUM(total_tokens), SUM(total_cost_usd),
                 MIN(start_ns), MAX(COALESCE(end_ns, start_ns))
          FROM trace_stats
-         WHERE (session_key IS NOT NULL AND session_key = ?1) OR (launch_id IS NOT NULL AND launch_id = ?2)",
+         WHERE (?1 != '' AND session_key = ?1) OR (?2 != '' AND launch_id = ?2)",
         params![skey, lid],
         |r| Ok((
             r.get::<_, i64>(0)?,
@@ -356,7 +726,7 @@ fn populate_session_recap_from_sqlite(
     if let Ok(Some((ordinal, t_status, latency, prompt, output))) = c.query_row(
         "SELECT ordinal, status, latency_ms, input, output
          FROM trace_stats
-         WHERE (session_key IS NOT NULL AND session_key = ?1) OR (launch_id IS NOT NULL AND launch_id = ?2)
+         WHERE (?1 != '' AND session_key = ?1) OR (?2 != '' AND launch_id = ?2)
          ORDER BY ordinal DESC, start_ns DESC LIMIT 1",
         params![skey, lid],
         |r| Ok((
@@ -376,12 +746,29 @@ fn populate_session_recap_from_sqlite(
             }
         }
 
+        // If latest turn output is missing (e.g. turn is still open/running), query the latest completed output
+        if open_info.latest_turn_output.is_none() {
+            if let Ok(Some(prev_out)) = c.query_row(
+                "SELECT output FROM traces
+                 WHERE ((?1 != '' AND session_key = ?1) OR (?2 != '' AND launch_id = ?2))
+                   AND output IS NOT NULL AND trim(output) != ''
+                 ORDER BY ordinal DESC, start_ns DESC LIMIT 1",
+                params![skey, lid],
+                |r| r.get::<_, String>(0),
+            ).optional() {
+                let snip = format_output_snippet(&prev_out);
+                if !snip.is_empty() {
+                    open_info.latest_turn_output = Some(snip);
+                }
+            }
+        }
+
         // 4. In-flight (open) observation or latest observation
         let open_obs = c.query_row(
             "SELECT o.name, o.input,
                     (COALESCE(o.end_ns, strftime('%s','now')*1000000000) - o.start_ns) / 1000000
              FROM observations o JOIN traces t ON t.id = o.trace_id
-             WHERE ((t.session_key IS NOT NULL AND t.session_key = ?1) OR (t.launch_id IS NOT NULL AND t.launch_id = ?2))
+             WHERE ((?1 != '' AND t.session_key = ?1) OR (?2 != '' AND t.launch_id = ?2))
                AND o.end_ns IS NULL AND o.type IN ('tool', 'agent')
              ORDER BY o.start_ns DESC LIMIT 1",
             params![skey, lid],
@@ -393,21 +780,40 @@ fn populate_session_recap_from_sqlite(
             open_info.running_tool_duration_ms = Some(dur_ms);
             open_info.current_clue = parse_tool_clue(&tool_name, tool_input.as_deref(), Some(dur_ms));
             open_info.explanation = format!("Turn #{ordinal}: {}", open_info.current_clue);
-        } else if open_info.is_working {
-            open_info.current_clue = format!("Thinking / generating response on turn #{ordinal} ({t_status})");
-            open_info.explanation = open_info.current_clue.clone();
-        } else if open_info.status == "NeedsAttention" {
-            open_info.current_clue = format!("Waiting for user approval or response on turn #{ordinal}");
-            open_info.explanation = open_info.current_clue.clone();
         } else {
-            // Idle state: see what it finished
-            if let Some(ref out_snip) = open_info.latest_turn_output {
-                open_info.current_clue = format!("Idle, completed turn #{ordinal}. Last output: \"{out_snip}\"");
+            // Check the latest completed observation to provide context
+            let latest_obs = c.query_row(
+                "SELECT o.name, o.input,
+                        (COALESCE(o.end_ns, strftime('%s','now')*1000000000) - o.start_ns) / 1000000
+                 FROM observations o JOIN traces t ON t.id = o.trace_id
+                 WHERE ((?1 != '' AND t.session_key = ?1) OR (?2 != '' AND t.launch_id = ?2))
+                   AND o.type IN ('tool', 'agent')
+                 ORDER BY o.start_ns DESC LIMIT 1",
+                params![skey, lid],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?)),
+            ).optional().unwrap_or(None);
+
+            if open_info.is_working {
+                if let Some((tool_name, tool_input, _dur_ms)) = latest_obs {
+                    let tool_clue = parse_tool_clue(&tool_name, tool_input.as_deref(), None);
+                    open_info.current_clue = format!("Thinking / generating for turn #{ordinal} (after {tool_clue})");
+                } else {
+                    open_info.current_clue = format!("Thinking / generating response for turn #{ordinal} ({t_status})");
+                }
+                open_info.explanation = open_info.current_clue.clone();
+            } else if open_info.status == "NeedsAttention" {
+                open_info.current_clue = format!("Waiting for user approval or response on turn #{ordinal}");
+                open_info.explanation = open_info.current_clue.clone();
             } else {
-                let prompt_snip = prompt.as_deref().map(format_goal_snippet).unwrap_or_else(|| "none".into());
-                open_info.current_clue = format!("Idle, completed turn #{ordinal}. Awaiting next prompt (last: \"{prompt_snip}\")");
+                // Idle state: see what it finished
+                if let Some(ref out_snip) = open_info.latest_turn_output {
+                    open_info.current_clue = format!("Idle, completed turn #{ordinal}. Last output: \"{out_snip}\"");
+                } else {
+                    let prompt_snip = prompt.as_deref().map(format_goal_snippet).unwrap_or_else(|| "none".into());
+                    open_info.current_clue = format!("Idle, completed turn #{ordinal}. Awaiting next prompt (last: \"{prompt_snip}\")");
+                }
+                open_info.explanation = open_info.current_clue.clone();
             }
-            open_info.explanation = open_info.current_clue.clone();
         }
     }
 
@@ -422,7 +828,7 @@ fn populate_session_recap_from_sqlite(
            ) AS target_file
          FROM observations o
          JOIN traces t ON t.id = o.trace_id
-         WHERE ((t.session_key IS NOT NULL AND t.session_key = ?1) OR (t.launch_id IS NOT NULL AND t.launch_id = ?2))
+         WHERE ((?1 != '' AND t.session_key = ?1) OR (?2 != '' AND t.launch_id = ?2))
            AND o.type = 'tool'
            AND (o.name IN ('write_to_file', 'replace_file_content', 'Write', 'Edit')
                 OR lower(o.name) LIKE '%edit%'
@@ -450,7 +856,7 @@ fn populate_session_recap_from_sqlite(
            ) AS cmd
          FROM observations o
          JOIN traces t ON t.id = o.trace_id
-         WHERE ((t.session_key IS NOT NULL AND t.session_key = ?1) OR (t.launch_id IS NOT NULL AND t.launch_id = ?2))
+         WHERE ((?1 != '' AND t.session_key = ?1) OR (?2 != '' AND t.launch_id = ?2))
            AND o.type = 'tool'
            AND cmd IS NOT NULL AND trim(cmd) != ''
          ORDER BY o.start_ns DESC
@@ -472,7 +878,7 @@ fn populate_session_recap_from_sqlite(
         "SELECT o.name, COUNT(*)
          FROM observations o
          JOIN traces t ON t.id = o.trace_id
-         WHERE ((t.session_key IS NOT NULL AND t.session_key = ?1) OR (t.launch_id IS NOT NULL AND t.launch_id = ?2))
+         WHERE ((?1 != '' AND t.session_key = ?1) OR (?2 != '' AND t.launch_id = ?2))
            AND o.type = 'tool'
          GROUP BY o.name
          ORDER BY COUNT(*) DESC
@@ -490,7 +896,31 @@ fn populate_session_recap_from_sqlite(
         open_info.turns,
         &open_info.tool_counts,
         &open_info.files_modified,
+        &open_info.recent_commands,
     );
+
+    // 9. Supplement with in-memory trace_stats and terminal screen contents if session provided
+    if let Some(s) = session {
+        if let Some(ref ts) = s.trace_stats {
+            if open_info.turns == 0 && ts.turns > 0 {
+                open_info.turns = ts.turns;
+            }
+            if open_info.total_tokens.is_none() && ts.total_tokens.is_some() {
+                open_info.total_tokens = ts.total_tokens;
+            }
+            if open_info.cost_usd.is_none() && ts.cost_usd.is_some() {
+                open_info.cost_usd = ts.cost_usd;
+            }
+            if open_info.running_tool.is_none() && ts.running_tool.is_some() {
+                open_info.running_tool = ts.running_tool.clone();
+                if let Some(ref tool) = ts.running_tool {
+                    open_info.current_clue = format!("Executing tool '{tool}'");
+                    open_info.explanation = open_info.current_clue.clone();
+                }
+            }
+        }
+        apply_terminal_screen_fallback(s, open_info);
+    }
 }
 
 fn query_overnight_sessions_fallback(c: &Connection, analysis: &mut HeimdallAnalysis) {
@@ -544,7 +974,7 @@ fn query_overnight_sessions_fallback(c: &Connection, analysis: &mut HeimdallAnal
                     explanation: "Completed overnight session".to_string(),
                 };
 
-                populate_session_recap_from_sqlite(c, None, Some(&key), &mut s_info);
+                populate_session_recap_from_sqlite(c, None, Some(&key), &mut s_info, None);
                 analysis.open_sessions.push(s_info);
             }
         }
@@ -629,26 +1059,16 @@ pub fn query_heimdall_analysis(
             };
 
             if let Some(ref c) = conn {
-                // Find launch_id and session_key
-                let launch_id: Option<String> = session.trace.as_ref().map(|t| t.launch_id.clone()).or_else(|| {
-                    c.query_row(
-                        "SELECT id FROM launches WHERE agent_mux_session = ?1 ORDER BY started_ns DESC LIMIT 1",
-                        params![session.id as i64],
-                        |r| r.get::<_, String>(0),
-                    ).ok()
-                });
-
-                let session_key: Option<String> = if let Some(ref lid) = launch_id {
-                    c.query_row(
-                        "SELECT session_key FROM launches WHERE id = ?1",
-                        params![lid],
-                        |r| r.get::<_, Option<String>>(0),
-                    ).ok().flatten()
-                } else {
-                    None
-                };
-
-                populate_session_recap_from_sqlite(c, launch_id.as_deref(), session_key.as_deref(), &mut open_info);
+                let (launch_id, session_key) = resolve_session_key(c, session);
+                populate_session_recap_from_sqlite(
+                    c,
+                    launch_id.as_deref(),
+                    session_key.as_deref(),
+                    &mut open_info,
+                    Some(session),
+                );
+            } else {
+                apply_terminal_screen_fallback(session, &mut open_info);
             }
 
             if open_info.current_clue.is_empty() {
@@ -1003,5 +1423,43 @@ mod tests {
         assert!(prompt.contains("spec-wave"));
         assert!(prompt.contains("1200000 tokens"));
         assert!(prompt.contains("sqlite3"));
+    }
+
+    #[test]
+    fn test_format_goal_snippet() {
+        let raw1 = "<USER_REQUEST>\nfix the broken tests in src/auth.rs\n</USER_REQUEST>";
+        assert_eq!(format_goal_snippet(raw1), "fix the broken tests in src/auth.rs");
+
+        let raw2 = "# AGENTS.md\n<INSTRUCTIONS>\n</INSTRUCTIONS>\nAntigravity: optimize sql queries";
+        assert_eq!(format_goal_snippet(raw2), "optimize sql queries");
+
+        let raw3 = "Claude Code: refactor the state machine";
+        assert_eq!(format_goal_snippet(raw3), "refactor the state machine");
+    }
+
+    #[test]
+    fn test_format_output_snippet() {
+        let out1 = "### Compilation Finished\nAll 42 tests passed without error.";
+        assert_eq!(format_output_snippet(out1), "Compilation Finished: All 42 tests passed without error.");
+
+        let out2 = "```rust\nfn main() {}\n```\nDone with refactoring.";
+        assert_eq!(format_output_snippet(out2), "Done with refactoring.");
+    }
+
+    #[test]
+    fn test_extract_screen_clues() {
+        let screen = r#"
+╭────────────────────────────────────────╮
+│ Claude Code v1.2                       │
+╰────────────────────────────────────────╯
+> Add JWT token refresh logic
+Working on the auth service...
+Created refresh endpoint in auth.rs
+⠋ Running cargo test --test auth...
+"#;
+        let clues = extract_screen_clues(screen);
+        assert_eq!(clues.user_prompt.as_deref(), Some("Add JWT token refresh logic"));
+        assert!(clues.current_action.as_deref().unwrap_or("").contains("Running cargo test"));
+        assert_eq!(clues.last_output.as_deref(), Some("Created refresh endpoint in auth.rs"));
     }
 }
