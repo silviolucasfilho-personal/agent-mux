@@ -65,27 +65,63 @@ impl HeimdallHarness {
     }
 }
 
-/// State for the Heimdall harness picker dialog.
-#[derive(Debug, Clone, Default)]
+impl std::fmt::Display for HeimdallHarness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// State for the Agent harness picker dialog.
+#[derive(Debug, Clone)]
 pub struct HeimdallLauncherState {
     pub selected: usize,
     pub error: Option<String>,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub harnesses: Vec<HeimdallHarness>,
+}
+
+impl Default for HeimdallLauncherState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            error: None,
+            agent_id: "heimdall".into(),
+            agent_name: "Heimdall".into(),
+            harnesses: HeimdallHarness::ALL.to_vec(),
+        }
+    }
 }
 
 impl HeimdallLauncherState {
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn for_agent(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        harnesses: Vec<HeimdallHarness>,
+    ) -> Self {
+        let h = if harnesses.is_empty() {
+            HeimdallHarness::ALL.to_vec()
+        } else {
+            harnesses
+        };
         Self {
             selected: 0,
             error: None,
+            agent_id: id.into(),
+            agent_name: name.into(),
+            harnesses: h,
         }
     }
 
     pub fn selected_harness(&self) -> HeimdallHarness {
-        match self.selected {
-            0 => HeimdallHarness::Claude,
-            1 => HeimdallHarness::Codex,
-            _ => HeimdallHarness::Antigravity,
-        }
+        self.harnesses
+            .get(self.selected)
+            .copied()
+            .unwrap_or(HeimdallHarness::Claude)
     }
 
     pub fn move_up(&mut self) {
@@ -93,7 +129,7 @@ impl HeimdallLauncherState {
     }
 
     pub fn move_down(&mut self) {
-        if self.selected + 1 < HeimdallHarness::ALL.len() {
+        if self.selected + 1 < self.harnesses.len() {
             self.selected += 1;
         }
     }

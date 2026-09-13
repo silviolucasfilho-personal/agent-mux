@@ -209,7 +209,7 @@ async fn test_sidebar_mouse_click_selection() {
         },
     ];
 
-    let (active_rect, agents_rect, history_rect) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3);
+    let (active_rect, agents_rect, history_rect) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.agents.len());
 
     // Click in history area
     let click_hist = MouseEvent {

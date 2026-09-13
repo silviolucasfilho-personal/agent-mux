@@ -1703,6 +1703,10 @@ pub struct App {
     pub sidebar_hidden: bool,
     /// Overall terminal dimensions (rows, cols).
     pub terminal_size: (u16, u16),
+    /// Loaded autonomous agents available in the Agents sidebar section.
+    pub agents: Vec<crate::agent::AgentDefinition>,
+    /// Selected agent index in the Agents section.
+    pub selected_agent: usize,
 }
 
 impl App {
@@ -1718,6 +1722,7 @@ impl App {
         if history_sessions.is_empty() {
             history_sessions = history::discover_sessions(None, None, cur_dir.as_deref(), true);
         }
+        let agents = crate::agent::load_agents(None);
         App {
             sessions: Vec::new(),
             selected: 0,
@@ -1743,7 +1748,22 @@ impl App {
             sessions_file: None,
             sidebar_hidden: false,
             terminal_size: (27, 112),
+            agents,
+            selected_agent: 0,
         }
+    }
+
+    /// Reloads all agents from disk (~/.agent-mux/agents/ and ./.agent-mux/agents/).
+    pub fn reload_agents(&mut self) {
+        self.agents = crate::agent::load_agents(None);
+        if self.selected_agent >= self.agents.len() {
+            self.selected_agent = self.agents.len().saturating_sub(1);
+        }
+    }
+
+    /// Returns the currently selected agent definition, if any.
+    pub fn selected_agent(&self) -> Option<&crate::agent::AgentDefinition> {
+        self.agents.get(self.selected_agent)
     }
 
     /// Toggles the sidebar visibility, expanding or contracting the harness.
@@ -2271,7 +2291,7 @@ impl App {
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
-            let (active_rect, agents_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
+            let (active_rect, agents_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3, self.agents.len());
             if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
                 if ev.row > active_rect.y
                     && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
@@ -2295,6 +2315,16 @@ impl App {
                 return;
             } else if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height {
                 self.sidebar_section = SidebarSection::Agents;
+                if ev.row > agents_rect.y
+                    && ev.row < agents_rect.y + agents_rect.height.saturating_sub(1)
+                {
+                    let visible = usize::from(agents_rect.height.saturating_sub(2));
+                    let row = usize::from(ev.row - agents_rect.y - 1);
+                    let idx = ui::sidebar_window(self.selected_agent, self.agents.len(), visible) + row;
+                    if idx < self.agents.len() {
+                        self.selected_agent = idx;
+                    }
+                }
                 return;
             } else if ev.row >= history_rect.y && ev.row < history_rect.y + history_rect.height {
                 if ev.row > history_rect.y
@@ -2346,7 +2376,17 @@ impl App {
             ) =>
             {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
-                    let (_, _, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
+                    let (_, agents_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3, self.agents.len());
+                    if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height && !self.agents.is_empty() {
+                        let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
+                        if delta > 0 {
+                            self.selected_agent = (self.selected_agent + 1)
+                                .min(self.agents.len() - 1);
+                        } else {
+                            self.selected_agent = self.selected_agent.saturating_sub(1);
+                        }
+                        return;
+                    }
                     if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
                         let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
                         if delta > 0 {
@@ -2545,10 +2585,13 @@ impl App {
                                 self.selected += 1;
                             } else {
                                 self.sidebar_section = SidebarSection::Agents;
+                                self.selected_agent = 0;
                             }
                         }
                         SidebarSection::Agents => {
-                            if !self.history_sessions.is_empty() {
+                            if !self.agents.is_empty() && self.selected_agent + 1 < self.agents.len() {
+                                self.selected_agent += 1;
+                            } else if !self.history_sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::History;
                                 self.selected_history = 0;
                             }
@@ -2572,7 +2615,9 @@ impl App {
                             self.selected = self.selected.saturating_sub(1);
                         }
                         SidebarSection::Agents => {
-                            if !self.sessions.is_empty() {
+                            if self.selected_agent > 0 {
+                                self.selected_agent -= 1;
+                            } else if !self.sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::Active;
                                 self.selected = self.sessions.len() - 1;
                             }
@@ -2582,6 +2627,7 @@ impl App {
                                 self.selected_history -= 1;
                             } else {
                                 self.sidebar_section = SidebarSection::Agents;
+                                self.selected_agent = self.agents.len().saturating_sub(1);
                             }
                         }
                     }
@@ -2594,14 +2640,30 @@ impl App {
                     }
                 } else {
                     self.sidebar_section = match self.sidebar_section {
-                        SidebarSection::Active => SidebarSection::Agents,
+                        SidebarSection::Active => {
+                            self.reload_agents();
+                            SidebarSection::Agents
+                        }
                         SidebarSection::Agents => SidebarSection::History,
                         SidebarSection::History => SidebarSection::Active,
                     };
                 }
             }
             Action::OpenHeimdallLauncher => {
-                self.mode = Mode::HeimdallLauncher(crate::heimdall::HeimdallLauncherState::default());
+                let state = if let Some(agent) = self.agents.get(self.selected_agent) {
+                    crate::heimdall::HeimdallLauncherState::for_agent(
+                        agent.id.clone(),
+                        agent.name.clone(),
+                        if agent.harnesses.is_empty() {
+                            crate::heimdall::HeimdallHarness::ALL.to_vec()
+                        } else {
+                            agent.harnesses.clone()
+                        },
+                    )
+                } else {
+                    crate::heimdall::HeimdallLauncherState::default()
+                };
+                self.mode = Mode::HeimdallLauncher(state);
             }
             Action::HeimdallLauncherKey => {
                 self.handle_heimdall_launcher_key(key);
@@ -3087,24 +3149,36 @@ impl App {
                 state.move_down();
             }
             KeyCode::Char('1') | KeyCode::Char('c') | KeyCode::Char('C') => {
-                state.selected = 0;
+                if !state.harnesses.is_empty() {
+                    state.selected = 0;
+                }
             }
             KeyCode::Char('2') | KeyCode::Char('x') | KeyCode::Char('X') => {
-                state.selected = 1;
+                if state.harnesses.len() > 1 {
+                    state.selected = 1;
+                }
             }
             KeyCode::Char('3') | KeyCode::Char('a') | KeyCode::Char('A') => {
-                state.selected = 2;
+                if state.harnesses.len() > 2 {
+                    state.selected = 2;
+                }
             }
             KeyCode::Enter => {
+                let agent_id = state.agent_id.clone();
                 let harness = state.selected_harness();
-                match self.launch_heimdall(harness) {
+                let launch_res = if agent_id == "heimdall" {
+                    self.launch_heimdall(harness)
+                } else {
+                    self.launch_agent(&agent_id, harness)
+                };
+                match launch_res {
                     Ok(_) => {
                         self.sidebar_section = SidebarSection::Active;
                         self.mode = Mode::Attached;
                     }
                     Err(e) => {
                         self.mode = Mode::Control;
-                        self.notice = Some(Notice::error(format!("Heimdall launch failed: {e}")));
+                        self.notice = Some(Notice::error(format!("Agent launch failed: {e}")));
                     }
                 }
             }
@@ -3178,6 +3252,87 @@ impl App {
                 profile.args = vec![
                     "--prompt-interactive".into(),
                     prompt,
+                ];
+            }
+        }
+
+        let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let id = self.next_id;
+        let session = self.spawn_traced(id, profile, dir)?;
+        self.next_id += 1;
+        self.sessions.push(session);
+        self.selected = self.sessions.len() - 1;
+        self.sidebar_section = SidebarSection::Active;
+        self.mode = Mode::Attached;
+        if let Some(s) = self.sessions.last_mut() {
+            s.tracker.on_attach();
+        }
+        let _ = self.save_active_sessions();
+        Ok(self.selected)
+    }
+
+    /// Launches or attaches to a session running the chosen agent and AI harness.
+    pub fn launch_agent(
+        &mut self,
+        agent_id: &str,
+        harness: crate::heimdall::HeimdallHarness,
+    ) -> anyhow::Result<usize> {
+        let agent = self
+            .agents
+            .iter()
+            .find(|a| a.id == agent_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Agent '{agent_id}' not found"))?;
+
+        let target_name = format!("{} ({})", agent.name, harness.as_str());
+
+        // 1. If an active session for this harness already exists, attach to it
+        if let Some(idx) = self.sessions.iter().position(|s| s.profile.name == target_name) {
+            if matches!(self.sessions[idx].status(Instant::now()), Status::Working | Status::Idle) {
+                self.selected = idx;
+                self.sidebar_section = SidebarSection::Active;
+                self.mode = Mode::Attached;
+                if let Some(s) = self.sessions.get_mut(idx) {
+                    s.tracker.on_attach();
+                }
+                return Ok(idx);
+            }
+        }
+
+        // 2. Find base profile or create new
+        let mut profile = self
+            .profiles
+            .iter()
+            .find(|p| crate::harness::Harness::detect(&p.command) == Some(harness.to_harness()))
+            .cloned()
+            .unwrap_or_else(|| Profile {
+                name: target_name.clone(),
+                command: harness.as_str().to_string(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            });
+
+        profile.name = target_name;
+        match harness {
+            crate::heimdall::HeimdallHarness::Claude => {
+                profile.args = vec![
+                    "--append-system-prompt".into(),
+                    agent.instructions.clone(),
+                ];
+            }
+            crate::heimdall::HeimdallHarness::Codex => {
+                profile.args = vec![
+                    "--no-alt-screen".into(),
+                    agent.instructions.clone(),
+                ];
+            }
+            crate::heimdall::HeimdallHarness::Antigravity => {
+                profile.args = vec![
+                    "--prompt-interactive".into(),
+                    agent.instructions.clone(),
                 ];
             }
         }

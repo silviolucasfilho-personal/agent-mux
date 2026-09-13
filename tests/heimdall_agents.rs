@@ -71,7 +71,7 @@ async fn test_agents_sidebar_navigation_and_launcher() {
 
     // Mouse click in Agents area selects Agents section
     app.sidebar_section = SidebarSection::Active;
-    let (_, agents_rect, _) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3);
+    let (_, agents_rect, _) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.agents.len());
     let click_agents = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 5,
@@ -166,3 +166,68 @@ fn test_sqlite_heimdall_analysis_and_prompt_generation() {
     assert!(prompt.contains("125000 tokens"));
     assert!(prompt.contains("sqlite3"));
 }
+
+#[tokio::test]
+async fn test_dynamic_agents_discovery_and_selection() {
+    let temp_dir = TempDir::new().unwrap();
+    let agents_dir = temp_dir.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+
+    // Create a custom agent: architect.md
+    let architect_md = r#"---
+name: Architect
+icon: 🏗️
+description: Designs scalable systems and modular architectures.
+harnesses: [claude, codex]
+---
+You are the System Architect.
+Focus on high-level architecture, module decomposition, and API contracts.
+"#;
+    std::fs::write(agents_dir.join("architect.md"), architect_md).unwrap();
+
+    // Load agents specifying agents_dir
+    let agents = agent_mux::agent::load_agents(Some(&agents_dir));
+
+    // Both Heimdall (seeded) and Architect should be present
+    assert!(agents.iter().any(|a| a.id == "heimdall"));
+    let architect = agents.iter().find(|a| a.id == "architect").expect("architect loaded");
+    assert_eq!(architect.name, "Architect");
+    assert_eq!(architect.icon.as_deref(), Some("🏗️"));
+    assert_eq!(architect.harnesses.len(), 2);
+    assert_eq!(architect.harnesses[0], HeimdallHarness::Claude);
+    assert_eq!(architect.harnesses[1], HeimdallHarness::Codex);
+    assert!(architect.instructions.contains("System Architect"));
+
+    // Verify seeding of default heimdall.md in agents_dir
+    assert!(agents_dir.join("heimdall.md").exists());
+
+    // Initialize App and test switching between agents
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![make_shell_profile("test-session")], None, tx);
+    app.set_pane_size(24, 80);
+    app.agents = agents;
+    app.selected_agent = 0;
+
+    // Focus Agents sidebar
+    app.sidebar_section = SidebarSection::Agents;
+
+    // Down moves to next agent
+    if app.agents.len() > 1 {
+        app.handle_key(&key(KeyCode::Down), Instant::now());
+        assert_eq!(app.selected_agent, 1);
+
+        // Up moves back
+        app.handle_key(&key(KeyCode::Up), Instant::now());
+        assert_eq!(app.selected_agent, 0);
+    }
+
+    // Enter opens launcher for the selected agent
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    if let Mode::HeimdallLauncher(ref state) = app.mode {
+        assert_eq!(state.agent_id, app.agents[0].id);
+        assert_eq!(state.agent_name, app.agents[0].name);
+    }
+
+    app.kill_all();
+}
+

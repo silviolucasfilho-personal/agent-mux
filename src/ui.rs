@@ -30,12 +30,15 @@ pub fn sidebar_window(selected: usize, len: usize, visible: usize) -> usize {
     }
 }
 
-/// Splits the sidebar height into 25% active sessions, 3 rows for Agents (Heimdall), and remaining history sessions.
-pub fn sidebar_areas(total_height: u16) -> (Rect, Rect, Rect) {
+/// Splits the sidebar height into 25% active sessions, dynamic rows for Agents, and remaining history sessions.
+pub fn sidebar_areas(total_height: u16, agent_count: usize) -> (Rect, Rect, Rect) {
     let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
+    let agent_rows = (agent_count.max(1) as u16 + 2)
+        .min(total_height.saturating_sub(8) / 2)
+        .max(3);
     let [active, agents, history] = Layout::vertical([
         Constraint::Percentage(25),
-        Constraint::Length(3),
+        Constraint::Length(agent_rows),
         Constraint::Min(4),
     ])
     .areas(side_area);
@@ -244,12 +247,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let [active_area, agents_area, history_area] = Layout::vertical([
-        Constraint::Percentage(25),
-        Constraint::Length(3),
-        Constraint::Min(4),
-    ])
-    .areas(area);
+    let (active_area, agents_area, history_area) = sidebar_areas(area.height, app.agents.len());
 
     draw_active_sidebar(f, active_area, app, now);
     draw_agents_sidebar(f, agents_area, app);
@@ -340,11 +338,17 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
+    let title = if app.agents.is_empty() {
+        "Agents [0]".to_string()
+    } else {
+        let current = (app.selected_agent + 1).min(app.agents.len());
+        format!("Agents [{current}/{}]", app.agents.len())
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Span::styled(
-            " Agents ",
+            format!(" {title} "),
             if is_focused {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
@@ -352,34 +356,65 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
             },
         ));
 
-    let is_active = app
-        .sessions
-        .iter()
-        .any(|s| s.profile.name.starts_with("Heimdall"));
-    let marker = if is_focused { "> " } else { "  " };
-    let mut spans = vec![
-        Span::raw(marker),
-        Span::styled(
-            "Heimdall",
-            if is_focused {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            },
-        ),
-    ];
-    if is_active {
-        spans.push(Span::styled(" [active]", Style::default().fg(Color::Green)));
+    if app.agents.is_empty() {
+        let hint = Paragraph::new("no agents found\n\n~/.agent-mux/agents/").block(block);
+        f.render_widget(hint, area);
+        return;
     }
 
-    let line = Line::from(spans);
-    let item = ListItem::new(line);
-    let list_item = if is_focused {
-        item.style(Style::default().add_modifier(Modifier::REVERSED))
-    } else {
-        item
-    };
-    f.render_widget(List::new(vec![list_item]).block(block), area);
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = sidebar_window(app.selected_agent, app.agents.len(), visible);
+    let end = (start + visible.max(1)).min(app.agents.len());
+    let items: Vec<ListItem> = app.agents[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, agent)| {
+            let i = start + offset;
+            let is_selected = i == app.selected_agent;
+            let marker = if is_selected && is_focused {
+                "> "
+            } else if is_selected {
+                "* "
+            } else {
+                "  "
+            };
+
+            let is_active = app.sessions.iter().any(|s| {
+                s.profile.name.eq_ignore_ascii_case(&agent.name)
+                    || s.profile.name.starts_with(&agent.name)
+            });
+
+            let icon_str = agent.icon.as_deref().unwrap_or("⚡");
+            let mut spans = vec![
+                Span::raw(marker),
+                Span::styled(format!("{icon_str} "), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    &agent.name,
+                    if is_selected && is_focused {
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    } else if is_selected {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+            ];
+            if is_active {
+                spans.push(Span::styled(" [active]", Style::default().fg(Color::Green)));
+            }
+
+            let line = Line::from(spans);
+            let item = ListItem::new(line);
+            if is_selected && is_focused {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else if is_selected {
+                item.style(Style::default().fg(Color::Cyan))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
 }
 
 fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
@@ -467,7 +502,15 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         && app.sidebar_section == SidebarSection::Agents
         && matches!(app.mode, Mode::Control)
     {
-        draw_heimdall_preview(f, area, app, now);
+        if let Some(agent) = app.agents.get(app.selected_agent) {
+            if agent.id == "heimdall" {
+                draw_heimdall_preview(f, area, app, now);
+            } else {
+                draw_generic_agent_preview(f, area, agent, app, now);
+            }
+        } else {
+            draw_heimdall_preview(f, area, app, now);
+        }
         return;
     }
     if (!app.sidebar_hidden && app.sidebar_section == SidebarSection::History && matches!(app.mode, Mode::Control))
@@ -630,6 +673,139 @@ fn draw_history_preview(
         ]));
     }
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_generic_agent_preview(
+    f: &mut Frame,
+    area: Rect,
+    agent: &crate::agent::AgentDefinition,
+    app: &App,
+    _now: Instant,
+) {
+    let icon_str = agent.icon.as_deref().unwrap_or("⚡");
+    let title = format!(" {icon_str} {} — Autonomous Agent [{}] ", agent.name, agent.id);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title(Span::styled(
+            title,
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let [info_area, instructions_area, footer_area] = Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Min(6),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    // 1. Info block
+    let harnesses_str = if agent.harnesses.is_empty() {
+        "claude, codex, agy (all supported)".to_string()
+    } else {
+        agent
+            .harnesses
+            .iter()
+            .map(|h| h.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let origin_str = if agent.is_builtin {
+        "Built-in (seeded in ~/.agent-mux/agents/)".to_string()
+    } else if let Some(ref p) = agent.file_path {
+        p.to_string_lossy().into_owned()
+    } else {
+        "Custom agent".to_string()
+    };
+    let info_lines = vec![
+        Line::from(vec![
+            Span::styled("Agent ID:    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&agent.id, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("   Origin:     ", Style::default().fg(Color::DarkGray)),
+            Span::styled(origin_str, Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(vec![
+            Span::styled("Harnesses:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(harnesses_str, Style::default().fg(Color::Green)),
+            Span::styled("   Default:    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(agent.default_harness.as_str(), Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::styled("Description: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                if agent.description.is_empty() {
+                    "No description provided."
+                } else {
+                    &agent.description
+                },
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(info_lines), info_area);
+
+    // 2. Instructions block
+    let inst_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            " Persona & Prompt Instructions ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    let inst_inner = inst_block.inner(instructions_area);
+    f.render_widget(inst_block, instructions_area);
+
+    let inst_lines: Vec<Line> = agent
+        .instructions
+        .lines()
+        .map(|line| {
+            if line.starts_with("# ") {
+                Line::styled(line, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            } else if line.starts_with("## ") {
+                Line::styled(line, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            } else if line.starts_with("### ") {
+                Line::styled(line, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+            } else if line.starts_with("- ") || line.starts_with("* ") {
+                Line::styled(line, Style::default().fg(Color::White))
+            } else if line.starts_with("```") {
+                Line::styled(line, Style::default().fg(Color::DarkGray))
+            } else {
+                Line::styled(line, Style::default().fg(Color::Gray))
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(inst_lines), inst_inner);
+
+    // 3. Footer
+    let is_running = app.sessions.iter().any(|s| {
+        s.profile.name.eq_ignore_ascii_case(&agent.name)
+            || s.profile.name.starts_with(&agent.name)
+    });
+    let enter_action = if is_running {
+        format!("Attach to {} Session", agent.name)
+    } else {
+        format!("Launch {} Harness", agent.name)
+    };
+    let footer = Line::from(vec![
+        Span::styled(
+            "[Enter] ",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("{enter_action}   ")),
+        Span::styled(
+            "[Tab] ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("Switch Section   "),
+        Span::styled(
+            "[b] ",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("Toggle Sidebar"),
+    ]);
+    f.render_widget(Paragraph::new(footer), footer_area);
 }
 
 fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
@@ -932,7 +1108,7 @@ fn draw_heimdall_launcher(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
         .title(Span::styled(
-            " Launch Heimdall [Agents] ",
+            format!(" Launch {} [Agents] ", state.agent_name),
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
@@ -948,14 +1124,18 @@ fn draw_heimdall_launcher(
 
     let header_text = Paragraph::new(vec![
         Line::styled(
-            "Select an AI harness to run Heimdall:",
+            format!("Select an AI harness to run {}:", state.agent_name),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
     ]);
     f.render_widget(header_text, header_area);
 
-    let harnesses = crate::heimdall::HeimdallHarness::ALL;
+    let harnesses = if state.harnesses.is_empty() {
+        crate::heimdall::HeimdallHarness::ALL.as_slice()
+    } else {
+        state.harnesses.as_slice()
+    };
     let items: Vec<ListItem> = harnesses
         .iter()
         .enumerate()
@@ -964,7 +1144,7 @@ fn draw_heimdall_launcher(
             let marker = if is_selected { "> " } else { "  " };
             let num = idx + 1;
             let is_running = app.sessions.iter().any(|s| {
-                s.profile.name == format!("Heimdall ({})", h.as_str())
+                s.profile.name == format!("{} ({})", state.agent_name, h.as_str())
                     && matches!(s.status(Instant::now()), Status::Working | Status::Idle)
             });
             let running_tag = if is_running { " [active - attach]" } else { "" };
@@ -991,12 +1171,29 @@ fn draw_heimdall_launcher(
         .collect();
     f.render_widget(List::new(items), list_area);
 
-    let info_lines = vec![
-        Line::styled("Heimdall Capabilities:", Style::default().fg(Color::Yellow)),
-        Line::raw("• Explains open sessions and live activities via SQLite metadata"),
-        Line::raw("• Calculates skill token costs, execution latencies & bottlenecks"),
-        Line::raw("• Recommends concrete optimizations to reduce spend and latency"),
-    ];
+    let info_lines = if state.agent_id == "heimdall" {
+        vec![
+            Line::styled("Heimdall Capabilities:", Style::default().fg(Color::Yellow)),
+            Line::raw("• Explains open sessions and live activities via SQLite metadata"),
+            Line::raw("• Calculates skill token costs, execution latencies & bottlenecks"),
+            Line::raw("• Recommends concrete optimizations to reduce spend and latency"),
+        ]
+    } else if let Some(agent) = app.agents.iter().find(|a| a.id == state.agent_id) {
+        vec![
+            Line::styled(format!("{} Persona:", agent.name), Style::default().fg(Color::Yellow)),
+            Line::raw(if agent.description.is_empty() {
+                "Autonomous agent loaded from ~/.agent-mux/agents/"
+            } else {
+                &agent.description
+            }),
+            Line::styled("Prompt instructions configured and ready.", Style::default().fg(Color::DarkGray)),
+        ]
+    } else {
+        vec![
+            Line::styled(format!("{} Capabilities:", state.agent_name), Style::default().fg(Color::Yellow)),
+            Line::raw("• Autonomous agent session with persistent traces and monitoring"),
+        ]
+    };
     f.render_widget(Paragraph::new(info_lines), info_area);
 
     let hints = Line::from(vec![
