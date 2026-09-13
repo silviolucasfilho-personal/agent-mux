@@ -52,6 +52,7 @@ pub enum Action {
     RemoveSelected,
     RespawnSelected,
     ToggleTracing,
+    ToggleSidebar,
     ToggleSidebarSection,
     RestartHistorySession,
     ToggleHistoryAllProjects,
@@ -125,6 +126,7 @@ pub struct DispatchCtx {
     pub just_detached: bool,
     pub app_cursor: bool,
     pub sidebar_section: SidebarSection,
+    pub sidebar_hidden: bool,
 }
 
 fn is_ctrl_q(key: &KeyEvent) -> bool {
@@ -205,37 +207,63 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 };
             }
             match key.code {
+                KeyCode::Char('b') | KeyCode::Char('B') => Action::ToggleSidebar,
                 KeyCode::Tab | KeyCode::BackTab => Action::ToggleSidebarSection,
                 KeyCode::Char('j') | KeyCode::Down => Action::MoveDown,
                 KeyCode::Char('k') | KeyCode::Up => Action::MoveUp,
-                KeyCode::Char(c @ '1'..='9') if ctx.sidebar_section == SidebarSection::Active => {
+                KeyCode::Char(c @ '1'..='9')
+                    if ctx.sidebar_hidden || ctx.sidebar_section == SidebarSection::Active =>
+                {
                     Action::SelectSession(c as usize - '1' as usize)
                 }
-                KeyCode::Enter => match ctx.sidebar_section {
-                    SidebarSection::Active if ctx.selected_status.is_some() => Action::Attach,
-                    SidebarSection::History => Action::RestartHistorySession,
-                    _ => Action::None,
-                },
-                KeyCode::Char('r') => match ctx.sidebar_section {
-                    SidebarSection::Active => match ctx.selected_status {
-                        Some(Status::Exited(_)) => Action::RespawnSelected,
-                        _ => Action::None,
-                    },
-                    SidebarSection::History => Action::RestartHistorySession,
-                },
+                KeyCode::Enter => {
+                    if ctx.sidebar_hidden {
+                        if ctx.selected_status.is_some() {
+                            Action::Attach
+                        } else {
+                            Action::None
+                        }
+                    } else {
+                        match ctx.sidebar_section {
+                            SidebarSection::Active if ctx.selected_status.is_some() => Action::Attach,
+                            SidebarSection::History => Action::RestartHistorySession,
+                            _ => Action::None,
+                        }
+                    }
+                }
+                KeyCode::Char('r') => {
+                    if ctx.sidebar_hidden {
+                        match ctx.selected_status {
+                            Some(Status::Exited(_)) => Action::RespawnSelected,
+                            _ => Action::None,
+                        }
+                    } else {
+                        match ctx.sidebar_section {
+                            SidebarSection::Active => match ctx.selected_status {
+                                Some(Status::Exited(_)) => Action::RespawnSelected,
+                                _ => Action::None,
+                            },
+                            SidebarSection::History => Action::RestartHistorySession,
+                        }
+                    }
+                }
                 KeyCode::Char('a') | KeyCode::Char('A')
-                    if ctx.sidebar_section == SidebarSection::History =>
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::History =>
                 {
                     Action::ToggleHistoryAllProjects
                 }
                 KeyCode::Char('n') => Action::OpenNewSession,
                 KeyCode::Char('l') | KeyCode::Char('L') => Action::OpenSessionHistory,
-                KeyCode::Char('t') if ctx.sidebar_section == SidebarSection::Active => {
+                KeyCode::Char('t')
+                    if ctx.sidebar_hidden || ctx.sidebar_section == SidebarSection::Active =>
+                {
                     Action::ToggleTracing
                 }
                 KeyCode::Char('T') => Action::OpenTraceBrowser,
                 KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
-                KeyCode::Char('x') if ctx.sidebar_section == SidebarSection::Active => {
+                KeyCode::Char('x')
+                    if ctx.sidebar_hidden || ctx.sidebar_section == SidebarSection::Active =>
+                {
                     match ctx.selected_status {
                         Some(Status::Exited(_)) => Action::RemoveSelected,
                         Some(_) => Action::EnterConfirmKill,
@@ -1658,6 +1686,10 @@ pub struct App {
     trace_db_path: Option<std::path::PathBuf>,
     /// Optional override for the persistent sessions file path (defaults to ~/.agent-mux/sessions.json).
     pub sessions_file: Option<std::path::PathBuf>,
+    /// Whether the sidebar is currently hidden (full-screen harness).
+    pub sidebar_hidden: bool,
+    /// Overall terminal dimensions (rows, cols).
+    pub terminal_size: (u16, u16),
 }
 
 impl App {
@@ -1696,7 +1728,33 @@ impl App {
             tracing,
             trace_db_path,
             sessions_file: None,
+            sidebar_hidden: false,
+            terminal_size: (27, 112),
         }
+    }
+
+    /// Toggles the sidebar visibility, expanding or contracting the harness.
+    pub fn toggle_sidebar(&mut self) {
+        self.sidebar_hidden = !self.sidebar_hidden;
+        if self.sidebar_hidden {
+            self.sidebar_section = SidebarSection::Active;
+        }
+        let (rows, cols) = self.terminal_size;
+        let (pane_rows, pane_cols) = ui::main_pane_inner_dims(
+            ratatui::layout::Rect::new(0, 0, cols, rows),
+            self.sidebar_hidden,
+        );
+        self.set_pane_size(pane_rows, pane_cols);
+    }
+
+    /// Sets the terminal dimensions and updates the pane size accordingly.
+    pub fn set_terminal_size(&mut self, rows: u16, cols: u16) {
+        self.terminal_size = (rows, cols);
+        let (pane_rows, pane_cols) = ui::main_pane_inner_dims(
+            ratatui::layout::Rect::new(0, 0, cols, rows),
+            self.sidebar_hidden,
+        );
+        self.set_pane_size(pane_rows, pane_cols);
     }
 
     /// Sets a custom path for persistent sessions file.
@@ -1959,6 +2017,7 @@ impl App {
             just_detached: self.just_detached,
             app_cursor,
             sidebar_section: self.sidebar_section,
+            sidebar_hidden: self.sidebar_hidden,
         };
         let action = dispatch(&self.mode, key, &ctx);
         // any Control-mode key other than the literal-send consumes the flag
@@ -1989,6 +2048,7 @@ impl App {
             Copy,
             Paste,
             OpenSearch,
+            ToggleSidebar,
         }
         let chord = match (key.code, shift, ctrl) {
             (KeyCode::Up, true, _) => Chord::LineUp,
@@ -2009,6 +2069,7 @@ impl App {
             {
                 Chord::OpenSearch
             }
+            (KeyCode::Char('b') | KeyCode::Char('B'), true, true) => Chord::ToggleSidebar,
             _ => return false,
         };
         let page = i32::from(self.pane_size.0.saturating_sub(1).max(1));
@@ -2032,6 +2093,7 @@ impl App {
             Chord::OpenSearch => {
                 self.search = Some(SearchState::new());
             }
+            Chord::ToggleSidebar => self.toggle_sidebar(),
         }
         true
     }
@@ -2180,9 +2242,18 @@ impl App {
         if !matches!(self.mode, Mode::Control | Mode::Attached) {
             return;
         }
+        // Click on the status bar sidebar toggle button "[b] sidebar"
+        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
+            && ev.row >= self.terminal_size.0.saturating_sub(1)
+            && ev.column <= 12
+        {
+            self.toggle_sidebar();
+            return;
+        }
         // Left click on a sidebar row selects that session (and follows it
         // when attached). Only a fresh Down, never a drag that slid over.
-        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
+        if !self.sidebar_hidden
+            && matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
             && self.selection.as_ref().is_none_or(|a| !a.dragging)
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
@@ -2243,10 +2314,10 @@ impl App {
                 ev.kind,
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
             );
-        let pane_pos = ui::pane_local(ev.column, ev.row, self.pane_size);
+        let pane_pos = ui::pane_local_with_sidebar(ev.column, ev.row, self.pane_size, self.sidebar_hidden);
         let (lcol, lrow) = match pane_pos {
             Some(p) => p,
-            None if finalizing_drag => ui::pane_clamped(ev.column, ev.row, self.pane_size),
+            None if finalizing_drag => ui::pane_clamped_with_sidebar(ev.column, ev.row, self.pane_size, self.sidebar_hidden),
             // Wheel gestures should scroll the selected session even when
             // the pointer is over the sidebar. This is especially important
             // for macOS trackpads: the pointer often stays parked over the
@@ -2258,7 +2329,7 @@ impl App {
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
             ) =>
             {
-                if ev.column < ui::SIDEBAR_WIDTH {
+                if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
                     let (_, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
                     if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
                         let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
@@ -2444,46 +2515,63 @@ impl App {
             Action::None => {}
             Action::Quit => self.should_quit = true,
             Action::EnterConfirmQuit => self.mode = Mode::ConfirmQuit,
+            Action::ToggleSidebar => self.toggle_sidebar(),
             Action::MoveDown => {
                 self.selection = None;
-                match self.sidebar_section {
-                    SidebarSection::Active => {
-                        if !self.sessions.is_empty() && self.selected + 1 < self.sessions.len() {
-                            self.selected += 1;
-                        } else if !self.history_sessions.is_empty() {
-                            self.sidebar_section = SidebarSection::History;
-                            self.selected_history = 0;
-                        }
+                if self.sidebar_hidden {
+                    if !self.sessions.is_empty() {
+                        self.selected = (self.selected + 1).min(self.sessions.len() - 1);
                     }
-                    SidebarSection::History => {
-                        if !self.history_sessions.is_empty() {
-                            self.selected_history =
-                                (self.selected_history + 1).min(self.history_sessions.len() - 1);
+                } else {
+                    match self.sidebar_section {
+                        SidebarSection::Active => {
+                            if !self.sessions.is_empty() && self.selected + 1 < self.sessions.len() {
+                                self.selected += 1;
+                            } else if !self.history_sessions.is_empty() {
+                                self.sidebar_section = SidebarSection::History;
+                                self.selected_history = 0;
+                            }
+                        }
+                        SidebarSection::History => {
+                            if !self.history_sessions.is_empty() {
+                                self.selected_history =
+                                    (self.selected_history + 1).min(self.history_sessions.len() - 1);
+                            }
                         }
                     }
                 }
             }
             Action::MoveUp => {
                 self.selection = None;
-                match self.sidebar_section {
-                    SidebarSection::Active => {
-                        self.selected = self.selected.saturating_sub(1);
-                    }
-                    SidebarSection::History => {
-                        if self.selected_history > 0 {
-                            self.selected_history -= 1;
-                        } else if !self.sessions.is_empty() {
-                            self.sidebar_section = SidebarSection::Active;
-                            self.selected = self.sessions.len() - 1;
+                if self.sidebar_hidden {
+                    self.selected = self.selected.saturating_sub(1);
+                } else {
+                    match self.sidebar_section {
+                        SidebarSection::Active => {
+                            self.selected = self.selected.saturating_sub(1);
+                        }
+                        SidebarSection::History => {
+                            if self.selected_history > 0 {
+                                self.selected_history -= 1;
+                            } else if !self.sessions.is_empty() {
+                                self.sidebar_section = SidebarSection::Active;
+                                self.selected = self.sessions.len() - 1;
+                            }
                         }
                     }
                 }
             }
             Action::ToggleSidebarSection => {
-                self.sidebar_section = match self.sidebar_section {
-                    SidebarSection::Active => SidebarSection::History,
-                    SidebarSection::History => SidebarSection::Active,
-                };
+                if self.sidebar_hidden {
+                    if !self.sessions.is_empty() {
+                        self.selected = (self.selected + 1) % self.sessions.len();
+                    }
+                } else {
+                    self.sidebar_section = match self.sidebar_section {
+                        SidebarSection::Active => SidebarSection::History,
+                        SidebarSection::History => SidebarSection::Active,
+                    };
+                }
             }
             Action::RestartHistorySession => {
                 if let Some(summary) = self.history_sessions.get(self.selected_history).cloned() {
@@ -3122,6 +3210,8 @@ impl App {
             return;
         }
         self.pane_size = (rows, cols);
+        let side_w = if self.sidebar_hidden { 0 } else { ui::SIDEBAR_WIDTH };
+        self.terminal_size = (rows + 3, cols + side_w + 2);
         for s in &mut self.sessions {
             s.resize(rows, cols);
         }
@@ -3192,6 +3282,7 @@ mod dispatch_tests {
             just_detached: false,
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
+            sidebar_hidden: false,
         }
     }
 
@@ -3414,6 +3505,7 @@ mod confirm_modes {
             just_detached: false,
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
+            sidebar_hidden: false,
         }
     }
 
@@ -3931,6 +4023,7 @@ mod history_tests {
             just_detached: false,
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
+            sidebar_hidden: false,
         }
     }
 

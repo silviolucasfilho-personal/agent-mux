@@ -9,7 +9,6 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Rect;
 use std::io::stdout;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -180,14 +179,22 @@ async fn main() -> Result<()> {
         None => None,
     };
 
+    let raw_args: Vec<String> = std::env::args().collect();
+    let hide_sidebar = raw_args
+        .iter()
+        .any(|a| a == "--hide-sidebar" || a == "--full-screen" || a == "-b")
+        || cfg.hide_sidebar;
+
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut app = App::new(cfg.profiles, trace_rt, tx);
+    if hide_sidebar {
+        app.sidebar_hidden = true;
+    }
     if let Some(first) = startup_notices.into_iter().next() {
         app.notice = Some(agent_mux::app::Notice::warn(first));
     }
     let size = terminal.size()?;
-    let (rows, cols) = ui::main_pane_inner(Rect::new(0, 0, size.width, size.height));
-    app.set_pane_size(rows, cols);
+    app.set_terminal_size(size.height, size.width);
     app.restore_saved_sessions();
 
     let mut draw_err = None;
@@ -238,8 +245,7 @@ fn handle_event(app: &mut App, event: AppEvent) {
     match event {
         AppEvent::Key(k) => app.handle_key(&k, Instant::now()),
         AppEvent::Resize(cols, rows) => {
-            let (r, c) = ui::main_pane_inner(Rect::new(0, 0, cols, rows));
-            app.set_pane_size(r, c);
+            app.set_terminal_size(rows, cols);
         }
         AppEvent::PtyOutput { id, bytes } => app.handle_pty_output(id, &bytes, Instant::now()),
         AppEvent::PtyExit { id } => app.handle_pty_exit(id),

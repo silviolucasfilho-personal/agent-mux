@@ -225,3 +225,100 @@ async fn test_sidebar_mouse_click_selection() {
 
     app.kill_all();
 }
+
+#[tokio::test]
+async fn test_toggle_sidebar_and_fullscreen_harness() {
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![make_echo_profile("echo1")], None, tx);
+    app.set_pane_size(24, 80);
+
+    assert!(!app.sidebar_hidden);
+    assert_eq!(app.pane_size, (24, 80));
+
+    // Press 'b' in Control mode to hide the sidebar
+    app.handle_key(&key(KeyCode::Char('b')), Instant::now());
+    assert!(app.sidebar_hidden);
+    // When sidebar is hidden, pane columns expand by SIDEBAR_WIDTH (30)
+    assert_eq!(app.pane_size.1, 80 + agent_mux::ui::SIDEBAR_WIDTH);
+
+    // Press 'b' again to show the sidebar
+    app.handle_key(&key(KeyCode::Char('b')), Instant::now());
+    assert!(!app.sidebar_hidden);
+    assert_eq!(app.pane_size.1, 80);
+
+    // Now test while in Attached mode with Ctrl+Shift+B chord
+    let dialog_key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    app.mode = Mode::NewSession(agent_mux::app::DialogState::new(&app.profiles));
+    app.handle_key(&dialog_key, Instant::now());
+    app.mode = Mode::Attached;
+
+    let toggle_chord = KeyEvent::new(
+        KeyCode::Char('b'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    app.handle_key(&toggle_chord, Instant::now());
+    assert!(app.sidebar_hidden);
+    assert_eq!(app.pane_size.1, 80 + agent_mux::ui::SIDEBAR_WIDTH);
+
+    // Toggle back in Attached mode
+    app.handle_key(&toggle_chord, Instant::now());
+    assert!(!app.sidebar_hidden);
+    assert_eq!(app.pane_size.1, 80);
+
+    app.kill_all();
+}
+
+#[tokio::test]
+async fn test_sidebar_hidden_navigation_and_mouse_click() {
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(
+        vec![make_echo_profile("agent1"), make_echo_profile("agent2")],
+        None,
+        tx,
+    );
+    app.set_pane_size(24, 80);
+
+    // Spawn 2 sessions
+    app.mode = Mode::NewSession(agent_mux::app::DialogState::new(&app.profiles));
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+
+    app.mode = Mode::NewSession(agent_mux::app::DialogState::new(&app.profiles));
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+
+    assert_eq!(app.sessions.len(), 2);
+
+    // Hide sidebar
+    app.toggle_sidebar();
+    assert!(app.sidebar_hidden);
+
+    // In hidden sidebar, Tab cycles between active sessions
+    app.selected = 0;
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(app.selected, 1);
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(app.selected, 0);
+
+    // Down and Up navigate active sessions
+    app.handle_key(&key(KeyCode::Down), Instant::now());
+    assert_eq!(app.selected, 1);
+    app.handle_key(&key(KeyCode::Up), Instant::now());
+    assert_eq!(app.selected, 0);
+
+    // 1-9 jumps to session
+    app.handle_key(&key(KeyCode::Char('2')), Instant::now());
+    assert_eq!(app.selected, 1);
+    app.handle_key(&key(KeyCode::Char('1')), Instant::now());
+    assert_eq!(app.selected, 0);
+
+    // Click on status bar toggle (row >= terminal_size.0 - 1, col <= 18)
+    let click_status = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        row: app.terminal_size.0.saturating_sub(1),
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse(click_status, Instant::now());
+    assert!(!app.sidebar_hidden);
+
+    app.kill_all();
+}

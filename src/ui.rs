@@ -84,37 +84,76 @@ pub fn status_label_style(status: Status) -> (String, Style) {
 }
 
 /// (rows, cols) inside the main pane's borders, given the full terminal
-/// rect. Keep in sync with the Layout in draw(): 1 status-bar row at the
-/// bottom, SIDEBAR_WIDTH columns on the left, 1-cell border all around
-/// the main pane.
-pub fn main_pane_inner(total: Rect) -> (u16, u16) {
+/// rect and sidebar visibility. Keep in sync with the Layout in draw():
+/// 1 status-bar row at the bottom, optional SIDEBAR_WIDTH columns on the left,
+/// 1-cell border all around the main pane.
+pub fn main_pane_inner_dims(total: Rect, sidebar_hidden: bool) -> (u16, u16) {
+    let sidebar_w = if sidebar_hidden { 0 } else { SIDEBAR_WIDTH };
     let rows = total.height.saturating_sub(1).saturating_sub(2).max(1);
     let cols = total
         .width
-        .saturating_sub(SIDEBAR_WIDTH)
+        .saturating_sub(sidebar_w)
         .saturating_sub(2)
         .max(1);
     (rows, cols)
 }
 
-/// (x, y) of the main pane's interior top-left cell. Keep in sync with
-/// draw()'s layout: sidebar occupies columns 0..SIDEBAR_WIDTH, then the
-/// pane's own left border, then the interior; row 0 is the pane's top
-/// border. pane_local_matches_layout_math pins this against
-/// main_pane_inner's numbers.
+/// (rows, cols) inside the main pane's borders, assuming the sidebar is visible.
+pub fn main_pane_inner(total: Rect) -> (u16, u16) {
+    main_pane_inner_dims(total, false)
+}
+
+/// (x, y) of the main pane's interior top-left cell based on sidebar visibility.
+pub fn pane_origin(sidebar_hidden: bool) -> (u16, u16) {
+    if sidebar_hidden {
+        (1, 1)
+    } else {
+        (SIDEBAR_WIDTH + 1, 1)
+    }
+}
+
+/// (x, y) of the main pane's interior top-left cell when the sidebar is visible.
 pub const PANE_ORIGIN: (u16, u16) = (SIDEBAR_WIDTH + 1, 1);
 
-/// Translate absolute terminal coordinates into pane-local (col, row).
-/// `pane` is App's pane_size, i.e. (rows, cols). None = outside the pane
-/// interior (border cells count as outside).
-pub fn pane_local(col: u16, row: u16, pane: (u16, u16)) -> Option<(u16, u16)> {
+/// Translate absolute terminal coordinates into pane-local (col, row),
+/// accounting for whether the sidebar is currently hidden.
+pub fn pane_local_with_sidebar(
+    col: u16,
+    row: u16,
+    pane: (u16, u16),
+    sidebar_hidden: bool,
+) -> Option<(u16, u16)> {
     let (rows, cols) = pane;
-    let (x0, y0) = PANE_ORIGIN;
+    let (x0, y0) = pane_origin(sidebar_hidden);
     if col >= x0 && col < x0 + cols && row >= y0 && row < y0 + rows {
         Some((col - x0, row - y0))
     } else {
         None
     }
+}
+
+/// Translate absolute terminal coordinates into pane-local (col, row).
+/// `pane` is App's pane_size, i.e. (rows, cols). None = outside the pane
+/// interior (border cells count as outside).
+pub fn pane_local(col: u16, row: u16, pane: (u16, u16)) -> Option<(u16, u16)> {
+    pane_local_with_sidebar(col, row, pane, false)
+}
+
+/// Like `pane_local_with_sidebar`, but clamps out-of-range terminal coordinates into the
+/// pane interior instead of returning `None`.
+pub fn pane_clamped_with_sidebar(
+    col: u16,
+    row: u16,
+    pane: (u16, u16),
+    sidebar_hidden: bool,
+) -> (u16, u16) {
+    let (rows, cols) = pane;
+    let (x0, y0) = pane_origin(sidebar_hidden);
+    let max_x = x0 + cols.saturating_sub(1);
+    let max_y = y0 + rows.saturating_sub(1);
+    let cx = col.clamp(x0, max_x);
+    let cy = row.clamp(y0, max_y);
+    (cx - x0, cy - y0)
 }
 
 /// Like `pane_local`, but clamps out-of-range terminal coordinates into the
@@ -123,13 +162,7 @@ pub fn pane_local(col: u16, row: u16, pane: (u16, u16)) -> Option<(u16, u16)> {
 /// drag still needs a definite final position rather than being stranded
 /// with `dragging: true` forever.
 pub fn pane_clamped(col: u16, row: u16, pane: (u16, u16)) -> (u16, u16) {
-    let (rows, cols) = pane;
-    let (x0, y0) = PANE_ORIGIN;
-    let max_x = x0 + cols.saturating_sub(1);
-    let max_y = y0 + rows.saturating_sub(1);
-    let cx = col.clamp(x0, max_x);
-    let cy = row.clamp(y0, max_y);
-    (cx - x0, cy - y0)
+    pane_clamped_with_sidebar(col, row, pane, false)
 }
 
 /// Applies REVERSED to every cell of `inner` whose grid-absolute position
@@ -187,11 +220,14 @@ pub fn apply_search_highlight(
 
 pub fn draw(f: &mut Frame, app: &App, now: Instant) {
     let [body, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
-    let [side, main] =
-        Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
-
-    draw_sidebar(f, side, app, now);
-    draw_main(f, main, app, now);
+    if app.sidebar_hidden {
+        draw_main(f, body, app, now);
+    } else {
+        let [side, main] =
+            Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
+        draw_sidebar(f, side, app, now);
+        draw_main(f, main, app, now);
+    }
     draw_status_bar(f, bar, app);
 
     match &app.mode {
@@ -373,7 +409,7 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    if (app.sidebar_section == SidebarSection::History && matches!(app.mode, Mode::Control))
+    if (!app.sidebar_hidden && app.sidebar_section == SidebarSection::History && matches!(app.mode, Mode::Control))
         || app.sessions.is_empty()
     {
         if let Some(hist) = app.history_sessions.get(app.selected_history) {
@@ -560,18 +596,26 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     } else {
         match app.mode {
             Mode::Attached => Line::raw(
-                "ATTACHED — Ctrl+Q detach · Shift+↑/↓ or PgUp/PgDn scroll · Ctrl+Shift+C/V copy/paste · Ctrl+Shift+F search",
+                "ATTACHED — Ctrl+Q detach · Ctrl+Shift+B toggle sidebar · Shift+↑/↓ scroll · Ctrl+Shift+C/V copy/paste · Ctrl+Shift+F search",
             ),
-            Mode::Control => match app.sidebar_section {
-                SidebarSection::Active => Line::raw(
-                    "[j/k] select  [Enter] attach  [Tab] history  [n] new  [l] logs  [t] trace  [x] kill  [?] help  [q] quit",
-                ),
-                SidebarSection::History => Line::raw(
-                    "[j/k] select  [Enter/r] restart  [Tab] active  [a] all projects  [n] new  [l] logs  [?] help  [q] quit",
-                ),
-            },
+            Mode::Control => {
+                if app.sidebar_hidden {
+                    Line::raw(
+                        "[b] sidebar  [1-9/Tab] select  [Enter] attach  [n] new  [l] logs  [t] trace  [x] kill  [?] help  [q] quit",
+                    )
+                } else {
+                    match app.sidebar_section {
+                        SidebarSection::Active => Line::raw(
+                            "[b] sidebar  [j/k] select  [Enter] attach  [Tab] hist  [n] new  [l] logs  [t] trace  [?] help  [q] quit",
+                        ),
+                        SidebarSection::History => Line::raw(
+                            "[b] sidebar  [j/k] select  [Enter/r] restart  [Tab] active  [a] all  [n] new  [l] logs  [?] help  [q] quit",
+                        ),
+                    }
+                }
+            }
             _ => Line::raw(
-                "[j/k] select  [Enter] attach  [n] new  [l] logs  [t] trace  [T] traces  [x] kill  [?] help  [q] quit",
+                "[b] sidebar  [j/k] select  [Enter] attach  [n] new  [l] logs  [t] trace  [T] traces  [?] help  [q] quit",
             ),
         }
     };
@@ -599,9 +643,10 @@ fn draw_help(f: &mut Frame) {
     };
     let lines: Vec<Line> = vec![
         Line::styled("Control mode", head),
+        row("b", "toggle sidebar (hide / full harness)"),
         row("j/k, ↑/↓", "select session"),
         row("1-9", "jump to session N"),
-        row("Tab", "toggle active (25%) / history (75%)"),
+        row("Tab", "toggle active/history (cycle when hidden)"),
         row("Enter", "attach (active) or restart (history)"),
         row(
             "n",
@@ -613,11 +658,11 @@ fn draw_help(f: &mut Frame) {
             "● ◆ ◈",
             "badge glyphs: traced locally, to Langfuse, to both",
         ),
-        row("x", "kill session (remove if exited)"),
-        row("r", "respawn exited (active) or restart (history)"),
+        row("x / r", "kill session / respawn or restart"),
         row("q", "quit"),
         Line::raw(""),
         Line::styled("Attached mode", head),
+        row("Ctrl+Shift+B", "toggle sidebar / full-screen harness"),
         row("Ctrl+Q", "detach back to control mode"),
         row("Ctrl+Q Ctrl+Q", "send a literal Ctrl+Q to the agent"),
         Line::raw(""),
@@ -626,10 +671,9 @@ fn draw_help(f: &mut Frame) {
         row("PgUp/PgDn", "scroll one page (Fn+↑/↓ on macOS)"),
         row("Shift+Home/End", "jump to top / back to live"),
         row(
-            "mouse wheel",
-            "scroll (forwarded to the agent when it asks)",
+            "mouse",
+            "wheel to scroll, drag to select text",
         ),
-        row("mouse drag", "select text — copied on release"),
         row("Ctrl+Shift+C/V", "copy selection / paste"),
         row("Ctrl+Shift+F", "search scrollback (Ctrl+F in control mode)"),
         Line::raw(""),
@@ -2012,6 +2056,42 @@ mod tests {
         assert_eq!(pane_clamped(35, 0, pane), (4, 0));
         // below the pane -> clamps to the last row
         assert_eq!(pane_clamped(35, 100, pane), (4, 36));
+    }
+
+    #[test]
+    fn main_pane_inner_dims_accounts_for_hidden_sidebar() {
+        let total = ratatui::layout::Rect::new(0, 0, 100, 40);
+        // when sidebar is visible (SIDEBAR_WIDTH = 30):
+        // cols = 100 - 30 - 2 = 68, rows = 40 - 1 - 2 = 37
+        assert_eq!(main_pane_inner_dims(total, false), (37, 68));
+        // when sidebar is hidden:
+        // cols = 100 - 0 - 2 = 98, rows = 40 - 1 - 2 = 37
+        assert_eq!(main_pane_inner_dims(total, true), (37, 98));
+    }
+
+    #[test]
+    fn pane_local_with_sidebar_hidden() {
+        assert_eq!(pane_origin(true), (1, 1));
+        let pane = (37u16, 98u16);
+        assert_eq!(pane_local_with_sidebar(1, 1, pane, true), Some((0, 0)));
+        assert_eq!(pane_local_with_sidebar(1 + 97, 1 + 36, pane, true), Some((97, 36)));
+        assert_eq!(pane_local_with_sidebar(0, 1, pane, true), None); // left border
+        assert_eq!(pane_local_with_sidebar(1 + 98, 1, pane, true), None);
+    }
+
+    #[test]
+    fn hidden_sidebar_renders_full_width_harness() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(Config::default_profiles(), None, tx);
+        app.sidebar_hidden = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        // Sidebar active/history headers shouldn't be rendered
+        assert!(!text.contains("Active Sessions"), "unexpected sidebar in {text}");
+        assert!(!text.contains("Past Sessions"), "unexpected sidebar in {text}");
+        // Status bar advertises [b] sidebar
+        assert!(text.contains("[b] sidebar"), "missing sidebar hint: {text}");
     }
 
     #[test]

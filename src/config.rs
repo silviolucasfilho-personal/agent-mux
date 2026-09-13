@@ -138,6 +138,9 @@ pub struct Config {
     pub profiles: Vec<Profile>,
     #[serde(default, alias = "langfuse")]
     pub tracing: Option<TracingConfig>,
+    /// Whether the sidebar starts hidden (full-screen harness).
+    #[serde(default)]
+    pub hide_sidebar: bool,
     /// Which file `load()` accepted. Not part of the TOML.
     #[serde(skip)]
     pub loaded_from: Option<PathBuf>,
@@ -511,6 +514,7 @@ pub fn load() -> anyhow::Result<Config> {
     Ok(Config {
         profiles: Config::default_profiles(),
         tracing: None,
+        hide_sidebar: false,
         loaded_from: None,
         legacy_langfuse_section: false,
     })
@@ -533,6 +537,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
     Ok(Config {
         profiles: Config::default_profiles(),
         tracing: None,
+        hide_sidebar: false,
         loaded_from: None,
         legacy_langfuse_section: false,
     })
