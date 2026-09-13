@@ -1,6 +1,6 @@
 use crate::app::{
     App, BrowserPane, DialogContentMode, DialogField, DialogState, HistoryPane, HistoryState, Mode,
-    NoticeLevel, TraceBrowserState,
+    NoticeLevel, SidebarSection, TraceBrowserState,
 };
 use crate::status::Status;
 use crate::tracing::cli::{fmt_cost, fmt_ms, fmt_time, fmt_tokens};
@@ -28,6 +28,17 @@ pub fn sidebar_window(selected: usize, len: usize, visible: usize) -> usize {
     } else {
         0
     }
+}
+
+/// Splits the sidebar height into 25% active sessions and 75% history sessions.
+pub fn sidebar_areas(total_height: u16) -> (Rect, Rect) {
+    let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
+    let [active, history] = Layout::vertical([
+        Constraint::Percentage(25),
+        Constraint::Percentage(75),
+    ])
+    .areas(side_area);
+    (active, history)
 }
 
 /// Char-boundary-safe truncation with an ellipsis. Byte slicing here
@@ -195,17 +206,47 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
+    let [active_area, history_area] = Layout::vertical([
+        Constraint::Percentage(25),
+        Constraint::Percentage(75),
+    ])
+    .areas(area);
+
+    draw_active_sidebar(f, active_area, app, now);
+    draw_history_sidebar(f, history_area, app);
+}
+
+fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
+    let is_focused = app.sidebar_section == SidebarSection::Active
+        && matches!(app.mode, Mode::Control);
     let title = if app.sessions.is_empty() {
-        "agent-mux".to_string()
+        "Active [0]".to_string()
     } else {
-        format!("agent-mux [{}/{}]", app.selected + 1, app.sessions.len())
+        format!("Active [{}/{}]", app.selected + 1, app.sessions.len())
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let border_style = if is_focused {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(
+            format!(" {title} "),
+            if is_focused {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+
     if app.sessions.is_empty() {
         let hint = Paragraph::new("no sessions\n\n[n] new session").block(block);
         f.render_widget(hint, area);
         return;
     }
+
     let visible = usize::from(area.height.saturating_sub(2));
     let start = sidebar_window(app.selected, app.sessions.len(), visible);
     let end = (start + visible.max(1)).min(app.sessions.len());
@@ -215,8 +256,8 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         .map(|(offset, s)| {
             let i = start + offset;
             let (label, style) = status_label_style(s.status(now));
-            let marker = if i == app.selected { "> " } else { "  " };
-            // rows 1-9 are directly addressable from Control mode
+            let is_selected = i == app.selected;
+            let marker = if is_selected { "> " } else { "  " };
             let num = if i < 9 {
                 format!("{} ", i + 1)
             } else {
@@ -239,8 +280,90 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
             }
             let line = Line::from(spans);
             let item = ListItem::new(line);
-            if i == app.selected {
+            if is_selected && is_focused {
                 item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else if is_selected {
+                item.style(Style::default().fg(Color::Cyan))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
+fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
+    let is_focused = app.sidebar_section == SidebarSection::History
+        && matches!(app.mode, Mode::Control);
+    let title = if app.history_sessions.is_empty() {
+        "History [0]".to_string()
+    } else {
+        format!(
+            "History [{}/{}]",
+            app.selected_history + 1,
+            app.history_sessions.len()
+        )
+    };
+    let border_style = if is_focused {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(
+            format!(" {title} "),
+            if is_focused {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+
+    if app.history_sessions.is_empty() {
+        let hint = Paragraph::new("no history\nsessions found\n\n[a] all projects").block(block);
+        f.render_widget(hint, area);
+        return;
+    }
+
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = sidebar_window(app.selected_history, app.history_sessions.len(), visible);
+    let end = (start + visible.max(1)).min(app.history_sessions.len());
+    let items: Vec<ListItem> = app.history_sessions[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, s)| {
+            let i = start + offset;
+            let is_selected = i == app.selected_history;
+            let marker = if is_selected { "> " } else { "  " };
+            let (provider_badge, provider_style) = match s.provider {
+                crate::history::AgentProvider::Claude => {
+                    ("C", Style::default().fg(Color::Magenta))
+                }
+                crate::history::AgentProvider::Antigravity => {
+                    ("A", Style::default().fg(Color::Blue))
+                }
+            };
+            let max_title_len = (area.width as usize).saturating_sub(8).max(5);
+            let title = if s.title.chars().count() > max_title_len {
+                let mut truncated: String =
+                    s.title.chars().take(max_title_len.saturating_sub(1)).collect();
+                truncated.push('…');
+                truncated
+            } else {
+                s.title.clone()
+            };
+            let line = Line::from(vec![
+                Span::raw(marker.to_string()),
+                Span::styled(format!("[{provider_badge}] "), provider_style),
+                Span::raw(title),
+            ]);
+            let item = ListItem::new(line);
+            if is_selected && is_focused {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else if is_selected {
+                item.style(Style::default().fg(Color::Cyan))
             } else {
                 item
             }
@@ -250,6 +373,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
 }
 
 fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
+    if (app.sidebar_section == SidebarSection::History && matches!(app.mode, Mode::Control))
+        || app.sessions.is_empty()
+    {
+        if let Some(hist) = app.history_sessions.get(app.selected_history) {
+            draw_history_preview(f, area, hist, !app.sessions.is_empty());
+            return;
+        }
+    }
     let Some(session) = app.sessions.get(app.selected) else {
         let block = Block::default().borders(Borders::ALL).title("agent-mux");
         f.render_widget(
@@ -306,6 +437,104 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     }
 }
 
+fn draw_history_preview(
+    f: &mut Frame,
+    area: Rect,
+    summary: &crate::history::SessionSummary,
+    has_active: bool,
+) {
+    let provider_name = match summary.provider {
+        crate::history::AgentProvider::Claude => "Claude Code",
+        crate::history::AgentProvider::Antigravity => "Google Antigravity",
+    };
+    let title = format!(" History Session: {} ", summary.title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Title:        ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&summary.title, Style::default().add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled("Provider:     ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                provider_name,
+                match summary.provider {
+                    crate::history::AgentProvider::Claude => Style::default().fg(Color::Magenta),
+                    crate::history::AgentProvider::Antigravity => Style::default().fg(Color::Blue),
+                },
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Session ID:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&summary.session_id, Style::default().fg(Color::Yellow)),
+        ]),
+        Line::from(vec![
+            Span::styled("Directory:    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(
+                summary
+                    .cwd
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "Unknown".into()),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Turns:        ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("{}", summary.turn_count)),
+            Span::styled("    Modified: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&summary.timestamp_str),
+        ]),
+        Line::from(vec![
+            Span::styled("Transcript:   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                summary.file_path.display().to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Actions:      ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "[Enter] / [r] ",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Restart / resume this session in agent-mux"),
+        ]),
+        Line::from(vec![
+            Span::styled("              ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "[Tab]         ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Switch to active sessions"),
+        ]),
+        Line::from(vec![
+            Span::styled("              ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "[a]           ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("Toggle current project / all projects"),
+        ]),
+    ];
+    if has_active {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Tip: Active sessions are running in the top panel. Press [Tab] to view terminal.",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     let text = if let Some(st) = &app.search {
         let count = if st.matches.is_empty() {
@@ -333,6 +562,14 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
             Mode::Attached => Line::raw(
                 "ATTACHED — Ctrl+Q detach · Shift+↑/↓ or PgUp/PgDn scroll · Ctrl+Shift+C/V copy/paste · Ctrl+Shift+F search",
             ),
+            Mode::Control => match app.sidebar_section {
+                SidebarSection::Active => Line::raw(
+                    "[j/k] select  [Enter] attach  [Tab] history  [n] new  [l] logs  [t] trace  [x] kill  [?] help  [q] quit",
+                ),
+                SidebarSection::History => Line::raw(
+                    "[j/k] select  [Enter/r] restart  [Tab] active  [a] all projects  [n] new  [l] logs  [?] help  [q] quit",
+                ),
+            },
             _ => Line::raw(
                 "[j/k] select  [Enter] attach  [n] new  [l] logs  [t] trace  [T] traces  [x] kill  [?] help  [q] quit",
             ),
@@ -364,20 +601,20 @@ fn draw_help(f: &mut Frame) {
         Line::styled("Control mode", head),
         row("j/k, ↑/↓", "select session"),
         row("1-9", "jump to session N"),
-        row("Enter", "attach to selected session"),
+        row("Tab", "toggle active (25%) / history (75%)"),
+        row("Enter", "attach (active) or restart (history)"),
         row(
             "n",
             "new session (pick the trace backend: SQLite, Langfuse, both)",
         ),
         row("l", "browse past session logs"),
-        row("t", "toggle tracing (local SQLite store)"),
-        row("T", "browse local traces: turns, tools, tokens, cost"),
+        row("t / T", "toggle tracing / browse local traces"),
         row(
             "● ◆ ◈",
             "badge glyphs: traced locally, to Langfuse, to both",
         ),
         row("x", "kill session (remove if exited)"),
-        row("r", "respawn exited session"),
+        row("r", "respawn exited (active) or restart (history)"),
         row("q", "quit"),
         Line::raw(""),
         Line::styled("Attached mode", head),

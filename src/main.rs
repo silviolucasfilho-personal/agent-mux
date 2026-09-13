@@ -188,6 +188,7 @@ async fn main() -> Result<()> {
     let size = terminal.size()?;
     let (rows, cols) = ui::main_pane_inner(Rect::new(0, 0, size.width, size.height));
     app.set_pane_size(rows, cols);
+    app.restore_saved_sessions();
 
     let mut draw_err = None;
     let mut current_cursor_style = crossterm::cursor::SetCursorStyle::DefaultUserShape;
@@ -216,6 +217,8 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Save active sessions before kill_all, so they can be restored on restart.
+    let _ = app.save_active_sessions();
     // kill_all must run on every exit from the loop above -- including the
     // draw-error path -- so live PTY children are never orphaned when we quit.
     app.kill_all();

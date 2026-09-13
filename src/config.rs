@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Profile {
     pub name: String,
     pub command: String,
@@ -103,7 +103,7 @@ pub struct ModelPriceConfig {
 
 /// Per-profile override: all-Option so one key can be overridden while the
 /// rest fall through to the global section.
-#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct ProfileTracing {
     pub enabled: Option<bool>,
     /// "claude" | "codex" | "antigravity" | "none" — forces CLI-kind

@@ -3,6 +3,7 @@ use crate::events::AppEvent;
 use crate::history::{self, SessionSummary};
 use crate::keys::encode_key_with_mode;
 use crate::mouse::{WheelRoute, encode_mouse, route_wheel};
+use crate::persistence;
 use crate::search::SearchState;
 use crate::selection::{self, Pos, Selection};
 use crate::session::Session;
@@ -22,6 +23,13 @@ pub enum Mode {
     ConfirmKill,
     ConfirmQuit,
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarSection {
+    #[default]
+    Active,
+    History,
 }
 
 #[derive(Debug)]
@@ -44,6 +52,9 @@ pub enum Action {
     RemoveSelected,
     RespawnSelected,
     ToggleTracing,
+    ToggleSidebarSection,
+    RestartHistorySession,
+    ToggleHistoryAllProjects,
     CancelToControl,
     ForwardBytes(Vec<u8>),
     SendLiteralDetachKey,
@@ -113,6 +124,7 @@ pub struct DispatchCtx {
     pub any_working: bool,
     pub just_detached: bool,
     pub app_cursor: bool,
+    pub sidebar_section: SidebarSection,
 }
 
 fn is_ctrl_q(key: &KeyEvent) -> bool {
@@ -193,24 +205,43 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 };
             }
             match key.code {
+                KeyCode::Tab | KeyCode::BackTab => Action::ToggleSidebarSection,
                 KeyCode::Char('j') | KeyCode::Down => Action::MoveDown,
                 KeyCode::Char('k') | KeyCode::Up => Action::MoveUp,
-                KeyCode::Char(c @ '1'..='9') => Action::SelectSession(c as usize - '1' as usize),
-                KeyCode::Enter if ctx.selected_status.is_some() => Action::Attach,
-                KeyCode::Char('n') => Action::OpenNewSession,
-                KeyCode::Char('l') | KeyCode::Char('L') => Action::OpenSessionHistory,
-                KeyCode::Char('t') => Action::ToggleTracing,
-                KeyCode::Char('T') => Action::OpenTraceBrowser,
-                KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
-                KeyCode::Char('x') => match ctx.selected_status {
-                    Some(Status::Exited(_)) => Action::RemoveSelected,
-                    Some(_) => Action::EnterConfirmKill,
-                    None => Action::None,
-                },
-                KeyCode::Char('r') => match ctx.selected_status {
-                    Some(Status::Exited(_)) => Action::RespawnSelected,
+                KeyCode::Char(c @ '1'..='9') if ctx.sidebar_section == SidebarSection::Active => {
+                    Action::SelectSession(c as usize - '1' as usize)
+                }
+                KeyCode::Enter => match ctx.sidebar_section {
+                    SidebarSection::Active if ctx.selected_status.is_some() => Action::Attach,
+                    SidebarSection::History => Action::RestartHistorySession,
                     _ => Action::None,
                 },
+                KeyCode::Char('r') => match ctx.sidebar_section {
+                    SidebarSection::Active => match ctx.selected_status {
+                        Some(Status::Exited(_)) => Action::RespawnSelected,
+                        _ => Action::None,
+                    },
+                    SidebarSection::History => Action::RestartHistorySession,
+                },
+                KeyCode::Char('a') | KeyCode::Char('A')
+                    if ctx.sidebar_section == SidebarSection::History =>
+                {
+                    Action::ToggleHistoryAllProjects
+                }
+                KeyCode::Char('n') => Action::OpenNewSession,
+                KeyCode::Char('l') | KeyCode::Char('L') => Action::OpenSessionHistory,
+                KeyCode::Char('t') if ctx.sidebar_section == SidebarSection::Active => {
+                    Action::ToggleTracing
+                }
+                KeyCode::Char('T') => Action::OpenTraceBrowser,
+                KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
+                KeyCode::Char('x') if ctx.sidebar_section == SidebarSection::Active => {
+                    match ctx.selected_status {
+                        Some(Status::Exited(_)) => Action::RemoveSelected,
+                        Some(_) => Action::EnterConfirmKill,
+                        None => Action::None,
+                    }
+                }
                 KeyCode::Char('q') => {
                     if ctx.any_working {
                         Action::EnterConfirmQuit
@@ -1598,6 +1629,10 @@ enum DragOwner {
 pub struct App {
     pub sessions: Vec<Session>,
     pub selected: usize,
+    pub sidebar_section: SidebarSection,
+    pub history_sessions: Vec<SessionSummary>,
+    pub selected_history: usize,
+    pub history_all_projects: bool,
     pub mode: Mode,
     pub should_quit: bool,
     pub notice: Option<Notice>,
@@ -1621,6 +1656,8 @@ pub struct App {
     tracing: Option<crate::tracing::TraceRuntime>,
     /// Where the trace browser reads from; `None` when tracing is off.
     trace_db_path: Option<std::path::PathBuf>,
+    /// Optional override for the persistent sessions file path (defaults to ~/.agent-mux/sessions.json).
+    pub sessions_file: Option<std::path::PathBuf>,
 }
 
 impl App {
@@ -1630,9 +1667,19 @@ impl App {
         tx: Sender<AppEvent>,
     ) -> App {
         let trace_db_path = tracing.as_ref().map(|rt| rt.db_path().to_path_buf());
+        let cur_dir = std::env::current_dir().ok();
+        let mut history_sessions =
+            history::discover_sessions(None, None, cur_dir.as_deref(), false);
+        if history_sessions.is_empty() {
+            history_sessions = history::discover_sessions(None, None, cur_dir.as_deref(), true);
+        }
         App {
             sessions: Vec::new(),
             selected: 0,
+            sidebar_section: SidebarSection::Active,
+            history_sessions,
+            selected_history: 0,
+            history_all_projects: false,
             mode: Mode::Control,
             should_quit: false,
             notice: None,
@@ -1648,7 +1695,13 @@ impl App {
             tx,
             tracing,
             trace_db_path,
+            sessions_file: None,
         }
+    }
+
+    /// Sets a custom path for persistent sessions file.
+    pub fn set_sessions_file(&mut self, path: impl Into<std::path::PathBuf>) {
+        self.sessions_file = Some(path.into());
     }
 
     /// Periodic housekeeping driven by `AppEvent::Tick`: the trace browser
@@ -1657,6 +1710,84 @@ impl App {
         if let Mode::TraceBrowser(browser) = &mut self.mode {
             browser.refresh_if_live(now);
         }
+    }
+
+    /// Discovers and reloads history sessions from Claude Code and Antigravity logs.
+    pub fn reload_history_sessions(&mut self) {
+        let cur_dir = self
+            .sessions
+            .get(self.selected)
+            .map(|s| s.dir.clone())
+            .or_else(|| std::env::current_dir().ok());
+        let mut sessions = history::discover_sessions(
+            None,
+            None,
+            cur_dir.as_deref(),
+            self.history_all_projects,
+        );
+        if sessions.is_empty() && !self.history_all_projects {
+            sessions = history::discover_sessions(None, None, cur_dir.as_deref(), true);
+        }
+        self.history_sessions = sessions;
+        if self.selected_history >= self.history_sessions.len() {
+            self.selected_history = self.history_sessions.len().saturating_sub(1);
+        }
+    }
+
+    /// Persists active (non-exited) sessions to disk so they can be restored on restart.
+    pub fn save_active_sessions(&self) -> anyhow::Result<()> {
+        let Some(path) = self.sessions_file.clone().or_else(persistence::sessions_file_path) else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        let saved: Vec<persistence::SavedSession> = self
+            .sessions
+            .iter()
+            .filter(|s| !matches!(s.status(now), Status::Exited(_)))
+            .map(|s| persistence::SavedSession {
+                profile: s.profile.clone(),
+                dir: s.dir.clone(),
+            })
+            .collect();
+        persistence::save_sessions(&path, &saved)?;
+        Ok(())
+    }
+
+    /// Restores saved sessions from disk upon application startup.
+    pub fn restore_saved_sessions(&mut self) {
+        let Some(path) = self.sessions_file.clone().or_else(persistence::sessions_file_path) else {
+            return;
+        };
+        let saved = persistence::load_saved_sessions(&path);
+        if saved.is_empty() {
+            return;
+        }
+        for s in saved {
+            let dir = if s.dir.is_dir() {
+                s.dir
+            } else if let Ok(cwd) = std::env::current_dir() {
+                cwd
+            } else {
+                continue;
+            };
+            let id = self.next_id;
+            match self.spawn_traced(id, s.profile, dir) {
+                Ok(session) => {
+                    self.next_id += 1;
+                    self.sessions.push(session);
+                }
+                Err(e) => {
+                    self.notice = Some(Notice::warn(format!("Failed to restore session: {e}")));
+                }
+            }
+        }
+        if !self.sessions.is_empty() {
+            self.selected = 0;
+            self.sidebar_section = SidebarSection::Active;
+        } else if !self.history_sessions.is_empty() {
+            self.sidebar_section = SidebarSection::History;
+        }
+        let _ = self.save_active_sessions();
     }
 
     /// Spawns a session with tracing launch extras applied and the tracing
@@ -1827,6 +1958,7 @@ impl App {
                 .any(|s| matches!(s.status(now), Status::Working)),
             just_detached: self.just_detached,
             app_cursor,
+            sidebar_section: self.sidebar_section,
         };
         let action = dispatch(&self.mode, key, &ctx);
         // any Control-mode key other than the literal-send consumes the flag
@@ -2054,23 +2186,47 @@ impl App {
             && self.selection.as_ref().is_none_or(|a| !a.dragging)
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
-            && ev.row >= 1
         {
-            let visible = usize::from(self.pane_size.0);
-            let row = usize::from(ev.row) - 1;
-            if row < visible {
-                let idx = ui::sidebar_window(self.selected, self.sessions.len(), visible) + row;
-                if idx < self.sessions.len() && idx != self.selected {
-                    self.selection = None;
-                    self.selected = idx;
-                    if matches!(self.mode, Mode::Attached)
-                        && let Some(s) = self.sessions.get_mut(idx)
-                    {
-                        s.tracker.on_attach();
+            let (active_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
+            if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
+                if ev.row > active_rect.y
+                    && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
+                {
+                    let visible = usize::from(active_rect.height.saturating_sub(2));
+                    let row = usize::from(ev.row - active_rect.y - 1);
+                    let idx = ui::sidebar_window(self.selected, self.sessions.len(), visible) + row;
+                    if idx < self.sessions.len() {
+                        self.sidebar_section = SidebarSection::Active;
+                        if idx != self.selected {
+                            self.selection = None;
+                            self.selected = idx;
+                            if matches!(self.mode, Mode::Attached)
+                                && let Some(s) = self.sessions.get_mut(idx)
+                            {
+                                s.tracker.on_attach();
+                            }
+                        }
                     }
                 }
+                return;
+            } else if ev.row >= history_rect.y && ev.row < history_rect.y + history_rect.height {
+                if ev.row > history_rect.y
+                    && ev.row < history_rect.y + history_rect.height.saturating_sub(1)
+                {
+                    let visible = usize::from(history_rect.height.saturating_sub(2));
+                    let row = usize::from(ev.row - history_rect.y - 1);
+                    let idx = ui::sidebar_window(
+                        self.selected_history,
+                        self.history_sessions.len(),
+                        visible,
+                    ) + row;
+                    if idx < self.history_sessions.len() {
+                        self.sidebar_section = SidebarSection::History;
+                        self.selected_history = idx;
+                    }
+                }
+                return;
             }
-            return;
         }
         // A live left-button drag must be able to finish even if the
         // terminating Drag/Up event lands outside the pane (e.g. the mouse
@@ -2102,6 +2258,19 @@ impl App {
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
             ) =>
             {
+                if ev.column < ui::SIDEBAR_WIDTH {
+                    let (_, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
+                    if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
+                        let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
+                        if delta > 0 {
+                            self.selected_history = (self.selected_history + 1)
+                                .min(self.history_sessions.len() - 1);
+                        } else {
+                            self.selected_history = self.selected_history.saturating_sub(1);
+                        }
+                        return;
+                    }
+                }
                 let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
                     3
                 } else {
@@ -2277,18 +2446,59 @@ impl App {
             Action::EnterConfirmQuit => self.mode = Mode::ConfirmQuit,
             Action::MoveDown => {
                 self.selection = None;
-                if !self.sessions.is_empty() {
-                    self.selected = (self.selected + 1).min(self.sessions.len() - 1);
+                match self.sidebar_section {
+                    SidebarSection::Active => {
+                        if !self.sessions.is_empty() && self.selected + 1 < self.sessions.len() {
+                            self.selected += 1;
+                        } else if !self.history_sessions.is_empty() {
+                            self.sidebar_section = SidebarSection::History;
+                            self.selected_history = 0;
+                        }
+                    }
+                    SidebarSection::History => {
+                        if !self.history_sessions.is_empty() {
+                            self.selected_history =
+                                (self.selected_history + 1).min(self.history_sessions.len() - 1);
+                        }
+                    }
                 }
             }
             Action::MoveUp => {
                 self.selection = None;
-                self.selected = self.selected.saturating_sub(1);
+                match self.sidebar_section {
+                    SidebarSection::Active => {
+                        self.selected = self.selected.saturating_sub(1);
+                    }
+                    SidebarSection::History => {
+                        if self.selected_history > 0 {
+                            self.selected_history -= 1;
+                        } else if !self.sessions.is_empty() {
+                            self.sidebar_section = SidebarSection::Active;
+                            self.selected = self.sessions.len() - 1;
+                        }
+                    }
+                }
+            }
+            Action::ToggleSidebarSection => {
+                self.sidebar_section = match self.sidebar_section {
+                    SidebarSection::Active => SidebarSection::History,
+                    SidebarSection::History => SidebarSection::Active,
+                };
+            }
+            Action::RestartHistorySession => {
+                if let Some(summary) = self.history_sessions.get(self.selected_history).cloned() {
+                    self.resume_history_session(&summary);
+                }
+            }
+            Action::ToggleHistoryAllProjects => {
+                self.history_all_projects = !self.history_all_projects;
+                self.reload_history_sessions();
             }
             Action::SelectSession(idx) => {
                 if idx < self.sessions.len() {
                     self.selection = None;
                     self.selected = idx;
+                    self.sidebar_section = SidebarSection::Active;
                 }
             }
             Action::Attach => {
@@ -2337,6 +2547,7 @@ impl App {
                     s.kill();
                 }
                 self.mode = Mode::Control;
+                let _ = self.save_active_sessions();
             }
             Action::RemoveSelected => {
                 self.selection = None;
@@ -2345,6 +2556,10 @@ impl App {
                     if self.selected >= self.sessions.len() {
                         self.selected = self.sessions.len().saturating_sub(1);
                     }
+                    if self.sessions.is_empty() && !self.history_sessions.is_empty() {
+                        self.sidebar_section = SidebarSection::History;
+                    }
+                    let _ = self.save_active_sessions();
                 }
             }
             Action::OpenSessionHistory => {
@@ -2470,7 +2685,9 @@ impl App {
                         self.next_id += 1;
                         self.sessions.push(session);
                         self.selected = self.sessions.len() - 1;
+                        self.sidebar_section = SidebarSection::Active;
                         self.mode = Mode::Control;
+                        let _ = self.save_active_sessions();
                         if let Some(link) = link {
                             self.experiment_links.insert(id, link);
                         }
@@ -2734,7 +2951,7 @@ impl App {
         }
     }
 
-    fn resume_history_session(&mut self, summary: &SessionSummary) {
+    pub fn resume_history_session(&mut self, summary: &SessionSummary) {
         let harness = match summary.provider {
             crate::history::AgentProvider::Claude => crate::harness::Harness::Claude,
             crate::history::AgentProvider::Antigravity => crate::harness::Harness::Antigravity,
@@ -2794,7 +3011,9 @@ impl App {
                 self.next_id += 1;
                 self.sessions.push(session);
                 self.selected = self.sessions.len() - 1;
+                self.sidebar_section = SidebarSection::Active;
                 self.mode = Mode::Control;
+                let _ = self.save_active_sessions();
             }
             Err(e) => {
                 self.notice = Some(Notice::error(format!("Failed to resume session: {e}")));
@@ -2818,6 +3037,7 @@ impl App {
             Ok(session) => {
                 self.next_id += 1;
                 self.sessions[self.selected] = session;
+                let _ = self.save_active_sessions();
             }
             Err(e) => self.notice = Some(Notice::error(format!("respawn failed: {e}"))),
         }
@@ -2892,6 +3112,8 @@ impl App {
             if self.attached() == Some(i) {
                 self.mode = Mode::Control;
             }
+            self.reload_history_sessions();
+            let _ = self.save_active_sessions();
         }
     }
 
@@ -2969,6 +3191,7 @@ mod dispatch_tests {
             any_working: false,
             just_detached: false,
             app_cursor: false,
+            sidebar_section: SidebarSection::Active,
         }
     }
 
@@ -3190,6 +3413,7 @@ mod confirm_modes {
             any_working: false,
             just_detached: false,
             app_cursor: false,
+            sidebar_section: SidebarSection::Active,
         }
     }
 
@@ -3706,6 +3930,7 @@ mod history_tests {
             any_working: false,
             just_detached: false,
             app_cursor: false,
+            sidebar_section: SidebarSection::Active,
         }
     }
 

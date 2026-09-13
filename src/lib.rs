@@ -5,6 +5,7 @@ pub mod harness;
 pub mod history;
 pub mod keys;
 pub mod mouse;
+pub mod persistence;
 pub mod search;
 pub mod selection;
 pub mod session;
