@@ -2,6 +2,7 @@ pub mod app;
 pub mod config;
 pub mod events;
 pub mod harness;
+pub mod heimdall;
 pub mod history;
 pub mod keys;
 pub mod mouse;

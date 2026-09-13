@@ -23,12 +23,14 @@ pub enum Mode {
     ConfirmKill,
     ConfirmQuit,
     Help,
+    HeimdallLauncher(crate::heimdall::HeimdallLauncherState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SidebarSection {
     #[default]
     Active,
+    Gods,
     History,
 }
 
@@ -47,6 +49,7 @@ pub enum Action {
     OpenSessionHistory,
     OpenTraceBrowser,
     OpenHelp,
+    OpenHeimdallLauncher,
     KillSelected,
     EnterConfirmKill,
     RemoveSelected,
@@ -65,6 +68,8 @@ pub enum Action {
     HistoryKey,
     /// TraceBrowser mode: App routes the key to the TraceBrowserState it owns.
     BrowserKey,
+    /// HeimdallLauncher mode: App routes the key to the HeimdallLauncherState it owns.
+    HeimdallLauncherKey,
 }
 
 /// Severity of a status-bar notice. The old single `error: Option<String>`
@@ -226,6 +231,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     } else {
                         match ctx.sidebar_section {
                             SidebarSection::Active if ctx.selected_status.is_some() => Action::Attach,
+                            SidebarSection::Gods => Action::OpenHeimdallLauncher,
                             SidebarSection::History => Action::RestartHistorySession,
                             _ => Action::None,
                         }
@@ -243,9 +249,15 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                                 Some(Status::Exited(_)) => Action::RespawnSelected,
                                 _ => Action::None,
                             },
+                            SidebarSection::Gods => Action::OpenHeimdallLauncher,
                             SidebarSection::History => Action::RestartHistorySession,
                         }
                     }
+                }
+                KeyCode::Char('h') | KeyCode::Char('H')
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Gods =>
+                {
+                    Action::OpenHeimdallLauncher
                 }
                 KeyCode::Char('a') | KeyCode::Char('A')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::History =>
@@ -293,6 +305,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::NewSession(_) => Action::DialogKey,
         Mode::SessionHistory(_) => Action::HistoryKey,
         Mode::TraceBrowser(_) => Action::BrowserKey,
+        Mode::HeimdallLauncher(_) => Action::HeimdallLauncherKey,
         Mode::ConfirmKill => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::KillSelected,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
@@ -1683,7 +1696,7 @@ pub struct App {
     tx: Sender<AppEvent>,
     tracing: Option<crate::tracing::TraceRuntime>,
     /// Where the trace browser reads from; `None` when tracing is off.
-    trace_db_path: Option<std::path::PathBuf>,
+    pub trace_db_path: Option<std::path::PathBuf>,
     /// Optional override for the persistent sessions file path (defaults to ~/.agent-mux/sessions.json).
     pub sessions_file: Option<std::path::PathBuf>,
     /// Whether the sidebar is currently hidden (full-screen harness).
@@ -2258,7 +2271,7 @@ impl App {
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
-            let (active_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
+            let (active_rect, gods_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
             if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
                 if ev.row > active_rect.y
                     && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
@@ -2279,6 +2292,9 @@ impl App {
                         }
                     }
                 }
+                return;
+            } else if ev.row >= gods_rect.y && ev.row < gods_rect.y + gods_rect.height {
+                self.sidebar_section = SidebarSection::Gods;
                 return;
             } else if ev.row >= history_rect.y && ev.row < history_rect.y + history_rect.height {
                 if ev.row > history_rect.y
@@ -2330,7 +2346,7 @@ impl App {
             ) =>
             {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
-                    let (_, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
+                    let (_, _, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
                     if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
                         let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
                         if delta > 0 {
@@ -2527,7 +2543,12 @@ impl App {
                         SidebarSection::Active => {
                             if !self.sessions.is_empty() && self.selected + 1 < self.sessions.len() {
                                 self.selected += 1;
-                            } else if !self.history_sessions.is_empty() {
+                            } else {
+                                self.sidebar_section = SidebarSection::Gods;
+                            }
+                        }
+                        SidebarSection::Gods => {
+                            if !self.history_sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::History;
                                 self.selected_history = 0;
                             }
@@ -2550,12 +2571,17 @@ impl App {
                         SidebarSection::Active => {
                             self.selected = self.selected.saturating_sub(1);
                         }
+                        SidebarSection::Gods => {
+                            if !self.sessions.is_empty() {
+                                self.sidebar_section = SidebarSection::Active;
+                                self.selected = self.sessions.len() - 1;
+                            }
+                        }
                         SidebarSection::History => {
                             if self.selected_history > 0 {
                                 self.selected_history -= 1;
-                            } else if !self.sessions.is_empty() {
-                                self.sidebar_section = SidebarSection::Active;
-                                self.selected = self.sessions.len() - 1;
+                            } else {
+                                self.sidebar_section = SidebarSection::Gods;
                             }
                         }
                     }
@@ -2568,10 +2594,17 @@ impl App {
                     }
                 } else {
                     self.sidebar_section = match self.sidebar_section {
-                        SidebarSection::Active => SidebarSection::History,
+                        SidebarSection::Active => SidebarSection::Gods,
+                        SidebarSection::Gods => SidebarSection::History,
                         SidebarSection::History => SidebarSection::Active,
                     };
                 }
+            }
+            Action::OpenHeimdallLauncher => {
+                self.mode = Mode::HeimdallLauncher(crate::heimdall::HeimdallLauncherState::default());
+            }
+            Action::HeimdallLauncherKey => {
+                self.handle_heimdall_launcher_key(key);
             }
             Action::RestartHistorySession => {
                 if let Some(summary) = self.history_sessions.get(self.selected_history).cloned() {
@@ -3037,6 +3070,128 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_heimdall_launcher_key(&mut self, key: &KeyEvent) {
+        let Mode::HeimdallLauncher(ref mut state) = self.mode else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Control;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.move_up();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.move_down();
+            }
+            KeyCode::Char('1') | KeyCode::Char('c') | KeyCode::Char('C') => {
+                state.selected = 0;
+            }
+            KeyCode::Char('2') | KeyCode::Char('x') | KeyCode::Char('X') => {
+                state.selected = 1;
+            }
+            KeyCode::Char('3') | KeyCode::Char('a') | KeyCode::Char('A') => {
+                state.selected = 2;
+            }
+            KeyCode::Enter => {
+                let harness = state.selected_harness();
+                match self.launch_heimdall(harness) {
+                    Ok(_) => {
+                        self.sidebar_section = SidebarSection::Active;
+                        self.mode = Mode::Attached;
+                    }
+                    Err(e) => {
+                        self.mode = Mode::Control;
+                        self.notice = Some(Notice::error(format!("Heimdall launch failed: {e}")));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Launches or attaches to a Heimdall session running the chosen AI harness.
+    pub fn launch_heimdall(
+        &mut self,
+        harness: crate::heimdall::HeimdallHarness,
+    ) -> anyhow::Result<usize> {
+        let target_name = format!("Heimdall ({})", harness.as_str());
+
+        // 1. If an active session for this harness already exists, attach to it
+        if let Some(idx) = self.sessions.iter().position(|s| s.profile.name == target_name) {
+            if matches!(self.sessions[idx].status(Instant::now()), Status::Working | Status::Idle) {
+                self.selected = idx;
+                self.sidebar_section = SidebarSection::Active;
+                self.mode = Mode::Attached;
+                if let Some(s) = self.sessions.get_mut(idx) {
+                    s.tracker.on_attach();
+                }
+                return Ok(idx);
+            }
+        }
+
+        // 2. Query SQLite analysis
+        let db_path = self
+            .trace_db_path
+            .clone()
+            .unwrap_or_else(crate::heimdall::default_trace_db_path);
+        let analysis = crate::heimdall::query_heimdall_analysis(&db_path, &self.sessions, Instant::now());
+        let prompt = crate::heimdall::generate_heimdall_prompt(&analysis, &db_path);
+
+        // 3. Find base profile or create new
+        let mut profile = self
+            .profiles
+            .iter()
+            .find(|p| crate::harness::Harness::detect(&p.command) == Some(harness.to_harness()))
+            .cloned()
+            .unwrap_or_else(|| Profile {
+                name: target_name.clone(),
+                command: harness.as_str().to_string(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            });
+
+        profile.name = target_name;
+        match harness {
+            crate::heimdall::HeimdallHarness::Claude => {
+                profile.args = vec![
+                    "--append-system-prompt".into(),
+                    prompt,
+                    "Heimdall online. Reporting status of open sessions and skills.".into(),
+                ];
+            }
+            crate::heimdall::HeimdallHarness::Codex => {
+                profile.args = vec![
+                    "--no-alt-screen".into(),
+                    prompt,
+                ];
+            }
+            crate::heimdall::HeimdallHarness::Antigravity => {
+                profile.args = vec![
+                    "--prompt-interactive".into(),
+                    prompt,
+                ];
+            }
+        }
+
+        let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let id = self.next_id;
+        let session = self.spawn_traced(id, profile, dir)?;
+        self.next_id += 1;
+        self.sessions.push(session);
+        self.selected = self.sessions.len() - 1;
+        self.sidebar_section = SidebarSection::Active;
+        self.mode = Mode::Attached;
+        if let Some(s) = self.sessions.last_mut() {
+            s.tracker.on_attach();
+        }
+        let _ = self.save_active_sessions();
+        Ok(self.selected)
     }
 
     pub fn resume_history_session(&mut self, summary: &SessionSummary) {

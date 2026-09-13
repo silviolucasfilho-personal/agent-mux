@@ -30,15 +30,16 @@ pub fn sidebar_window(selected: usize, len: usize, visible: usize) -> usize {
     }
 }
 
-/// Splits the sidebar height into 25% active sessions and 75% history sessions.
-pub fn sidebar_areas(total_height: u16) -> (Rect, Rect) {
+/// Splits the sidebar height into 25% active sessions, 3 rows for Gods (Heimdall), and remaining history sessions.
+pub fn sidebar_areas(total_height: u16) -> (Rect, Rect, Rect) {
     let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
-    let [active, history] = Layout::vertical([
+    let [active, gods, history] = Layout::vertical([
         Constraint::Percentage(25),
-        Constraint::Percentage(75),
+        Constraint::Length(3),
+        Constraint::Min(4),
     ])
     .areas(side_area);
-    (active, history)
+    (active, gods, history)
 }
 
 /// Char-boundary-safe truncation with an ellipsis. Byte slicing here
@@ -237,18 +238,21 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::ConfirmKill => draw_confirm(f, "Kill this session? [y/n]"),
         Mode::ConfirmQuit => draw_confirm(f, "Sessions are still working. Quit anyway? [y/n]"),
         Mode::Help => draw_help(f),
+        Mode::HeimdallLauncher(launcher) => draw_heimdall_launcher(f, launcher, app),
         _ => {}
     }
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let [active_area, history_area] = Layout::vertical([
+    let [active_area, gods_area, history_area] = Layout::vertical([
         Constraint::Percentage(25),
-        Constraint::Percentage(75),
+        Constraint::Length(3),
+        Constraint::Min(4),
     ])
     .areas(area);
 
     draw_active_sidebar(f, active_area, app, now);
+    draw_gods_sidebar(f, gods_area, app);
     draw_history_sidebar(f, history_area, app);
 }
 
@@ -326,6 +330,56 @@ fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         })
         .collect();
     f.render_widget(List::new(items).block(block), area);
+}
+
+fn draw_gods_sidebar(f: &mut Frame, area: Rect, app: &App) {
+    let is_focused = app.sidebar_section == SidebarSection::Gods
+        && matches!(app.mode, Mode::Control);
+    let border_style = if is_focused {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(
+            " Gods ",
+            if is_focused {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+
+    let is_active = app
+        .sessions
+        .iter()
+        .any(|s| s.profile.name.starts_with("Heimdall"));
+    let marker = if is_focused { "> " } else { "  " };
+    let mut spans = vec![
+        Span::raw(marker),
+        Span::styled(
+            "Heimdall",
+            if is_focused {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            },
+        ),
+    ];
+    if is_active {
+        spans.push(Span::styled(" [active]", Style::default().fg(Color::Green)));
+    }
+
+    let line = Line::from(spans);
+    let item = ListItem::new(line);
+    let list_item = if is_focused {
+        item.style(Style::default().add_modifier(Modifier::REVERSED))
+    } else {
+        item
+    };
+    f.render_widget(List::new(vec![list_item]).block(block), area);
 }
 
 fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
@@ -409,6 +463,13 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
+    if !app.sidebar_hidden
+        && app.sidebar_section == SidebarSection::Gods
+        && matches!(app.mode, Mode::Control)
+    {
+        draw_heimdall_preview(f, area, app, now);
+        return;
+    }
     if (!app.sidebar_hidden && app.sidebar_section == SidebarSection::History && matches!(app.mode, Mode::Control))
         || app.sessions.is_empty()
     {
@@ -571,6 +632,337 @@ fn draw_history_preview(
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
+    let db_path = app
+        .trace_db_path
+        .clone()
+        .unwrap_or_else(crate::heimdall::default_trace_db_path);
+    let analysis = crate::heimdall::query_heimdall_analysis(&db_path, &app.sessions, now);
+
+    let title = " ⚡ HEIMDALL — Omniscient Monitor & Skill Optimizer [Gods] ";
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title(Span::styled(
+            title,
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let [summary_area, sessions_area, skills_area, footer_area] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Percentage(45),
+        Constraint::Min(6),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    // 1. Summary info
+    let summary_lines = vec![
+        Line::from(vec![
+            Span::styled("SQLite Store: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                db_path.display().to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled("  |  Sessions: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", analysis.total_sessions),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  |  Traces: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", analysis.total_traces),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  |  Observations: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", analysis.total_observations),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Live Status:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(
+                    "{} open session(s), {} skill(s) analyzed from SQLite metadata",
+                    analysis.open_sessions.len(),
+                    analysis.skills.len()
+                ),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(summary_lines), summary_area);
+
+    // 2. Open Sessions
+    let sessions_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            format!(" Open Sessions Activity ({}) ", analysis.open_sessions.len()),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    let sess_inner = sessions_block.inner(sessions_area);
+    f.render_widget(sessions_block, sessions_area);
+
+    if analysis.open_sessions.is_empty() {
+        let empty_msg = Paragraph::new(
+            "No active sessions are running.\nPress [n] to create a new session or [Enter] to launch Heimdall.",
+        )
+        .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(empty_msg, sess_inner);
+    } else {
+        let items: Vec<ListItem> = analysis
+            .open_sessions
+            .iter()
+            .map(|s| {
+                let status_style = if s.is_working {
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                let harness_str = s.harness.as_deref().unwrap_or("agent");
+                let toks = s.total_tokens.unwrap_or(0);
+                let cost = s.cost_usd.unwrap_or(0.0);
+                let lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!("Session #{} ", s.session_id + 1),
+                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(format!("[{}] ", s.name), Style::default().fg(Color::White)),
+                        Span::styled(format!("({harness_str}) "), Style::default().fg(Color::Magenta)),
+                        Span::styled(format!("[{}] ", s.status), status_style),
+                        Span::styled(format!("— {}", s.dir.display()), Style::default().fg(Color::DarkGray)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  Activity: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&s.explanation, Style::default().fg(Color::White)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  Metrics:  ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("{} turns", s.turns), Style::default().fg(Color::Yellow)),
+                        Span::raw(" | "),
+                        Span::styled(format!("{toks} tokens"), Style::default().fg(Color::Yellow)),
+                        Span::raw(" | "),
+                        Span::styled(format!("${cost:.3}"), Style::default().fg(Color::Yellow)),
+                    ]),
+                ];
+                ListItem::new(lines)
+            })
+            .collect();
+        f.render_widget(List::new(items), sess_inner);
+    }
+
+    // 3. Skills & Bottlenecks
+    let skills_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            format!(
+                " Skills Token Usage & Bottleneck Analysis ({}) ",
+                analysis.skills.len()
+            ),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    let skills_inner = skills_block.inner(skills_area);
+    f.render_widget(skills_block, skills_area);
+
+    if analysis.skills.is_empty() {
+        let empty_msg = Paragraph::new(
+            "No skill statistics recorded in SQLite traces.db yet.\nSkills will appear here once executed.",
+        )
+        .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(empty_msg, skills_inner);
+    } else {
+        let items: Vec<ListItem> = analysis
+            .skills
+            .iter()
+            .map(|sk| {
+                let toks = sk.tokens.unwrap_or(0);
+                let cost = sk.cost.unwrap_or(0.0);
+                let gen_ms = sk
+                    .avg_gen_latency_ms
+                    .map(|ms| format!("{ms}ms"))
+                    .unwrap_or_else(|| "n/a".into());
+                let tool_ms = sk
+                    .avg_tool_latency_ms
+                    .map(|ms| format!("{ms}ms"))
+                    .unwrap_or_else(|| "n/a".into());
+                let slowest_name = sk.slowest_tool_name.as_deref().unwrap_or("none");
+                let slowest_ms = sk.slowest_tool_latency_ms.unwrap_or(0);
+
+                let mut lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!("• Skill: {} ", sk.skill),
+                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("— {toks} tokens (${cost:.3}) "),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        Span::styled(
+                            format!("| Loaded: {} turns ({} unused)", sk.turns_loaded, sk.turns_unused),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  Latency:      ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(format!(
+                            "LLM Gen avg {gen_ms}, Tool Exec avg {tool_ms} (Slowest: '{slowest_name}' at {slowest_ms}ms, errors: {})",
+                            sk.error_count
+                        )),
+                    ]),
+                ];
+
+                if !sk.bottlenecks.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ⚠️  Bottleneck:  ", Style::default().fg(Color::Red)),
+                        Span::styled(sk.bottlenecks.join("; "), Style::default().fg(Color::LightRed)),
+                    ]));
+                }
+
+                if !sk.optimizations.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("  💡 Optimization: ", Style::default().fg(Color::Green)),
+                        Span::styled(sk.optimizations.join(" | "), Style::default().fg(Color::LightGreen)),
+                    ]));
+                }
+
+                ListItem::new(lines)
+            })
+            .collect();
+        f.render_widget(List::new(items), skills_inner);
+    }
+
+    // 4. Footer hints
+    let is_running = app
+        .sessions
+        .iter()
+        .any(|s| s.profile.name.starts_with("Heimdall"));
+    let enter_action = if is_running {
+        "Attach to Heimdall Harness"
+    } else {
+        "Launch Heimdall Harness (Claude / Codex / AGY)"
+    };
+    let footer = Line::from(vec![
+        Span::styled(
+            "[Enter] ",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("{enter_action}   ")),
+        Span::styled(
+            "[Tab] ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("Switch Section   "),
+        Span::styled(
+            "[b] ",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("Toggle Sidebar"),
+    ]);
+    f.render_widget(Paragraph::new(footer), footer_area);
+}
+
+fn draw_heimdall_launcher(
+    f: &mut Frame,
+    state: &crate::heimdall::HeimdallLauncherState,
+    app: &App,
+) {
+    let width = 68.min(f.area().width.saturating_sub(4)).max(48);
+    let height = 18.min(f.area().height.saturating_sub(2)).max(14);
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title(Span::styled(
+            " Launch Heimdall [Gods] ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let [header_area, list_area, info_area, hint_area] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(4),
+        Constraint::Min(4),
+        Constraint::Length(2),
+    ])
+    .areas(inner);
+
+    let header_text = Paragraph::new(vec![
+        Line::styled(
+            "Select an AI harness to run Heimdall:",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+    ]);
+    f.render_widget(header_text, header_area);
+
+    let harnesses = crate::heimdall::HeimdallHarness::ALL;
+    let items: Vec<ListItem> = harnesses
+        .iter()
+        .enumerate()
+        .map(|(idx, h)| {
+            let is_selected = idx == state.selected;
+            let marker = if is_selected { "> " } else { "  " };
+            let num = idx + 1;
+            let is_running = app.sessions.iter().any(|s| {
+                s.profile.name == format!("Heimdall ({})", h.as_str())
+                    && matches!(s.status(Instant::now()), Status::Working | Status::Idle)
+            });
+            let running_tag = if is_running { " [active - attach]" } else { "" };
+            let line = Line::from(vec![
+                Span::raw(marker),
+                Span::styled(format!("[{num}] "), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    h.display_name(),
+                    if is_selected {
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+                Span::styled(running_tag, Style::default().fg(Color::Green)),
+            ]);
+            let item = ListItem::new(line);
+            if is_selected {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items), list_area);
+
+    let info_lines = vec![
+        Line::styled("Heimdall Capabilities:", Style::default().fg(Color::Yellow)),
+        Line::raw("• Explains open sessions and live activities via SQLite metadata"),
+        Line::raw("• Calculates skill token costs, execution latencies & bottlenecks"),
+        Line::raw("• Recommends concrete optimizations to reduce spend and latency"),
+    ];
+    f.render_widget(Paragraph::new(info_lines), info_area);
+
+    let hints = Line::from(vec![
+        Span::styled(
+            "[Enter] ",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("Launch/Attach   "),
+        Span::styled("[1-3 / c,x,a] ", Style::default().fg(Color::Cyan)),
+        Span::raw("Select   "),
+        Span::styled("[Esc] ", Style::default().fg(Color::DarkGray)),
+        Span::raw("Cancel"),
+    ]);
+    f.render_widget(Paragraph::new(hints), hint_area);
+}
+
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     let text = if let Some(st) = &app.search {
         let count = if st.matches.is_empty() {
@@ -606,7 +998,10 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     match app.sidebar_section {
                         SidebarSection::Active => Line::raw(
-                            "[b] sidebar  [j/k] select  [Enter] attach  [Tab] hist  [n] new  [l] logs  [t] trace  [?] help  [q] quit",
+                            "[b] sidebar  [j/k] select  [Enter] attach  [Tab] gods  [n] new  [l] logs  [t] trace  [?] help  [q] quit",
+                        ),
+                        SidebarSection::Gods => Line::raw(
+                            "[b] sidebar  [j/k] select  [Enter] heimdall harness  [Tab] hist  [n] new  [?] help  [q] quit",
                         ),
                         SidebarSection::History => Line::raw(
                             "[b] sidebar  [j/k] select  [Enter/r] restart  [Tab] active  [a] all  [n] new  [l] logs  [?] help  [q] quit",
@@ -646,8 +1041,8 @@ fn draw_help(f: &mut Frame) {
         row("b", "toggle sidebar (hide / full harness)"),
         row("j/k, ↑/↓", "select session"),
         row("1-9", "jump to session N"),
-        row("Tab", "toggle active/history (cycle when hidden)"),
-        row("Enter", "attach (active) or restart (history)"),
+        row("Tab", "cycle active / gods / history sections"),
+        row("Enter", "attach (active), launch Heimdall (gods), or restart (history)"),
         row(
             "n",
             "new session (pick the trace backend: SQLite, Langfuse, both)",

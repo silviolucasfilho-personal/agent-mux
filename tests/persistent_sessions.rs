@@ -101,15 +101,21 @@ async fn test_sidebar_split_navigation() {
     // Starts in Active section
     assert_eq!(app.sidebar_section, SidebarSection::Active);
 
-    // Tab toggles to History
+    // Tab cycles: Active -> Gods -> History -> Active
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Gods);
+
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
 
-    // Tab toggles back to Active
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Active);
 
-    // Down at the end of active sessions transitions into History
+    // Down at the end of active sessions transitions into Gods
+    app.handle_key(&key(KeyCode::Down), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Gods);
+
+    // Down in Gods transitions into History
     app.handle_key(&key(KeyCode::Down), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
     assert_eq!(app.selected_history, 0);
@@ -122,7 +128,11 @@ async fn test_sidebar_split_navigation() {
     app.handle_key(&key(KeyCode::Up), Instant::now());
     assert_eq!(app.selected_history, 0);
 
-    // Up at top of History transitions back to Active
+    // Up at top of History transitions to Gods
+    app.handle_key(&key(KeyCode::Up), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Gods);
+
+    // Up in Gods transitions back to Active
     app.handle_key(&key(KeyCode::Up), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Active);
 
@@ -199,7 +209,7 @@ async fn test_sidebar_mouse_click_selection() {
         },
     ];
 
-    let (active_rect, history_rect) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3);
+    let (active_rect, gods_rect, history_rect) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3);
 
     // Click in history area
     let click_hist = MouseEvent {
@@ -211,6 +221,16 @@ async fn test_sidebar_mouse_click_selection() {
     app.handle_mouse(click_hist, Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
     assert_eq!(app.selected_history, 1);
+
+    // Click in gods area
+    let click_gods = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        row: gods_rect.y + 1,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse(click_gods, Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Gods);
 
     // Click in active area
     let click_active = MouseEvent {
