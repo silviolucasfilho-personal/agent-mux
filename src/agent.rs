@@ -6,8 +6,11 @@
 
 pub mod adapters;
 pub mod artifacts;
+pub mod cli;
 pub mod definition;
 pub mod discovery;
+pub mod install;
+pub mod launch;
 
 pub use artifacts::{render_artifacts, write_artifacts, ArtifactError, ArtifactSet};
 pub use crate::harness::Harness as HeimdallHarness;
@@ -16,6 +19,13 @@ pub use definition::{
 };
 pub use discovery::{
     bundled_agents_dir, discover_agents, migrate_legacy, DiscoveryReport, MigrationError,
+};
+pub use install::{
+    doctor_agent, install_agent, uninstall_agent, DoctorError, DoctorReport, DoctorStatus,
+    InstallError, InstallReport, UninstallReport,
+};
+pub use launch::{
+    build_agent_launch, selected_harness_index, AgentLaunch, LaunchError, LaunchOptions,
 };
 use std::path::{Path, PathBuf};
 

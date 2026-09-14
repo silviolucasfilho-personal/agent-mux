@@ -58,6 +58,13 @@ async fn main() -> Result<()> {
                 );
                 return Ok(());
             }
+            Some("agent") => {
+                if let Err(err) = agent_mux::agent::cli::handle_agent_cli(&args[2..]) {
+                    eprintln!("{err}");
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             _ => {}
         }
     }

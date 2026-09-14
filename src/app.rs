@@ -1838,6 +1838,8 @@ impl App {
             .map(|s| persistence::SavedSession {
                 profile: s.profile.clone(),
                 dir: s.dir.clone(),
+                agent_id: s.agent_id.clone(),
+                source_hash: s.source_hash.clone(),
             })
             .collect();
         persistence::save_sessions(&path, &saved)?;
@@ -1863,7 +1865,9 @@ impl App {
             };
             let id = self.next_id;
             match self.spawn_traced(id, s.profile, dir) {
-                Ok(session) => {
+                Ok(mut session) => {
+                    session.agent_id = s.agent_id;
+                    session.source_hash = s.source_hash;
                     self.next_id += 1;
                     self.sessions.push(session);
                 }
@@ -3303,29 +3307,34 @@ impl App {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Agent '{agent_id}' not found"))?;
 
-        let target_name = format!("{} ({})", agent.name, harness.as_str());
+        let target_harness = harness.to_harness();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-        // 1. If an active session for this harness already exists, attach to it
-        if let Some(idx) = self.sessions.iter().position(|s| s.profile.name == target_name) {
-            if matches!(self.sessions[idx].status(Instant::now()), Status::Working | Status::Idle) {
-                self.selected = idx;
-                self.sidebar_section = SidebarSection::Active;
-                self.mode = Mode::Attached;
-                if let Some(s) = self.sessions.get_mut(idx) {
-                    s.tracker.on_attach();
-                }
-                return Ok(idx);
+        // 1. If an active session for this agent + harness + workspace already exists, attach to it:
+        let now = Instant::now();
+        if let Some(idx) = self.sessions.iter().position(|s| {
+            s.agent_id.as_deref() == Some(agent_id)
+                && crate::harness::Harness::detect(&s.profile.command) == Some(target_harness)
+                && s.dir == cwd
+                && !matches!(s.status(now), Status::Exited(_))
+        }) {
+            self.selected = idx;
+            self.sidebar_section = SidebarSection::Active;
+            self.mode = Mode::Attached;
+            if let Some(s) = self.sessions.get_mut(idx) {
+                s.tracker.on_attach();
             }
+            return Ok(idx);
         }
 
         // 2. Find base profile or create new
-        let mut profile = self
+        let base_profile = self
             .profiles
             .iter()
-            .find(|p| crate::harness::Harness::detect(&p.command) == Some(harness.to_harness()))
+            .find(|p| crate::harness::Harness::detect(&p.command) == Some(target_harness))
             .cloned()
             .unwrap_or_else(|| Profile {
-                name: target_name.clone(),
+                name: format!("{} ({})", agent.name, harness.as_str()),
                 command: harness.as_str().to_string(),
                 args: vec![],
                 default_dir: None,
@@ -3334,31 +3343,27 @@ impl App {
                 bypass_approvals: None,
             });
 
-        profile.name = target_name;
-        match harness {
-            crate::heimdall::HeimdallHarness::Claude => {
-                profile.args = vec![
-                    "--append-system-prompt".into(),
-                    agent.instructions.clone(),
-                ];
-            }
-            crate::heimdall::HeimdallHarness::Codex => {
-                profile.args = vec![
-                    "--no-alt-screen".into(),
-                    agent.instructions.clone(),
-                ];
-            }
-            crate::heimdall::HeimdallHarness::Antigravity => {
-                profile.args = vec![
-                    "--prompt-interactive".into(),
-                    agent.instructions.clone(),
-                ];
-            }
-        }
+        let source_path = agent.file_path.as_deref().unwrap_or(std::path::Path::new("AGENTS.md"));
+        let artifacts = crate::agent::artifacts::render_artifacts(&agent, source_path)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let options = crate::agent::launch::LaunchOptions {
+            harness_override: Some(target_harness),
+            ..Default::default()
+        };
+
+        let launch = crate::agent::launch::build_agent_launch(
+            &agent,
+            &base_profile,
+            &options,
+            &cwd,
+            &artifacts,
+        ).map_err(|e| anyhow::anyhow!("{e}"))?;
+
         let id = self.next_id;
-        let session = self.spawn_traced(id, profile, dir)?;
+        let mut session = self.spawn_traced(id, launch.profile, launch.cwd)?;
+        session.agent_id = Some(agent.id.clone());
+        session.source_hash = Some(agent.source_hash.clone());
         self.next_id += 1;
         self.sessions.push(session);
         self.selected = self.sessions.len() - 1;

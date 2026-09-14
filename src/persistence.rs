@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 pub struct SavedSession {
     pub profile: Profile,
     pub dir: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_hash: Option<String>,
 }
 
 pub fn sessions_file_path() -> Option<PathBuf> {
@@ -61,6 +65,8 @@ mod tests {
                     bypass_approvals: Some(true),
                 },
                 dir: PathBuf::from("/tmp/project1"),
+                agent_id: Some("heimdall".into()),
+                source_hash: Some("abcdef123".into()),
             },
             SavedSession {
                 profile: Profile {
@@ -73,6 +79,8 @@ mod tests {
                     bypass_approvals: None,
                 },
                 dir: PathBuf::from("/tmp/project2"),
+                agent_id: None,
+                source_hash: None,
             },
         ];
 
