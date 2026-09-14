@@ -5,6 +5,8 @@ pub mod evidence;
 pub mod metrics;
 pub mod model;
 pub mod query;
+pub mod scope;
+pub mod service;
 
 pub use correlation::resolve_binding;
 pub use evidence::{extract_command, extract_target_file, snippet};

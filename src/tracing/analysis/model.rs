@@ -1,9 +1,8 @@
-//! Core domain and evidence types for trace analysis and session state.
-
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Canonical runtime states for an agent session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeState {
     Working,
@@ -28,7 +27,7 @@ impl RuntimeState {
 }
 
 /// Task completion outcome, distinct from process exit or closed turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskOutcome {
     Succeeded,
@@ -38,7 +37,7 @@ pub enum TaskOutcome {
 }
 
 /// Provenance sources for inferred or observed telemetry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceSource {
     Hook,
@@ -50,7 +49,7 @@ pub enum EvidenceSource {
 }
 
 /// Confidence classification for evidence values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
     Observed,
@@ -59,7 +58,7 @@ pub enum Confidence {
 }
 
 /// A qualified telemetry value carrying source and confidence metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Evidence<T> {
     pub value: Option<T>,
     pub source: EvidenceSource,
@@ -119,7 +118,7 @@ impl<T> Evidence<T> {
 }
 
 /// Binding between an agent-mux launch and a provider-native session key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Binding {
     pub launch_id: String,
     pub session_key: Option<String>,
@@ -161,7 +160,7 @@ impl From<rusqlite::Error> for AnalysisError {
 }
 
 /// Live process and session state captured from active mux instances.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LiveSession {
     pub run_id: String,
     pub launch_id: String,
@@ -175,14 +174,14 @@ pub struct LiveSession {
 }
 
 /// Breakdown of tool invocation counts by tool name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolCountSummary {
     pub name: String,
     pub count: i64,
 }
 
 /// Factual evidence-based summary card for an individual session.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionCard {
     pub session_key: Option<String>,
     pub launch_id: Option<String>,
@@ -218,7 +217,7 @@ pub struct SessionCard {
 }
 
 /// Executive briefing across sessions in a time window.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Briefing {
     pub cards: Vec<SessionCard>,
     pub scope_workspace: std::path::PathBuf,
@@ -233,7 +232,7 @@ pub struct Briefing {
 }
 
 /// Attribution and performance telemetry for an individual skill.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SkillMetricRow {
     pub skill_name: String,
     pub turns_loaded: i64,
