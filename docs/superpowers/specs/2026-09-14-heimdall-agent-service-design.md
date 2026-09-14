@@ -6,7 +6,9 @@ Baseline: `8ed92d4` (dynamic agent discovery and enhanced Heimdall summaries).
 
 ## 1. Outcome and scope
 
-Heimdall must provide the same evidence-backed monitoring and investigation capabilities when launched through Codex, Claude Code, or Antigravity (AGY). Agent definitions remain portable Markdown files owned by agent-mux. A shared Rust service computes facts and exposes them to the TUI, CLI, and a local MCP server. Harnesses interpret those facts and conduct investigations.
+Heimdall must provide the same evidence-backed monitoring and investigation capabilities when launched through Codex, Claude Code, or Antigravity (AGY). Every agent is defined completely by an `AGENTS.md` source and has generated artifacts for each harness. No agent may require an agent-specific Rust file, implementation branch, embedded persona, or compiled registration. A shared Rust service computes facts and exposes them to the TUI, CLI, and a local MCP server. Harnesses interpret those facts and conduct investigations.
+
+Adding, changing, or removing an agent must require only Markdown/configuration changes and artifact regeneration, never rebuilding agent-mux. This requirement applies equally to the bundled Heimdall agent and user-created agents. `AGENTS.md` is the canonical filename; the user's `ANGENTS.md` spelling is interpreted as referring to it.
 
 This spec extends the existing registry and tracing pipeline. It does not replace them. Delivery is split into three independently verifiable milestones:
 
@@ -24,7 +26,7 @@ Reuse:
 
 - `src/agent.rs`: global/workspace Markdown discovery, workspace overrides, default Heimdall seeding, agent metadata.
 - `src/app.rs`: agent picker, traced process launch, session attachment and persistence.
-- `src/heimdall.rs`: recap construction, skill analysis, terminal clues, prompt generation.
+- `src/heimdall.rs`: migrate reusable recap, analytics and terminal-clue logic into generic tracing services; move persona, workflow and presentation instructions into Heimdall's `AGENTS.md`, then remove the agent-specific module.
 - `src/tracing/`: provider adapters, hooks, correlation, canonical trace store, read-only queries, inventory, comparisons and experiments.
 
 Correct these baseline behaviors:
@@ -57,7 +59,7 @@ Managed execution is introduced only for optional background investigations in m
 ```mermaid
 flowchart TD
     H[Existing hooks and transcript readers] --> DB[Canonical SQLite trace store]
-    L[Live mux session snapshots] --> Q[Heimdall query core]
+    L[Live mux session snapshots] --> Q[Generic trace query core]
     DB --> Q
     Q --> UI[TUI and JSON CLI]
     Q --> MCP[Local stdio MCP server]
@@ -73,7 +75,9 @@ flowchart TD
 
 ## 4. Portable agent definition and launch contract
 
-Retain `.agent-mux/agents/*.md`, the global directory, and `AGENT_MUX_AGENTS_DIR`. Workspace definitions override global definitions by agent ID. Add optional fields to the current frontmatter:
+Use `.agent-mux/agents/<id>/AGENTS.md`, the equivalent global directory, and `AGENT_MUX_AGENTS_DIR`. Workspace definitions override global definitions by agent ID. Each package has one complete canonical source, including identity, instructions, initial task, tool requirements, output expectations and optional trigger declarations. Repository-root `AGENTS.md` remains repository guidance and is not implicitly treated as an agent package.
+
+The package source uses validated YAML frontmatter plus a Markdown instruction body:
 
 ```yaml
 ---
@@ -82,15 +86,53 @@ name: Heimdall
 description: Briefings and evidence-backed session investigations
 harnesses: [claude, codex, agy]
 default_harness: agy
-capabilities: [heimdall.read]
+capabilities: [trace.read]
+startup_task: "Read the current session briefing and report progress, blockers and evidence coverage."
+mcp_servers: [agent-mux]
 ---
+# Instructions
+Provide an executive briefing using agent_mux_get_briefing.
+Distinguish observed facts from terminal heuristics and cite evidence IDs.
 ```
 
-`capabilities` declares agent intent; it does not grant permissions by itself. Existing definitions without it retain existing launch behavior. Built-in Heimdall receives `heimdall.read`; the service still enforces workspace and content scope independently.
+`capabilities` declares agent intent; it does not grant permissions by itself. The service enforces workspace and content scope independently. Optional `triggers` select generic runtime events and provide investigation prompts and budgets declaratively; Rust must not choose a workflow by agent name or ID. Agent-specific output formats and prioritization rules belong in the instruction body. Generic code may supply facts but may not contain Heimdall's persona or briefing narrative.
+
+Legacy `.agent-mux/agents/*.md` definitions remain readable during migration. An explicit migration command copies each to `<id>/AGENTS.md`, preserving its original and reporting conflicts. Canonical package sources take precedence over legacy definitions of the same ID. Ship the default Heimdall source as a normal Markdown asset/package, never as a Rust string constant or `include_str!` persona. Existing user definitions are never replaced automatically.
 
 Use a real YAML parser with a validated typed schema. Preserve supported existing scalar/inline-list syntax. Reject malformed known fields with a visible filename and reason; warn on unknown fields to catch typos. Validate unique supported harnesses, a nonempty ID and instructions, and membership of `default_harness` in `harnesses`. If the default is omitted, choose the first supported harness. Deterministically reject duplicate IDs within one directory rather than letting filesystem iteration pick a winner. Do not overwrite existing seeded user definitions.
 
-Introduce one launch builder returning command, argument vector, environment overrides, resolved working directory, and launch metadata. Both generic agents and Heimdall use it. Heimdall supplies a context provider, not a separate harness switch statement.
+Introduce one launch builder returning command, argument vector, environment overrides, resolved working directory, and launch metadata. Every agent uses it. Generic capability providers supply trace context based on declarative requirements, never on `agent_id == "heimdall"`. Remove `launch_heimdall`, `HeimdallHarness`, and agent-specific picker/preview branches; reuse the generic harness enum and capability-selected preview components.
+
+### Required generated artifacts
+
+Every agent package must produce separate Claude, Codex and AGY artifacts from the same source through a generic renderer. Source files remain authoritative; generated output is disposable and must not become a second editable persona.
+
+```text
+.agent-mux/agents/<id>/
+  AGENTS.md
+  generated/
+    manifest.json
+    claude/
+      agent.md
+      launch.json
+      mcp.json
+    codex/
+      AGENTS.md
+      launch.json
+      mcp.toml
+    agy/
+      agent.md
+      launch.json
+      mcp.json
+```
+
+These are agent-mux staging paths, not claims about native harness discovery paths. Each adapter installs or passes them using its verified native conventions. Claude and AGY `agent.md` files contain the corresponding native agent metadata and translated instructions; Codex receives scoped `AGENTS.md` instructions plus launch/configuration artifacts. Do not overwrite a user's repository-root `AGENTS.md` to activate an agent. An adapter must provide supported instruction injection or an isolated instruction context while retaining the intended working directory.
+
+`launch.json` records the adapter-level initial task, configuration references and supported launch options, not credentials or transient trace snapshots. MCP fragments reference shared services and contain no agent-specific executable. If no MCP servers are requested, generate an explicit empty fragment. Emit artifacts for all three harnesses; an unsupported declared harness is marked disabled in the manifest and cannot be launched.
+
+The manifest records source path and hash, agent ID, schema/generator version, adapter compatibility, artifact hashes, and enabled harnesses. Generation is deterministic and atomic. Launch verifies hashes and regenerates stale owned artifacts; user edits to generated output cause a visible conflict, never a silent overwrite. Installation verifies ownership and retains rollback information. Removal deletes only owned generated/installed artifacts and preserves the canonical source unless explicitly requested.
+
+Proposed generic command: `agent-mux agent build <id> --harness all`. The renderer must work for an unknown agent ID without changing Rust or adding templates named after that ID.
 
 Requirements:
 
@@ -101,7 +143,7 @@ Requirements:
 - Use argument vectors and structured configuration, not shell interpolation. Preserve spaces, quotes, Unicode, and literal shell metacharacters.
 - Record `agent_id`, instruction hash, harness version, and configuration provenance with the launch. Attach using agent ID, provider, workspace, and active launch identity rather than display name. A session awaiting approval is attachable.
 - Keep existing working-directory selection semantics explicit in the resolved launch; do not accidentally use the global agent-definition directory as the workspace.
-- MCP-capable launches start with a short instruction to call `heimdall_get_briefing`. If MCP is unavailable, show the reason and use the bounded JSON CLI query fallback with an explicitly timestamped snapshot.
+- Launch runs the source-defined `startup_task`. Heimdall's Markdown requests `agent_mux_get_briefing`; other agents may request different tools or no tools. If a required MCP service is unavailable, show the reason and use a declared generic CLI capability fallback where available, with an explicitly timestamped snapshot.
 
 ## 5. Canonical identity and evidence
 
@@ -158,7 +200,7 @@ Report completed tool duration distributions (p50/p95/max and sample count), thr
 
 ## 7. Shared service and live data lifecycle
 
-Refactor Heimdall into focused modules for domain types, queries, correlation, evidence normalization, analytics, presentation, and launch context. Reuse `tracing::store::query` and existing comparisons rather than creating another ingestion pipeline.
+Move reusable logic into generic modules for domain types, queries, correlation, evidence normalization, analytics, presentation, and launch context. Reuse `tracing::store::query` and existing comparisons rather than creating another ingestion pipeline. No Rust module is named after or dedicated to an individual agent.
 
 The query core accepts a read-only trace connection, a clock, an optional immutable live snapshot, and a server-side scope. It does not spawn models, edit agent definitions, or mutate the trace database.
 
@@ -190,14 +232,14 @@ All names below are server-local names; client-specific prefixes are not part of
 
 | Tool | Inputs | Result data |
 | --- | --- | --- |
-| `heimdall_get_briefing` | optional `since`, `until`, `provider`, `cursor`, `limit` | Session cards, exact scope/window totals, prioritized evidence-based findings |
-| `heimdall_list_sessions` | optional `since`, `until`, `provider`, `runtime_state`, `cursor`, `limit` | Session identities, launch identities, states, correlation quality, usage coverage |
-| `heimdall_get_session` | required `session_key`; optional `launch_id` | Detailed recap, source references, active tools, coverage and correlation warnings |
-| `heimdall_get_timeline` | required `session_key`; optional `launch_id`, `cursor`, `limit` | Ordered turns and observations with IDs, nesting, duration and error classification |
-| `heimdall_search_traces` | required `query`; optional `session_key`, `provider`, `since`, `until`, `cursor`, `limit` | Scoped FTS matches with bounded excerpts and source IDs |
-| `heimdall_analyze_skills` | optional `skill`, `provider`, `since`, `until`, `cursor`, `limit` | Attribution, latency, error and usage metrics with sample sizes and limitations |
-| `heimdall_compare_runs` | required `a`, `b`, each an exact launch ID | Metric deltas, tool-path differences, task/model/config comparability warnings |
-| `heimdall_get_health` | empty object | Reader schema compatibility, collector freshness, content mode, provider coverage, available features |
+| `agent_mux_get_briefing` | optional `since`, `until`, `provider`, `cursor`, `limit` | Session cards, exact scope/window totals, prioritized evidence-based findings |
+| `agent_mux_list_sessions` | optional `since`, `until`, `provider`, `runtime_state`, `cursor`, `limit` | Session identities, launch identities, states, correlation quality, usage coverage |
+| `agent_mux_get_session` | required `session_key`; optional `launch_id` | Detailed recap, source references, active tools, coverage and correlation warnings |
+| `agent_mux_get_timeline` | required `session_key`; optional `launch_id`, `cursor`, `limit` | Ordered turns and observations with IDs, nesting, duration and error classification |
+| `agent_mux_search_traces` | required `query`; optional `session_key`, `provider`, `since`, `until`, `cursor`, `limit` | Scoped FTS matches with bounded excerpts and source IDs |
+| `agent_mux_analyze_skills` | optional `skill`, `provider`, `since`, `until`, `cursor`, `limit` | Attribution, latency, error and usage metrics with sample sizes and limitations |
+| `agent_mux_compare_runs` | required `a`, `b`, each an exact launch ID | Metric deltas, tool-path differences, task/model/config comparability warnings |
+| `agent_mux_get_health` | empty object | Reader schema compatibility, collector freshness, content mode, provider coverage, available features |
 
 Inputs use closed JSON object schemas. `provider` is `claude`, `codex`, or `antigravity`; `agy` is a CLI alias normalized at the boundary. IDs are nonempty strings; timestamps are RFC3339; invalid/reversed windows are rejected. Search text is limited to 4 KiB and compiled as an FTS query, never interpolated into SQL. List limit defaults to 20 and is capped at 100. Timelines sort by timestamp plus immutable ID; session lists sort by last activity plus session key.
 
@@ -237,7 +279,7 @@ The stdio process lifecycle follows the MCP [transport contract](https://modelco
 
 ## 9. Harness connection and standalone usage
 
-Each native launcher configures a local server named `heimdall` with an absolute executable path and separate arguments for the resolved DB and workspace. Prefer supported per-launch configuration. When a harness requires persistent configuration, provide an explicit install/update command that merges only the owned `heimdall` entry and preserves unrelated settings. Do not silently rewrite global configuration during ordinary launch.
+Each native launcher configures a local server named `agent-mux` with an absolute executable path and separate arguments for the resolved DB and workspace. Prefer supported per-launch configuration. When a harness requires persistent configuration, provide an explicit install/update command that merges only the owned `agent-mux` entry and preserves unrelated settings. Do not silently rewrite global configuration during ordinary launch.
 
 Proposed management commands:
 
@@ -246,7 +288,7 @@ agent-mux agent doctor heimdall --harness codex
 agent-mux agent install heimdall --harness codex --scope user
 agent-mux agent install heimdall --harness claude --scope workspace
 agent-mux agent install heimdall --harness agy --scope user
-agent-mux heimdall briefing --json [--since RFC3339] [--db PATH]
+agent-mux trace briefing --json [--since RFC3339] [--db PATH]
 ```
 
 `doctor` checks binary availability/version, supported configuration mechanism, executable resolution, schema compatibility and MCP initialization without making model calls. Installation is idempotent, records ownership and previous values, and refuses to replace an unowned conflicting entry. Generated native entrypoints refer to one agent-mux definition source; they are not independent copies of the persona. Definitions can therefore be used from standalone harness sessions as well as the mux.
@@ -257,9 +299,11 @@ Interactive entrypoint behavior: load current instructions, obtain a fresh brief
 
 ## 10. Durable review state and monitoring (milestone 3)
 
-Add an optional watcher command, `agent-mux heimdall watch`, with explicit start/stop/status controls. It can continue without the TUI while running, but no OS autostart registration is performed implicitly. It does not claim to observe new events if the tracing collector is absent.
+Add an optional watcher command, `agent-mux agent watch <id>`, with explicit start/stop/status controls. It can continue without the TUI while running, but no OS autostart registration is performed implicitly. It does not claim to observe new events if the tracing collector is absent.
 
-The trace database remains canonical for captured execution data. Store derived review state separately in `heimdall.db`, alongside the configured trace DB, with an independent schema and writer. MCP tools remain read-only; watcher and explicit CLI/TUI actions own these writes.
+The trace database remains canonical for captured execution data. Store derived review state separately in `agent-state.db`, alongside the configured trace DB, with an independent schema and writer. MCP tools remain read-only; watcher and explicit CLI/TUI actions own these writes.
+
+All review records are namespaced by agent ID, canonical source identity and workspace. The generic runtime consumes source-defined triggers and prompts; it contains no hard-coded Heimdall schedule or behavior.
 
 Logical records:
 
@@ -274,7 +318,7 @@ Detect completion/exit, approval waits, repeated classified errors and stale col
 
 Automatic model investigation is disabled by default. Enabling it requires a chosen harness, workspace scope, maximum jobs/hour, per-job timeout, and a supported turn/token/cost budget. Reject a budget mode the adapter cannot enforce. Initial defaults after enablement: at most one concurrent job, three jobs/hour, 120 seconds/job, and three turns/job. A cost ceiling is an additional option only where usage reporting supports enforcement; disclose reporting lag.
 
-Debounce related events for five seconds, deduplicate on session/finding type/evidence revision, and exclude Heimdall's own agent-tagged activity from triggering itself. Persist a job before execution. On restart, mark formerly running jobs interrupted and require a new explicit retry or fresh trigger; do not blindly replay a paid model call.
+Debounce related events for five seconds, deduplicate on session/finding type/evidence revision, and exclude the watching agent's own activity and descendant jobs from triggering itself. Persist a job before execution. On restart, mark formerly running jobs interrupted and require a new explicit retry or fresh trigger; do not blindly replay a paid model call.
 
 Managed adapters must support start, events, completion, cancellation, and resumable conversation identity where available. Preferred candidates are Codex App Server, Claude's structured CLI/Agent SDK, and AGY's structured streaming CLI; these are adapter choices subject to version-specific compatibility tests, not a shared wire protocol assumption. No adapter may drive interactive sessions by simulated keystrokes.
 
@@ -295,16 +339,17 @@ Suggested source organization (names may follow existing conventions):
 | Area | Responsibility |
 | --- | --- |
 | `agent.rs` / `agent/` | Validated definition, discovery, deterministic overrides, launch identity |
+| `agent/artifacts.rs` / harness renderers | Deterministic source-to-artifact generation, manifest and drift checks |
 | `harness.rs` / adapter modules | Native launch/configuration capability handling |
-| `heimdall/model.rs` | Versioned domain types and evidence semantics |
-| `heimdall/query.rs` | Scoped reads, session selection, exact counts |
-| `heimdall/correlation.rs` | Exact binding and candidate-only fallbacks |
-| `heimdall/evidence.rs` | Tool normalization, terminal heuristics and safe snippets |
-| `heimdall/analytics.rs` | Measured metrics and qualified findings |
-| `heimdall/service.rs` | Limits, snapshots, caching and cancellation |
-| `heimdall/mcp.rs` | Protocol transport and schema mapping |
-| `heimdall/cli.rs` | Briefing, doctor and connection management |
-| `heimdall/watch.rs`, `heimdall/state.rs` | Milestone 3 jobs, review cursors and findings |
+| `tracing/analysis/model.rs` | Versioned domain types and evidence semantics |
+| `tracing/analysis/query.rs` | Scoped reads, session selection, exact counts |
+| `tracing/analysis/correlation.rs` | Exact binding and candidate-only fallbacks |
+| `tracing/analysis/evidence.rs` | Tool normalization, terminal heuristics and safe snippets |
+| `tracing/analysis/metrics.rs` | Measured metrics and qualified findings |
+| `tracing/analysis/service.rs` | Limits, snapshots, caching and cancellation |
+| `mcp/server.rs` | Protocol transport and schema mapping |
+| `agent/cli.rs`, `tracing/cli.rs` | Briefing, doctor and connection management |
+| `agent/watch.rs`, `agent/state.rs` | Milestone 3 jobs, review cursors and findings |
 | `app.rs`, `ui.rs`, `main.rs` | Thin integration, background refresh and command routing |
 
 Milestone 1 changes behavior without requiring MCP. Milestone 2 adds protocol support and per-harness installation/launch integration. Milestone 3 adds derived persistence and optional scheduling. No milestone rewrites unrelated tracing/export functionality.
@@ -313,6 +358,10 @@ Milestone 1 changes behavior without requiring MCP. Milestone 2 adds protocol su
 
 Milestone 1:
 
+- Add a new agent solely through `<id>/AGENTS.md`; build all three artifact sets, discover and launch it without modifying Rust or rebuilding the binary.
+- Remove the Heimdall-specific Rust module, embedded default persona and ID-based dispatch. A source scan and launch tests verify that all agents use the generic runtime.
+- Changing source instructions updates all three generated artifact hashes and launches consistently. Test stale artifacts, conflicting generated edits, deterministic output, package overrides and legacy migration.
+- Install each artifact set into a temporary native configuration root; preserve unrelated configuration and verify rollback/owned removal.
 - The same custom Heimdall instruction appears in launch fixtures for all three harnesses; declared defaults and compatible profile options are preserved.
 - Two simultaneous sessions in one directory, different providers in one directory, and numeric session-ID reuse across mux runs cannot steal each other's recaps.
 - Historical and live sessions appear together with correct deduplication and explicit time bounds.
