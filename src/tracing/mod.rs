@@ -12,6 +12,7 @@
 //! failure here may break, block, or slow a session.
 
 pub mod agy_usage;
+pub mod analysis;
 pub mod cli;
 pub mod correlate;
 pub mod experiments;
