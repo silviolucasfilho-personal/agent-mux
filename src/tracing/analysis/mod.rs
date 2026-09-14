@@ -1,6 +1,7 @@
 //! Shared trace analysis, evidence models, and correlation services.
 
 pub mod correlation;
+pub mod cursor;
 pub mod evidence;
 pub mod metrics;
 pub mod model;

@@ -1,7 +1,7 @@
 use agent_mux::tracing::analysis::scope::Scope;
 use agent_mux::tracing::analysis::service::{
-    BriefingArgs, CompareRunsArgs, GetSessionArgs, HealthArgs, Request, SearchArgs, ServiceConfig,
-    ServiceError, TraceService,
+    BriefingArgs, CompareRunsArgs, GetSessionArgs, HealthArgs, Limits, Request, SearchArgs,
+    ServiceConfig, ServiceError, TraceService,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -133,6 +133,8 @@ fn service_starts_with_scope() {
         db_path: Path::new("/nonexistent/traces.db").to_path_buf(),
         scope,
         snapshot_dir: None,
+        limits: Limits::default(),
+        admission_hook: None,
     };
     let service = TraceService::new(config);
     assert!(service.is_ok());
@@ -147,6 +149,8 @@ fn read_only_startup_does_not_create_db() {
         db_path: missing_db.clone(),
         scope,
         snapshot_dir: None,
+        limits: Limits::default(),
+        admission_hook: None,
     })
     .unwrap();
 
@@ -176,6 +180,8 @@ fn cross_scope_briefing_totals_and_isolation() {
         db_path,
         scope,
         snapshot_dir: None,
+        limits: Limits::default(),
+        admission_hook: None,
     })
     .unwrap();
 
@@ -208,6 +214,8 @@ fn direct_id_nonexistent_vs_denied() {
         db_path,
         scope,
         snapshot_dir: None,
+        limits: Limits::default(),
+        admission_hook: None,
     })
     .unwrap();
 
@@ -243,6 +251,8 @@ fn get_session_rejects_mismatched_launch_id() {
         db_path,
         scope,
         snapshot_dir: None,
+        limits: Limits::default(),
+        admission_hook: None,
     })
     .unwrap();
 
@@ -264,6 +274,8 @@ fn scoped_search_isolates_workspaces() {
         db_path,
         scope,
         snapshot_dir: None,
+        limits: Limits::default(),
+        admission_hook: None,
     })
     .unwrap();
 
@@ -316,6 +328,8 @@ fn compare_runs_scope_and_existence() {
         db_path,
         scope,
         snapshot_dir: None,
+        limits: Limits::default(),
+        admission_hook: None,
     })
     .unwrap();
 
@@ -351,6 +365,8 @@ fn health_returns_capabilities_not_secrets() {
         db_path,
         scope,
         snapshot_dir: None,
+        limits: Limits::default(),
+        admission_hook: None,
     })
     .unwrap();
 
@@ -376,6 +392,8 @@ fn invalid_or_reversed_window_rejected() {
         db_path,
         scope,
         snapshot_dir: None,
+        limits: Limits::default(),
+        admission_hook: None,
     })
     .unwrap();
 

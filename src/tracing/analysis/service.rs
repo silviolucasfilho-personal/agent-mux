@@ -1,5 +1,4 @@
-//! Shared trace query service with workspace scope enforcement and typed contracts.
-
+use super::cursor::{compute_filters_hash, CursorCodec, CursorPayload};
 use super::model::{
     AnalysisError, Binding, LiveSession, RuntimeState, SessionCard, SkillMetricRow,
 };
@@ -9,6 +8,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -73,7 +73,7 @@ impl From<AnalysisError> for ServiceError {
         match err {
             AnalysisError::NotFound(m) => ServiceError::NotFound(m),
             AnalysisError::InvalidParameter(m) => ServiceError::InvalidArgument(m),
-            AnalysisError::Sqlite(e) => ServiceError::DbUnavailable(e.to_string()),
+            AnalysisError::Sqlite(e) => ServiceError::from(e),
             AnalysisError::Correlation(m) => ServiceError::Internal(m),
         }
     }
@@ -81,7 +81,14 @@ impl From<AnalysisError> for ServiceError {
 
 impl From<rusqlite::Error> for ServiceError {
     fn from(err: rusqlite::Error) -> Self {
-        ServiceError::DbUnavailable(err.to_string())
+        match err {
+            rusqlite::Error::SqliteFailure(ref ffi_err, _)
+                if ffi_err.code == rusqlite::ErrorCode::OperationInterrupted =>
+            {
+                ServiceError::QueryTimeout("query exceeded execution deadline".into())
+            }
+            _ => ServiceError::DbUnavailable(err.to_string()),
+        }
     }
 }
 
@@ -420,14 +427,59 @@ pub struct HealthData {
 // Configuration & TraceService
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Limits {
+    pub concurrent: usize,
+    pub queue: usize,
+    pub response_bytes: usize,
+    pub page_default: usize,
+    pub page_max: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            concurrent: 4,
+            queue: 16,
+            response_bytes: 64 * 1024,
+            page_default: 20,
+            page_max: 100,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct ServiceConfig {
     pub db_path: PathBuf,
     pub scope: Scope,
     pub snapshot_dir: Option<PathBuf>,
+    pub limits: Limits,
+    pub admission_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl std::fmt::Debug for ServiceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceConfig")
+            .field("db_path", &self.db_path)
+            .field("scope", &self.scope)
+            .field("snapshot_dir", &self.snapshot_dir)
+            .field("limits", &self.limits)
+            .field("admission_hook", &self.admission_hook.is_some())
+            .finish()
+    }
 }
 
 impl ServiceConfig {
+    pub fn new(db_path: PathBuf, scope: Scope) -> Self {
+        Self {
+            db_path,
+            scope,
+            snapshot_dir: None,
+            limits: Limits::default(),
+            admission_hook: None,
+        }
+    }
+
     pub fn resolve(explicit_db: Option<&Path>, scope: Scope) -> Self {
         let db_path = explicit_db
             .map(|p| p.to_path_buf())
@@ -448,25 +500,124 @@ impl ServiceConfig {
             db_path,
             scope,
             snapshot_dir: None,
+            limits: Limits::default(),
+            admission_hook: None,
         }
     }
 }
 
+struct AdmissionState {
+    running: usize,
+    waiting: usize,
+}
+
 pub struct TraceService {
     config: ServiceConfig,
+    codec: CursorCodec,
+    admission: Arc<(std::sync::Mutex<AdmissionState>, std::sync::Condvar)>,
 }
 
 impl TraceService {
     pub fn new(config: ServiceConfig) -> Result<Self, ServiceError> {
-        Ok(Self { config })
+        let mut key = [0u8; 32];
+        let u1 = uuid::Uuid::new_v4();
+        let u2 = uuid::Uuid::new_v4();
+        key[0..16].copy_from_slice(u1.as_bytes());
+        key[16..32].copy_from_slice(u2.as_bytes());
+        let codec = CursorCodec::new(key);
+        let admission = Arc::new((
+            std::sync::Mutex::new(AdmissionState {
+                running: 0,
+                waiting: 0,
+            }),
+            std::sync::Condvar::new(),
+        ));
+        Ok(Self {
+            config,
+            codec,
+            admission,
+        })
     }
 
     pub fn config(&self) -> &ServiceConfig {
         &self.config
     }
 
+    pub fn codec(&self) -> &CursorCodec {
+        &self.codec
+    }
+
+    pub fn admission_counts(&self) -> (usize, usize) {
+        if let Ok(state) = self.admission.0.lock() {
+            (state.running, state.waiting)
+        } else {
+            (0, 0)
+        }
+    }
+
     /// Synchronously executes a trace query or analysis request.
     pub fn execute(&self, request: Request) -> Result<Envelope<serde_json::Value>, ServiceError> {
+        let start = std::time::Instant::now();
+        let deadline_duration = match request {
+            Request::AnalyzeSkills(_) | Request::CompareRuns(_) => std::time::Duration::from_secs(5),
+            _ => std::time::Duration::from_secs(2),
+        };
+
+        // Admission check
+        {
+            let mut state = self.admission.0.lock().map_err(|_| {
+                ServiceError::Internal("admission lock poisoned".into())
+            })?;
+            if state.running < self.config.limits.concurrent {
+                state.running += 1;
+            } else if state.waiting < self.config.limits.queue {
+                state.waiting += 1;
+                while state.running >= self.config.limits.concurrent {
+                    let elapsed = start.elapsed();
+                    if elapsed >= deadline_duration {
+                        state.waiting = state.waiting.saturating_sub(1);
+                        return Err(ServiceError::QueryTimeout(
+                            "query timed out waiting for admission slot".into(),
+                        ));
+                    }
+                    let remaining = deadline_duration - elapsed;
+                    let (new_state, timeout_result) = self
+                        .admission
+                        .1
+                        .wait_timeout(state, remaining)
+                        .map_err(|_| ServiceError::Internal("admission condvar poisoned".into()))?;
+                    state = new_state;
+                    if timeout_result.timed_out() && state.running >= self.config.limits.concurrent {
+                        state.waiting = state.waiting.saturating_sub(1);
+                        return Err(ServiceError::QueryTimeout(
+                            "query timed out waiting for admission slot".into(),
+                        ));
+                    }
+                }
+                state.waiting = state.waiting.saturating_sub(1);
+                state.running += 1;
+            } else {
+                return Err(ServiceError::Busy(
+                    "capacity exceeded: queue full".into(),
+                ));
+            }
+        }
+
+        struct SlotGuard<'a>(&'a (std::sync::Mutex<AdmissionState>, std::sync::Condvar));
+        impl<'a> Drop for SlotGuard<'a> {
+            fn drop(&mut self) {
+                if let Ok(mut s) = self.0.0.lock() {
+                    s.running = s.running.saturating_sub(1);
+                    self.0.1.notify_one();
+                }
+            }
+        }
+        let _slot_guard = SlotGuard(&self.admission);
+
+        if let Some(ref hook) = self.config.admission_hook {
+            hook();
+        }
+
         let now = OffsetDateTime::now_utc();
         let as_of = now.format(&Rfc3339).map_err(|e| ServiceError::Internal(e.to_string()))?;
         let scope_info = ScopeInfo {
@@ -507,16 +658,28 @@ impl TraceService {
         )
         .map_err(|e| ServiceError::DbUnavailable(format!("cannot open database read-only: {e}")))?;
 
-        match request {
+        // Install progress handler with deadline
+        let deadline_instant = start + deadline_duration;
+        let _ = conn.progress_handler(50, Some(move || {
+            std::time::Instant::now() >= deadline_instant
+        }));
+
+        let mut envelope = match request {
             Request::Health(_) => unreachable!(),
-            Request::Briefing(args) => self.execute_briefing(&conn, args, as_of, scope_info, now),
-            Request::ListSessions(args) => self.execute_list_sessions(&conn, args, as_of, scope_info, now),
-            Request::GetSession(args) => self.execute_get_session(&conn, args, as_of, scope_info),
-            Request::Timeline(args) => self.execute_timeline(&conn, args, as_of, scope_info),
-            Request::Search(args) => self.execute_search(&conn, args, as_of, scope_info, now),
-            Request::AnalyzeSkills(args) => self.execute_analyze_skills(&conn, args, as_of, scope_info, now),
-            Request::CompareRuns(args) => self.execute_compare_runs(&conn, args, as_of, scope_info),
-        }
+            Request::Briefing(args) => self.execute_briefing(&conn, args, as_of, scope_info, now)?,
+            Request::ListSessions(args) => self.execute_list_sessions(&conn, args, as_of, scope_info, now)?,
+            Request::GetSession(args) => self.execute_get_session(&conn, args, as_of, scope_info)?,
+            Request::Timeline(args) => self.execute_timeline(&conn, args, as_of, scope_info)?,
+            Request::Search(args) => self.execute_search(&conn, args, as_of, scope_info, now)?,
+            Request::AnalyzeSkills(args) => self.execute_analyze_skills(&conn, args, as_of, scope_info, now)?,
+            Request::CompareRuns(args) => self.execute_compare_runs(&conn, args, as_of, scope_info)?,
+        };
+
+        let _ = conn.progress_handler(0, None::<fn() -> bool>);
+
+        bound_envelope(&mut envelope, self.config.limits.response_bytes);
+
+        Ok(envelope)
     }
 
     // --- Tool Handlers ---
@@ -577,7 +740,7 @@ impl TraceService {
         now: OffsetDateTime,
     ) -> Result<Envelope<serde_json::Value>, ServiceError> {
         let (since_ns, until_ns, window) = parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
-        let limit = args.limit.unwrap_or(20).min(100);
+        let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
 
         let ws = self.config.scope.workspace_path().unwrap_or(Path::new(""));
         let live: Vec<LiveSession> = Vec::new(); // Will be loaded from snapshots in Task 3
@@ -589,14 +752,45 @@ impl TraceService {
             b.cards.retain(|c| c.provider.as_deref() == Some(prov.as_str()));
         }
 
-        let truncated = b.cards.len() > limit;
-        if truncated {
-            b.cards.truncate(limit);
+        let now_ns = now.unix_timestamp_nanos() as i64;
+        let filters_detail = format!("prov:{:?}", args.provider);
+        let filters_hash = compute_filters_hash("briefing", &self.config.scope, &filters_detail);
+
+        let mut offset = 0;
+        if let Some(ref c) = args.cursor {
+            let payload = self.codec.decode(c, &filters_hash, now_ns)?;
+            offset = payload.offset;
         }
 
+        let total_sessions = b.cards.len();
+        let mut paged_cards = if offset < b.cards.len() {
+            b.cards.into_iter().skip(offset).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        let has_more = paged_cards.len() > limit;
+        if has_more {
+            paged_cards.truncate(limit);
+        }
+
+        let next_cursor = if has_more {
+            Some(self.codec.encode(&CursorPayload {
+                schema_version: 1,
+                issued_at_ns: now_ns,
+                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                filters_hash,
+                upper_bound_ns: until_ns,
+                sort_key: paged_cards.last().and_then(|c| c.session_key.clone()).unwrap_or_default(),
+                offset: offset + limit,
+            }))
+        } else {
+            None
+        };
+
         let data = BriefingData {
-            sessions: b.cards,
-            total_sessions: b.total_sessions,
+            sessions: paged_cards,
+            total_sessions,
             total_turns: b.total_turns,
             total_tools: b.total_tools,
             total_tokens: b.total_tokens,
@@ -614,8 +808,8 @@ impl TraceService {
                 reasons: vec!["live_snapshot_unavailable".into()],
             },
             warnings: b.warnings,
-            next_cursor: None,
-            truncated,
+            next_cursor,
+            truncated: has_more,
         })
     }
 
@@ -628,7 +822,17 @@ impl TraceService {
         now: OffsetDateTime,
     ) -> Result<Envelope<serde_json::Value>, ServiceError> {
         let (since_ns, until_ns, window) = parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
-        let limit = args.limit.unwrap_or(20).min(100);
+        let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
+
+        let now_ns = now.unix_timestamp_nanos() as i64;
+        let filters_detail = format!("prov:{:?}:state:{:?}", args.provider, args.runtime_state);
+        let filters_hash = compute_filters_hash("list_sessions", &self.config.scope, &filters_detail);
+
+        let mut offset = 0;
+        if let Some(ref c) = args.cursor {
+            let payload = self.codec.decode(c, &filters_hash, now_ns)?;
+            offset = payload.offset;
+        }
 
         let mut items = Vec::new();
 
@@ -708,13 +912,33 @@ impl TraceService {
         }
 
         let total_matching = items.len();
-        let truncated = items.len() > limit;
-        if truncated {
-            items.truncate(limit);
+        let mut paged_items = if offset < items.len() {
+            items[offset..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let has_more = paged_items.len() > limit;
+        if has_more {
+            paged_items.truncate(limit);
         }
 
+        let next_cursor = if has_more {
+            Some(self.codec.encode(&CursorPayload {
+                schema_version: 1,
+                issued_at_ns: now_ns,
+                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                filters_hash,
+                upper_bound_ns: until_ns,
+                sort_key: paged_items.last().and_then(|i| i.session_key.clone()).unwrap_or_default(),
+                offset: offset + limit,
+            }))
+        } else {
+            None
+        };
+
         let data = ListSessionsData {
-            sessions: items,
+            sessions: paged_items,
             total_matching,
         };
 
@@ -729,8 +953,8 @@ impl TraceService {
                 reasons: vec!["live_snapshot_unavailable".into()],
             },
             warnings: Vec::new(),
-            next_cursor: None,
-            truncated,
+            next_cursor,
+            truncated: has_more,
         })
     }
 
@@ -884,7 +1108,17 @@ impl TraceService {
         }
 
         let lid_filter = args.launch_id.as_deref().unwrap_or("");
-        let limit = args.limit.unwrap_or(50).min(100);
+        let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
+
+        let now_ns = OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
+        let filters_detail = format!("sess:{}:launch:{:?}", args.session_key, args.launch_id);
+        let filters_hash = compute_filters_hash("timeline", &self.config.scope, &filters_detail);
+
+        let mut offset = 0;
+        if let Some(ref c) = args.cursor {
+            let payload = self.codec.decode(c, &filters_hash, now_ns)?;
+            offset = payload.offset;
+        }
 
         let mut stmt = conn.prepare(
             "SELECT id, start_ns, end_ns, input, output
@@ -970,15 +1204,35 @@ impl TraceService {
         }
 
         let total_turns = turns.len();
-        let truncated = turns.len() > limit;
-        if truncated {
-            turns.truncate(limit);
+        let mut paged_turns = if offset < turns.len() {
+            turns[offset..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let has_more = paged_turns.len() > limit;
+        if has_more {
+            paged_turns.truncate(limit);
         }
+
+        let next_cursor = if has_more {
+            Some(self.codec.encode(&CursorPayload {
+                schema_version: 1,
+                issued_at_ns: now_ns,
+                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                filters_hash,
+                upper_bound_ns: now_ns,
+                sort_key: paged_turns.last().map(|t| t.turn_id.clone()).unwrap_or_default(),
+                offset: offset + limit,
+            }))
+        } else {
+            None
+        };
 
         let data = TimelineData {
             session_key: args.session_key,
             launch_id: args.launch_id,
-            turns,
+            turns: paged_turns,
             total_turns,
         };
 
@@ -993,8 +1247,8 @@ impl TraceService {
                 reasons: Vec::new(),
             },
             warnings: Vec::new(),
-            next_cursor: None,
-            truncated,
+            next_cursor,
+            truncated: has_more,
         })
     }
 
@@ -1014,7 +1268,17 @@ impl TraceService {
         }
 
         let (since_ns, until_ns, window) = parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
-        let limit = args.limit.unwrap_or(20).min(100);
+        let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
+
+        let now_ns = now.unix_timestamp_nanos() as i64;
+        let filters_detail = format!("q:{}:sess:{:?}:prov:{:?}", args.query, args.session_key, args.provider);
+        let filters_hash = compute_filters_hash("search", &self.config.scope, &filters_detail);
+
+        let mut offset = 0;
+        if let Some(ref c) = args.cursor {
+            let payload = self.codec.decode(c, &filters_hash, now_ns)?;
+            offset = payload.offset;
+        }
 
         // If session_key specified, verify scope
         if let Some(ref sk) = args.session_key {
@@ -1068,8 +1332,7 @@ impl TraceService {
                AND (?5 = '' OR session_key = ?5)
                AND (?6 = '' OR provider = ?6)
                AND (input LIKE ?7 OR output LIKE ?7)
-             ORDER BY start_ns DESC
-             LIMIT ?8",
+             ORDER BY start_ns DESC",
         )?;
 
         let t_rows = t_stmt.query_map(
@@ -1081,7 +1344,6 @@ impl TraceService {
                 sk_filter,
                 prov_filter,
                 query_pattern,
-                (limit + 1) as i64
             ],
             |r| {
                 Ok((
@@ -1139,13 +1401,33 @@ impl TraceService {
         }
 
         let total_matches = matches.len();
-        let truncated = matches.len() > limit;
-        if truncated {
-            matches.truncate(limit);
+        let mut paged_matches = if offset < matches.len() {
+            matches[offset..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let has_more = paged_matches.len() > limit;
+        if has_more {
+            paged_matches.truncate(limit);
         }
 
+        let next_cursor = if has_more {
+            Some(self.codec.encode(&CursorPayload {
+                schema_version: 1,
+                issued_at_ns: now_ns,
+                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                filters_hash,
+                upper_bound_ns: until_ns,
+                sort_key: paged_matches.last().map(|m| m.source_id.clone()).unwrap_or_default(),
+                offset: offset + limit,
+            }))
+        } else {
+            None
+        };
+
         let data = SearchData {
-            matches,
+            matches: paged_matches,
             total_matches,
         };
 
@@ -1160,8 +1442,8 @@ impl TraceService {
                 reasons: Vec::new(),
             },
             warnings: Vec::new(),
-            next_cursor: None,
-            truncated,
+            next_cursor,
+            truncated: has_more,
         })
     }
 
@@ -1174,9 +1456,19 @@ impl TraceService {
         now: OffsetDateTime,
     ) -> Result<Envelope<serde_json::Value>, ServiceError> {
         let (since_ns, until_ns, window) = parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
-        let limit = args.limit.unwrap_or(20).min(100);
+        let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
 
-        let mut skills = super::metrics::analyze_skills(
+        let now_ns = now.unix_timestamp_nanos() as i64;
+        let filters_detail = format!("skill:{:?}:prov:{:?}", args.skill, args.provider);
+        let filters_hash = compute_filters_hash("analyze_skills", &self.config.scope, &filters_detail);
+
+        let mut offset = 0;
+        if let Some(ref c) = args.cursor {
+            let payload = self.codec.decode(c, &filters_hash, now_ns)?;
+            offset = payload.offset;
+        }
+
+        let skills = super::metrics::analyze_skills(
             conn,
             args.skill.as_deref(),
             Some(since_ns),
@@ -1184,13 +1476,33 @@ impl TraceService {
         )?;
 
         let total_skills = skills.len();
-        let truncated = skills.len() > limit;
-        if truncated {
-            skills.truncate(limit);
+        let mut paged_skills = if offset < skills.len() {
+            skills[offset..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let has_more = paged_skills.len() > limit;
+        if has_more {
+            paged_skills.truncate(limit);
         }
 
+        let next_cursor = if has_more {
+            Some(self.codec.encode(&CursorPayload {
+                schema_version: 1,
+                issued_at_ns: now_ns,
+                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                filters_hash,
+                upper_bound_ns: until_ns,
+                sort_key: paged_skills.last().map(|s| s.skill_name.clone()).unwrap_or_default(),
+                offset: offset + limit,
+            }))
+        } else {
+            None
+        };
+
         let data = AnalyzeSkillsData {
-            skills,
+            skills: paged_skills,
             total_skills,
         };
 
@@ -1205,8 +1517,8 @@ impl TraceService {
                 reasons: Vec::new(),
             },
             warnings: Vec::new(),
-            next_cursor: None,
-            truncated,
+            next_cursor,
+            truncated: has_more,
         })
     }
 
@@ -1387,4 +1699,68 @@ fn parse_window(
             until: until_str,
         },
     ))
+}
+
+fn bound_envelope(envelope: &mut Envelope<serde_json::Value>, max_bytes: usize) {
+    let serialized_len = match serde_json::to_vec(envelope) {
+        Ok(v) => v.len(),
+        Err(_) => return,
+    };
+    if serialized_len <= max_bytes {
+        return;
+    }
+
+    envelope.truncated = true;
+    if !envelope.warnings.iter().any(|w| w.contains("64 KiB")) {
+        envelope.warnings.push("response truncated to fit 64 KiB limit".into());
+    }
+
+    // Step 1: Truncate large string values in envelope.data down to 100 chars
+    truncate_json_strings(&mut envelope.data, 100);
+    if serde_json::to_vec(envelope).map(|v| v.len()).unwrap_or(0) <= max_bytes {
+        return;
+    }
+
+    // Step 2: Truncate large string values down to 40 chars
+    truncate_json_strings(&mut envelope.data, 40);
+    if serde_json::to_vec(envelope).map(|v| v.len()).unwrap_or(0) <= max_bytes {
+        return;
+    }
+
+    // Step 3: Truncate array items in envelope.data
+    if let serde_json::Value::Object(map) = &mut envelope.data {
+        for (_k, v) in map.iter_mut() {
+            if let serde_json::Value::Array(arr) = v {
+                while arr.len() > 1 {
+                    arr.pop();
+                }
+            }
+        }
+    }
+
+    // Step 4: If single huge record, heavily truncate strings down to 20 chars
+    if serde_json::to_vec(envelope).map(|v| v.len()).unwrap_or(0) > max_bytes {
+        truncate_json_strings(&mut envelope.data, 20);
+    }
+}
+
+fn truncate_json_strings(val: &mut serde_json::Value, max_len: usize) {
+    match val {
+        serde_json::Value::String(s) => {
+            if s.len() > max_len {
+                *s = super::evidence::snippet(s, max_len);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                truncate_json_strings(item, max_len);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for (_, v) in obj {
+                truncate_json_strings(v, max_len);
+            }
+        }
+        _ => {}
+    }
 }
