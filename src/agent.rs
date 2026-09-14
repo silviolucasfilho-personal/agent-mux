@@ -4,9 +4,12 @@
 //! `agent-mux` automatically scans `~/.agent-mux/agents/` (and `./.agent-mux/agents/`),
 //! loading each discovered agent into the sidebar's Agents menu.
 
+pub mod adapters;
+pub mod artifacts;
 pub mod definition;
 pub mod discovery;
 
+pub use artifacts::{render_artifacts, write_artifacts, ArtifactError, ArtifactSet};
 pub use crate::harness::Harness as HeimdallHarness;
 pub use definition::{
     parse_definition, parse_legacy_definition, AgentDefinition, DefinitionError,
