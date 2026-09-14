@@ -4,45 +4,16 @@
 //! `agent-mux` automatically scans `~/.agent-mux/agents/` (and `./.agent-mux/agents/`),
 //! loading each discovered agent into the sidebar's Agents menu.
 
-use crate::heimdall::HeimdallHarness;
+pub mod definition;
+
+pub use crate::harness::Harness as HeimdallHarness;
+pub use definition::{
+    parse_definition, parse_legacy_definition, AgentDefinition, DefinitionError,
+};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Definition of an agent discovered on disk or built-in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentDefinition {
-    pub id: String,
-    pub name: String,
-    pub icon: Option<String>,
-    pub description: String,
-    pub harnesses: Vec<HeimdallHarness>,
-    pub default_harness: HeimdallHarness,
-    pub instructions: String,
-    pub file_path: Option<PathBuf>,
-    pub is_builtin: bool,
-}
-
-impl Default for AgentDefinition {
-    fn default() -> Self {
-        Self {
-            id: "heimdall".into(),
-            name: "Heimdall".into(),
-            icon: Some("⚡".into()),
-            description: "Omniscient monitor, executive morning briefings, and skill optimizer".into(),
-            harnesses: vec![
-                HeimdallHarness::Claude,
-                HeimdallHarness::Codex,
-                HeimdallHarness::Antigravity,
-            ],
-            default_harness: HeimdallHarness::Antigravity,
-            instructions: DEFAULT_HEIMDALL_MD.to_string(),
-            file_path: None,
-            is_builtin: true,
-        }
-    }
-}
-
-/// Default built-in markdown instructions for Heimdall.
+/// Default built-in markdown instructions for Heimdall (legacy compatibility constant).
 pub const DEFAULT_HEIMDALL_MD: &str = r#"---
 id: heimdall
 name: Heimdall
@@ -78,129 +49,6 @@ Inspect SQLite metadata to detect:
 Directly query SQLite (`~/.agent-mux/traces.db`) using sqlite3 commands whenever the user asks to drill down into specific turns, logs, or observations.
 "#;
 
-impl AgentDefinition {
-    /// Parses an agent definition from Markdown content and optional file path.
-    pub fn parse_markdown(content: &str, file_path: Option<&Path>) -> Self {
-        let fallback_id = file_path
-            .and_then(|p| p.file_stem())
-            .and_then(|s| s.to_str())
-            .unwrap_or("agent")
-            .to_string();
-
-        let mut id = fallback_id.clone();
-        let mut name = capitalize_name(&fallback_id);
-        let mut icon = None;
-        let mut description = String::new();
-        let mut harnesses = vec![
-            HeimdallHarness::Claude,
-            HeimdallHarness::Codex,
-            HeimdallHarness::Antigravity,
-        ];
-        let mut default_harness = HeimdallHarness::Antigravity;
-
-        let trimmed = content.trim_start();
-        let body = if trimmed.starts_with("---") {
-            // Frontmatter exists
-            if let Some(end_idx) = trimmed[3..].find("---") {
-                let frontmatter = &trimmed[3..3 + end_idx];
-                for line in frontmatter.lines() {
-                    if let Some((k, v)) = line.split_once(':') {
-                        let k = k.trim();
-                        let clean_v = v.trim().trim_matches('"').trim_matches('\'').trim();
-                        match k {
-                            "id" => {
-                                if !clean_v.is_empty() {
-                                    id = clean_v.to_string();
-                                }
-                            }
-                            "name" => {
-                                if !clean_v.is_empty() {
-                                    name = clean_v.to_string();
-                                }
-                            }
-                            "icon" => {
-                                if !clean_v.is_empty() {
-                                    icon = Some(clean_v.to_string());
-                                }
-                            }
-                            "description" => {
-                                if !clean_v.is_empty() {
-                                    description = clean_v.to_string();
-                                }
-                            }
-                            "default_harness" => {
-                                match clean_v.to_lowercase().as_str() {
-                                    "claude" => default_harness = HeimdallHarness::Claude,
-                                    "codex" => default_harness = HeimdallHarness::Codex,
-                                    "agy" | "antigravity" => default_harness = HeimdallHarness::Antigravity,
-                                    _ => {}
-                                }
-                            }
-                            "harnesses" => {
-                                let inner = clean_v.trim_start_matches('[').trim_end_matches(']');
-                                let mut custom_h = Vec::new();
-                                for h_str in inner.split(',') {
-                                    match h_str.trim().trim_matches('"').trim_matches('\'').to_lowercase().as_str() {
-                                        "claude" => custom_h.push(HeimdallHarness::Claude),
-                                        "codex" => custom_h.push(HeimdallHarness::Codex),
-                                        "agy" | "antigravity" => custom_h.push(HeimdallHarness::Antigravity),
-                                        _ => {}
-                                    }
-                                }
-                                if !custom_h.is_empty() {
-                                    harnesses = custom_h;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                trimmed[3 + end_idx + 3..].trim()
-            } else {
-                trimmed
-            }
-        } else {
-            trimmed
-        };
-
-        if description.is_empty() {
-            for line in body.lines() {
-                let l = line.trim();
-                if !l.is_empty() && !l.starts_with('#') {
-                    description = l.to_string();
-                    break;
-                }
-            }
-        }
-
-        Self {
-            id,
-            name,
-            icon,
-            description,
-            harnesses,
-            default_harness,
-            instructions: body.to_string(),
-            file_path: file_path.map(|p| p.to_path_buf()),
-            is_builtin: false,
-        }
-    }
-}
-
-fn capitalize_name(s: &str) -> String {
-    let mut parts = Vec::new();
-    for word in s.replace(['-', '_'], " ").split_whitespace() {
-        let mut chars = word.chars();
-        if let Some(first) = chars.next() {
-            parts.push(format!("{}{}", first.to_uppercase(), chars.as_str()));
-        }
-    }
-    if parts.is_empty() {
-        s.to_string()
-    } else {
-        parts.join(" ")
-    }
-}
 
 /// Fallback location for the global agents directory (`~/.agent-mux/agents`).
 pub fn default_agents_dir() -> PathBuf {

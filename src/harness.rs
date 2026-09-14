@@ -37,12 +37,64 @@ impl Harness {
         }
     }
 
+    pub const ALL: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Antigravity];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
             Harness::Antigravity => "agy",
         }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Harness::Claude => "Claude Code (claude)",
+            Harness::Codex => "Codex CLI (codex)",
+            Harness::Antigravity => "Google Antigravity (agy)",
+        }
+    }
+
+    pub fn to_harness(self) -> Harness {
+        self
+    }
+}
+
+impl std::fmt::Display for Harness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for Harness {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "claude" => Ok(Harness::Claude),
+            "codex" => Ok(Harness::Codex),
+            "agy" | "antigravity" => Ok(Harness::Antigravity),
+            other => Err(format!("unknown harness '{other}'")),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Harness {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl serde::Serialize for Harness {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
     }
 }
 

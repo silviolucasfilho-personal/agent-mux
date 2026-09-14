@@ -25,51 +25,8 @@ pub fn default_trace_db_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("traces.db"))
 }
 
-/// The available AI harnesses for Heimdall.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeimdallHarness {
-    Claude,
-    Codex,
-    Antigravity,
-}
-
-impl HeimdallHarness {
-    pub const ALL: [HeimdallHarness; 3] = [
-        HeimdallHarness::Claude,
-        HeimdallHarness::Codex,
-        HeimdallHarness::Antigravity,
-    ];
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            HeimdallHarness::Claude => "claude",
-            HeimdallHarness::Codex => "codex",
-            HeimdallHarness::Antigravity => "agy",
-        }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            HeimdallHarness::Claude => "Claude Code (claude)",
-            HeimdallHarness::Codex => "Codex CLI (codex)",
-            HeimdallHarness::Antigravity => "Google Antigravity (agy)",
-        }
-    }
-
-    pub fn to_harness(&self) -> Harness {
-        match self {
-            HeimdallHarness::Claude => Harness::Claude,
-            HeimdallHarness::Codex => Harness::Codex,
-            HeimdallHarness::Antigravity => Harness::Antigravity,
-        }
-    }
-}
-
-impl std::fmt::Display for HeimdallHarness {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
+/// The available AI harnesses for Heimdall (alias to canonical Harness).
+pub use crate::harness::Harness as HeimdallHarness;
 
 /// State for the Agent harness picker dialog.
 #[derive(Debug, Clone)]
