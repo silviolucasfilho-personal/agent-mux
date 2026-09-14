@@ -19,6 +19,7 @@ impl HarnessAdapter for AgyAdapter {
         &self,
         definition: &AgentDefinition,
         enabled: bool,
+        ctx: &crate::agent::artifacts::RenderContext,
     ) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut files = BTreeMap::new();
 
@@ -49,11 +50,13 @@ impl HarnessAdapter for AgyAdapter {
         // 3. agy/mcp.json
         let mut mcp_servers_map = serde_json::Map::new();
         if definition.mcp_servers.iter().any(|s| s == "agent-mux") {
+            let (cmd, args) =
+                crate::agent::artifacts::mcp_command(&ctx.executable, &ctx.db, &ctx.workspace);
             mcp_servers_map.insert(
                 "agent-mux".to_string(),
                 serde_json::json!({
-                    "command": "agent-mux",
-                    "args": ["mcp", "serve", "--stdio"]
+                    "command": cmd.to_string_lossy().to_string(),
+                    "args": args
                 }),
             );
         }

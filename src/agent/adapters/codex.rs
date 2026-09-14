@@ -19,6 +19,7 @@ impl HarnessAdapter for CodexAdapter {
         &self,
         definition: &AgentDefinition,
         enabled: bool,
+        ctx: &crate::agent::artifacts::RenderContext,
     ) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut files = BTreeMap::new();
 
@@ -44,9 +45,16 @@ impl HarnessAdapter for CodexAdapter {
         // 3. codex/mcp.toml
         let mut mcp_toml = String::new();
         if definition.mcp_servers.iter().any(|s| s == "agent-mux") {
+            let (cmd, args) =
+                crate::agent::artifacts::mcp_command(&ctx.executable, &ctx.db, &ctx.workspace);
             mcp_toml.push_str("[mcp_servers.agent-mux]\n");
-            mcp_toml.push_str("command = \"agent-mux\"\n");
-            mcp_toml.push_str("args = [\"mcp\", \"serve\", \"--stdio\"]\n");
+            mcp_toml.push_str(&format!("command = \"{}\"\n", cmd.to_string_lossy()));
+            let formatted_args = args
+                .iter()
+                .map(|a| format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            mcp_toml.push_str(&format!("args = [{}]\n", formatted_args));
         } else {
             mcp_toml.push_str("[mcp_servers]\n");
         }

@@ -14,5 +14,6 @@ pub trait HarnessAdapter {
         &self,
         definition: &AgentDefinition,
         enabled: bool,
+        ctx: &crate::agent::artifacts::RenderContext,
     ) -> BTreeMap<PathBuf, Vec<u8>>;
 }

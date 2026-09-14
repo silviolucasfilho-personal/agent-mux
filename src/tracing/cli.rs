@@ -16,6 +16,8 @@ const USAGE: &str = "usage: agent-mux trace <command> [options]
 commands:
   doctor                       store health, schema, unpriced models, provider readiness
   path                         print the resolved database path
+  briefing [--since RFC3339] [--until RFC3339] [--provider P] [--workspace DIR] [--all-workspaces] [--db PATH] [--json]
+                               executive morning briefing across sessions
   ls [--all] [--project DIR] [--since 7d] [--limit N] [--json]
                                sessions with turns, tokens, cost
   show <session|trace> [--full] [--json] [--tree | --timeline]
@@ -75,6 +77,7 @@ impl Args {
                         | "langfuse"
                         | "tree"
                         | "timeline"
+                        | "all-workspaces"
                 ) {
                     flags.insert(name.to_string(), None);
                 } else {
@@ -229,6 +232,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
     let args = Args::parse(&raw[1..]);
     match command {
         "doctor" => doctor(),
+        "briefing" => briefing(&args),
         "path" => {
             let (_, resolved) = resolved()?;
             println!("{}", resolved.db_path.display());
@@ -1497,6 +1501,90 @@ fn session_json(s: &query::SessionStat) -> serde_json::Value {
         "total_tokens": s.total_tokens, "total_cost_usd": s.total_cost_usd,
         "reported_cost_usd": s.reported_cost_usd, "unpriced_generations": s.unpriced_generations,
     })
+}
+
+fn briefing(args: &Args) -> anyhow::Result<()> {
+    let db_path = if let Some(p) = args.value("db") {
+        PathBuf::from(p)
+    } else {
+        let (_, r) = resolved()?;
+        r.db_path
+    };
+
+    let scope = if args.has("all-workspaces") {
+        crate::tracing::analysis::Scope::all_workspaces()
+    } else if let Some(ws) = args.value("workspace") {
+        crate::tracing::analysis::Scope::workspace(Path::new(ws))
+            .map_err(|e| anyhow::anyhow!("invalid workspace path: {e}"))?
+    } else {
+        let cur = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        crate::tracing::analysis::Scope::workspace(&cur)
+            .unwrap_or_else(|_| crate::tracing::analysis::Scope::all_workspaces())
+    };
+
+    let config = crate::tracing::analysis::ServiceConfig::new(db_path, scope);
+    let service = crate::tracing::analysis::TraceService::new(config)
+        .map_err(|e| anyhow::anyhow!("cannot initialize trace service: {e}"))?;
+
+    let briefing_args = crate::tracing::analysis::BriefingArgs {
+        since: args.value("since").map(String::from),
+        until: args.value("until").map(String::from),
+        provider: args.value("provider").map(String::from),
+        cursor: args.value("cursor").map(String::from),
+        limit: args.value("limit").and_then(|s| s.parse().ok()),
+    };
+
+    let envelope = service
+        .execute(crate::tracing::analysis::Request::Briefing(briefing_args))
+        .map_err(|e| anyhow::anyhow!("trace briefing failed: {e}"))?;
+
+    if args.has("json") {
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
+    } else {
+        let briefing_data: crate::tracing::analysis::BriefingData =
+            serde_json::from_value(envelope.data)?;
+        println!("Executive Morning Briefing");
+        println!("==========================");
+        println!(
+            "Sessions: {} | Turns: {} | Tools: {} | Cost: {}",
+            briefing_data.total_sessions,
+            briefing_data.total_turns,
+            briefing_data.total_tools,
+            fmt_cost(briefing_data.total_cost_usd)
+        );
+        for s in &briefing_data.sessions {
+            let id = s
+                .session_key
+                .as_deref()
+                .or(s.launch_id.as_deref())
+                .unwrap_or("unknown");
+            let prov = s.provider.as_deref().unwrap_or("unknown");
+            println!(
+                "\n[{:?}] {} ({}) - {}",
+                s.runtime_state,
+                id,
+                prov,
+                s.cwd.display()
+            );
+            println!(
+                "  Goal: {}",
+                s.initial_goal.value.as_deref().unwrap_or("none")
+            );
+            println!(
+                "  Activity: {}",
+                s.current_activity.value.as_deref().unwrap_or("idle")
+            );
+            println!(
+                "  Turns: {} | Tools: {} | Tokens: {} | Cost: {}",
+                s.completed_turns,
+                s.total_tools,
+                fmt_tokens(s.total_tokens),
+                fmt_cost(s.total_cost_usd)
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn ls(args: &Args) -> anyhow::Result<()> {

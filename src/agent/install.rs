@@ -81,7 +81,10 @@ impl From<serde_json::Error> for InstallError {
 }
 
 /// Diagnoses the integrity of an agent's package and generated artifacts.
-pub fn doctor_agent(definition: &AgentDefinition, root: &Path) -> Result<DoctorReport, DoctorError> {
+pub fn doctor_agent(
+    definition: &AgentDefinition,
+    root: &Path,
+) -> Result<DoctorReport, DoctorError> {
     let mut issues = Vec::new();
     let gen_dir = root.join("generated");
 
@@ -135,7 +138,10 @@ pub fn doctor_agent(definition: &AgentDefinition, root: &Path) -> Result<DoctorR
         for (rel_path_str, _) in file_hashes {
             let p = gen_dir.join(rel_path_str);
             if !p.is_file() {
-                issues.push(format!("Expected artifact '{}' is missing on disk", p.display()));
+                issues.push(format!(
+                    "Expected artifact '{}' is missing on disk",
+                    p.display()
+                ));
             }
         }
     }
@@ -145,6 +151,35 @@ pub fn doctor_agent(definition: &AgentDefinition, root: &Path) -> Result<DoctorR
             status: DoctorStatus::MissingArtifacts,
             issues,
         });
+    }
+
+    // Verify MCP service health if agent-mux is a declared MCP server
+    if definition.mcp_servers.iter().any(|s| s == "agent-mux") {
+        let db_path = crate::tracing::analysis::default_trace_db_path();
+        let config = crate::tracing::analysis::ServiceConfig::new(
+            db_path,
+            crate::tracing::analysis::Scope::all_workspaces(),
+        );
+        match crate::tracing::analysis::TraceService::new(config) {
+            Ok(service) => {
+                if let Err(e) = service.execute(crate::tracing::analysis::Request::Health(
+                    crate::tracing::analysis::HealthArgs {},
+                )) {
+                    issues.push(format!("MCP health check failed: {e}"));
+                    return Ok(DoctorReport {
+                        status: DoctorStatus::Damaged,
+                        issues,
+                    });
+                }
+            }
+            Err(e) => {
+                issues.push(format!("Failed to initialize trace service: {e}"));
+                return Ok(DoctorReport {
+                    status: DoctorStatus::Damaged,
+                    issues,
+                });
+            }
+        }
     }
 
     Ok(DoctorReport {
@@ -205,7 +240,9 @@ pub fn uninstall_agent(
                         let rel_path = PathBuf::from(rel_path_str);
                         if let Some(h) = filter_harness {
                             let h_str = h.as_str();
-                            if !rel_path.starts_with(h_str) && rel_path != Path::new("manifest.json") {
+                            if !rel_path.starts_with(h_str)
+                                && rel_path != Path::new("manifest.json")
+                            {
                                 continue;
                             }
                         }

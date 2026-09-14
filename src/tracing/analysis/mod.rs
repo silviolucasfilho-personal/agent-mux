@@ -21,6 +21,12 @@ pub use model::{
     RuntimeState, SessionCard, SkillMetricRow, TaskOutcome, ToolCountSummary,
 };
 pub use query::briefing;
+pub use scope::Scope;
+pub use service::{
+    AnalyzeSkillsArgs, BriefingArgs, BriefingData, CompareRunsArgs, GetSessionArgs, HealthArgs,
+    Limits, ListSessionsArgs, ListSessionsData, Request, SearchArgs, ServiceConfig, ServiceError,
+    TimelineArgs, TraceService,
+};
 use std::path::PathBuf;
 
 /// Fallback location for the traces database if not configured.

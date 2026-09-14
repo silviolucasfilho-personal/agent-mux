@@ -63,10 +63,51 @@ fn compute_sha256(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Deterministically renders the complete artifact set for Claude, Codex, and AGY.
-pub fn render_artifacts(
+/// Builds the MCP server executable and arguments vector.
+pub fn mcp_command(executable: &Path, db: &Path, workspace: &Path) -> (PathBuf, Vec<String>) {
+    (
+        executable.to_path_buf(),
+        vec![
+            "mcp".to_string(),
+            "serve".to_string(),
+            "--stdio".to_string(),
+            "--db".to_string(),
+            db.to_string_lossy().to_string(),
+            "--workspace".to_string(),
+            workspace.to_string_lossy().to_string(),
+        ],
+    )
+}
+
+/// Rendering context for resolving paths and external tools in harness artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderContext {
+    pub executable: PathBuf,
+    pub db: PathBuf,
+    pub workspace: PathBuf,
+}
+
+impl Default for RenderContext {
+    fn default() -> Self {
+        let executable = std::env::var("AGENT_MUX_BIN")
+            .map(PathBuf::from)
+            .or_else(|_| std::env::current_exe())
+            .unwrap_or_else(|_| PathBuf::from("agent-mux"));
+        let db = crate::tracing::analysis::default_trace_db_path();
+        let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self {
+            executable,
+            db,
+            workspace,
+        }
+    }
+}
+
+/// Deterministically renders the complete artifact set for Claude, Codex, and AGY with context.
+pub fn render_artifacts_with_context(
     definition: &AgentDefinition,
     source: &Path,
+    ctx: &RenderContext,
 ) -> Result<ArtifactSet, ArtifactError> {
     let mut files = BTreeMap::new();
 
@@ -90,7 +131,7 @@ pub fn render_artifacts(
         }
         adapter_versions.insert(h.as_str().to_string(), adapter.version());
 
-        let rendered = adapter.render(definition, is_enabled);
+        let rendered = adapter.render(definition, is_enabled, ctx);
         for (rel_path, content) in rendered {
             files.insert(rel_path, content);
         }
@@ -123,6 +164,20 @@ pub fn render_artifacts(
         files,
         source_hash: definition.source_hash.clone(),
     })
+}
+
+/// Deterministically renders the complete artifact set for Claude, Codex, and AGY.
+pub fn render_artifacts(
+    definition: &AgentDefinition,
+    source: &Path,
+) -> Result<ArtifactSet, ArtifactError> {
+    let mut ctx = RenderContext::default();
+    if let Some(parent) = source.parent() {
+        if parent.is_absolute() {
+            ctx.workspace = parent.to_path_buf();
+        }
+    }
+    render_artifacts_with_context(definition, source, &ctx)
 }
 
 /// Atomically writes an ArtifactSet into the target `root` directory.
