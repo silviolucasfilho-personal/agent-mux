@@ -285,7 +285,8 @@ impl StateStore {
                budget_usage TEXT,
                created_at_ns INTEGER NOT NULL,
                started_at_ns INTEGER,
-               ended_at_ns INTEGER
+               ended_at_ns INTEGER,
+               updated_at_ns INTEGER NOT NULL DEFAULT 0
              );
              CREATE INDEX IF NOT EXISTS idx_jobs_scope ON jobs(scope_key);
              CREATE INDEX IF NOT EXISTS idx_jobs_dedupe ON jobs(dedupe_key);
@@ -475,8 +476,8 @@ impl StateStore {
         let key = scope.scope_key();
 
         self.conn.execute(
-            "INSERT INTO jobs (id, scope_key, agent_id, source_path, workspace, dedupe_key, evidence_revision, status, attempts, created_at_ns)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)",
+            "INSERT INTO jobs (id, scope_key, agent_id, source_path, workspace, dedupe_key, evidence_revision, status, attempts, created_at_ns, updated_at_ns)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9)",
             params![
                 id,
                 key,

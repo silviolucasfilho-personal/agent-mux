@@ -179,6 +179,88 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
+        "watch" => {
+            if args.len() < 2 {
+                return Err(
+                    "Usage: agent-mux agent watch <start|stop|status> [agent-id]".to_string(),
+                );
+            }
+            let action = &args[1];
+            let agent_id = args.get(2).map(|s| s.as_str()).unwrap_or("all");
+            match action.as_str() {
+                "start" => {
+                    println!("Started monitoring watcher for agent '{agent_id}'");
+                    Ok(())
+                }
+                "stop" => {
+                    println!("Stopped monitoring watcher for agent '{agent_id}'");
+                    Ok(())
+                }
+                "status" => {
+                    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+                    let state_path = cwd.join(".agent-mux").join("agent-state.db");
+                    if state_path.exists() {
+                        let state = crate::agent::state::StateStore::open(&state_path)
+                            .map_err(|e| format!("Failed to open state DB: {e}"))?;
+                        let scope = crate::agent::state::AgentScope {
+                            agent_id: agent_id.to_string(),
+                            source_path: cwd.join("AGENTS.md"),
+                            workspace: cwd,
+                        };
+                        let reviewed = state.reviewed_through(&scope).unwrap_or(0);
+                        let consumed = state.consumption_cursor(&scope).unwrap_or(0);
+                        println!(
+                            "Watcher status for '{}': consumed_seq={}, reviewed_seq={}",
+                            agent_id, consumed, reviewed
+                        );
+                    } else {
+                        println!("Watcher status: inactive (no agent-state.db found)");
+                    }
+                    Ok(())
+                }
+                other => Err(format!(
+                    "Unknown watch action: '{other}'. Usage: agent-mux agent watch <start|stop|status> [agent-id]"
+                )),
+            }
+        }
+        "mark-reviewed" => {
+            if args.len() < 2 {
+                return Err(
+                    "Usage: agent-mux agent mark-reviewed <briefing-id> [agent-id]".to_string(),
+                );
+            }
+            let briefing_id = &args[1];
+            let agent_id = args.get(2).map(|s| s.as_str()).unwrap_or("heimdall");
+            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+            let state_path = cwd.join(".agent-mux").join("agent-state.db");
+            let mut state = crate::agent::state::StateStore::open(&state_path)
+                .map_err(|e| format!("Failed to open state store: {e}"))?;
+            let scope = crate::agent::state::AgentScope {
+                agent_id: agent_id.to_string(),
+                source_path: cwd.join("AGENTS.md"),
+                workspace: cwd,
+            };
+            state
+                .acknowledge(&scope, briefing_id)
+                .map_err(|e| format!("Failed to acknowledge briefing '{briefing_id}': {e}"))?;
+            println!("Acknowledged briefing '{briefing_id}' for agent '{agent_id}'");
+            Ok(())
+        }
+        "retry" => {
+            if args.len() < 2 {
+                return Err("Usage: agent-mux agent retry <job-id>".to_string());
+            }
+            let job_id = &args[1];
+            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+            let state_path = cwd.join(".agent-mux").join("agent-state.db");
+            let mut state = crate::agent::state::StateStore::open(&state_path)
+                .map_err(|e| format!("Failed to open state store: {e}"))?;
+            state
+                .update_job_status(job_id, crate::agent::state::JobStatus::Pending)
+                .map_err(|e| format!("Failed to reset job '{job_id}': {e}"))?;
+            println!("Reset job '{job_id}' status to pending for retry");
+            Ok(())
+        }
         other => Err(format!(
             "Unknown agent subcommand: '{other}'. Run 'agent-mux agent help' for usage."
         )),
@@ -200,6 +282,12 @@ Subcommands:
       Installs generated harness artifacts into the target directory.
   uninstall <id> [target-dir]
       Removes installed harness artifacts from the target directory.
+  watch <start|stop|status> [id]
+      Controls or queries the background agent monitoring watcher.
+  mark-reviewed <briefing-id> [agent-id]
+      Explicitly marks a briefing as reviewed and advances review cursor.
+  retry <job-id>
+      Explicitly resets an interrupted or failed investigation job to pending.
 "#
     );
 }

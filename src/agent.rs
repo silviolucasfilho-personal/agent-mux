@@ -15,6 +15,7 @@ pub mod launch;
 pub mod managed;
 pub mod state;
 pub mod triggers;
+pub mod watch;
 
 pub use crate::harness::Harness;
 pub use artifacts::{ArtifactError, ArtifactSet, render_artifacts, write_artifacts};
@@ -42,6 +43,7 @@ pub use triggers::{
     EventKind, JobRequest, MonitoringConfig, TriggerDefinition, TriggerEvent, evaluate_changes,
     should_trigger,
 };
+pub use watch::{WatchError, Watcher, WatcherConfig};
 
 /// Fallback location for the global agents directory (`~/.agent-mux/agents`).
 pub fn default_agents_dir() -> PathBuf {
