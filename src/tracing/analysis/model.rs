@@ -231,3 +231,22 @@ pub struct Briefing {
     pub total_cost_usd: Option<f64>,
     pub warnings: Vec<String>,
 }
+
+/// Attribution and performance telemetry for an individual skill.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillMetricRow {
+    pub skill_name: String,
+    pub turns_loaded: i64,
+    pub attributed_calls: i64,
+    pub attributed_tokens: Option<i64>,
+    pub attributed_cost_usd: Option<f64>,
+    pub error_count: i64,
+    pub schema_error_count: i64,
+    pub sample_size: usize,
+    pub p50_ms: Option<u64>,
+    pub p95_ms: Option<u64>,
+    pub max_ms: Option<u64>,
+    pub slow_calls_above_4s: usize,
+    pub ongoing_count: usize,
+    pub limitations: Vec<String>,
+}

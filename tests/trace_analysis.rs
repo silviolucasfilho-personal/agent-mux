@@ -3,7 +3,15 @@ mod support;
 
 use agent_mux::tracing::analysis::correlation::resolve_binding;
 use agent_mux::tracing::analysis::evidence::snippet;
+use agent_mux::tracing::analysis::metrics::{completed_percentiles, ttft_ms};
 use agent_mux::tracing::analysis::model::*;
+
+#[test]
+fn generation_duration_is_not_ttft() {
+    assert_eq!(ttft_ms(Some(1_000_000), None), None);
+    assert_eq!(ttft_ms(Some(1_000_000), Some(4_000_000)), Some(3));
+    assert_eq!(completed_percentiles(&[None, Some(10), Some(30)]), Some((10, 30, 30, 2)));
+}
 
 #[test]
 fn snippets_are_unicode_safe() {
@@ -160,4 +168,43 @@ fn briefing_with_live_session_merges_activity() {
     let card = &rep.cards[0];
     assert_eq!(card.runtime_state, RuntimeState::Working);
     assert!(card.current_activity.value.as_deref().unwrap().contains("cargo test"));
+}
+
+#[test]
+fn analyze_skills_computes_attribution_and_percentiles() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        r#"
+        CREATE TABLE observations (
+            id TEXT PRIMARY KEY,
+            trace_id TEXT,
+            type TEXT,
+            name TEXT,
+            skill TEXT,
+            input TEXT,
+            output TEXT,
+            start_ns INTEGER,
+            end_ns INTEGER,
+            is_error INTEGER,
+            total_tokens INTEGER,
+            total_cost_usd REAL,
+            status_message TEXT
+        );
+
+        INSERT INTO observations VALUES('o1', 't1', 'tool', 'cargo_test', 'rust-dev', '{}', 'ok', 100_000_000, 200_000_000, 0, 100, 0.01, NULL);
+        INSERT INTO observations VALUES('o2', 't1', 'tool', 'cargo_test', 'rust-dev', '{}', 'err', 100_000_000, 300_000_000, 1, 150, 0.02, 'JSON Schema error: invalid input');
+        "#,
+    ).unwrap();
+
+    let metrics = agent_mux::tracing::analysis::metrics::analyze_skills(&db, Some("rust-dev"), None, None).unwrap();
+    assert_eq!(metrics.len(), 1);
+    let row = &metrics[0];
+    assert_eq!(row.skill_name, "rust-dev");
+    assert_eq!(row.attributed_calls, 2);
+    assert_eq!(row.error_count, 1);
+    assert_eq!(row.schema_error_count, 1);
+    assert_eq!(row.attributed_tokens, Some(250));
+    assert_eq!(row.sample_size, 2);
+    assert_eq!(row.p50_ms, Some(100));
+    assert_eq!(row.max_ms, Some(200));
 }
