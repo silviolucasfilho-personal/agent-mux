@@ -6,15 +6,18 @@
 
 pub mod adapters;
 pub mod artifacts;
+pub mod budgets;
 pub mod cli;
 pub mod definition;
 pub mod discovery;
 pub mod install;
 pub mod launch;
 pub mod state;
+pub mod triggers;
 
 pub use crate::harness::Harness;
 pub use artifacts::{ArtifactError, ArtifactSet, render_artifacts, write_artifacts};
+pub use budgets::{Budget, BudgetError, ManagedCapabilities, validate_budget};
 pub use definition::{AgentDefinition, DefinitionError, parse_definition, parse_legacy_definition};
 pub use discovery::{
     DiscoveryReport, MigrationError, bundled_agents_dir, discover_agents, migrate_legacy,
@@ -30,6 +33,10 @@ pub use state::{
     AgentScope, BriefingRecord, Finding, FindingStatus, Job, JobStatus, StateError, StateStore,
 };
 use std::path::{Path, PathBuf};
+pub use triggers::{
+    EventKind, JobRequest, MonitoringConfig, TriggerDefinition, TriggerEvent, evaluate_changes,
+    should_trigger,
+};
 
 /// Fallback location for the global agents directory (`~/.agent-mux/agents`).
 pub fn default_agents_dir() -> PathBuf {

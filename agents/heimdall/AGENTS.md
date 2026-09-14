@@ -8,6 +8,16 @@ default_harness: agy
 capabilities: [trace.read]
 startup_task: "Read the current session briefing and report progress, blockers and evidence coverage."
 mcp_servers: [agent-mux]
+triggers:
+  - event: repeated_error
+    prompt: "Inspect the repeated error evidence and report its likely cause with citations."
+    debounce_ms: 5000
+monitoring:
+  automatic: false
+  max_jobs_per_hour: 3
+  max_concurrent_jobs: 1
+  timeout_seconds: 120
+  max_turns: 3
 ---
 
 # Heimdall — The Omniscient Watcher

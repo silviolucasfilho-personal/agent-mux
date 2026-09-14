@@ -1,3 +1,4 @@
+use crate::agent::triggers::{MonitoringConfig, TriggerDefinition};
 use crate::harness::Harness;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -62,7 +63,8 @@ pub struct AgentDefinition {
     pub source_hash: String,
     pub file_path: Option<PathBuf>,
     pub is_builtin: bool,
-    pub triggers: Option<serde_yaml::Value>,
+    pub triggers: Vec<TriggerDefinition>,
+    pub monitoring: MonitoringConfig,
 }
 
 impl Default for AgentDefinition {
@@ -81,7 +83,8 @@ impl Default for AgentDefinition {
             source_hash: String::new(),
             file_path: None,
             is_builtin: false,
-            triggers: None,
+            triggers: Vec::new(),
+            monitoring: MonitoringConfig::default(),
         }
     }
 }
@@ -108,7 +111,8 @@ impl AgentDefinition {
                 source_hash: String::new(),
                 file_path: file_path.map(|p| p.to_path_buf()),
                 is_builtin: false,
-                triggers: None,
+                triggers: Vec::new(),
+                monitoring: MonitoringConfig::default(),
             }
         })
     }
@@ -125,7 +129,10 @@ struct FrontmatterRaw {
     capabilities: Option<Vec<String>>,
     startup_task: Option<String>,
     mcp_servers: Option<Vec<String>>,
-    triggers: Option<serde_yaml::Value>,
+    #[serde(default)]
+    triggers: Vec<TriggerDefinition>,
+    #[serde(default)]
+    monitoring: MonitoringConfig,
     #[serde(flatten)]
     unknown: BTreeMap<String, serde_yaml::Value>,
 }
@@ -270,6 +277,7 @@ pub fn parse_definition(source: &str, path: &Path) -> Result<AgentDefinition, De
         file_path: Some(path.to_path_buf()),
         is_builtin: false,
         triggers: raw.triggers,
+        monitoring: raw.monitoring,
     })
 }
 
@@ -318,6 +326,7 @@ pub fn parse_legacy_definition(
                     file_path: file_path.map(|p| p.to_path_buf()),
                     is_builtin: false,
                     triggers: raw.triggers,
+                    monitoring: raw.monitoring,
                 });
             }
         }
@@ -352,7 +361,8 @@ pub fn parse_legacy_definition(
         source_hash,
         file_path: file_path.map(|p| p.to_path_buf()),
         is_builtin: false,
-        triggers: None,
+        triggers: Vec::new(),
+        monitoring: MonitoringConfig::default(),
     })
 }
 
