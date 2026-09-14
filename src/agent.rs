@@ -12,6 +12,7 @@ pub mod definition;
 pub mod discovery;
 pub mod install;
 pub mod launch;
+pub mod managed;
 pub mod state;
 pub mod triggers;
 
@@ -28,6 +29,10 @@ pub use install::{
 };
 pub use launch::{
     AgentLaunch, LaunchError, LaunchOptions, build_agent_launch, selected_harness_index,
+};
+pub use managed::{
+    AgyManagedAdapter, ClaudeManagedAdapter, CodexManagedAdapter, ManagedAdapter, ManagedError,
+    ManagedEvent, ManagedRequest, ManagedSession, ScriptedManagedAdapter,
 };
 pub use state::{
     AgentScope, BriefingRecord, Finding, FindingStatus, Job, JobStatus, StateError, StateStore,
