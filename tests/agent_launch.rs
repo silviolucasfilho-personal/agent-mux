@@ -99,6 +99,68 @@ fn build_agent_launch_codex_composes_argv() {
     assert_eq!(launch.agent_id, "audit");
     assert!(launch.profile.args.contains(&"--yolo".to_string()));
     assert!(launch.profile.args.contains(&"Run audit".to_string()));
+    assert!(launch.profile.args.contains(&"-c".to_string()));
+    assert!(
+        launch
+            .profile
+            .args
+            .contains(&"developer_instructions=\"Review.\"".to_string())
+    );
+}
+
+#[test]
+fn build_agent_launch_codex_configures_mcp_servers() {
+    let d = parse_definition(
+        "---\nid: heimdall\nharnesses: [codex]\nmcp_servers: [agent-mux]\nstartup_task: Briefing\n---\nHeimdall instructions.",
+        Path::new("heimdall/AGENTS.md"),
+    )
+    .unwrap();
+    let artifacts = render_artifacts(&d, Path::new("heimdall/AGENTS.md")).unwrap();
+    let profile = make_test_profile(Harness::Codex);
+    let options = LaunchOptions::default();
+
+    let launch =
+        build_agent_launch(&d, &profile, &options, Path::new("/workspace"), &artifacts).unwrap();
+
+    assert!(
+        launch
+            .profile
+            .args
+            .iter()
+            .any(|a| a.starts_with("mcp_servers.agent-mux.command="))
+    );
+    assert!(
+        launch
+            .profile
+            .args
+            .iter()
+            .any(|a| a.starts_with("mcp_servers.agent-mux.args="))
+    );
+    assert!(launch.profile.args.contains(&"Briefing".to_string()));
+}
+
+#[test]
+fn build_agent_launch_claude_configures_mcp_servers() {
+    let d = parse_definition(
+        "---\nid: heimdall\nharnesses: [claude]\nmcp_servers: [agent-mux]\nstartup_task: Briefing\n---\nHeimdall instructions.",
+        Path::new("heimdall/AGENTS.md"),
+    )
+    .unwrap();
+    let artifacts = render_artifacts(&d, Path::new("heimdall/AGENTS.md")).unwrap();
+    let profile = make_test_profile(Harness::Claude);
+    let options = LaunchOptions::default();
+
+    let launch =
+        build_agent_launch(&d, &profile, &options, Path::new("/workspace"), &artifacts).unwrap();
+
+    assert!(launch.profile.args.contains(&"--mcp-config".to_string()));
+    assert!(
+        launch
+            .profile
+            .args
+            .iter()
+            .any(|a| a.contains("mcpServers") && a.contains("agent-mux"))
+    );
 }
 
 #[test]

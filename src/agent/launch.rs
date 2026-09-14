@@ -106,6 +106,25 @@ pub fn build_agent_launch(
         Harness::Claude => {
             args.push("--append-system-prompt".to_string());
             args.push(definition.instructions.clone());
+            if definition.mcp_servers.iter().any(|s| s == "agent-mux") {
+                let executable = std::env::var("AGENT_MUX_BIN")
+                    .map(PathBuf::from)
+                    .or_else(|_| std::env::current_exe())
+                    .unwrap_or_else(|_| PathBuf::from("agent-mux"));
+                let db = crate::tracing::analysis::default_trace_db_path();
+                let (cmd, mcp_args) =
+                    crate::agent::artifacts::mcp_command(&executable, &db, workspace);
+                let mcp_json = serde_json::json!({
+                    "mcpServers": {
+                        "agent-mux": {
+                            "command": cmd.to_string_lossy().to_string(),
+                            "args": mcp_args,
+                        }
+                    }
+                });
+                args.push("--mcp-config".to_string());
+                args.push(mcp_json.to_string());
+            }
             if let Some(ref m) = model {
                 args.push("--model".to_string());
                 args.push(m.clone());
@@ -121,6 +140,33 @@ pub fn build_agent_launch(
             }
         }
         Harness::Codex => {
+            if !definition.instructions.trim().is_empty() {
+                args.push("-c".to_string());
+                let escaped_instructions = serde_json::to_string(&definition.instructions)
+                    .unwrap_or_else(|_| format!("\"{}\"", definition.instructions));
+                args.push(format!("developer_instructions={escaped_instructions}"));
+            }
+            if definition.mcp_servers.iter().any(|s| s == "agent-mux") {
+                let executable = std::env::var("AGENT_MUX_BIN")
+                    .map(PathBuf::from)
+                    .or_else(|_| std::env::current_exe())
+                    .unwrap_or_else(|_| PathBuf::from("agent-mux"));
+                let db = crate::tracing::analysis::default_trace_db_path();
+                let (_, mcp_args) =
+                    crate::agent::artifacts::mcp_command(&executable, &db, workspace);
+                let formatted_args = mcp_args
+                    .iter()
+                    .map(|a| format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                args.push("-c".to_string());
+                args.push(format!(
+                    "mcp_servers.agent-mux.command=\"{}\"",
+                    executable.to_string_lossy()
+                ));
+                args.push("-c".to_string());
+                args.push(format!("mcp_servers.agent-mux.args=[{}]", formatted_args));
+            }
             if let Some(ref m) = model {
                 args.push("--model".to_string());
                 args.push(m.clone());

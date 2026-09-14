@@ -121,6 +121,38 @@ fn canonical_package_overrides_legacy_within_same_root() {
 }
 
 #[test]
+fn canonical_package_overrides_legacy_across_roots() {
+    let ws_root = tempdir().unwrap();
+    let global_root = tempdir().unwrap();
+    let bundled_root = tempdir().unwrap();
+
+    // Global has a legacy heimdall.md
+    let legacy_file = global_root.path().join("heimdall.md");
+    fs::write(
+        &legacy_file,
+        "---\nid: heimdall\nname: Legacy Heimdall\nharnesses: [codex]\n---\nLegacy.",
+    )
+    .unwrap();
+
+    // Bundled has canonical heimdall/AGENTS.md
+    let canonical_file = bundled_root.path().join("heimdall/AGENTS.md");
+    fs::create_dir_all(canonical_file.parent().unwrap()).unwrap();
+    fs::write(
+        &canonical_file,
+        "---\nid: heimdall\nname: Canonical Heimdall\nharnesses: [codex]\n---\nCanonical.",
+    )
+    .unwrap();
+
+    let report = discover_agents(
+        ws_root.path(),
+        global_root.path(),
+        Some(bundled_root.path()),
+    );
+    assert_eq!(report.agents.len(), 1);
+    assert_eq!(report.agents[0].name, "Canonical Heimdall");
+}
+
+#[test]
 fn discovery_does_not_mutate_disk() {
     let ws_root = tempdir().unwrap();
     let global_root = tempdir().unwrap();

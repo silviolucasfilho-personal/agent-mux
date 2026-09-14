@@ -94,6 +94,12 @@ pub fn bundled_agents_dir() -> Option<PathBuf> {
             if share.is_dir() {
                 return Some(share);
             }
+            if let Some(repo_dir) = prefix.parent() {
+                let repo_agents = repo_dir.join("agents");
+                if repo_agents.is_dir() {
+                    return Some(repo_agents);
+                }
+            }
         }
     }
     for sys_share in [
@@ -121,8 +127,9 @@ pub fn bundled_agents_dir() -> Option<PathBuf> {
 /// Scans canonical packages and legacy files across workspace, global, and bundled roots.
 ///
 /// Precedence:
-/// `workspace canonical > workspace legacy > global canonical > global legacy > bundled canonical`
+/// `workspace canonical > global canonical > bundled canonical > workspace legacy > global legacy`
 ///
+/// Canonical package sources take precedence over legacy definitions of the same ID.
 /// This function is strictly read-only and never mutates the filesystem.
 pub fn discover_agents(workspace: &Path, global: &Path, bundled: Option<&Path>) -> DiscoveryReport {
     let mut diagnostics = Vec::new();
@@ -137,15 +144,7 @@ pub fn discover_agents(workspace: &Path, global: &Path, bundled: Option<&Path>) 
         }
     }
 
-    // 2. Workspace legacy files
-    let ws_legacy = scan_legacy_files(workspace, &mut diagnostics);
-    for agent in ws_legacy {
-        if seen_ids.insert(agent.id.clone()) {
-            agents.push(agent);
-        }
-    }
-
-    // 3. Global canonical packages
+    // 2. Global canonical packages
     let global_canonical = scan_canonical_packages(global, &mut diagnostics);
     for agent in global_canonical {
         if seen_ids.insert(agent.id.clone()) {
@@ -153,15 +152,7 @@ pub fn discover_agents(workspace: &Path, global: &Path, bundled: Option<&Path>) 
         }
     }
 
-    // 4. Global legacy files
-    let global_legacy = scan_legacy_files(global, &mut diagnostics);
-    for agent in global_legacy {
-        if seen_ids.insert(agent.id.clone()) {
-            agents.push(agent);
-        }
-    }
-
-    // 5. Bundled canonical packages
+    // 3. Bundled canonical packages
     if let Some(bundled_root) = bundled {
         if bundled_root.is_dir() {
             let bundled_canonical = scan_canonical_packages(bundled_root, &mut diagnostics);
@@ -176,6 +167,22 @@ pub fn discover_agents(workspace: &Path, global: &Path, bundled: Option<&Path>) 
                 "Bundled agents directory not found or not a directory: {}",
                 bundled_root.display()
             ));
+        }
+    }
+
+    // 4. Workspace legacy files
+    let ws_legacy = scan_legacy_files(workspace, &mut diagnostics);
+    for agent in ws_legacy {
+        if seen_ids.insert(agent.id.clone()) {
+            agents.push(agent);
+        }
+    }
+
+    // 5. Global legacy files
+    let global_legacy = scan_legacy_files(global, &mut diagnostics);
+    for agent in global_legacy {
+        if seen_ids.insert(agent.id.clone()) {
+            agents.push(agent);
         }
     }
 
