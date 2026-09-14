@@ -555,6 +555,28 @@ impl TraceService {
         }
     }
 
+    pub fn load_live_sessions(&self, now_ns: i64) -> (Vec<LiveSession>, bool) {
+        let dir = self
+            .config
+            .snapshot_dir
+            .clone()
+            .unwrap_or_else(crate::tracing::analysis::default_snapshot_dir);
+        if !dir.exists() {
+            return (Vec::new(), false);
+        }
+        match crate::tracing::analysis::read_snapshots(&dir, now_ns) {
+            Ok(snaps) => {
+                let available = !snaps.is_empty();
+                let mut sessions = Vec::new();
+                for snap in snaps {
+                    sessions.extend(snap.sessions);
+                }
+                (sessions, available)
+            }
+            Err(_) => (Vec::new(), false),
+        }
+    }
+
     /// Synchronously executes a trace query or analysis request.
     pub fn execute(&self, request: Request) -> Result<Envelope<serde_json::Value>, ServiceError> {
         let start = std::time::Instant::now();
@@ -710,6 +732,22 @@ impl TraceService {
             }
         }
 
+        let now_ns = OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
+        let (_, live_available) = self.load_live_sessions(now_ns);
+        let mut features = vec![
+            "briefing".into(),
+            "list_sessions".into(),
+            "get_session".into(),
+            "timeline".into(),
+            "search".into(),
+            "analyze_skills".into(),
+            "compare_runs".into(),
+            "health".into(),
+        ];
+        if live_available {
+            features.push("live_sessions".into());
+        }
+
         Ok(HealthData {
             reader_version: env!("CARGO_PKG_VERSION").to_string(),
             schema_version: 1,
@@ -718,16 +756,7 @@ impl TraceService {
             collector_freshness,
             content_mode: "full".to_string(),
             provider_coverage: vec!["claude".into(), "codex".into(), "antigravity".into()],
-            features: vec![
-                "briefing".into(),
-                "list_sessions".into(),
-                "get_session".into(),
-                "timeline".into(),
-                "search".into(),
-                "analyze_skills".into(),
-                "compare_runs".into(),
-                "health".into(),
-            ],
+            features,
         })
     }
 
@@ -742,8 +771,9 @@ impl TraceService {
         let (since_ns, until_ns, window) = parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
         let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
 
+        let now_ns = now.unix_timestamp_nanos() as i64;
         let ws = self.config.scope.workspace_path().unwrap_or(Path::new(""));
-        let live: Vec<LiveSession> = Vec::new(); // Will be loaded from snapshots in Task 3
+        let (live, live_available) = self.load_live_sessions(now_ns);
 
         let mut b = query::briefing(conn, ws, since_ns, until_ns, &live)?;
 
@@ -752,7 +782,6 @@ impl TraceService {
             b.cards.retain(|c| c.provider.as_deref() == Some(prov.as_str()));
         }
 
-        let now_ns = now.unix_timestamp_nanos() as i64;
         let filters_detail = format!("prov:{:?}", args.provider);
         let filters_hash = compute_filters_hash("briefing", &self.config.scope, &filters_detail);
 
@@ -804,8 +833,16 @@ impl TraceService {
             window: Some(window),
             data: serde_json::to_value(data).map_err(|e| ServiceError::Internal(e.to_string()))?,
             coverage: CoverageInfo {
-                status: CoverageStatus::Partial,
-                reasons: vec!["live_snapshot_unavailable".into()],
+                status: if live_available {
+                    CoverageStatus::Full
+                } else {
+                    CoverageStatus::Partial
+                },
+                reasons: if live_available {
+                    Vec::new()
+                } else {
+                    vec!["live_snapshot_unavailable".into()]
+                },
             },
             warnings: b.warnings,
             next_cursor,
@@ -825,6 +862,7 @@ impl TraceService {
         let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
 
         let now_ns = now.unix_timestamp_nanos() as i64;
+        let (live, live_available) = self.load_live_sessions(now_ns);
         let filters_detail = format!("prov:{:?}:state:{:?}", args.provider, args.runtime_state);
         let filters_hash = compute_filters_hash("list_sessions", &self.config.scope, &filters_detail);
 
@@ -911,6 +949,18 @@ impl TraceService {
             }
         }
 
+        // Augment with live session states
+        for item in &mut items {
+            if let Some(ref key) = item.session_key {
+                if let Some(ls) = live.iter().find(|s| s.session_key.as_deref() == Some(key.as_str())) {
+                    item.runtime_state = ls.state;
+                }
+            }
+        }
+        if let Some(ref req_state) = args.runtime_state {
+            items.retain(|item| item.runtime_state.as_str() == req_state.as_str());
+        }
+
         let total_matching = items.len();
         let mut paged_items = if offset < items.len() {
             items[offset..].to_vec()
@@ -949,8 +999,16 @@ impl TraceService {
             window: Some(window),
             data: serde_json::to_value(data).map_err(|e| ServiceError::Internal(e.to_string()))?,
             coverage: CoverageInfo {
-                status: CoverageStatus::Partial,
-                reasons: vec!["live_snapshot_unavailable".into()],
+                status: if live_available {
+                    CoverageStatus::Full
+                } else {
+                    CoverageStatus::Partial
+                },
+                reasons: if live_available {
+                    Vec::new()
+                } else {
+                    vec!["live_snapshot_unavailable".into()]
+                },
             },
             warnings: Vec::new(),
             next_cursor,

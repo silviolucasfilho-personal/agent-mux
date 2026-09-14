@@ -1802,6 +1802,12 @@ pub struct App {
     pub briefing_pending: bool,
     /// Timestamp of the last refresh trigger.
     pub last_briefing_refresh: Option<Instant>,
+    /// Persistent identifier for this mux run instance.
+    pub app_run_id: String,
+    /// Revision counter for published live snapshots.
+    pub live_snapshot_revision: u64,
+    /// Instant of the last published live snapshot.
+    pub last_snapshot_published: Option<Instant>,
 }
 
 impl App {
@@ -1810,6 +1816,10 @@ impl App {
         tracing: Option<crate::tracing::TraceRuntime>,
         tx: Sender<AppEvent>,
     ) -> App {
+        let app_run_id = tracing
+            .as_ref()
+            .map(|rt| rt.run_id().to_string())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let trace_db_path = tracing.as_ref().map(|rt| rt.db_path().to_path_buf());
         let cur_dir = std::env::current_dir().ok();
         let mut history_sessions =
@@ -1851,6 +1861,9 @@ impl App {
             briefing_revision: 0,
             briefing_pending: false,
             last_briefing_refresh: None,
+            app_run_id,
+            live_snapshot_revision: 0,
+            last_snapshot_published: None,
         }
     }
 
@@ -1897,12 +1910,44 @@ impl App {
     }
 
     /// Periodic housekeeping driven by `AppEvent::Tick`: the trace browser
-    /// re-queries live sessions and agent briefing is refreshed asynchronously.
+    /// re-queries live sessions, live snapshots are published, and agent briefing is refreshed.
     pub fn on_tick(&mut self, now: Instant) {
         if let Mode::TraceBrowser(browser) = &mut self.mode {
             browser.refresh_if_live(now);
         }
+        self.publish_live_snapshot_if_needed(now);
         self.refresh_briefing_if_needed(now);
+    }
+
+    /// Publishes live session snapshot bounded to 1MiB every second if needed.
+    pub fn publish_live_snapshot_if_needed(&mut self, now: Instant) {
+        let should_publish = match self.last_snapshot_published {
+            None => true,
+            Some(last) => now.saturating_duration_since(last) >= std::time::Duration::from_secs(1),
+        };
+        if should_publish {
+            self.last_snapshot_published = Some(now);
+            self.live_snapshot_revision += 1;
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as i64;
+            let sessions = self.collect_live_sessions(now);
+            let snapshot = crate::tracing::analysis::LiveSnapshot {
+                run_id: self.app_run_id.clone(),
+                revision: self.live_snapshot_revision,
+                heartbeat_ns: now_ns,
+                sessions,
+            };
+            let root = crate::tracing::analysis::default_snapshot_dir();
+            let _ = crate::tracing::analysis::publish_snapshot(&root, &snapshot);
+        }
+    }
+
+    /// Cleans up the published live snapshot on shutdown.
+    pub fn cleanup_live_snapshot(&self) {
+        let root = crate::tracing::analysis::default_snapshot_dir();
+        let _ = crate::tracing::analysis::clean_up_snapshot(&root, &self.app_run_id);
     }
 
     /// Refreshes the session briefing asynchronously if a trace-capable preview is visible.
@@ -1977,7 +2022,7 @@ impl App {
             .tracing
             .as_ref()
             .map(|rt| rt.run_id().to_string())
-            .unwrap_or_default();
+            .unwrap_or_else(|| self.app_run_id.clone());
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
