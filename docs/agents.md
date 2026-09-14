@@ -54,7 +54,8 @@ Distinguish observed facts from terminal heuristics and cite evidence IDs.
 | `capabilities` | list of string | No | Declared capabilities (e.g. `[trace.read]`). |
 | `startup_task` | string | No | Autonomous initial prompt or command run when the session starts. |
 | `mcp_servers` | list of string | No | MCP servers required by this agent (e.g. `[agent-mux]`). |
-| `triggers` | map / value | No | Declarative event triggers for autonomous monitoring (Milestone 3). |
+| `triggers` | list of TriggerDefinition | No | Declarative event triggers for autonomous monitoring (see [Agent Monitoring](agent-monitoring.md)). |
+| `monitoring` | MonitoringConfig | No | Bounds and rate limits for autonomous investigations (defaults to `automatic: false`). |
 
 ---
 
