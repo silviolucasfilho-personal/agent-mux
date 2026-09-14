@@ -167,8 +167,18 @@ async fn test_restart_history_session_from_sidebar() {
     assert_eq!(app.sidebar_section, SidebarSection::Active);
     assert_eq!(app.selected, 0);
     // Profile args for claude resume should contain --resume
-    assert!(app.sessions[0].profile.args.contains(&"--resume".to_string()));
-    assert!(app.sessions[0].profile.args.contains(&"uuid-abc".to_string()));
+    assert!(
+        app.sessions[0]
+            .profile
+            .args
+            .contains(&"--resume".to_string())
+    );
+    assert!(
+        app.sessions[0]
+            .profile
+            .args
+            .contains(&"uuid-abc".to_string())
+    );
 
     app.kill_all();
 }
@@ -209,7 +219,8 @@ async fn test_sidebar_mouse_click_selection() {
         },
     ];
 
-    let (active_rect, agents_rect, history_rect) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.agents.len());
+    let (active_rect, agents_rect, history_rect) =
+        agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.agents.len());
 
     // Click in history area
     let click_hist = MouseEvent {

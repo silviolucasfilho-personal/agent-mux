@@ -2,7 +2,7 @@
 
 use crate::agent::artifacts::{render_artifacts, write_artifacts};
 use crate::agent::discovery::{discover_agents, migrate_legacy};
-use crate::agent::install::{doctor_agent, install_agent, uninstall_agent, DoctorStatus};
+use crate::agent::install::{DoctorStatus, doctor_agent, install_agent, uninstall_agent};
 use std::path::{Path, PathBuf};
 
 pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
@@ -14,7 +14,10 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
     match args[0].as_str() {
         "build" => {
             if args.len() < 2 {
-                return Err("Usage: agent-mux agent build <agent-id> [--harness <all|claude|codex|agy>]".to_string());
+                return Err(
+                    "Usage: agent-mux agent build <agent-id> [--harness <all|claude|codex|agy>]"
+                        .to_string(),
+                );
             }
             let agent_id = &args[1];
             let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -41,7 +44,11 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
             write_artifacts(&gen_dir, &artifacts)
                 .map_err(|e| format!("Failed to write artifacts: {e}"))?;
 
-            println!("Successfully built artifacts for agent '{}' at '{}'", agent_id, gen_dir.display());
+            println!(
+                "Successfully built artifacts for agent '{}' at '{}'",
+                agent_id,
+                gen_dir.display()
+            );
             Ok(())
         }
         "doctor" => {
@@ -67,12 +74,15 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
                 .and_then(|p| p.parent())
                 .unwrap_or(Path::new("."));
 
-            let doc = doctor_agent(agent, root_dir)
-                .map_err(|e| format!("Doctor check failed: {e}"))?;
+            let doc =
+                doctor_agent(agent, root_dir).map_err(|e| format!("Doctor check failed: {e}"))?;
 
             match doc.status {
                 DoctorStatus::Healthy => {
-                    println!("Agent '{}' is healthy. All artifacts are up to date.", agent_id);
+                    println!(
+                        "Agent '{}' is healthy. All artifacts are up to date.",
+                        agent_id
+                    );
                 }
                 status => {
                     println!("Agent '{}' check: {:?}", agent_id, status);
@@ -85,12 +95,18 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
         }
         "migrate" => {
             if args.len() < 3 {
-                return Err("Usage: agent-mux agent migrate <source.md> <dest/AGENTS.md>".to_string());
+                return Err(
+                    "Usage: agent-mux agent migrate <source.md> <dest/AGENTS.md>".to_string(),
+                );
             }
             let source = Path::new(&args[1]);
             let dest = Path::new(&args[2]);
             migrate_legacy(source, dest).map_err(|e| format!("Migration error: {e}"))?;
-            println!("Successfully migrated '{}' to '{}'", source.display(), dest.display());
+            println!(
+                "Successfully migrated '{}' to '{}'",
+                source.display(),
+                dest.display()
+            );
             Ok(())
         }
         "install" => {
@@ -123,7 +139,11 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
             let res = install_agent(agent, &artifacts, &target_dir, None)
                 .map_err(|e| format!("Install failed: {e}"))?;
 
-            println!("Installed {} artifact files to '{}'", res.installed_files.len(), target_dir.display());
+            println!(
+                "Installed {} artifact files to '{}'",
+                res.installed_files.len(),
+                target_dir.display()
+            );
             Ok(())
         }
         "uninstall" => {
@@ -152,15 +172,22 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
             let res = uninstall_agent(agent, &target_dir, None)
                 .map_err(|e| format!("Uninstall failed: {e}"))?;
 
-            println!("Removed {} artifact files from '{}'", res.removed_files.len(), target_dir.display());
+            println!(
+                "Removed {} artifact files from '{}'",
+                res.removed_files.len(),
+                target_dir.display()
+            );
             Ok(())
         }
-        other => Err(format!("Unknown agent subcommand: '{other}'. Run 'agent-mux agent help' for usage.")),
+        other => Err(format!(
+            "Unknown agent subcommand: '{other}'. Run 'agent-mux agent help' for usage."
+        )),
     }
 }
 
 fn print_help() {
-    println!(r#"Usage: agent-mux agent <subcommand> [args...]
+    println!(
+        r#"Usage: agent-mux agent <subcommand> [args...]
 
 Subcommands:
   build <id> [--harness <all|claude|codex|agy>]
@@ -173,5 +200,6 @@ Subcommands:
       Installs generated harness artifacts into the target directory.
   uninstall <id> [target-dir]
       Removes installed harness artifacts from the target directory.
-"#);
+"#
+    );
 }

@@ -272,8 +272,7 @@ mod tests {
         assert_eq!(encode_key(&opt_delete), Some(b"\x1bd".to_vec()));
 
         // Shift modifier preserves xterm sequence for selection
-        let shift_opt_left =
-            KeyEvent::new(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT);
+        let shift_opt_left = KeyEvent::new(KeyCode::Left, KeyModifiers::ALT | KeyModifiers::SHIFT);
         assert_eq!(encode_key(&shift_opt_left), Some(b"\x1b[1;4D".to_vec()));
     }
 

@@ -13,7 +13,7 @@ pub mod service;
 pub use correlation::resolve_binding;
 pub use evidence::{extract_command, extract_target_file, snippet};
 pub use live::{
-    clean_up_snapshot, is_stale, publish_snapshot, read_snapshots, LiveSnapshot, MAX_SNAPSHOT_BYTES,
+    LiveSnapshot, MAX_SNAPSHOT_BYTES, clean_up_snapshot, is_stale, publish_snapshot, read_snapshots,
 };
 pub use metrics::{analyze_skills, completed_percentiles, ttft_ms};
 pub use model::{

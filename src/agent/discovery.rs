@@ -1,8 +1,6 @@
 //! Dynamic discovery and migration of agent packages and legacy definition files.
 
-use crate::agent::definition::{
-    parse_definition, parse_legacy_definition, AgentDefinition,
-};
+use crate::agent::definition::{AgentDefinition, parse_definition, parse_legacy_definition};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -126,11 +124,7 @@ pub fn bundled_agents_dir() -> Option<PathBuf> {
 /// `workspace canonical > workspace legacy > global canonical > global legacy > bundled canonical`
 ///
 /// This function is strictly read-only and never mutates the filesystem.
-pub fn discover_agents(
-    workspace: &Path,
-    global: &Path,
-    bundled: Option<&Path>,
-) -> DiscoveryReport {
+pub fn discover_agents(workspace: &Path, global: &Path, bundled: Option<&Path>) -> DiscoveryReport {
     let mut diagnostics = Vec::new();
     let mut agents = Vec::new();
     let mut seen_ids = HashSet::new();
@@ -213,9 +207,7 @@ fn scan_canonical_packages(root: &Path, diagnostics: &mut Vec<String>) -> Vec<Ag
         }
     };
 
-    let mut entry_paths: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .collect();
+    let mut entry_paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
     entry_paths.sort();
 
     for dir_path in entry_paths {
@@ -300,9 +292,7 @@ fn scan_legacy_files(root: &Path, diagnostics: &mut Vec<String>) -> Vec<AgentDef
         }
     };
 
-    let mut entry_paths: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .collect();
+    let mut entry_paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
     entry_paths.sort();
 
     for file_path in entry_paths {

@@ -1,4 +1,4 @@
-use agent_mux::agent::definition::{parse_definition, DefinitionError};
+use agent_mux::agent::definition::{DefinitionError, parse_definition};
 use agent_mux::harness::Harness;
 use std::path::Path;
 
@@ -25,17 +25,27 @@ mcp_servers: [agent-mux]
 Review all code changes thoroughly.
 Report any security issues found.
 "#;
-    let def = parse_definition(source, Path::new("audit/AGENTS.md")).expect("should parse valid package");
+    let def =
+        parse_definition(source, Path::new("audit/AGENTS.md")).expect("should parse valid package");
     assert_eq!(def.id, "audit");
     assert_eq!(def.name, "Security Auditor");
     assert_eq!(def.icon.as_deref(), Some("🛡️"));
     assert_eq!(def.description, "Audits code for security vulnerabilities");
-    assert_eq!(def.harnesses, vec![Harness::Claude, Harness::Codex, Harness::Antigravity]);
+    assert_eq!(
+        def.harnesses,
+        vec![Harness::Claude, Harness::Codex, Harness::Antigravity]
+    );
     assert_eq!(def.default_harness, Harness::Claude);
     assert_eq!(def.capabilities, vec!["trace.read".to_string()]);
-    assert_eq!(def.startup_task.as_deref(), Some("Check the latest session for suspicious commands"));
+    assert_eq!(
+        def.startup_task.as_deref(),
+        Some("Check the latest session for suspicious commands")
+    );
     assert_eq!(def.mcp_servers, vec!["agent-mux".to_string()]);
-    assert!(def.instructions.contains("Review all code changes thoroughly"));
+    assert!(
+        def.instructions
+            .contains("Review all code changes thoroughly")
+    );
     assert!(!def.source_hash.is_empty());
 }
 
@@ -96,7 +106,11 @@ fn source_hash_is_deterministic_sha256() {
 
 #[test]
 fn definition_error_display_formatting() {
-    let err = DefinitionError::field(Path::new("audit/AGENTS.md"), "default_harness", "must be in harnesses");
+    let err = DefinitionError::field(
+        Path::new("audit/AGENTS.md"),
+        "default_harness",
+        "must be in harnesses",
+    );
     assert!(err.to_string().contains("audit/AGENTS.md"));
     assert!(err.to_string().contains("default_harness"));
     assert!(err.to_string().contains("must be in harnesses"));

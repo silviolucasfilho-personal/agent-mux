@@ -1,4 +1,4 @@
-use agent_mux::agent::discovery::{discover_agents, migrate_legacy, MigrationError};
+use agent_mux::agent::discovery::{MigrationError, discover_agents, migrate_legacy};
 use std::fs;
 use tempfile::tempdir;
 
@@ -6,7 +6,11 @@ use tempfile::tempdir;
 fn migration_preserves_legacy_source() {
     let root = tempdir().unwrap();
     let source = root.path().join("audit.md");
-    fs::write(&source, "---\nid: audit\nharnesses: [codex]\n---\nReview changes.").unwrap();
+    fs::write(
+        &source,
+        "---\nid: audit\nharnesses: [codex]\n---\nReview changes.",
+    )
+    .unwrap();
     let destination = root.path().join("audit/AGENTS.md");
     migrate_legacy(&source, &destination).unwrap();
     assert_eq!(fs::read(&source).unwrap(), fs::read(&destination).unwrap());
@@ -19,11 +23,18 @@ fn migration_refuses_to_overwrite_existing_destination() {
     let destination = root.path().join("audit/AGENTS.md");
     fs::create_dir_all(destination.parent().unwrap()).unwrap();
     fs::write(&source, "---\nid: audit\nharnesses: [codex]\n---\nLegacy").unwrap();
-    fs::write(&destination, "---\nid: audit\nharnesses: [codex]\n---\nCanonical").unwrap();
+    fs::write(
+        &destination,
+        "---\nid: audit\nharnesses: [codex]\n---\nCanonical",
+    )
+    .unwrap();
 
     let res = migrate_legacy(&source, &destination);
     assert!(matches!(res, Err(MigrationError::DestinationExists(_))));
-    assert_eq!(fs::read_to_string(&destination).unwrap(), "---\nid: audit\nharnesses: [codex]\n---\nCanonical");
+    assert_eq!(
+        fs::read_to_string(&destination).unwrap(),
+        "---\nid: audit\nharnesses: [codex]\n---\nCanonical"
+    );
 }
 
 #[test]
@@ -68,7 +79,11 @@ fn resolution_precedence_workspace_overrides_global_and_bundled() {
     )
     .unwrap();
 
-    let report = discover_agents(ws_root.path(), global_root.path(), Some(bundled_root.path()));
+    let report = discover_agents(
+        ws_root.path(),
+        global_root.path(),
+        Some(bundled_root.path()),
+    );
     assert_eq!(report.agents.len(), 2);
 
     let heimdall = report.agents.iter().find(|a| a.id == "heimdall").unwrap();
@@ -166,8 +181,16 @@ fn duplicate_canonical_ids_in_same_root_emits_diagnostic() {
     fs::create_dir_all(pkg_a.parent().unwrap()).unwrap();
     fs::create_dir_all(pkg_b.parent().unwrap()).unwrap();
 
-    fs::write(&pkg_a, "---\nid: dupe\nname: First\nharnesses: [claude]\n---\nFirst.").unwrap();
-    fs::write(&pkg_b, "---\nid: dupe\nname: Second\nharnesses: [claude]\n---\nSecond.").unwrap();
+    fs::write(
+        &pkg_a,
+        "---\nid: dupe\nname: First\nharnesses: [claude]\n---\nFirst.",
+    )
+    .unwrap();
+    fs::write(
+        &pkg_b,
+        "---\nid: dupe\nname: Second\nharnesses: [claude]\n---\nSecond.",
+    )
+    .unwrap();
 
     let empty = tempdir().unwrap();
     let report = discover_agents(root.path(), empty.path(), None);
@@ -185,7 +208,12 @@ fn absent_bundled_assets_reports_diagnostic() {
     let non_existent = ws.path().join("does_not_exist");
 
     let report = discover_agents(ws.path(), global.path(), Some(&non_existent));
-    assert!(report.diagnostics.iter().any(|d| d.contains("Bundled agents directory not found")));
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("Bundled agents directory not found"))
+    );
 }
 
 #[test]

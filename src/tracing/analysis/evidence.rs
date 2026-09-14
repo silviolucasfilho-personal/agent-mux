@@ -58,7 +58,14 @@ pub fn extract_target_file(tool_name: &str, input_raw: &str) -> Option<String> {
     }
 
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(input_raw) {
-        for key in ["TargetFile", "file_path", "path", "target_file", "filename", "filepath"] {
+        for key in [
+            "TargetFile",
+            "file_path",
+            "path",
+            "target_file",
+            "filename",
+            "filepath",
+        ] {
             if let Some(p) = val.get(key).and_then(|v| v.as_str()) {
                 let trimmed = p.trim();
                 if !trimmed.is_empty() {

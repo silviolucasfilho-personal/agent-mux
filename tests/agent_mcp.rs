@@ -1,6 +1,6 @@
+use agent_mux::agent::artifacts::RenderContext;
 use agent_mux::agent::artifacts::mcp_command;
 use agent_mux::agent::artifacts::render_artifacts_with_context;
-use agent_mux::agent::artifacts::RenderContext;
 use agent_mux::agent::definition::parse_definition;
 use std::path::Path;
 
@@ -97,7 +97,7 @@ fn render_artifacts_emits_empty_fragment_when_no_mcp_servers() {
 #[test]
 fn doctor_agent_checks_mcp_health() {
     use agent_mux::agent::artifacts::write_artifacts;
-    use agent_mux::agent::install::{doctor_agent, DoctorStatus};
+    use agent_mux::agent::install::{DoctorStatus, doctor_agent};
     use tempfile::tempdir;
 
     let root = tempdir().unwrap();

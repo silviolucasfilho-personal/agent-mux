@@ -140,7 +140,6 @@ fn antigravity_transcript(brain_conv_dir: &Path) -> Option<PathBuf> {
     condensed.is_file().then_some(condensed)
 }
 
-
 /// Reads the first few lines of a file looking for Codex `session_meta`.
 fn read_codex_session_meta(path: &Path, cap: usize) -> Option<TranscriptEvent> {
     let file = std::fs::File::open(path).ok()?;
@@ -456,18 +455,19 @@ pub fn poll(
                 candidates.push(id);
             }
             candidates.sort();
-            let adopt = |id: &str, correlation: &'static str, resume_prime: bool| -> Option<Adopted> {
-                let path = antigravity_transcript(&brain.join(id))?;
-                if !try_claim(claims, Provider::Antigravity, id) {
-                    return None;
-                }
-                Some(Adopted {
-                    session_id: id.to_string(),
-                    path,
-                    correlation,
-                    resume_prime,
-                })
-            };
+            let adopt =
+                |id: &str, correlation: &'static str, resume_prime: bool| -> Option<Adopted> {
+                    let path = antigravity_transcript(&brain.join(id))?;
+                    if !try_claim(claims, Provider::Antigravity, id) {
+                        return None;
+                    }
+                    Some(Adopted {
+                        session_id: id.to_string(),
+                        path,
+                        correlation,
+                        resume_prime,
+                    })
+                };
             // Tier 1: presence lock created since spawn — the strongest signal.
             for id in &candidates {
                 let lock = root.join("presence").join(format!("{id}.lock"));

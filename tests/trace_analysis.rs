@@ -10,7 +10,10 @@ use agent_mux::tracing::analysis::model::*;
 fn generation_duration_is_not_ttft() {
     assert_eq!(ttft_ms(Some(1_000_000), None), None);
     assert_eq!(ttft_ms(Some(1_000_000), Some(4_000_000)), Some(3));
-    assert_eq!(completed_percentiles(&[None, Some(10), Some(30)]), Some((10, 30, 30, 2)));
+    assert_eq!(
+        completed_percentiles(&[None, Some(10), Some(30)]),
+        Some((10, 30, 30, 2))
+    );
 }
 
 #[test]
@@ -27,7 +30,11 @@ fn absence_of_exact_identity_stays_uncorrelated() {
          INSERT INTO launches VALUES('old','previous-run',1,'claude:old',1);",
     )
     .unwrap();
-    assert!(resolve_binding(&db, "current-run", 1, None, None).unwrap().is_none());
+    assert!(
+        resolve_binding(&db, "current-run", 1, None, None)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -39,7 +46,9 @@ fn exact_launch_id_binds_immediately() {
     )
     .unwrap();
 
-    let binding = resolve_binding(&db, "run-1", 1, Some("launch-1"), None).unwrap().unwrap();
+    let binding = resolve_binding(&db, "run-1", 1, Some("launch-1"), None)
+        .unwrap()
+        .unwrap();
     assert_eq!(binding.launch_id, "launch-1");
     assert_eq!(binding.session_key.as_deref(), Some("claude:s1"));
 }
@@ -53,7 +62,9 @@ fn native_key_resolves_when_present() {
     )
     .unwrap();
 
-    let binding = resolve_binding(&db, "run-1", 1, None, Some("claude:s1")).unwrap().unwrap();
+    let binding = resolve_binding(&db, "run-1", 1, None, Some("claude:s1"))
+        .unwrap()
+        .unwrap();
     assert_eq!(binding.launch_id, "launch-1");
     assert_eq!(binding.session_key.as_deref(), Some("claude:s1"));
 }
@@ -82,7 +93,9 @@ fn run_id_and_local_id_picks_latest_launch_of_that_run() {
     )
     .unwrap();
 
-    let binding = resolve_binding(&db, "run-1", 1, None, None).unwrap().unwrap();
+    let binding = resolve_binding(&db, "run-1", 1, None, None)
+        .unwrap()
+        .unwrap();
     assert_eq!(binding.launch_id, "new-launch");
     assert_eq!(binding.session_key.as_deref(), Some("claude:s2"));
 }
@@ -97,11 +110,15 @@ fn two_runs_sharing_local_id_do_not_collide() {
     )
     .unwrap();
 
-    let b1 = resolve_binding(&db, "run-1", 1, None, None).unwrap().unwrap();
+    let b1 = resolve_binding(&db, "run-1", 1, None, None)
+        .unwrap()
+        .unwrap();
     assert_eq!(b1.launch_id, "run1-l1");
     assert_eq!(b1.session_key.as_deref(), Some("claude:r1"));
 
-    let b2 = resolve_binding(&db, "run-2", 1, None, None).unwrap().unwrap();
+    let b2 = resolve_binding(&db, "run-2", 1, None, None)
+        .unwrap()
+        .unwrap();
     assert_eq!(b2.launch_id, "run2-l1");
     assert_eq!(b2.session_key.as_deref(), Some("claude:r2"));
 }
@@ -129,16 +146,24 @@ fn briefing_preserves_distinct_relative_paths() {
         0,
         1000,
         &[],
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(rep.total_sessions, 1);
     let card = &rep.cards[0];
     assert_eq!(card.files_modified.len(), 2);
-    let paths: Vec<_> = card.files_modified.iter().map(|f| f.value.as_deref().unwrap()).collect();
+    let paths: Vec<_> = card
+        .files_modified
+        .iter()
+        .map(|f| f.value.as_deref().unwrap())
+        .collect();
     assert!(paths.contains(&"src/a/config.rs"));
     assert!(paths.contains(&"src/b/config.rs"));
     assert_eq!(card.recent_commands.len(), 1);
-    assert_eq!(card.recent_commands[0].value.as_deref().unwrap(), "cargo test --workspace");
+    assert_eq!(
+        card.recent_commands[0].value.as_deref().unwrap(),
+        "cargo test --workspace"
+    );
 }
 
 #[test]
@@ -162,12 +187,19 @@ fn briefing_with_live_session_merges_activity() {
         0,
         1000,
         &live,
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(rep.total_sessions, 1);
     let card = &rep.cards[0];
     assert_eq!(card.runtime_state, RuntimeState::Working);
-    assert!(card.current_activity.value.as_deref().unwrap().contains("cargo test"));
+    assert!(
+        card.current_activity
+            .value
+            .as_deref()
+            .unwrap()
+            .contains("cargo test")
+    );
 }
 
 #[test]
@@ -196,7 +228,9 @@ fn analyze_skills_computes_attribution_and_percentiles() {
         "#,
     ).unwrap();
 
-    let metrics = agent_mux::tracing::analysis::metrics::analyze_skills(&db, Some("rust-dev"), None, None).unwrap();
+    let metrics =
+        agent_mux::tracing::analysis::metrics::analyze_skills(&db, Some("rust-dev"), None, None)
+            .unwrap();
     assert_eq!(metrics.len(), 1);
     let row = &metrics[0];
     assert_eq!(row.skill_name, "rust-dev");

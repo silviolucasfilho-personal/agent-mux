@@ -2,8 +2,8 @@
 
 use super::evidence::{extract_command, extract_target_file, snippet};
 use super::model::{
-    AnalysisError, Briefing, Evidence, EvidenceSource, LiveSession, RuntimeState,
-    SessionCard, TaskOutcome, ToolCountSummary,
+    AnalysisError, Briefing, Evidence, EvidenceSource, LiveSession, RuntimeState, SessionCard,
+    TaskOutcome, ToolCountSummary,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
@@ -135,7 +135,11 @@ pub fn briefing(
         total_sessions,
         total_turns,
         total_tools,
-        total_tokens: if has_tokens { Some(total_tokens_sum) } else { None },
+        total_tokens: if has_tokens {
+            Some(total_tokens_sum)
+        } else {
+            None
+        },
         total_cost_usd: if has_cost { Some(total_cost_sum) } else { None },
         warnings: Vec::new(),
     })
@@ -151,9 +155,6 @@ fn build_session_card(
     task_outcome: TaskOutcome,
     live_active_tools: &[String],
 ) -> Result<SessionCard, AnalysisError> {
-    let skey = session_key.unwrap_or("");
-    let lid = launch_id.unwrap_or("");
-
     // Check if traces table exists
     let has_traces: bool = conn
         .query_row(
@@ -164,7 +165,8 @@ fn build_session_card(
         .optional()?
         .unwrap_or(false);
 
-    let mut initial_goal = Evidence::missing(EvidenceSource::Transcript, "No initial goal recorded");
+    let mut initial_goal =
+        Evidence::missing(EvidenceSource::Transcript, "No initial goal recorded");
     let mut completed_turns = 0;
     let mut open_turns = 0;
     let mut last_assistant_output = None;
@@ -173,39 +175,61 @@ fn build_session_card(
     let mut total_tokens = None;
     let mut total_cost_usd = None;
 
-    if has_traces && (!skey.is_empty() || !lid.is_empty()) {
+    let (filter_sql, t_filter_sql, filter_params): (String, String, Vec<String>) =
+        match (session_key, launch_id) {
+            (Some(sk), Some(lid)) if !sk.is_empty() && !lid.is_empty() => (
+                "(session_key = ?1 OR launch_id = ?2)".into(),
+                "(t.session_key = ?1 OR t.launch_id = ?2)".into(),
+                vec![sk.to_string(), lid.to_string()],
+            ),
+            (Some(sk), _) if !sk.is_empty() => (
+                "session_key = ?1".into(),
+                "t.session_key = ?1".into(),
+                vec![sk.to_string()],
+            ),
+            (_, Some(lid)) if !lid.is_empty() => (
+                "launch_id = ?1".into(),
+                "t.launch_id = ?1".into(),
+                vec![lid.to_string()],
+            ),
+            _ => (String::new(), String::new(), vec![]),
+        };
+
+    if has_traces && !filter_sql.is_empty() {
         // Initial goal: first input
+        let sql = format!(
+            "SELECT input FROM traces
+             WHERE {filter_sql}
+               AND input IS NOT NULL AND trim(input) != ''
+             ORDER BY start_ns ASC LIMIT 1"
+        );
         if let Ok(Some(first_in)) = conn
             .query_row(
-                "SELECT input FROM traces
-                 WHERE ((?1 != '' AND session_key = ?1) OR (?2 != '' AND launch_id = ?2))
-                   AND input IS NOT NULL AND trim(input) != ''
-                 ORDER BY start_ns ASC LIMIT 1",
-                params![skey, lid],
+                &sql,
+                rusqlite::params_from_iter(filter_params.iter()),
                 |r| r.get::<_, String>(0),
             )
             .optional()
         {
-            initial_goal = Evidence::observed(
-                snippet(&first_in, 200),
-                EvidenceSource::Transcript,
-                None,
-            );
+            initial_goal =
+                Evidence::observed(snippet(&first_in, 200), EvidenceSource::Transcript, None);
         }
 
         // Turns count
+        let sql = format!("SELECT COUNT(*) FROM traces WHERE {filter_sql}");
         if let Ok(total) = conn.query_row(
-            "SELECT COUNT(*) FROM traces WHERE (?1 != '' AND session_key = ?1) OR (?2 != '' AND launch_id = ?2)",
-            params![skey, lid],
+            &sql,
+            rusqlite::params_from_iter(filter_params.iter()),
             |r| r.get::<_, i64>(0),
         ) {
             completed_turns = total;
         }
 
         // Open turns count
+        let sql = format!("SELECT COUNT(*) FROM traces WHERE {filter_sql} AND end_ns IS NULL");
         if let Ok(open) = conn.query_row(
-            "SELECT COUNT(*) FROM traces WHERE ((?1 != '' AND session_key = ?1) OR (?2 != '' AND launch_id = ?2)) AND end_ns IS NULL",
-            params![skey, lid],
+            &sql,
+            rusqlite::params_from_iter(filter_params.iter()),
             |r| r.get::<_, i64>(0),
         ) {
             open_turns = open;
@@ -213,13 +237,16 @@ fn build_session_card(
         }
 
         // Latest assistant output
+        let sql = format!(
+            "SELECT output FROM traces
+             WHERE {filter_sql}
+               AND output IS NOT NULL AND trim(output) != ''
+             ORDER BY start_ns DESC LIMIT 1"
+        );
         if let Ok(Some(last_out)) = conn
             .query_row(
-                "SELECT output FROM traces
-                 WHERE ((?1 != '' AND session_key = ?1) OR (?2 != '' AND launch_id = ?2))
-                   AND output IS NOT NULL AND trim(output) != ''
-                 ORDER BY start_ns DESC LIMIT 1",
-                params![skey, lid],
+                &sql,
+                rusqlite::params_from_iter(filter_params.iter()),
                 |r| r.get::<_, String>(0),
             )
             .optional()
@@ -242,17 +269,22 @@ fn build_session_card(
             .unwrap_or(false);
 
         if has_trace_stats {
-            if let Ok(row) = conn.query_row(
+            let sql = format!(
                 "SELECT SUM(total_tokens), SUM(total_cost_usd), MIN(start_ns), MAX(COALESCE(end_ns, start_ns))
                  FROM trace_stats
-                 WHERE (?1 != '' AND session_key = ?1) OR (?2 != '' AND launch_id = ?2)",
-                params![skey, lid],
-                |r| Ok((
-                    r.get::<_, Option<i64>>(0)?,
-                    r.get::<_, Option<f64>>(1)?,
-                    r.get::<_, Option<i64>>(2)?,
-                    r.get::<_, Option<i64>>(3)?,
-                )),
+                 WHERE {filter_sql}"
+            );
+            if let Ok(row) = conn.query_row(
+                &sql,
+                rusqlite::params_from_iter(filter_params.iter()),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<i64>>(0)?,
+                        r.get::<_, Option<f64>>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                    ))
+                },
             ) {
                 total_tokens = row.0;
                 total_cost_usd = row.1;
@@ -280,19 +312,26 @@ fn build_session_card(
     let mut recent_commands = Vec::new();
     let mut db_active_tools = Vec::new();
 
-    if has_obs && (!skey.is_empty() || !lid.is_empty()) {
+    if has_obs && !t_filter_sql.is_empty() {
         // Tool count and breakdown
-        if let Ok(mut stmt) = conn.prepare(
+        let sql = format!(
             "SELECT o.name, COUNT(*)
              FROM observations o JOIN traces t ON t.id = o.trace_id
-             WHERE ((?1 != '' AND t.session_key = ?1) OR (?2 != '' AND t.launch_id = ?2))
+             WHERE {t_filter_sql}
                AND o.type = 'tool'
              GROUP BY o.name
-             ORDER BY COUNT(*) DESC",
-        ) {
-            if let Ok(rows) = stmt.query_map(params![skey, lid], |r| {
-                Ok((r.get::<_, Option<String>>(0)?.unwrap_or_else(|| "unknown".into()), r.get::<_, i64>(1)?))
-            }) {
+             ORDER BY COUNT(*) DESC"
+        );
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            if let Ok(rows) =
+                stmt.query_map(rusqlite::params_from_iter(filter_params.iter()), |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?
+                            .unwrap_or_else(|| "unknown".into()),
+                        r.get::<_, i64>(1)?,
+                    ))
+                })
+            {
                 for (name, count) in rows.flatten() {
                     total_tools += count;
                     tool_counts.push(ToolCountSummary { name, count });
@@ -301,17 +340,23 @@ fn build_session_card(
         }
 
         // Files modified
-        if let Ok(mut stmt) = conn.prepare(
+        let sql = format!(
             "SELECT o.name, o.input
              FROM observations o JOIN traces t ON t.id = o.trace_id
-             WHERE ((?1 != '' AND t.session_key = ?1) OR (?2 != '' AND t.launch_id = ?2))
+             WHERE {t_filter_sql}
                AND o.type = 'tool'
-             ORDER BY o.start_ns DESC",
-        ) {
+             ORDER BY o.start_ns DESC LIMIT 50"
+        );
+        if let Ok(mut stmt) = conn.prepare(&sql) {
             let mut seen_files = HashSet::new();
-            if let Ok(rows) = stmt.query_map(params![skey, lid], |r| {
-                Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<String>>(1)?.unwrap_or_default()))
-            }) {
+            if let Ok(rows) =
+                stmt.query_map(rusqlite::params_from_iter(filter_params.iter()), |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                })
+            {
                 for (name, input) in rows.flatten() {
                     if let Some(file_path) = extract_target_file(&name, &input) {
                         if seen_files.insert(file_path.clone()) {
@@ -330,17 +375,23 @@ fn build_session_card(
         }
 
         // Recent commands
-        if let Ok(mut stmt) = conn.prepare(
+        let sql = format!(
             "SELECT o.name, o.input
              FROM observations o JOIN traces t ON t.id = o.trace_id
-             WHERE ((?1 != '' AND t.session_key = ?1) OR (?2 != '' AND t.launch_id = ?2))
+             WHERE {t_filter_sql}
                AND o.type = 'tool'
-             ORDER BY o.start_ns DESC",
-        ) {
+             ORDER BY o.start_ns DESC LIMIT 50"
+        );
+        if let Ok(mut stmt) = conn.prepare(&sql) {
             let mut seen_cmds = HashSet::new();
-            if let Ok(rows) = stmt.query_map(params![skey, lid], |r| {
-                Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<String>>(1)?.unwrap_or_default()))
-            }) {
+            if let Ok(rows) =
+                stmt.query_map(rusqlite::params_from_iter(filter_params.iter()), |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                })
+            {
                 for (name, input) in rows.flatten() {
                     if let Some(cmd) = extract_command(&name, &input) {
                         if seen_cmds.insert(cmd.clone()) {
@@ -359,16 +410,22 @@ fn build_session_card(
         }
 
         // Open observations (in-flight tools)
-        if let Ok(mut stmt) = conn.prepare(
+        let sql = format!(
             "SELECT o.name, o.input
              FROM observations o JOIN traces t ON t.id = o.trace_id
-             WHERE ((?1 != '' AND t.session_key = ?1) OR (?2 != '' AND t.launch_id = ?2))
+             WHERE {t_filter_sql}
                AND o.end_ns IS NULL AND o.type IN ('tool', 'agent')
-             ORDER BY o.start_ns DESC",
-        ) {
-            if let Ok(rows) = stmt.query_map(params![skey, lid], |r| {
-                Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<String>>(1)?.unwrap_or_default()))
-            }) {
+             ORDER BY o.start_ns DESC LIMIT 10"
+        );
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+            if let Ok(rows) =
+                stmt.query_map(rusqlite::params_from_iter(filter_params.iter()), |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                })
+            {
                 for (name, input) in rows.flatten() {
                     let clue = if let Some(cmd) = extract_command(&name, &input) {
                         format!("{name}: {}", snippet(&cmd, 30))
@@ -400,14 +457,23 @@ fn build_session_card(
         )
     } else {
         match runtime_state {
-            RuntimeState::Working => Evidence::derived("Working / Generating".into(), EvidenceSource::LiveProcess),
-            RuntimeState::WaitingForUser => {
-                Evidence::derived("Waiting for user response / approval".into(), EvidenceSource::LiveProcess)
+            RuntimeState::Working => {
+                Evidence::derived("Working / Generating".into(), EvidenceSource::LiveProcess)
             }
+            RuntimeState::WaitingForUser => Evidence::derived(
+                "Waiting for user response / approval".into(),
+                EvidenceSource::LiveProcess,
+            ),
             RuntimeState::Idle => Evidence::derived("Idle".into(), EvidenceSource::LiveProcess),
-            RuntimeState::Exited => Evidence::derived("Session exited".into(), EvidenceSource::StoreRollup),
-            RuntimeState::Disconnected => Evidence::derived("Disconnected".into(), EvidenceSource::LiveProcess),
-            RuntimeState::Unknown => Evidence::missing(EvidenceSource::LiveProcess, "State unknown"),
+            RuntimeState::Exited => {
+                Evidence::derived("Session exited".into(), EvidenceSource::StoreRollup)
+            }
+            RuntimeState::Disconnected => {
+                Evidence::derived("Disconnected".into(), EvidenceSource::LiveProcess)
+            }
+            RuntimeState::Unknown => {
+                Evidence::missing(EvidenceSource::LiveProcess, "State unknown")
+            }
         }
     };
 

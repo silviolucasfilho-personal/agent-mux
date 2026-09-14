@@ -5,7 +5,7 @@ use crate::tracing::analysis::service::{
     SearchArgs, TimelineArgs,
 };
 use schemars::schema_for;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Generates the standard MCP tool definitions for all eight tools.
 pub fn tool_definitions() -> Vec<Value> {

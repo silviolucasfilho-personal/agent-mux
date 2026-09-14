@@ -6,7 +6,7 @@ use crate::tracing::analysis::scope::Scope;
 use crate::tracing::analysis::service::{Limits, Request, ServiceConfig, TraceService};
 use crate::tracing::analysis::{default_snapshot_dir, default_trace_db_path};
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -254,10 +254,7 @@ async fn serve_stdio(service: Arc<TraceService>) -> Result<()> {
     Ok(())
 }
 
-async fn write_json_line(
-    stdout: &mut tokio::io::Stdout,
-    value: &Value,
-) -> Result<()> {
+async fn write_json_line(stdout: &mut tokio::io::Stdout, value: &Value) -> Result<()> {
     let mut serialized = serde_json::to_string(value)?;
     serialized.push('\n');
     stdout.write_all(serialized.as_bytes()).await?;

@@ -1,6 +1,6 @@
 use agent_mux::agent::artifacts::{render_artifacts, write_artifacts};
 use agent_mux::agent::definition::parse_definition;
-use agent_mux::agent::install::{doctor_agent, install_agent, uninstall_agent, DoctorStatus};
+use agent_mux::agent::install::{DoctorStatus, doctor_agent, install_agent, uninstall_agent};
 use agent_mux::harness::Harness;
 use std::fs;
 use tempfile::tempdir;

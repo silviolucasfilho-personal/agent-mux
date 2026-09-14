@@ -26,11 +26,20 @@ pub fn completed_percentiles(durations: &[Option<u64>]) -> Option<(u64, u64, u64
     completed.sort_unstable();
     let count = completed.len();
 
-    let p50_idx = ((0.50 * count as f64).ceil() as usize).saturating_sub(1).min(count - 1);
-    let p95_idx = ((0.95 * count as f64).ceil() as usize).saturating_sub(1).min(count - 1);
+    let p50_idx = ((0.50 * count as f64).ceil() as usize)
+        .saturating_sub(1)
+        .min(count - 1);
+    let p95_idx = ((0.95 * count as f64).ceil() as usize)
+        .saturating_sub(1)
+        .min(count - 1);
     let max_idx = count - 1;
 
-    Some((completed[p50_idx], completed[p95_idx], completed[max_idx], count))
+    Some((
+        completed[p50_idx],
+        completed[p95_idx],
+        completed[max_idx],
+        count,
+    ))
 }
 
 /// Analyzes skill execution telemetry, tool durations, and error classifications from SQLite.
@@ -111,7 +120,10 @@ pub fn analyze_skills(
                 error_count += 1;
                 if let Some(msg) = status_msg {
                     let lower = msg.to_lowercase();
-                    if lower.contains("schema") || lower.contains("validation") || lower.contains("json error") {
+                    if lower.contains("schema")
+                        || lower.contains("validation")
+                        || lower.contains("json error")
+                    {
                         schema_error_count += 1;
                     }
                 }

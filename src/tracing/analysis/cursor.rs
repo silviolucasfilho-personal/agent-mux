@@ -58,12 +58,15 @@ impl CursorCodec {
 
         let payload_bytes = hex_decode(payload_hex)
             .ok_or_else(|| ServiceError::InvalidArgument("invalid cursor hex encoding".into()))?;
-        let tag_bytes = hex_decode(tag_hex)
-            .ok_or_else(|| ServiceError::InvalidArgument("invalid cursor tag hex encoding".into()))?;
+        let tag_bytes = hex_decode(tag_hex).ok_or_else(|| {
+            ServiceError::InvalidArgument("invalid cursor tag hex encoding".into())
+        })?;
 
         let expected_tag = self.compute_tag(&payload_bytes);
         if tag_bytes.as_slice() != expected_tag.as_slice() {
-            return Err(ServiceError::InvalidArgument("tampered or invalid cursor".into()));
+            return Err(ServiceError::InvalidArgument(
+                "tampered or invalid cursor".into(),
+            ));
         }
 
         let payload: CursorPayload = serde_json::from_slice(&payload_bytes)

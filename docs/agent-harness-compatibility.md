@@ -48,3 +48,22 @@ The following configurations are implemented per specifications but have not yet
 - **Linux (x86_64 / arm64)**: Standard POSIX ptys; paths follow XDG directories (`$XDG_DATA_HOME/agent-mux`).
 - **Codex CLI < 0.100.0**: Legacy versions may not support `mcp.toml` configuration format without command-line flag conversions.
 - **Antigravity CLI 2.0+ (Preview)**: Early alpha builds of Antigravity 2.0 with sidecar agent protocols.
+
+---
+
+## 4. MCP Server & Harness Verification Script
+
+`agent-mux` includes an automated verification script at `scripts/verify-agent-mcp.sh`:
+
+```sh
+# Run verification across all detected harnesses using an isolated fixture DB
+./scripts/verify-agent-mcp.sh
+
+# Run targeted check for a single harness
+./scripts/verify-agent-mcp.sh --harness claude
+./scripts/verify-agent-mcp.sh --harness codex
+./scripts/verify-agent-mcp.sh --harness agy
+```
+
+### Safety Guarantee
+The script refuses to execute if pointed to production trace data (`~/.agent-mux/traces.db` or `$AGENT_MUX_TRACE_DB`). All assertions run against an isolated SQLite store in a temporary directory.

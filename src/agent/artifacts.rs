@@ -1,9 +1,9 @@
 //! Deterministic multi-harness artifact generation and management.
 
+use crate::agent::adapters::HarnessAdapter;
 use crate::agent::adapters::agy::AgyAdapter;
 use crate::agent::adapters::claude::ClaudeAdapter;
 use crate::agent::adapters::codex::CodexAdapter;
-use crate::agent::adapters::HarnessAdapter;
 use crate::agent::definition::AgentDefinition;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

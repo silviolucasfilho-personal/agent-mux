@@ -9,7 +9,11 @@ fn catalog_contains_exactly_eight_read_tools() {
     assert_eq!(names.len(), 8);
     assert!(names.contains(&"agent_mux_get_briefing"));
     assert!(names.contains(&"agent_mux_compare_runs"));
-    assert!(!names.iter().any(|n| n.contains("shell") || n.contains("write")));
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("shell") || n.contains("write"))
+    );
 }
 
 #[test]
@@ -134,7 +138,10 @@ fn mcp_stdio_full_lifecycle_and_protocol_contract() {
 
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
-    assert!(!line.contains("\x1b["), "stdout must never contain ANSI escape sequences");
+    assert!(
+        !line.contains("\x1b["),
+        "stdout must never contain ANSI escape sequences"
+    );
     let init_resp: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(init_resp["id"], 1);
     assert_eq!(init_resp["result"]["serverInfo"]["name"], "agent-mux");
@@ -144,7 +151,12 @@ fn mcp_stdio_full_lifecycle_and_protocol_contract() {
         "jsonrpc": "2.0",
         "method": "notifications/initialized"
     });
-    writeln!(stdin, "{}", serde_json::to_string(&initialized_notif).unwrap()).unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::to_string(&initialized_notif).unwrap()
+    )
+    .unwrap();
     stdin.flush().unwrap();
 
     // 2. tools/list - validate against golden fixture
@@ -159,7 +171,10 @@ fn mcp_stdio_full_lifecycle_and_protocol_contract() {
 
     line.clear();
     reader.read_line(&mut line).unwrap();
-    assert!(!line.contains("\x1b["), "stdout must never contain ANSI escape sequences");
+    assert!(
+        !line.contains("\x1b["),
+        "stdout must never contain ANSI escape sequences"
+    );
     let list_resp: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(list_resp["id"], 2);
     let tools = list_resp["result"]["tools"].as_array().unwrap();
@@ -188,7 +203,12 @@ fn mcp_stdio_full_lifecycle_and_protocol_contract() {
             "arguments": {}
         }
     });
-    writeln!(stdin, "{}", serde_json::to_string(&call_health_req).unwrap()).unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::to_string(&call_health_req).unwrap()
+    )
+    .unwrap();
     stdin.flush().unwrap();
 
     line.clear();
@@ -198,9 +218,14 @@ fn mcp_stdio_full_lifecycle_and_protocol_contract() {
     assert_eq!(health_resp["result"]["isError"], false);
     let structured = &health_resp["result"]["structuredContent"];
     assert_eq!(structured["schema_version"], 1);
-    let content_text = health_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let content_text = health_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     let text_val: serde_json::Value = serde_json::from_str(content_text).unwrap();
-    assert_eq!(&text_val, structured, "content text and structuredContent must match");
+    assert_eq!(
+        &text_val, structured,
+        "content text and structuredContent must match"
+    );
 
     // 4. tools/call agent_mux_get_briefing
     let call_briefing = serde_json::json!({
@@ -252,7 +277,12 @@ fn mcp_stdio_full_lifecycle_and_protocol_contract() {
             }
         }
     });
-    writeln!(stdin, "{}", serde_json::to_string(&call_get_session).unwrap()).unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::to_string(&call_get_session).unwrap()
+    )
+    .unwrap();
     stdin.flush().unwrap();
 
     line.clear();
@@ -403,7 +433,10 @@ fn mcp_stdio_full_lifecycle_and_protocol_contract() {
     // 14. Drop stdin -> EOF -> clean exit
     drop(stdin);
     let status = child.wait().unwrap();
-    assert!(status.success(), "Server must exit cleanly with code 0 on stdin EOF");
+    assert!(
+        status.success(),
+        "Server must exit cleanly with code 0 on stdin EOF"
+    );
 }
 
 #[test]

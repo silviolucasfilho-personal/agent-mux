@@ -156,7 +156,10 @@ fn read_only_startup_does_not_create_db() {
 
     let res = service.execute(Request::Briefing(BriefingArgs::default()));
     assert!(matches!(res, Err(ServiceError::DbUnavailable(_))));
-    assert!(!missing_db.exists(), "Read-only query must not create missing DB");
+    assert!(
+        !missing_db.exists(),
+        "Read-only query must not create missing DB"
+    );
 }
 
 #[test]
@@ -403,7 +406,10 @@ fn invalid_or_reversed_window_rejected() {
         until: Some("2026-09-13T12:00:00Z".into()),
         ..Default::default()
     }));
-    assert!(matches!(res_reversed, Err(ServiceError::InvalidArgument(_))));
+    assert!(matches!(
+        res_reversed,
+        Err(ServiceError::InvalidArgument(_))
+    ));
 
     // Invalid RFC3339 string
     let res_invalid = service.execute(Request::Briefing(BriefingArgs {

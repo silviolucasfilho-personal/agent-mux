@@ -342,7 +342,10 @@ fn codex_adopts_past_date_dir_on_resume() {
     // Rollout file is located in a date dir from 2026/01/15 (in the past)
     let past_date_dir = sessions.join("2026").join("01").join("15");
     let past_rollout = past_date_dir.join("rollout-2026-01-15T10-00-00-resumed.jsonl");
-    write_file(&past_rollout, &(codex_meta_line("resumed-session", &cwd) + "\n"));
+    write_file(
+        &past_rollout,
+        &(codex_meta_line("resumed-session", &cwd) + "\n"),
+    );
 
     let claims = registry();
     let t0 = SystemTime::now() - Duration::from_secs(2);
@@ -390,4 +393,3 @@ fn antigravity_adopts_resumed_conversation_with_active_presence_lock() {
     assert_eq!(adopted.correlation, "watched");
     assert!(adopted.resume_prime);
 }
-

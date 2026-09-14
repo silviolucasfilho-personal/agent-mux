@@ -1,7 +1,7 @@
 use agent_mux::agent::artifacts::render_artifacts;
 use agent_mux::agent::definition::parse_definition;
 use agent_mux::agent::launch::{
-    build_agent_launch, selected_harness_index, LaunchError, LaunchOptions,
+    LaunchError, LaunchOptions, build_agent_launch, selected_harness_index,
 };
 use agent_mux::config::Profile;
 use agent_mux::harness::Harness;
@@ -45,22 +45,36 @@ fn build_agent_launch_claude_composes_argv() {
         ..Default::default()
     };
 
-    let launch = build_agent_launch(
-        &d,
-        &profile,
-        &options,
-        Path::new("/workspace"),
-        &artifacts,
-    )
-    .unwrap();
+    let launch =
+        build_agent_launch(&d, &profile, &options, Path::new("/workspace"), &artifacts).unwrap();
 
     assert_eq!(launch.agent_id, "audit");
     assert_eq!(launch.cwd, PathBuf::from("/workspace"));
-    assert!(launch.profile.args.contains(&"--append-system-prompt".to_string()));
-    assert!(launch.profile.args.contains(&"Audit instructions.".to_string()));
+    assert!(
+        launch
+            .profile
+            .args
+            .contains(&"--append-system-prompt".to_string())
+    );
+    assert!(
+        launch
+            .profile
+            .args
+            .contains(&"Audit instructions.".to_string())
+    );
     assert!(launch.profile.args.contains(&"--model".to_string()));
-    assert!(launch.profile.args.contains(&"claude-3-7-sonnet".to_string()));
-    assert!(launch.profile.args.contains(&"--dangerously-skip-permissions".to_string()));
+    assert!(
+        launch
+            .profile
+            .args
+            .contains(&"claude-3-7-sonnet".to_string())
+    );
+    assert!(
+        launch
+            .profile
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string())
+    );
     assert!(launch.profile.args.contains(&"Check the repo".to_string()));
 }
 
@@ -79,14 +93,8 @@ fn build_agent_launch_codex_composes_argv() {
         ..Default::default()
     };
 
-    let launch = build_agent_launch(
-        &d,
-        &profile,
-        &options,
-        Path::new("/workspace"),
-        &artifacts,
-    )
-    .unwrap();
+    let launch =
+        build_agent_launch(&d, &profile, &options, Path::new("/workspace"), &artifacts).unwrap();
 
     assert_eq!(launch.agent_id, "audit");
     assert!(launch.profile.args.contains(&"--yolo".to_string()));
@@ -108,19 +116,23 @@ fn build_agent_launch_agy_composes_argv() {
         ..Default::default()
     };
 
-    let launch = build_agent_launch(
-        &d,
-        &profile,
-        &options,
-        Path::new("/workspace"),
-        &artifacts,
-    )
-    .unwrap();
+    let launch =
+        build_agent_launch(&d, &profile, &options, Path::new("/workspace"), &artifacts).unwrap();
 
     assert_eq!(launch.agent_id, "audit");
-    assert!(launch.profile.args.contains(&"--prompt-interactive".to_string()));
+    assert!(
+        launch
+            .profile
+            .args
+            .contains(&"--prompt-interactive".to_string())
+    );
     assert!(launch.profile.args.contains(&"Investigate".to_string()));
-    assert!(launch.profile.args.contains(&"--dangerously-skip-permissions".to_string()));
+    assert!(
+        launch
+            .profile
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string())
+    );
 }
 
 #[test]
@@ -137,13 +149,7 @@ fn unsupported_harness_rejected() {
         ..Default::default()
     };
 
-    let res = build_agent_launch(
-        &d,
-        &profile,
-        &options,
-        Path::new("/workspace"),
-        &artifacts,
-    );
+    let res = build_agent_launch(&d, &profile, &options, Path::new("/workspace"), &artifacts);
     assert!(matches!(res, Err(LaunchError::UnsupportedHarness(_))));
 }
 
@@ -158,15 +164,19 @@ fn spaces_and_quotes_preserved_without_shell_splitting() {
     let profile = make_test_profile(Harness::Claude);
     let options = LaunchOptions::default();
 
-    let launch = build_agent_launch(
-        &d,
-        &profile,
-        &options,
-        Path::new("/workspace"),
-        &artifacts,
-    )
-    .unwrap();
+    let launch =
+        build_agent_launch(&d, &profile, &options, Path::new("/workspace"), &artifacts).unwrap();
 
-    assert!(launch.profile.args.contains(&"echo \"hello world\" && ls -la".to_string()));
-    assert!(launch.profile.args.contains(&"Instructions with 'single' and \"double\" quotes.".to_string()));
+    assert!(
+        launch
+            .profile
+            .args
+            .contains(&"echo \"hello world\" && ls -la".to_string())
+    );
+    assert!(
+        launch
+            .profile
+            .args
+            .contains(&"Instructions with 'single' and \"double\" quotes.".to_string())
+    );
 }

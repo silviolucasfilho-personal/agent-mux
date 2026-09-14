@@ -1,5 +1,5 @@
 use agent_mux::tracing::analysis::live::{
-    clean_up_snapshot, is_stale, publish_snapshot, read_snapshots, LiveSnapshot, MAX_SNAPSHOT_BYTES,
+    LiveSnapshot, MAX_SNAPSHOT_BYTES, clean_up_snapshot, is_stale, publish_snapshot, read_snapshots,
 };
 use agent_mux::tracing::analysis::model::{LiveSession, RuntimeState};
 use std::fs;
@@ -234,7 +234,10 @@ fn briefing_reflects_live_snapshots_and_full_coverage() {
     ).unwrap();
 
     let snap_dir = temp.path().join("snapshots");
-    let scope = agent_mux::tracing::analysis::scope::Scope::workspace(std::path::Path::new("/workspace/app")).unwrap();
+    let scope = agent_mux::tracing::analysis::scope::Scope::workspace(std::path::Path::new(
+        "/workspace/app",
+    ))
+    .unwrap();
     let service = agent_mux::tracing::analysis::service::TraceService::new(
         agent_mux::tracing::analysis::service::ServiceConfig {
             db_path,
@@ -242,15 +245,26 @@ fn briefing_reflects_live_snapshots_and_full_coverage() {
             snapshot_dir: Some(snap_dir.clone()),
             limits: agent_mux::tracing::analysis::service::Limits::default(),
             admission_hook: None,
-        }
-    ).unwrap();
+        },
+    )
+    .unwrap();
 
     // 1. Without live snapshot -> CoverageStatus::Partial
-    let res_no_snap = service.execute(agent_mux::tracing::analysis::service::Request::Briefing(
-        agent_mux::tracing::analysis::service::BriefingArgs::default()
-    )).unwrap();
-    assert_eq!(res_no_snap.coverage.status, agent_mux::tracing::analysis::service::CoverageStatus::Partial);
-    assert!(res_no_snap.coverage.reasons.contains(&"live_snapshot_unavailable".to_string()));
+    let res_no_snap = service
+        .execute(agent_mux::tracing::analysis::service::Request::Briefing(
+            agent_mux::tracing::analysis::service::BriefingArgs::default(),
+        ))
+        .unwrap();
+    assert_eq!(
+        res_no_snap.coverage.status,
+        agent_mux::tracing::analysis::service::CoverageStatus::Partial
+    );
+    assert!(
+        res_no_snap
+            .coverage
+            .reasons
+            .contains(&"live_snapshot_unavailable".to_string())
+    );
 
     // 2. Publish live snapshot -> CoverageStatus::Full
     let now_ns = std::time::SystemTime::now()
@@ -265,9 +279,14 @@ fn briefing_reflects_live_snapshots_and_full_coverage() {
     };
     publish_snapshot(&snap_dir, &live_snap).unwrap();
 
-    let res_with_snap = service.execute(agent_mux::tracing::analysis::service::Request::Briefing(
-        agent_mux::tracing::analysis::service::BriefingArgs::default()
-    )).unwrap();
-    assert_eq!(res_with_snap.coverage.status, agent_mux::tracing::analysis::service::CoverageStatus::Full);
+    let res_with_snap = service
+        .execute(agent_mux::tracing::analysis::service::Request::Briefing(
+            agent_mux::tracing::analysis::service::BriefingArgs::default(),
+        ))
+        .unwrap();
+    assert_eq!(
+        res_with_snap.coverage.status,
+        agent_mux::tracing::analysis::service::CoverageStatus::Full
+    );
     assert!(res_with_snap.coverage.reasons.is_empty());
 }

@@ -1,4 +1,4 @@
-use super::cursor::{compute_filters_hash, CursorCodec, CursorPayload};
+use super::cursor::{CursorCodec, CursorPayload, compute_filters_hash};
 use super::model::{
     AnalysisError, Binding, LiveSession, RuntimeState, SessionCard, SkillMetricRow,
 };
@@ -9,8 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 /// Stable error codes and classifications for MCP and trace query operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,7 +192,9 @@ impl Request {
             }
             "agent_mux_list_sessions" => {
                 let args = serde_json::from_value(arguments).map_err(|e| {
-                    ServiceError::InvalidArgument(format!("invalid arguments for list_sessions: {e}"))
+                    ServiceError::InvalidArgument(format!(
+                        "invalid arguments for list_sessions: {e}"
+                    ))
                 })?;
                 Ok(Request::ListSessions(args))
             }
@@ -204,37 +206,49 @@ impl Request {
             }
             "agent_mux_get_timeline" => {
                 let args = serde_json::from_value(arguments).map_err(|e| {
-                    ServiceError::InvalidArgument(format!("invalid arguments for get_timeline: {e}"))
+                    ServiceError::InvalidArgument(format!(
+                        "invalid arguments for get_timeline: {e}"
+                    ))
                 })?;
                 Ok(Request::Timeline(args))
             }
             "agent_mux_search_traces" => {
                 let args = serde_json::from_value(arguments).map_err(|e| {
-                    ServiceError::InvalidArgument(format!("invalid arguments for search_traces: {e}"))
+                    ServiceError::InvalidArgument(format!(
+                        "invalid arguments for search_traces: {e}"
+                    ))
                 })?;
                 Ok(Request::Search(args))
             }
             "agent_mux_analyze_skills" => {
                 let args = serde_json::from_value(arguments).map_err(|e| {
-                    ServiceError::InvalidArgument(format!("invalid arguments for analyze_skills: {e}"))
+                    ServiceError::InvalidArgument(format!(
+                        "invalid arguments for analyze_skills: {e}"
+                    ))
                 })?;
                 Ok(Request::AnalyzeSkills(args))
             }
             "agent_mux_compare_runs" => {
                 let args = serde_json::from_value(arguments).map_err(|e| {
-                    ServiceError::InvalidArgument(format!("invalid arguments for compare_runs: {e}"))
+                    ServiceError::InvalidArgument(format!(
+                        "invalid arguments for compare_runs: {e}"
+                    ))
                 })?;
                 Ok(Request::CompareRuns(args))
             }
             "agent_mux_get_health" => {
                 if !arguments.is_null() {
                     let _args: HealthArgs = serde_json::from_value(arguments).map_err(|e| {
-                        ServiceError::InvalidArgument(format!("invalid arguments for get_health: {e}"))
+                        ServiceError::InvalidArgument(format!(
+                            "invalid arguments for get_health: {e}"
+                        ))
                     })?;
                 }
                 Ok(Request::Health(HealthArgs {}))
             }
-            other => Err(ServiceError::InvalidArgument(format!("unknown tool: {other}"))),
+            other => Err(ServiceError::InvalidArgument(format!(
+                "unknown tool: {other}"
+            ))),
         }
     }
 }
@@ -581,15 +595,19 @@ impl TraceService {
     pub fn execute(&self, request: Request) -> Result<Envelope<serde_json::Value>, ServiceError> {
         let start = std::time::Instant::now();
         let deadline_duration = match request {
-            Request::AnalyzeSkills(_) | Request::CompareRuns(_) => std::time::Duration::from_secs(5),
+            Request::AnalyzeSkills(_) | Request::CompareRuns(_) => {
+                std::time::Duration::from_secs(5)
+            }
             _ => std::time::Duration::from_secs(2),
         };
 
         // Admission check
         {
-            let mut state = self.admission.0.lock().map_err(|_| {
-                ServiceError::Internal("admission lock poisoned".into())
-            })?;
+            let mut state = self
+                .admission
+                .0
+                .lock()
+                .map_err(|_| ServiceError::Internal("admission lock poisoned".into()))?;
             if state.running < self.config.limits.concurrent {
                 state.running += 1;
             } else if state.waiting < self.config.limits.queue {
@@ -609,7 +627,8 @@ impl TraceService {
                         .wait_timeout(state, remaining)
                         .map_err(|_| ServiceError::Internal("admission condvar poisoned".into()))?;
                     state = new_state;
-                    if timeout_result.timed_out() && state.running >= self.config.limits.concurrent {
+                    if timeout_result.timed_out() && state.running >= self.config.limits.concurrent
+                    {
                         state.waiting = state.waiting.saturating_sub(1);
                         return Err(ServiceError::QueryTimeout(
                             "query timed out waiting for admission slot".into(),
@@ -619,9 +638,7 @@ impl TraceService {
                 state.waiting = state.waiting.saturating_sub(1);
                 state.running += 1;
             } else {
-                return Err(ServiceError::Busy(
-                    "capacity exceeded: queue full".into(),
-                ));
+                return Err(ServiceError::Busy("capacity exceeded: queue full".into()));
             }
         }
 
@@ -641,9 +658,15 @@ impl TraceService {
         }
 
         let now = OffsetDateTime::now_utc();
-        let as_of = now.format(&Rfc3339).map_err(|e| ServiceError::Internal(e.to_string()))?;
+        let as_of = now
+            .format(&Rfc3339)
+            .map_err(|e| ServiceError::Internal(e.to_string()))?;
         let scope_info = ScopeInfo {
-            workspace: self.config.scope.workspace_path().map(|p| p.to_string_lossy().to_string()),
+            workspace: self
+                .config
+                .scope
+                .workspace_path()
+                .map(|p| p.to_string_lossy().to_string()),
             all_workspaces: self.config.scope.is_all_workspaces(),
         };
 
@@ -655,7 +678,8 @@ impl TraceService {
                 as_of,
                 scope: scope_info,
                 window: None,
-                data: serde_json::to_value(data).map_err(|e| ServiceError::Internal(e.to_string()))?,
+                data: serde_json::to_value(data)
+                    .map_err(|e| ServiceError::Internal(e.to_string()))?,
                 coverage: CoverageInfo {
                     status: CoverageStatus::Full,
                     reasons: Vec::new(),
@@ -682,19 +706,30 @@ impl TraceService {
 
         // Install progress handler with deadline
         let deadline_instant = start + deadline_duration;
-        let _ = conn.progress_handler(50, Some(move || {
-            std::time::Instant::now() >= deadline_instant
-        }));
+        let _ = conn.progress_handler(
+            50,
+            Some(move || std::time::Instant::now() >= deadline_instant),
+        );
 
         let mut envelope = match request {
             Request::Health(_) => unreachable!(),
-            Request::Briefing(args) => self.execute_briefing(&conn, args, as_of, scope_info, now)?,
-            Request::ListSessions(args) => self.execute_list_sessions(&conn, args, as_of, scope_info, now)?,
-            Request::GetSession(args) => self.execute_get_session(&conn, args, as_of, scope_info)?,
+            Request::Briefing(args) => {
+                self.execute_briefing(&conn, args, as_of, scope_info, now)?
+            }
+            Request::ListSessions(args) => {
+                self.execute_list_sessions(&conn, args, as_of, scope_info, now)?
+            }
+            Request::GetSession(args) => {
+                self.execute_get_session(&conn, args, as_of, scope_info)?
+            }
             Request::Timeline(args) => self.execute_timeline(&conn, args, as_of, scope_info)?,
             Request::Search(args) => self.execute_search(&conn, args, as_of, scope_info, now)?,
-            Request::AnalyzeSkills(args) => self.execute_analyze_skills(&conn, args, as_of, scope_info, now)?,
-            Request::CompareRuns(args) => self.execute_compare_runs(&conn, args, as_of, scope_info)?,
+            Request::AnalyzeSkills(args) => {
+                self.execute_analyze_skills(&conn, args, as_of, scope_info, now)?
+            }
+            Request::CompareRuns(args) => {
+                self.execute_compare_runs(&conn, args, as_of, scope_info)?
+            }
         };
 
         let _ = conn.progress_handler(0, None::<fn() -> bool>);
@@ -716,11 +751,7 @@ impl TraceService {
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             ) {
                 let latest: Option<i64> = conn
-                    .query_row(
-                        "SELECT MAX(start_ns) FROM traces",
-                        [],
-                        |r| r.get(0),
-                    )
+                    .query_row("SELECT MAX(start_ns) FROM traces", [], |r| r.get(0))
                     .optional()
                     .unwrap_or(None);
 
@@ -768,8 +799,12 @@ impl TraceService {
         scope_info: ScopeInfo,
         now: OffsetDateTime,
     ) -> Result<Envelope<serde_json::Value>, ServiceError> {
-        let (since_ns, until_ns, window) = parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
-        let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
+        let (since_ns, until_ns, window) =
+            parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
+        let limit = args
+            .limit
+            .unwrap_or(self.config.limits.page_default)
+            .min(self.config.limits.page_max);
 
         let now_ns = now.unix_timestamp_nanos() as i64;
         let ws = self.config.scope.workspace_path().unwrap_or(Path::new(""));
@@ -779,7 +814,8 @@ impl TraceService {
 
         // Filter by provider if specified
         if let Some(ref prov) = args.provider {
-            b.cards.retain(|c| c.provider.as_deref() == Some(prov.as_str()));
+            b.cards
+                .retain(|c| c.provider.as_deref() == Some(prov.as_str()));
         }
 
         let filters_detail = format!("prov:{:?}", args.provider);
@@ -804,15 +840,20 @@ impl TraceService {
         }
 
         let next_cursor = if has_more {
-            Some(self.codec.encode(&CursorPayload {
-                schema_version: 1,
-                issued_at_ns: now_ns,
-                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
-                filters_hash,
-                upper_bound_ns: until_ns,
-                sort_key: paged_cards.last().and_then(|c| c.session_key.clone()).unwrap_or_default(),
-                offset: offset + limit,
-            }))
+            Some(
+                self.codec.encode(&CursorPayload {
+                    schema_version: 1,
+                    issued_at_ns: now_ns,
+                    expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                    filters_hash,
+                    upper_bound_ns: until_ns,
+                    sort_key: paged_cards
+                        .last()
+                        .and_then(|c| c.session_key.clone())
+                        .unwrap_or_default(),
+                    offset: offset + limit,
+                }),
+            )
         } else {
             None
         };
@@ -858,13 +899,18 @@ impl TraceService {
         scope_info: ScopeInfo,
         now: OffsetDateTime,
     ) -> Result<Envelope<serde_json::Value>, ServiceError> {
-        let (since_ns, until_ns, window) = parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
-        let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
+        let (since_ns, until_ns, window) =
+            parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
+        let limit = args
+            .limit
+            .unwrap_or(self.config.limits.page_default)
+            .min(self.config.limits.page_max);
 
         let now_ns = now.unix_timestamp_nanos() as i64;
         let (live, live_available) = self.load_live_sessions(now_ns);
         let filters_detail = format!("prov:{:?}:state:{:?}", args.provider, args.runtime_state);
-        let filters_hash = compute_filters_hash("list_sessions", &self.config.scope, &filters_detail);
+        let filters_hash =
+            compute_filters_hash("list_sessions", &self.config.scope, &filters_detail);
 
         let mut offset = 0;
         if let Some(ref c) = args.cursor {
@@ -911,7 +957,17 @@ impl TraceService {
             })?;
 
             for row in rows.flatten() {
-                let (key, provider, cwd_opt, first_seen_ns, last_seen_ns, turns, tools, tokens, cost) = row;
+                let (
+                    key,
+                    provider,
+                    cwd_opt,
+                    first_seen_ns,
+                    last_seen_ns,
+                    turns,
+                    tools,
+                    tokens,
+                    cost,
+                ) = row;
                 let cwd_path = cwd_opt.as_deref().map(Path::new).unwrap_or(Path::new(""));
 
                 if !self.config.scope.allows_session_cwd(cwd_path) {
@@ -944,7 +1000,11 @@ impl TraceService {
                     tokens,
                     cost_usd: cost,
                     correlation_quality: "exact".into(),
-                    usage_coverage: if tokens.is_some() { "full".into() } else { "none".into() },
+                    usage_coverage: if tokens.is_some() {
+                        "full".into()
+                    } else {
+                        "none".into()
+                    },
                 });
             }
         }
@@ -952,7 +1012,10 @@ impl TraceService {
         // Augment with live session states
         for item in &mut items {
             if let Some(ref key) = item.session_key {
-                if let Some(ls) = live.iter().find(|s| s.session_key.as_deref() == Some(key.as_str())) {
+                if let Some(ls) = live
+                    .iter()
+                    .find(|s| s.session_key.as_deref() == Some(key.as_str()))
+                {
                     item.runtime_state = ls.state;
                 }
             }
@@ -974,15 +1037,20 @@ impl TraceService {
         }
 
         let next_cursor = if has_more {
-            Some(self.codec.encode(&CursorPayload {
-                schema_version: 1,
-                issued_at_ns: now_ns,
-                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
-                filters_hash,
-                upper_bound_ns: until_ns,
-                sort_key: paged_items.last().and_then(|i| i.session_key.clone()).unwrap_or_default(),
-                offset: offset + limit,
-            }))
+            Some(
+                self.codec.encode(&CursorPayload {
+                    schema_version: 1,
+                    issued_at_ns: now_ns,
+                    expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                    filters_hash,
+                    upper_bound_ns: until_ns,
+                    sort_key: paged_items
+                        .last()
+                        .and_then(|i| i.session_key.clone())
+                        .unwrap_or_default(),
+                    offset: offset + limit,
+                }),
+            )
         } else {
             None
         };
@@ -1041,7 +1109,9 @@ impl TraceService {
                 .ok()
                 .flatten()
             })
-            .ok_or_else(|| ServiceError::NotFound(format!("session '{}' not found", args.session_key)))?;
+            .ok_or_else(|| {
+                ServiceError::NotFound(format!("session '{}' not found", args.session_key))
+            })?;
 
         let cwd_path = cwd_str.as_deref().map(Path::new).unwrap_or(Path::new(""));
 
@@ -1073,17 +1143,13 @@ impl TraceService {
         }
 
         // Build session card using query builder logic
-        let card = query::briefing(
-            conn,
-            cwd_path,
-            0,
-            i64::MAX,
-            &[],
-        )?
-        .cards
-        .into_iter()
-        .find(|c| c.session_key.as_deref() == Some(&args.session_key))
-        .ok_or_else(|| ServiceError::NotFound(format!("session '{}' details not found", args.session_key)))?;
+        let card = query::briefing(conn, cwd_path, 0, i64::MAX, &[])?
+            .cards
+            .into_iter()
+            .find(|c| c.session_key.as_deref() == Some(&args.session_key))
+            .ok_or_else(|| {
+                ServiceError::NotFound(format!("session '{}' details not found", args.session_key))
+            })?;
 
         let binding = Binding {
             launch_id: args.launch_id.clone().unwrap_or_default(),
@@ -1137,7 +1203,9 @@ impl TraceService {
                 .ok()
                 .flatten()
             })
-            .ok_or_else(|| ServiceError::NotFound(format!("session '{}' not found", args.session_key)))?;
+            .ok_or_else(|| {
+                ServiceError::NotFound(format!("session '{}' not found", args.session_key))
+            })?;
 
         let cwd_path = cwd_str.as_deref().map(Path::new).unwrap_or(Path::new(""));
         if !self.config.scope.allows_session_cwd(cwd_path) {
@@ -1166,7 +1234,10 @@ impl TraceService {
         }
 
         let lid_filter = args.launch_id.as_deref().unwrap_or("");
-        let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
+        let limit = args
+            .limit
+            .unwrap_or(self.config.limits.page_default)
+            .min(self.config.limits.page_max);
 
         let now_ns = OffsetDateTime::now_utc().unix_timestamp_nanos() as i64;
         let filters_detail = format!("sess:{}:launch:{:?}", args.session_key, args.launch_id);
@@ -1221,8 +1292,10 @@ impl TraceService {
                 if let Ok(obs_rows) = obs_stmt.query_map(params![t_id], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
-                        r.get::<_, Option<String>>(1)?.unwrap_or_else(|| "unknown".into()),
-                        r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "tool".into()),
+                        r.get::<_, Option<String>>(1)?
+                            .unwrap_or_else(|| "unknown".into()),
+                        r.get::<_, Option<String>>(2)?
+                            .unwrap_or_else(|| "tool".into()),
                         r.get::<_, i64>(3)?,
                         r.get::<_, Option<i64>>(4)?,
                         r.get::<_, Option<i64>>(5)?.unwrap_or(0) != 0,
@@ -1231,11 +1304,13 @@ impl TraceService {
                 }) {
                     for o in obs_rows.flatten() {
                         let (o_id, o_name, o_type, o_start_ns, o_end_ns, is_err, status_msg) = o;
-                        let o_start_time = OffsetDateTime::from_unix_timestamp_nanos(o_start_ns as i128)
-                            .ok()
-                            .and_then(|dt| dt.format(&Rfc3339).ok())
-                            .unwrap_or_default();
-                        let o_dur_ms = o_end_ns.map(|e| ((e.saturating_sub(o_start_ns)) / 1_000_000) as u64);
+                        let o_start_time =
+                            OffsetDateTime::from_unix_timestamp_nanos(o_start_ns as i128)
+                                .ok()
+                                .and_then(|dt| dt.format(&Rfc3339).ok())
+                                .unwrap_or_default();
+                        let o_dur_ms =
+                            o_end_ns.map(|e| ((e.saturating_sub(o_start_ns)) / 1_000_000) as u64);
 
                         obs.push(TimelineObservationItem {
                             id: o_id,
@@ -1274,15 +1349,20 @@ impl TraceService {
         }
 
         let next_cursor = if has_more {
-            Some(self.codec.encode(&CursorPayload {
-                schema_version: 1,
-                issued_at_ns: now_ns,
-                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
-                filters_hash,
-                upper_bound_ns: now_ns,
-                sort_key: paged_turns.last().map(|t| t.turn_id.clone()).unwrap_or_default(),
-                offset: offset + limit,
-            }))
+            Some(
+                self.codec.encode(&CursorPayload {
+                    schema_version: 1,
+                    issued_at_ns: now_ns,
+                    expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                    filters_hash,
+                    upper_bound_ns: now_ns,
+                    sort_key: paged_turns
+                        .last()
+                        .map(|t| t.turn_id.clone())
+                        .unwrap_or_default(),
+                    offset: offset + limit,
+                }),
+            )
         } else {
             None
         };
@@ -1319,17 +1399,28 @@ impl TraceService {
         now: OffsetDateTime,
     ) -> Result<Envelope<serde_json::Value>, ServiceError> {
         if args.query.len() > 4096 {
-            return Err(ServiceError::InvalidArgument("query exceeds 4 KiB limit".into()));
+            return Err(ServiceError::InvalidArgument(
+                "query exceeds 4 KiB limit".into(),
+            ));
         }
         if args.query.trim().is_empty() {
-            return Err(ServiceError::InvalidArgument("query cannot be empty".into()));
+            return Err(ServiceError::InvalidArgument(
+                "query cannot be empty".into(),
+            ));
         }
 
-        let (since_ns, until_ns, window) = parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
-        let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
+        let (since_ns, until_ns, window) =
+            parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
+        let limit = args
+            .limit
+            .unwrap_or(self.config.limits.page_default)
+            .min(self.config.limits.page_max);
 
         let now_ns = now.unix_timestamp_nanos() as i64;
-        let filters_detail = format!("q:{}:sess:{:?}:prov:{:?}", args.query, args.session_key, args.provider);
+        let filters_detail = format!(
+            "q:{}:sess:{:?}:prov:{:?}",
+            args.query, args.session_key, args.provider
+        );
         let filters_hash = compute_filters_hash("search", &self.config.scope, &filters_detail);
 
         let mut offset = 0;
@@ -1471,15 +1562,20 @@ impl TraceService {
         }
 
         let next_cursor = if has_more {
-            Some(self.codec.encode(&CursorPayload {
-                schema_version: 1,
-                issued_at_ns: now_ns,
-                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
-                filters_hash,
-                upper_bound_ns: until_ns,
-                sort_key: paged_matches.last().map(|m| m.source_id.clone()).unwrap_or_default(),
-                offset: offset + limit,
-            }))
+            Some(
+                self.codec.encode(&CursorPayload {
+                    schema_version: 1,
+                    issued_at_ns: now_ns,
+                    expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                    filters_hash,
+                    upper_bound_ns: until_ns,
+                    sort_key: paged_matches
+                        .last()
+                        .map(|m| m.source_id.clone())
+                        .unwrap_or_default(),
+                    offset: offset + limit,
+                }),
+            )
         } else {
             None
         };
@@ -1513,12 +1609,17 @@ impl TraceService {
         scope_info: ScopeInfo,
         now: OffsetDateTime,
     ) -> Result<Envelope<serde_json::Value>, ServiceError> {
-        let (since_ns, until_ns, window) = parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
-        let limit = args.limit.unwrap_or(self.config.limits.page_default).min(self.config.limits.page_max);
+        let (since_ns, until_ns, window) =
+            parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
+        let limit = args
+            .limit
+            .unwrap_or(self.config.limits.page_default)
+            .min(self.config.limits.page_max);
 
         let now_ns = now.unix_timestamp_nanos() as i64;
         let filters_detail = format!("skill:{:?}:prov:{:?}", args.skill, args.provider);
-        let filters_hash = compute_filters_hash("analyze_skills", &self.config.scope, &filters_detail);
+        let filters_hash =
+            compute_filters_hash("analyze_skills", &self.config.scope, &filters_detail);
 
         let mut offset = 0;
         if let Some(ref c) = args.cursor {
@@ -1546,15 +1647,20 @@ impl TraceService {
         }
 
         let next_cursor = if has_more {
-            Some(self.codec.encode(&CursorPayload {
-                schema_version: 1,
-                issued_at_ns: now_ns,
-                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
-                filters_hash,
-                upper_bound_ns: until_ns,
-                sort_key: paged_skills.last().map(|s| s.skill_name.clone()).unwrap_or_default(),
-                offset: offset + limit,
-            }))
+            Some(
+                self.codec.encode(&CursorPayload {
+                    schema_version: 1,
+                    issued_at_ns: now_ns,
+                    expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                    filters_hash,
+                    upper_bound_ns: until_ns,
+                    sort_key: paged_skills
+                        .last()
+                        .map(|s| s.skill_name.clone())
+                        .unwrap_or_default(),
+                    offset: offset + limit,
+                }),
+            )
         } else {
             None
         };
@@ -1770,7 +1876,9 @@ fn bound_envelope(envelope: &mut Envelope<serde_json::Value>, max_bytes: usize) 
 
     envelope.truncated = true;
     if !envelope.warnings.iter().any(|w| w.contains("64 KiB")) {
-        envelope.warnings.push("response truncated to fit 64 KiB limit".into());
+        envelope
+            .warnings
+            .push("response truncated to fit 64 KiB limit".into());
     }
 
     // Step 1: Truncate large string values in envelope.data down to 100 chars

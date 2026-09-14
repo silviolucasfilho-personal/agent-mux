@@ -1,6 +1,4 @@
-use agent_mux::agent::artifacts::{
-    render_artifacts, write_artifacts, ArtifactError,
-};
+use agent_mux::agent::artifacts::{ArtifactError, render_artifacts, write_artifacts};
 use agent_mux::agent::definition::parse_definition;
 use std::fs;
 use std::path::Path;
@@ -47,7 +45,10 @@ fn manifest_contains_file_hashes_and_no_volatile_timestamps() {
     .unwrap();
     let a = render_artifacts(&d, Path::new("audit/AGENTS.md")).unwrap();
 
-    let manifest_bytes = a.files.get(Path::new("manifest.json")).expect("manifest.json");
+    let manifest_bytes = a
+        .files
+        .get(Path::new("manifest.json"))
+        .expect("manifest.json");
     let manifest_str = std::str::from_utf8(manifest_bytes).unwrap();
     let val: serde_json::Value = serde_json::from_str(manifest_str).unwrap();
 
@@ -72,7 +73,10 @@ fn disabled_harnesses_marked_in_manifest() {
     .unwrap();
     let a = render_artifacts(&d, Path::new("audit/AGENTS.md")).unwrap();
 
-    let manifest_bytes = a.files.get(Path::new("manifest.json")).expect("manifest.json");
+    let manifest_bytes = a
+        .files
+        .get(Path::new("manifest.json"))
+        .expect("manifest.json");
     let val: serde_json::Value = serde_json::from_slice(manifest_bytes).unwrap();
 
     let enabled = val["enabled_harnesses"].as_array().unwrap();
@@ -94,7 +98,8 @@ fn empty_mcp_servers_generates_empty_fragments() {
     .unwrap();
     let a = render_artifacts(&d, Path::new("standalone/AGENTS.md")).unwrap();
 
-    let claude_mcp = std::str::from_utf8(a.files.get(Path::new("claude/mcp.json")).unwrap()).unwrap();
+    let claude_mcp =
+        std::str::from_utf8(a.files.get(Path::new("claude/mcp.json")).unwrap()).unwrap();
     let agy_mcp = std::str::from_utf8(a.files.get(Path::new("agy/mcp.json")).unwrap()).unwrap();
     let codex_mcp = std::str::from_utf8(a.files.get(Path::new("codex/mcp.toml")).unwrap()).unwrap();
 
@@ -177,6 +182,7 @@ fn unicode_and_special_chars_preserved() {
     .unwrap();
     let a = render_artifacts(&d, Path::new("test-unicode/AGENTS.md")).unwrap();
 
-    let claude_agent = std::str::from_utf8(a.files.get(Path::new("claude/agent.md")).unwrap()).unwrap();
+    let claude_agent =
+        std::str::from_utf8(a.files.get(Path::new("claude/agent.md")).unwrap()).unwrap();
     assert!(claude_agent.contains("⚡ 🦀 🚀 Unicode & \"quoted\" string: 100% accurate!"));
 }
