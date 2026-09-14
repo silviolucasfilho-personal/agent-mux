@@ -84,7 +84,10 @@ async fn main() -> Result<()> {
         EnableMouseCapture,
         SetCursorStyle::DefaultUserShape
     )?;
-    if matches!(crossterm::terminal::supports_keyboard_enhancement(), Ok(true)) {
+    if matches!(
+        crossterm::terminal::supports_keyboard_enhancement(),
+        Ok(true)
+    ) {
         if crossterm::execute!(
             stdout(),
             crossterm::event::PushKeyboardEnhancementFlags(
@@ -259,6 +262,9 @@ fn handle_event(app: &mut App, event: AppEvent) {
         AppEvent::Mouse(m) => app.handle_mouse(m, Instant::now()),
         AppEvent::TraceStatus(message) => app.notice = Some(agent_mux::app::Notice::warn(message)),
         AppEvent::TraceStats { launch_id, stats } => app.handle_trace_stats(&launch_id, stats),
+        AppEvent::AnalysisUpdated { revision, result } => {
+            app.handle_analysis_updated(revision, result);
+        }
         AppEvent::Tick => app.on_tick(Instant::now()),
     }
 }

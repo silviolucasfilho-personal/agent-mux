@@ -115,3 +115,43 @@ When distributing `agent-mux`:
 1. The pre-built binary is installed to `<prefix>/bin/agent-mux`.
 2. The bundled agent assets under `agents/` (including `agents/heimdall/AGENTS.md`) are installed to `<prefix>/share/agent-mux/agents/`.
 3. If bundled assets are missing on the system, `agent-mux` outputs diagnostic warnings rather than using compiled-in fallback persona strings.
+
+---
+
+## 5. TUI Previews and Telemetry Caching
+
+In `agent-mux`, autonomous agents are displayed in the **Agents** sidebar section.
+
+### Capability-Based Previews
+Previews are dynamically selected based on declared agent capabilities rather than agent identity:
+- **`trace.read` Capability**: When an agent declares `capabilities: [trace.read]` (e.g. Heimdall or an Audit agent), the main pane renders an **Executive Briefing & Telemetry** dashboard with real-time session clues, active tools, files modified, recent commands, and uncapped metrics.
+- **Definition Previews**: Agents without `trace.read` render an autonomous agent definition card containing metadata, origin, supported harnesses, capabilities, and parsed markdown instructions.
+
+### Asynchronous Telemetry Cache
+- **Non-blocking UI**: The TUI render loop never initiates database I/O or blocks on SQLite.
+- **Background Worker**: A dedicated blocking task runs queries outside the UI thread, emitting `AppEvent::AnalysisUpdated { revision, result }`.
+- **Throttling & Coalescing**: Telemetry refreshes at most once per second while a trace-capable preview is visible.
+- **Resilient Stale Cache**: In the event of SQLite lock contention or transient query failures, the cached briefing is preserved and displayed alongside a clear warning indicator.
+
+---
+
+## 6. CLI Management Commands
+
+Agents can be inspected, built, installed, and validated directly from the CLI:
+
+```sh
+# Validate agent definitions and show diagnostics
+agent-mux agent doctor <agent-id>
+
+# Generate disposable harness artifacts without launching
+agent-mux agent build <agent-id>
+
+# Install an agent package into the global agent directory (~/.agent-mux/agents/)
+agent-mux agent install /path/to/my-agent/AGENTS.md
+
+# Remove an installed agent package
+agent-mux agent uninstall <agent-id>
+
+# Non-destructively migrate a legacy flat file (.agent-mux/agents/<id>.md)
+agent-mux agent migrate <legacy-file>
+```

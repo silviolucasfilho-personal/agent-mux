@@ -40,5 +40,10 @@ pub enum AppEvent {
         launch_id: String,
         stats: crate::tracing::store::query::LaunchStats,
     },
+    /// Background analysis update delivering cached session briefing facts.
+    AnalysisUpdated {
+        revision: u64,
+        result: Result<crate::tracing::analysis::Briefing, String>,
+    },
     Tick,
 }

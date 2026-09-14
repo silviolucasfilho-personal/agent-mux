@@ -241,7 +241,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::ConfirmKill => draw_confirm(f, "Kill this session? [y/n]"),
         Mode::ConfirmQuit => draw_confirm(f, "Sessions are still working. Quit anyway? [y/n]"),
         Mode::Help => draw_help(f),
-        Mode::HeimdallLauncher(launcher) => draw_heimdall_launcher(f, launcher, app),
+        Mode::AgentLauncher(launcher) => draw_agent_launcher(f, launcher, app),
         _ => {}
     }
 }
@@ -255,15 +255,17 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
 }
 
 fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let is_focused = app.sidebar_section == SidebarSection::Active
-        && matches!(app.mode, Mode::Control);
+    let is_focused =
+        app.sidebar_section == SidebarSection::Active && matches!(app.mode, Mode::Control);
     let title = if app.sessions.is_empty() {
         "Active [0]".to_string()
     } else {
         format!("Active [{}/{}]", app.selected + 1, app.sessions.len())
     };
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -273,7 +275,9 @@ fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         .title(Span::styled(
             format!(" {title} "),
             if is_focused {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             },
@@ -331,10 +335,12 @@ fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
 }
 
 fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    let is_focused = app.sidebar_section == SidebarSection::Agents
-        && matches!(app.mode, Mode::Control);
+    let is_focused =
+        app.sidebar_section == SidebarSection::Agents && matches!(app.mode, Mode::Control);
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -350,7 +356,9 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
         .title(Span::styled(
             format!(" {title} "),
             if is_focused {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             },
@@ -391,7 +399,9 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(
                     &agent.name,
                     if is_selected && is_focused {
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
                     } else if is_selected {
                         Style::default().fg(Color::Cyan)
                     } else {
@@ -418,8 +428,8 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    let is_focused = app.sidebar_section == SidebarSection::History
-        && matches!(app.mode, Mode::Control);
+    let is_focused =
+        app.sidebar_section == SidebarSection::History && matches!(app.mode, Mode::Control);
     let title = if app.history_sessions.is_empty() {
         "History [0]".to_string()
     } else {
@@ -430,7 +440,9 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
         )
     };
     let border_style = if is_focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -440,7 +452,9 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
         .title(Span::styled(
             format!(" {title} "),
             if is_focused {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             },
@@ -463,17 +477,18 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
             let is_selected = i == app.selected_history;
             let marker = if is_selected { "> " } else { "  " };
             let (provider_badge, provider_style) = match s.provider {
-                crate::history::AgentProvider::Claude => {
-                    ("C", Style::default().fg(Color::Magenta))
-                }
+                crate::history::AgentProvider::Claude => ("C", Style::default().fg(Color::Magenta)),
                 crate::history::AgentProvider::Antigravity => {
                     ("A", Style::default().fg(Color::Blue))
                 }
             };
             let max_title_len = (area.width as usize).saturating_sub(8).max(5);
             let title = if s.title.chars().count() > max_title_len {
-                let mut truncated: String =
-                    s.title.chars().take(max_title_len.saturating_sub(1)).collect();
+                let mut truncated: String = s
+                    .title
+                    .chars()
+                    .take(max_title_len.saturating_sub(1))
+                    .collect();
                 truncated.push('…');
                 truncated
             } else {
@@ -503,17 +518,17 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         && matches!(app.mode, Mode::Control)
     {
         if let Some(agent) = app.agents.get(app.selected_agent) {
-            if agent.id == "heimdall" {
-                draw_heimdall_preview(f, area, app, now);
+            if agent.capabilities.iter().any(|c| c == "trace.read") {
+                draw_trace_briefing_preview(f, area, agent, app, now);
             } else {
                 draw_generic_agent_preview(f, area, agent, app, now);
             }
-        } else {
-            draw_heimdall_preview(f, area, app, now);
         }
         return;
     }
-    if (!app.sidebar_hidden && app.sidebar_section == SidebarSection::History && matches!(app.mode, Mode::Control))
+    if (!app.sidebar_hidden
+        && app.sidebar_section == SidebarSection::History
+        && matches!(app.mode, Mode::Control))
         || app.sessions.is_empty()
     {
         if let Some(hist) = app.history_sessions.get(app.selected_history) {
@@ -598,7 +613,10 @@ fn draw_history_preview(
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Title:        ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&summary.title, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &summary.title,
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Provider:     ", Style::default().fg(Color::DarkGray)),
@@ -642,7 +660,9 @@ fn draw_history_preview(
             Span::styled("Actions:      ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "[Enter] / [r] ",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("Restart / resume this session in agent-mux"),
         ]),
@@ -650,7 +670,9 @@ fn draw_history_preview(
             Span::styled("              ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "[Tab]         ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("Switch to active sessions"),
         ]),
@@ -658,19 +680,19 @@ fn draw_history_preview(
             Span::styled("              ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 "[a]           ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("Toggle current project / all projects"),
         ]),
     ];
     if has_active {
         lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Tip: Active sessions are running in the top panel. Press [Tab] to view terminal.",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "Tip: Active sessions are running in the top panel. Press [Tab] to view terminal.",
+            Style::default().fg(Color::DarkGray),
+        )]));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -683,13 +705,22 @@ fn draw_generic_agent_preview(
     _now: Instant,
 ) {
     let icon_str = agent.icon.as_deref().unwrap_or("⚡");
-    let title = format!(" {icon_str} {} — Autonomous Agent [{}] ", agent.name, agent.id);
+    let title = format!(
+        " {icon_str} {} — Autonomous Agent [{}] ",
+        agent.name, agent.id
+    );
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(Span::styled(
             title,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -722,7 +753,12 @@ fn draw_generic_agent_preview(
     let info_lines = vec![
         Line::from(vec![
             Span::styled("Agent ID:    ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&agent.id, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &agent.id,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("   Origin:     ", Style::default().fg(Color::DarkGray)),
             Span::styled(origin_str, Style::default().fg(Color::Yellow)),
         ]),
@@ -730,7 +766,10 @@ fn draw_generic_agent_preview(
             Span::styled("Harnesses:   ", Style::default().fg(Color::DarkGray)),
             Span::styled(harnesses_str, Style::default().fg(Color::Green)),
             Span::styled("   Default:    ", Style::default().fg(Color::DarkGray)),
-            Span::styled(agent.default_harness.as_str(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                agent.default_harness.as_str(),
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Description: ", Style::default().fg(Color::DarkGray)),
@@ -752,7 +791,9 @@ fn draw_generic_agent_preview(
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Span::styled(
             " Persona & Prompt Instructions ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
     let inst_inner = inst_block.inner(instructions_area);
     f.render_widget(inst_block, instructions_area);
@@ -762,11 +803,26 @@ fn draw_generic_agent_preview(
         .lines()
         .map(|line| {
             if line.starts_with("# ") {
-                Line::styled(line, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                Line::styled(
+                    line,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else if line.starts_with("## ") {
-                Line::styled(line, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                Line::styled(
+                    line,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else if line.starts_with("### ") {
-                Line::styled(line, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                Line::styled(
+                    line,
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else if line.starts_with("- ") || line.starts_with("* ") {
                 Line::styled(line, Style::default().fg(Color::White))
             } else if line.starts_with("```") {
@@ -780,8 +836,7 @@ fn draw_generic_agent_preview(
 
     // 3. Footer
     let is_running = app.sessions.iter().any(|s| {
-        s.profile.name.eq_ignore_ascii_case(&agent.name)
-            || s.profile.name.starts_with(&agent.name)
+        s.profile.name.eq_ignore_ascii_case(&agent.name) || s.profile.name.starts_with(&agent.name)
     });
     let enter_action = if is_running {
         format!("Attach to {} Session", agent.name)
@@ -791,189 +846,315 @@ fn draw_generic_agent_preview(
     let footer = Line::from(vec![
         Span::styled(
             "[Enter] ",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!("{enter_action}   ")),
         Span::styled(
             "[Tab] ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("Switch Section   "),
         Span::styled(
             "[b] ",
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("Toggle Sidebar"),
     ]);
     f.render_widget(Paragraph::new(footer), footer_area);
 }
 
-fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let db_path = app
-        .trace_db_path
-        .clone()
-        .unwrap_or_else(crate::heimdall::default_trace_db_path);
-    let analysis = crate::heimdall::query_heimdall_analysis(&db_path, &app.sessions, now);
-
-    let title = " ⚡ HEIMDALL — Omniscient Monitor & Skill Optimizer [Agents] ";
+fn draw_trace_briefing_preview(
+    f: &mut Frame,
+    area: Rect,
+    agent: &crate::agent::AgentDefinition,
+    app: &App,
+    now: Instant,
+) {
+    let icon_str = agent.icon.as_deref().unwrap_or("⚡");
+    let title = format!(
+        " {icon_str} {} — Executive Briefing & Telemetry [{}] ",
+        agent.name, agent.id
+    );
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(Span::styled(
             title,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let (sess_constraint, skills_constraint) = if analysis.skills.is_empty() {
-        (Constraint::Min(8), Constraint::Length(3))
-    } else {
-        (Constraint::Percentage(55), Constraint::Min(6))
-    };
-
-    let [summary_area, sessions_area, skills_area, footer_area] = Layout::vertical([
+    let [summary_area, sessions_area, footer_area] = Layout::vertical([
         Constraint::Length(3),
-        sess_constraint,
-        skills_constraint,
+        Constraint::Min(8),
         Constraint::Length(1),
     ])
     .areas(inner);
 
-    // 1. Summary info
-    let summary_lines = vec![
-        Line::from(vec![
-            Span::styled("SQLite Store: ", Style::default().fg(Color::DarkGray)),
+    let briefing = app.cached_briefing.as_ref();
+
+    // 1. Summary line
+    let summary_lines = if let Some(b) = briefing {
+        let db_path = app
+            .trace_db_path
+            .clone()
+            .unwrap_or_else(crate::tracing::analysis::default_trace_db_path);
+        let toks = b.total_tokens.unwrap_or(0);
+        let cost = b.total_cost_usd.unwrap_or(0.0);
+        let mut lines = vec![Line::from(vec![
+            Span::styled("Trace Store: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 db_path.display().to_string(),
                 Style::default().fg(Color::Yellow),
             ),
+            Span::styled("  |  Scope: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                b.scope_workspace.display().to_string(),
+                Style::default().fg(Color::White),
+            ),
             Span::styled("  |  Sessions: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("{}", analysis.total_sessions),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                format!("{}", b.total_sessions),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  |  Traces: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  |  Turns: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("{}", analysis.total_traces),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                format!("{}", b.total_turns),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  |  Observations: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  |  Tools: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("{}", analysis.total_observations),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                format!("{}", b.total_tools),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled("Live Status:  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!(
-                    "{} session(s) in review, {} skill(s) analyzed from SQLite metadata",
-                    analysis.open_sessions.len(),
-                    analysis.skills.len()
-                ),
-                Style::default().fg(Color::Green),
+            Span::styled("  |  Tokens: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{toks}"), Style::default().fg(Color::Yellow)),
+            Span::styled("  |  Cost: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("${cost:.3}"), Style::default().fg(Color::Yellow)),
+        ])];
+
+        let as_of_text = if let Some(t) = app.cached_briefing_as_of {
+            let secs = now.saturating_duration_since(t).as_secs();
+            format!("Refreshed {secs}s ago")
+        } else {
+            "Cached".to_string()
+        };
+
+        let mut status_spans = vec![
+            Span::styled("Cache Status: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(as_of_text, Style::default().fg(Color::Green)),
+        ];
+        if let Some(ref warn) = app.cached_briefing_warning {
+            status_spans.push(Span::styled(
+                format!("  ⚠️ Refresh warning: {warn}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        lines.push(Line::from(status_spans));
+        lines
+    } else {
+        let mut spans = vec![Span::styled(
+            "Telemetry briefing pending initial refresh...",
+            Style::default().fg(Color::DarkGray),
+        )];
+        if let Some(ref warn) = app.cached_briefing_warning {
+            spans.push(Span::styled(
+                format!("  ⚠️ Error: {warn}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        vec![
+            Line::from(spans),
+            Line::styled(
+                "Press [Enter] to launch this agent or wait for background trace query.",
+                Style::default().fg(Color::DarkGray),
             ),
-        ]),
-    ];
+        ]
+    };
     f.render_widget(Paragraph::new(summary_lines), summary_area);
 
-    // 2. Open Sessions Executive Briefing
+    // 2. Session Cards
+    let card_count = briefing.map_or(0, |b| b.cards.len());
     let sessions_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Span::styled(
-            format!(" Executive Briefing & Session Clues ({}) ", analysis.open_sessions.len()),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            format!(" Executive Briefing & Session Clues ({card_count}) "),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
     let sess_inner = sessions_block.inner(sessions_area);
     f.render_widget(sessions_block, sessions_area);
 
-    if analysis.open_sessions.is_empty() {
+    if card_count == 0 {
         let empty_msg = Paragraph::new(
-            "No active or historical sessions recorded yet in SQLite traces.db.\nPress [n] to create a new session or [Enter] to launch Heimdall.",
+            "No active or historical sessions recorded yet in trace database.\nPress [Enter] to launch this agent or [n] to create a new session.",
         )
         .style(Style::default().fg(Color::DarkGray));
         f.render_widget(empty_msg, sess_inner);
-    } else {
-        let items: Vec<ListItem> = analysis
-            .open_sessions
+    } else if let Some(b) = briefing {
+        let items: Vec<ListItem> = b
+            .cards
             .iter()
-            .map(|s| {
-                let status_style = if s.is_working {
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                } else if s.status == "NeedsAttention" {
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
+            .map(|card| {
+                let status_style = match card.runtime_state {
+                    crate::tracing::analysis::RuntimeState::Working => Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                    crate::tracing::analysis::RuntimeState::WaitingForUser => {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    }
+                    crate::tracing::analysis::RuntimeState::Idle => {
+                        Style::default().fg(Color::Yellow)
+                    }
+                    crate::tracing::analysis::RuntimeState::Exited => {
+                        Style::default().fg(Color::DarkGray)
+                    }
+                    crate::tracing::analysis::RuntimeState::Disconnected
+                    | crate::tracing::analysis::RuntimeState::Unknown => {
+                        Style::default().fg(Color::DarkGray)
+                    }
                 };
-                let harness_str = s.harness.as_deref().unwrap_or("agent");
-                let toks = s.total_tokens.unwrap_or(0);
-                let cost = s.cost_usd.unwrap_or(0.0);
-                let live_badge = if s.is_live {
-                    Span::styled("[LIVE] ", Style::default().fg(Color::Green))
-                } else {
-                    Span::styled("[OVERNIGHT] ", Style::default().fg(Color::DarkGray))
-                };
 
-                let mut lines = vec![
-                    Line::from(vec![
-                        Span::styled(
-                            format!("Session #{} ", s.session_id + 1),
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(format!("[{}] ", s.name), Style::default().fg(Color::White)),
-                        Span::styled(format!("({harness_str}) "), Style::default().fg(Color::Magenta)),
-                        live_badge,
-                        Span::styled(format!("[{}] ", s.status), status_style),
-                        Span::styled(format!("— {}", s.dir.display()), Style::default().fg(Color::DarkGray)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("  ⚡ Right Now:  ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                        Span::styled(&s.current_clue, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                    ]),
-                ];
+                let id_label = card
+                    .launch_id
+                    .as_deref()
+                    .or(card.session_key.as_deref())
+                    .unwrap_or("unknown");
+                let provider_label = card.provider.as_deref().unwrap_or("agent");
+                let toks = card.total_tokens.unwrap_or(0);
+                let cost = card.total_cost_usd.unwrap_or(0.0);
 
-                if let Some(ref goal) = s.initial_goal {
-                    lines.push(Line::from(vec![
-                        Span::styled("  🎯 Goal:       ", Style::default().fg(Color::Cyan)),
-                        Span::styled(goal, Style::default().fg(Color::Gray)),
-                    ]));
+                let mut lines = vec![Line::from(vec![
+                    Span::styled(
+                        format!("Session [{id_label}] "),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("({provider_label}) "),
+                        Style::default().fg(Color::Magenta),
+                    ),
+                    Span::styled(format!("[{:?}] ", card.runtime_state), status_style),
+                    Span::styled(
+                        format!("— {}", card.cwd.display()),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])];
+
+                if let Some(ref act) = card.current_activity.value {
+                    if !act.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "  ⚡ Right Now:  ",
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                act,
+                                Style::default()
+                                    .fg(Color::White)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                    }
                 }
 
-                if !s.actions_accomplished.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("  📦 Summary:    ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(&s.actions_accomplished, Style::default().fg(Color::White)),
-                    ]));
+                if let Some(ref goal) = card.initial_goal.value {
+                    if !goal.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("  🎯 Goal:       ", Style::default().fg(Color::Cyan)),
+                            Span::styled(goal, Style::default().fg(Color::Gray)),
+                        ]));
+                    }
                 }
 
-                if !s.files_modified.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("  📝 Files:      ", Style::default().fg(Color::LightCyan)),
-                        Span::styled(s.files_modified.join(", "), Style::default().fg(Color::LightCyan)),
-                    ]));
+                if !card.files_modified.is_empty() {
+                    let files_str = card
+                        .files_modified
+                        .iter()
+                        .filter_map(|e| e.value.as_deref())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !files_str.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "  📝 Files:      ",
+                                Style::default().fg(Color::LightCyan),
+                            ),
+                            Span::styled(files_str, Style::default().fg(Color::LightCyan)),
+                        ]));
+                    }
                 }
 
-                if !s.recent_commands.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("  💻 Commands:   ", Style::default().fg(Color::LightGreen)),
-                        Span::styled(s.recent_commands.join("  ·  "), Style::default().fg(Color::LightGreen)),
-                    ]));
+                if !card.recent_commands.is_empty() {
+                    let cmds_str = card
+                        .recent_commands
+                        .iter()
+                        .filter_map(|e| e.value.as_deref())
+                        .collect::<Vec<_>>()
+                        .join("  ·  ");
+                    if !cmds_str.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "  💻 Commands:   ",
+                                Style::default().fg(Color::LightGreen),
+                            ),
+                            Span::styled(cmds_str, Style::default().fg(Color::LightGreen)),
+                        ]));
+                    }
                 }
 
-                if let Some(ref out) = s.latest_turn_output {
-                    lines.push(Line::from(vec![
-                        Span::styled("  💬 Last Out:   ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(format!("\"{out}\""), Style::default().fg(Color::DarkGray)),
-                    ]));
+                if let Some(ref out) = card.last_assistant_output {
+                    if let Some(ref text) = out.value {
+                        if !text.is_empty() {
+                            lines.push(Line::from(vec![
+                                Span::styled(
+                                    "  💬 Last Out:   ",
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                                Span::styled(
+                                    format!("\"{text}\""),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                            ]));
+                        }
+                    }
                 }
 
                 lines.push(Line::from(vec![
                     Span::styled("  📊 Metrics:    ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(&s.timing_summary, Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        format!("{} turns", card.completed_turns),
+                        Style::default().fg(Color::Yellow),
+                    ),
                     Span::raw(" | "),
-                    Span::styled(format!("{} turns", s.turns), Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("{} tools", card.total_tools),
+                        Style::default().fg(Color::Yellow),
+                    ),
                     Span::raw(" | "),
                     Span::styled(format!("{toks} tokens"), Style::default().fg(Color::Yellow)),
                     Span::raw(" | "),
@@ -981,130 +1162,40 @@ fn draw_heimdall_preview(f: &mut Frame, area: Rect, app: &App, now: Instant) {
                 ]));
 
                 lines.push(Line::raw("")); // Spacer between sessions
-
                 ListItem::new(lines)
             })
             .collect();
         f.render_widget(List::new(items), sess_inner);
     }
 
-    // 3. Skills & Bottlenecks
-    let skills_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(Span::styled(
-            format!(
-                " Skills Token Usage & Bottleneck Analysis ({}) ",
-                analysis.skills.len()
-            ),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ));
-    let skills_inner = skills_block.inner(skills_area);
-    f.render_widget(skills_block, skills_area);
-
-    if analysis.skills.is_empty() {
-        let empty_msg = Paragraph::new(
-            "No skill statistics recorded in SQLite traces.db yet.\nSkills will appear here once executed.",
-        )
-        .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(empty_msg, skills_inner);
-    } else {
-        let items: Vec<ListItem> = analysis
-            .skills
-            .iter()
-            .map(|sk| {
-                let toks = sk.tokens.unwrap_or(0);
-                let cost = sk.cost.unwrap_or(0.0);
-                let gen_ms = sk
-                    .avg_gen_latency_ms
-                    .map(|ms| format!("{ms}ms"))
-                    .unwrap_or_else(|| "n/a".into());
-                let tool_ms = sk
-                    .avg_tool_latency_ms
-                    .map(|ms| format!("{ms}ms"))
-                    .unwrap_or_else(|| "n/a".into());
-                let slowest_name = sk.slowest_tool_name.as_deref().unwrap_or("none");
-                let slowest_ms = sk.slowest_tool_latency_ms.unwrap_or(0);
-
-                let mut lines = vec![
-                    Line::from(vec![
-                        Span::styled(
-                            format!("• Skill: {} ", sk.skill),
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("— {toks} tokens (${cost:.3}) "),
-                            Style::default().fg(Color::Yellow),
-                        ),
-                        Span::styled(
-                            format!("| Loaded: {} turns ({} unused)", sk.turns_loaded, sk.turns_unused),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("  Latency:      ", Style::default().fg(Color::DarkGray)),
-                        Span::raw(format!(
-                            "LLM Gen avg {gen_ms}, Tool Exec avg {tool_ms} (Slowest: '{slowest_name}' at {slowest_ms}ms, errors: {})",
-                            sk.error_count
-                        )),
-                    ]),
-                ];
-
-                if !sk.bottlenecks.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("  ⚠️  Bottleneck:  ", Style::default().fg(Color::Red)),
-                        Span::styled(sk.bottlenecks.join("; "), Style::default().fg(Color::LightRed)),
-                    ]));
-                }
-
-                if !sk.optimizations.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("  💡 Optimization: ", Style::default().fg(Color::Green)),
-                        Span::styled(sk.optimizations.join(" | "), Style::default().fg(Color::LightGreen)),
-                    ]));
-                }
-
-                ListItem::new(lines)
-            })
-            .collect();
-        f.render_widget(List::new(items), skills_inner);
-    }
-
-    // 4. Footer hints
-    let is_running = app
-        .sessions
-        .iter()
-        .any(|s| s.profile.name.starts_with("Heimdall"));
-    let enter_action = if is_running {
-        "Attach to Heimdall Harness"
-    } else {
-        "Launch Heimdall Harness (Claude / Codex / AGY)"
-    };
+    // 3. Footer hints
     let footer = Line::from(vec![
         Span::styled(
             "[Enter] ",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!("{enter_action}   ")),
+        Span::raw(format!("Launch {}   ", agent.name)),
         Span::styled(
             "[Tab] ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("Switch Section   "),
         Span::styled(
             "[b] ",
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("Toggle Sidebar"),
     ]);
     f.render_widget(Paragraph::new(footer), footer_area);
 }
 
-fn draw_heimdall_launcher(
-    f: &mut Frame,
-    state: &crate::heimdall::HeimdallLauncherState,
-    app: &App,
-) {
+fn draw_agent_launcher(f: &mut Frame, state: &crate::app::AgentLauncherState, app: &App) {
     let width = 68.min(f.area().width.saturating_sub(4)).max(48);
     let height = 18.min(f.area().height.saturating_sub(2)).max(14);
     let area = centered(f.area(), width, height);
@@ -1112,10 +1203,16 @@ fn draw_heimdall_launcher(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(Span::styled(
-            format!(" Launch {} [Agents] ", state.agent_name),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            format!(" Launch {} [{}] ", state.agent_name, state.agent_id),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1138,7 +1235,7 @@ fn draw_heimdall_launcher(
     f.render_widget(header_text, header_area);
 
     let harnesses = if state.harnesses.is_empty() {
-        crate::heimdall::HeimdallHarness::ALL.as_slice()
+        crate::harness::Harness::ALL.as_slice()
     } else {
         state.harnesses.as_slice()
     };
@@ -1150,7 +1247,8 @@ fn draw_heimdall_launcher(
             let marker = if is_selected { "> " } else { "  " };
             let num = idx + 1;
             let is_running = app.sessions.iter().any(|s| {
-                s.profile.name == format!("{} ({})", state.agent_name, h.as_str())
+                s.agent_id.as_deref() == Some(&state.agent_id)
+                    && crate::harness::Harness::detect(&s.profile.command) == Some(*h)
                     && matches!(s.status(Instant::now()), Status::Working | Status::Idle)
             });
             let running_tag = if is_running { " [active - attach]" } else { "" };
@@ -1160,7 +1258,9 @@ fn draw_heimdall_launcher(
                 Span::styled(
                     h.display_name(),
                     if is_selected {
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::White)
                     },
@@ -1177,26 +1277,38 @@ fn draw_heimdall_launcher(
         .collect();
     f.render_widget(List::new(items), list_area);
 
-    let info_lines = if state.agent_id == "heimdall" {
+    let info_lines = if let Some(agent) = app.agents.iter().find(|a| a.id == state.agent_id) {
+        let desc = if agent.description.is_empty() {
+            "Autonomous agent loaded from ~/.agent-mux/agents/"
+        } else {
+            &agent.description
+        };
+        let caps = if agent.capabilities.is_empty() {
+            "none declared".to_string()
+        } else {
+            agent.capabilities.join(", ")
+        };
         vec![
-            Line::styled("Heimdall Capabilities:", Style::default().fg(Color::Yellow)),
-            Line::raw("• Explains open sessions and live activities via SQLite metadata"),
-            Line::raw("• Calculates skill token costs, execution latencies & bottlenecks"),
-            Line::raw("• Recommends concrete optimizations to reduce spend and latency"),
-        ]
-    } else if let Some(agent) = app.agents.iter().find(|a| a.id == state.agent_id) {
-        vec![
-            Line::styled(format!("{} Persona:", agent.name), Style::default().fg(Color::Yellow)),
-            Line::raw(if agent.description.is_empty() {
-                "Autonomous agent loaded from ~/.agent-mux/agents/"
-            } else {
-                &agent.description
-            }),
-            Line::styled("Prompt instructions configured and ready.", Style::default().fg(Color::DarkGray)),
+            Line::styled(
+                format!("{} Description:", agent.name),
+                Style::default().fg(Color::Yellow),
+            ),
+            Line::raw(desc),
+            Line::from(vec![
+                Span::styled("Capabilities: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(caps, Style::default().fg(Color::Cyan)),
+            ]),
+            Line::styled(
+                "Prompt instructions and tools configured.",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]
     } else {
         vec![
-            Line::styled(format!("{} Capabilities:", state.agent_name), Style::default().fg(Color::Yellow)),
+            Line::styled(
+                format!("{} Capabilities:", state.agent_name),
+                Style::default().fg(Color::Yellow),
+            ),
             Line::raw("• Autonomous agent session with persistent traces and monitoring"),
         ]
     };
@@ -1205,7 +1317,9 @@ fn draw_heimdall_launcher(
     let hints = Line::from(vec![
         Span::styled(
             "[Enter] ",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("Launch/Attach   "),
         Span::styled("[1-3 / c,x,a] ", Style::default().fg(Color::Cyan)),
@@ -1254,7 +1368,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                             "[b] sidebar  [j/k] select  [Enter] attach  [Tab] agents  [n] new  [l] logs  [t] trace  [?] help  [q] quit",
                         ),
                         SidebarSection::Agents => Line::raw(
-                            "[b] sidebar  [j/k] select  [Enter] heimdall agent  [Tab] hist  [n] new  [?] help  [q] quit",
+                            "[b] sidebar  [j/k] select  [Enter] launch agent  [Tab] hist  [n] new  [?] help  [q] quit",
                         ),
                         SidebarSection::History => Line::raw(
                             "[b] sidebar  [j/k] select  [Enter/r] restart  [Tab] active  [a] all  [n] new  [l] logs  [?] help  [q] quit",
@@ -1295,7 +1409,10 @@ fn draw_help(f: &mut Frame) {
         row("j/k, ↑/↓", "select session"),
         row("1-9", "jump to session N"),
         row("Tab", "cycle active / agents / history sections"),
-        row("Enter", "attach (active), launch Heimdall (agents), or restart (history)"),
+        row(
+            "Enter",
+            "attach (active), launch agent (agents), or restart (history)",
+        ),
         row(
             "n",
             "new session (pick the trace backend: SQLite, Langfuse, both)",
@@ -1318,10 +1435,7 @@ fn draw_help(f: &mut Frame) {
         row("Shift+↑/↓", "scroll three lines"),
         row("PgUp/PgDn", "scroll one page (Fn+↑/↓ on macOS)"),
         row("Shift+Home/End", "jump to top / back to live"),
-        row(
-            "mouse",
-            "wheel to scroll, drag to select text",
-        ),
+        row("mouse", "wheel to scroll, drag to select text"),
         row("Ctrl+Shift+C/V", "copy selection / paste"),
         row("Ctrl+Shift+F", "search scrollback (Ctrl+F in control mode)"),
         Line::raw(""),
@@ -2722,7 +2836,10 @@ mod tests {
         assert_eq!(pane_origin(true), (1, 1));
         let pane = (37u16, 98u16);
         assert_eq!(pane_local_with_sidebar(1, 1, pane, true), Some((0, 0)));
-        assert_eq!(pane_local_with_sidebar(1 + 97, 1 + 36, pane, true), Some((97, 36)));
+        assert_eq!(
+            pane_local_with_sidebar(1 + 97, 1 + 36, pane, true),
+            Some((97, 36))
+        );
         assert_eq!(pane_local_with_sidebar(0, 1, pane, true), None); // left border
         assert_eq!(pane_local_with_sidebar(1 + 98, 1, pane, true), None);
     }
@@ -2736,8 +2853,14 @@ mod tests {
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
         // Sidebar active/history headers shouldn't be rendered
-        assert!(!text.contains("Active Sessions"), "unexpected sidebar in {text}");
-        assert!(!text.contains("Past Sessions"), "unexpected sidebar in {text}");
+        assert!(
+            !text.contains("Active Sessions"),
+            "unexpected sidebar in {text}"
+        );
+        assert!(
+            !text.contains("Past Sessions"),
+            "unexpected sidebar in {text}"
+        );
         // Status bar advertises [b] sidebar
         assert!(text.contains("[b] sidebar"), "missing sidebar hint: {text}");
     }

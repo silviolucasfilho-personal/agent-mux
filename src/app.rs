@@ -23,7 +23,7 @@ pub enum Mode {
     ConfirmKill,
     ConfirmQuit,
     Help,
-    HeimdallLauncher(crate::heimdall::HeimdallLauncherState),
+    AgentLauncher(AgentLauncherState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,7 +49,7 @@ pub enum Action {
     OpenSessionHistory,
     OpenTraceBrowser,
     OpenHelp,
-    OpenHeimdallLauncher,
+    OpenAgentLauncher,
     KillSelected,
     EnterConfirmKill,
     RemoveSelected,
@@ -68,8 +68,8 @@ pub enum Action {
     HistoryKey,
     /// TraceBrowser mode: App routes the key to the TraceBrowserState it owns.
     BrowserKey,
-    /// HeimdallLauncher mode: App routes the key to the HeimdallLauncherState it owns.
-    HeimdallLauncherKey,
+    /// AgentLauncher mode: App routes the key to the AgentLauncherState it owns.
+    AgentLauncherKey,
 }
 
 /// Severity of a status-bar notice. The old single `error: Option<String>`
@@ -230,8 +230,10 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                         }
                     } else {
                         match ctx.sidebar_section {
-                            SidebarSection::Active if ctx.selected_status.is_some() => Action::Attach,
-                            SidebarSection::Agents => Action::OpenHeimdallLauncher,
+                            SidebarSection::Active if ctx.selected_status.is_some() => {
+                                Action::Attach
+                            }
+                            SidebarSection::Agents => Action::OpenAgentLauncher,
                             SidebarSection::History => Action::RestartHistorySession,
                             _ => Action::None,
                         }
@@ -249,7 +251,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                                 Some(Status::Exited(_)) => Action::RespawnSelected,
                                 _ => Action::None,
                             },
-                            SidebarSection::Agents => Action::OpenHeimdallLauncher,
+                            SidebarSection::Agents => Action::OpenAgentLauncher,
                             SidebarSection::History => Action::RestartHistorySession,
                         }
                     }
@@ -257,7 +259,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 KeyCode::Char('h') | KeyCode::Char('H')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Agents =>
                 {
-                    Action::OpenHeimdallLauncher
+                    Action::OpenAgentLauncher
                 }
                 KeyCode::Char('a') | KeyCode::Char('A')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::History =>
@@ -305,7 +307,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::NewSession(_) => Action::DialogKey,
         Mode::SessionHistory(_) => Action::HistoryKey,
         Mode::TraceBrowser(_) => Action::BrowserKey,
-        Mode::HeimdallLauncher(_) => Action::HeimdallLauncherKey,
+        Mode::AgentLauncher(_) => Action::AgentLauncherKey,
         Mode::ConfirmKill => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::KillSelected,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
@@ -429,6 +431,86 @@ fn default_dir_for_profile(profile: Option<&Profile>) -> String {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| ".".into())
         })
+}
+
+/// State for the generic Agent harness picker dialog.
+#[derive(Debug, Clone)]
+pub struct AgentLauncherState {
+    pub selected: usize,
+    pub error: Option<String>,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub harnesses: Vec<crate::harness::Harness>,
+}
+
+impl Default for AgentLauncherState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            error: None,
+            agent_id: String::new(),
+            agent_name: String::new(),
+            harnesses: crate::harness::Harness::ALL.to_vec(),
+        }
+    }
+}
+
+impl AgentLauncherState {
+    pub fn for_agent(agent: &crate::agent::AgentDefinition) -> Self {
+        let harnesses = if agent.harnesses.is_empty() {
+            crate::harness::Harness::ALL.to_vec()
+        } else {
+            agent.harnesses.clone()
+        };
+        let default_idx = crate::agent::launch::selected_harness_index(agent);
+        Self {
+            selected: if default_idx < harnesses.len() {
+                default_idx
+            } else {
+                0
+            },
+            error: None,
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
+            harnesses,
+        }
+    }
+
+    pub fn with_harnesses(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        harnesses: Vec<crate::harness::Harness>,
+    ) -> Self {
+        let h = if harnesses.is_empty() {
+            crate::harness::Harness::ALL.to_vec()
+        } else {
+            harnesses
+        };
+        Self {
+            selected: 0,
+            error: None,
+            agent_id: id.into(),
+            agent_name: name.into(),
+            harnesses: h,
+        }
+    }
+
+    pub fn selected_harness(&self) -> crate::harness::Harness {
+        self.harnesses
+            .get(self.selected)
+            .copied()
+            .unwrap_or(crate::harness::Harness::Claude)
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        if self.selected + 1 < self.harnesses.len() {
+            self.selected += 1;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1613,7 +1695,8 @@ impl TraceBrowserState {
         {
             idx
         } else {
-            self.selected_session.min(self.sessions.len().saturating_sub(1))
+            self.selected_session
+                .min(self.sessions.len().saturating_sub(1))
         };
         self.selected_session = target_idx;
         if let Some(s) = self.sessions.get(self.selected_session) {
@@ -1707,6 +1790,18 @@ pub struct App {
     pub agents: Vec<crate::agent::AgentDefinition>,
     /// Selected agent index in the Agents section.
     pub selected_agent: usize,
+    /// Cached briefing for the active Agents preview (if capable of trace.read).
+    pub cached_briefing: Option<crate::tracing::analysis::Briefing>,
+    /// Instant when the briefing was last successfully refreshed.
+    pub cached_briefing_as_of: Option<Instant>,
+    /// Most recent warning / error from briefing refresh, if any.
+    pub cached_briefing_warning: Option<String>,
+    /// Monotonically increasing revision counter for briefing queries.
+    pub briefing_revision: u64,
+    /// Whether an asynchronous briefing query is currently in flight.
+    pub briefing_pending: bool,
+    /// Timestamp of the last refresh trigger.
+    pub last_briefing_refresh: Option<Instant>,
 }
 
 impl App {
@@ -1750,6 +1845,12 @@ impl App {
             terminal_size: (27, 112),
             agents,
             selected_agent: 0,
+            cached_briefing: None,
+            cached_briefing_as_of: None,
+            cached_briefing_warning: None,
+            briefing_revision: 0,
+            briefing_pending: false,
+            last_briefing_refresh: None,
         }
     }
 
@@ -1796,10 +1897,144 @@ impl App {
     }
 
     /// Periodic housekeeping driven by `AppEvent::Tick`: the trace browser
-    /// re-queries live sessions.
+    /// re-queries live sessions and agent briefing is refreshed asynchronously.
     pub fn on_tick(&mut self, now: Instant) {
         if let Mode::TraceBrowser(browser) = &mut self.mode {
             browser.refresh_if_live(now);
+        }
+        self.refresh_briefing_if_needed(now);
+    }
+
+    /// Refreshes the session briefing asynchronously if a trace-capable preview is visible.
+    pub fn refresh_briefing_if_needed(&mut self, now: Instant) {
+        let is_trace_preview_visible = !self.sidebar_hidden
+            && self.sidebar_section == SidebarSection::Agents
+            && matches!(self.mode, Mode::Control)
+            && self
+                .agents
+                .get(self.selected_agent)
+                .map_or(false, |a| a.capabilities.iter().any(|c| c == "trace.read"));
+
+        if is_trace_preview_visible && !self.briefing_pending {
+            let should_refresh = match self.last_briefing_refresh {
+                None => true,
+                Some(last) => {
+                    now.saturating_duration_since(last) >= std::time::Duration::from_secs(1)
+                }
+            };
+            if should_refresh {
+                self.briefing_pending = true;
+                self.briefing_revision += 1;
+                self.last_briefing_refresh = Some(now);
+
+                let revision = self.briefing_revision;
+                let tx = self.tx.clone();
+                let db_path = self
+                    .trace_db_path
+                    .clone()
+                    .unwrap_or_else(crate::tracing::analysis::default_trace_db_path);
+                let workspace =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let live_sessions = self.collect_live_sessions(now);
+
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn_blocking(move || {
+                        let result = (|| -> Result<crate::tracing::analysis::Briefing, String> {
+                            let conn = rusqlite::Connection::open_with_flags(
+                                &db_path,
+                                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                            )
+                            .map_err(|e| format!("cannot open traces db: {e}"))?;
+
+                            let now_ns = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos() as i64;
+                            let since_ns = now_ns - (24 * 3600 * 1_000_000_000);
+                            crate::tracing::analysis::briefing(
+                                &conn,
+                                &workspace,
+                                since_ns,
+                                now_ns,
+                                &live_sessions,
+                            )
+                            .map_err(|e| e.to_string())
+                        })();
+                        let _ = tx.blocking_send(AppEvent::AnalysisUpdated { revision, result });
+                    });
+                }
+            }
+        }
+    }
+
+    /// Collects live session states for trace analysis correlation.
+    pub fn collect_live_sessions(
+        &self,
+        now: Instant,
+    ) -> Vec<crate::tracing::analysis::LiveSession> {
+        let run_id = self
+            .tracing
+            .as_ref()
+            .map(|rt| rt.run_id().to_string())
+            .unwrap_or_default();
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i64;
+
+        self.sessions
+            .iter()
+            .map(|s| {
+                let state = match s.status(now) {
+                    Status::Working => crate::tracing::analysis::RuntimeState::Working,
+                    Status::Idle => crate::tracing::analysis::RuntimeState::Idle,
+                    Status::NeedsAttention => {
+                        crate::tracing::analysis::RuntimeState::WaitingForUser
+                    }
+                    Status::Exited(_) => crate::tracing::analysis::RuntimeState::Exited,
+                };
+                let provider = crate::harness::Harness::detect(&s.profile.command)
+                    .map(|h| h.as_str().to_string());
+                let launch_id = s
+                    .trace
+                    .as_ref()
+                    .map(|t| t.launch_id.clone())
+                    .unwrap_or_else(|| format!("session-{}", s.id));
+
+                crate::tracing::analysis::LiveSession {
+                    run_id: run_id.clone(),
+                    launch_id,
+                    session_id: s.id,
+                    session_key: None,
+                    provider,
+                    cwd: s.dir.clone(),
+                    state,
+                    updated_at_ns: now_ns,
+                    active_tools: Vec::new(),
+                }
+            })
+            .collect()
+    }
+
+    /// Handles completion of a background briefing query.
+    pub fn handle_analysis_updated(
+        &mut self,
+        revision: u64,
+        result: Result<crate::tracing::analysis::Briefing, String>,
+    ) {
+        self.briefing_pending = false;
+        if revision >= self.briefing_revision {
+            match result {
+                Ok(briefing) => {
+                    self.cached_briefing = Some(briefing);
+                    self.cached_briefing_as_of = Some(Instant::now());
+                    self.cached_briefing_warning = None;
+                }
+                Err(err) => {
+                    self.cached_briefing_warning = Some(err);
+                }
+            }
         }
     }
 
@@ -1810,12 +2045,8 @@ impl App {
             .get(self.selected)
             .map(|s| s.dir.clone())
             .or_else(|| std::env::current_dir().ok());
-        let mut sessions = history::discover_sessions(
-            None,
-            None,
-            cur_dir.as_deref(),
-            self.history_all_projects,
-        );
+        let mut sessions =
+            history::discover_sessions(None, None, cur_dir.as_deref(), self.history_all_projects);
         if sessions.is_empty() && !self.history_all_projects {
             sessions = history::discover_sessions(None, None, cur_dir.as_deref(), true);
         }
@@ -1827,7 +2058,11 @@ impl App {
 
     /// Persists active (non-exited) sessions to disk so they can be restored on restart.
     pub fn save_active_sessions(&self) -> anyhow::Result<()> {
-        let Some(path) = self.sessions_file.clone().or_else(persistence::sessions_file_path) else {
+        let Some(path) = self
+            .sessions_file
+            .clone()
+            .or_else(persistence::sessions_file_path)
+        else {
             return Ok(());
         };
         let now = Instant::now();
@@ -1848,7 +2083,11 @@ impl App {
 
     /// Restores saved sessions from disk upon application startup.
     pub fn restore_saved_sessions(&mut self) {
-        let Some(path) = self.sessions_file.clone().or_else(persistence::sessions_file_path) else {
+        let Some(path) = self
+            .sessions_file
+            .clone()
+            .or_else(persistence::sessions_file_path)
+        else {
             return;
         };
         let saved = persistence::load_saved_sessions(&path);
@@ -2295,7 +2534,8 @@ impl App {
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
-            let (active_rect, agents_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3, self.agents.len());
+            let (active_rect, agents_rect, history_rect) =
+                ui::sidebar_areas(self.pane_size.0 + 3, self.agents.len());
             if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
                 if ev.row > active_rect.y
                     && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
@@ -2324,7 +2564,8 @@ impl App {
                 {
                     let visible = usize::from(agents_rect.height.saturating_sub(2));
                     let row = usize::from(ev.row - agents_rect.y - 1);
-                    let idx = ui::sidebar_window(self.selected_agent, self.agents.len(), visible) + row;
+                    let idx =
+                        ui::sidebar_window(self.selected_agent, self.agents.len(), visible) + row;
                     if idx < self.agents.len() {
                         self.selected_agent = idx;
                     }
@@ -2364,10 +2605,16 @@ impl App {
                 ev.kind,
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
             );
-        let pane_pos = ui::pane_local_with_sidebar(ev.column, ev.row, self.pane_size, self.sidebar_hidden);
+        let pane_pos =
+            ui::pane_local_with_sidebar(ev.column, ev.row, self.pane_size, self.sidebar_hidden);
         let (lcol, lrow) = match pane_pos {
             Some(p) => p,
-            None if finalizing_drag => ui::pane_clamped_with_sidebar(ev.column, ev.row, self.pane_size, self.sidebar_hidden),
+            None if finalizing_drag => ui::pane_clamped_with_sidebar(
+                ev.column,
+                ev.row,
+                self.pane_size,
+                self.sidebar_hidden,
+            ),
             // Wheel gestures should scroll the selected session even when
             // the pointer is over the sidebar. This is especially important
             // for macOS trackpads: the pointer often stays parked over the
@@ -2380,22 +2627,34 @@ impl App {
             ) =>
             {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
-                    let (_, agents_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3, self.agents.len());
-                    if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height && !self.agents.is_empty() {
-                        let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
+                    let (_, agents_rect, history_rect) =
+                        ui::sidebar_areas(self.pane_size.0 + 3, self.agents.len());
+                    if ev.row >= agents_rect.y
+                        && ev.row < agents_rect.y + agents_rect.height
+                        && !self.agents.is_empty()
+                    {
+                        let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
+                            -1
+                        } else {
+                            1
+                        };
                         if delta > 0 {
-                            self.selected_agent = (self.selected_agent + 1)
-                                .min(self.agents.len() - 1);
+                            self.selected_agent =
+                                (self.selected_agent + 1).min(self.agents.len() - 1);
                         } else {
                             self.selected_agent = self.selected_agent.saturating_sub(1);
                         }
                         return;
                     }
                     if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
-                        let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
+                        let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
+                            -1
+                        } else {
+                            1
+                        };
                         if delta > 0 {
-                            self.selected_history = (self.selected_history + 1)
-                                .min(self.history_sessions.len() - 1);
+                            self.selected_history =
+                                (self.selected_history + 1).min(self.history_sessions.len() - 1);
                         } else {
                             self.selected_history = self.selected_history.saturating_sub(1);
                         }
@@ -2585,7 +2844,8 @@ impl App {
                 } else {
                     match self.sidebar_section {
                         SidebarSection::Active => {
-                            if !self.sessions.is_empty() && self.selected + 1 < self.sessions.len() {
+                            if !self.sessions.is_empty() && self.selected + 1 < self.sessions.len()
+                            {
                                 self.selected += 1;
                             } else {
                                 self.sidebar_section = SidebarSection::Agents;
@@ -2593,7 +2853,9 @@ impl App {
                             }
                         }
                         SidebarSection::Agents => {
-                            if !self.agents.is_empty() && self.selected_agent + 1 < self.agents.len() {
+                            if !self.agents.is_empty()
+                                && self.selected_agent + 1 < self.agents.len()
+                            {
                                 self.selected_agent += 1;
                             } else if !self.history_sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::History;
@@ -2602,8 +2864,8 @@ impl App {
                         }
                         SidebarSection::History => {
                             if !self.history_sessions.is_empty() {
-                                self.selected_history =
-                                    (self.selected_history + 1).min(self.history_sessions.len() - 1);
+                                self.selected_history = (self.selected_history + 1)
+                                    .min(self.history_sessions.len() - 1);
                             }
                         }
                     }
@@ -2653,24 +2915,16 @@ impl App {
                     };
                 }
             }
-            Action::OpenHeimdallLauncher => {
+            Action::OpenAgentLauncher => {
                 let state = if let Some(agent) = self.agents.get(self.selected_agent) {
-                    crate::heimdall::HeimdallLauncherState::for_agent(
-                        agent.id.clone(),
-                        agent.name.clone(),
-                        if agent.harnesses.is_empty() {
-                            crate::heimdall::HeimdallHarness::ALL.to_vec()
-                        } else {
-                            agent.harnesses.clone()
-                        },
-                    )
+                    AgentLauncherState::for_agent(agent)
                 } else {
-                    crate::heimdall::HeimdallLauncherState::default()
+                    AgentLauncherState::default()
                 };
-                self.mode = Mode::HeimdallLauncher(state);
+                self.mode = Mode::AgentLauncher(state);
             }
-            Action::HeimdallLauncherKey => {
-                self.handle_heimdall_launcher_key(key);
+            Action::AgentLauncherKey => {
+                self.handle_agent_launcher_key(key);
             }
             Action::RestartHistorySession => {
                 if let Some(summary) = self.history_sessions.get(self.selected_history).cloned() {
@@ -3138,8 +3392,8 @@ impl App {
         }
     }
 
-    fn handle_heimdall_launcher_key(&mut self, key: &KeyEvent) {
-        let Mode::HeimdallLauncher(ref mut state) = self.mode else {
+    fn handle_agent_launcher_key(&mut self, key: &KeyEvent) {
+        let Mode::AgentLauncher(ref mut state) = self.mode else {
             return;
         };
         match key.code {
@@ -3170,11 +3424,7 @@ impl App {
             KeyCode::Enter => {
                 let agent_id = state.agent_id.clone();
                 let harness = state.selected_harness();
-                let launch_res = if agent_id == "heimdall" {
-                    self.launch_heimdall(harness)
-                } else {
-                    self.launch_agent(&agent_id, harness)
-                };
+                let launch_res = self.launch_agent(&agent_id, harness);
                 match launch_res {
                     Ok(_) => {
                         self.sidebar_section = SidebarSection::Active;
@@ -3190,116 +3440,12 @@ impl App {
         }
     }
 
-    /// Launches or attaches to a Heimdall session running the chosen AI harness.
-    pub fn launch_heimdall(
-        &mut self,
-        harness: crate::heimdall::HeimdallHarness,
-    ) -> anyhow::Result<usize> {
-        let target_name = format!("Heimdall ({})", harness.as_str());
-
-        // 1. If an active session for this harness already exists, attach to it
-        if let Some(idx) = self.sessions.iter().position(|s| s.profile.name == target_name) {
-            if matches!(self.sessions[idx].status(Instant::now()), Status::Working | Status::Idle) {
-                self.selected = idx;
-                self.sidebar_section = SidebarSection::Active;
-                self.mode = Mode::Attached;
-                if let Some(s) = self.sessions.get_mut(idx) {
-                    s.tracker.on_attach();
-                }
-                return Ok(idx);
-            }
-        }
-
-        // 2. Query SQLite analysis
-        let db_path = self
-            .trace_db_path
-            .clone()
-            .unwrap_or_else(crate::heimdall::default_trace_db_path);
-        let analysis = crate::heimdall::query_heimdall_analysis(&db_path, &self.sessions, Instant::now());
-        let prompt = crate::heimdall::generate_heimdall_prompt(&analysis, &db_path);
-
-        // 3. Find base profile or create new
-        let mut profile = self
-            .profiles
-            .iter()
-            .find(|p| crate::harness::Harness::detect(&p.command) == Some(harness.to_harness()))
-            .cloned()
-            .unwrap_or_else(|| Profile {
-                name: target_name.clone(),
-                command: harness.as_str().to_string(),
-                args: vec![],
-                default_dir: None,
-                tracing: None,
-                model: None,
-                bypass_approvals: None,
-            });
-
-        profile.name = target_name;
-        let custom_instructions = self
-            .agents
-            .iter()
-            .find(|a| a.id == "heimdall")
-            .map(|a| a.instructions.clone())
-            .unwrap_or_default();
-
-        match harness {
-            crate::heimdall::HeimdallHarness::Claude => {
-                let sys_prompt = if custom_instructions.is_empty() {
-                    format!(
-                        "You are Heimdall, the omniscient watcher and autonomous monitoring agent of agent-mux. You inspect SQLite traces at {}. Deliver an executive morning briefing and optimize skills.",
-                        db_path.display()
-                    )
-                } else {
-                    format!(
-                        "{custom_instructions}\n\nYou are backed by SQLite traces at {}.",
-                        db_path.display()
-                    )
-                };
-                profile.args = vec![
-                    "--append-system-prompt".into(),
-                    sys_prompt,
-                    prompt,
-                ];
-            }
-            crate::heimdall::HeimdallHarness::Codex => {
-                profile.args = vec![
-                    "--no-alt-screen".into(),
-                    prompt,
-                ];
-            }
-            crate::heimdall::HeimdallHarness::Antigravity => {
-                profile.args = vec![
-                    "--prompt-interactive".into(),
-                    prompt,
-                ];
-            }
-        }
-
-        let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let id = self.next_id;
-        let session = self.spawn_traced(id, profile, dir)?;
-        self.next_id += 1;
-        self.sessions.push(session);
-        self.selected = self.sessions.len() - 1;
-        self.sidebar_section = SidebarSection::Active;
-        self.mode = Mode::Attached;
-        if let Some(s) = self.sessions.last_mut() {
-            s.tracker.on_attach();
-        }
-        let _ = self.save_active_sessions();
-        Ok(self.selected)
-    }
-
     /// Launches or attaches to a session running the chosen agent and AI harness.
     pub fn launch_agent(
         &mut self,
         agent_id: &str,
-        harness: crate::heimdall::HeimdallHarness,
+        harness: crate::harness::Harness,
     ) -> anyhow::Result<usize> {
-        if agent_id == "heimdall" {
-            return self.launch_heimdall(harness);
-        }
-
         let agent = self
             .agents
             .iter()
@@ -3307,7 +3453,7 @@ impl App {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Agent '{agent_id}' not found"))?;
 
-        let target_harness = harness.to_harness();
+        let target_harness = harness;
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
         // 1. If an active session for this agent + harness + workspace already exists, attach to it:
@@ -3343,7 +3489,10 @@ impl App {
                 bypass_approvals: None,
             });
 
-        let source_path = agent.file_path.as_deref().unwrap_or(std::path::Path::new("AGENTS.md"));
+        let source_path = agent
+            .file_path
+            .as_deref()
+            .unwrap_or(std::path::Path::new("AGENTS.md"));
         let artifacts = crate::agent::artifacts::render_artifacts(&agent, source_path)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -3358,7 +3507,8 @@ impl App {
             &options,
             &cwd,
             &artifacts,
-        ).map_err(|e| anyhow::anyhow!("{e}"))?;
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let id = self.next_id;
         let mut session = self.spawn_traced(id, launch.profile, launch.cwd)?;
@@ -3547,7 +3697,11 @@ impl App {
             return;
         }
         self.pane_size = (rows, cols);
-        let side_w = if self.sidebar_hidden { 0 } else { ui::SIDEBAR_WIDTH };
+        let side_w = if self.sidebar_hidden {
+            0
+        } else {
+            ui::SIDEBAR_WIDTH
+        };
         self.terminal_size = (rows + 3, cols + side_w + 2);
         for s in &mut self.sessions {
             s.resize(rows, cols);
@@ -4624,7 +4778,7 @@ mod history_tests {
     fn trace_browser_refresh_if_live_updates_sessions_and_tracks_selection() {
         use crate::tracing::pricing::PriceTable;
         use crate::tracing::store::model::{LaunchRow, StoreOp, TraceRow, TraceStatus};
-        use crate::tracing::store::{open_rw, OpenOptions};
+        use crate::tracing::store::{OpenOptions, open_rw};
         use std::time::Duration;
 
         let dir = tempfile::tempdir().unwrap();
@@ -4675,7 +4829,10 @@ mod history_tests {
             id: id.into(),
             session_key: session_key.into(),
             provider: "claude".into(),
-            session_id: session_key.strip_prefix("claude:").unwrap_or(session_key).into(),
+            session_id: session_key
+                .strip_prefix("claude:")
+                .unwrap_or(session_key)
+                .into(),
             launch_id: None,
             ordinal: 1,
             name: "turn 1".into(),
@@ -4745,4 +4902,3 @@ mod history_tests {
         assert_eq!(browser.sessions[browser.selected_session].key, "claude:s1");
     }
 }
-

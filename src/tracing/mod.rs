@@ -30,6 +30,8 @@ pub mod tail;
 pub mod usage;
 pub mod view;
 
+pub use analysis::default_trace_db_path;
+
 use crate::config::{Backend, ContentMode, Profile, ResolvedTracing};
 use crate::events::AppEvent;
 use crate::transcript::Provider;

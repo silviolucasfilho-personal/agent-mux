@@ -68,22 +68,19 @@ pub struct AgentDefinition {
 impl Default for AgentDefinition {
     fn default() -> Self {
         Self {
-            id: "heimdall".into(),
-            name: "Heimdall".into(),
-            icon: Some("⚡".into()),
-            description: "Omniscient monitor, executive morning briefings, and skill optimizer".into(),
+            id: String::new(),
+            name: String::new(),
+            icon: None,
+            description: String::new(),
             harnesses: Harness::ALL.to_vec(),
-            default_harness: Harness::Antigravity,
-            capabilities: vec!["trace.read".to_string()],
-            startup_task: Some(
-                "Read the current session briefing and report progress, blockers and evidence coverage."
-                    .into(),
-            ),
-            mcp_servers: vec!["agent-mux".into()],
+            default_harness: Harness::Claude,
+            capabilities: Vec::new(),
+            startup_task: None,
+            mcp_servers: Vec::new(),
             instructions: String::new(),
             source_hash: String::new(),
             file_path: None,
-            is_builtin: true,
+            is_builtin: false,
             triggers: None,
         }
     }
@@ -204,9 +201,7 @@ pub fn parse_definition(source: &str, path: &Path) -> Result<AgentDefinition, De
         return Err(DefinitionError::field(
             path,
             "id",
-            format!(
-                "invalid agent id '{id}': must be non-empty and match ^[a-z0-9][a-z0-9_-]*$"
-            ),
+            format!("invalid agent id '{id}': must be non-empty and match ^[a-z0-9][a-z0-9_-]*$"),
         ));
     }
 
