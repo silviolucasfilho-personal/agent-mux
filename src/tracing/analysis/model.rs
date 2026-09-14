@@ -159,3 +159,75 @@ impl From<rusqlite::Error> for AnalysisError {
         AnalysisError::Sqlite(err)
     }
 }
+
+/// Live process and session state captured from active mux instances.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveSession {
+    pub run_id: String,
+    pub launch_id: String,
+    pub session_id: usize,
+    pub session_key: Option<String>,
+    pub provider: Option<String>,
+    pub cwd: std::path::PathBuf,
+    pub state: RuntimeState,
+    pub updated_at_ns: i64,
+    pub active_tools: Vec<String>,
+}
+
+/// Breakdown of tool invocation counts by tool name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCountSummary {
+    pub name: String,
+    pub count: i64,
+}
+
+/// Factual evidence-based summary card for an individual session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionCard {
+    pub session_key: Option<String>,
+    pub launch_id: Option<String>,
+    pub provider: Option<String>,
+    pub cwd: std::path::PathBuf,
+    pub runtime_state: RuntimeState,
+    pub task_outcome: TaskOutcome,
+
+    // Initial goal
+    pub initial_goal: Evidence<String>,
+    // In-flight clue / current activity
+    pub current_activity: Evidence<String>,
+
+    // Turns & tools
+    pub completed_turns: i64,
+    pub open_turns: i64,
+    pub total_tools: i64,
+    pub tool_counts: Vec<ToolCountSummary>,
+
+    // Accomplishments
+    pub files_modified: Vec<Evidence<String>>,
+    pub recent_commands: Vec<Evidence<String>>,
+    pub last_assistant_output: Option<Evidence<String>>,
+
+    // Timing & Resources
+    pub duration_ms: u64,
+    pub last_active_ns: i64,
+    pub total_tokens: Option<i64>,
+    pub total_cost_usd: Option<f64>,
+
+    // Concurrency & Active Tools
+    pub active_tools: Vec<String>,
+}
+
+/// Executive briefing across sessions in a time window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Briefing {
+    pub cards: Vec<SessionCard>,
+    pub scope_workspace: std::path::PathBuf,
+    pub since_ns: i64,
+    pub until_ns: i64,
+    pub total_sessions: usize,
+    pub total_turns: i64,
+    pub total_tools: i64,
+    pub total_tokens: Option<i64>,
+    pub total_cost_usd: Option<f64>,
+    pub warnings: Vec<String>,
+}

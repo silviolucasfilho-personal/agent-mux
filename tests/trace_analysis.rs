@@ -2,7 +2,14 @@
 mod support;
 
 use agent_mux::tracing::analysis::correlation::resolve_binding;
+use agent_mux::tracing::analysis::evidence::snippet;
 use agent_mux::tracing::analysis::model::*;
+
+#[test]
+fn snippets_are_unicode_safe() {
+    assert_eq!(snippet("á🦀日本語", 3), "á🦀日…");
+    assert_eq!(snippet("ok", 3), "ok");
+}
 
 #[test]
 fn absence_of_exact_identity_stays_uncorrelated() {
@@ -89,4 +96,68 @@ fn two_runs_sharing_local_id_do_not_collide() {
     let b2 = resolve_binding(&db, "run-2", 1, None, None).unwrap().unwrap();
     assert_eq!(b2.launch_id, "run2-l1");
     assert_eq!(b2.session_key.as_deref(), Some("claude:r2"));
+}
+
+#[test]
+fn briefing_preserves_distinct_relative_paths() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        r#"
+        CREATE TABLE sessions (key TEXT PRIMARY KEY, provider TEXT, cwd TEXT, first_seen_ns INTEGER, last_seen_ns INTEGER);
+        CREATE TABLE traces (id TEXT PRIMARY KEY, session_key TEXT, launch_id TEXT, start_ns INTEGER, end_ns INTEGER, input TEXT, output TEXT);
+        CREATE TABLE observations (id TEXT PRIMARY KEY, trace_id TEXT, type TEXT, name TEXT, input TEXT, output TEXT, start_ns INTEGER, end_ns INTEGER);
+
+        INSERT INTO sessions VALUES('s1', 'claude', '/my/workspace', 100, 200);
+        INSERT INTO traces VALUES('t1', 's1', 'l1', 100, 200, 'Refactor configs', 'All done');
+        INSERT INTO observations VALUES('o1', 't1', 'tool', 'write_to_file', '{"TargetFile": "src/a/config.rs"}', 'ok', 110, 120);
+        INSERT INTO observations VALUES('o2', 't1', 'tool', 'write_to_file', '{"TargetFile": "src/b/config.rs"}', 'ok', 130, 140);
+        INSERT INTO observations VALUES('o3', 't1', 'tool', 'execute_command', '{"CommandLine": "cargo test --workspace"}', 'ok', 150, 160);
+        "#,
+    ).unwrap();
+
+    let rep = agent_mux::tracing::analysis::query::briefing(
+        &db,
+        std::path::Path::new("/my/workspace"),
+        0,
+        1000,
+        &[],
+    ).unwrap();
+
+    assert_eq!(rep.total_sessions, 1);
+    let card = &rep.cards[0];
+    assert_eq!(card.files_modified.len(), 2);
+    let paths: Vec<_> = card.files_modified.iter().map(|f| f.value.as_deref().unwrap()).collect();
+    assert!(paths.contains(&"src/a/config.rs"));
+    assert!(paths.contains(&"src/b/config.rs"));
+    assert_eq!(card.recent_commands.len(), 1);
+    assert_eq!(card.recent_commands[0].value.as_deref().unwrap(), "cargo test --workspace");
+}
+
+#[test]
+fn briefing_with_live_session_merges_activity() {
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    let live = vec![LiveSession {
+        run_id: "run-1".into(),
+        launch_id: "launch-1".into(),
+        session_id: 1,
+        session_key: Some("s-live".into()),
+        provider: Some("claude".into()),
+        cwd: std::path::PathBuf::from("/my/workspace"),
+        state: RuntimeState::Working,
+        updated_at_ns: 500,
+        active_tools: vec!["cargo test".into()],
+    }];
+
+    let rep = agent_mux::tracing::analysis::query::briefing(
+        &db,
+        std::path::Path::new("/my/workspace"),
+        0,
+        1000,
+        &live,
+    ).unwrap();
+
+    assert_eq!(rep.total_sessions, 1);
+    let card = &rep.cards[0];
+    assert_eq!(card.runtime_state, RuntimeState::Working);
+    assert!(card.current_activity.value.as_deref().unwrap().contains("cargo test"));
 }
