@@ -11,6 +11,7 @@ pub mod definition;
 pub mod discovery;
 pub mod install;
 pub mod launch;
+pub mod state;
 
 pub use crate::harness::Harness;
 pub use artifacts::{ArtifactError, ArtifactSet, render_artifacts, write_artifacts};
@@ -24,6 +25,9 @@ pub use install::{
 };
 pub use launch::{
     AgentLaunch, LaunchError, LaunchOptions, build_agent_launch, selected_harness_index,
+};
+pub use state::{
+    AgentScope, BriefingRecord, Finding, FindingStatus, Job, JobStatus, StateError, StateStore,
 };
 use std::path::{Path, PathBuf};
 
