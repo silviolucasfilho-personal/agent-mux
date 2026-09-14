@@ -35,6 +35,98 @@ pub struct OpenOptions {
     pub agent_mux_version: String,
 }
 
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self {
+            prices: PriceTable::default(),
+            run_id: "default-run".to_string(),
+            retention_days: 0,
+            agent_mux_version: "0.1.0".to_string(),
+        }
+    }
+}
+
+/// A committed change in the trace store for review cursors and watchers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Change {
+    pub seq: i64,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub session_key: Option<String>,
+    pub launch_id: Option<String>,
+    pub operation: String,
+}
+
+/// Reads committed trace changes strictly newer than `after_seq`.
+pub fn read_changes(
+    conn: &Connection,
+    after_seq: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<Change>> {
+    let mut stmt = conn.prepare(
+        "SELECT seq, entity_kind, entity_id, session_key, launch_id, operation
+         FROM trace_changes
+         WHERE seq > ?1
+         ORDER BY seq ASC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![after_seq, limit as i64], |r| {
+        Ok(Change {
+            seq: r.get(0)?,
+            entity_kind: r.get(1)?,
+            entity_id: r.get(2)?,
+            session_key: r.get(3)?,
+            launch_id: r.get(4)?,
+            operation: r.get(5)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Returns the highest committed change sequence number in the store.
+pub fn latest_change_seq(conn: &Connection) -> rusqlite::Result<i64> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'trace_changes'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !exists {
+        return Ok(0);
+    }
+    let seq: Option<i64> = conn
+        .query_row("SELECT MAX(seq) FROM trace_changes", [], |r| r.get(0))
+        .optional()?
+        .flatten();
+    Ok(seq.unwrap_or(0))
+}
+
+/// Returns the persistent unique identifier for this trace database, generating one if absent.
+pub fn store_uuid(conn: &Connection) -> rusqlite::Result<String> {
+    let uuid: Option<String> = conn
+        .query_row("SELECT value FROM meta WHERE key = 'store_uuid'", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if let Some(u) = uuid {
+        Ok(u)
+    } else {
+        let generated: String =
+            conn.query_row("SELECT lower(hex(randomblob(16)))", [], |r| r.get(0))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('store_uuid', ?1)",
+            params![generated],
+        )?;
+        Ok(generated)
+    }
+}
+
 pub struct Store {
     conn: Connection,
     prices: PriceTable,
@@ -1336,7 +1428,7 @@ mod tests {
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, schema::SCHEMA_VERSION);
     }
 
     #[test]

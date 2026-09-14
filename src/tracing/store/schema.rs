@@ -1,9 +1,9 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 11;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
 // uses a separate database rather than silently replacing its history.
@@ -525,4 +525,131 @@ CREATE TABLE scores (
   created_ns INTEGER NOT NULL
 );
 CREATE INDEX scores_by_target ON scores (target, target_id);
+"#;
+
+const V11: &str = r#"
+CREATE TABLE IF NOT EXISTS trace_changes (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_kind TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  session_key TEXT,
+  launch_id TEXT,
+  operation TEXT NOT NULL CHECK(operation IN ('insert','update','delete'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_trace_changes_seq ON trace_changes(seq);
+CREATE INDEX IF NOT EXISTS idx_trace_changes_session ON trace_changes(session_key);
+CREATE INDEX IF NOT EXISTS idx_trace_changes_entity ON trace_changes(entity_kind, entity_id);
+
+INSERT OR IGNORE INTO meta(key, value) VALUES ('store_uuid', lower(hex(randomblob(16))));
+
+-- Triggers for sessions
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_sessions_insert
+AFTER INSERT ON sessions
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('session', NEW.key, NEW.key, NULL, 'insert');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_sessions_update
+AFTER UPDATE ON sessions
+WHEN NEW.last_seen_ns IS NOT OLD.last_seen_ns OR NEW.provider IS NOT OLD.provider OR NEW.cwd IS NOT OLD.cwd
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('session', NEW.key, NEW.key, NULL, 'update');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_sessions_delete
+AFTER DELETE ON sessions
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('session', OLD.key, OLD.key, NULL, 'delete');
+END;
+
+-- Triggers for launches
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_launches_insert
+AFTER INSERT ON launches
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('launch', NEW.id, NEW.session_key, NEW.id, 'insert');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_launches_update
+AFTER UPDATE ON launches
+WHEN NEW.ended_ns IS NOT OLD.ended_ns OR NEW.reported_cost_usd IS NOT OLD.reported_cost_usd OR NEW.termination IS NOT OLD.termination
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('launch', NEW.id, NEW.session_key, NEW.id, 'update');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_launches_delete
+AFTER DELETE ON launches
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('launch', OLD.id, OLD.session_key, OLD.id, 'delete');
+END;
+
+-- Triggers for traces
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_traces_insert
+AFTER INSERT ON traces
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('trace', NEW.id, NEW.session_key, NEW.launch_id, 'insert');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_traces_update
+AFTER UPDATE ON traces
+WHEN NEW.end_ns IS NOT OLD.end_ns OR NEW.status IS NOT OLD.status OR NEW.session_cost_usd IS NOT OLD.session_cost_usd OR NEW.output IS NOT OLD.output
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('trace', NEW.id, NEW.session_key, NEW.launch_id, 'update');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_traces_delete
+AFTER DELETE ON traces
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('trace', OLD.id, OLD.session_key, OLD.launch_id, 'delete');
+END;
+
+-- Triggers for observations
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_observations_insert
+AFTER INSERT ON observations
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES (
+    'observation',
+    NEW.id,
+    (SELECT session_key FROM traces WHERE id = NEW.trace_id),
+    (SELECT launch_id FROM traces WHERE id = NEW.trace_id),
+    'insert'
+  );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_observations_update
+AFTER UPDATE ON observations
+WHEN NEW.end_ns IS NOT OLD.end_ns OR NEW.level IS NOT OLD.level OR NEW.total_tokens IS NOT OLD.total_tokens OR NEW.total_cost_usd IS NOT OLD.total_cost_usd OR NEW.output IS NOT OLD.output
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES (
+    'observation',
+    NEW.id,
+    (SELECT session_key FROM traces WHERE id = NEW.trace_id),
+    (SELECT launch_id FROM traces WHERE id = NEW.trace_id),
+    'update'
+  );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_observations_delete
+AFTER DELETE ON observations
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES (
+    'observation',
+    OLD.id,
+    (SELECT session_key FROM traces WHERE id = OLD.trace_id),
+    (SELECT launch_id FROM traces WHERE id = OLD.trace_id),
+    'delete'
+  );
+END;
 "#;
