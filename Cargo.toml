@@ -16,7 +16,7 @@ serde_yaml = "0.9.34"
 sha2 = "0.10.8"
 tempfile = "3.27.0"
 time = { version = "0.3.55", default-features = false, features = ["formatting", "local-offset", "parsing", "std"] }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "io-std", "io-util"] }
 toml = "1.1.4"
 tui-term = "0.3.4"
 ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
