@@ -5,12 +5,15 @@
 //! loading each discovered agent into the sidebar's Agents menu.
 
 pub mod definition;
+pub mod discovery;
 
 pub use crate::harness::Harness as HeimdallHarness;
 pub use definition::{
     parse_definition, parse_legacy_definition, AgentDefinition, DefinitionError,
 };
-use std::collections::HashSet;
+pub use discovery::{
+    bundled_agents_dir, discover_agents, migrate_legacy, DiscoveryReport, MigrationError,
+};
 use std::path::{Path, PathBuf};
 
 /// Default built-in markdown instructions for Heimdall (legacy compatibility constant).
@@ -76,26 +79,19 @@ pub fn seed_default_agents(dir: &Path) {
 
 /// Discovers and loads all agents from workspace and global directories.
 pub fn load_agents(custom_dir: Option<&Path>) -> Vec<AgentDefinition> {
-    let mut agents = Vec::new();
-    let mut seen_ids = HashSet::new();
-
-    // 1. Check workspace agents dir (e.g. ./.agent-mux/agents)
-    if let Ok(cwd) = std::env::current_dir() {
-        let local_dir = cwd.join(".agent-mux").join("agents");
-        if local_dir.is_dir() {
-            scan_dir(&local_dir, &mut agents, &mut seen_ids);
-        }
-    }
-
-    // 2. Check global agents dir (e.g. ~/.agent-mux/agents)
     let global_dir = custom_dir.map(Path::to_path_buf).unwrap_or_else(default_agents_dir);
     seed_default_agents(&global_dir);
-    if global_dir.is_dir() {
-        scan_dir(&global_dir, &mut agents, &mut seen_ids);
-    }
 
-    // 3. Guarantee built-in Heimdall if not found on disk
-    if !seen_ids.contains("heimdall") {
+    let ws_dir = std::env::current_dir()
+        .map(|cwd| cwd.join(".agent-mux").join("agents"))
+        .unwrap_or_else(|_| PathBuf::from(".agent-mux/agents"));
+
+    let bundled = bundled_agents_dir();
+    let report = discover_agents(&ws_dir, &global_dir, bundled.as_deref());
+    let mut agents = report.agents;
+
+    // Guarantee built-in Heimdall if not found on disk or bundled
+    if !agents.iter().any(|a| a.id == "heimdall") {
         let mut builtin = AgentDefinition::default();
         builtin.instructions = DEFAULT_HEIMDALL_MD.to_string();
         agents.insert(0, builtin);
@@ -113,23 +109,6 @@ pub fn load_agents(custom_dir: Option<&Path>) -> Vec<AgentDefinition> {
     });
 
     agents
-}
-
-fn scan_dir(dir: &Path, agents: &mut Vec<AgentDefinition>, seen_ids: &mut HashSet<String>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let agent = AgentDefinition::parse_markdown(&content, Some(&path));
-                    if !seen_ids.contains(&agent.id) {
-                        seen_ids.insert(agent.id.clone());
-                        agents.push(agent);
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
