@@ -210,6 +210,14 @@ impl SkillLauncherState {
     }
 }
 
+/// What `prepare_agent_launch` adds to a spawn.
+#[derive(Debug, Default)]
+struct AgentLaunchPrep {
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    briefing_path: Option<std::path::PathBuf>,
+}
+
 pub struct DispatchCtx {
     pub selected_status: Option<Status>,
     pub any_working: bool,
@@ -1728,6 +1736,11 @@ pub struct App {
     pub skills_dir: Option<std::path::PathBuf>,
     /// Selected row of the Agents sidebar section (index into `skills`).
     pub selected_agent: usize,
+    /// `[agents]`: whether launches get briefing snapshots and MCP.
+    pub agents: crate::config::AgentsSettings,
+    /// Where briefing snapshots are written; `None` is the runtime
+    /// directory (`AGENT_MUX_RUNTIME_DIR` or `~/.agent-mux/snapshots`).
+    pub runtime_dir: Option<std::path::PathBuf>,
     /// Cached briefing for the active Agents preview (if capable of trace.read).
     pub cached_briefing: Option<crate::tracing::analysis::Briefing>,
     /// Instant when the briefing was last successfully refreshed.
@@ -1766,6 +1779,10 @@ impl App {
             history_sessions = history::discover_sessions(None, None, cur_dir.as_deref(), true);
         }
         let (skills, _) = crate::skill::load_skills(None);
+        crate::skill::launch::sweep_briefings(
+            &crate::tracing::analysis::default_snapshot_dir(),
+            std::time::Duration::from_secs(24 * 3600),
+        );
         App {
             sessions: Vec::new(),
             selected: 0,
@@ -1795,6 +1812,8 @@ impl App {
             skill_install_home: None,
             skills_dir: None,
             selected_agent: 0,
+            agents: crate::config::AgentsSettings::default(),
+            runtime_dir: None,
             cached_briefing: None,
             cached_briefing_as_of: None,
             cached_briefing_warning: None,
@@ -2181,15 +2200,27 @@ impl App {
                 .unwrap_or("unknown");
             p.skill = Some((skill.to_string(), harness.to_string()));
         }
-        let extra_args: &[String] = match &plan {
-            Some(p) => &p.extra_args,
-            None => &[],
+        let mut extra_args: Vec<String> = match &plan {
+            Some(p) => p.extra_args.clone(),
+            None => Vec::new(),
         };
         let mut extra_env: Vec<(String, String)> = match &plan {
             Some(p) => p.extra_env.clone(),
             None => Vec::new(),
         };
         extra_env.extend(env.iter().cloned());
+        // An agent launch (fresh, restored or respawned) gets its facts
+        // from Rust: the briefing snapshot and the MCP registration.
+        let mut briefing_path = None;
+        if let Some(def) = skill_id
+            .and_then(|sid| self.skills.iter().find(|s| s.id == sid))
+            .cloned()
+        {
+            let prep = self.prepare_agent_launch(&def, &profile, &dir);
+            extra_args.extend(prep.args);
+            extra_env.extend(prep.env);
+            briefing_path = prep.briefing_path;
+        }
         let mut session = Session::spawn(
             id,
             profile,
@@ -2197,13 +2228,86 @@ impl App {
             rows,
             cols,
             self.tx.clone(),
-            extra_args,
+            &extra_args,
             &extra_env,
         )?;
+        session.briefing_path = briefing_path;
         if let (Some(rt), Some(plan)) = (self.tracing.as_mut(), plan) {
             session.trace = Some(rt.start_session(id, plan));
         }
         Ok(session)
+    }
+
+    /// The Rust side of an agent launch: writes the briefing snapshot the
+    /// package asked for and decides how the harness reaches the MCP
+    /// server. Nothing here can fail the launch; problems become notices.
+    fn prepare_agent_launch(
+        &mut self,
+        def: &crate::skill::SkillDefinition,
+        profile: &Profile,
+        dir: &std::path::Path,
+    ) -> AgentLaunchPrep {
+        let mut prep = AgentLaunchPrep::default();
+        if self.agents.hydrate && !def.hydrate.is_empty() {
+            let key = uuid::Uuid::new_v4().to_string();
+            let runtime_dir = self
+                .runtime_dir
+                .clone()
+                .unwrap_or_else(crate::tracing::analysis::default_snapshot_dir);
+            if let Some(h) = crate::skill::launch::hydrate(
+                def,
+                self.trace_db_path.as_deref(),
+                dir,
+                &runtime_dir,
+                &key,
+            ) {
+                prep.env.push((
+                    "AGENT_MUX_BRIEFING".into(),
+                    h.path.to_string_lossy().into_owned(),
+                ));
+                prep.env
+                    .push(("AGENT_MUX_BRIEFING_AS_OF".into(), h.as_of.clone()));
+                if let Some(e) = &h.error {
+                    self.notice =
+                        Some(Notice::warn(format!("{} briefing snapshot: {e}", def.name)));
+                }
+                prep.briefing_path = Some(h.path);
+            }
+        }
+        let wanted = def.mcp == crate::skill::McpMode::Auto
+            && self.agents.mcp == crate::skill::McpMode::Auto;
+        let registration = if wanted {
+            let exe = crate::tracing::hooks::register::current_exe();
+            crate::mcp::register::plan(
+                crate::harness::Harness::detect(&profile.command),
+                exe.as_deref(),
+                self.trace_db_path.as_deref(),
+                dir,
+                &self.skill_home(),
+            )
+        } else {
+            crate::mcp::register::Registration::Unavailable("mcp is off".into())
+        };
+        match &registration {
+            crate::mcp::register::Registration::PerLaunch { args } => {
+                prep.args.extend(args.iter().cloned());
+            }
+            crate::mcp::register::Registration::Installed => {}
+            crate::mcp::register::Registration::Unavailable(why) if wanted => {
+                self.notice = Some(Notice::info(format!(
+                    "{} runs without MCP tools: {why}",
+                    def.name
+                )));
+            }
+            crate::mcp::register::Registration::Unavailable(_) => {}
+        }
+        prep.env
+            .push(("AGENT_MUX_MCP".into(), registration.env_value().into()));
+        prep.env.push((
+            "AGENT_MUX_WORKSPACE".into(),
+            dir.to_string_lossy().into_owned(),
+        ));
+        prep
     }
 
     /// Hands the runtime back to `main` for the post-`kill_all` bounded
@@ -3674,12 +3778,13 @@ impl App {
                 model: None,
                 bypass_approvals: None,
             });
-        let launch = crate::skill::launch::build_skill_launch_with_db(
+        let launch = crate::skill::launch::build_skill_launch_full(
             &skill,
             harness,
             &base,
             &cwd,
             self.trace_db_path.as_deref(),
+            self.agents.hydrate && !skill.hydrate.is_empty(),
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -3849,6 +3954,9 @@ impl App {
     pub fn handle_pty_exit(&mut self, id: usize) {
         if let Some(i) = self.session_index(id) {
             self.sessions[i].mark_exited();
+            if let Some(path) = self.sessions[i].briefing_path.take() {
+                let _ = std::fs::remove_file(path);
+            }
             // notify the tracing pipeline (idempotent against the
             // documented duplicate PtyExit) with the exit code now known
             if let Some(trace) = &self.sessions[i].trace {
@@ -3893,6 +4001,9 @@ impl App {
         // child, so calling it again here is harmless.
         for s in &mut self.sessions {
             s.kill();
+            if let Some(path) = s.briefing_path.take() {
+                let _ = std::fs::remove_file(path);
+            }
         }
         for i in 0..self.sessions.len() {
             self.record_experiment_link(i);

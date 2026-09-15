@@ -40,11 +40,60 @@ const BUILTIN_HEIMDALL_FILES: &[(&str, &str)] = &[
         "reference/agents.md",
         include_str!("../../skills/heimdall/reference/agents.md"),
     ),
-    (
-        "reference/sql.md",
-        include_str!("../../skills/heimdall/reference/sql.md"),
-    ),
 ];
+
+/// A snapshot agent-mux computes in Rust and hands to the agent at launch
+/// (`[agent] hydrate` in skill.toml).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hydration {
+    /// `Request::Briefing` scoped to the launch workspace, last 24 hours.
+    Briefing,
+}
+
+impl Hydration {
+    pub const ALL: [Hydration; 1] = [Hydration::Briefing];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Hydration::Briefing => "briefing",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim() {
+            "briefing" => Some(Hydration::Briefing),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a launch registers the agent-mux MCP server for the agent
+/// (`[agent] mcp` in skill.toml).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum McpMode {
+    /// Register per launch where the harness allows, else use an installed
+    /// entry, else run without.
+    Auto,
+    #[default]
+    Off,
+}
+
+impl McpMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            McpMode::Auto => "auto",
+            McpMode::Off => "off",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "auto" => Some(McpMode::Auto),
+            "off" => Some(McpMode::Off),
+            _ => None,
+        }
+    }
+}
 
 /// A skill package as agent-mux sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +110,13 @@ pub struct SkillDefinition {
     pub capabilities: Vec<String>,
     /// Text appended to the skill invocation when a session is launched.
     pub startup_prompt: Option<String>,
+    /// Snapshots written before launch; requires `trace.read`.
+    pub hydrate: Vec<Hydration>,
+    /// MCP registration policy; `Auto` by default when `trace.read` is
+    /// declared, `Off` otherwise.
+    pub mcp: McpMode,
+    /// Non-fatal package problems (reported by `skill list`).
+    pub warnings: Vec<String>,
     /// Markdown after the frontmatter.
     pub body: String,
     /// Extra files installed next to SKILL.md, as (relative path, content).
@@ -97,6 +153,16 @@ struct SkillMeta {
     #[serde(default)]
     capabilities: Vec<String>,
     startup_prompt: Option<String>,
+    agent: Option<AgentMeta>,
+}
+
+/// `[agent]` in skill.toml: what Rust prepares for the agent at launch.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMeta {
+    #[serde(default)]
+    hydrate: Vec<String>,
+    mcp: Option<String>,
 }
 
 /// Skill ids double as directory names in every harness, so they stay
@@ -233,6 +299,43 @@ pub fn parse_skill(
         None => harnesses[0],
     };
 
+    let reads_traces = meta.capabilities.iter().any(|c| c == "trace.read");
+    let agent = meta.agent.unwrap_or_default();
+    let mut hydrate = Vec::new();
+    for name in &agent.hydrate {
+        let Some(h) = Hydration::parse(name) else {
+            return Err(err(format!(
+                "unknown [agent] hydrate entry {name:?}; known: {}",
+                Hydration::ALL
+                    .iter()
+                    .map(|h| h.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        if !hydrate.contains(&h) {
+            hydrate.push(h);
+        }
+    }
+    let mcp = match agent.mcp.as_deref() {
+        Some(m) => McpMode::parse(m).ok_or_else(|| {
+            err(format!(
+                "[agent] mcp must be \"auto\" or \"off\", not {m:?}"
+            ))
+        })?,
+        None if reads_traces => McpMode::Auto,
+        None => McpMode::Off,
+    };
+    let mut warnings = Vec::new();
+    let (hydrate, mcp) = if !reads_traces && (!hydrate.is_empty() || agent.mcp.is_some()) {
+        warnings.push(
+            "[agent] hydrate/mcp need the trace.read capability; both are disabled".to_string(),
+        );
+        (Vec::new(), McpMode::Off)
+    } else {
+        (hydrate, mcp)
+    };
+
     let mut files = files;
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -253,6 +356,9 @@ pub fn parse_skill(
         default_harness,
         capabilities: meta.capabilities,
         startup_prompt: meta.startup_prompt.filter(|s| !s.trim().is_empty()),
+        hydrate,
+        mcp,
+        warnings,
         body,
         files,
         source_hash: format!("{:x}", hasher.finalize()),
@@ -360,7 +466,12 @@ pub fn load_skills(custom_dir: Option<&Path>) -> (Vec<SkillDefinition>, Vec<Stri
                     s.id,
                     dir.display()
                 )),
-                Ok(s) => skills.push(s),
+                Ok(s) => {
+                    for w in &s.warnings {
+                        diagnostics.push(format!("{}: {w}", dir.display()));
+                    }
+                    skills.push(s);
+                }
                 Err(e) => diagnostics.push(e.to_string()),
             }
         }
@@ -392,7 +503,7 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].id, "heimdall");
         assert!(s[0].is_builtin);
-        assert_eq!(s[0].files.len(), 4);
+        assert_eq!(s[0].files.len(), 3);
         assert!(s[0].capabilities.iter().any(|c| c == "trace.read"));
     }
 

@@ -143,6 +143,7 @@ Terminal rendering and telemetry are separate paths. The PTY's escape sequences 
 | Langfuse exporter | OS thread (optional) | `langfuse/mod.rs` | Batches OTLP spans and posts them. |
 | Briefing refresh | `spawn_blocking` | `app.rs` | Runs the Heimdall briefing query off the UI thread. |
 | Hook process | Separate process per hook event | harness | `agent-mux trace hook …` invoked by the CLI; writes one `hook_events` row and exits. |
+| MCP server | Separate process per agent session | harness | `agent-mux mcp serve --stdio` started by the harness for an agent launch; answers the eight `agent_mux_*` tools from `TraceService` and exits on EOF. |
 
 ### Event loop
 
@@ -211,6 +212,10 @@ redact_literals = []
 tool_storm = 25
 ping_pong = 6
 no_progress = 3
+
+[agents]
+hydrate = true      # write a briefing snapshot for agents that ask for one
+mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 ```
 
 ### Fields, defaults and precedence
@@ -236,6 +241,7 @@ no_progress = 3
 | `tracing.loops` | Warning thresholds (25 / 6 / 3); `0` disables one. |
 | `tracing.models` | Price rows: `id`, optional `provider`, `match` patterns, `input`, `output`, optional `cache_read`, `cache_write`, `cache_write_1h`, `reasoning` (USD per million tokens). Rows with an empty id or negative input/output are dropped silently. |
 | Per-profile `[profiles.tracing]` | `enabled`, `provider`, `content_mode`, `inject_session_id`, `hooks`, `backend`, `max_cost_usd`, `max_turns` override the global defaults for that profile. |
+| `[agents] hydrate`, `mcp` | `true` and `"auto"` by default (`config::resolve_agents`). `hydrate = false` writes no briefing snapshots; `mcp = "off"` never registers the MCP server, whatever a package declares. |
 
 Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secret_key`, `flush_interval_ms` default 3,000) or from `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` then `LANGFUSE_BASE_URL` for the host (default `https://cloud.langfuse.com`). If the `[tracing.langfuse]` sub-table exists at all, the legacy `[tracing] host/public_key/secret_key` fields are ignored entirely; they are used only when the sub-table is absent, and trip a migration notice. Both keys must resolve or the remote backend is unavailable and launches fall back to local. A trailing `/` or `/api/public` is stripped from the host.
 
@@ -251,6 +257,10 @@ Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secr
 | `AGENT_MUX_TRACE_DB` | Store path override. Skill launches from the TUI receive the store the TUI writes (which honours a configured `db_path`); the CLI-less fallback in `skill::launch` uses this variable or the home default. |
 | `AGENT_MUX`, `AGENT_MUX_SESSION_ID`, `AGENT_MUX_EXE` | Set on every traced child: marker, the **launch id**, and the binary path (the last only when hooks are registered). |
 | `AGENT_MUX_BIN`, `AGENT_MUX_SKILL_ID` | Passed to skill launches. |
+| `AGENT_MUX_BRIEFING`, `AGENT_MUX_BRIEFING_AS_OF` | Path and RFC 3339 time of the briefing snapshot written for an agent launch (section 11). |
+| `AGENT_MUX_MCP`, `AGENT_MUX_WORKSPACE` | `registered`, `installed` or `unavailable`: how the agent session reaches the MCP server; the workspace the server is scoped to. |
+| `~/.agent-mux/snapshots/briefings/<key>.json` | Briefing snapshots, owner-only, removed when the session exits and swept after 24 hours. |
+| `AGENT_MUX_AGY_BIN`, `AGENT_MUX_MCP_DEBUG` | Tests point the agy installer at a fake `agy`; the debug variable logs MCP method names on the server's stderr. |
 | `AGENT_MUX_HOOK_DEBUG` | When present (any value), `trace hook` prints `inserted=<bool> <error>` on stderr. |
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | Honoured when locating Claude's data dir and Codex's config. |
 | `LANGFUSE_*` | Optional remote credentials. |
@@ -386,6 +396,8 @@ Opened by `n`. State is `DialogState`; the visible field list is computed by `Di
 #### Agent harness picker (`draw_skill_launcher`)
 
 Opened by `Enter`, `r` or `h` on an agent without a live session. Lists only the harnesses the package declares, starting on its default; each row shows `[n] <display name>` and `[active - attach]` when a live session of that agent already runs there. Keys: `↑/↓`, `j/k`, `1`-`3`, `c`/`x`/`a`, `Enter`, `Esc`/`q`. On `Enter`, `App::launch_skill` installs or refreshes the package into the harness skill directory (refusing an unmanaged directory), picks the first configured profile whose command detects as that harness (keeping a wrapper path such as `~/bin/claude`) or a bare one, builds the command with `skill::launch::build_skill_launch_with_db` (section 11), spawns with `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` and `AGENT_MUX_TRACE_DB`, records the skill on the launch row (`launches.metadata.skill_id` and `skill_harness`), tags the session with the skill id and attaches. An agent is a singleton by id across harnesses: with a live session the picker attaches instead, warning if a different harness was requested.
+
+For a package that declares `trace.read` and `[agent] hydrate = ["briefing"]`, the spawn path (`App::prepare_agent_launch`) also writes a briefing snapshot and decides the MCP registration before the process starts (section 11); this runs for fresh launches, restored sessions and respawns alike.
 
 #### Skills view (`draw_skills_view`)
 
@@ -818,6 +830,20 @@ Rows bind by launch id (inherited environment) or, once the session is known, by
 `trace hooks status` inspects both persistent installs (handler count, whether the command points at the current binary, a Codex trust heuristic) and `trace doctor` adds 24-hour activity from `SELECT provider, count(*), max(ts_ns) FROM hook_events WHERE ts_ns >= ?1 GROUP BY provider`.
 
 ---
+
+### 6.7 MCP registration (agent tools)
+
+The same per-launch pattern serves the read-only MCP server that agents use (`src/mcp/`). For an agent launch whose package has `[agent] mcp = "auto"` (the default with `trace.read`) and `[agents] mcp = "auto"`, `mcp::register::plan` produces:
+
+| Harness | Mechanism | Verified flag / file |
+| --- | --- | --- |
+| Claude Code | Per launch: `--mcp-config '{"mcpServers":{"agent-mux":{"type":"stdio","command":"<binary>","args":["mcp","serve","--stdio","--db","<store>","--workspace","<cwd>"]}}}'`. The user's own servers stay active (`--strict-mcp-config` is not passed). | `claude --help` 2.1.273 |
+| Codex | Per launch: `-c 'mcp_servers.agent-mux.command="<binary>"' -c 'mcp_servers.agent-mux.args=[…]'`. | `codex --help` 0.154.0 |
+| Antigravity | Installed once: `agent-mux mcp install agy` runs `agy mcp add agent-mux <binary> -- mcp serve --stdio --workspace-from-env`, which writes `~/.gemini/config/mcp_config.json`; the launch exports `AGENT_MUX_WORKSPACE` for scoping. `agent-mux mcp uninstall agy` runs `agy mcp remove`. | `agy mcp add` 1.2.3 (no per-launch flag) |
+
+The child environment gets `AGENT_MUX_MCP=registered|installed|unavailable` and `AGENT_MUX_WORKSPACE`. Registration needs a trace store (tracing on) and an absolute binary path; otherwise the launch proceeds without tools, one notice says why, and the CLI remains the fallback. `agent-mux mcp status` and the `mcp` section of `trace doctor` (which spawns the server and runs `initialize`, `tools/list` and `agent_mux_get_health`) report the state.
+
+The server itself (`src/mcp/server.rs`) is line-delimited JSON-RPC 2.0 over stdio with `initialize`, `ping`, `tools/list` and `tools/call`; notifications are accepted and unanswered. Tool calls decode through `Request::from_tool_call` and return the service envelope as `structuredContent` and as JSON text; service errors come back as `isError` results carrying the `ServiceError` code, while unknown methods, malformed JSON and batches are JSON-RPC errors. Stdout carries protocol lines only. The server never creates or migrates a store: with a missing store `agent_mux_get_health` still answers and every other tool returns `DB_UNAVAILABLE`.
 
 ## 7. SQLite trace store
 
@@ -1333,6 +1359,8 @@ The remaining analysis-service requests are listed in section 10.
 | `trace hooks install\|uninstall codex\|agy` | Section 6. |
 | `trace hook …` | Internal hook entry point. |
 | `skill list \| show <id> [--harness H] \| install <id> [--harness H\|all] [--force] \| uninstall <id> [--harness H] \| status [id]` | Section 11. |
+| `mcp serve --stdio [--db PATH] [--workspace DIR \| --all-workspaces \| --workspace-from-env]` | The read-only MCP server (section 6.7); started by harnesses, usable by hand for debugging. |
+| `mcp install \| uninstall agy`, `mcp status [claude\|codex\|agy]` | Antigravity's installed entry through `agy mcp add|remove`; how each harness reaches the server. |
 | `run --experiment <name> --variant <label> --prompt <text> [--harness H] [--profile P] [--model M] [--bypass] [--cwd DIR] [--check CMD] [--repeat N] [--timeout SECS] [--max-cost USD] [--max-turns N]` | Section 12. |
 
 Examples:
@@ -1353,7 +1381,7 @@ agent-mux trace sql 'SELECT skill, turns_loaded, turns_unused FROM skill_stats O
 
 ### 10.1 `TraceService` (`analysis/service.rs`)
 
-An in-process, typed, read-only service. Requests: `Briefing`, `ListSessions`, `GetSession`, `Timeline`, `Search`, `AnalyzeSkills`, `CompareRuns`, `Health` (with `agent_mux_*` tool names and closed JSON schemas). Today only `trace briefing` uses it; the executable exposes no MCP or network server. Rules:
+An in-process, typed, read-only service. Requests: `Briefing`, `ListSessions`, `GetSession`, `Timeline`, `Search`, `AnalyzeSkills`, `CompareRuns`, `Health` (with `agent_mux_*` tool names and closed JSON schemas). `trace briefing`, the briefing snapshot written at agent launch, and the stdio MCP server (`agent-mux mcp serve`, section 6.7) use it; there is no network server. Rules:
 
 - Each request opens a fresh `READ_ONLY | NO_MUTEX` connection and installs a progress handler every 50 VM steps that interrupts at the deadline: 5 s for `AnalyzeSkills` and `CompareRuns`, 2 s otherwise. `Health` never needs the database.
 - Admission: 4 concurrent, 16 waiting per instance; a full queue returns `BUSY`.
@@ -1399,9 +1427,11 @@ A skill package is:
 ```text
 <id>/
   SKILL.md            # frontmatter name + description, then the body
-  skill.toml          # optional: name, icon, harnesses, default_harness, capabilities, startup_prompt
+  skill.toml          # optional: name, icon, harnesses, default_harness, capabilities, startup_prompt, [agent]
   reference/*.md      # optional, copied unchanged
 ```
+
+`[agent]` in `skill.toml` tells Rust what to prepare for a launch: `hydrate = ["briefing"]` writes a briefing snapshot, `mcp = "auto" | "off"` controls MCP registration. Both need the `trace.read` capability; without it they are disabled and `skill list` prints a warning. `mcp` defaults to `auto` when `trace.read` is declared. The rule behind the split: facts are computed in Rust (`TraceService`), judgment and presentation live in the package, and mid-session questions go through MCP with the CLI as fallback.
 
 `skill::parse_skill` requires the frontmatter, an id matching `^[a-z0-9][a-z0-9_-]*$` that equals the directory name, a non-empty description containing neither `: ` nor ` #` (so every harness parses it as a plain YAML scalar), a non-empty body, and a `default_harness` listed in `harnesses`. `source_hash` is SHA-256 over `SKILL.md`, `skill.toml` and every reference file. Discovery: user packages under `AGENT_MUX_SKILLS_DIR` or `~/.agent-mux/skills` first, then the compiled-in Heimdall unless shadowed by id.
 
@@ -1413,6 +1443,8 @@ A skill package is:
 
 `render_skill_md` writes the canonical `SKILL.md` with `Invoke with /<id>.` or `Invoke with $<id>.` appended to the description. `install` writes a `.agent-mux.json` manifest (`installed_by`, `id`, `harness`, `source_hash`, `files`); an unchanged hash skips the write; a directory without a manifest is refused unless `--force`. Launches set `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` and `AGENT_MUX_TRACE_DB`; the TUI passes the store its runtime writes (`build_skill_launch_with_db`), so a configured `db_path` reaches the skill. The session is named `<name> (<harness>)`; the base profile is the first configured profile for that harness, and its command is kept when it already detects as that harness (a wrapper path), otherwise the bare executable name is used. The launch row records `metadata.skill_id` and `skill_harness`, which is how the Skills view lists a skill's executions. A skill is a singleton by id; `Enter` attaches to the live instance, including restored ones.
 
+**Hydration.** When the package asks for `briefing` and `[agents] hydrate` is on, `skill::launch::hydrate` runs `Request::Briefing` on a `TraceService` scoped to the launch directory (default 24-hour window) and writes the envelope to `<runtime>/briefings/<uuid>.json` through a temp file and rename, owner-only. A failure never blocks the launch: the file then holds `{"schema_version":1,"as_of":…,"error":{"code","message"}}` and the status bar shows one notice. The child gets `AGENT_MUX_BRIEFING` and `AGENT_MUX_BRIEFING_AS_OF`, and the opening prompt ends with a sentence pointing at them (`HYDRATION_HINT`), so the agent reads facts before running anything. The file is removed when the session exits and files older than 24 hours are swept at startup.
+
 ```sh
 agent-mux skill list
 agent-mux skill show heimdall --harness codex
@@ -1421,7 +1453,7 @@ agent-mux skill status heimdall           # not installed | present, not managed
 agent-mux skill uninstall heimdall --harness codex
 ```
 
-**Heimdall** (`skills/heimdall/`, compiled in with `include_str!`; icon `⚡`, default harness `agy`, capability `trace.read`) briefs on active and recent sessions and evaluates skills and subagents using **only** the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`), never writing. Its startup prompt asks for the executive briefing plus top skill and agent findings. `SKILL.md` carries the command reference and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); `reference/sessions.md`, `skills.md`, `agents.md` hold thresholds and report shapes, and `reference/sql.md` ships ready queries (most expensive turns, tool storms, error hot spots by tool, cost per model, cache effectiveness, FTS). See [docs/skills.md](docs/skills.md).
+**Heimdall** (`skills/heimdall/`, compiled in with `include_str!`; icon `⚡`, default harness `agy`, capability `trace.read`, `[agent] hydrate = ["briefing"]`, `mcp = "auto"`) briefs on active and recent sessions and evaluates skills and subagents, read-only. It starts from the briefing snapshot in `$AGENT_MUX_BRIEFING`, prefers the eight `agent_mux_*` MCP tools when `$AGENT_MUX_MCP` is not `unavailable`, and falls back to the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`). `SKILL.md` carries the tool-to-CLI table and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); `reference/sessions.md`, `skills.md`, `agents.md` hold thresholds and report shapes. Ad-hoc SQL for `trace sql` is developer material in [docs/trace-sql-examples.md](docs/trace-sql-examples.md), not part of the package. See [docs/skills.md](docs/skills.md).
 
 ---
 
@@ -1496,7 +1528,8 @@ Repository rules are in [AGENTS.md](AGENTS.md): schema changes go through `PRAGM
 | Test file | Focus |
 | --- | --- |
 | `app_flow`, `pty_session`, `scroll_ux`, `session_history`, `persistent_sessions` | Dialog launch and modes, PTY lifecycle, scrolling and selection, history discovery and the Session Logs pane, saved-session restore. |
-| `skill_package`, `skill_ui` | Package validation, shadowing, per-harness rendering, managed installs; the Agents sidebar and picker (launch through a fake `claude` in a temporary home), the singleton rule, and the read-only Skills view (grouping, filter, tabs, install state). |
+| `skill_package`, `skill_ui`, `skill_hydrate` | Package validation and the `[agent]` contract, shadowing, per-harness rendering, managed installs; the Agents sidebar and picker (launch through a fake `claude` in a temporary home), the singleton rule, the read-only Skills view; the briefing snapshot, its environment and prompt hint, per-launch MCP registration, the global switches and the sweep. |
+| `mcp_protocol` | The built binary as an MCP server over piped stdio: initialize, tool catalog, calls equal to the in-process service, typed tool errors, protocol errors, EOF, and a missing store. |
 | `trace_capture`, `trace_session`, `trace_tail`, `trace_correlate`, `trace_provider_matrix`, `zz_sub` | Assembler regressions on committed rows, the full pipeline with a fake `claude`, tailing edge cases, adoption per provider, provider-neutral row contract, subagent recovery. |
 | `trace_hooks`, `trace_guard` | `trace hook` against a real store (policy, dedupe, locked store, agy contract, announcements); budget guard decisions. |
 | `trace_store`, `trace_changes` | Writer batches and deadlines, parent validation, replay, views; change journal. |
@@ -1540,12 +1573,15 @@ It builds a temporary project and home with `alpha`/`beta` skills and a `verifie
 | The Skills view shows no executions for a skill that ran | Rows before this version carry no `skill_id`; they match only when the launch's profile name equals `<name> (<harness>)`. Executions need the trace store; with tracing off the tab says so. |
 | Restarted session starts fresh | Persistence relaunches profiles; it does not reconnect PTYs. Resume the conversation from History or the Trace Browser. |
 | A launched skill reads the wrong store | Check `AGENT_MUX_TRACE_DB` in the skill session (`trace path` inside it); the TUI passes its own store path, and the variable wins over `db_path` when set. |
+| The agent says MCP is unavailable | `agent-mux mcp status`: Claude and Codex need tracing on and an absolute binary path; Antigravity needs `agent-mux mcp install agy` (and the entry enabled). `[agents] mcp = "off"` or the package's `[agent] mcp = "off"` also disable it. The CLI fallback still works. |
+| The briefing snapshot holds an error | Its `error.code` is the service error (`DB_UNAVAILABLE` when tracing is off); `trace doctor` shows the store state. The launch itself is unaffected. |
 
 ### Documentation map and current boundaries
 
 - [docs/tracing.md](docs/tracing.md): tracing reference by provider.
 - [docs/skills.md](docs/skills.md): package format, installation, invocation.
-- [skills/heimdall/reference/](skills/heimdall/reference/): analysis playbooks, SQL, thresholds.
+- [skills/heimdall/reference/](skills/heimdall/reference/): analysis playbooks and thresholds.
+- [docs/trace-sql-examples.md](docs/trace-sql-examples.md): ad-hoc SQL for `trace sql`, with the tool or command that answers the same question.
 - [docs/superpowers/specs/](docs/superpowers/specs/), [docs/superpowers/plans/](docs/superpowers/plans/): historical designs.
 
-The implementation is best-effort capture with provider-dependent evidence, heuristic attribution and loop warnings, an in-process analysis service, and optional remote export. It does not infer task success from process exit, recreate lost hook events from terminal output, manage packages other than skills, provide a full database restore through `trace import`, or expose a network analysis server. Known limitations at the time of writing: analysis cursors are keyed per process (section 10.1), CLI writers ignore `retention_days`, read commands other than `doctor` migrate an old store in place, and the Skills view accepts mouse wheel input but not clicks.
+The implementation is best-effort capture with provider-dependent evidence, heuristic attribution and loop warnings, an in-process analysis service, and optional remote export. It does not infer task success from process exit, recreate lost hook events from terminal output, manage packages other than skills, provide a full database restore through `trace import`, or expose a network analysis server (the MCP server is local stdio only). Known limitations at the time of writing: analysis cursors are keyed per process (section 10.1), CLI writers ignore `retention_days`, read commands other than `doctor` migrate an old store in place, and the Skills view accepts mouse wheel input but not clicks.

@@ -1,6 +1,15 @@
-# SQL cheat-sheet for the agent-mux trace store
+# SQL examples for the agent-mux trace store
 
-Run everything through `"$AGENT_MUX_BIN" trace sql "<query>" --json`. The connection is read-only.
+Developer material for `agent-mux trace sql "<query>" --json` (read-only connection). This file used to ship inside the Heimdall skill; it moved here on 2026-09-15 because the questions below are answered without SQL by the MCP tools and CLI commands, which track the schema through tests, while hand-written SQL does not. Prefer those; use these queries for ad-hoc exploration.
+
+| Question | Tool / command that answers it |
+| :--- | :--- |
+| Most expensive turns | `agent_mux_list_sessions`, `trace ls --all --json`, then `trace show <session> --json` |
+| Tool-storm turns | `trace loops [session] --json` (`tool_calls`, warnings) |
+| Error hot spots by tool | `agent_mux_get_timeline`, `trace show <trace-id> --json` (`level = ERROR`) |
+| Model mix and cost per model | `trace doctor` (unpriced models), `trace show --json` per turn (`models`) |
+| Cache effectiveness | `trace loops --json` (`cache_ratio`) |
+| Full-text search | `agent_mux_search_traces`, `trace search "<fts5>" --json` |
 
 ## Tables
 
