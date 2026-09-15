@@ -1,6 +1,6 @@
-//! The Skills view (`S`): grouping by harness, navigation, the harness
-//! filter, install and uninstall from the view, launching on the row's
-//! harness, and the one-session rule per skill.
+//! The Agents sidebar (Heimdall on the main screen: navigation, the harness
+//! picker, the one-session rule) and the read-only Skills view (`S`):
+//! grouping by harness, navigation, the harness filter, install state.
 
 use agent_mux::app::{App, Mode, SidebarSection, SkillRow, SkillsPane, SkillsTab};
 use agent_mux::config::Profile;
@@ -102,18 +102,176 @@ fn selected(app: &App) -> Option<(String, Harness)> {
     view.selected_package().map(|(p, h)| (p.id.clone(), h))
 }
 
+// ---------------------------------------------------------------- Agents
+
 #[tokio::test]
-async fn s_opens_the_view_grouped_by_harness_and_the_sidebar_has_no_skills_section() {
+async fn heimdall_is_listed_in_the_agents_section_and_the_picker_defaults_to_its_harness() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = app_in(temp.path(), vec![shell_profile("test")]);
+    let heimdall = app
+        .skills
+        .iter()
+        .position(|s| s.id == "heimdall")
+        .expect("compiled-in heimdall");
     assert_eq!(app.sidebar_section, SidebarSection::Active);
     app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(
-        app.sidebar_section,
-        SidebarSection::History,
-        "Tab goes straight to History"
+    assert_eq!(app.sidebar_section, SidebarSection::Agents);
+    app.selected_agent = heimdall;
+
+    // the agent owns the main pane: its telemetry briefing, not a terminal
+    let text = screen(&app);
+    assert!(text.contains("Agents ["), "sidebar section is named Agents");
+    assert!(text.contains("Heimdall"));
+    assert!(
+        text.contains("Executive Briefing"),
+        "trace.read agents preview the briefing: {text}"
     );
 
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    let Mode::SkillLauncher(ref state) = app.mode else {
+        panic!("Enter on an agent opens the harness picker");
+    };
+    assert_eq!(state.skill_id, "heimdall");
+    assert_eq!(state.selected_harness(), Harness::Antigravity);
+    assert_eq!(state.harnesses, Harness::ALL.to_vec());
+
+    app.handle_key(&key(KeyCode::Char('1')), Instant::now());
+    if let Mode::SkillLauncher(ref state) = app.mode {
+        assert_eq!(state.selected_harness(), Harness::Claude);
+    }
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    assert!(matches!(app.mode, Mode::Control));
+
+    // h also opens it while Agents is focused
+    app.handle_key(&key(KeyCode::Char('h')), Instant::now());
+    assert!(matches!(app.mode, Mode::SkillLauncher(_)));
+    app.kill_all();
+}
+
+#[tokio::test]
+async fn a_running_agent_is_attached_to_instead_of_relaunched() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = app_in(temp.path(), vec![shell_profile("test")]);
+    let heimdall = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
+    let session_idx = push_skill_session(&mut app, "heimdall");
+    app.sessions[session_idx].profile.command = "codex".to_string();
+    assert_eq!(app.running_skill_session("heimdall"), Some(session_idx));
+    assert_eq!(app.running_skill_harness("heimdall"), Some(Harness::Codex));
+
+    app.mode = Mode::Control;
+    app.sidebar_section = SidebarSection::Agents;
+    app.selected_agent = heimdall;
+    let text = screen(&app);
+    assert!(
+        text.contains("[codex]"),
+        "sidebar shows the running harness"
+    );
+
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(matches!(app.mode, Mode::Attached));
+    assert_eq!(app.selected, session_idx);
+
+    // Any harness asked for while it runs attaches; no second process.
+    let before = app.sessions.len();
+    for h in Harness::ALL {
+        assert_eq!(app.launch_skill("heimdall", h).unwrap(), session_idx);
+        assert_eq!(app.sessions.len(), before);
+    }
+
+    // Once it exits, the picker is available again.
+    app.sessions[session_idx].mark_exited();
+    assert_eq!(app.running_skill_session("heimdall"), None);
+    app.mode = Mode::Control;
+    app.sidebar_section = SidebarSection::Agents;
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(matches!(app.mode, Mode::SkillLauncher(_)));
+    app.kill_all();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_picker_installs_and_launches_on_the_chosen_harness() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = fake_claude(&temp.path().join("bin"));
+    let profile = Profile {
+        name: "Claude Code".into(),
+        command: script.to_string_lossy().into_owned(),
+        args: vec![],
+        default_dir: Some(temp.path().to_string_lossy().into_owned()),
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    let mut app = app_in(temp.path(), vec![profile]);
+    app.sidebar_section = SidebarSection::Agents;
+    app.selected_agent = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    app.handle_key(&key(KeyCode::Char('1')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
+
+    let session = &app.sessions[app.selected];
+    assert_eq!(session.skill_id.as_deref(), Some("heimdall"));
+    assert_eq!(session.profile.name, "Heimdall (claude)");
+    assert_eq!(
+        session.profile.command,
+        script.to_string_lossy(),
+        "the configured wrapper path is kept for the harness"
+    );
+    assert!(
+        session
+            .profile
+            .args
+            .last()
+            .unwrap()
+            .starts_with("/heimdall ")
+    );
+    let installed = temp.path().join(".claude/skills/heimdall");
+    assert!(
+        installed.join("SKILL.md").is_file(),
+        "installed before launch"
+    );
+    assert!(installed.join(".agent-mux.json").is_file());
+
+    // the Skills view reports the same launch on the Claude row only
+    app.mode = Mode::Control;
+    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
+    let text = screen(&app);
+    assert!(text.contains("running [claude]"), "{text}");
+    assert_eq!(
+        text.matches("not installed").count(),
+        2,
+        "codex and agy: {text}"
+    );
+    app.kill_all();
+}
+
+#[tokio::test]
+async fn skill_sessions_survive_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("sessions.json");
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app1 = App::new(vec![shell_profile("test")], None, tx.clone());
+    app1.set_sessions_file(&file);
+    push_skill_session(&mut app1, "heimdall");
+    app1.save_active_sessions().unwrap();
+    app1.kill_all();
+
+    let mut app2 = App::new(vec![shell_profile("test")], None, tx);
+    app2.set_sessions_file(&file);
+    app2.restore_saved_sessions();
+    assert_eq!(app2.sessions.len(), 1);
+    assert_eq!(app2.sessions[0].skill_id.as_deref(), Some("heimdall"));
+    assert_eq!(app2.running_skill_session("heimdall"), Some(0));
+    app2.kill_all();
+}
+
+// ------------------------------------------------------------ Skills view
+
+#[tokio::test]
+async fn s_opens_a_read_only_view_grouped_by_harness() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = app_in(temp.path(), vec![shell_profile("test")]);
     app.handle_key(&key(KeyCode::Char('S')), Instant::now());
     assert_eq!(
         shape(&app),
@@ -143,6 +301,20 @@ async fn s_opens_the_view_grouped_by_harness_and_the_sidebar_has_no_skills_secti
     );
     assert!(text.contains("not installed"), "{text}");
     assert!(text.contains("Details"), "the detail tab is titled: {text}");
+    assert!(
+        !text.contains("[i] install") && !text.contains("[Enter] launch"),
+        "the view is read-only: {text}"
+    );
+
+    // Enter only moves focus; the row is still not installed afterwards
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    let Mode::SkillsView(v) = &app.mode else {
+        panic!()
+    };
+    assert_eq!(v.focus, SkillsPane::Detail);
+    assert!(!temp.path().join(".claude/skills/heimdall").exists());
+    assert!(app.sessions.is_empty());
+    app.handle_key(&key(KeyCode::Left), Instant::now());
 
     // 2 narrows to Codex, 2 again clears; Esc clears a filter before closing
     app.handle_key(&key(KeyCode::Char('2')), Instant::now());
@@ -163,7 +335,7 @@ async fn s_opens_the_view_grouped_by_harness_and_the_sidebar_has_no_skills_secti
 }
 
 #[tokio::test]
-async fn tabs_follow_the_selected_rows_capabilities() {
+async fn the_view_has_details_and_executions_tabs_and_reflects_install_state() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = app_in(temp.path(), vec![shell_profile("test")]);
     std::fs::create_dir_all(temp.path().join("skills/plain")).unwrap();
@@ -173,37 +345,23 @@ async fn tabs_follow_the_selected_rows_capabilities() {
     )
     .unwrap();
     app.reload_skills();
+    let heimdall = app
+        .skills
+        .iter()
+        .find(|s| s.id == "heimdall")
+        .unwrap()
+        .clone();
+    agent_mux::skill::install::install(&heimdall, Harness::Codex, temp.path(), false).unwrap();
+
     app.handle_key(&key(KeyCode::Char('S')), Instant::now());
     assert_eq!(
         shape(&app)[..3],
         ["# claude", "heimdall@claude", "plain@claude"]
     );
-
-    // Heimdall reads traces: three tabs, cycling with Tab / BackTab
     let tabs = |app: &App| match &app.mode {
         Mode::SkillsView(v) => (v.tabs(), v.tab),
         _ => panic!(),
     };
-    assert_eq!(
-        tabs(&app).0,
-        vec![
-            SkillsTab::Details,
-            SkillsTab::Executions,
-            SkillsTab::Briefing
-        ]
-    );
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(tabs(&app).1, SkillsTab::Executions);
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(tabs(&app).1, SkillsTab::Briefing);
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(tabs(&app).1, SkillsTab::Details);
-    app.handle_key(&key(KeyCode::BackTab), Instant::now());
-    assert_eq!(tabs(&app).1, SkillsTab::Briefing);
-
-    // moving onto a plain skill drops the Briefing tab and lands on Details
-    app.handle_key(&key(KeyCode::Char('j')), Instant::now());
-    assert_eq!(selected(&app), Some(("plain".into(), Harness::Claude)));
     assert_eq!(
         tabs(&app),
         (
@@ -211,210 +369,28 @@ async fn tabs_follow_the_selected_rows_capabilities() {
             SkillsTab::Details
         )
     );
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(tabs(&app).1, SkillsTab::Executions);
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(tabs(&app).1, SkillsTab::Details);
+    app.handle_key(&key(KeyCode::BackTab), Instant::now());
+    assert_eq!(tabs(&app).1, SkillsTab::Executions);
 
-    // → focuses the detail pane, ← comes back, Esc from the detail pane
-    // returns to the list before closing
-    app.handle_key(&key(KeyCode::Right), Instant::now());
+    // the Codex row shows the CLI-made install; Claude and agy do not
+    let text = screen(&app);
+    assert_eq!(text.matches("installed ✓").count(), 1, "{text}");
     let Mode::SkillsView(v) = &app.mode else {
         panic!()
     };
-    assert_eq!(v.focus, SkillsPane::Detail);
-    app.handle_key(&key(KeyCode::Esc), Instant::now());
-    let Mode::SkillsView(v) = &app.mode else {
-        panic!()
-    };
-    assert_eq!(v.focus, SkillsPane::Skills);
-    app.kill_all();
-}
+    let codex = &v.install[&("heimdall".to_string(), Harness::Codex)];
+    assert!(codex.installed && codex.managed && codex.current);
+    assert!(!v.install[&("heimdall".to_string(), Harness::Claude)].installed);
 
-#[tokio::test]
-async fn a_running_skill_is_attached_to_instead_of_relaunched() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut app = app_in(temp.path(), vec![shell_profile("test")]);
-    let session_idx = push_skill_session(&mut app, "heimdall");
-    app.sessions[session_idx].profile.command = "codex".to_string();
-    assert_eq!(app.running_skill_session("heimdall"), Some(session_idx));
-    assert_eq!(app.running_skill_harness("heimdall"), Some(Harness::Codex));
-
-    app.mode = Mode::Control;
-    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
-    let text = screen(&app);
-    assert!(
-        text.contains("running [codex]"),
-        "the Codex row shows it: {text}"
-    );
-
-    // Enter on any row of a running skill attaches (here the Claude row)
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Attached));
-    assert_eq!(app.selected, session_idx);
-    assert!(
-        app.notice
-            .as_ref()
-            .is_some_and(|n| n.text.contains("already running on codex")),
-        "asking for another harness warns: {:?}",
-        app.notice
-    );
-
-    // Any harness asked for while it runs attaches; no second process.
-    let before = app.sessions.len();
-    for h in Harness::ALL {
-        assert_eq!(app.launch_skill("heimdall", h).unwrap(), session_idx);
-        assert_eq!(app.sessions.len(), before);
-    }
-
-    // Once it exits the row is no longer running
-    app.sessions[session_idx].mark_exited();
-    assert_eq!(app.running_skill_session("heimdall"), None);
-    app.mode = Mode::Control;
-    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
-    assert!(!screen(&app).contains("running ["));
-    app.kill_all();
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn enter_installs_and_launches_on_the_rows_harness() {
-    let temp = tempfile::tempdir().unwrap();
-    let script = fake_claude(&temp.path().join("bin"));
-    let profile = Profile {
-        name: "Claude Code".into(),
-        command: script.to_string_lossy().into_owned(),
-        args: vec![],
-        default_dir: Some(temp.path().to_string_lossy().into_owned()),
-        tracing: None,
-        model: None,
-        bypass_approvals: None,
-    };
-    let mut app = app_in(temp.path(), vec![profile]);
-    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
-    assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
-
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
-    let session = &app.sessions[app.selected];
-    assert_eq!(session.skill_id.as_deref(), Some("heimdall"));
-    assert_eq!(session.profile.name, "Heimdall (claude)");
-    assert_eq!(
-        session.profile.command,
-        script.to_string_lossy(),
-        "the configured wrapper path is kept for the harness"
-    );
-    assert!(
-        session
-            .profile
-            .args
-            .last()
-            .unwrap()
-            .starts_with("/heimdall ")
-    );
-    let installed = temp.path().join(".claude/skills/heimdall/SKILL.md");
-    assert!(
-        installed.is_file(),
-        "installed into the harness directory before launch"
-    );
-    assert!(
-        temp.path()
-            .join(".claude/skills/heimdall/.agent-mux.json")
-            .is_file()
-    );
-
-    // reopening shows the new state on the Claude row only
-    app.mode = Mode::Control;
-    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
-    let text = screen(&app);
-    assert!(text.contains("running [claude]"), "{text}");
-    assert_eq!(
-        text.matches("not installed").count(),
-        2,
-        "codex and agy: {text}"
-    );
-    app.kill_all();
-}
-
-#[tokio::test]
-async fn install_and_uninstall_from_the_view() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut app = app_in(temp.path(), vec![shell_profile("test")]);
-    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
-    let dir = temp.path().join(".claude/skills/heimdall");
-
-    app.handle_key(&key(KeyCode::Char('i')), Instant::now());
-    assert!(dir.join("SKILL.md").is_file());
-    assert!(
-        app.notice
-            .as_ref()
-            .is_some_and(|n| n.text.contains("installed on Claude Code"))
-    );
-    let Mode::SkillsView(v) = &app.mode else {
-        panic!()
-    };
-    let st = &v.install[&("heimdall".to_string(), Harness::Claude)];
-    assert!(st.installed && st.managed && st.current);
-    assert!(screen(&app).contains("installed ✓"));
-
-    // a second install is a no-op
-    app.handle_key(&key(KeyCode::Char('i')), Instant::now());
-    assert!(
-        app.notice
-            .as_ref()
-            .is_some_and(|n| n.text.contains("is current on Claude Code"))
-    );
-
-    // u asks first; n keeps it, y removes it
-    app.handle_key(&key(KeyCode::Char('u')), Instant::now());
-    let text = screen(&app);
-    assert!(
-        text.contains("Uninstall Heimdall from Claude Code (claude)? [y/n]"),
-        "{text}"
-    );
-    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
-    assert!(dir.is_dir());
-    app.handle_key(&key(KeyCode::Char('u')), Instant::now());
-    app.handle_key(&key(KeyCode::Char('y')), Instant::now());
-    assert!(!dir.exists(), "removed");
-    assert!(
-        app.notice
-            .as_ref()
-            .is_some_and(|n| n.text.contains("removed from Claude Code"))
-    );
-    assert!(screen(&app).contains("not installed"));
-
-    // a foreign directory is refused unless forced
+    // a foreign directory reads as not managed after a rescan
+    let dir = temp.path().join(".claude/skills/plain");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("SKILL.md"), "someone else's").unwrap();
     app.handle_key(&key(KeyCode::Char('r')), Instant::now());
     assert!(screen(&app).contains("not managed"));
-    app.handle_key(&key(KeyCode::Char('i')), Instant::now());
-    assert!(
-        app.notice
-            .as_ref()
-            .is_some_and(|n| n.text.starts_with("install:"))
-    );
-    app.handle_key(&key(KeyCode::Char('I')), Instant::now());
-    assert!(
-        dir.join(".agent-mux.json").is_file(),
-        "forced over the foreign directory"
-    );
     app.kill_all();
-}
-
-#[tokio::test]
-async fn skill_sessions_survive_a_restart() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("sessions.json");
-    let (tx, _rx) = mpsc::channel(32);
-    let mut app1 = App::new(vec![shell_profile("test")], None, tx.clone());
-    app1.set_sessions_file(&file);
-    push_skill_session(&mut app1, "heimdall");
-    app1.save_active_sessions().unwrap();
-    app1.kill_all();
-
-    let mut app2 = App::new(vec![shell_profile("test")], None, tx);
-    app2.set_sessions_file(&file);
-    app2.restore_saved_sessions();
-    assert_eq!(app2.sessions.len(), 1);
-    assert_eq!(app2.sessions[0].skill_id.as_deref(), Some("heimdall"));
-    assert_eq!(app2.running_skill_session("heimdall"), Some(0));
-    app2.kill_all();
 }
