@@ -249,3 +249,46 @@ pub struct SkillMetricRow {
     pub ongoing_count: usize,
     pub limitations: Vec<String>,
 }
+
+/// Per-definition-version slice of an agent's history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentVersionRow {
+    /// SHA-256 of the `AGENTS.md` source that produced these launches.
+    pub source_hash: String,
+    pub launches: i64,
+    pub turns: i64,
+    pub tools: i64,
+    pub tool_errors: i64,
+    pub tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+    pub first_seen: Option<String>,
+    pub last_seen: Option<String>,
+}
+
+/// Aggregated behaviour of one agent package across its launches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentMetricRow {
+    pub agent_id: String,
+    pub launches: i64,
+    /// Harness providers seen for this agent (`claude`, `codex`, `antigravity`).
+    pub providers: Vec<String>,
+    pub turns: i64,
+    pub tools: i64,
+    pub tool_errors: i64,
+    /// `tool_errors / tools`, absent when no tool calls were observed.
+    pub tool_error_rate: Option<f64>,
+    pub tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+    /// Completed generation (model call) latency, nearest-rank percentiles.
+    pub generation_sample_size: usize,
+    pub generation_p50_ms: Option<u64>,
+    pub generation_p95_ms: Option<u64>,
+    /// Mean wall-clock of finished launches.
+    pub avg_launch_duration_ms: Option<u64>,
+    pub last_launch: Option<String>,
+    /// One slice per distinct definition version, newest last.
+    pub versions: Vec<AgentVersionRow>,
+    /// Human-readable deltas between the two most recent versions.
+    pub drift: Vec<String>,
+    pub limitations: Vec<String>,
+}

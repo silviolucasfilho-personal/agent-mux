@@ -12,7 +12,7 @@ Probed on macOS (Darwin arm64) as of 2026-09-14:
 | :--- | :--- | :--- | :--- | :--- |
 | **Claude Code** | `claude` | `2.1.270` | `/Users/sifilho/.local/bin/claude` | Injects system instructions via `--append-system-prompt`, startup prompt via argument, and MCP servers via `--mcp-config` / `generated/claude/mcp.json`. |
 | **Codex CLI** | `codex` | `0.154.0` | `/opt/homebrew/bin/codex` | Interactive CLI with `--no-alt-screen` and prompt argument; MCP tools configured via `mcp.toml` or CLI options. |
-| **Google Antigravity** | `agy` | `1.2.2` | `/Users/sifilho/.local/bin/agy` | Interactive launcher with `--prompt-interactive` and configuration in `.antigravity/` / `generated/agy/mcp.json`. |
+| **Google Antigravity** | `agy` | `1.2.2` | `/Users/sifilho/.local/bin/agy` | Instructions as a custom main agent at `~/.gemini/config/agents/<id>/agent.md` selected with `--agent <name>`; startup prompt via `--prompt-interactive`; MCP registered with `agy mcp add` in `~/.gemini/config/mcp_config.json`. |
 
 ---
 
@@ -35,9 +35,10 @@ Probed on macOS (Darwin arm64) as of 2026-09-14:
 ### Google Antigravity (`agy`)
 - **Artifact Path**: `<agent-pkg>/generated/agy/`
 - **Supported Options**:
+  - `--agent <NAME>`: Selects a custom agent. Probed on `agy 1.2.2`: agents are discovered under `~/.gemini/config/agents/<dir>/agent.md` (a workspace `.agents/agents/` copy was *not* picked up), `NAME` matches the frontmatter `name`, an unknown name is silently ignored, and the system prompt is the body under an H1 titled `System Prompt`. The file needs `mainAgent: true`. agent-mux writes this file on launch (`prepare_launch`) and the same content to `generated/agy/agent.md`.
   - `--prompt-interactive <PROMPT>`: Pre-seeds the conversation with the agent startup task.
-  - `mcp.json`: Antigravity MCP definition file.
-- **Compatibility Status**: Verified with `agy 1.2.x`.
+  - `agy mcp add <name> <command> -- <args…>`: Adds or updates a stdio MCP server in `~/.gemini/config/mcp_config.json`, preserving arguments with spaces. There is no per-launch MCP flag, so agent-mux runs this before spawning. `generated/agy/mcp.json` mirrors the entry.
+- **Compatibility Status**: Verified with `agy 1.2.2` (agent discovery and `mcp add` probed on 2026-09-14).
 
 ---
 

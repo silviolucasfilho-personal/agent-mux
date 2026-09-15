@@ -45,5 +45,8 @@ pub enum AppEvent {
         revision: u64,
         result: Result<crate::tracing::analysis::Briefing, String>,
     },
+    /// An agent root on disk changed (package added, edited, or removed);
+    /// the Agents sidebar should rescan. Debounced by `agent::fswatch`.
+    AgentsChanged,
     Tick,
 }

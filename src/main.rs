@@ -207,6 +207,13 @@ async fn main() -> Result<()> {
     let size = terminal.size()?;
     app.set_terminal_size(size.height, size.width);
     app.restore_saved_sessions();
+    if let Err(e) =
+        agent_mux::agent::fswatch::spawn(agent_mux::agent::agent_roots(), app.event_sender())
+    {
+        app.notice = Some(agent_mux::app::Notice::warn(format!(
+            "Agents directory watch unavailable: {e}"
+        )));
+    }
 
     let mut draw_err = None;
     let mut current_cursor_style = crossterm::cursor::SetCursorStyle::DefaultUserShape;
@@ -267,6 +274,7 @@ fn handle_event(app: &mut App, event: AppEvent) {
         AppEvent::AnalysisUpdated { revision, result } => {
             app.handle_analysis_updated(revision, result);
         }
+        AppEvent::AgentsChanged => app.reload_agents(),
         AppEvent::Tick => app.on_tick(Instant::now()),
     }
 }

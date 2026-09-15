@@ -1,6 +1,6 @@
 //! Tool names and catalog enumeration for agent-mux MCP.
 
-/// Enumerates the exact eight read-only trace analysis tools supported by agent-mux.
+/// Enumerates the exact nine read-only trace analysis tools supported by agent-mux.
 pub fn tool_names() -> Vec<&'static str> {
     vec![
         "agent_mux_get_briefing",
@@ -9,6 +9,7 @@ pub fn tool_names() -> Vec<&'static str> {
         "agent_mux_get_timeline",
         "agent_mux_search_traces",
         "agent_mux_analyze_skills",
+        "agent_mux_analyze_agents",
         "agent_mux_compare_runs",
         "agent_mux_get_health",
     ]

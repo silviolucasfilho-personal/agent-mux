@@ -111,6 +111,11 @@ pub struct LaunchPlan {
     pub guard: Option<hooks::guard::Guard>,
     profile_name: String,
     dir: PathBuf,
+    /// Agent package this launch runs, when started from the Agents
+    /// sidebar. Recorded in the launch row's metadata so per-agent
+    /// analysis can group launches by agent and definition version.
+    pub agent_id: Option<String>,
+    pub agent_source_hash: Option<String>,
 }
 
 pub struct TraceRuntime {
@@ -479,6 +484,8 @@ impl TraceRuntime {
             guard: None,
             profile_name: profile.name.clone(),
             dir: dir.to_path_buf(),
+            agent_id: None,
+            agent_source_hash: None,
         })
     }
 
@@ -699,6 +706,8 @@ impl TraceRuntime {
             guard,
             profile_name: profile.name.clone(),
             dir: dir.to_path_buf(),
+            agent_id: None,
+            agent_source_hash: None,
         })
     }
 
@@ -793,6 +802,15 @@ impl TraceRuntime {
         }
         if let Some(g) = &plan.guard {
             meta.insert("guard".into(), g.to_json());
+        }
+        if let Some(id) = &plan.agent_id {
+            meta.insert("agent_id".into(), serde_json::Value::from(id.as_str()));
+        }
+        if let Some(h) = &plan.agent_source_hash {
+            meta.insert(
+                "agent_source_hash".into(),
+                serde_json::Value::from(h.as_str()),
+            );
         }
         launch.metadata = Some(serde_json::Value::Object(meta));
         self.send(StoreOp::Launch(launch));

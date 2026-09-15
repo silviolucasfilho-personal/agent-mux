@@ -4,9 +4,10 @@ use std::process::{Command, Stdio};
 use tempfile::tempdir;
 
 #[test]
-fn catalog_contains_exactly_eight_read_tools() {
+fn catalog_contains_exactly_nine_read_tools() {
     let names = tool_names();
-    assert_eq!(names.len(), 8);
+    assert_eq!(names.len(), 9);
+    assert!(names.contains(&"agent_mux_analyze_agents"));
     assert!(names.contains(&"agent_mux_get_briefing"));
     assert!(names.contains(&"agent_mux_compare_runs"));
     assert!(
@@ -178,7 +179,7 @@ fn mcp_stdio_full_lifecycle_and_protocol_contract() {
     let list_resp: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(list_resp["id"], 2);
     let tools = list_resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 9);
 
     let golden_json = include_str!("fixtures/mcp/golden_tools.json");
     let golden_tools: Vec<serde_json::Value> = serde_json::from_str(golden_json).unwrap();

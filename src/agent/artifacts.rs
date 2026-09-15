@@ -64,6 +64,10 @@ fn compute_sha256(bytes: &[u8]) -> String {
 }
 
 /// Builds the MCP server executable and arguments vector.
+///
+/// Agents run inside agent-mux, whose sidebar spans every workspace, so the
+/// server they get is authorized for all workspaces. `--workspace` is still
+/// recorded as the launch directory for scope metadata.
 pub fn mcp_command(executable: &Path, db: &Path, workspace: &Path) -> (PathBuf, Vec<String>) {
     (
         executable.to_path_buf(),
@@ -75,6 +79,7 @@ pub fn mcp_command(executable: &Path, db: &Path, workspace: &Path) -> (PathBuf, 
             db.to_string_lossy().to_string(),
             "--workspace".to_string(),
             workspace.to_string_lossy().to_string(),
+            "--all-workspaces".to_string(),
         ],
     )
 }

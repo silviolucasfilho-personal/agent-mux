@@ -49,6 +49,32 @@ pub struct DiscoveryReport {
     pub diagnostics: Vec<String>,
 }
 
+/// Canonical source of the Heimdall package, compiled into the binary so the
+/// agent is always available even when no share directory is installed.
+pub const BUILTIN_HEIMDALL_SOURCE: &str = include_str!("../../agents/heimdall/AGENTS.md");
+
+/// Agent packages compiled into the binary. They sit at the lowest
+/// precedence: any workspace, global, or bundled package with the same id
+/// shadows them. A compiled-in agent has no `file_path` and is marked
+/// `is_builtin`.
+pub fn builtin_agents() -> Vec<AgentDefinition> {
+    let mut out = Vec::new();
+    let path = Path::new("<builtin>/heimdall/AGENTS.md");
+    match parse_definition(BUILTIN_HEIMDALL_SOURCE, path) {
+        Ok(mut agent) => {
+            agent.file_path = None;
+            agent.is_builtin = true;
+            out.push(agent);
+        }
+        Err(err) => {
+            // The source is validated by the test-suite; a failure here is a
+            // packaging bug, not a runtime condition worth crashing on.
+            eprintln!("Warning: compiled-in agent package failed to parse: {err}");
+        }
+    }
+    out
+}
+
 /// Copies a legacy agent markdown file to a canonical `AGENTS.md` package path.
 ///
 /// Preserves the original legacy source file and refuses to overwrite an existing
@@ -130,7 +156,9 @@ pub fn bundled_agents_dir() -> Option<PathBuf> {
 /// `workspace canonical > global canonical > bundled canonical > workspace legacy > global legacy`
 ///
 /// Canonical package sources take precedence over legacy definitions of the same ID.
-/// This function is strictly read-only and never mutates the filesystem.
+/// This function is strictly read-only and never mutates the filesystem. It
+/// only reports what is on disk; see [`discover_agents_with_builtins`] for the
+/// runtime view that also includes compiled-in packages.
 pub fn discover_agents(workspace: &Path, global: &Path, bundled: Option<&Path>) -> DiscoveryReport {
     let mut diagnostics = Vec::new();
     let mut agents = Vec::new();
@@ -190,6 +218,23 @@ pub fn discover_agents(workspace: &Path, global: &Path, bundled: Option<&Path>) 
         agents,
         diagnostics,
     }
+}
+
+/// Disk discovery plus the compiled-in packages, which sit at the lowest
+/// precedence: any on-disk definition with the same id shadows them.
+pub fn discover_agents_with_builtins(
+    workspace: &Path,
+    global: &Path,
+    bundled: Option<&Path>,
+) -> DiscoveryReport {
+    let mut report = discover_agents(workspace, global, bundled);
+    let seen: HashSet<String> = report.agents.iter().map(|a| a.id.clone()).collect();
+    for agent in builtin_agents() {
+        if !seen.contains(&agent.id) {
+            report.agents.push(agent);
+        }
+    }
+    report
 }
 
 /// Scans direct subdirectories under `root` for canonical packages (`<id>/AGENTS.md`).

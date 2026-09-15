@@ -343,3 +343,119 @@ async fn test_capability_based_preview_selection() {
 
     app.kill_all();
 }
+
+/// Pushes a shell session tagged as running `agent_id`, the way a restored
+/// or launched agent session looks to the app, and returns its index.
+fn push_agent_session(app: &mut App, agent_id: &str) -> usize {
+    let idx = app
+        .launch(make_shell_profile("agent-shell"), std::env::temp_dir())
+        .expect("spawn shell");
+    app.sessions[idx].agent_id = Some(agent_id.to_string());
+    idx
+}
+
+#[tokio::test]
+async fn selecting_a_running_agent_attaches_instead_of_opening_the_picker() {
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![make_shell_profile("test-session")], None, tx);
+    app.set_pane_size(24, 80);
+
+    let heimdall_idx = app
+        .agents
+        .iter()
+        .position(|a| a.id == "heimdall")
+        .expect("heimdall discovered");
+    let session_idx = push_agent_session(&mut app, "heimdall");
+    assert_eq!(app.running_agent_session("heimdall"), Some(session_idx));
+
+    // Select Heimdall in the Agents section and press Enter.
+    app.mode = Mode::Control;
+    app.sidebar_section = SidebarSection::Agents;
+    app.selected_agent = heimdall_idx;
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+
+    assert!(
+        matches!(app.mode, Mode::Attached),
+        "running agent must attach, not open the harness picker"
+    );
+    assert_eq!(app.sidebar_section, SidebarSection::Active);
+    assert_eq!(app.selected, session_idx);
+
+    app.kill_all();
+}
+
+#[tokio::test]
+async fn agent_launch_is_a_singleton_across_harnesses() {
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![make_shell_profile("test-session")], None, tx);
+    app.set_pane_size(24, 80);
+
+    let session_idx = push_agent_session(&mut app, "heimdall");
+    let before = app.sessions.len();
+
+    // Asking for any harness while the agent runs attaches to the existing
+    // session; no second process is spawned.
+    for harness in Harness::ALL {
+        let idx = app.launch_agent("heimdall", harness).expect("attach");
+        assert_eq!(idx, session_idx);
+        assert_eq!(app.sessions.len(), before);
+        assert!(matches!(app.mode, Mode::Attached));
+    }
+
+    app.kill_all();
+}
+
+#[tokio::test]
+async fn exited_agent_session_releases_the_singleton() {
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![make_shell_profile("test-session")], None, tx);
+    app.set_pane_size(24, 80);
+
+    let session_idx = push_agent_session(&mut app, "heimdall");
+    app.sessions[session_idx].mark_exited();
+    assert_eq!(app.running_agent_session("heimdall"), None);
+
+    // With no live session the picker opens again.
+    let heimdall_idx = app.agents.iter().position(|a| a.id == "heimdall").unwrap();
+    app.mode = Mode::Control;
+    app.sidebar_section = SidebarSection::Agents;
+    app.selected_agent = heimdall_idx;
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(matches!(app.mode, Mode::AgentLauncher(_)));
+
+    app.kill_all();
+}
+
+#[tokio::test]
+async fn sidebar_shows_running_harness_next_to_agent() {
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![make_shell_profile("test-session")], None, tx);
+    app.set_pane_size(24, 80);
+
+    let idx = push_agent_session(&mut app, "heimdall");
+    // Pretend the shell is Codex so the harness tag has something to show.
+    app.sessions[idx].profile.command = "codex".to_string();
+    assert_eq!(app.running_agent_harness("heimdall"), Some(Harness::Codex));
+
+    app.mode = Mode::Control;
+    app.sidebar_section = SidebarSection::Agents;
+    let backend = TestBackend::new(112, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| agent_mux::ui::draw(f, &app, Instant::now()))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let mut text = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    assert!(
+        text.contains("[codex]"),
+        "sidebar must show the running harness"
+    );
+
+    app.kill_all();
+}

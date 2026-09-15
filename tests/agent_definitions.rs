@@ -115,3 +115,43 @@ fn definition_error_display_formatting() {
     assert!(err.to_string().contains("default_harness"));
     assert!(err.to_string().contains("must be in harnesses"));
 }
+
+#[test]
+fn launch_block_is_parsed_per_harness() {
+    let d = parse_definition(
+        "---\nid: audit\nharnesses: [claude, codex]\nlaunch:\n  claude:\n    args: [--verbose]\n    model: claude-opus-5\n    env:\n      FOO: bar\n  codex:\n    bypass_approvals: true\n---\nAudit.",
+        Path::new("audit/AGENTS.md"),
+    )
+    .unwrap();
+    let claude = d.launch.get(&Harness::Claude).unwrap();
+    assert_eq!(claude.args, vec!["--verbose".to_string()]);
+    assert_eq!(claude.model.as_deref(), Some("claude-opus-5"));
+    assert_eq!(claude.env.get("FOO").map(String::as_str), Some("bar"));
+    assert_eq!(claude.bypass_approvals, None);
+    let codex = d.launch.get(&Harness::Codex).unwrap();
+    assert_eq!(codex.bypass_approvals, Some(true));
+    assert!(codex.args.is_empty());
+    assert!(!d.launch.contains_key(&Harness::Antigravity));
+}
+
+#[test]
+fn launch_block_for_undeclared_harness_is_rejected() {
+    let err = parse_definition(
+        "---\nid: audit\nharnesses: [claude]\nlaunch:\n  codex:\n    args: [--x]\n---\nAudit.",
+        Path::new("audit/AGENTS.md"),
+    )
+    .unwrap_err();
+    assert_eq!(err.field.as_deref(), Some("launch"));
+    assert!(err.message.contains("codex"));
+}
+
+#[test]
+fn launch_block_rejects_unknown_keys() {
+    let err = parse_definition(
+        "---\nid: audit\nharnesses: [claude]\nlaunch:\n  claude:\n    flags: [--x]\n---\nAudit.",
+        Path::new("audit/AGENTS.md"),
+    )
+    .unwrap_err();
+    assert_eq!(err.field.as_deref(), Some("frontmatter"));
+    assert!(err.message.contains("flags"));
+}

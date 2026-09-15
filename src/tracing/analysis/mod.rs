@@ -15,17 +15,18 @@ pub use evidence::{extract_command, extract_target_file, snippet};
 pub use live::{
     LiveSnapshot, MAX_SNAPSHOT_BYTES, clean_up_snapshot, is_stale, publish_snapshot, read_snapshots,
 };
-pub use metrics::{analyze_skills, completed_percentiles, ttft_ms};
+pub use metrics::{analyze_agents, analyze_skills, completed_percentiles, ttft_ms};
 pub use model::{
-    AnalysisError, Binding, Briefing, Confidence, Evidence, EvidenceSource, LiveSession,
-    RuntimeState, SessionCard, SkillMetricRow, TaskOutcome, ToolCountSummary,
+    AgentMetricRow, AgentVersionRow, AnalysisError, Binding, Briefing, Confidence, Evidence,
+    EvidenceSource, LiveSession, RuntimeState, SessionCard, SkillMetricRow, TaskOutcome,
+    ToolCountSummary,
 };
 pub use query::briefing;
 pub use scope::Scope;
 pub use service::{
-    AnalyzeSkillsArgs, BriefingArgs, BriefingData, CompareRunsArgs, GetSessionArgs, HealthArgs,
-    Limits, ListSessionsArgs, ListSessionsData, Request, SearchArgs, ServiceConfig, ServiceError,
-    TimelineArgs, TraceService,
+    AnalyzeAgentsArgs, AnalyzeAgentsData, AnalyzeSkillsArgs, BriefingArgs, BriefingData,
+    CompareRunsArgs, GetSessionArgs, HealthArgs, Limits, ListSessionsArgs, ListSessionsData,
+    Request, SearchArgs, ServiceConfig, ServiceError, TimelineArgs, TraceService,
 };
 use std::path::PathBuf;
 

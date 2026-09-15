@@ -1,6 +1,6 @@
 # agent-mux Shared Trace MCP Service
 
-This document provides the reference manual for the `agent-mux` Model Context Protocol (MCP) server, its eight read-only diagnostic tools, scope boundaries, limits, error formats, and native harness integration.
+This document provides the reference manual for the `agent-mux` Model Context Protocol (MCP) server, its nine read-only diagnostic tools, scope boundaries, limits, error formats, and native harness integration.
 
 ---
 
@@ -50,7 +50,7 @@ agent-mux trace briefing --json [--workspace DIR] [--since RFC3339] [--db PATH]
 
 ## 3. Tool Reference
 
-The service exposes exactly 8 tools. All arguments use closed schemas (`additionalProperties: false`) and reject unknown fields.
+The service exposes exactly 9 tools. All arguments use closed schemas (`additionalProperties: false`) and reject unknown fields.
 
 ### 1. `agent_mux_get_briefing`
 Executive morning briefing summarizing workspace state, active and completed sessions, tool usage, modified files, and resource spend.
@@ -123,6 +123,18 @@ Side-by-side behavioral comparison of two runs or sessions.
 Service and collector health status, available features, database connectivity, and timestamp of the latest collected trace.
 
 - **Arguments**: None (`{}`).
+
+
+### 9. `agent_mux_analyze_agents`
+Per-agent-package evaluation: launches, turns, tool calls, tool error rate, generation latency percentiles, tokens and cost, sliced by definition version (`source_hash` of `AGENTS.md`) with plain-language `drift` lines comparing the two most recent versions. Only launches started from the agent-mux Agents sidebar carry agent identity (`launches.metadata.agent_id` / `agent_source_hash`).
+
+- **Arguments**:
+  - `agent` (string, optional): Restrict to one agent id (for example `heimdall`).
+  - `provider` (string, optional): Filter by provider.
+  - `since` / `until` (string, optional): RFC3339 window on launch start.
+  - `cursor` (string, optional): Pagination cursor.
+  - `limit` (integer, optional): Page size.
+- **Coverage**: `partial` with a warning when the store predates launch metadata.
 
 ---
 

@@ -13,7 +13,8 @@ fn mcp_command_keeps_paths_as_arguments() {
     );
     assert_eq!(command, Path::new("/tmp/bin/agent-mux"));
     assert_eq!(args[4], "/tmp/a b/traces.db");
-    assert_eq!(args.len(), 7);
+    assert_eq!(args.len(), 8);
+    assert_eq!(args[7], "--all-workspaces");
     assert_eq!(args[0], "mcp");
     assert_eq!(args[1], "serve");
     assert_eq!(args[2], "--stdio");

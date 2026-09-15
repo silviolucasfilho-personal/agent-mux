@@ -2,8 +2,9 @@ use agent_mux::tracing::analysis::live::{LiveSnapshot, publish_snapshot};
 use agent_mux::tracing::analysis::model::{LiveSession, RuntimeState};
 use agent_mux::tracing::analysis::scope::Scope;
 use agent_mux::tracing::analysis::service::{
-    AnalyzeSkillsArgs, BriefingArgs, CompareRunsArgs, GetSessionArgs, HealthArgs, ListSessionsArgs,
-    Request, SearchArgs, ServiceConfig, ServiceError, TimelineArgs, TraceService,
+    AnalyzeAgentsArgs, AnalyzeSkillsArgs, BriefingArgs, CompareRunsArgs, GetSessionArgs,
+    HealthArgs, ListSessionsArgs, Request, SearchArgs, ServiceConfig, ServiceError, TimelineArgs,
+    TraceService,
 };
 use rusqlite::Connection;
 use std::path::Path;
@@ -106,11 +107,12 @@ fn all_tool_arguments_are_closed_schemas() {
     assert!(serde_json::from_str::<TimelineArgs>(r#"{"session_key":"s1","bad":true}"#).is_err());
     assert!(serde_json::from_str::<SearchArgs>(r#"{"query":"q","invalid":null}"#).is_err());
     assert!(serde_json::from_str::<AnalyzeSkillsArgs>(r#"{"skill":"s","extra":false}"#).is_err());
+    assert!(serde_json::from_str::<AnalyzeAgentsArgs>(r#"{"agent":"a","extra":false}"#).is_err());
     assert!(serde_json::from_str::<CompareRunsArgs>(r#"{"a":"1","b":"2","c":"3"}"#).is_err());
 }
 
 #[test]
-fn eight_tools_parity_and_execution() {
+fn nine_tools_parity_and_execution() {
     let root = tempdir().unwrap();
     let db_path = root.path().join("traces.db");
     let ws_path = root
@@ -214,7 +216,14 @@ fn eight_tools_parity_and_execution() {
         .unwrap();
     assert_eq!(skills_res.schema_version, 1);
 
-    // 7. CompareRuns
+    // 7. AnalyzeAgents (no launches table in this fixture: empty, partial coverage)
+    let agents_res = service
+        .execute(Request::AnalyzeAgents(AnalyzeAgentsArgs::default()))
+        .unwrap();
+    assert_eq!(agents_res.schema_version, 1);
+    assert_eq!(agents_res.data["total_agents"], 0);
+
+    // 8. CompareRuns
     let compare_res = service
         .execute(Request::CompareRuns(CompareRunsArgs {
             a: "l1".to_string(),
@@ -223,7 +232,7 @@ fn eight_tools_parity_and_execution() {
         .unwrap();
     assert_eq!(compare_res.schema_version, 1);
 
-    // 8. Health
+    // 9. Health
     let health_res = service.execute(Request::Health(HealthArgs {})).unwrap();
     assert_eq!(health_res.schema_version, 1);
 }

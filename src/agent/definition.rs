@@ -47,6 +47,29 @@ impl std::fmt::Display for DefinitionError {
 
 impl std::error::Error for DefinitionError {}
 
+/// Per-harness launch parameters declared in the `launch` frontmatter map.
+///
+/// Everything here is optional and layered between an explicit launch
+/// override and the profile: `override > launch block > agent field >
+/// profile > harness default`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessLaunchOverrides {
+    /// Extra command-line arguments appended after the harness mapping and
+    /// before any startup task.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables set for the harness process.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Model passed to the harness, unless a launch override names one.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Skip permission prompts, unless a launch override decides.
+    #[serde(default)]
+    pub bypass_approvals: Option<bool>,
+}
+
 /// Definition of an agent discovered on disk or bundled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentDefinition {
@@ -65,6 +88,8 @@ pub struct AgentDefinition {
     pub is_builtin: bool,
     pub triggers: Vec<TriggerDefinition>,
     pub monitoring: MonitoringConfig,
+    /// Per-harness launch parameters, keyed by a harness from `harnesses`.
+    pub launch: BTreeMap<Harness, HarnessLaunchOverrides>,
 }
 
 impl Default for AgentDefinition {
@@ -85,6 +110,7 @@ impl Default for AgentDefinition {
             is_builtin: false,
             triggers: Vec::new(),
             monitoring: MonitoringConfig::default(),
+            launch: BTreeMap::new(),
         }
     }
 }
@@ -113,6 +139,7 @@ impl AgentDefinition {
                 is_builtin: false,
                 triggers: Vec::new(),
                 monitoring: MonitoringConfig::default(),
+                launch: BTreeMap::new(),
             }
         })
     }
@@ -133,6 +160,8 @@ struct FrontmatterRaw {
     triggers: Vec<TriggerDefinition>,
     #[serde(default)]
     monitoring: MonitoringConfig,
+    #[serde(default)]
+    launch: BTreeMap<Harness, HarnessLaunchOverrides>,
     #[serde(flatten)]
     unknown: BTreeMap<String, serde_yaml::Value>,
 }
@@ -251,6 +280,17 @@ pub fn parse_definition(source: &str, path: &Path) -> Result<AgentDefinition, De
         None => harnesses[0],
     };
 
+    // Validate launch overrides: only declared harnesses may carry one
+    for h in raw.launch.keys() {
+        if !harnesses.contains(h) {
+            return Err(DefinitionError::field(
+                path,
+                "launch",
+                format!("launch.{h} targets a harness not declared in 'harnesses'"),
+            ));
+        }
+    }
+
     // Compute deterministic SHA-256 hash of canonical source bytes
     let mut hasher = Sha256::new();
     hasher.update(source.as_bytes());
@@ -278,6 +318,7 @@ pub fn parse_definition(source: &str, path: &Path) -> Result<AgentDefinition, De
         is_builtin: false,
         triggers: raw.triggers,
         monitoring: raw.monitoring,
+        launch: raw.launch,
     })
 }
 
@@ -327,6 +368,7 @@ pub fn parse_legacy_definition(
                     is_builtin: false,
                     triggers: raw.triggers,
                     monitoring: raw.monitoring,
+                    launch: raw.launch,
                 });
             }
         }
@@ -363,6 +405,7 @@ pub fn parse_legacy_definition(
         is_builtin: false,
         triggers: Vec::new(),
         monitoring: MonitoringConfig::default(),
+        launch: BTreeMap::new(),
     })
 }
 

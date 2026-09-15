@@ -8,7 +8,8 @@
         "--db",
         "/Users/sifilho/.agent-mux/traces.db",
         "--workspace",
-        "/Users/sifilho/workspace/agent-mux/agents/heimdall"
+        "/Users/sifilho/workspace/agent-mux/agents/heimdall",
+        "--all-workspaces"
       ],
       "command": "/Users/sifilho/workspace/agent-mux/target/debug/agent-mux"
     }

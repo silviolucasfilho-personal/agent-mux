@@ -1868,16 +1868,47 @@ impl App {
     }
 
     /// Reloads all agents from disk (~/.agent-mux/agents/ and ./.agent-mux/agents/).
+    /// The selection follows the agent id, so a rescan that inserts or
+    /// removes neighbours does not move the cursor onto another agent.
     pub fn reload_agents(&mut self) {
+        let keep = self.selected_agent().map(|a| a.id.clone());
         self.agents = crate::agent::load_agents(None);
-        if self.selected_agent >= self.agents.len() {
-            self.selected_agent = self.agents.len().saturating_sub(1);
-        }
+        self.selected_agent = keep
+            .and_then(|id| self.agents.iter().position(|a| a.id == id))
+            .unwrap_or_else(|| self.selected_agent.min(self.agents.len().saturating_sub(1)));
     }
 
     /// Returns the currently selected agent definition, if any.
     pub fn selected_agent(&self) -> Option<&crate::agent::AgentDefinition> {
         self.agents.get(self.selected_agent)
+    }
+
+    /// Index of the live session running `agent_id`, if any. Agents are
+    /// singletons: at most one non-exited session per agent id, whatever
+    /// harness or workspace it was started with.
+    pub fn running_agent_session(&self, agent_id: &str) -> Option<usize> {
+        let now = Instant::now();
+        self.sessions.iter().position(|s| {
+            s.agent_id.as_deref() == Some(agent_id) && !matches!(s.status(now), Status::Exited(_))
+        })
+    }
+
+    /// Harness the live session for `agent_id` runs on, if one exists.
+    pub fn running_agent_harness(&self, agent_id: &str) -> Option<crate::harness::Harness> {
+        self.running_agent_session(agent_id)
+            .and_then(|idx| self.sessions.get(idx))
+            .and_then(|s| crate::harness::Harness::detect(&s.profile.command))
+    }
+
+    /// Selects and attaches to session `idx`, switching the sidebar to the
+    /// Active section.
+    fn attach_to_session(&mut self, idx: usize) {
+        self.selected = idx;
+        self.sidebar_section = SidebarSection::Active;
+        self.mode = Mode::Attached;
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.tracker.on_attach();
+        }
     }
 
     /// Toggles the sidebar visibility, expanding or contracting the harness.
@@ -1902,6 +1933,12 @@ impl App {
             self.sidebar_hidden,
         );
         self.set_pane_size(pane_rows, pane_cols);
+    }
+
+    /// A clone of the app's event sender, for background producers such as
+    /// the agents directory watch.
+    pub fn event_sender(&self) -> Sender<AppEvent> {
+        self.tx.clone()
     }
 
     /// Sets a custom path for persistent sessions file.
@@ -2148,7 +2185,13 @@ impl App {
                 continue;
             };
             let id = self.next_id;
-            match self.spawn_traced(id, s.profile, dir) {
+            match self.spawn_traced_as(
+                id,
+                s.profile,
+                dir,
+                s.agent_id.clone(),
+                s.source_hash.clone(),
+            ) {
                 Ok(mut session) => {
                     session.agent_id = s.agent_id;
                     session.source_hash = s.source_hash;
@@ -2176,15 +2219,33 @@ impl App {
     fn spawn_traced(
         &mut self,
         id: usize,
+        profile: Profile,
+        dir: std::path::PathBuf,
+    ) -> anyhow::Result<Session> {
+        self.spawn_traced_as(id, profile, dir, None, None)
+    }
+
+    /// Like `spawn_traced`, tagging the trace launch with the agent package
+    /// (id and definition hash) it runs, so the store can attribute it.
+    fn spawn_traced_as(
+        &mut self,
+        id: usize,
         mut profile: Profile,
         dir: std::path::PathBuf,
+        agent_id: Option<String>,
+        agent_source_hash: Option<String>,
     ) -> anyhow::Result<Session> {
         prepare_nested_tui(&mut profile);
         let (rows, cols) = self.pane_size;
         let plan = self
             .tracing
             .as_ref()
-            .and_then(|rt| rt.plan_launch(&profile, &dir));
+            .and_then(|rt| rt.plan_launch(&profile, &dir))
+            .map(|mut p| {
+                p.agent_id = agent_id;
+                p.agent_source_hash = agent_source_hash;
+                p
+            });
         let (extra_args, extra_env): (&[String], &[(String, String)]) = match &plan {
             Some(p) => (&p.extra_args, &p.extra_env),
             None => (&[], &[]),
@@ -2961,12 +3022,17 @@ impl App {
                 }
             }
             Action::OpenAgentLauncher => {
-                let state = if let Some(agent) = self.agents.get(self.selected_agent) {
-                    AgentLauncherState::for_agent(agent)
-                } else {
-                    AgentLauncherState::default()
+                let Some(agent) = self.agents.get(self.selected_agent) else {
+                    return;
                 };
-                self.mode = Mode::AgentLauncher(state);
+                // Singleton: a running agent is attached to, never relaunched.
+                // The harness can only change once that session is closed.
+                if let Some(idx) = self.running_agent_session(&agent.id) {
+                    self.attach_to_session(idx);
+                } else {
+                    let state = AgentLauncherState::for_agent(agent);
+                    self.mode = Mode::AgentLauncher(state);
+                }
             }
             Action::AgentLauncherKey => {
                 self.handle_agent_launcher_key(key);
@@ -3501,20 +3567,18 @@ impl App {
         let target_harness = harness;
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-        // 1. If an active session for this agent + harness + workspace already exists, attach to it:
-        let now = Instant::now();
-        if let Some(idx) = self.sessions.iter().position(|s| {
-            s.agent_id.as_deref() == Some(agent_id)
-                && crate::harness::Harness::detect(&s.profile.command) == Some(target_harness)
-                && s.dir == cwd
-                && !matches!(s.status(now), Status::Exited(_))
-        }) {
-            self.selected = idx;
-            self.sidebar_section = SidebarSection::Active;
-            self.mode = Mode::Attached;
-            if let Some(s) = self.sessions.get_mut(idx) {
-                s.tracker.on_attach();
+        // 1. Singleton: if this agent already has a live session anywhere,
+        //    attach to it instead of starting a second instance.
+        if let Some(idx) = self.running_agent_session(agent_id) {
+            let running = self.running_agent_harness(agent_id);
+            if running.is_some() && running != Some(target_harness) {
+                self.notice = Some(Notice::warn(format!(
+                    "{} is already running on {}; close that session to switch harness",
+                    agent.name,
+                    running.map(|h| h.as_str()).unwrap_or("another harness")
+                )));
             }
+            self.attach_to_session(idx);
             return Ok(idx);
         }
 
@@ -3534,11 +3598,8 @@ impl App {
                 bypass_approvals: None,
             });
 
-        let source_path = agent
-            .file_path
-            .as_deref()
-            .unwrap_or(std::path::Path::new("AGENTS.md"));
-        let artifacts = crate::agent::artifacts::render_artifacts(&agent, source_path)
+        let source_path = crate::agent::cli::package_source_path(&agent);
+        let artifacts = crate::agent::artifacts::render_artifacts(&agent, &source_path)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let options = crate::agent::launch::LaunchOptions {
@@ -3555,20 +3616,28 @@ impl App {
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+        let prepare_warnings =
+            crate::agent::launch::prepare_launch(&launch).map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Some(first) = prepare_warnings.first() {
+            self.notice = Some(Notice::warn(first.clone()));
+        }
+
         let id = self.next_id;
-        let mut session = self.spawn_traced(id, launch.profile, launch.cwd)?;
+        let mut session = self.spawn_traced_as(
+            id,
+            launch.profile,
+            launch.cwd,
+            Some(agent.id.clone()),
+            Some(agent.source_hash.clone()),
+        )?;
         session.agent_id = Some(agent.id.clone());
         session.source_hash = Some(agent.source_hash.clone());
         self.next_id += 1;
         self.sessions.push(session);
-        self.selected = self.sessions.len() - 1;
-        self.sidebar_section = SidebarSection::Active;
-        self.mode = Mode::Attached;
-        if let Some(s) = self.sessions.last_mut() {
-            s.tracker.on_attach();
-        }
+        let idx = self.sessions.len() - 1;
+        self.attach_to_session(idx);
         let _ = self.save_active_sessions();
-        Ok(self.selected)
+        Ok(idx)
     }
 
     pub fn resume_history_session(&mut self, summary: &SessionSummary) {

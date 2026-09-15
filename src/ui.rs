@@ -387,10 +387,7 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
                 "  "
             };
 
-            let is_active = app.sessions.iter().any(|s| {
-                s.profile.name.eq_ignore_ascii_case(&agent.name)
-                    || s.profile.name.starts_with(&agent.name)
-            });
+            let running_harness = app.running_agent_harness(&agent.id);
 
             let icon_str = agent.icon.as_deref().unwrap_or("⚡");
             let mut spans = vec![
@@ -409,8 +406,11 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
                     },
                 ),
             ];
-            if is_active {
-                spans.push(Span::styled(" [active]", Style::default().fg(Color::Green)));
+            if let Some(h) = running_harness {
+                spans.push(Span::styled(
+                    format!(" [{}]", h.as_str()),
+                    Style::default().fg(Color::Green),
+                ));
             }
 
             let line = Line::from(spans);
@@ -743,12 +743,10 @@ fn draw_generic_agent_preview(
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let origin_str = if agent.is_builtin {
-        "Built-in (seeded in ~/.agent-mux/agents/)".to_string()
-    } else if let Some(ref p) = agent.file_path {
-        p.to_string_lossy().into_owned()
-    } else {
-        "Custom agent".to_string()
+    let origin_str = match (&agent.file_path, agent.is_builtin) {
+        (None, _) => "Built-in (compiled into agent-mux)".to_string(),
+        (Some(p), true) => format!("Bundled ({})", p.to_string_lossy()),
+        (Some(p), false) => p.to_string_lossy().into_owned(),
     };
     let info_lines = vec![
         Line::from(vec![

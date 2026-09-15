@@ -52,6 +52,14 @@
       "destructiveHint": false,
       "readOnlyHint": true
     },
+    "description": "Per-agent launches, turns, tool calls, error rate, latency, tokens and cost, sliced by definition version with drift between versions",
+    "name": "agent_mux_analyze_agents"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "readOnlyHint": true
+    },
     "description": "Metric deltas, tool-path differences, task/model/config comparability warnings",
     "name": "agent_mux_compare_runs"
   },

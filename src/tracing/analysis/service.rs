@@ -1,6 +1,6 @@
 use super::cursor::{CursorCodec, CursorPayload, compute_filters_hash};
 use super::model::{
-    AnalysisError, Binding, LiveSession, RuntimeState, SessionCard, SkillMetricRow,
+    AgentMetricRow, AnalysisError, Binding, LiveSession, RuntimeState, SessionCard, SkillMetricRow,
 };
 use super::query;
 use super::scope::Scope;
@@ -156,6 +156,18 @@ pub struct AnalyzeSkillsArgs {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyzeAgentsArgs {
+    /// Restrict to one agent package id (e.g. `heimdall`).
+    pub agent: Option<String>,
+    pub provider: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CompareRunsArgs {
@@ -167,7 +179,7 @@ pub struct CompareRunsArgs {
 #[serde(deny_unknown_fields)]
 pub struct HealthArgs {}
 
-/// Request enum dispatching to the eight tool operations.
+/// Request enum dispatching to the nine tool operations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "tool", content = "arguments")]
 pub enum Request {
@@ -177,6 +189,7 @@ pub enum Request {
     Timeline(TimelineArgs),
     Search(SearchArgs),
     AnalyzeSkills(AnalyzeSkillsArgs),
+    AnalyzeAgents(AnalyzeAgentsArgs),
     CompareRuns(CompareRunsArgs),
     Health(HealthArgs),
 }
@@ -227,6 +240,14 @@ impl Request {
                     ))
                 })?;
                 Ok(Request::AnalyzeSkills(args))
+            }
+            "agent_mux_analyze_agents" => {
+                let args = serde_json::from_value(arguments).map_err(|e| {
+                    ServiceError::InvalidArgument(format!(
+                        "invalid arguments for analyze_agents: {e}"
+                    ))
+                })?;
+                Ok(Request::AnalyzeAgents(args))
             }
             "agent_mux_compare_runs" => {
                 let args = serde_json::from_value(arguments).map_err(|e| {
@@ -392,6 +413,12 @@ pub struct SearchData {
 pub struct AnalyzeSkillsData {
     pub skills: Vec<SkillMetricRow>,
     pub total_skills: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AnalyzeAgentsData {
+    pub agents: Vec<AgentMetricRow>,
+    pub total_agents: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -595,7 +622,7 @@ impl TraceService {
     pub fn execute(&self, request: Request) -> Result<Envelope<serde_json::Value>, ServiceError> {
         let start = std::time::Instant::now();
         let deadline_duration = match request {
-            Request::AnalyzeSkills(_) | Request::CompareRuns(_) => {
+            Request::AnalyzeSkills(_) | Request::AnalyzeAgents(_) | Request::CompareRuns(_) => {
                 std::time::Duration::from_secs(5)
             }
             _ => std::time::Duration::from_secs(2),
@@ -726,6 +753,9 @@ impl TraceService {
             Request::Search(args) => self.execute_search(&conn, args, as_of, scope_info, now)?,
             Request::AnalyzeSkills(args) => {
                 self.execute_analyze_skills(&conn, args, as_of, scope_info, now)?
+            }
+            Request::AnalyzeAgents(args) => {
+                self.execute_analyze_agents(&conn, args, as_of, scope_info, now)?
             }
             Request::CompareRuns(args) => {
                 self.execute_compare_runs(&conn, args, as_of, scope_info)?
@@ -1681,6 +1711,95 @@ impl TraceService {
                 reasons: Vec::new(),
             },
             warnings: Vec::new(),
+            next_cursor,
+            truncated: has_more,
+        })
+    }
+
+    fn execute_analyze_agents(
+        &self,
+        conn: &Connection,
+        args: AnalyzeAgentsArgs,
+        as_of: String,
+        scope_info: ScopeInfo,
+        now: OffsetDateTime,
+    ) -> Result<Envelope<serde_json::Value>, ServiceError> {
+        let (since_ns, until_ns, window) =
+            parse_window(args.since.as_deref(), args.until.as_deref(), now)?;
+        let limit = args
+            .limit
+            .unwrap_or(self.config.limits.page_default)
+            .min(self.config.limits.page_max);
+
+        let now_ns = now.unix_timestamp_nanos() as i64;
+        let filters_detail = format!("agent:{:?}:prov:{:?}", args.agent, args.provider);
+        let filters_hash =
+            compute_filters_hash("analyze_agents", &self.config.scope, &filters_detail);
+
+        let mut offset = 0;
+        if let Some(ref c) = args.cursor {
+            let payload = self.codec.decode(c, &filters_hash, now_ns)?;
+            offset = payload.offset;
+        }
+
+        let scope = self.config.scope.clone();
+        let (agents, warnings) = super::metrics::analyze_agents(
+            conn,
+            args.agent.as_deref(),
+            args.provider.as_deref(),
+            Some(since_ns),
+            Some(until_ns),
+            &|cwd| scope.allows_session_cwd(cwd),
+        )?;
+
+        let total_agents = agents.len();
+        let mut paged = if offset < agents.len() {
+            agents[offset..].to_vec()
+        } else {
+            Vec::new()
+        };
+        let has_more = paged.len() > limit;
+        if has_more {
+            paged.truncate(limit);
+        }
+        let next_cursor = if has_more {
+            Some(self.codec.encode(&CursorPayload {
+                schema_version: 1,
+                issued_at_ns: now_ns,
+                expires_at_ns: now_ns + 10 * 60 * 1_000_000_000,
+                filters_hash,
+                upper_bound_ns: until_ns,
+                sort_key: paged.last().map(|a| a.agent_id.clone()).unwrap_or_default(),
+                offset: offset + limit,
+            }))
+        } else {
+            None
+        };
+
+        let coverage = if warnings.is_empty() {
+            CoverageInfo {
+                status: CoverageStatus::Full,
+                reasons: Vec::new(),
+            }
+        } else {
+            CoverageInfo {
+                status: CoverageStatus::Partial,
+                reasons: warnings.clone(),
+            }
+        };
+        let data = AnalyzeAgentsData {
+            agents: paged,
+            total_agents,
+        };
+
+        Ok(Envelope {
+            schema_version: 1,
+            as_of,
+            scope: scope_info,
+            window: Some(window),
+            data: serde_json::to_value(data).map_err(|e| ServiceError::Internal(e.to_string()))?,
+            coverage,
+            warnings,
             next_cursor,
             truncated: has_more,
         })

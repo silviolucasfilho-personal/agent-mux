@@ -271,3 +271,58 @@ fn read_only_root_discovery_succeeds() {
     assert_eq!(report.agents.len(), 1);
     assert_eq!(report.agents[0].id, "audit");
 }
+
+#[test]
+fn compiled_in_heimdall_is_always_present() {
+    use agent_mux::agent::discovery::discover_agents_with_builtins;
+    let ws = tempdir().unwrap();
+    let global = tempdir().unwrap();
+
+    // Disk-only discovery reports nothing…
+    let disk = discover_agents(ws.path(), global.path(), None);
+    assert!(disk.agents.is_empty());
+
+    // …but the runtime view always carries the compiled-in Heimdall.
+    let report = discover_agents_with_builtins(ws.path(), global.path(), None);
+    let heimdall = report
+        .agents
+        .iter()
+        .find(|a| a.id == "heimdall")
+        .expect("compiled-in heimdall present");
+    assert!(heimdall.is_builtin);
+    assert!(heimdall.file_path.is_none());
+    assert!(heimdall.capabilities.iter().any(|c| c == "trace.read"));
+    assert!(!heimdall.instructions.trim().is_empty());
+}
+
+#[test]
+fn on_disk_package_shadows_compiled_in_heimdall() {
+    use agent_mux::agent::discovery::discover_agents_with_builtins;
+    let ws = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let pkg = global.path().join("heimdall/AGENTS.md");
+    fs::create_dir_all(pkg.parent().unwrap()).unwrap();
+    fs::write(
+        &pkg,
+        "---\nid: heimdall\nname: My Heimdall\nharnesses: [codex]\n---\nCustom watcher.",
+    )
+    .unwrap();
+
+    let report = discover_agents_with_builtins(ws.path(), global.path(), None);
+    let matches: Vec<_> = report
+        .agents
+        .iter()
+        .filter(|a| a.id == "heimdall")
+        .collect();
+    assert_eq!(matches.len(), 1, "exactly one heimdall after shadowing");
+    assert_eq!(matches[0].name, "My Heimdall");
+    assert!(!matches[0].is_builtin);
+    assert_eq!(matches[0].file_path.as_deref(), Some(pkg.as_path()));
+}
+
+#[test]
+fn compiled_in_source_matches_bundled_package() {
+    // The bundled file and the compiled-in copy must never drift apart.
+    let bundled = fs::read_to_string("agents/heimdall/AGENTS.md").unwrap();
+    assert_eq!(bundled, agent_mux::agent::BUILTIN_HEIMDALL_SOURCE);
+}

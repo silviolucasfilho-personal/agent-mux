@@ -1,13 +1,13 @@
 //! Schemas and tool definitions for agent-mux MCP tools.
 
 use crate::tracing::analysis::service::{
-    AnalyzeSkillsArgs, BriefingArgs, CompareRunsArgs, GetSessionArgs, HealthArgs, ListSessionsArgs,
-    SearchArgs, TimelineArgs,
+    AnalyzeAgentsArgs, AnalyzeSkillsArgs, BriefingArgs, CompareRunsArgs, GetSessionArgs,
+    HealthArgs, ListSessionsArgs, SearchArgs, TimelineArgs,
 };
 use schemars::schema_for;
 use serde_json::{Value, json};
 
-/// Generates the standard MCP tool definitions for all eight tools.
+/// Generates the standard MCP tool definitions for all nine tools.
 pub fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
@@ -59,6 +59,15 @@ pub fn tool_definitions() -> Vec<Value> {
             "name": "agent_mux_analyze_skills",
             "description": "Attribution, latency, error and usage metrics with sample sizes and limitations",
             "inputSchema": schema_for!(AnalyzeSkillsArgs),
+            "annotations": {
+                "readOnlyHint": true,
+                "destructiveHint": false
+            }
+        }),
+        json!({
+            "name": "agent_mux_analyze_agents",
+            "description": "Per-agent launches, turns, tool calls, error rate, latency, tokens and cost, sliced by definition version with drift between versions",
+            "inputSchema": schema_for!(AnalyzeAgentsArgs),
             "annotations": {
                 "readOnlyHint": true,
                 "destructiveHint": false

@@ -10,6 +10,7 @@ pub mod budgets;
 pub mod cli;
 pub mod definition;
 pub mod discovery;
+pub mod fswatch;
 pub mod install;
 pub mod launch;
 pub mod managed;
@@ -20,16 +21,21 @@ pub mod watch;
 pub use crate::harness::Harness;
 pub use artifacts::{ArtifactError, ArtifactSet, render_artifacts, write_artifacts};
 pub use budgets::{Budget, BudgetError, ManagedCapabilities, validate_budget};
-pub use definition::{AgentDefinition, DefinitionError, parse_definition, parse_legacy_definition};
+pub use definition::{
+    AgentDefinition, DefinitionError, HarnessLaunchOverrides, parse_definition,
+    parse_legacy_definition,
+};
 pub use discovery::{
-    DiscoveryReport, MigrationError, bundled_agents_dir, discover_agents, migrate_legacy,
+    BUILTIN_HEIMDALL_SOURCE, DiscoveryReport, MigrationError, builtin_agents, bundled_agents_dir,
+    discover_agents, discover_agents_with_builtins, migrate_legacy,
 };
 pub use install::{
     DoctorError, DoctorReport, DoctorStatus, InstallError, InstallReport, UninstallReport,
     doctor_agent, install_agent, uninstall_agent,
 };
 pub use launch::{
-    AgentLaunch, LaunchError, LaunchOptions, build_agent_launch, selected_harness_index,
+    AgentLaunch, LaunchError, LaunchOptions, build_agent_launch, prepare_launch,
+    selected_harness_index,
 };
 pub use managed::{
     AgyManagedAdapter, ClaudeManagedAdapter, CodexManagedAdapter, ManagedAdapter, ManagedError,
@@ -58,6 +64,20 @@ pub fn default_agents_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("agents"))
 }
 
+/// The directories the Agents sidebar is built from, in precedence order:
+/// workspace, global, bundled. Missing directories are included so a
+/// filesystem watch can pick them up when they appear.
+pub fn agent_roots() -> Vec<PathBuf> {
+    let ws_dir = std::env::current_dir()
+        .map(|cwd| cwd.join(".agent-mux").join("agents"))
+        .unwrap_or_else(|_| PathBuf::from(".agent-mux/agents"));
+    let mut roots = vec![ws_dir, default_agents_dir()];
+    if let Some(bundled) = bundled_agents_dir() {
+        roots.push(bundled);
+    }
+    roots
+}
+
 /// Discovers and loads all agents from workspace and global directories.
 pub fn load_agents(custom_dir: Option<&Path>) -> Vec<AgentDefinition> {
     let global_dir = custom_dir
@@ -68,7 +88,7 @@ pub fn load_agents(custom_dir: Option<&Path>) -> Vec<AgentDefinition> {
         .unwrap_or_else(|_| PathBuf::from(".agent-mux/agents"));
 
     let bundled = bundled_agents_dir();
-    let report = discover_agents(&ws_dir, &global_dir, bundled.as_deref());
+    let report = discover_agents_with_builtins(&ws_dir, &global_dir, bundled.as_deref());
     let mut agents = report.agents;
 
     // Sort alphabetically by name

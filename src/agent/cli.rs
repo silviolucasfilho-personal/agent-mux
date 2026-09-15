@@ -1,9 +1,27 @@
 //! CLI command handlers for `agent-mux agent <subcommand>`.
 
 use crate::agent::artifacts::{render_artifacts, write_artifacts};
-use crate::agent::discovery::{discover_agents, migrate_legacy};
+use crate::agent::discovery::{discover_agents_with_builtins, migrate_legacy};
 use crate::agent::install::{DoctorStatus, doctor_agent, install_agent, uninstall_agent};
 use std::path::{Path, PathBuf};
+
+/// Directory that owns an agent's `generated/` artifacts. Packages on disk
+/// use their own directory; compiled-in agents use the global agents root so
+/// `build`, `doctor` and `install` have a stable, user-writable home.
+pub fn package_root(agent: &crate::agent::AgentDefinition) -> PathBuf {
+    match agent.file_path.as_ref().and_then(|p| p.parent()) {
+        Some(parent) => parent.to_path_buf(),
+        None => crate::agent::default_agents_dir().join(&agent.id),
+    }
+}
+
+/// Source path recorded in manifests for an agent, real or synthetic.
+pub fn package_source_path(agent: &crate::agent::AgentDefinition) -> PathBuf {
+    match agent.file_path.as_ref() {
+        Some(p) => p.clone(),
+        None => package_root(agent).join("AGENTS.md"),
+    }
+}
 
 pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
@@ -25,21 +43,18 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
             let global = crate::agent::default_agents_dir();
             let bundled = crate::agent::bundled_agents_dir();
 
-            let report = discover_agents(&ws, &global, bundled.as_deref());
+            let report = discover_agents_with_builtins(&ws, &global, bundled.as_deref());
             let agent = report
                 .agents
                 .iter()
                 .find(|a| a.id == *agent_id)
                 .ok_or_else(|| format!("Agent '{agent_id}' not found"))?;
 
-            let source_path = agent.file_path.as_deref().unwrap_or(Path::new("AGENTS.md"));
-            let artifacts = render_artifacts(agent, source_path)
+            let source_path = package_source_path(agent);
+            let artifacts = render_artifacts(agent, &source_path)
                 .map_err(|e| format!("Failed to render artifacts: {e}"))?;
 
-            let gen_dir = source_path
-                .parent()
-                .map(|p| p.join("generated"))
-                .unwrap_or_else(|| PathBuf::from("generated"));
+            let gen_dir = package_root(agent).join("generated");
 
             write_artifacts(&gen_dir, &artifacts)
                 .map_err(|e| format!("Failed to write artifacts: {e}"))?;
@@ -61,21 +76,24 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
             let global = crate::agent::default_agents_dir();
             let bundled = crate::agent::bundled_agents_dir();
 
-            let report = discover_agents(&ws, &global, bundled.as_deref());
+            let report = discover_agents_with_builtins(&ws, &global, bundled.as_deref());
             let agent = report
                 .agents
                 .iter()
                 .find(|a| a.id == *agent_id)
                 .ok_or_else(|| format!("Agent '{agent_id}' not found"))?;
 
-            let root_dir = agent
-                .file_path
-                .as_ref()
-                .and_then(|p| p.parent())
-                .unwrap_or(Path::new("."));
+            let root_dir = package_root(agent);
+            if agent.file_path.is_none() {
+                println!(
+                    "Agent '{}' is compiled into agent-mux; artifacts live under '{}'",
+                    agent_id,
+                    root_dir.display()
+                );
+            }
 
             let doc =
-                doctor_agent(agent, root_dir).map_err(|e| format!("Doctor check failed: {e}"))?;
+                doctor_agent(agent, &root_dir).map_err(|e| format!("Doctor check failed: {e}"))?;
 
             match doc.status {
                 DoctorStatus::Healthy => {
@@ -125,15 +143,15 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
             let global = crate::agent::default_agents_dir();
             let bundled = crate::agent::bundled_agents_dir();
 
-            let report = discover_agents(&ws, &global, bundled.as_deref());
+            let report = discover_agents_with_builtins(&ws, &global, bundled.as_deref());
             let agent = report
                 .agents
                 .iter()
                 .find(|a| a.id == *agent_id)
                 .ok_or_else(|| format!("Agent '{agent_id}' not found"))?;
 
-            let source_path = agent.file_path.as_deref().unwrap_or(Path::new("AGENTS.md"));
-            let artifacts = render_artifacts(agent, source_path)
+            let source_path = package_source_path(agent);
+            let artifacts = render_artifacts(agent, &source_path)
                 .map_err(|e| format!("Failed to render artifacts: {e}"))?;
 
             let res = install_agent(agent, &artifacts, &target_dir, None)
@@ -162,12 +180,22 @@ pub fn handle_agent_cli(args: &[String]) -> Result<(), String> {
             let global = crate::agent::default_agents_dir();
             let bundled = crate::agent::bundled_agents_dir();
 
-            let report = discover_agents(&ws, &global, bundled.as_deref());
+            let report = discover_agents_with_builtins(&ws, &global, bundled.as_deref());
             let agent = report
                 .agents
                 .iter()
                 .find(|a| a.id == *agent_id)
                 .ok_or_else(|| format!("Agent '{agent_id}' not found"))?;
+
+            // Built-in agents (compiled-in or bundled) are never uninstalled
+            // from their own package; an explicit target directory still
+            // lets the user clean artifacts they installed elsewhere.
+            if agent.is_builtin && args.len() < 3 {
+                return Err(format!(
+                    "Agent '{agent_id}' is built into agent-mux and cannot be uninstalled; \
+                     shadow it with your own package at ~/.agent-mux/agents/{agent_id}/AGENTS.md instead"
+                ));
+            }
 
             let res = uninstall_agent(agent, &target_dir, None)
                 .map_err(|e| format!("Uninstall failed: {e}"))?;
