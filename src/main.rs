@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
         let args: Vec<String> = std::env::args().collect();
         match args.get(1).map(String::as_str) {
             Some("trace") => return agent_mux::tracing::cli::run(&args[2..]),
+            Some("mcp") => return agent_mux::mcp::run(&args[2..]),
             Some("run") => return agent_mux::tracing::experiments::run_cli(&args[2..]).await,
             Some("langfuse") => {
                 eprintln!(
@@ -197,6 +198,7 @@ async fn main() -> Result<()> {
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut app = App::new(cfg.profiles, trace_rt, tx);
+    app.agents = config::resolve_agents(cfg.agents.as_ref());
     if hide_sidebar {
         app.sidebar_hidden = true;
     }

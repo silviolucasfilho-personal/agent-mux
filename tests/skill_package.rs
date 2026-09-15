@@ -4,9 +4,13 @@
 use agent_mux::config::Profile;
 use agent_mux::harness::Harness;
 use agent_mux::skill::install::{MANIFEST, install, skills_root, status, uninstall};
-use agent_mux::skill::launch::{build_skill_launch, opening_prompt};
+use agent_mux::skill::launch::{
+    HYDRATION_HINT, build_skill_launch, build_skill_launch_full, opening_prompt,
+};
 use agent_mux::skill::render::{invocation, render_skill_md};
-use agent_mux::skill::{builtin_skills, load_skill_dir, load_skills, parse_skill};
+use agent_mux::skill::{
+    Hydration, McpMode, builtin_skills, load_skill_dir, load_skills, parse_skill,
+};
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
@@ -43,10 +47,12 @@ fn builtin_heimdall_is_a_complete_package() {
         [
             "reference/agents.md",
             "reference/sessions.md",
-            "reference/skills.md",
-            "reference/sql.md"
+            "reference/skills.md"
         ]
     );
+    assert_eq!(h.hydrate, vec![Hydration::Briefing]);
+    assert_eq!(h.mcp, McpMode::Auto);
+    assert!(h.warnings.is_empty());
     for needle in [
         "trace doctor",
         "trace briefing --all-workspaces --json",
@@ -55,6 +61,8 @@ fn builtin_heimdall_is_a_complete_package() {
         "trace sql",
         "$AGENT_MUX_BIN",
         "$AGENT_MUX_TRACE_DB",
+        "$AGENT_MUX_BRIEFING",
+        "agent_mux_get_briefing",
         "reference/skills.md",
     ] {
         assert!(h.body.contains(needle), "SKILL.md must mention `{needle}`");
@@ -108,6 +116,59 @@ fn parse_validates_frontmatter_and_directory_name() {
     )
     .unwrap_err();
     assert!(bad_default.message.contains("default_harness"));
+
+    // [agent]: hydrate names are validated, mcp defaults by capability
+    let plain = parse_skill(
+        "---\nname: audit\ndescription: Use it.\n---\nBody.\n",
+        None,
+        vec![],
+        None,
+    )
+    .unwrap();
+    assert!(plain.hydrate.is_empty());
+    assert_eq!(plain.mcp, McpMode::Off);
+    let reader = parse_skill(
+        "---\nname: audit\ndescription: Use it.\n---\nBody.\n",
+        Some("capabilities = [\"trace.read\"]\n[agent]\nhydrate = [\"briefing\"]\n"),
+        vec![],
+        None,
+    )
+    .unwrap();
+    assert_eq!(reader.hydrate, vec![Hydration::Briefing]);
+    assert_eq!(reader.mcp, McpMode::Auto, "trace.read defaults mcp to auto");
+    let quiet = parse_skill(
+        "---\nname: audit\ndescription: Use it.\n---\nBody.\n",
+        Some("capabilities = [\"trace.read\"]\n[agent]\nmcp = \"off\"\n"),
+        vec![],
+        None,
+    )
+    .unwrap();
+    assert_eq!(quiet.mcp, McpMode::Off);
+    let unknown = parse_skill(
+        "---\nname: audit\ndescription: Use it.\n---\nBody.\n",
+        Some("capabilities = [\"trace.read\"]\n[agent]\nhydrate = [\"weather\"]\n"),
+        vec![],
+        None,
+    )
+    .unwrap_err();
+    assert!(unknown.message.contains("weather") && unknown.message.contains("briefing"));
+    let no_cap = parse_skill(
+        "---\nname: audit\ndescription: Use it.\n---\nBody.\n",
+        Some("[agent]\nhydrate = [\"briefing\"]\nmcp = \"auto\"\n"),
+        vec![],
+        None,
+    )
+    .unwrap();
+    assert!(no_cap.hydrate.is_empty() && no_cap.mcp == McpMode::Off);
+    assert!(no_cap.warnings[0].contains("trace.read"));
+    let bad_mode = parse_skill(
+        "---\nname: audit\ndescription: Use it.\n---\nBody.\n",
+        Some("capabilities = [\"trace.read\"]\n[agent]\nmcp = \"maybe\"\n"),
+        vec![],
+        None,
+    )
+    .unwrap_err();
+    assert!(bad_mode.message.contains("mcp"));
 }
 
 #[test]
@@ -183,7 +244,7 @@ fn install_writes_into_each_harness_root_and_refuses_foreign_dirs() {
         let dir = skills_root(harness, home.path()).join("heimdall");
         assert_eq!(r.dir, dir);
         assert!(dir.join("SKILL.md").is_file());
-        assert!(dir.join("reference/sql.md").is_file());
+        assert!(dir.join("reference/sessions.md").is_file());
         assert!(dir.join(MANIFEST).is_file());
         let md = fs::read_to_string(dir.join("SKILL.md")).unwrap();
         assert!(md.contains(&format!("Invoke with {}.", invocation("heimdall", harness))));
@@ -235,15 +296,20 @@ fn launch_composes_each_harness_command_line() {
     let c = build_skill_launch(&h, Harness::Claude, &base, Path::new("/ws")).unwrap();
     assert_eq!(c.profile.name, "Heimdall (claude)");
     assert_eq!(c.profile.command, "claude");
+    // Heimdall asks for a briefing snapshot, so the prompt points at it
+    let hydrated_prompt = format!("{prompt_claude} {HYDRATION_HINT}");
     assert_eq!(
         c.profile.args,
         vec![
             "--model",
             "m1",
             "--dangerously-skip-permissions",
-            prompt_claude.as_str()
+            hydrated_prompt.as_str()
         ]
     );
+    let plain =
+        build_skill_launch_full(&h, Harness::Claude, &base, Path::new("/ws"), None, false).unwrap();
+    assert_eq!(plain.profile.args.last().unwrap(), &prompt_claude);
     assert_eq!(c.cwd, Path::new("/ws"));
 
     let x = build_skill_launch(&h, Harness::Codex, &base, Path::new("/ws")).unwrap();

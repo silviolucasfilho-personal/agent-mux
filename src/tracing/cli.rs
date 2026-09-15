@@ -1454,6 +1454,10 @@ fn doctor() -> anyhow::Result<()> {
             println!("  rows (24h): {}", parts.join(", "));
         }
     }
+    println!("\nmcp (agent tools):");
+    for (ok, label, detail) in crate::mcp::doctor_lines(&resolved.db_path, &resolved.home) {
+        check(&label, ok, &detail);
+    }
     println!(
         "\nA provider marked [!!] still gets a launch row per session; turn traces need\nits transcript machinery above to be in place."
     );

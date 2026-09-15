@@ -5,3 +5,10 @@ harnesses = ["claude", "codex", "agy"]
 default_harness = "agy"
 capabilities = ["trace.read"]
 startup_prompt = "Give me the executive briefing of active and recent sessions, then the top skill and agent findings."
+
+# What agent-mux prepares in Rust before the session starts: a briefing
+# snapshot file ($AGENT_MUX_BRIEFING) and, where the harness allows it, the
+# agent-mux MCP server with the read-only trace tools.
+[agent]
+hydrate = ["briefing"]
+mcp = "auto"

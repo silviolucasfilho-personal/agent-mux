@@ -132,12 +132,53 @@ pub struct LoopsConfig {
     pub no_progress: Option<usize>,
 }
 
+/// Global `[agents]` table: what agent-mux prepares for a skill launch.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct AgentsConfig {
+    /// Write briefing snapshots for packages that ask for them (default true).
+    pub hydrate: Option<bool>,
+    /// `"auto"` (default) or `"off"`: a global gate over every package's
+    /// `[agent] mcp`.
+    pub mcp: Option<String>,
+}
+
+/// `[agents]` resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentsSettings {
+    pub hydrate: bool,
+    pub mcp: crate::skill::McpMode,
+}
+
+impl Default for AgentsSettings {
+    fn default() -> Self {
+        AgentsSettings {
+            hydrate: true,
+            mcp: crate::skill::McpMode::Auto,
+        }
+    }
+}
+
+pub fn resolve_agents(cfg: Option<&AgentsConfig>) -> AgentsSettings {
+    let mut out = AgentsSettings::default();
+    if let Some(c) = cfg {
+        if let Some(h) = c.hydrate {
+            out.hydrate = h;
+        }
+        if let Some(m) = c.mcp.as_deref().and_then(crate::skill::McpMode::parse) {
+            out.mcp = m;
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 pub struct Config {
     #[serde(default)]
     pub profiles: Vec<Profile>,
     #[serde(default, alias = "langfuse")]
     pub tracing: Option<TracingConfig>,
+    #[serde(default)]
+    pub agents: Option<AgentsConfig>,
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
@@ -514,6 +555,7 @@ pub fn load() -> anyhow::Result<Config> {
     Ok(Config {
         profiles: Config::default_profiles(),
         tracing: None,
+        agents: None,
         hide_sidebar: false,
         loaded_from: None,
         legacy_langfuse_section: false,
@@ -537,6 +579,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
     Ok(Config {
         profiles: Config::default_profiles(),
         tracing: None,
+        agents: None,
         hide_sidebar: false,
         loaded_from: None,
         legacy_langfuse_section: false,

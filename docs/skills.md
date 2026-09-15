@@ -30,6 +30,8 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 | `default_harness` | first | Preselected in the picker; must be in `harnesses`. |
 | `capabilities` | none | `trace.read` switches the preview pane to the telemetry dashboard. |
 | `startup_prompt` | none | Appended to the invocation as the session's first message. |
+| `[agent] hydrate` | none | Snapshots Rust writes before launch; `["briefing"]` is the only value. Needs `trace.read`. |
+| `[agent] mcp` | `auto` with `trace.read`, else `off` | Whether the launch registers the agent-mux MCP server (Claude and Codex per launch; Antigravity through `agent-mux mcp install agy`). |
 
 ## 2. Discovery
 
@@ -55,7 +57,11 @@ Every package is listed in the Agents section of the sidebar; a `trace.read` pac
 
 1. installs or refreshes the skill in that harness's directory (manifest hash check; unchanged packages are left alone),
 2. builds the harness command line: model and permission flags from your profile for that harness, then the opening prompt `<invocation> <startup_prompt>` as the positional prompt (Claude Code, Codex) or via `--prompt-interactive` (Antigravity),
-3. spawns the session with `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` (this executable) and `AGENT_MUX_TRACE_DB` (the store the TUI writes) in its environment, and records `skill_id` / `skill_harness` on the launch row so the Executions tab can find it later.
+3. for a package with `[agent] hydrate`, computes the briefing in Rust and writes it to a snapshot file; the prompt ends with a sentence pointing at `$AGENT_MUX_BRIEFING`,
+4. registers the read-only MCP server for the harness when the package's `[agent] mcp` allows it (`$AGENT_MUX_MCP` says `registered`, `installed` or `unavailable`),
+5. spawns the session with `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` (this executable), `AGENT_MUX_TRACE_DB` (the store the TUI writes) and `AGENT_MUX_WORKSPACE` in its environment, and records `skill_id` / `skill_harness` on the launch row so the Executions tab can find it later.
+
+The same preparation runs for sessions restored at startup and for respawns.
 
 A skill is a **singleton**: one live session per skill id. While it runs, the sidebar shows `<name> [<harness>]` and the Skills view shows `running [<harness>]`, Enter attaches to it, and asking for another harness attaches with a warning. Close the session to start it on another harness. Restored sessions count.
 
@@ -75,4 +81,4 @@ agent-mux skill status [heimdall]             # installed / stale / not managed,
 
 ## 7. Heimdall
 
-Heimdall reads the store through the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`) and never through anything else. `SKILL.md` carries the command reference and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); the `reference/` files hold the thresholds, ready-made SQL and report shapes for each. See `skills/heimdall/`.
+Heimdall starts from the briefing snapshot in `$AGENT_MUX_BRIEFING`, asks follow-up questions through the eight `agent_mux_*` MCP tools when `$AGENT_MUX_MCP` is not `unavailable`, and otherwise uses the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`). It never writes. `SKILL.md` carries the tool-to-CLI table and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); the `reference/` files hold thresholds and report shapes. Ad-hoc SQL lives in `docs/trace-sql-examples.md`. See `skills/heimdall/`.
