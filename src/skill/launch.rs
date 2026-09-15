@@ -107,7 +107,12 @@ pub fn build_skill_launch_with_db(
     }
     let mut profile = base.clone();
     profile.name = session_name(def, harness);
-    profile.command = harness.as_str().to_string();
+    // A configured profile whose command already resolves to this harness
+    // (a wrapper path such as `~/bin/claude`) is kept; otherwise the bare
+    // executable name is looked up on PATH.
+    if Harness::detect(&base.command) != Some(harness) {
+        profile.command = harness.as_str().to_string();
+    }
     profile.args = args;
 
     let executable = std::env::var("AGENT_MUX_BIN")

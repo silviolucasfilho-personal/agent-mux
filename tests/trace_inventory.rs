@@ -1,9 +1,8 @@
 //! The skill inventory against a real store: prompts and skill loads
 //! seeded through the writer, the join that reports `missed` and
 //! `never triggered`, the turn filter, the tool names a lint reads, the
-//! CLI table, and the browser's Skills pane.
+//! CLI table, and the Skills view.
 
-use agent_mux::app::{App, BrowserPane, Mode, TraceBrowserState};
 use agent_mux::harness::Harness;
 use agent_mux::tracing::cli::skills_lines;
 use agent_mux::tracing::inventory::{inventory, skill_reports};
@@ -222,63 +221,219 @@ fn the_join_reports_missed_triggers_and_never_triggered_skills() {
 }
 
 #[test]
-fn the_browser_skills_pane_lists_and_filters() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use std::time::Instant;
+fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
+    use agent_mux::app::{SkillRow, SkillsTab, SkillsViewState};
 
     let temp = tempfile::tempdir().unwrap();
     let db = seeded_store(temp.path());
     let cwd = project_with_skills(temp.path());
-    let browser =
-        TraceBrowserState::new(Some(&db), Some(&cwd)).with_home(Some(temp.path().join("nohome")));
-    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-    let mut app = App::new(vec![], None, tx);
-    app.mode = Mode::TraceBrowser(Box::new(browser));
-    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let home = temp.path().join("nohome");
+    let skills_dir = temp.path().join("skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
 
-    app.handle_key(&key(KeyCode::Char('K')), Instant::now());
-    let Mode::TraceBrowser(b) = &app.mode else {
-        panic!("left the browser");
-    };
-    assert!(b.skills_pane);
-    assert_eq!(b.focused, BrowserPane::Sessions);
-    let names: Vec<&str> = b.skills.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, vec!["deploy", "other", "silent"]);
-    assert_eq!(b.selected_skill, 0);
+    let mut view = SkillsViewState::new(Some(&db), &cwd, &home, &home, Some(&skills_dir));
+    // grouped by harness: the compiled-in package under each harness it
+    // declares, then the project's native Claude skills
+    let shape: Vec<String> = view
+        .rows
+        .iter()
+        .map(|r| match r {
+            SkillRow::Header(h) => format!("# {}", h.as_str()),
+            SkillRow::Package { index, harness } => {
+                format!("{}@{}", view.packages[*index].id, harness.as_str())
+            }
+            SkillRow::Native { index } => format!("native {}", view.native[*index].name),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            "# claude",
+            "heimdall@claude",
+            "native deploy",
+            "native silent",
+            "# codex",
+            "heimdall@codex",
+            "# agy",
+            "heimdall@agy",
+        ]
+    );
+    assert_eq!(view.selected, 1, "the first selectable row, never a header");
 
-    // j/k move within the skills, Enter filters the turns pane
-    app.handle_key(&key(KeyCode::Char('j')), Instant::now());
-    app.handle_key(&key(KeyCode::Char('j')), Instant::now());
-    app.handle_key(&key(KeyCode::Char('j')), Instant::now());
-    app.handle_key(&key(KeyCode::Char('k')), Instant::now());
-    app.handle_key(&key(KeyCode::Char('k')), Instant::now());
-    let Mode::TraceBrowser(b) = &app.mode else {
-        panic!()
-    };
-    assert_eq!(b.selected_skill, 0, "clamped at both ends");
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
-    let Mode::TraceBrowser(b) = &app.mode else {
-        panic!()
-    };
-    assert_eq!(b.focused, BrowserPane::Turns);
-    assert_eq!(b.search_query.as_deref(), Some("skill: deploy"));
-    assert_eq!(b.turns.len(), 1);
-    assert_eq!(b.turns[0].id, "t1");
+    // j reaches the native rows; the store knows deploy's turn and misses
+    view.step(1);
+    assert_eq!(
+        view.selected_native().map(|d| d.name.as_str()),
+        Some("deploy")
+    );
+    assert_eq!(view.tabs(), vec![SkillsTab::Details, SkillsTab::Executions]);
+    assert!(
+        view.launches.is_empty(),
+        "native skills have no agent-mux launches"
+    );
+    assert_eq!(view.turns.len(), 1);
+    assert_eq!(view.turns[0].stat.id, "t1");
+    assert!(
+        !view.turns[0].attributed,
+        "the tool row carries no skill attribution"
+    );
+    let report = view.selected_report().expect("deploy is in the store");
+    assert_eq!(report.stat.as_ref().unwrap().turns_loaded, 1);
+    assert_eq!(report.missed, 2);
+    let detail: String = view
+        .detail_lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(detail.contains("project"), "{detail}");
+    assert!(
+        detail.contains("2 prompt(s) quoted a trigger phrase"),
+        "{detail}"
+    );
 
-    // K again brings the sessions back
-    app.handle_key(&key(KeyCode::Char('K')), Instant::now());
-    let Mode::TraceBrowser(b) = &app.mode else {
-        panic!()
-    };
-    assert!(!b.skills_pane);
+    // headers are skipped in both directions and the ends clamp
+    view.step(1);
+    assert_eq!(
+        view.selected_native().map(|d| d.name.as_str()),
+        Some("silent")
+    );
+    view.step(1);
+    assert_eq!(
+        view.selected_package().map(|(p, h)| (p.id.as_str(), h)),
+        Some(("heimdall", Harness::Codex))
+    );
+    view.step(-1);
+    assert_eq!(
+        view.selected_native().map(|d| d.name.as_str()),
+        Some("silent")
+    );
+    view.step(-10);
+    assert_eq!(view.selected, 1);
 
-    // without a store the pane still lists what is on disk
-    let mut bare =
-        TraceBrowserState::new(None, Some(&cwd)).with_home(Some(temp.path().join("nohome")));
-    bare.toggle_skills_pane();
-    let names: Vec<&str> = bare.skills.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, vec!["deploy", "silent"]);
-    assert!(bare.skills.iter().all(|r| r.stat.is_none()));
-    bare.filter_by_skill();
-    assert!(bare.turns.is_empty(), "no store, no filter — and no panic");
+    // a harness filter keeps only that group; the same key clears it
+    view.toggle_filter(Harness::Codex);
+    assert_eq!(view.rows.len(), 2);
+    assert_eq!(
+        view.selected_package().map(|(p, h)| (p.id.as_str(), h)),
+        Some(("heimdall", Harness::Codex))
+    );
+    assert!(view.clear_filter());
+    assert_eq!(view.rows.len(), 8);
+    assert!(!view.clear_filter());
+
+    // without a store the view still lists what is on disk
+    let bare = SkillsViewState::new(None, &cwd, &home, &home, Some(&skills_dir));
+    assert_eq!(bare.rows.len(), 8);
+    assert!(bare.turns.is_empty());
+    assert!(bare.error.as_deref().unwrap().contains("tracing is off"));
+}
+
+#[test]
+fn skill_launches_match_by_id_first_and_by_session_name_for_older_rows() {
+    use agent_mux::tracing::store::query::{skill_launches, traces_with_skill_detail};
+
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("launches.db");
+    let mut store = open_rw(
+        &db,
+        OpenOptions {
+            prices: PriceTable::builtin(),
+            run_id: "run-live".into(),
+            retention_days: 0,
+            agent_mux_version: "test".into(),
+        },
+    )
+    .unwrap();
+    let launch =
+        |id: &str, profile: &str, provider: &str, started: i64, meta: Option<serde_json::Value>| {
+            LaunchRow {
+                id: id.into(),
+                run_id: "run-live".into(),
+                agent_mux_session: 1,
+                profile: profile.into(),
+                provider: provider.into(),
+                cwd: "/proj".into(),
+                project_slug: "-proj".into(),
+                content_mode: "full".into(),
+                correlation_plan: "deterministic".into(),
+                correlation: None,
+                session_key: None,
+                injected_session_id: false,
+                attached: false,
+                started_ns: started,
+                ended_ns: None,
+                termination: None,
+                exit_code: None,
+                parse_errors: None,
+                dropped_ops: None,
+                reported_cost_usd: None,
+                reported_lines_added: None,
+                reported_lines_removed: None,
+                agent_mux_version: "test".into(),
+                user_id: None,
+                release: None,
+                environment: None,
+                tags: vec![],
+                metadata: meta,
+            }
+        };
+    let by_id = launch(
+        "l-id",
+        "Heimdall (claude)",
+        "claude",
+        3_000,
+        Some(serde_json::json!({"skill_id": "heimdall", "skill_harness": "claude"})),
+    );
+    let mut by_name = launch("l-name", "Heimdall (claude)", "claude", 2_000, None);
+    by_name.ended_ns = Some(2_500);
+    by_name.exit_code = Some(0);
+    let other_skill = launch(
+        "l-other",
+        "Heimdall (claude)",
+        "claude",
+        1_000,
+        Some(serde_json::json!({"skill_id": "other"})),
+    );
+    let codex = launch(
+        "l-codex",
+        "Heimdall (codex)",
+        "codex",
+        4_000,
+        Some(serde_json::json!({"skill_id": "heimdall", "skill_harness": "codex"})),
+    );
+    store
+        .apply(&[
+            StoreOp::Launch(by_id),
+            StoreOp::Launch(by_name),
+            StoreOp::Launch(other_skill),
+            StoreOp::Launch(codex),
+        ])
+        .unwrap();
+
+    let conn = open_ro(&db).unwrap();
+    let rows = skill_launches(&conn, "heimdall", "Heimdall (claude)", Some("claude"), 10).unwrap();
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["l-id", "l-name"],
+        "newest first; other skill ids excluded"
+    );
+    assert!(
+        rows[0].by_id && rows[0].live,
+        "still running under the open run"
+    );
+    assert!(!rows[1].by_id && !rows[1].live);
+    assert_eq!(rows[1].exit_code, Some(0));
+    assert_eq!(rows[0].turns, 0);
+
+    let all = skill_launches(&conn, "heimdall", "Heimdall (claude)", None, 10).unwrap();
+    assert_eq!(all.len(), 3, "every harness when no provider is given");
+    assert_eq!(all[0].id, "l-codex");
+
+    assert!(
+        traces_with_skill_detail(&conn, "heimdall", 10)
+            .unwrap()
+            .is_empty()
+    );
 }
