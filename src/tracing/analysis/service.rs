@@ -1284,7 +1284,7 @@ impl TraceService {
             // Fetch observations for this trace turn
             let mut obs = Vec::new();
             if let Ok(mut obs_stmt) = conn.prepare(
-                "SELECT id, name, type, start_ns, end_ns, is_error, status_message
+                "SELECT id, name, type, start_ns, end_ns, level, status_message
                  FROM observations
                  WHERE trace_id = ?1
                  ORDER BY start_ns ASC, id ASC",
@@ -1298,7 +1298,7 @@ impl TraceService {
                             .unwrap_or_else(|| "tool".into()),
                         r.get::<_, i64>(3)?,
                         r.get::<_, Option<i64>>(4)?,
-                        r.get::<_, Option<i64>>(5)?.unwrap_or(0) != 0,
+                        r.get::<_, Option<String>>(5)?.as_deref() == Some("ERROR"),
                         r.get::<_, Option<String>>(6)?,
                     ))
                 }) {

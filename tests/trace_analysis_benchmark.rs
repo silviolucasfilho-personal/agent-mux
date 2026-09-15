@@ -43,7 +43,7 @@ fn seed_benchmark_store(
             type TEXT,
             start_ns INTEGER,
             end_ns INTEGER,
-            is_error INTEGER,
+            level TEXT NOT NULL DEFAULT 'DEFAULT',
             status_message TEXT,
             input TEXT,
             output TEXT,
@@ -90,7 +90,7 @@ fn seed_benchmark_store(
             .prepare("INSERT INTO traces (id, session_key, launch_id, provider, cwd, start_ns, end_ns, input, output, total_tokens, total_cost_usd) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)")
             .unwrap();
         let mut stmt_obs = tx
-            .prepare("INSERT INTO observations (id, trace_id, name, type, start_ns, end_ns, is_error, status_message, input, output, total_tokens, total_cost_usd, skill) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)")
+            .prepare("INSERT INTO observations (id, trace_id, name, type, start_ns, end_ns, level, status_message, input, output, total_tokens, total_cost_usd, skill) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)")
             .unwrap();
 
         for s in 0..num_sessions {
@@ -131,7 +131,7 @@ fn seed_benchmark_store(
                         "tool",
                         o_start,
                         o_start + 100_000,
-                        0,
+                        "DEFAULT",
                         "ok",
                         r#"{"path":"src/main.rs"}"#,
                         "fn main() {}",

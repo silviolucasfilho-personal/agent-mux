@@ -39,7 +39,7 @@ fn setup_test_db(dir: &Path) -> PathBuf {
             type TEXT,
             start_ns INTEGER,
             end_ns INTEGER,
-            is_error INTEGER,
+            level TEXT NOT NULL DEFAULT 'DEFAULT',
             status_message TEXT,
             input TEXT,
             output TEXT,
@@ -83,14 +83,14 @@ fn setup_test_db(dir: &Path) -> PathBuf {
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO observations (id, trace_id, name, type, start_ns, end_ns, is_error, status_message, input, output, total_tokens, total_cost_usd, skill)
-         VALUES ('o-app-1', 't-app-1', 'Write', 'tool', 1100000000, 1200000000, 0, NULL, '{\"TargetFile\":\"/workspace/app/src/main.rs\"}', 'ok', 100, 0.02, NULL)",
+        "INSERT INTO observations (id, trace_id, name, type, start_ns, end_ns, level, status_message, input, output, total_tokens, total_cost_usd, skill)
+         VALUES ('o-app-1', 't-app-1', 'Write', 'tool', 1100000000, 1200000000, 'DEFAULT', NULL, '{\"TargetFile\":\"/workspace/app/src/main.rs\"}', 'ok', 100, 0.02, NULL)",
         [],
     )
     .unwrap();
     conn.execute(
-        "INSERT INTO observations (id, trace_id, name, type, start_ns, end_ns, is_error, status_message, input, output, total_tokens, total_cost_usd, skill)
-         VALUES ('o-app-2', 't-app-2', 'run_command', 'tool', 1600000000, 1700000000, 0, NULL, '{\"CommandLine\":\"cargo test\"}', 'ok', 50, 0.01, NULL)",
+        "INSERT INTO observations (id, trace_id, name, type, start_ns, end_ns, level, status_message, input, output, total_tokens, total_cost_usd, skill)
+         VALUES ('o-app-2', 't-app-2', 'run_command', 'tool', 1600000000, 1700000000, 'DEFAULT', NULL, '{\"CommandLine\":\"cargo test\"}', 'ok', 50, 0.01, NULL)",
         [],
     )
     .unwrap();
@@ -417,4 +417,57 @@ fn invalid_or_reversed_window_rejected() {
         ..Default::default()
     }));
     assert!(matches!(res_invalid, Err(ServiceError::InvalidArgument(_))));
+}
+
+#[test]
+fn timeline_reads_observations_and_error_level_from_the_current_schema() {
+    use agent_mux::tracing::analysis::service::TimelineArgs;
+
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = setup_test_db(temp.path());
+    {
+        // the store dropped `is_error` in schema v9; errors are `level = 'ERROR'`
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO observations (id, trace_id, name, type, start_ns, end_ns, level, status_message, input, output, total_tokens, total_cost_usd, skill)
+             VALUES ('o-app-err', 't-app-1', 'Bash', 'tool', 1250000000, 1300000000, 'ERROR', 'exit code 1', '{}', 'boom', 5, 0.001, NULL)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let scope = Scope::workspace(Path::new("/workspace/app")).unwrap();
+    let service = TraceService::new(ServiceConfig {
+        db_path,
+        scope,
+        snapshot_dir: None,
+        limits: Limits::default(),
+        admission_hook: None,
+    })
+    .unwrap();
+
+    let res = service
+        .execute(Request::Timeline(TimelineArgs {
+            session_key: "s-app-1".into(),
+            launch_id: None,
+            cursor: None,
+            limit: None,
+        }))
+        .unwrap();
+    let data = serde_json::to_value(&res.data).unwrap();
+    let turns = data["turns"].as_array().expect("turns array");
+    let first = turns
+        .iter()
+        .find(|t| t["turn_id"] == "t-app-1")
+        .expect("turn t-app-1");
+    let obs = first["observations"].as_array().expect("observations");
+    assert_eq!(
+        obs.len(),
+        2,
+        "both observations of t-app-1 are listed: {obs:?}"
+    );
+    let by_id = |id: &str| obs.iter().find(|o| o["id"] == id).unwrap();
+    assert_eq!(by_id("o-app-1")["is_error"], false);
+    assert_eq!(by_id("o-app-err")["is_error"], true);
+    assert_eq!(by_id("o-app-err")["error_message"], "exit code 1");
 }

@@ -56,6 +56,19 @@ pub fn build_skill_launch(
     base: &Profile,
     cwd: &Path,
 ) -> Result<SkillLaunch, LaunchError> {
+    build_skill_launch_with_db(def, harness, base, cwd, None)
+}
+
+/// Like [`build_skill_launch`], but hands the skill the trace store at
+/// `trace_db` (the one the running TUI writes, which honours a configured
+/// `[tracing] db_path`). `None` falls back to the environment/home default.
+pub fn build_skill_launch_with_db(
+    def: &SkillDefinition,
+    harness: Harness,
+    base: &Profile,
+    cwd: &Path,
+    trace_db: Option<&Path>,
+) -> Result<SkillLaunch, LaunchError> {
     if !def.harnesses.contains(&harness) {
         return Err(LaunchError::UnsupportedHarness(harness));
     }
@@ -109,7 +122,9 @@ pub fn build_skill_launch(
         ),
         (
             "AGENT_MUX_TRACE_DB".to_string(),
-            crate::tracing::analysis::default_trace_db_path()
+            trace_db
+                .map(Path::to_path_buf)
+                .unwrap_or_else(crate::tracing::analysis::default_trace_db_path)
                 .to_string_lossy()
                 .into_owned(),
         ),

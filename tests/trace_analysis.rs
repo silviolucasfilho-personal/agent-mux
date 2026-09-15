@@ -217,14 +217,14 @@ fn analyze_skills_computes_attribution_and_percentiles() {
             output TEXT,
             start_ns INTEGER,
             end_ns INTEGER,
-            is_error INTEGER,
+            level TEXT NOT NULL DEFAULT 'DEFAULT',
             total_tokens INTEGER,
             total_cost_usd REAL,
             status_message TEXT
         );
 
-        INSERT INTO observations VALUES('o1', 't1', 'tool', 'cargo_test', 'rust-dev', '{}', 'ok', 100_000_000, 200_000_000, 0, 100, 0.01, NULL);
-        INSERT INTO observations VALUES('o2', 't1', 'tool', 'cargo_test', 'rust-dev', '{}', 'err', 100_000_000, 300_000_000, 1, 150, 0.02, 'JSON Schema error: invalid input');
+        INSERT INTO observations VALUES('o1', 't1', 'tool', 'cargo_test', 'rust-dev', '{}', 'ok', 100_000_000, 200_000_000, 'DEFAULT', 100, 0.01, NULL);
+        INSERT INTO observations VALUES('o2', 't1', 'tool', 'cargo_test', 'rust-dev', '{}', 'err', 100_000_000, 300_000_000, 'ERROR', 150, 0.02, 'JSON Schema error: invalid input');
         "#,
     ).unwrap();
 
