@@ -86,7 +86,7 @@ pub fn analyze_skills(
     for skill in skill_names {
         // Query observations attributed to this skill
         let mut stmt = conn.prepare(
-            "SELECT o.start_ns, o.end_ns, o.is_error, o.total_tokens, o.total_cost_usd, o.status_message, o.input
+            "SELECT o.start_ns, o.end_ns, o.level, o.total_tokens, o.total_cost_usd, o.status_message, o.input
              FROM observations o
              WHERE (o.skill = ?1 OR (o.type = 'skill' AND o.name = ?1))
                AND o.start_ns >= ?2 AND o.start_ns < ?3",
@@ -96,7 +96,7 @@ pub fn analyze_skills(
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, Option<i64>>(1)?,
-                r.get::<_, Option<i64>>(2)?.unwrap_or(0) != 0,
+                r.get::<_, Option<String>>(2)?.as_deref() == Some("ERROR"),
                 r.get::<_, Option<i64>>(3)?,
                 r.get::<_, Option<f64>>(4)?,
                 r.get::<_, Option<String>>(5)?,

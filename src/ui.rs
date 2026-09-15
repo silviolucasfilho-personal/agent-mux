@@ -1406,8 +1406,9 @@ fn draw_help(f: &mut Frame) {
         row("Tab", "cycle active / agents / history sections"),
         row(
             "Enter",
-            "attach (active), launch agent (agents), or restart (history)",
+            "attach (active), launch skill (skills), or restart (history)",
         ),
+        row("h", "launch / attach the selected skill (skills)"),
         row(
             "n",
             "new session (pick the trace backend: SQLite, Langfuse, both)",
@@ -1432,7 +1433,10 @@ fn draw_help(f: &mut Frame) {
         row("Shift+Home/End", "jump to top / back to live"),
         row("mouse", "wheel to scroll, drag to select text"),
         row("Ctrl+Shift+C/V", "copy selection / paste"),
-        row("Ctrl+Shift+F", "search scrollback (Ctrl+F in control mode)"),
+        row(
+            "Ctrl+Shift+F",
+            "search scrollback (plain Ctrl+F in control mode)",
+        ),
         Line::raw(""),
         Line::styled("Session logs", head),
         row("Tab, ←/→", "switch pane"),
@@ -1442,22 +1446,21 @@ fn draw_help(f: &mut Frame) {
         Line::styled("Trace browser", head),
         row("Tab, ←/→", "sessions → turns → detail"),
         row("Enter", "drill in / expand an observation"),
+        row("v", "detail view: list → tree → timeline → loop"),
+        row("Space", "fold / unfold the selected subtree (tree view)"),
         row("/", "full-text search (full mode content)"),
         row("a", "toggle this project / all projects"),
         row(
             "K",
-            "skills pane: inventory joined to the store; Enter filters turns",
+            "skills inventory joined to the store; Enter filters turns",
         ),
-        row(
-            "s",
-            "verdict on the selected turn: good → bad → cleared (sent to Langfuse too)",
-        ),
+        row("s", "verdict: good → bad → cleared (also sent to Langfuse)"),
         row("r", "resume the selected session"),
         Line::raw(""),
         Line::styled("  [Esc] or [?] to close", dim),
     ];
     let height = (lines.len() as u16 + 2).min(f.area().height.saturating_sub(2));
-    let width = 64.min(f.area().width.saturating_sub(4)).max(40);
+    let width = 84.min(f.area().width.saturating_sub(4)).max(40);
     let area = centered(f.area(), width, height);
     f.render_widget(Clear, area);
     let block = Block::default()
@@ -2904,7 +2907,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut app = App::new(Config::default_profiles(), None, tx);
         app.mode = crate::app::Mode::Help;
-        let mut terminal = Terminal::new(TestBackend::new(100, 34)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 52)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
         for needle in [
@@ -2913,6 +2916,11 @@ mod tests {
             "PgUp/PgDn",
             "Ctrl+Q Ctrl+Q",
             "jump to session N",
+            "launch / attach the selected skill",
+            "list → tree → timeline → loop",
+            "fold / unfold the selected subtree",
+            "Enter filters turns",
+            "also sent to Langfuse",
             "resume the selected session",
         ] {
             assert!(

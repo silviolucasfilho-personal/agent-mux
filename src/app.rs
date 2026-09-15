@@ -1590,7 +1590,7 @@ impl TraceBrowserState {
         self.select_observation(rows[next]);
     }
 
-    /// Cycles list → tree → timeline. Leaving the tree keeps the fold set
+    /// Cycles list → tree → timeline → loop. Leaving the tree keeps the fold set
     /// so coming back looks the way it was left; the selection is pulled
     /// back onto a visible row.
     pub fn cycle_detail_view(&mut self) {
@@ -3585,8 +3585,14 @@ impl App {
                 model: None,
                 bypass_approvals: None,
             });
-        let launch = crate::skill::launch::build_skill_launch(&skill, harness, &base, &cwd)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let launch = crate::skill::launch::build_skill_launch_with_db(
+            &skill,
+            harness,
+            &base,
+            &cwd,
+            self.trace_db_path.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let id = self.next_id;
         let mut session =
