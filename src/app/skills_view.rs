@@ -26,7 +26,6 @@ pub enum SkillsPane {
 pub enum SkillsTab {
     Details,
     Executions,
-    Briefing,
 }
 
 impl SkillsTab {
@@ -34,7 +33,6 @@ impl SkillsTab {
         match self {
             SkillsTab::Details => "Details",
             SkillsTab::Executions => "Executions",
-            SkillsTab::Briefing => "Briefing",
         }
     }
 }
@@ -129,8 +127,6 @@ pub struct SkillsViewState {
     pub install: HashMap<(String, Harness), InstallStatus>,
     pub reports: Vec<SkillReport>,
     pub detail_lines: Vec<Line<'static>>,
-    /// `u` asked; the confirm overlay is up until `y`/`n`.
-    pub pending_uninstall: bool,
     last_refresh: Instant,
     cwd: PathBuf,
     home: PathBuf,
@@ -195,7 +191,6 @@ impl SkillsViewState {
             install: HashMap::new(),
             reports: Vec::new(),
             detail_lines: Vec::new(),
-            pending_uninstall: false,
             last_refresh: Instant::now(),
             cwd: cwd.to_path_buf(),
             home: home.to_path_buf(),
@@ -354,12 +349,6 @@ impl SkillsViewState {
         }
     }
 
-    /// The selected package declares `trace.read`.
-    pub fn selected_reads_traces(&self) -> bool {
-        self.selected_package()
-            .is_some_and(|(p, _)| p.capabilities.iter().any(|c| c == "trace.read"))
-    }
-
     /// `j`/`k` (and the wheel): `|delta|` selectable rows in that
     /// direction; headers are skipped, the ends clamp.
     pub fn step(&mut self, delta: isize) {
@@ -437,13 +426,9 @@ impl SkillsViewState {
         true
     }
 
-    /// The tabs the selected row offers.
+    /// The tabs of the detail pane.
     pub fn tabs(&self) -> Vec<SkillsTab> {
-        let mut tabs = vec![SkillsTab::Details, SkillsTab::Executions];
-        if self.selected_reads_traces() {
-            tabs.push(SkillsTab::Briefing);
-        }
-        tabs
+        vec![SkillsTab::Details, SkillsTab::Executions]
     }
 
     pub fn next_tab(&mut self) {
@@ -626,12 +611,12 @@ impl SkillsViewState {
                             match InstallLabel::of(st) {
                                 InstallLabel::Current => "installed, managed, current".into(),
                                 InstallLabel::Stale => {
-                                    "installed, managed, stale — press i to refresh".into()
+                                    "installed, managed, stale — `agent-mux skill install` refreshes it".into()
                                 }
                                 InstallLabel::NotManaged => {
-                                    "present, not written by agent-mux — I forces".into()
+                                    "present, not written by agent-mux (no manifest)".into()
                                 }
-                                InstallLabel::NotInstalled => "not installed — press i".into(),
+                                InstallLabel::NotInstalled => "not installed".into(),
                             },
                         ));
                     }
@@ -663,7 +648,7 @@ impl SkillsViewState {
                 }
                 lines.push(row(
                     "Note",
-                    "not an agent-mux package: launched by its harness, not from here".into(),
+                    "not an agent-mux package: the harness loads it directly".into(),
                 ));
             }
             _ => {

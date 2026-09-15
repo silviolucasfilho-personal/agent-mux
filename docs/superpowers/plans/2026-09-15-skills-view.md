@@ -64,6 +64,12 @@ Baseline: `f5e5166` on `docs/onboarding-readme`.
 - [x] `tests/persistent_sessions.rs`: two-section sidebar navigation and clicks.
 - [x] `src/ui.rs` unit tests: help lists `S`, hints mention `[S] skills`.
 
+### Amendment (same day, after review)
+
+- [x] Restore the sidebar section as **Agents** (all agent-mux packages, briefing or generic preview in the main pane, harness picker on `Enter`/`r`/`h`), keeping Heimdall on the main screen.
+- [x] Make the Skills view read-only: remove `Enter` launch, `i`/`I` install, `u` uninstall and the Briefing tab; keep Details, Executions, filter, rescan and `T`.
+- [x] Tests: Agents sidebar and picker tests restored (launch through a fake `claude` in a temporary home); Skills view tests assert read-only behaviour and CLI-made install state.
+
 ### Task 5: Documentation
 
 - [x] README sections 4, 8, 11, 14 per spec section 9; `docs/skills.md` section 4; Heimdall `reference/agents.md` query; `AGENTS.md`; spec status line.

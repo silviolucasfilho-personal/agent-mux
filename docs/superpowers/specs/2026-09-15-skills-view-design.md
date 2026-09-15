@@ -1,6 +1,6 @@
 # Skills view: a dedicated modal for browsing, installing and launching skills
 
-Status: Implemented on 2026-09-15 (see the plan of the same date). Open questions resolved: native skills are listed as read-only rows; the row's harness is the launch harness and the separate picker was removed; uninstall is per row.
+Status: Implemented on 2026-09-15 (see the plan of the same date), then amended the same day after review: specialized agents such as Heimdall stay on the main screen in an **Agents** sidebar section with the briefing preview and the harness picker; the Skills view is **read-only** (no launch, install or uninstall from the modal). Sections 4.2 and 4.3 below describe the original proposal; the amendment supersedes them where they differ.
 Date: 2026-09-15
 Baseline: `f5e5166` (onboarding README, analysis `is_error` fix, skill launch store path).
 

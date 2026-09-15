@@ -266,21 +266,21 @@ pub enum Mode {
     Control, Attached,
     NewSession(DialogState), SessionHistory(HistoryState),
     TraceBrowser(Box<TraceBrowserState>), SkillsView(Box<SkillsViewState>),
-    ConfirmKill, ConfirmQuit, Help,
+    SkillLauncher(SkillLauncherState), ConfirmKill, ConfirmQuit, Help,
 }
 ```
 
-`SidebarSection::{Active, History}` is orthogonal to `Mode` and decides both what the main pane shows and which keys are live. `dispatch()` is a pure function from `(mode, key, context)` to an `Action`; `App::apply()` performs it. Rendering lives in `src/ui.rs`: `draw` splits the frame into body and a one-line status bar, draws the sidebar (30 columns) and main pane, then the modal overlay for the current mode.
+`SidebarSection::{Active, Agents, History}` is orthogonal to `Mode` and decides both what the main pane shows and which keys are live. `dispatch()` is a pure function from `(mode, key, context)` to an `Action`; `App::apply()` performs it. Rendering lives in `src/ui.rs`: `draw` splits the frame into body and a one-line status bar, draws the sidebar (30 columns) and main pane, then the modal overlay for the current mode.
 
 ```text
 Main screen (sidebar visible)                          30 cols │ rest
 ┌─ Active [1/2] ──────────┬─ Claude Code — ~/proj [working] [● 3t $0.12 ▸ Bash] ─┐
 │ > 1 Claude Code [working]│                                                     │
 │   2 Codex [idle]        │      VT100 screen of the selected session            │
-│   3 Heimdall (agy) [idle]│     (or the history preview when History is focused │
-├─ History [3/12] ────────┤       or there are no sessions)                      │
+├─ Agents [1/1] ──────────┤      (or the agent's briefing / history preview      │
+│ ⚡ Heimdall [agy]       │       depending on the focused sidebar section)      │
+├─ History [3/12] ────────┤                                                      │
 │ [C] Fix flaky test…     │                                                      │
-│ [A] Scan the repo…      │                                                      │
 └─────────────────────────┴──────────────────────────────────────────────────────┘
  [b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [t/T] trace  [?] help  [q] quit
 ```
@@ -297,6 +297,13 @@ Title `Active [<selected>/<count>]`. Each row shows a `>` marker, index `1`-`9`,
 - **Trace badge** (`trace_badge`): glyph `●` local, `◆` Langfuse, `◈` both; `[● TRACE]` before the first rollup; afterwards `[● <turns>t <cost>]`, or `<tokens> tok` when no cost is known. The main pane title uses the verbose form and appends `▸ <running tool>`.
 - **Refresh:** PTY output redraws immediately; the 250 ms tick keeps working/idle current; `TraceStats` events update the badge. The rollup is produced by the writer's commit hook running `query::launch_stats` (section 8) at most once per launch per second.
 
+#### Agents sidebar (`draw_agents_sidebar`)
+
+Title `Agents [<sel>/<count>]`; rows show the package icon (default `⚡`), display name, and `[harness]` in green when a live session runs that agent. This is where specialized agents such as Heimdall live on the main screen.
+
+- **Population:** `skill::load_skills`: user packages under `AGENT_MUX_SKILLS_DIR` or `~/.agent-mux/skills`, then compiled-in Heimdall unless shadowed by id, sorted by display name. Every agent-mux package is an agent here; the read-only Skills view (`S`) is the place to inspect skills and their usage.
+- **Refresh:** loaded at startup and rescanned when `Tab` moves from Active into Agents and when the Skills view opens.
+
 #### History sidebar (`draw_history_sidebar`)
 
 Title `History [<sel>/<count>]`; rows show `[C]` (Claude, magenta) or `[A]` (Antigravity, blue) and a truncated title.
@@ -307,12 +314,13 @@ Title `History [<sel>/<count>]`; rows show `[C]` (Claude, magenta) or `[A]` (Ant
 
 #### Main pane (`draw_main`)
 
-Selection order: with the sidebar visible and History focused in Control mode (or no sessions at all), the history preview; otherwise the selected session's terminal. Skills never take over the main pane; they have their own view (`S`, section 4.4).
+Selection order: with the sidebar visible and Agents focused in Control mode, the agent preview; with History focused (or no sessions at all), the history preview; otherwise the selected session's terminal.
 
 - **Terminal:** title `<profile> — <dir> [<status>] <badge> [SCROLL ↑ n/len]`. Rendered with `tui_term::PseudoTerminal` from the session's `vt100` screen. The child cursor is shown only when attached, visible and at the live bottom. Selection highlight is reversed video; search matches get a yellow background, the current match white bold.
 - **History preview:** `Title`, `Provider`, `Session ID`, `Directory`, `Turns`, `Modified`, `Transcript` path, and the `[Enter]/[r]`, `[Tab]`, `[a]` actions.
-- **Telemetry briefing** (`draw_trace_briefing_preview`), drawn in the Skills view's Briefing tab for a package that declares `trace.read` (Heimdall does): line 1 `Trace Store | Scope | Sessions | Turns | Tools | Tokens | Cost`; line 2 `Cache Status: Refreshed Ns ago` plus any refresh warning; then one card per session: `Session [launch or key] (provider) [RuntimeState] — cwd`, optional `⚡ Right Now`, `🎯 Goal`, `📝 Files`, `💻 Commands`, `💬 Last Out`, and always `📊 Metrics: turns | tools | tokens | cost`.
-  - **Population:** `App::refresh_briefing_if_needed` runs only while the Skills view is open on its Briefing tab with a `trace.read` package selected. At most once per second and one in flight. It opens its own read-only connection and calls `analysis::query::briefing(conn, cwd, now-24h, now, live_sessions)` in `spawn_blocking`; live sessions are the mux's own panes mapped to runtime states. The result arrives as `AnalysisUpdated`; stale revisions are dropped and the previous briefing stays visible if a refresh fails. The SQL is listed in section 8.
+- **Generic agent preview** (`draw_generic_agent_preview`): id, origin (built-in, package directory, or custom), harnesses and default, description, then the `SKILL.md` body with light Markdown styling, and a footer whose `[Enter]` label says Launch or Attach.
+- **Telemetry briefing** (`draw_trace_briefing_preview`), the agent preview for a package that declares `trace.read` (Heimdall does): line 1 `Trace Store | Scope | Sessions | Turns | Tools | Tokens | Cost`; line 2 `Cache Status: Refreshed Ns ago` plus any refresh warning; then one card per session: `Session [launch or key] (provider) [RuntimeState] — cwd`, optional `⚡ Right Now`, `🎯 Goal`, `📝 Files`, `💻 Commands`, `💬 Last Out`, and always `📊 Metrics: turns | tools | tokens | cost`.
+  - **Population:** `App::refresh_briefing_if_needed` runs only while the sidebar is visible, Agents is focused, the mode is Control and the selected agent has `trace.read`. At most once per second and one in flight. It opens its own read-only connection and calls `analysis::query::briefing(conn, cwd, now-24h, now, live_sessions)` in `spawn_blocking`; live sessions are the mux's own panes mapped to runtime states. The result arrives as `AnalysisUpdated`; stale revisions are dropped and the previous briefing stays visible if a refresh fails. The SQL is listed in section 8.
 
 #### Status bar and search (`draw_status_bar`)
 
@@ -326,11 +334,12 @@ Search (`src/search.rs`) turns the status bar into `Search: <query>  <n/m>`; it 
 
 | Key | Action (and guard) |
 | --- | --- |
-| `j`/`k`, `↓`/`↑` | Move within the focused section; at the edges continue into the adjacent section (Active ↔ History). |
-| `Tab`, `BackTab` | Both toggle Active ↔ History. With the sidebar hidden, cycle active sessions. |
+| `j`/`k`, `↓`/`↑` | Move within the focused section; at the edges continue into the adjacent section (Active ↔ Agents ↔ History). |
+| `Tab`, `BackTab` | Both advance Active → Agents → History → Active (BackTab does **not** reverse). Entering Agents rescans packages. With the sidebar hidden, cycle active sessions. |
 | `1`-`9` | Select active session; only when Active is focused or the sidebar is hidden. |
-| `Enter` | Active: attach. History: resume. |
-| `r` | Active: respawn, only when the selected session has exited (new PTY, same profile and directory, tracing replanned; a skill session keeps its skill id). History: resume. |
+| `Enter` | Active: attach. Agents: open the harness picker, or attach to the running agent session. History: resume. |
+| `r` | Active: respawn, only when the selected session has exited (new PTY, same profile and directory, tracing replanned; an agent session keeps its skill id). Agents: picker/attach. History: resume. |
+| `h` | Agents focused: open the harness picker. |
 | `S` | Skills view (section 4.4), from any section. |
 | `n` | New session dialog. |
 | `l` | Session Logs dialog. |
@@ -353,7 +362,7 @@ Reserved in both Control and Attached mode: `Shift+↑/↓` scroll three lines; 
 
 #### Mouse
 
-Clicks select sidebar rows. Wheel over the History sidebar moves that selection; elsewhere in Control mode it scrolls the selected terminal. In the main pane, dragging selects and button release copies to the clipboard. While attached, `mouse::route_wheel` decides: Shift or not attached → local scroll; Codex inline transcript → local; the child asked for mouse reports → forwarded in SGR or legacy encoding; alternate screen without mouse capture → three arrow keys; otherwise local. `Alt`+click on the live screen moves the child cursor with arrow keys. Drag ownership is latched on button-down so a modifier change mid-drag cannot retarget it. See `src/mouse.rs` and `src/selection.rs`.
+Clicks select sidebar rows. Wheel over the Agents or History sidebar moves that selection; elsewhere in Control mode it scrolls the selected terminal. In the main pane, dragging selects and button release copies to the clipboard. While attached, `mouse::route_wheel` decides: Shift or not attached → local scroll; Codex inline transcript → local; the child asked for mouse reports → forwarded in SGR or legacy encoding; alternate screen without mouse capture → three arrow keys; otherwise local. `Alt`+click on the live screen moves the child cursor with arrow keys. Drag ownership is latched on button-down so a modifier change mid-drag cannot retarget it. See `src/mouse.rs` and `src/selection.rs`.
 
 ### 4.3 New session dialog (`draw_new_session_dialog`)
 
@@ -372,12 +381,18 @@ Opened by `n`. State is `DialogState`; the visible field list is computed by `Di
 
 `Tab`/`BackTab` walk the visible fields, `Enter` launches from any field, `Esc` cancels. On submit, `App::handle_dialog_key` parses the budget, writes enabled/content mode/backend into the profile's tracing overrides, composes harness args **before** trace planning, resolves the directory, spawns through `spawn_traced` (section 5.2), pushes the session, selects it, focuses Active, returns to Control and saves sessions.
 
-### 4.4 Skills view (`draw_skills_view`)
+### 4.4 Agent harness picker and the Skills view
 
-Opened by `S`. One modal for everything about skills: which harness can run which skill, where each is installed, and when it ran. State is `SkillsViewState` in `src/app/skills_view.rs`; the store is read through `store::open_ro`, and the only writes are `skill::install::install`/`uninstall` on the harness skill directories. Layout: `[34% Skills | rest detail tabs]` plus a footer.
+#### Agent harness picker (`draw_skill_launcher`)
+
+Opened by `Enter`, `r` or `h` on an agent without a live session. Lists only the harnesses the package declares, starting on its default; each row shows `[n] <display name>` and `[active - attach]` when a live session of that agent already runs there. Keys: `↑/↓`, `j/k`, `1`-`3`, `c`/`x`/`a`, `Enter`, `Esc`/`q`. On `Enter`, `App::launch_skill` installs or refreshes the package into the harness skill directory (refusing an unmanaged directory), picks the first configured profile whose command detects as that harness (keeping a wrapper path such as `~/bin/claude`) or a bare one, builds the command with `skill::launch::build_skill_launch_with_db` (section 11), spawns with `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` and `AGENT_MUX_TRACE_DB`, records the skill on the launch row (`launches.metadata.skill_id` and `skill_harness`), tags the session with the skill id and attaches. An agent is a singleton by id across harnesses: with a live session the picker attaches instead, warning if a different harness was requested.
+
+#### Skills view (`draw_skills_view`)
+
+Opened by `S`. A **read-only** modal for looking at skills: which harness can load which skill, where each is installed and whether the installation is current, and when it ran. State is `SkillsViewState` in `src/app/skills_view.rs`; the store is read through `store::open_ro`, and nothing here installs, uninstalls or launches (use the Agents sidebar to launch and the `agent-mux skill` CLI to install). Layout: `[34% Skills | rest detail tabs]` plus a footer.
 
 ```text
-┌─ Skills (5) [harness: all] ───────┬─ Details | Executions | Briefing · heimdall · Claude Code (claude) ──┐
+┌─ Skills (5) [harness: all] ───────┬─ Details | Executions · heimdall · Claude Code (claude) ─────────────┐
 │ Claude Code (claude)              │ Package                                                              │
 │ > ⚡ Heimdall      installed ✓    │   Name         Heimdall  (id heimdall)                               │
 │   ⚙ deploy        native · project│   Origin       built-in (compiled into agent-mux)                    │
@@ -389,21 +404,20 @@ Opened by `S`. One modal for everything about skills: which harness can run whic
 │                                   │ Recorded activity                                                    │
 │                                   │   Turns        41 loaded · 9 without attributed work · …             │
 └───────────────────────────────────┴──────────────────────────────────────────────────────────────────────┘
- [Tab] tab  [←/→] pane  [↑/↓] select  [Enter] launch/attach  [i] install  [u] uninstall  [1-3] harness  [r] rescan  [T] traces  [Esc] close
+ [Tab] tab  [←/→] pane  [↑/↓] select  [1-3] harness  [r] rescan  [T] traces  [Esc] close
 ```
 
-**Skills pane.** Rows are grouped under a header per harness, in the fixed order Claude Code, Codex CLI, Antigravity. Under each header come the agent-mux packages that declare the harness (icon, name, install state), then the harness's own skill definitions found by the inventory (`⚙`, `native · project|home|plugin:<name>`), which agent-mux does not manage. A package appears once per declared harness because install state and executions are per harness; the installed copy of a package is not repeated as a native row. Headers are not selectable: `j`/`k` skip them and clamp at the ends. The state column shows `running [harness]` in green when a live session carries the skill id, otherwise `installed ✓`, `stale` (manifest hash differs from the package), `not managed` (a directory agent-mux did not write), or `not installed`. `1`/`2`/`3` (or `c`/`x`/`a`) filter to one harness; the same key again clears.
+**Skills pane.** Rows are grouped under a header per harness, in the fixed order Claude Code, Codex CLI, Antigravity. Under each header come the agent-mux packages that declare the harness (icon, name, install state), then the harness's own skill definitions found by the inventory (`⚙`, `native · project|home|plugin:<name>`). A package appears once per declared harness because install state and executions are per harness; the installed copy of a package is not repeated as a native row. Headers are not selectable: `j`/`k` skip them and clamp at the ends. The state column shows `running [harness]` in green when a live session carries the skill id, otherwise `installed ✓`, `stale` (manifest hash differs from the package), `not managed` (a directory agent-mux did not write), or `not installed`. `1`/`2`/`3` (or `c`/`x`/`a`) filter to one harness; the same key again clears.
 
-- **Population:** `SkillsViewState::reload`: `skill::load_skills` (compiled-in Heimdall plus `~/.agent-mux/skills`), `inventory::inventory_all(cwd, home)` filtered to skills, `skill::install::status` per package and harness, and `inventory::skill_reports` over `query::skill_stats` and 5,000 `query::prompt_rows` when the store opens. A store that cannot be opened leaves packages and install state usable and shows the error in the Details and Executions tabs.
+- **Population:** `SkillsViewState::reload`: `skill::load_skills`, `inventory::inventory_all(cwd, home)` filtered to skills, `skill::install::status` per package and harness, and `inventory::skill_reports` over `query::skill_stats` and 5,000 `query::prompt_rows` when the store opens. A store that cannot be opened leaves packages and install state usable and shows the error in both tabs.
 - **Refresh:** on open and on `r` (filesystem and store); executions of the selected row are re-queried at most every 500 ms from the tick while the Executions tab is visible, so live launches update.
 
-**Detail tabs.** `Tab`/`BackTab` cycle Details → Executions → Briefing; Briefing exists only for a package declaring `trace.read`. `→` focuses the detail pane (so `j`/`k` scroll it, or move the execution selection), `←` returns to the list.
+**Detail tabs.** `Tab`/`BackTab` cycle Details ↔ Executions. `→` (or `Enter` in the list) focuses the detail pane so `j`/`k` scroll it or move the execution selection; `←` returns to the list.
 
-- **Details:** package name and id, origin (built-in or user directory), harnesses and default, capabilities, description and startup prompt; then for the row's harness the install directory, state, manifest hash prefix and file list; for a native definition its scope, path, declared tools and trigger phrases; then the store's statistics for the skill (`turns_loaded`, `turns_unused`, generations, tools, cost, first and last load, missed triggers).
-- **Executions:** two lists. *Sessions launched on this harness* (`query::skill_launches`, newest first, up to 100): start time, provider badge, `● live` or `exit N`/termination, turns, cost, working directory, and `(matched by name)` for rows captured before the skill id was recorded. *Turns that loaded it, any harness* (`query::traces_with_skill_detail`, up to 200): start time, ordinal, latency, cost, `attributed` when an observation in the turn was attributed to the skill or `loaded` otherwise, and the turn name. `Enter` on a live launch attaches to that session; `T` opens the Trace Browser positioned on the selected execution's session and turn.
-- **Briefing:** the Heimdall telemetry briefing described under "Main pane" above, refreshed at most once per second while the tab is visible.
+- **Details:** package name and id, origin, harnesses and default, capabilities, description and startup prompt; then for the row's harness the install directory, state, manifest hash prefix and file list; for a native definition its scope, path, declared tools and trigger phrases; then the store's statistics for the skill (`turns_loaded`, `turns_unused`, generations, tools, cost, first and last load, missed triggers).
+- **Executions:** *Sessions launched on this harness* (`query::skill_launches`, newest first, up to 100): start time, provider badge, `● live` or `exit N`/termination, turns, cost, working directory, and `(matched by name)` for rows captured before the skill id was recorded. *Turns that loaded it, any harness* (`query::traces_with_skill_detail`, up to 200): start time, ordinal, latency, cost, `attributed` when an observation in the turn was attributed to the skill or `loaded` otherwise, and the turn name. `Enter` on a live launch attaches to that session; `T` opens the Trace Browser positioned on the selected execution's session and turn.
 
-**Actions.** `Enter` on a package row attaches when a live session already carries the skill id (warning when it runs on a different harness), otherwise installs or refreshes the package into the row's harness directory and launches there: `App::launch_skill` picks the first configured profile whose command detects as that harness (keeping a wrapper path such as `~/bin/claude`), or a bare one; builds the command with `skill::launch::build_skill_launch_with_db` (section 11); spawns with `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` and `AGENT_MUX_TRACE_DB`; records the skill on the launch row (`launches.metadata.skill_id` and `skill_harness`); tags the session and attaches. A native row cannot be launched from here. `i` installs or refreshes without launching, `I` forces over a foreign directory, `u` asks `[y/n]` in the footer then uninstalls (refused while the skill runs on that harness), `r` rescans. `Esc`/`q` unwind: detail pane → list, then clear a harness filter, then close. The mouse wheel moves the focused list or scrolls the detail pane.
+`Esc`/`q` unwind: detail pane → list, then clear a harness filter, then close. The mouse wheel moves the focused list or scrolls the detail pane.
 
 ### 4.5 Session Logs dialog (`draw_session_history`)
 
@@ -464,10 +478,12 @@ Opened by `T`. Backed by a **read-only** SQLite connection (`store::open_ro`) to
 | --- | --- | --- | --- | --- |
 | Active rows and badge | `App.sessions[i].status`, `.trace_stats` | `Session::status`, `handle_trace_stats` | in-memory; `query::launch_stats` via writer commit hook | output, 250 ms tick, ≤1 stats/s per launch |
 | Terminal pane | `Session.parser` (vt100) | `handle_pty_output` | PTY bytes | immediate |
+| Agents rows | `App.skills` | `skill::load_skills` | filesystem | startup; Tab into Agents; Skills view open |
+| Agent preview | `SkillDefinition` | same | `SKILL.md`, `skill.toml` | in memory |
+| Briefing preview | `App.cached_briefing` | `refresh_briefing_if_needed` | `analysis::query::briefing` (section 8) | ≤1/s while visible |
 | Skills view rows | `SkillsViewState.rows` | `SkillsViewState::reload` | `skill::load_skills`, `inventory_all`, `install::status` | open, `r` |
 | Skills view Details | `SkillsViewState.detail_lines` | `rebuild_detail` | package, install state, `skill_stats` via `skill_reports` | selection change |
 | Skills view Executions | `.launches`, `.turns` | `load_executions` | `skill_launches`, `traces_with_skill_detail` | selection change, 500 ms while visible |
-| Skills view Briefing | `App.cached_briefing` | `refresh_briefing_if_needed` | `analysis::query::briefing` (section 8) | ≤1/s while visible |
 | History rows and preview | `App.history_sessions` | `history::discover_sessions` | `~/.claude/projects/*/*.jsonl`, Antigravity `transcript.jsonl` | startup, PTY exit, `a` |
 | Session Logs left/right | `HistoryState.sessions`, `.log_lines` | `HistoryState::new`, `load_selected_log` | same files, parsed by `transcript.rs` | open, `a`, selection change |
 | Trace Browser Sessions | `Vec<SessionStat>` | `list_sessions` | `session_stats` view | open, 500 ms live refresh |
@@ -1480,7 +1496,7 @@ Repository rules are in [AGENTS.md](AGENTS.md): schema changes go through `PRAGM
 | Test file | Focus |
 | --- | --- |
 | `app_flow`, `pty_session`, `scroll_ux`, `session_history`, `persistent_sessions` | Dialog launch and modes, PTY lifecycle, scrolling and selection, history discovery and the Session Logs pane, saved-session restore. |
-| `skill_package`, `skill_ui` | Package validation, shadowing, per-harness rendering, managed installs; the Skills view (grouping, filter, tabs, install/uninstall, launch on the row's harness through a fake `claude`), singleton rule. |
+| `skill_package`, `skill_ui` | Package validation, shadowing, per-harness rendering, managed installs; the Agents sidebar and picker (launch through a fake `claude` in a temporary home), the singleton rule, and the read-only Skills view (grouping, filter, tabs, install state). |
 | `trace_capture`, `trace_session`, `trace_tail`, `trace_correlate`, `trace_provider_matrix`, `zz_sub` | Assembler regressions on committed rows, the full pipeline with a fake `claude`, tailing edge cases, adoption per provider, provider-neutral row contract, subagent recovery. |
 | `trace_hooks`, `trace_guard` | `trace hook` against a real store (policy, dedupe, locked store, agy contract, announcements); budget guard decisions. |
 | `trace_store`, `trace_changes` | Writer batches and deadlines, parent validation, replay, views; change journal. |
@@ -1520,7 +1536,7 @@ It builds a temporary project and home with `alpha`/`beta` skills and a `verifie
 | Budget guard never fires | Claude needs hooks on; Codex needs `trace hooks install codex` and trust in `/hooks`; Antigravity cannot enforce it. |
 | Old process lingers in the briefing | Snapshots expire 5 s after the last heartbeat; a crash cannot clean up. |
 | SQLite is busy or unhealthy | Check for other writers; on WSL keep the store under `$HOME`, not `/mnt/*`; never delete `-wal`/`-shm` while a writer runs. |
-| A skill refuses installation | `skill status` or the Skills view row says `not managed`: the directory has no `.agent-mux.json`; `I` in the view or `--force` on the CLI replaces it. |
+| A skill refuses installation | `skill status` or the Skills view row says `not managed`: the directory has no `.agent-mux.json`; `agent-mux skill install <id> --force` replaces it. |
 | The Skills view shows no executions for a skill that ran | Rows before this version carry no `skill_id`; they match only when the launch's profile name equals `<name> (<harness>)`. Executions need the trace store; with tracing off the tab says so. |
 | Restarted session starts fresh | Persistence relaunches profiles; it does not reconnect PTYs. Resume the conversation from History or the Trace Browser. |
 | A launched skill reads the wrong store | Check `AGENT_MUX_TRACE_DB` in the skill session (`trace path` inside it); the TUI passes its own store path, and the variable wins over `db_path` when set. |
