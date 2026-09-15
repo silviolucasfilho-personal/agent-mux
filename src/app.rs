@@ -23,14 +23,14 @@ pub enum Mode {
     ConfirmKill,
     ConfirmQuit,
     Help,
-    AgentLauncher(AgentLauncherState),
+    SkillLauncher(SkillLauncherState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SidebarSection {
     #[default]
     Active,
-    Agents,
+    Skills,
     History,
 }
 
@@ -49,7 +49,7 @@ pub enum Action {
     OpenSessionHistory,
     OpenTraceBrowser,
     OpenHelp,
-    OpenAgentLauncher,
+    OpenSkillLauncher,
     KillSelected,
     EnterConfirmKill,
     RemoveSelected,
@@ -68,8 +68,8 @@ pub enum Action {
     HistoryKey,
     /// TraceBrowser mode: App routes the key to the TraceBrowserState it owns.
     BrowserKey,
-    /// AgentLauncher mode: App routes the key to the AgentLauncherState it owns.
-    AgentLauncherKey,
+    /// SkillLauncher mode: App routes the key to the SkillLauncherState it owns.
+    SkillLauncherKey,
 }
 
 /// Severity of a status-bar notice. The old single `error: Option<String>`
@@ -233,7 +233,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                             SidebarSection::Active if ctx.selected_status.is_some() => {
                                 Action::Attach
                             }
-                            SidebarSection::Agents => Action::OpenAgentLauncher,
+                            SidebarSection::Skills => Action::OpenSkillLauncher,
                             SidebarSection::History => Action::RestartHistorySession,
                             _ => Action::None,
                         }
@@ -251,15 +251,15 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                                 Some(Status::Exited(_)) => Action::RespawnSelected,
                                 _ => Action::None,
                             },
-                            SidebarSection::Agents => Action::OpenAgentLauncher,
+                            SidebarSection::Skills => Action::OpenSkillLauncher,
                             SidebarSection::History => Action::RestartHistorySession,
                         }
                     }
                 }
                 KeyCode::Char('h') | KeyCode::Char('H')
-                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Agents =>
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Skills =>
                 {
-                    Action::OpenAgentLauncher
+                    Action::OpenSkillLauncher
                 }
                 KeyCode::Char('a') | KeyCode::Char('A')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::History =>
@@ -307,7 +307,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::NewSession(_) => Action::DialogKey,
         Mode::SessionHistory(_) => Action::HistoryKey,
         Mode::TraceBrowser(_) => Action::BrowserKey,
-        Mode::AgentLauncher(_) => Action::AgentLauncherKey,
+        Mode::SkillLauncher(_) => Action::SkillLauncherKey,
         Mode::ConfirmKill => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::KillSelected,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
@@ -433,36 +433,36 @@ fn default_dir_for_profile(profile: Option<&Profile>) -> String {
         })
 }
 
-/// State for the generic Agent harness picker dialog.
+/// State for the skill harness picker dialog.
 #[derive(Debug, Clone)]
-pub struct AgentLauncherState {
+pub struct SkillLauncherState {
     pub selected: usize,
     pub error: Option<String>,
-    pub agent_id: String,
-    pub agent_name: String,
+    pub skill_id: String,
+    pub skill_name: String,
     pub harnesses: Vec<crate::harness::Harness>,
 }
 
-impl Default for AgentLauncherState {
+impl Default for SkillLauncherState {
     fn default() -> Self {
         Self {
             selected: 0,
             error: None,
-            agent_id: String::new(),
-            agent_name: String::new(),
+            skill_id: String::new(),
+            skill_name: String::new(),
             harnesses: crate::harness::Harness::ALL.to_vec(),
         }
     }
 }
 
-impl AgentLauncherState {
-    pub fn for_agent(agent: &crate::agent::AgentDefinition) -> Self {
-        let harnesses = if agent.harnesses.is_empty() {
+impl SkillLauncherState {
+    pub fn for_skill(skill: &crate::skill::SkillDefinition) -> Self {
+        let harnesses = if skill.harnesses.is_empty() {
             crate::harness::Harness::ALL.to_vec()
         } else {
-            agent.harnesses.clone()
+            skill.harnesses.clone()
         };
-        let default_idx = crate::agent::launch::selected_harness_index(agent);
+        let default_idx = crate::skill::default_harness_index(skill);
         Self {
             selected: if default_idx < harnesses.len() {
                 default_idx
@@ -470,8 +470,8 @@ impl AgentLauncherState {
                 0
             },
             error: None,
-            agent_id: agent.id.clone(),
-            agent_name: agent.name.clone(),
+            skill_id: skill.id.clone(),
+            skill_name: skill.name.clone(),
             harnesses,
         }
     }
@@ -489,8 +489,8 @@ impl AgentLauncherState {
         Self {
             selected: 0,
             error: None,
-            agent_id: id.into(),
-            agent_name: name.into(),
+            skill_id: id.into(),
+            skill_name: name.into(),
             harnesses: h,
         }
     }
@@ -1786,10 +1786,10 @@ pub struct App {
     pub sidebar_hidden: bool,
     /// Overall terminal dimensions (rows, cols).
     pub terminal_size: (u16, u16),
-    /// Loaded autonomous agents available in the Agents sidebar section.
-    pub agents: Vec<crate::agent::AgentDefinition>,
-    /// Selected agent index in the Agents section.
-    pub selected_agent: usize,
+    /// Skills available in the Skills sidebar section.
+    pub skills: Vec<crate::skill::SkillDefinition>,
+    /// Selected skill index in the Skills section.
+    pub selected_skill: usize,
     /// Cached briefing for the active Agents preview (if capable of trace.read).
     pub cached_briefing: Option<crate::tracing::analysis::Briefing>,
     /// Instant when the briefing was last successfully refreshed.
@@ -1827,7 +1827,7 @@ impl App {
         if history_sessions.is_empty() {
             history_sessions = history::discover_sessions(None, None, cur_dir.as_deref(), true);
         }
-        let agents = crate::agent::load_agents(None);
+        let (skills, _) = crate::skill::load_skills(None);
         App {
             sessions: Vec::new(),
             selected: 0,
@@ -1853,8 +1853,8 @@ impl App {
             sessions_file: None,
             sidebar_hidden: false,
             terminal_size: (27, 112),
-            agents,
-            selected_agent: 0,
+            skills,
+            selected_skill: 0,
             cached_briefing: None,
             cached_briefing_as_of: None,
             cached_briefing_warning: None,
@@ -1867,17 +1867,46 @@ impl App {
         }
     }
 
-    /// Reloads all agents from disk (~/.agent-mux/agents/ and ./.agent-mux/agents/).
-    pub fn reload_agents(&mut self) {
-        self.agents = crate::agent::load_agents(None);
-        if self.selected_agent >= self.agents.len() {
-            self.selected_agent = self.agents.len().saturating_sub(1);
-        }
+    /// Rescans ~/.agent-mux/skills and the compiled-in packages, keeping the
+    /// selection on the same skill id when it still exists.
+    pub fn reload_skills(&mut self) {
+        let keep = self.selected_skill().map(|s| s.id.clone());
+        let (skills, _) = crate::skill::load_skills(None);
+        self.skills = skills;
+        self.selected_skill = keep
+            .and_then(|id| self.skills.iter().position(|s| s.id == id))
+            .unwrap_or_else(|| self.selected_skill.min(self.skills.len().saturating_sub(1)));
     }
 
-    /// Returns the currently selected agent definition, if any.
-    pub fn selected_agent(&self) -> Option<&crate::agent::AgentDefinition> {
-        self.agents.get(self.selected_agent)
+    /// Returns the currently selected skill, if any.
+    pub fn selected_skill(&self) -> Option<&crate::skill::SkillDefinition> {
+        self.skills.get(self.selected_skill)
+    }
+
+    /// Index of the live session running `skill_id`. Skills are singletons:
+    /// one non-exited session per skill id, whatever harness it runs on.
+    pub fn running_skill_session(&self, skill_id: &str) -> Option<usize> {
+        let now = Instant::now();
+        self.sessions.iter().position(|s| {
+            s.skill_id.as_deref() == Some(skill_id) && !matches!(s.status(now), Status::Exited(_))
+        })
+    }
+
+    /// Harness the live session for `skill_id` runs on, if any.
+    pub fn running_skill_harness(&self, skill_id: &str) -> Option<crate::harness::Harness> {
+        self.running_skill_session(skill_id)
+            .and_then(|idx| self.sessions.get(idx))
+            .and_then(|s| crate::harness::Harness::detect(&s.profile.command))
+    }
+
+    /// Selects and attaches to session `idx`.
+    fn attach_to_session(&mut self, idx: usize) {
+        self.selected = idx;
+        self.sidebar_section = SidebarSection::Active;
+        self.mode = Mode::Attached;
+        if let Some(s) = self.sessions.get_mut(idx) {
+            s.tracker.on_attach();
+        }
     }
 
     /// Toggles the sidebar visibility, expanding or contracting the harness.
@@ -1953,11 +1982,11 @@ impl App {
     /// Refreshes the session briefing asynchronously if a trace-capable preview is visible.
     pub fn refresh_briefing_if_needed(&mut self, now: Instant) {
         let is_trace_preview_visible = !self.sidebar_hidden
-            && self.sidebar_section == SidebarSection::Agents
+            && self.sidebar_section == SidebarSection::Skills
             && matches!(self.mode, Mode::Control)
             && self
-                .agents
-                .get(self.selected_agent)
+                .skills
+                .get(self.selected_skill)
                 .map_or(false, |a| a.capabilities.iter().any(|c| c == "trace.read"));
 
         if is_trace_preview_visible && !self.briefing_pending {
@@ -2118,8 +2147,7 @@ impl App {
             .map(|s| persistence::SavedSession {
                 profile: s.profile.clone(),
                 dir: s.dir.clone(),
-                agent_id: s.agent_id.clone(),
-                source_hash: s.source_hash.clone(),
+                skill_id: s.skill_id.clone(),
             })
             .collect();
         persistence::save_sessions(&path, &saved)?;
@@ -2150,8 +2178,7 @@ impl App {
             let id = self.next_id;
             match self.spawn_traced(id, s.profile, dir) {
                 Ok(mut session) => {
-                    session.agent_id = s.agent_id;
-                    session.source_hash = s.source_hash;
+                    session.skill_id = s.skill_id;
                     self.next_id += 1;
                     self.sessions.push(session);
                 }
@@ -2176,8 +2203,20 @@ impl App {
     fn spawn_traced(
         &mut self,
         id: usize,
+        profile: Profile,
+        dir: std::path::PathBuf,
+    ) -> anyhow::Result<Session> {
+        self.spawn_traced_with_env(id, profile, dir, &[])
+    }
+
+    /// Like `spawn_traced`, with extra environment for the child (an agent
+    /// launch's declared variables) merged after the tracing plan's own.
+    fn spawn_traced_with_env(
+        &mut self,
+        id: usize,
         mut profile: Profile,
         dir: std::path::PathBuf,
+        env: &[(String, String)],
     ) -> anyhow::Result<Session> {
         prepare_nested_tui(&mut profile);
         let (rows, cols) = self.pane_size;
@@ -2185,10 +2224,15 @@ impl App {
             .tracing
             .as_ref()
             .and_then(|rt| rt.plan_launch(&profile, &dir));
-        let (extra_args, extra_env): (&[String], &[(String, String)]) = match &plan {
-            Some(p) => (&p.extra_args, &p.extra_env),
-            None => (&[], &[]),
+        let extra_args: &[String] = match &plan {
+            Some(p) => &p.extra_args,
+            None => &[],
         };
+        let mut extra_env: Vec<(String, String)> = match &plan {
+            Some(p) => p.extra_env.clone(),
+            None => Vec::new(),
+        };
+        extra_env.extend(env.iter().cloned());
         let mut session = Session::spawn(
             id,
             profile,
@@ -2197,7 +2241,7 @@ impl App {
             cols,
             self.tx.clone(),
             extra_args,
-            extra_env,
+            &extra_env,
         )?;
         if let (Some(rt), Some(plan)) = (self.tracing.as_mut(), plan) {
             session.trace = Some(rt.start_session(id, plan));
@@ -2580,7 +2624,7 @@ impl App {
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
             let (active_rect, agents_rect, history_rect) =
-                ui::sidebar_areas(self.pane_size.0 + 3, self.agents.len());
+                ui::sidebar_areas(self.pane_size.0 + 3, self.skills.len());
             if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
                 if ev.row > active_rect.y
                     && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
@@ -2603,16 +2647,16 @@ impl App {
                 }
                 return;
             } else if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height {
-                self.sidebar_section = SidebarSection::Agents;
+                self.sidebar_section = SidebarSection::Skills;
                 if ev.row > agents_rect.y
                     && ev.row < agents_rect.y + agents_rect.height.saturating_sub(1)
                 {
                     let visible = usize::from(agents_rect.height.saturating_sub(2));
                     let row = usize::from(ev.row - agents_rect.y - 1);
                     let idx =
-                        ui::sidebar_window(self.selected_agent, self.agents.len(), visible) + row;
-                    if idx < self.agents.len() {
-                        self.selected_agent = idx;
+                        ui::sidebar_window(self.selected_skill, self.skills.len(), visible) + row;
+                    if idx < self.skills.len() {
+                        self.selected_skill = idx;
                     }
                 }
                 return;
@@ -2673,10 +2717,10 @@ impl App {
             {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
                     let (_, agents_rect, history_rect) =
-                        ui::sidebar_areas(self.pane_size.0 + 3, self.agents.len());
+                        ui::sidebar_areas(self.pane_size.0 + 3, self.skills.len());
                     if ev.row >= agents_rect.y
                         && ev.row < agents_rect.y + agents_rect.height
-                        && !self.agents.is_empty()
+                        && !self.skills.is_empty()
                     {
                         let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
                             -1
@@ -2684,10 +2728,10 @@ impl App {
                             1
                         };
                         if delta > 0 {
-                            self.selected_agent =
-                                (self.selected_agent + 1).min(self.agents.len() - 1);
+                            self.selected_skill =
+                                (self.selected_skill + 1).min(self.skills.len() - 1);
                         } else {
-                            self.selected_agent = self.selected_agent.saturating_sub(1);
+                            self.selected_skill = self.selected_skill.saturating_sub(1);
                         }
                         return;
                     }
@@ -2893,15 +2937,15 @@ impl App {
                             {
                                 self.selected += 1;
                             } else {
-                                self.sidebar_section = SidebarSection::Agents;
-                                self.selected_agent = 0;
+                                self.sidebar_section = SidebarSection::Skills;
+                                self.selected_skill = 0;
                             }
                         }
-                        SidebarSection::Agents => {
-                            if !self.agents.is_empty()
-                                && self.selected_agent + 1 < self.agents.len()
+                        SidebarSection::Skills => {
+                            if !self.skills.is_empty()
+                                && self.selected_skill + 1 < self.skills.len()
                             {
-                                self.selected_agent += 1;
+                                self.selected_skill += 1;
                             } else if !self.history_sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::History;
                                 self.selected_history = 0;
@@ -2925,9 +2969,9 @@ impl App {
                         SidebarSection::Active => {
                             self.selected = self.selected.saturating_sub(1);
                         }
-                        SidebarSection::Agents => {
-                            if self.selected_agent > 0 {
-                                self.selected_agent -= 1;
+                        SidebarSection::Skills => {
+                            if self.selected_skill > 0 {
+                                self.selected_skill -= 1;
                             } else if !self.sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::Active;
                                 self.selected = self.sessions.len() - 1;
@@ -2937,8 +2981,8 @@ impl App {
                             if self.selected_history > 0 {
                                 self.selected_history -= 1;
                             } else {
-                                self.sidebar_section = SidebarSection::Agents;
-                                self.selected_agent = self.agents.len().saturating_sub(1);
+                                self.sidebar_section = SidebarSection::Skills;
+                                self.selected_skill = self.skills.len().saturating_sub(1);
                             }
                         }
                     }
@@ -2952,24 +2996,29 @@ impl App {
                 } else {
                     self.sidebar_section = match self.sidebar_section {
                         SidebarSection::Active => {
-                            self.reload_agents();
-                            SidebarSection::Agents
+                            self.reload_skills();
+                            SidebarSection::Skills
                         }
-                        SidebarSection::Agents => SidebarSection::History,
+                        SidebarSection::Skills => SidebarSection::History,
                         SidebarSection::History => SidebarSection::Active,
                     };
                 }
             }
-            Action::OpenAgentLauncher => {
-                let state = if let Some(agent) = self.agents.get(self.selected_agent) {
-                    AgentLauncherState::for_agent(agent)
-                } else {
-                    AgentLauncherState::default()
+            Action::OpenSkillLauncher => {
+                let Some(skill) = self.skills.get(self.selected_skill) else {
+                    return;
                 };
-                self.mode = Mode::AgentLauncher(state);
+                // Singleton: a running skill session is attached to, never
+                // relaunched; the harness can only change once it is closed.
+                if let Some(idx) = self.running_skill_session(&skill.id) {
+                    self.attach_to_session(idx);
+                } else {
+                    let state = SkillLauncherState::for_skill(skill);
+                    self.mode = Mode::SkillLauncher(state);
+                }
             }
-            Action::AgentLauncherKey => {
-                self.handle_agent_launcher_key(key);
+            Action::SkillLauncherKey => {
+                self.handle_skill_launcher_key(key);
             }
             Action::RestartHistorySession => {
                 if let Some(summary) = self.history_sessions.get(self.selected_history).cloned() {
@@ -3437,8 +3486,8 @@ impl App {
         }
     }
 
-    fn handle_agent_launcher_key(&mut self, key: &KeyEvent) {
-        let Mode::AgentLauncher(ref mut state) = self.mode else {
+    fn handle_skill_launcher_key(&mut self, key: &KeyEvent) {
+        let Mode::SkillLauncher(ref mut state) = self.mode else {
             return;
         };
         match key.code {
@@ -3467,9 +3516,9 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                let agent_id = state.agent_id.clone();
+                let skill_id = state.skill_id.clone();
                 let harness = state.selected_harness();
-                let launch_res = self.launch_agent(&agent_id, harness);
+                let launch_res = self.launch_skill(&skill_id, harness);
                 match launch_res {
                     Ok(_) => {
                         self.sidebar_section = SidebarSection::Active;
@@ -3477,7 +3526,7 @@ impl App {
                     }
                     Err(e) => {
                         self.mode = Mode::Control;
-                        self.notice = Some(Notice::error(format!("Agent launch failed: {e}")));
+                        self.notice = Some(Notice::error(format!("Skill launch failed: {e}")));
                     }
                 }
             }
@@ -3485,47 +3534,50 @@ impl App {
         }
     }
 
-    /// Launches or attaches to a session running the chosen agent and AI harness.
-    pub fn launch_agent(
+    /// Launches a harness session around `skill_id`, or attaches to the one
+    /// already running it. The skill is (re)installed into the harness's
+    /// skill directory right before the spawn, so the session always sees
+    /// the current package.
+    pub fn launch_skill(
         &mut self,
-        agent_id: &str,
+        skill_id: &str,
         harness: crate::harness::Harness,
     ) -> anyhow::Result<usize> {
-        let agent = self
-            .agents
+        let skill = self
+            .skills
             .iter()
-            .find(|a| a.id == agent_id)
+            .find(|s| s.id == skill_id)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Agent '{agent_id}' not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("Skill '{skill_id}' not found"))?;
 
-        let target_harness = harness;
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-        // 1. If an active session for this agent + harness + workspace already exists, attach to it:
-        let now = Instant::now();
-        if let Some(idx) = self.sessions.iter().position(|s| {
-            s.agent_id.as_deref() == Some(agent_id)
-                && crate::harness::Harness::detect(&s.profile.command) == Some(target_harness)
-                && s.dir == cwd
-                && !matches!(s.status(now), Status::Exited(_))
-        }) {
-            self.selected = idx;
-            self.sidebar_section = SidebarSection::Active;
-            self.mode = Mode::Attached;
-            if let Some(s) = self.sessions.get_mut(idx) {
-                s.tracker.on_attach();
+        // 1. Singleton: attach to a live session for this skill.
+        if let Some(idx) = self.running_skill_session(skill_id) {
+            let running = self.running_skill_harness(skill_id);
+            if running.is_some() && running != Some(harness) {
+                self.notice = Some(Notice::warn(format!(
+                    "{} is already running on {}; close that session to switch harness",
+                    skill.name,
+                    running.map(|h| h.as_str()).unwrap_or("another harness")
+                )));
             }
+            self.attach_to_session(idx);
             return Ok(idx);
         }
 
-        // 2. Find base profile or create new
-        let base_profile = self
+        // 2. Install the skill where this harness reads it.
+        let home = crate::skill::install::home_dir();
+        crate::skill::install::install(&skill, harness, &home, false)
+            .map_err(|e| anyhow::anyhow!("cannot install skill for {}: {e}", harness.as_str()))?;
+
+        // 3. Base profile for the harness, or a bare one.
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let base = self
             .profiles
             .iter()
-            .find(|p| crate::harness::Harness::detect(&p.command) == Some(target_harness))
+            .find(|p| crate::harness::Harness::detect(&p.command) == Some(harness))
             .cloned()
             .unwrap_or_else(|| Profile {
-                name: format!("{} ({})", agent.name, harness.as_str()),
+                name: String::new(),
                 command: harness.as_str().to_string(),
                 args: vec![],
                 default_dir: None,
@@ -3533,42 +3585,19 @@ impl App {
                 model: None,
                 bypass_approvals: None,
             });
-
-        let source_path = agent
-            .file_path
-            .as_deref()
-            .unwrap_or(std::path::Path::new("AGENTS.md"));
-        let artifacts = crate::agent::artifacts::render_artifacts(&agent, source_path)
+        let launch = crate::skill::launch::build_skill_launch(&skill, harness, &base, &cwd)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        let options = crate::agent::launch::LaunchOptions {
-            harness_override: Some(target_harness),
-            ..Default::default()
-        };
-
-        let launch = crate::agent::launch::build_agent_launch(
-            &agent,
-            &base_profile,
-            &options,
-            &cwd,
-            &artifacts,
-        )
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
         let id = self.next_id;
-        let mut session = self.spawn_traced(id, launch.profile, launch.cwd)?;
-        session.agent_id = Some(agent.id.clone());
-        session.source_hash = Some(agent.source_hash.clone());
+        let mut session =
+            self.spawn_traced_with_env(id, launch.profile, launch.cwd, &launch.env)?;
+        session.skill_id = Some(skill.id.clone());
         self.next_id += 1;
         self.sessions.push(session);
-        self.selected = self.sessions.len() - 1;
-        self.sidebar_section = SidebarSection::Active;
-        self.mode = Mode::Attached;
-        if let Some(s) = self.sessions.last_mut() {
-            s.tracker.on_attach();
-        }
+        let idx = self.sessions.len() - 1;
+        self.attach_to_session(idx);
         let _ = self.save_active_sessions();
-        Ok(self.selected)
+        Ok(idx)
     }
 
     pub fn resume_history_session(&mut self, summary: &SessionSummary) {

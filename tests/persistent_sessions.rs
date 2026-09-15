@@ -101,9 +101,9 @@ async fn test_sidebar_split_navigation() {
     // Starts in Active section
     assert_eq!(app.sidebar_section, SidebarSection::Active);
 
-    // Tab cycles: Active -> Agents -> History -> Active
+    // Tab cycles: Active -> Skills -> History -> Active
     app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
+    assert_eq!(app.sidebar_section, SidebarSection::Skills);
 
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
@@ -111,11 +111,11 @@ async fn test_sidebar_split_navigation() {
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Active);
 
-    // Down at the end of active sessions transitions into Agents
+    // Down at the end of active sessions transitions into Skills
     app.handle_key(&key(KeyCode::Down), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
+    assert_eq!(app.sidebar_section, SidebarSection::Skills);
 
-    // Down in Agents transitions into History
+    // Down in Skills transitions into History
     app.handle_key(&key(KeyCode::Down), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
     assert_eq!(app.selected_history, 0);
@@ -128,11 +128,11 @@ async fn test_sidebar_split_navigation() {
     app.handle_key(&key(KeyCode::Up), Instant::now());
     assert_eq!(app.selected_history, 0);
 
-    // Up at top of History transitions to Agents
+    // Up at top of History transitions to Skills
     app.handle_key(&key(KeyCode::Up), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
+    assert_eq!(app.sidebar_section, SidebarSection::Skills);
 
-    // Up in Agents transitions back to Active
+    // Up in Skills transitions back to Active
     app.handle_key(&key(KeyCode::Up), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Active);
 
@@ -220,7 +220,7 @@ async fn test_sidebar_mouse_click_selection() {
     ];
 
     let (active_rect, agents_rect, history_rect) =
-        agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.agents.len());
+        agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.skills.len());
 
     // Click in history area
     let click_hist = MouseEvent {
@@ -241,7 +241,7 @@ async fn test_sidebar_mouse_click_selection() {
         modifiers: KeyModifiers::NONE,
     };
     app.handle_mouse(click_agents, Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
+    assert_eq!(app.sidebar_section, SidebarSection::Skills);
 
     // Click in active area
     let click_active = MouseEvent {

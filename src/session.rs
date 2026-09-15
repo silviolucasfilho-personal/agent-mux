@@ -125,8 +125,8 @@ pub struct Session {
     // Shared with the exit-watcher thread spawned in `spawn()` (see there
     // for why exit detection can't rely solely on the reader thread's EOF).
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
-    pub agent_id: Option<String>,
-    pub source_hash: Option<String>,
+    /// Skill this session was launched around from the sidebar, if any.
+    pub skill_id: Option<String>,
 }
 
 /// How often the exit-watcher thread polls `Child::try_wait()`.
@@ -272,8 +272,7 @@ impl Session {
             writer,
             master: pair.master,
             child,
-            agent_id: None,
-            source_hash: None,
+            skill_id: None,
         })
     }
 

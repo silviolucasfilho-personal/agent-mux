@@ -36,13 +36,13 @@ pub fn sidebar_areas(total_height: u16, agent_count: usize) -> (Rect, Rect, Rect
     let agent_rows = (agent_count.max(1) as u16 + 2)
         .min(total_height.saturating_sub(8) / 2)
         .max(3);
-    let [active, agents, history] = Layout::vertical([
+    let [active, skills, history] = Layout::vertical([
         Constraint::Percentage(25),
         Constraint::Length(agent_rows),
         Constraint::Min(4),
     ])
     .areas(side_area);
-    (active, agents, history)
+    (active, skills, history)
 }
 
 /// Char-boundary-safe truncation with an ellipsis. Byte slicing here
@@ -241,16 +241,16 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::ConfirmKill => draw_confirm(f, "Kill this session? [y/n]"),
         Mode::ConfirmQuit => draw_confirm(f, "Sessions are still working. Quit anyway? [y/n]"),
         Mode::Help => draw_help(f),
-        Mode::AgentLauncher(launcher) => draw_agent_launcher(f, launcher, app),
+        Mode::SkillLauncher(launcher) => draw_skill_launcher(f, launcher, app),
         _ => {}
     }
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let (active_area, agents_area, history_area) = sidebar_areas(area.height, app.agents.len());
+    let (active_area, skills_area, history_area) = sidebar_areas(area.height, app.skills.len());
 
     draw_active_sidebar(f, active_area, app, now);
-    draw_agents_sidebar(f, agents_area, app);
+    draw_skills_sidebar(f, skills_area, app);
     draw_history_sidebar(f, history_area, app);
 }
 
@@ -334,9 +334,9 @@ fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     f.render_widget(List::new(items).block(block), area);
 }
 
-fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
+fn draw_skills_sidebar(f: &mut Frame, area: Rect, app: &App) {
     let is_focused =
-        app.sidebar_section == SidebarSection::Agents && matches!(app.mode, Mode::Control);
+        app.sidebar_section == SidebarSection::Skills && matches!(app.mode, Mode::Control);
     let border_style = if is_focused {
         Style::default()
             .fg(Color::Cyan)
@@ -344,11 +344,11 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let title = if app.agents.is_empty() {
-        "Agents [0]".to_string()
+    let title = if app.skills.is_empty() {
+        "Skills [0]".to_string()
     } else {
-        let current = (app.selected_agent + 1).min(app.agents.len());
-        format!("Agents [{current}/{}]", app.agents.len())
+        let current = (app.selected_skill + 1).min(app.skills.len());
+        format!("Skills [{current}/{}]", app.skills.len())
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -364,21 +364,21 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
             },
         ));
 
-    if app.agents.is_empty() {
-        let hint = Paragraph::new("no agents found\n\n~/.agent-mux/agents/").block(block);
+    if app.skills.is_empty() {
+        let hint = Paragraph::new("no skills found\n\n~/.agent-mux/skills/").block(block);
         f.render_widget(hint, area);
         return;
     }
 
     let visible = usize::from(area.height.saturating_sub(2));
-    let start = sidebar_window(app.selected_agent, app.agents.len(), visible);
-    let end = (start + visible.max(1)).min(app.agents.len());
-    let items: Vec<ListItem> = app.agents[start..end]
+    let start = sidebar_window(app.selected_skill, app.skills.len(), visible);
+    let end = (start + visible.max(1)).min(app.skills.len());
+    let items: Vec<ListItem> = app.skills[start..end]
         .iter()
         .enumerate()
         .map(|(offset, agent)| {
             let i = start + offset;
-            let is_selected = i == app.selected_agent;
+            let is_selected = i == app.selected_skill;
             let marker = if is_selected && is_focused {
                 "> "
             } else if is_selected {
@@ -387,10 +387,7 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
                 "  "
             };
 
-            let is_active = app.sessions.iter().any(|s| {
-                s.profile.name.eq_ignore_ascii_case(&agent.name)
-                    || s.profile.name.starts_with(&agent.name)
-            });
+            let running_harness = app.running_skill_harness(&agent.id);
 
             let icon_str = agent.icon.as_deref().unwrap_or("⚡");
             let mut spans = vec![
@@ -409,8 +406,11 @@ fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
                     },
                 ),
             ];
-            if is_active {
-                spans.push(Span::styled(" [active]", Style::default().fg(Color::Green)));
+            if let Some(h) = running_harness {
+                spans.push(Span::styled(
+                    format!(" [{}]", h.as_str()),
+                    Style::default().fg(Color::Green),
+                ));
             }
 
             let line = Line::from(spans);
@@ -514,10 +514,10 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     if !app.sidebar_hidden
-        && app.sidebar_section == SidebarSection::Agents
+        && app.sidebar_section == SidebarSection::Skills
         && matches!(app.mode, Mode::Control)
     {
-        if let Some(agent) = app.agents.get(app.selected_agent) {
+        if let Some(agent) = app.skills.get(app.selected_skill) {
             if agent.capabilities.iter().any(|c| c == "trace.read") {
                 draw_trace_briefing_preview(f, area, agent, app, now);
             } else {
@@ -700,15 +700,12 @@ fn draw_history_preview(
 fn draw_generic_agent_preview(
     f: &mut Frame,
     area: Rect,
-    agent: &crate::agent::AgentDefinition,
+    agent: &crate::skill::SkillDefinition,
     app: &App,
     _now: Instant,
 ) {
     let icon_str = agent.icon.as_deref().unwrap_or("⚡");
-    let title = format!(
-        " {icon_str} {} — Autonomous Agent [{}] ",
-        agent.name, agent.id
-    );
+    let title = format!(" {icon_str} {} — Skill [{}] ", agent.name, agent.id);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(
@@ -744,15 +741,15 @@ fn draw_generic_agent_preview(
             .join(", ")
     };
     let origin_str = if agent.is_builtin {
-        "Built-in (seeded in ~/.agent-mux/agents/)".to_string()
-    } else if let Some(ref p) = agent.file_path {
+        "Built-in (compiled into agent-mux)".to_string()
+    } else if let Some(ref p) = agent.dir {
         p.to_string_lossy().into_owned()
     } else {
-        "Custom agent".to_string()
+        "Custom skill".to_string()
     };
     let info_lines = vec![
         Line::from(vec![
-            Span::styled("Agent ID:    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Skill ID:    ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 &agent.id,
                 Style::default()
@@ -790,7 +787,7 @@ fn draw_generic_agent_preview(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Span::styled(
-            " Persona & Prompt Instructions ",
+            " SKILL.md ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -799,7 +796,7 @@ fn draw_generic_agent_preview(
     f.render_widget(inst_block, instructions_area);
 
     let inst_lines: Vec<Line> = agent
-        .instructions
+        .body
         .lines()
         .map(|line| {
             if line.starts_with("# ") {
@@ -835,9 +832,7 @@ fn draw_generic_agent_preview(
     f.render_widget(Paragraph::new(inst_lines), inst_inner);
 
     // 3. Footer
-    let is_running = app.sessions.iter().any(|s| {
-        s.profile.name.eq_ignore_ascii_case(&agent.name) || s.profile.name.starts_with(&agent.name)
-    });
+    let is_running = app.running_skill_session(&agent.id).is_some();
     let enter_action = if is_running {
         format!("Attach to {} Session", agent.name)
     } else {
@@ -872,7 +867,7 @@ fn draw_generic_agent_preview(
 fn draw_trace_briefing_preview(
     f: &mut Frame,
     area: Rect,
-    agent: &crate::agent::AgentDefinition,
+    agent: &crate::skill::SkillDefinition,
     app: &App,
     now: Instant,
 ) {
@@ -985,7 +980,7 @@ fn draw_trace_briefing_preview(
         vec![
             Line::from(spans),
             Line::styled(
-                "Press [Enter] to launch this agent or wait for background trace query.",
+                "Press [Enter] to launch this skill or wait for background trace query.",
                 Style::default().fg(Color::DarkGray),
             ),
         ]
@@ -1008,7 +1003,7 @@ fn draw_trace_briefing_preview(
 
     if card_count == 0 {
         let empty_msg = Paragraph::new(
-            "No active or historical sessions recorded yet in trace database.\nPress [Enter] to launch this agent or [n] to create a new session.",
+            "No active or historical sessions recorded yet in trace database.\nPress [Enter] to launch this skill or [n] to create a new session.",
         )
         .style(Style::default().fg(Color::DarkGray));
         f.render_widget(empty_msg, sess_inner);
@@ -1195,7 +1190,7 @@ fn draw_trace_briefing_preview(
     f.render_widget(Paragraph::new(footer), footer_area);
 }
 
-fn draw_agent_launcher(f: &mut Frame, state: &crate::app::AgentLauncherState, app: &App) {
+fn draw_skill_launcher(f: &mut Frame, state: &crate::app::SkillLauncherState, app: &App) {
     let width = 68.min(f.area().width.saturating_sub(4)).max(48);
     let height = 18.min(f.area().height.saturating_sub(2)).max(14);
     let area = centered(f.area(), width, height);
@@ -1209,7 +1204,7 @@ fn draw_agent_launcher(f: &mut Frame, state: &crate::app::AgentLauncherState, ap
                 .add_modifier(Modifier::BOLD),
         )
         .title(Span::styled(
-            format!(" Launch {} [{}] ", state.agent_name, state.agent_id),
+            format!(" Launch {} [{}] ", state.skill_name, state.skill_id),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -1227,7 +1222,7 @@ fn draw_agent_launcher(f: &mut Frame, state: &crate::app::AgentLauncherState, ap
 
     let header_text = Paragraph::new(vec![
         Line::styled(
-            format!("Select an AI harness to run {}:", state.agent_name),
+            format!("Select an AI harness to run {}:", state.skill_name),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
@@ -1247,7 +1242,7 @@ fn draw_agent_launcher(f: &mut Frame, state: &crate::app::AgentLauncherState, ap
             let marker = if is_selected { "> " } else { "  " };
             let num = idx + 1;
             let is_running = app.sessions.iter().any(|s| {
-                s.agent_id.as_deref() == Some(&state.agent_id)
+                s.skill_id.as_deref() == Some(&state.skill_id)
                     && crate::harness::Harness::detect(&s.profile.command) == Some(*h)
                     && matches!(s.status(Instant::now()), Status::Working | Status::Idle)
             });
@@ -1277,9 +1272,9 @@ fn draw_agent_launcher(f: &mut Frame, state: &crate::app::AgentLauncherState, ap
         .collect();
     f.render_widget(List::new(items), list_area);
 
-    let info_lines = if let Some(agent) = app.agents.iter().find(|a| a.id == state.agent_id) {
+    let info_lines = if let Some(agent) = app.skills.iter().find(|a| a.id == state.skill_id) {
         let desc = if agent.description.is_empty() {
-            "Autonomous agent loaded from ~/.agent-mux/agents/"
+            "Skill loaded from ~/.agent-mux/skills/"
         } else {
             &agent.description
         };
@@ -1299,17 +1294,17 @@ fn draw_agent_launcher(f: &mut Frame, state: &crate::app::AgentLauncherState, ap
                 Span::styled(caps, Style::default().fg(Color::Cyan)),
             ]),
             Line::styled(
-                "Prompt instructions and tools configured.",
+                "Installed into the harness skill directory before launch.",
                 Style::default().fg(Color::DarkGray),
             ),
         ]
     } else {
         vec![
             Line::styled(
-                format!("{} Capabilities:", state.agent_name),
+                format!("{} Capabilities:", state.skill_name),
                 Style::default().fg(Color::Yellow),
             ),
-            Line::raw("• Autonomous agent session with persistent traces and monitoring"),
+            Line::raw("• Harness session opened with the skill invoked"),
         ]
     };
     f.render_widget(Paragraph::new(info_lines), info_area);
@@ -1365,9 +1360,9 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     match app.sidebar_section {
                         SidebarSection::Active => Line::raw(
-                            "[b] sidebar  [j/k] select  [Enter] attach  [Tab] agents  [n] new  [l] logs  [t] trace  [?] help  [q] quit",
+                            "[b] sidebar  [j/k] select  [Enter] attach  [Tab] skills  [n] new  [l] logs  [t] trace  [?] help  [q] quit",
                         ),
-                        SidebarSection::Agents => Line::raw(
+                        SidebarSection::Skills => Line::raw(
                             "[b] sidebar  [j/k] select  [Enter] launch agent  [Tab] hist  [n] new  [?] help  [q] quit",
                         ),
                         SidebarSection::History => Line::raw(

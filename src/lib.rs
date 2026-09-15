@@ -1,16 +1,15 @@
-pub mod agent;
 pub mod app;
 pub mod config;
 pub mod events;
 pub mod harness;
 pub mod history;
 pub mod keys;
-pub mod mcp;
 pub mod mouse;
 pub mod persistence;
 pub mod search;
 pub mod selection;
 pub mod session;
+pub mod skill;
 pub mod status;
 pub mod tracing;
 pub mod transcript;

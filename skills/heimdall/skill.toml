@@ -1,0 +1,7 @@
+# agent-mux metadata for the Heimdall skill. SKILL.md stays harness-neutral;
+# this file only tells agent-mux how to list and launch it.
+icon = "⚡"
+harnesses = ["claude", "codex", "agy"]
+default_harness = "agy"
+capabilities = ["trace.read"]
+startup_prompt = "Give me the executive briefing of active and recent sessions, then the top skill and agent findings."

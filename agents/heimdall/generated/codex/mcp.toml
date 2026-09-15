@@ -1,3 +1,0 @@
-[mcp_servers.agent-mux]
-command = "/Users/sifilho/workspace/agent-mux/target/debug/agent-mux"
-args = ["mcp", "serve", "--stdio", "--db", "/Users/sifilho/.agent-mux/traces.db", "--workspace", "/Users/sifilho/workspace/agent-mux/agents/heimdall"]

@@ -1,8 +1,0 @@
-{
-  "agent_id": "heimdall",
-  "enabled": true,
-  "mcp_servers": [
-    "agent-mux"
-  ],
-  "startup_task": "Read the current session briefing and report progress, blockers and evidence coverage."
-}
