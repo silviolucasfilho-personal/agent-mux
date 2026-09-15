@@ -1,6 +1,7 @@
 use crate::app::{
-    App, BrowserPane, DialogContentMode, DialogField, DialogState, HistoryPane, HistoryState, Mode,
-    NoticeLevel, SidebarSection, TraceBrowserState,
+    App, BrowserPane, DialogContentMode, DialogField, DialogState, HistoryPane, HistoryState,
+    InstallLabel, Mode, NoticeLevel, SidebarSection, SkillRow, SkillsPane, SkillsTab,
+    SkillsViewState, TraceBrowserState,
 };
 use crate::status::Status;
 use crate::tracing::cli::{fmt_cost, fmt_ms, fmt_time, fmt_tokens};
@@ -30,19 +31,12 @@ pub fn sidebar_window(selected: usize, len: usize, visible: usize) -> usize {
     }
 }
 
-/// Splits the sidebar height into 25% active sessions, dynamic rows for Agents, and remaining history sessions.
-pub fn sidebar_areas(total_height: u16, agent_count: usize) -> (Rect, Rect, Rect) {
+/// Splits the sidebar height into active sessions (40%) and history.
+pub fn sidebar_areas(total_height: u16) -> (Rect, Rect) {
     let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
-    let agent_rows = (agent_count.max(1) as u16 + 2)
-        .min(total_height.saturating_sub(8) / 2)
-        .max(3);
-    let [active, skills, history] = Layout::vertical([
-        Constraint::Percentage(25),
-        Constraint::Length(agent_rows),
-        Constraint::Min(4),
-    ])
-    .areas(side_area);
-    (active, skills, history)
+    let [active, history] =
+        Layout::vertical([Constraint::Percentage(40), Constraint::Min(4)]).areas(side_area);
+    (active, history)
 }
 
 /// Char-boundary-safe truncation with an ellipsis. Byte slicing here
@@ -241,16 +235,15 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::ConfirmKill => draw_confirm(f, "Kill this session? [y/n]"),
         Mode::ConfirmQuit => draw_confirm(f, "Sessions are still working. Quit anyway? [y/n]"),
         Mode::Help => draw_help(f),
-        Mode::SkillLauncher(launcher) => draw_skill_launcher(f, launcher, app),
+        Mode::SkillsView(view) => draw_skills_view(f, view, app, now),
         _ => {}
     }
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let (active_area, skills_area, history_area) = sidebar_areas(area.height, app.skills.len());
+    let (active_area, history_area) = sidebar_areas(area.height);
 
     draw_active_sidebar(f, active_area, app, now);
-    draw_skills_sidebar(f, skills_area, app);
     draw_history_sidebar(f, history_area, app);
 }
 
@@ -320,99 +313,6 @@ fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
                     Style::default().fg(Color::Cyan),
                 ));
             }
-            let line = Line::from(spans);
-            let item = ListItem::new(line);
-            if is_selected && is_focused {
-                item.style(Style::default().add_modifier(Modifier::REVERSED))
-            } else if is_selected {
-                item.style(Style::default().fg(Color::Cyan))
-            } else {
-                item
-            }
-        })
-        .collect();
-    f.render_widget(List::new(items).block(block), area);
-}
-
-fn draw_skills_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    let is_focused =
-        app.sidebar_section == SidebarSection::Skills && matches!(app.mode, Mode::Control);
-    let border_style = if is_focused {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let title = if app.skills.is_empty() {
-        "Skills [0]".to_string()
-    } else {
-        let current = (app.selected_skill + 1).min(app.skills.len());
-        format!("Skills [{current}/{}]", app.skills.len())
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(
-            format!(" {title} "),
-            if is_focused {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            },
-        ));
-
-    if app.skills.is_empty() {
-        let hint = Paragraph::new("no skills found\n\n~/.agent-mux/skills/").block(block);
-        f.render_widget(hint, area);
-        return;
-    }
-
-    let visible = usize::from(area.height.saturating_sub(2));
-    let start = sidebar_window(app.selected_skill, app.skills.len(), visible);
-    let end = (start + visible.max(1)).min(app.skills.len());
-    let items: Vec<ListItem> = app.skills[start..end]
-        .iter()
-        .enumerate()
-        .map(|(offset, agent)| {
-            let i = start + offset;
-            let is_selected = i == app.selected_skill;
-            let marker = if is_selected && is_focused {
-                "> "
-            } else if is_selected {
-                "* "
-            } else {
-                "  "
-            };
-
-            let running_harness = app.running_skill_harness(&agent.id);
-
-            let icon_str = agent.icon.as_deref().unwrap_or("⚡");
-            let mut spans = vec![
-                Span::raw(marker),
-                Span::styled(format!("{icon_str} "), Style::default().fg(Color::Yellow)),
-                Span::styled(
-                    &agent.name,
-                    if is_selected && is_focused {
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else if is_selected {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::White)
-                    },
-                ),
-            ];
-            if let Some(h) = running_harness {
-                spans.push(Span::styled(
-                    format!(" [{}]", h.as_str()),
-                    Style::default().fg(Color::Green),
-                ));
-            }
-
             let line = Line::from(spans);
             let item = ListItem::new(line);
             if is_selected && is_focused {
@@ -513,19 +413,6 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    if !app.sidebar_hidden
-        && app.sidebar_section == SidebarSection::Skills
-        && matches!(app.mode, Mode::Control)
-    {
-        if let Some(agent) = app.skills.get(app.selected_skill) {
-            if agent.capabilities.iter().any(|c| c == "trace.read") {
-                draw_trace_briefing_preview(f, area, agent, app, now);
-            } else {
-                draw_generic_agent_preview(f, area, agent, app, now);
-            }
-        }
-        return;
-    }
     if (!app.sidebar_hidden
         && app.sidebar_section == SidebarSection::History
         && matches!(app.mode, Mode::Control))
@@ -695,173 +582,6 @@ fn draw_history_preview(
         )]));
     }
     f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn draw_generic_agent_preview(
-    f: &mut Frame,
-    area: Rect,
-    agent: &crate::skill::SkillDefinition,
-    app: &App,
-    _now: Instant,
-) {
-    let icon_str = agent.icon.as_deref().unwrap_or("⚡");
-    let title = format!(" {icon_str} {} — Skill [{}] ", agent.name, agent.id);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .title(Span::styled(
-            title,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let [info_area, instructions_area, footer_area] = Layout::vertical([
-        Constraint::Length(5),
-        Constraint::Min(6),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-
-    // 1. Info block
-    let harnesses_str = if agent.harnesses.is_empty() {
-        "claude, codex, agy (all supported)".to_string()
-    } else {
-        agent
-            .harnesses
-            .iter()
-            .map(|h| h.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let origin_str = if agent.is_builtin {
-        "Built-in (compiled into agent-mux)".to_string()
-    } else if let Some(ref p) = agent.dir {
-        p.to_string_lossy().into_owned()
-    } else {
-        "Custom skill".to_string()
-    };
-    let info_lines = vec![
-        Line::from(vec![
-            Span::styled("Skill ID:    ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                &agent.id,
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("   Origin:     ", Style::default().fg(Color::DarkGray)),
-            Span::styled(origin_str, Style::default().fg(Color::Yellow)),
-        ]),
-        Line::from(vec![
-            Span::styled("Harnesses:   ", Style::default().fg(Color::DarkGray)),
-            Span::styled(harnesses_str, Style::default().fg(Color::Green)),
-            Span::styled("   Default:    ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                agent.default_harness.as_str(),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("Description: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                if agent.description.is_empty() {
-                    "No description provided."
-                } else {
-                    &agent.description
-                },
-                Style::default().fg(Color::Gray),
-            ),
-        ]),
-    ];
-    f.render_widget(Paragraph::new(info_lines), info_area);
-
-    // 2. Instructions block
-    let inst_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(Span::styled(
-            " SKILL.md ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inst_inner = inst_block.inner(instructions_area);
-    f.render_widget(inst_block, instructions_area);
-
-    let inst_lines: Vec<Line> = agent
-        .body
-        .lines()
-        .map(|line| {
-            if line.starts_with("# ") {
-                Line::styled(
-                    line,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if line.starts_with("## ") {
-                Line::styled(
-                    line,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if line.starts_with("### ") {
-                Line::styled(
-                    line,
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if line.starts_with("- ") || line.starts_with("* ") {
-                Line::styled(line, Style::default().fg(Color::White))
-            } else if line.starts_with("```") {
-                Line::styled(line, Style::default().fg(Color::DarkGray))
-            } else {
-                Line::styled(line, Style::default().fg(Color::Gray))
-            }
-        })
-        .collect();
-    f.render_widget(Paragraph::new(inst_lines), inst_inner);
-
-    // 3. Footer
-    let is_running = app.running_skill_session(&agent.id).is_some();
-    let enter_action = if is_running {
-        format!("Attach to {} Session", agent.name)
-    } else {
-        format!("Launch {} Harness", agent.name)
-    };
-    let footer = Line::from(vec![
-        Span::styled(
-            "[Enter] ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!("{enter_action}   ")),
-        Span::styled(
-            "[Tab] ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Switch Section   "),
-        Span::styled(
-            "[b] ",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Toggle Sidebar"),
-    ]);
-    f.render_widget(Paragraph::new(footer), footer_area);
 }
 
 fn draw_trace_briefing_preview(
@@ -1178,151 +898,16 @@ fn draw_trace_briefing_preview(
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("Switch Section   "),
+        Span::raw("Next tab   "),
         Span::styled(
-            "[b] ",
+            "[Esc] ",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("Toggle Sidebar"),
+        Span::raw("Close"),
     ]);
     f.render_widget(Paragraph::new(footer), footer_area);
-}
-
-fn draw_skill_launcher(f: &mut Frame, state: &crate::app::SkillLauncherState, app: &App) {
-    let width = 68.min(f.area().width.saturating_sub(4)).max(48);
-    let height = 18.min(f.area().height.saturating_sub(2)).max(14);
-    let area = centered(f.area(), width, height);
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .title(Span::styled(
-            format!(" Launch {} [{}] ", state.skill_name, state.skill_id),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let [header_area, list_area, info_area, hint_area] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(4),
-        Constraint::Min(4),
-        Constraint::Length(2),
-    ])
-    .areas(inner);
-
-    let header_text = Paragraph::new(vec![
-        Line::styled(
-            format!("Select an AI harness to run {}:", state.skill_name),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Line::raw(""),
-    ]);
-    f.render_widget(header_text, header_area);
-
-    let harnesses = if state.harnesses.is_empty() {
-        crate::harness::Harness::ALL.as_slice()
-    } else {
-        state.harnesses.as_slice()
-    };
-    let items: Vec<ListItem> = harnesses
-        .iter()
-        .enumerate()
-        .map(|(idx, h)| {
-            let is_selected = idx == state.selected;
-            let marker = if is_selected { "> " } else { "  " };
-            let num = idx + 1;
-            let is_running = app.sessions.iter().any(|s| {
-                s.skill_id.as_deref() == Some(&state.skill_id)
-                    && crate::harness::Harness::detect(&s.profile.command) == Some(*h)
-                    && matches!(s.status(Instant::now()), Status::Working | Status::Idle)
-            });
-            let running_tag = if is_running { " [active - attach]" } else { "" };
-            let line = Line::from(vec![
-                Span::raw(marker),
-                Span::styled(format!("[{num}] "), Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    h.display_name(),
-                    if is_selected {
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White)
-                    },
-                ),
-                Span::styled(running_tag, Style::default().fg(Color::Green)),
-            ]);
-            let item = ListItem::new(line);
-            if is_selected {
-                item.style(Style::default().add_modifier(Modifier::REVERSED))
-            } else {
-                item
-            }
-        })
-        .collect();
-    f.render_widget(List::new(items), list_area);
-
-    let info_lines = if let Some(agent) = app.skills.iter().find(|a| a.id == state.skill_id) {
-        let desc = if agent.description.is_empty() {
-            "Skill loaded from ~/.agent-mux/skills/"
-        } else {
-            &agent.description
-        };
-        let caps = if agent.capabilities.is_empty() {
-            "none declared".to_string()
-        } else {
-            agent.capabilities.join(", ")
-        };
-        vec![
-            Line::styled(
-                format!("{} Description:", agent.name),
-                Style::default().fg(Color::Yellow),
-            ),
-            Line::raw(desc),
-            Line::from(vec![
-                Span::styled("Capabilities: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(caps, Style::default().fg(Color::Cyan)),
-            ]),
-            Line::styled(
-                "Installed into the harness skill directory before launch.",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]
-    } else {
-        vec![
-            Line::styled(
-                format!("{} Capabilities:", state.skill_name),
-                Style::default().fg(Color::Yellow),
-            ),
-            Line::raw("• Harness session opened with the skill invoked"),
-        ]
-    };
-    f.render_widget(Paragraph::new(info_lines), info_area);
-
-    let hints = Line::from(vec![
-        Span::styled(
-            "[Enter] ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("Launch/Attach   "),
-        Span::styled("[1-3 / c,x,a] ", Style::default().fg(Color::Cyan)),
-        Span::raw("Select   "),
-        Span::styled("[Esc] ", Style::default().fg(Color::DarkGray)),
-        Span::raw("Cancel"),
-    ]);
-    f.render_widget(Paragraph::new(hints), hint_area);
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
@@ -1355,24 +940,21 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
             Mode::Control => {
                 if app.sidebar_hidden {
                     Line::raw(
-                        "[b] sidebar  [1-9/Tab] select  [Enter] attach  [n] new  [l] logs  [t] trace  [x] kill  [?] help  [q] quit",
+                        "[b] sidebar  [Tab] select  [Enter] attach  [n] new  [l] logs  [S] skills  [t/T] trace  [?] help  [q] quit",
                     )
                 } else {
                     match app.sidebar_section {
                         SidebarSection::Active => Line::raw(
-                            "[b] sidebar  [j/k] select  [Enter] attach  [Tab] skills  [n] new  [l] logs  [t] trace  [?] help  [q] quit",
-                        ),
-                        SidebarSection::Skills => Line::raw(
-                            "[b] sidebar  [j/k] select  [Enter] launch agent  [Tab] hist  [n] new  [?] help  [q] quit",
+                            "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [t/T] trace  [?] help  [q] quit",
                         ),
                         SidebarSection::History => Line::raw(
-                            "[b] sidebar  [j/k] select  [Enter/r] restart  [Tab] active  [a] all  [n] new  [l] logs  [?] help  [q] quit",
+                            "[b] sidebar  [Enter/r] restart  [a] all  [n] new  [l] logs  [S] skills  [?] help  [q] quit",
                         ),
                     }
                 }
             }
             _ => Line::raw(
-                "[b] sidebar  [j/k] select  [Enter] attach  [n] new  [l] logs  [t] trace  [T] traces  [?] help  [q] quit",
+                "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [t/T] trace  [?] help  [q] quit",
             ),
         }
     };
@@ -1403,12 +985,9 @@ fn draw_help(f: &mut Frame) {
         row("b", "toggle sidebar (hide / full harness)"),
         row("j/k, ↑/↓", "select session"),
         row("1-9", "jump to session N"),
-        row("Tab", "cycle active / agents / history sections"),
-        row(
-            "Enter",
-            "attach (active), launch skill (skills), or restart (history)",
-        ),
-        row("h", "launch / attach the selected skill (skills)"),
+        row("Tab", "cycle active / history sections"),
+        row("Enter", "attach (active) or restart (history)"),
+        row("S", "skills view: install, launch and inspect skills"),
         row(
             "n",
             "new session (pick the trace backend: SQLite, Langfuse, both)",
@@ -1443,6 +1022,18 @@ fn draw_help(f: &mut Frame) {
         row("a", "toggle this project / all projects"),
         row("r or Enter", "resume the selected session"),
         Line::raw(""),
+        Line::styled("Skills view", head),
+        row("Tab, ←/→", "next tab / focus the list or the detail pane"),
+        row("1-3, c/x/a", "filter to one harness (again to clear)"),
+        row("Enter", "launch or attach the skill on the row's harness"),
+        row(
+            "i / I",
+            "install / refresh (I forces over a foreign directory)",
+        ),
+        row("u", "uninstall from the row's harness (asks first)"),
+        row("r", "rescan packages, install state and the store"),
+        row("T", "open the selected execution's traces"),
+        Line::raw(""),
         Line::styled("Trace browser", head),
         row("Tab, ←/→", "sessions → turns → detail"),
         row("Enter", "drill in / expand an observation"),
@@ -1450,10 +1041,6 @@ fn draw_help(f: &mut Frame) {
         row("Space", "fold / unfold the selected subtree (tree view)"),
         row("/", "full-text search (full mode content)"),
         row("a", "toggle this project / all projects"),
-        row(
-            "K",
-            "skills inventory joined to the store; Enter filters turns",
-        ),
         row("s", "verdict: good → bad → cleared (also sent to Langfuse)"),
         row("r", "resume the selected session"),
         Line::raw(""),
@@ -2026,74 +1613,6 @@ fn provider_badge(provider: &str) -> Span<'static> {
     }
 }
 
-/// The left column as the skill inventory: each row a skill on disk or
-/// in the store, with what the store attributes to it.
-fn draw_skills_pane(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(pane_border(browser.focused == BrowserPane::Sessions))
-        .title(format!(" Skills ({}) [K: sessions] ", browser.skills.len()));
-    if browser.skills.is_empty() {
-        let p = Paragraph::new(
-            "\n  No skills on disk for this project\n  or your home, and none recorded.\n\n  `agent-mux trace skills` lists the roots.",
-        )
-        .style(Style::default().fg(Color::DarkGray))
-        .block(block);
-        f.render_widget(p, area);
-        return;
-    }
-    let visible = usize::from(area.height.saturating_sub(2));
-    let start = sidebar_window(browser.selected_skill, browser.skills.len(), visible);
-    let end = (start + visible.max(1)).min(browser.skills.len());
-    let items: Vec<ListItem> = browser.skills[start..end]
-        .iter()
-        .enumerate()
-        .map(|(offset, r)| {
-            let i = start + offset;
-            let is_sel = i == browser.selected_skill;
-            let (loaded, unused, cost) = match &r.stat {
-                Some(s) => (s.turns_loaded, s.turns_unused, fmt_cost(s.cost)),
-                None => (0, 0, "-".to_string()),
-            };
-            let tag = match r.note() {
-                "" => r
-                    .def
-                    .as_ref()
-                    .map(|d| format!("{} {}", d.harness.as_str(), d.scope.label()))
-                    .unwrap_or_default(),
-                note => note.to_string(),
-            };
-            let line = Line::from(vec![
-                Span::raw(if is_sel { "> " } else { "  " }),
-                Span::raw(truncate_chars(&r.name, 22)),
-                Span::styled(
-                    format!(" {loaded}↑{unused}↓"),
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::styled(
-                    if r.missed > 0 {
-                        format!(" {}?", r.missed)
-                    } else {
-                        String::new()
-                    },
-                    Style::default().fg(Color::Magenta),
-                ),
-                Span::styled(format!(" {cost} "), Style::default().fg(Color::DarkGray)),
-                Span::styled(tag, Style::default().fg(Color::DarkGray)),
-            ]);
-            let item = ListItem::new(line);
-            if is_sel && browser.focused == BrowserPane::Sessions {
-                item.style(Style::default().add_modifier(Modifier::REVERSED))
-            } else if is_sel {
-                item.style(Style::default().fg(Color::Yellow))
-            } else {
-                item
-            }
-        })
-        .collect();
-    f.render_widget(List::new(items).block(block), area);
-}
-
 fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
     let width = (f.area().width * 96 / 100).clamp(60, 200);
     let height = (f.area().height * 92 / 100).clamp(18, 60);
@@ -2120,9 +1639,7 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             " Sessions ({}) [a: {scope}] ",
             browser.sessions.len()
         ));
-    if browser.skills_pane {
-        draw_skills_pane(f, browser, left);
-    } else if let Some(err) = &browser.error {
+    if let Some(err) = &browser.error {
         let p = Paragraph::new(vec![
             Line::raw(""),
             Line::styled(format!("  {err}"), Style::default().fg(Color::Red)),
@@ -2423,7 +1940,7 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             Style::default().fg(Color::Black).bg(Color::Yellow),
         ),
         None => Line::styled(
-            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [K] skills  [s] score  [a] all  [r] resume  [Esc] close",
+            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [s] score  [a] all  [r] resume  [Esc] close",
             Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
     };
@@ -2733,6 +2250,356 @@ fn draw_observation_timeline(f: &mut Frame, browser: &TraceBrowserState, area: R
     f.render_widget(Paragraph::new(lines), area);
 }
 
+/// The Skills view: skills grouped by harness on the left, the selected
+/// row's details, executions or briefing on the right.
+fn draw_skills_view(f: &mut Frame, view: &SkillsViewState, app: &App, now: Instant) {
+    let width = (f.area().width * 96 / 100).clamp(60, 200);
+    let height = (f.area().height * 92 / 100).clamp(18, 60);
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+    let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(34), Constraint::Min(0)]).areas(body);
+
+    // Left: skills grouped by harness
+    let selectable = view
+        .rows
+        .iter()
+        .filter(|r| !matches!(r, SkillRow::Header(_)))
+        .count();
+    let filter = view.harness_filter.map(|h| h.as_str()).unwrap_or("all");
+    let left_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(view.focus == SkillsPane::Skills))
+        .title(format!(" Skills ({selectable}) [harness: {filter}] "));
+    if selectable == 0 {
+        let p = Paragraph::new("\n  no skills found\n\n  ~/.agent-mux/skills/<id>/SKILL.md")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(left_block);
+        f.render_widget(p, left);
+    } else {
+        let visible = usize::from(left.height.saturating_sub(2));
+        let start = sidebar_window(view.selected, view.rows.len(), visible);
+        let end = (start + visible.max(1)).min(view.rows.len());
+        let name_width = usize::from(left.width.saturating_sub(4))
+            .saturating_sub(20)
+            .max(8);
+        let items: Vec<ListItem> = view.rows[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, row)| {
+                let i = start + offset;
+                let is_sel = i == view.selected;
+                let marker = if is_sel { "> " } else { "  " };
+                let line = match row {
+                    SkillRow::Header(h) => Line::styled(
+                        h.display_name().to_string(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    SkillRow::Package { index, harness } => {
+                        let Some(def) = view.packages.get(*index) else {
+                            return ListItem::new(Line::raw(""));
+                        };
+                        let icon = def.icon.as_deref().unwrap_or("⚡");
+                        let (state, style) = match app.running_skill_harness(&def.id) {
+                            Some(h) if h == *harness => (
+                                format!("running [{}]", h.as_str()),
+                                Style::default().fg(Color::Green),
+                            ),
+                            _ => match view.install.get(&(def.id.clone(), *harness)) {
+                                Some(st) => {
+                                    let label = InstallLabel::of(st);
+                                    let color = match label {
+                                        InstallLabel::Current => Color::Green,
+                                        InstallLabel::Stale | InstallLabel::NotManaged => {
+                                            Color::Yellow
+                                        }
+                                        InstallLabel::NotInstalled => Color::DarkGray,
+                                    };
+                                    (label.text().to_string(), Style::default().fg(color))
+                                }
+                                None => ("—".to_string(), Style::default().fg(Color::DarkGray)),
+                            },
+                        };
+                        Line::from(vec![
+                            Span::raw(marker),
+                            Span::styled(format!("{icon} "), Style::default().fg(Color::Yellow)),
+                            Span::raw(format!(
+                                "{:<w$} ",
+                                truncate_chars(&def.name, name_width),
+                                w = name_width
+                            )),
+                            Span::styled(state, style),
+                        ])
+                    }
+                    SkillRow::Native { index } => {
+                        let Some(def) = view.native.get(*index) else {
+                            return ListItem::new(Line::raw(""));
+                        };
+                        Line::from(vec![
+                            Span::raw(marker),
+                            Span::styled("⚙ ", Style::default().fg(Color::DarkGray)),
+                            Span::raw(format!(
+                                "{:<w$} ",
+                                truncate_chars(&def.name, name_width),
+                                w = name_width
+                            )),
+                            Span::styled(
+                                format!("native · {}", def.scope.label()),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ])
+                    }
+                };
+                let item = ListItem::new(line);
+                if is_sel && view.focus == SkillsPane::Skills {
+                    item.style(Style::default().add_modifier(Modifier::REVERSED))
+                } else if is_sel {
+                    item.style(Style::default().fg(Color::Cyan))
+                } else {
+                    item
+                }
+            })
+            .collect();
+        f.render_widget(List::new(items).block(left_block), left);
+    }
+
+    // Right: tabs
+    let selected_name = match view.selected_row() {
+        Some(SkillRow::Package { index, harness }) => view
+            .packages
+            .get(*index)
+            .map(|p| format!("{} · {}", p.id, harness.display_name()))
+            .unwrap_or_default(),
+        Some(SkillRow::Native { index }) => view
+            .native
+            .get(*index)
+            .map(|d| format!("{} · {}", d.name, d.harness.display_name()))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    let mut title_spans = vec![Span::raw(" ")];
+    for (i, tab) in view.tabs().into_iter().enumerate() {
+        if i > 0 {
+            title_spans.push(Span::raw(" | "));
+        }
+        title_spans.push(if tab == view.tab {
+            Span::styled(
+                tab.label(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(tab.label(), Style::default().fg(Color::DarkGray))
+        });
+    }
+    if !selected_name.is_empty() {
+        title_spans.push(Span::raw(format!(" · {selected_name} ")));
+    } else {
+        title_spans.push(Span::raw(" "));
+    }
+    let right_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(view.focus == SkillsPane::Detail))
+        .title(Line::from(title_spans));
+    let inner = right_block.inner(right);
+    view.viewport_rows.set(usize::from(inner.height));
+
+    match view.tab {
+        SkillsTab::Briefing => {
+            if let Some((def, _)) = view.selected_package() {
+                draw_trace_briefing_preview(f, right, def, app, now);
+            } else {
+                f.render_widget(right_block, right);
+            }
+        }
+        SkillsTab::Details => {
+            f.render_widget(right_block, right);
+            let lines: Vec<Line> = view
+                .detail_lines
+                .iter()
+                .skip(view.scroll_offset)
+                .cloned()
+                .collect();
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+        SkillsTab::Executions => {
+            f.render_widget(right_block, right);
+            draw_skill_executions(f, inner, view);
+        }
+    }
+
+    let footer_text = if view.pending_uninstall {
+        let what = view
+            .selected_package()
+            .map(|(def, h)| format!("{} from {}", def.name, h.display_name()))
+            .unwrap_or_default();
+        Line::styled(
+            format!(" Uninstall {what}? [y/n]"),
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        )
+    } else {
+        Line::styled(
+            " [Tab] tab  [←/→] pane  [↑/↓] select  [Enter] launch/attach  [i] install  [u] uninstall  [1-3] harness  [r] rescan  [T] traces  [Esc] close",
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        )
+    };
+    f.render_widget(Paragraph::new(footer_text), footer);
+}
+
+/// The Executions tab: launches of the skill on this harness, then the
+/// turns (on any harness) that loaded it.
+fn draw_skill_executions(f: &mut Frame, area: Rect, view: &SkillsViewState) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let head = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    // (line, execution index it stands for)
+    let mut lines: Vec<(Line<'static>, Option<usize>)> = Vec::new();
+    if view.launches.is_empty() && view.turns.is_empty() {
+        match &view.error {
+            Some(e) => {
+                lines.push((
+                    Line::styled(format!("  {e}"), Style::default().fg(Color::Red)),
+                    None,
+                ));
+            }
+            None => {
+                let harness = view
+                    .selected_row()
+                    .and_then(|r| r.harness(&view.native))
+                    .map(|h| h.display_name())
+                    .unwrap_or("this harness");
+                lines.push((
+                    Line::styled(format!("  no recorded executions on {harness}"), dim),
+                    None,
+                ));
+                lines.push((Line::raw(""), None));
+                lines.push((
+                    Line::styled(
+                        "  launch it with Enter, or `agent-mux trace import --discover` for past sessions",
+                        dim,
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    let harness_name = view
+        .selected_row()
+        .and_then(|r| r.harness(&view.native))
+        .map(|h| h.display_name())
+        .unwrap_or("harness");
+    if !view.launches.is_empty() {
+        lines.push((
+            Line::styled(
+                format!(
+                    "Sessions launched on {harness_name} ({})",
+                    view.launches.len()
+                ),
+                head,
+            ),
+            None,
+        ));
+        for (i, l) in view.launches.iter().enumerate() {
+            let status = if l.live {
+                Span::styled("● live   ", Style::default().fg(Color::Green))
+            } else {
+                let text = match (l.termination.as_deref(), l.exit_code) {
+                    (_, Some(code)) => format!("exit {code}"),
+                    (Some(t), None) => t.to_string(),
+                    (None, None) => "ended".to_string(),
+                };
+                Span::styled(format!("{text:<9}"), dim)
+            };
+            let matched = if l.by_id { "" } else { " (matched by name)" };
+            lines.push((
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::raw(format!("{} ", &fmt_time(l.started_ns)[..16])),
+                    provider_badge(&l.provider),
+                    status,
+                    Span::styled(
+                        format!(" {}t {:>7} ", l.turns, fmt_cost(l.total_cost_usd)),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::raw(truncate_path_chars(&l.cwd, 36)),
+                    Span::styled(matched.to_string(), dim),
+                ]),
+                Some(i),
+            ));
+        }
+        lines.push((Line::raw(""), None));
+    }
+    if !view.turns.is_empty() {
+        lines.push((
+            Line::styled(
+                format!("Turns that loaded it, any harness ({})", view.turns.len()),
+                head,
+            ),
+            None,
+        ));
+        for (i, t) in view.turns.iter().enumerate() {
+            let name = t
+                .stat
+                .name
+                .split_once(": ")
+                .map(|(_, rest)| rest)
+                .unwrap_or(&t.stat.name);
+            let attributed = if t.attributed {
+                Span::styled("attributed ", Style::default().fg(Color::Green))
+            } else {
+                Span::styled("loaded     ", dim)
+            };
+            lines.push((
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::raw(format!("{} ", &fmt_time(t.stat.start_ns)[..16])),
+                    Span::styled(
+                        format!("#{:<3} ", t.stat.ordinal),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        format!(
+                            "{:>6} {:>7} ",
+                            fmt_ms(t.stat.latency_ms),
+                            fmt_cost(t.stat.total_cost_usd)
+                        ),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    attributed,
+                    Span::raw(truncate_chars(name, 40)),
+                ]),
+                Some(view.launches.len() + i),
+            ));
+        }
+    }
+    let selected_line = lines
+        .iter()
+        .position(|(_, idx)| *idx == Some(view.selected_execution))
+        .unwrap_or(0);
+    let visible = usize::from(area.height).max(1);
+    let start = sidebar_window(selected_line, lines.len(), visible);
+    let end = (start + visible).min(lines.len());
+    let items: Vec<ListItem> = lines[start..end]
+        .iter()
+        .map(|(line, idx)| {
+            let item = ListItem::new(line.clone());
+            if *idx == Some(view.selected_execution) && view.focus == SkillsPane::Detail {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else if *idx == Some(view.selected_execution) && idx.is_some() {
+                item.style(Style::default().fg(Color::Cyan))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items), area);
+}
+
 fn draw_confirm(f: &mut Frame, message: &str) {
     let width = (message.chars().count() as u16 + 4).min(f.area().width);
     let area = centered(f.area(), width, 3);
@@ -2907,7 +2774,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut app = App::new(Config::default_profiles(), None, tx);
         app.mode = crate::app::Mode::Help;
-        let mut terminal = Terminal::new(TestBackend::new(100, 52)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 64)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
         for needle in [
@@ -2916,10 +2783,11 @@ mod tests {
             "PgUp/PgDn",
             "Ctrl+Q Ctrl+Q",
             "jump to session N",
-            "launch / attach the selected skill",
+            "skills view",
+            "install / refresh",
+            "open the selected execution's traces",
             "list → tree → timeline → loop",
             "fold / unfold the selected subtree",
-            "Enter filters turns",
             "also sent to Langfuse",
             "resume the selected session",
         ] {

@@ -75,13 +75,16 @@ FROM observations a JOIN traces t ON t.id=a.trace_id
 WHERE t.session_key = ?1 AND a.type='agent' GROUP BY agent_type ORDER BY agent_cost DESC;
 ```
 
-Sessions launched from the agent-mux sidebar for a skill (e.g. Heimdall itself):
+Sessions launched from the agent-mux Skills view for a skill (e.g. Heimdall itself). `?1` is the skill id; rows captured before the id was recorded match by the session name `<Name> (<harness>)` in `?2`:
 
 ```sql
 SELECT l.id, l.profile, l.provider, l.cwd, datetime(l.started_ns/1000000000,'unixepoch','localtime') AS started,
-       l.termination, l.exit_code, ss.turn_count, ss.tool_count, ss.error_count, ss.total_cost_usd
+       l.termination, l.exit_code, json_extract(l.metadata,'$.skill_harness') AS skill_harness,
+       ss.turn_count, ss.tool_count, ss.error_count, ss.total_cost_usd
 FROM launches l LEFT JOIN session_stats ss ON ss.key = l.session_key
-WHERE l.profile LIKE ?1 || ' (%' ORDER BY l.started_ns DESC LIMIT 20;
+WHERE json_extract(l.metadata,'$.skill_id') = ?1
+   OR (json_extract(l.metadata,'$.skill_id') IS NULL AND l.profile = ?2)
+ORDER BY l.started_ns DESC LIMIT 20;
 ```
 
 ## Interpretation guide

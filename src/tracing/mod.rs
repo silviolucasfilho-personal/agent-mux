@@ -109,6 +109,11 @@ pub struct LaunchPlan {
     /// The budget guard asked for, recorded on the launch row and enforced
     /// through a synchronous `PreToolUse` hook where the CLI has one.
     pub guard: Option<hooks::guard::Guard>,
+    /// The skill package this launch runs, as `(id, harness label)`, set by
+    /// the app for sidebar/skills-view launches. Recorded on the launch row
+    /// as `metadata.skill_id` / `metadata.skill_harness` so a skill's
+    /// executions are found by id rather than by session name.
+    pub skill: Option<(String, String)>,
     profile_name: String,
     dir: PathBuf,
 }
@@ -478,6 +483,7 @@ impl TraceRuntime {
             backend_requested,
             guard: None,
             profile_name: profile.name.clone(),
+            skill: None,
             dir: dir.to_path_buf(),
         })
     }
@@ -698,6 +704,7 @@ impl TraceRuntime {
             backend_requested,
             guard,
             profile_name: profile.name.clone(),
+            skill: None,
             dir: dir.to_path_buf(),
         })
     }
@@ -793,6 +800,16 @@ impl TraceRuntime {
         }
         if let Some(g) = &plan.guard {
             meta.insert("guard".into(), g.to_json());
+        }
+        if let Some((skill_id, harness)) = &plan.skill {
+            meta.insert(
+                "skill_id".into(),
+                serde_json::Value::from(skill_id.as_str()),
+            );
+            meta.insert(
+                "skill_harness".into(),
+                serde_json::Value::from(harness.as_str()),
+            );
         }
         launch.metadata = Some(serde_json::Value::Object(meta));
         self.send(StoreOp::Launch(launch));

@@ -677,3 +677,101 @@ pub fn agent_stats(conn: &Connection) -> rusqlite::Result<Vec<AgentStat>> {
     }
     Ok(stats)
 }
+
+/// One launch that ran a skill: the launch row joined to its turn count,
+/// priced cost, and whether the owning run is still alive.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillLaunch {
+    pub id: String,
+    pub provider: String,
+    pub profile: String,
+    pub cwd: String,
+    pub started_ns: i64,
+    pub ended_ns: Option<i64>,
+    pub termination: Option<String>,
+    pub exit_code: Option<i64>,
+    pub session_key: Option<String>,
+    /// Matched through `metadata.skill_id`; `false` means the row predates
+    /// that key and was matched by its session name.
+    pub by_id: bool,
+    pub turns: i64,
+    pub total_cost_usd: Option<f64>,
+    /// The launch has not ended and its run is still heartbeating.
+    pub live: bool,
+}
+
+/// Launches of `skill_id`, newest first. Rows without `metadata.skill_id`
+/// (captured before it was recorded) match when their profile name equals
+/// `session_name`, the `<name> (<harness>)` the skill launcher uses.
+/// `provider` narrows to one harness; `None` lists every harness.
+pub fn skill_launches(
+    conn: &Connection,
+    skill_id: &str,
+    session_name: &str,
+    provider: Option<&str>,
+    limit: usize,
+) -> rusqlite::Result<Vec<SkillLaunch>> {
+    let mut stmt = conn.prepare(
+        "SELECT l.id, l.provider, l.profile, l.cwd, l.started_ns, l.ended_ns, l.termination, l.exit_code,
+                l.session_key,
+                json_extract(l.metadata, '$.skill_id') IS NOT NULL AS by_id,
+                (SELECT COUNT(*) FROM traces t WHERE t.launch_id = l.id) AS turns,
+                (SELECT SUM(ts.total_cost_usd) FROM trace_stats ts WHERE ts.launch_id = l.id) AS total_cost_usd,
+                (l.ended_ns IS NULL AND EXISTS (SELECT 1 FROM runs r WHERE r.id = l.run_id AND r.ended_ns IS NULL)) AS live
+         FROM launches l
+         WHERE (json_extract(l.metadata, '$.skill_id') = ?1
+                OR (json_extract(l.metadata, '$.skill_id') IS NULL AND l.profile = ?2))
+           AND (?3 IS NULL OR l.provider = ?3)
+         ORDER BY l.started_ns DESC LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(
+        params![skill_id, session_name, provider, limit.max(1) as i64],
+        |r| {
+            Ok(SkillLaunch {
+                id: r.get(0)?,
+                provider: r.get(1)?,
+                profile: r.get(2)?,
+                cwd: r.get(3)?,
+                started_ns: r.get(4)?,
+                ended_ns: r.get(5)?,
+                termination: r.get(6)?,
+                exit_code: r.get(7)?,
+                session_key: r.get(8)?,
+                by_id: r.get::<_, i64>(9)? != 0,
+                turns: r.get(10)?,
+                total_cost_usd: r.get(11)?,
+                live: r.get::<_, i64>(12)? != 0,
+            })
+        },
+    )?;
+    rows.collect()
+}
+
+/// A turn that loaded a skill, with whether any observation in it was
+/// attributed to that skill.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillTurn {
+    pub stat: TraceStat,
+    pub attributed: bool,
+}
+
+/// Like [`traces_with_skill`], newest first, plus the attribution flag.
+pub fn traces_with_skill_detail(
+    conn: &Connection,
+    skill: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<SkillTurn>> {
+    let mut stmt = conn.prepare(
+        "SELECT *, EXISTS (SELECT 1 FROM observations o WHERE o.trace_id = trace_stats.id AND o.skill = ?1) AS attributed
+         FROM trace_stats
+         WHERE EXISTS (SELECT 1 FROM json_each(trace_stats.skills) j WHERE j.value = ?1)
+         ORDER BY start_ns DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![skill, limit as i64], |r| {
+        Ok(SkillTurn {
+            stat: trace_from_row(r)?,
+            attributed: r.get::<_, i64>("attributed")? != 0,
+        })
+    })?;
+    rows.collect()
+}

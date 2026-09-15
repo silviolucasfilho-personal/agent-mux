@@ -1,6 +1,6 @@
 # Skills in agent-mux
 
-agent-mux ships **Heimdall**, a skill that briefs you on active sessions and evaluates skills and agents from the local SQLite trace store. Skills are the only kind of package agent-mux manages: one harness-neutral `SKILL.md`, installed into each harness's own skill directory in the syntax that harness reads, and launched from the sidebar.
+agent-mux ships **Heimdall**, a skill that briefs you on active sessions and evaluates skills and agents from the local SQLite trace store. Skills are the only kind of package agent-mux manages: one harness-neutral `SKILL.md`, installed into each harness's own skill directory in the syntax that harness reads, and launched from the Skills view (`S`).
 
 ---
 
@@ -35,7 +35,7 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 
 - Compiled-in: Heimdall (`skills/heimdall` in the repository, embedded with `include_str!`). Always present.
 - User packages: `~/.agent-mux/skills/<id>/` (or `AGENT_MUX_SKILLS_DIR`). A user package with the same id shadows the compiled-in one.
-- The Skills sidebar rescans when you switch to it with Tab. Packages that fail to load are reported by `agent-mux skill list`.
+- The Skills view (`S`) rescans when it opens and on `r`. Packages that fail to load are reported by `agent-mux skill list`.
 
 ## 3. Harness syntax
 
@@ -49,15 +49,15 @@ Verified against the installed CLIs (Claude Code 2.1.x, Codex CLI 0.154.x, Antig
 
 The installed `SKILL.md` is the canonical file with one difference: the description ends with `Invoke with /<name>.` or `Invoke with $<name>.` for that harness. `reference/` files are copied unchanged. A `.agent-mux.json` manifest marks directories agent-mux wrote; a directory without it is never overwritten or removed unless `--force`.
 
-## 4. Launching from the sidebar
+## 4. Launching from the Skills view
 
-Enter on a skill opens the harness picker. On confirm agent-mux:
+Press `S`. The view lists every skill under each harness it declares, with its install state (`installed ✓`, `stale`, `not managed`, `not installed`, or `running [harness]`), and shows the selected row's details, its executions (sessions launched with it and turns that loaded it), and the telemetry briefing for a `trace.read` skill. `i` installs or refreshes, `u` uninstalls, `1`-`3` filter by harness. Enter on a row launches on that row's harness. On launch agent-mux:
 
 1. installs or refreshes the skill in that harness's directory (manifest hash check; unchanged packages are left alone),
 2. builds the harness command line: model and permission flags from your profile for that harness, then the opening prompt `<invocation> <startup_prompt>` as the positional prompt (Claude Code, Codex) or via `--prompt-interactive` (Antigravity),
-3. spawns the session with `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` (this executable) and `AGENT_MUX_TRACE_DB` (the store the TUI writes) in its environment.
+3. spawns the session with `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` (this executable) and `AGENT_MUX_TRACE_DB` (the store the TUI writes) in its environment, and records `skill_id` / `skill_harness` on the launch row so the Executions tab can find it later.
 
-A skill is a **singleton**: one live session per skill id. While it runs, the sidebar shows `<name> [<harness>]`, Enter attaches to it, and asking for another harness attaches with a warning. Close the session to start it on another harness. Restored sessions count.
+A skill is a **singleton**: one live session per skill id. While it runs, its row shows `running [<harness>]`, Enter attaches to it, and asking for another harness attaches with a warning. Close the session to start it on another harness. Restored sessions count.
 
 ## 5. CLI
 

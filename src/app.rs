@@ -13,6 +13,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
+mod skills_view;
+pub use skills_view::*;
+
 #[derive(Debug)]
 pub enum Mode {
     Control,
@@ -23,14 +26,13 @@ pub enum Mode {
     ConfirmKill,
     ConfirmQuit,
     Help,
-    SkillLauncher(SkillLauncherState),
+    SkillsView(Box<SkillsViewState>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SidebarSection {
     #[default]
     Active,
-    Skills,
     History,
 }
 
@@ -49,7 +51,7 @@ pub enum Action {
     OpenSessionHistory,
     OpenTraceBrowser,
     OpenHelp,
-    OpenSkillLauncher,
+    OpenSkillsView,
     KillSelected,
     EnterConfirmKill,
     RemoveSelected,
@@ -68,8 +70,8 @@ pub enum Action {
     HistoryKey,
     /// TraceBrowser mode: App routes the key to the TraceBrowserState it owns.
     BrowserKey,
-    /// SkillLauncher mode: App routes the key to the SkillLauncherState it owns.
-    SkillLauncherKey,
+    /// SkillsView mode: App routes the key to the SkillsViewState it owns.
+    SkillsKey,
 }
 
 /// Severity of a status-bar notice. The old single `error: Option<String>`
@@ -233,7 +235,6 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                             SidebarSection::Active if ctx.selected_status.is_some() => {
                                 Action::Attach
                             }
-                            SidebarSection::Skills => Action::OpenSkillLauncher,
                             SidebarSection::History => Action::RestartHistorySession,
                             _ => Action::None,
                         }
@@ -251,15 +252,9 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                                 Some(Status::Exited(_)) => Action::RespawnSelected,
                                 _ => Action::None,
                             },
-                            SidebarSection::Skills => Action::OpenSkillLauncher,
                             SidebarSection::History => Action::RestartHistorySession,
                         }
                     }
-                }
-                KeyCode::Char('h') | KeyCode::Char('H')
-                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Skills =>
-                {
-                    Action::OpenSkillLauncher
                 }
                 KeyCode::Char('a') | KeyCode::Char('A')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::History =>
@@ -274,6 +269,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     Action::ToggleTracing
                 }
                 KeyCode::Char('T') => Action::OpenTraceBrowser,
+                KeyCode::Char('S') => Action::OpenSkillsView,
                 KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
                 KeyCode::Char('x')
                     if ctx.sidebar_hidden || ctx.sidebar_section == SidebarSection::Active =>
@@ -307,7 +303,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::NewSession(_) => Action::DialogKey,
         Mode::SessionHistory(_) => Action::HistoryKey,
         Mode::TraceBrowser(_) => Action::BrowserKey,
-        Mode::SkillLauncher(_) => Action::SkillLauncherKey,
+        Mode::SkillsView(_) => Action::SkillsKey,
         Mode::ConfirmKill => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::KillSelected,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
@@ -431,86 +427,6 @@ fn default_dir_for_profile(profile: Option<&Profile>) -> String {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| ".".into())
         })
-}
-
-/// State for the skill harness picker dialog.
-#[derive(Debug, Clone)]
-pub struct SkillLauncherState {
-    pub selected: usize,
-    pub error: Option<String>,
-    pub skill_id: String,
-    pub skill_name: String,
-    pub harnesses: Vec<crate::harness::Harness>,
-}
-
-impl Default for SkillLauncherState {
-    fn default() -> Self {
-        Self {
-            selected: 0,
-            error: None,
-            skill_id: String::new(),
-            skill_name: String::new(),
-            harnesses: crate::harness::Harness::ALL.to_vec(),
-        }
-    }
-}
-
-impl SkillLauncherState {
-    pub fn for_skill(skill: &crate::skill::SkillDefinition) -> Self {
-        let harnesses = if skill.harnesses.is_empty() {
-            crate::harness::Harness::ALL.to_vec()
-        } else {
-            skill.harnesses.clone()
-        };
-        let default_idx = crate::skill::default_harness_index(skill);
-        Self {
-            selected: if default_idx < harnesses.len() {
-                default_idx
-            } else {
-                0
-            },
-            error: None,
-            skill_id: skill.id.clone(),
-            skill_name: skill.name.clone(),
-            harnesses,
-        }
-    }
-
-    pub fn with_harnesses(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        harnesses: Vec<crate::harness::Harness>,
-    ) -> Self {
-        let h = if harnesses.is_empty() {
-            crate::harness::Harness::ALL.to_vec()
-        } else {
-            harnesses
-        };
-        Self {
-            selected: 0,
-            error: None,
-            skill_id: id.into(),
-            skill_name: name.into(),
-            harnesses: h,
-        }
-    }
-
-    pub fn selected_harness(&self) -> crate::harness::Harness {
-        self.harnesses
-            .get(self.selected)
-            .copied()
-            .unwrap_or(crate::harness::Harness::Claude)
-    }
-
-    pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    pub fn move_down(&mut self) {
-        if self.selected + 1 < self.harnesses.len() {
-            self.selected += 1;
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1158,12 +1074,6 @@ pub struct TraceBrowserState {
     /// Detail-pane interior height, written back by the renderer.
     pub viewport_rows: std::cell::Cell<usize>,
     last_refresh: Instant,
-    /// `K`: the left column lists skills instead of sessions.
-    pub skills_pane: bool,
-    pub skills: Vec<crate::tracing::inventory::SkillReport>,
-    pub selected_skill: usize,
-    cwd: Option<std::path::PathBuf>,
-    home: Option<std::path::PathBuf>,
     /// The store, for the browser's own writes (scores).
     db_path: Option<std::path::PathBuf>,
     /// Latest verdict per turn id, for the marks in the Turns pane.
@@ -1219,13 +1129,6 @@ impl TraceBrowserState {
             search_query: None,
             viewport_rows: std::cell::Cell::new(30),
             last_refresh: Instant::now(),
-            skills_pane: false,
-            skills: Vec::new(),
-            selected_skill: 0,
-            cwd: current_dir.map(std::path::Path::to_path_buf),
-            home: std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(std::path::PathBuf::from),
             db_path: db_path.map(std::path::Path::to_path_buf),
             scores: std::collections::HashMap::new(),
             langfuse: None,
@@ -1284,90 +1187,6 @@ impl TraceBrowserState {
         self.refresh_scores();
         Ok(message)
     }
-    /// Where the Skills pane reads the user's home definitions from.
-    pub fn with_home(mut self, home: Option<std::path::PathBuf>) -> Self {
-        if home.is_some() {
-            self.home = home;
-        }
-        self
-    }
-
-    /// `K`: the left column shows the skill inventory joined to the store
-    /// instead of sessions, and back.
-    pub fn toggle_skills_pane(&mut self) {
-        self.skills_pane = !self.skills_pane;
-        if self.skills_pane {
-            self.load_skills();
-            self.focused = BrowserPane::Sessions;
-        }
-    }
-
-    pub fn load_skills(&mut self) {
-        use crate::tracing::inventory::{inventory_all, skill_reports};
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let home = self
-            .home
-            .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let defs = inventory_all(&cwd, &home);
-        let (stats, prompts) = match &self.conn {
-            Some(conn) => (
-                crate::tracing::store::query::skill_stats(conn).unwrap_or_default(),
-                crate::tracing::store::query::prompt_rows(conn, 5000).unwrap_or_default(),
-            ),
-            None => (Vec::new(), Vec::new()),
-        };
-        self.skills = skill_reports(&defs, &stats, &prompts);
-        self.selected_skill = self.selected_skill.min(self.skills.len().saturating_sub(1));
-    }
-
-    pub fn step_skill(&mut self, delta: isize) {
-        if self.skills.is_empty() {
-            return;
-        }
-        let max = self.skills.len() as isize - 1;
-        self.selected_skill = (self.selected_skill as isize + delta).clamp(0, max) as usize;
-    }
-
-    /// `Enter` on a skill: the Turns pane shows the turns that loaded it.
-    pub fn filter_by_skill(&mut self) {
-        let Some(report) = self.skills.get(self.selected_skill) else {
-            return;
-        };
-        let Some(conn) = &self.conn else {
-            return;
-        };
-        let names = report
-            .def
-            .as_ref()
-            .map(|d| d.store_names())
-            .unwrap_or_else(|| vec![report.name.clone()]);
-        let label = report.name.clone();
-        let mut turns = Vec::new();
-        for name in names {
-            if let Ok(found) = crate::tracing::store::query::traces_with_skill(conn, &name, 200) {
-                for t in found {
-                    if !turns
-                        .iter()
-                        .any(|u: &crate::tracing::store::query::TraceStat| u.id == t.id)
-                    {
-                        turns.push(t);
-                    }
-                }
-            }
-        }
-        turns.sort_by_key(|t| std::cmp::Reverse(t.start_ns));
-        self.turns = turns;
-        self.selected_turn = 0;
-        self.search_query = Some(format!("skill: {label}"));
-        self.focused = BrowserPane::Turns;
-        self.error = None;
-        self.load_observations();
-    }
 
     fn filter(&self) -> crate::tracing::store::query::SessionFilter {
         crate::tracing::store::query::SessionFilter {
@@ -1378,6 +1197,28 @@ impl TraceBrowserState {
             },
             since_ns: None,
             limit: 500,
+        }
+    }
+
+    /// Positions the browser on `session_key` (widening to all projects
+    /// when it is outside the current one) and, when given, on `trace_id`.
+    pub fn focus_session(&mut self, session_key: &str, trace_id: Option<&str>) {
+        if !self.sessions.iter().any(|s| s.key == session_key) {
+            self.all_projects = true;
+            self.reload_sessions();
+        }
+        let Some(idx) = self.sessions.iter().position(|s| s.key == session_key) else {
+            return;
+        };
+        self.selected_session = idx;
+        self.search_query = None;
+        self.load_turns();
+        if let Some(tid) = trace_id
+            && let Some(t) = self.turns.iter().position(|t| t.id == tid)
+        {
+            self.selected_turn = t;
+            self.load_observations();
+            self.focused = BrowserPane::Turns;
         }
     }
 
@@ -1786,10 +1627,14 @@ pub struct App {
     pub sidebar_hidden: bool,
     /// Overall terminal dimensions (rows, cols).
     pub terminal_size: (u16, u16),
-    /// Skills available in the Skills sidebar section.
+    /// Skill packages, loaded at startup and rescanned when the Skills
+    /// view opens; `launch_skill` resolves ids against this list.
     pub skills: Vec<crate::skill::SkillDefinition>,
-    /// Selected skill index in the Skills section.
-    pub selected_skill: usize,
+    /// Where packages are installed for a harness; `None` is the real home.
+    /// Tests point this at a temporary directory.
+    pub skill_install_home: Option<std::path::PathBuf>,
+    /// Where user packages are read from; `None` is `~/.agent-mux/skills`.
+    pub skills_dir: Option<std::path::PathBuf>,
     /// Cached briefing for the active Agents preview (if capable of trace.read).
     pub cached_briefing: Option<crate::tracing::analysis::Briefing>,
     /// Instant when the briefing was last successfully refreshed.
@@ -1854,7 +1699,8 @@ impl App {
             sidebar_hidden: false,
             terminal_size: (27, 112),
             skills,
-            selected_skill: 0,
+            skill_install_home: None,
+            skills_dir: None,
             cached_briefing: None,
             cached_briefing_as_of: None,
             cached_briefing_warning: None,
@@ -1867,20 +1713,17 @@ impl App {
         }
     }
 
-    /// Rescans ~/.agent-mux/skills and the compiled-in packages, keeping the
-    /// selection on the same skill id when it still exists.
+    /// Rescans the user skill directory and the compiled-in packages.
     pub fn reload_skills(&mut self) {
-        let keep = self.selected_skill().map(|s| s.id.clone());
-        let (skills, _) = crate::skill::load_skills(None);
+        let (skills, _) = crate::skill::load_skills(self.skills_dir.as_deref());
         self.skills = skills;
-        self.selected_skill = keep
-            .and_then(|id| self.skills.iter().position(|s| s.id == id))
-            .unwrap_or_else(|| self.selected_skill.min(self.skills.len().saturating_sub(1)));
     }
 
-    /// Returns the currently selected skill, if any.
-    pub fn selected_skill(&self) -> Option<&crate::skill::SkillDefinition> {
-        self.skills.get(self.selected_skill)
+    /// The home whose harness skill directories receive installs.
+    fn skill_home(&self) -> std::path::PathBuf {
+        self.skill_install_home
+            .clone()
+            .unwrap_or_else(crate::skill::install::home_dir)
     }
 
     /// Index of the live session running `skill_id`. Skills are singletons:
@@ -1944,6 +1787,9 @@ impl App {
         if let Mode::TraceBrowser(browser) = &mut self.mode {
             browser.refresh_if_live(now);
         }
+        if let Mode::SkillsView(view) = &mut self.mode {
+            view.refresh_if_live(now);
+        }
         self.publish_live_snapshot_if_needed(now);
         self.refresh_briefing_if_needed(now);
     }
@@ -1981,13 +1827,10 @@ impl App {
 
     /// Refreshes the session briefing asynchronously if a trace-capable preview is visible.
     pub fn refresh_briefing_if_needed(&mut self, now: Instant) {
-        let is_trace_preview_visible = !self.sidebar_hidden
-            && self.sidebar_section == SidebarSection::Skills
-            && matches!(self.mode, Mode::Control)
-            && self
-                .skills
-                .get(self.selected_skill)
-                .map_or(false, |a| a.capabilities.iter().any(|c| c == "trace.read"));
+        let is_trace_preview_visible = matches!(
+            &self.mode,
+            Mode::SkillsView(view) if view.tab == SkillsTab::Briefing && view.selected_reads_traces()
+        );
 
         if is_trace_preview_visible && !self.briefing_pending {
             let should_refresh = match self.last_briefing_refresh {
@@ -2176,7 +2019,7 @@ impl App {
                 continue;
             };
             let id = self.next_id;
-            match self.spawn_traced(id, s.profile, dir) {
+            match self.spawn_traced_with_env(id, s.profile, dir, &[], s.skill_id.as_deref()) {
                 Ok(mut session) => {
                     session.skill_id = s.skill_id;
                     self.next_id += 1;
@@ -2206,24 +2049,32 @@ impl App {
         profile: Profile,
         dir: std::path::PathBuf,
     ) -> anyhow::Result<Session> {
-        self.spawn_traced_with_env(id, profile, dir, &[])
+        self.spawn_traced_with_env(id, profile, dir, &[], None)
     }
 
-    /// Like `spawn_traced`, with extra environment for the child (an agent
-    /// launch's declared variables) merged after the tracing plan's own.
+    /// Like `spawn_traced`, with extra environment for the child (a skill
+    /// launch's declared variables) merged after the tracing plan's own,
+    /// and the skill id recorded on the launch row when there is one.
     fn spawn_traced_with_env(
         &mut self,
         id: usize,
         mut profile: Profile,
         dir: std::path::PathBuf,
         env: &[(String, String)],
+        skill_id: Option<&str>,
     ) -> anyhow::Result<Session> {
         prepare_nested_tui(&mut profile);
         let (rows, cols) = self.pane_size;
-        let plan = self
+        let mut plan = self
             .tracing
             .as_ref()
             .and_then(|rt| rt.plan_launch(&profile, &dir));
+        if let (Some(p), Some(skill)) = (plan.as_mut(), skill_id) {
+            let harness = crate::harness::Harness::detect(&profile.command)
+                .map(|h| h.as_str())
+                .unwrap_or("unknown");
+            p.skill = Some((skill.to_string(), harness.to_string()));
+        }
         let extra_args: &[String] = match &plan {
             Some(p) => &p.extra_args,
             None => &[],
@@ -2562,7 +2413,6 @@ impl App {
             // selected row), so moving detail_lines' scroll_offset had no
             // visible effect. Scroll the focused list instead.
             match browser.focused {
-                BrowserPane::Sessions if browser.skills_pane => browser.step_skill(delta),
                 BrowserPane::Sessions => {
                     if !browser.sessions.is_empty() {
                         let max = browser.sessions.len() as isize - 1;
@@ -2586,6 +2436,25 @@ impl App {
                     }
                 }
                 BrowserPane::Detail => browser.step_observation(delta),
+            }
+            return;
+        }
+        if let Mode::SkillsView(ref mut view) = self.mode {
+            let delta = match ev.kind {
+                MouseEventKind::ScrollUp => -3,
+                MouseEventKind::ScrollDown => 3,
+                _ => return,
+            };
+            match (view.focus, view.tab) {
+                (SkillsPane::Skills, _) => view.step(delta),
+                (SkillsPane::Detail, SkillsTab::Executions) => view.step_execution(delta),
+                (SkillsPane::Detail, _) => {
+                    view.scroll_offset = if delta < 0 {
+                        view.scroll_offset.saturating_sub(3)
+                    } else {
+                        view.scroll_offset.saturating_add(3).min(view.max_scroll())
+                    };
+                }
             }
             return;
         }
@@ -2623,8 +2492,7 @@ impl App {
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
-            let (active_rect, agents_rect, history_rect) =
-                ui::sidebar_areas(self.pane_size.0 + 3, self.skills.len());
+            let (active_rect, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
             if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
                 if ev.row > active_rect.y
                     && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
@@ -2643,20 +2511,6 @@ impl App {
                                 s.tracker.on_attach();
                             }
                         }
-                    }
-                }
-                return;
-            } else if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height {
-                self.sidebar_section = SidebarSection::Skills;
-                if ev.row > agents_rect.y
-                    && ev.row < agents_rect.y + agents_rect.height.saturating_sub(1)
-                {
-                    let visible = usize::from(agents_rect.height.saturating_sub(2));
-                    let row = usize::from(ev.row - agents_rect.y - 1);
-                    let idx =
-                        ui::sidebar_window(self.selected_skill, self.skills.len(), visible) + row;
-                    if idx < self.skills.len() {
-                        self.selected_skill = idx;
                     }
                 }
                 return;
@@ -2716,25 +2570,7 @@ impl App {
             ) =>
             {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
-                    let (_, agents_rect, history_rect) =
-                        ui::sidebar_areas(self.pane_size.0 + 3, self.skills.len());
-                    if ev.row >= agents_rect.y
-                        && ev.row < agents_rect.y + agents_rect.height
-                        && !self.skills.is_empty()
-                    {
-                        let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
-                            -1
-                        } else {
-                            1
-                        };
-                        if delta > 0 {
-                            self.selected_skill =
-                                (self.selected_skill + 1).min(self.skills.len() - 1);
-                        } else {
-                            self.selected_skill = self.selected_skill.saturating_sub(1);
-                        }
-                        return;
-                    }
+                    let (_, history_rect) = ui::sidebar_areas(self.pane_size.0 + 3);
                     if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
                         let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
                             -1
@@ -2936,16 +2772,6 @@ impl App {
                             if !self.sessions.is_empty() && self.selected + 1 < self.sessions.len()
                             {
                                 self.selected += 1;
-                            } else {
-                                self.sidebar_section = SidebarSection::Skills;
-                                self.selected_skill = 0;
-                            }
-                        }
-                        SidebarSection::Skills => {
-                            if !self.skills.is_empty()
-                                && self.selected_skill + 1 < self.skills.len()
-                            {
-                                self.selected_skill += 1;
                             } else if !self.history_sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::History;
                                 self.selected_history = 0;
@@ -2969,20 +2795,12 @@ impl App {
                         SidebarSection::Active => {
                             self.selected = self.selected.saturating_sub(1);
                         }
-                        SidebarSection::Skills => {
-                            if self.selected_skill > 0 {
-                                self.selected_skill -= 1;
-                            } else if !self.sessions.is_empty() {
-                                self.sidebar_section = SidebarSection::Active;
-                                self.selected = self.sessions.len() - 1;
-                            }
-                        }
                         SidebarSection::History => {
                             if self.selected_history > 0 {
                                 self.selected_history -= 1;
-                            } else {
-                                self.sidebar_section = SidebarSection::Skills;
-                                self.selected_skill = self.skills.len().saturating_sub(1);
+                            } else if !self.sessions.is_empty() {
+                                self.sidebar_section = SidebarSection::Active;
+                                self.selected = self.sessions.len() - 1;
                             }
                         }
                     }
@@ -2995,31 +2813,13 @@ impl App {
                     }
                 } else {
                     self.sidebar_section = match self.sidebar_section {
-                        SidebarSection::Active => {
-                            self.reload_skills();
-                            SidebarSection::Skills
-                        }
-                        SidebarSection::Skills => SidebarSection::History,
+                        SidebarSection::Active => SidebarSection::History,
                         SidebarSection::History => SidebarSection::Active,
                     };
                 }
             }
-            Action::OpenSkillLauncher => {
-                let Some(skill) = self.skills.get(self.selected_skill) else {
-                    return;
-                };
-                // Singleton: a running skill session is attached to, never
-                // relaunched; the harness can only change once it is closed.
-                if let Some(idx) = self.running_skill_session(&skill.id) {
-                    self.attach_to_session(idx);
-                } else {
-                    let state = SkillLauncherState::for_skill(skill);
-                    self.mode = Mode::SkillLauncher(state);
-                }
-            }
-            Action::SkillLauncherKey => {
-                self.handle_skill_launcher_key(key);
-            }
+            Action::OpenSkillsView => self.open_skills_view(),
+            Action::SkillsKey => self.handle_skills_key(key),
             Action::RestartHistorySession => {
                 if let Some(summary) = self.history_sessions.get(self.selected_history).cloned() {
                     self.resume_history_session(&summary);
@@ -3112,11 +2912,9 @@ impl App {
                     .get(self.selected)
                     .map(|s| s.dir.clone())
                     .or_else(|| std::env::current_dir().ok());
-                let home = self.tracing.as_ref().map(|rt| rt.home().to_path_buf());
                 let langfuse = self.tracing.as_ref().and_then(|rt| rt.langfuse().cloned());
                 self.mode = Mode::TraceBrowser(Box::new(
                     TraceBrowserState::new(self.trace_db_path.as_deref(), cur_dir.as_deref())
-                        .with_home(home)
                         .with_langfuse(langfuse),
                 ));
             }
@@ -3303,7 +3101,6 @@ impl App {
             }
             KeyCode::Char('/') => browser.search_input = Some(String::new()),
             KeyCode::Char('v') | KeyCode::Char('V') => browser.cycle_detail_view(),
-            KeyCode::Char('K') => browser.toggle_skills_pane(),
             KeyCode::Char(' ') => browser.toggle_collapsed(),
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 browser.all_projects = !browser.all_projects;
@@ -3315,13 +3112,11 @@ impl App {
                 }
             }
             KeyCode::Enter => match browser.focused {
-                BrowserPane::Sessions if browser.skills_pane => browser.filter_by_skill(),
                 BrowserPane::Sessions => browser.focused = BrowserPane::Turns,
                 BrowserPane::Turns => browser.focused = BrowserPane::Detail,
                 BrowserPane::Detail => browser.toggle_expanded(),
             },
             KeyCode::Down | KeyCode::Char('j') => match browser.focused {
-                BrowserPane::Sessions if browser.skills_pane => browser.step_skill(1),
                 BrowserPane::Sessions => {
                     if !browser.sessions.is_empty() {
                         let next = (browser.selected_session + 1).min(browser.sessions.len() - 1);
@@ -3353,7 +3148,6 @@ impl App {
                 }
             },
             KeyCode::Up | KeyCode::Char('k') => match browser.focused {
-                BrowserPane::Sessions if browser.skills_pane => browser.step_skill(-1),
                 BrowserPane::Sessions => {
                     if browser.selected_session > 0 {
                         browser.selected_session -= 1;
@@ -3486,50 +3280,228 @@ impl App {
         }
     }
 
-    fn handle_skill_launcher_key(&mut self, key: &KeyEvent) {
-        let Mode::SkillLauncher(ref mut state) = self.mode else {
+    /// `S`: opens the Skills view over the current screen.
+    fn open_skills_view(&mut self) {
+        self.reload_skills();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let install_home = self.skill_home();
+        // A test override of the install home is the whole home: harness
+        // definitions are read from the same tree the installs land in.
+        let home = match &self.skill_install_home {
+            Some(h) => h.clone(),
+            None => self
+                .tracing
+                .as_ref()
+                .map(|rt| rt.home().to_path_buf())
+                .unwrap_or_else(crate::skill::install::home_dir),
+        };
+        self.mode = Mode::SkillsView(Box::new(SkillsViewState::new(
+            self.trace_db_path.as_deref(),
+            &cwd,
+            &home,
+            &install_home,
+            self.skills_dir.as_deref(),
+        )));
+    }
+
+    fn handle_skills_key(&mut self, key: &KeyEvent) {
+        let Mode::SkillsView(view) = &mut self.mode else {
             return;
         };
+        // the uninstall confirmation captures every key until y/n
+        if view.pending_uninstall {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    view.pending_uninstall = false;
+                    let target = view
+                        .selected_package()
+                        .map(|(def, h)| (def.id.clone(), def.name.clone(), h));
+                    let home = view.install_home().to_path_buf();
+                    if let Some((id, name, harness)) = target {
+                        let outcome = crate::skill::install::uninstall(&id, harness, &home);
+                        view.reload();
+                        self.notice = Some(match outcome {
+                            Ok(true) => Notice::info(format!(
+                                "{name} removed from {}",
+                                harness.display_name()
+                            )),
+                            Ok(false) => Notice::info(format!(
+                                "{name} was not installed on {}",
+                                harness.display_name()
+                            )),
+                            Err(e) => Notice::error(format!("uninstall: {e}")),
+                        });
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    view.pending_uninstall = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+        let page = view.viewport_rows.get().max(1);
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::Control;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                state.move_up();
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                state.move_down();
-            }
-            KeyCode::Char('1') | KeyCode::Char('c') | KeyCode::Char('C') => {
-                if !state.harnesses.is_empty() {
-                    state.selected = 0;
+                if view.focus == SkillsPane::Detail {
+                    view.focus = SkillsPane::Skills;
+                } else if !view.clear_filter() {
+                    self.mode = Mode::Control;
                 }
+            }
+            KeyCode::Tab => view.next_tab(),
+            KeyCode::BackTab => view.prev_tab(),
+            KeyCode::Right => view.focus = SkillsPane::Detail,
+            KeyCode::Left => view.focus = SkillsPane::Skills,
+            KeyCode::Char('1') | KeyCode::Char('c') | KeyCode::Char('C') => {
+                view.toggle_filter(crate::harness::Harness::Claude)
             }
             KeyCode::Char('2') | KeyCode::Char('x') | KeyCode::Char('X') => {
-                if state.harnesses.len() > 1 {
-                    state.selected = 1;
-                }
+                view.toggle_filter(crate::harness::Harness::Codex)
             }
             KeyCode::Char('3') | KeyCode::Char('a') | KeyCode::Char('A') => {
-                if state.harnesses.len() > 2 {
-                    state.selected = 2;
+                view.toggle_filter(crate::harness::Harness::Antigravity)
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                view.reload();
+                self.reload_skills();
+            }
+            KeyCode::Char('i') | KeyCode::Char('I') => {
+                let force = key.code == KeyCode::Char('I');
+                let target = view.selected_package().map(|(def, h)| (def.clone(), h));
+                let home = view.install_home().to_path_buf();
+                match target {
+                    Some((def, harness)) => {
+                        let outcome = crate::skill::install::install(&def, harness, &home, force);
+                        view.reload();
+                        self.notice = Some(match outcome {
+                            Ok(report) if report.unchanged => Notice::info(format!(
+                                "{} is current on {}",
+                                def.name,
+                                harness.display_name()
+                            )),
+                            Ok(_) => Notice::info(format!(
+                                "{} installed on {}",
+                                def.name,
+                                harness.display_name()
+                            )),
+                            Err(e) => Notice::error(format!("install: {e}")),
+                        });
+                    }
+                    None => {
+                        self.notice =
+                            Some(Notice::warn("native skills are managed by their harness"));
+                    }
                 }
             }
-            KeyCode::Enter => {
-                let skill_id = state.skill_id.clone();
-                let harness = state.selected_harness();
-                let launch_res = self.launch_skill(&skill_id, harness);
-                match launch_res {
-                    Ok(_) => {
-                        self.sidebar_section = SidebarSection::Active;
-                        self.mode = Mode::Attached;
-                    }
-                    Err(e) => {
-                        self.mode = Mode::Control;
-                        self.notice = Some(Notice::error(format!("Skill launch failed: {e}")));
-                    }
+            KeyCode::Char('u') | KeyCode::Char('U') => {
+                let Some((def, harness)) = view.selected_package() else {
+                    self.notice = Some(Notice::warn("native skills are managed by their harness"));
+                    return;
+                };
+                let installed = view
+                    .install
+                    .get(&(def.id.clone(), harness))
+                    .is_some_and(|st| st.installed);
+                if !installed {
+                    self.notice = Some(Notice::info(format!(
+                        "{} is not installed on {}",
+                        def.name,
+                        harness.display_name()
+                    )));
+                } else if self.sessions.iter().any(|s| {
+                    s.skill_id.as_deref() == Some(def.id.as_str())
+                        && crate::harness::Harness::detect(&s.profile.command) == Some(harness)
+                        && !matches!(s.status(Instant::now()), Status::Exited(_))
+                }) {
+                    self.notice = Some(Notice::warn(format!(
+                        "{} is running on {}; close it before uninstalling",
+                        def.name,
+                        harness.display_name()
+                    )));
+                } else {
+                    view.pending_uninstall = true;
                 }
             }
+            KeyCode::Char('T') => {
+                let target = view.selected_execution().and_then(|e| {
+                    e.session_key()
+                        .map(|k| (k.to_string(), e.trace_id().map(str::to_string)))
+                });
+                let Some((session_key, trace_id)) = target else {
+                    self.notice = Some(Notice::info(
+                        "select an execution to open in the Trace Browser",
+                    ));
+                    return;
+                };
+                let cur_dir = std::env::current_dir().ok();
+                let langfuse = self.tracing.as_ref().and_then(|rt| rt.langfuse().cloned());
+                let mut browser =
+                    TraceBrowserState::new(self.trace_db_path.as_deref(), cur_dir.as_deref())
+                        .with_langfuse(langfuse);
+                browser.focus_session(&session_key, trace_id.as_deref());
+                self.mode = Mode::TraceBrowser(Box::new(browser));
+            }
+            KeyCode::Enter => match view.focus {
+                SkillsPane::Skills => {
+                    if let Some((def, harness)) = view.selected_package() {
+                        let (id, name) = (def.id.clone(), def.name.clone());
+                        match self.launch_skill(&id, harness) {
+                            Ok(_) => self.mode = Mode::Attached,
+                            Err(e) => {
+                                self.notice =
+                                    Some(Notice::error(format!("{name} launch failed: {e}")));
+                            }
+                        }
+                    } else if view.selected_native().is_some() {
+                        self.notice =
+                            Some(Notice::info("native skills are launched by their harness"));
+                    }
+                }
+                SkillsPane::Detail => {
+                    if view.tab == SkillsTab::Executions
+                        && let Some(Execution::Launch(launch)) = view.selected_execution()
+                    {
+                        let launch_id = launch.id.clone();
+                        let live = self.sessions.iter().position(|s| {
+                            s.trace.as_ref().is_some_and(|t| t.launch_id == launch_id)
+                                && !matches!(s.status(Instant::now()), Status::Exited(_))
+                        });
+                        match live {
+                            Some(idx) => self.attach_to_session(idx),
+                            None => {
+                                self.notice = Some(Notice::info(
+                                    "that launch is not running in this agent-mux; T opens its traces",
+                                ));
+                            }
+                        }
+                    }
+                }
+            },
+            KeyCode::Down | KeyCode::Char('j') => match (view.focus, view.tab) {
+                (SkillsPane::Skills, _) => view.step(1),
+                (SkillsPane::Detail, SkillsTab::Executions) => view.step_execution(1),
+                (SkillsPane::Detail, _) => {
+                    view.scroll_offset =
+                        view.scroll_offset.saturating_add(1).min(view.max_scroll());
+                }
+            },
+            KeyCode::Up | KeyCode::Char('k') => match (view.focus, view.tab) {
+                (SkillsPane::Skills, _) => view.step(-1),
+                (SkillsPane::Detail, SkillsTab::Executions) => view.step_execution(-1),
+                (SkillsPane::Detail, _) => {
+                    view.scroll_offset = view.scroll_offset.saturating_sub(1);
+                }
+            },
+            KeyCode::PageDown => {
+                view.scroll_offset = view
+                    .scroll_offset
+                    .saturating_add(page)
+                    .min(view.max_scroll());
+            }
+            KeyCode::PageUp => view.scroll_offset = view.scroll_offset.saturating_sub(page),
+            KeyCode::Home => view.scroll_offset = 0,
+            KeyCode::End => view.scroll_offset = view.max_scroll(),
             _ => {}
         }
     }
@@ -3565,7 +3537,7 @@ impl App {
         }
 
         // 2. Install the skill where this harness reads it.
-        let home = crate::skill::install::home_dir();
+        let home = self.skill_home();
         crate::skill::install::install(&skill, harness, &home, false)
             .map_err(|e| anyhow::anyhow!("cannot install skill for {}: {e}", harness.as_str()))?;
 
@@ -3595,8 +3567,13 @@ impl App {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let id = self.next_id;
-        let mut session =
-            self.spawn_traced_with_env(id, launch.profile, launch.cwd, &launch.env)?;
+        let mut session = self.spawn_traced_with_env(
+            id,
+            launch.profile,
+            launch.cwd,
+            &launch.env,
+            Some(&skill.id),
+        )?;
         session.skill_id = Some(skill.id.clone());
         self.next_id += 1;
         self.sessions.push(session);
@@ -3683,13 +3660,15 @@ impl App {
         };
         let profile = old.profile.clone();
         let dir = old.dir.clone();
+        let skill_id = old.skill_id.clone();
         // Fresh id: a stale reader thread from the dead session may still
         // send PtyExit for the old id; it must not find the new session.
         // Launch extras are re-planned fresh too (never stored in the
         // profile), so a respawned Claude tab gets a NEW session uuid.
         let id = self.next_id;
-        match self.spawn_traced(id, profile, dir) {
-            Ok(session) => {
+        match self.spawn_traced_with_env(id, profile, dir, &[], skill_id.as_deref()) {
+            Ok(mut session) => {
+                session.skill_id = skill_id;
                 self.next_id += 1;
                 self.sessions[self.selected] = session;
                 let _ = self.save_active_sessions();
