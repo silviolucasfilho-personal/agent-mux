@@ -16,6 +16,7 @@ pub mod gate;
 pub mod patterns;
 pub mod readiness;
 pub mod registry;
+pub mod run;
 pub mod runlog;
 pub mod scaffold;
 pub mod schedule;
@@ -154,7 +155,10 @@ pub struct Pattern {
 impl Pattern {
     /// The skill whose invocation opens a run.
     pub fn triage_skill(&self) -> &str {
-        self.skills.first().map(String::as_str).unwrap_or("loop-triage")
+        self.skills
+            .first()
+            .map(String::as_str)
+            .unwrap_or("loop-triage")
     }
 }
 
@@ -275,11 +279,11 @@ pub fn parse_interval(s: &str) -> Option<u64> {
 
 /// The shortest of `1d`, `2h`, `15m` that spells `secs` exactly, else `<n>s`.
 pub fn format_interval(secs: u64) -> String {
-    if secs % 86_400 == 0 {
+    if secs.is_multiple_of(86_400) {
         format!("{}d", secs / 86_400)
-    } else if secs % 3600 == 0 {
+    } else if secs.is_multiple_of(3600) {
         format!("{}h", secs / 3600)
-    } else if secs % 60 == 0 {
+    } else if secs.is_multiple_of(60) {
         format!("{}m", secs / 60)
     } else {
         format!("{secs}s")

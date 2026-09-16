@@ -15,6 +15,9 @@ pub struct Registration {
     /// A budget guard is set: `PreToolUse` waits for the hook's answer
     /// (`--guard`) instead of running async.
     pub guard: bool,
+    /// A loop launch: `PreToolUse` also carries `--loop`, which enforces
+    /// the launch row's `loop_policy` and fails closed for write tools.
+    pub loop_guard: bool,
 }
 
 /// The running binary, for hook commands. `None` when the OS cannot say.
@@ -42,7 +45,7 @@ pub const CLAUDE_EVENTS: &[(&str, bool, bool)] = &[
 ];
 
 fn handler(reg: &Registration, event: &str, is_async: bool) -> Value {
-    let guarded = reg.guard && event == "PreToolUse";
+    let guarded = (reg.guard || reg.loop_guard) && event == "PreToolUse";
     let is_async = is_async && !guarded;
     let mut args = vec![
         "trace".to_string(),
@@ -53,8 +56,11 @@ fn handler(reg: &Registration, event: &str, is_async: bool) -> Value {
         "--content-mode".to_string(),
         reg.content_mode.as_str().to_string(),
     ];
-    if guarded {
+    if guarded && reg.guard {
         args.push("--guard".to_string());
+    }
+    if guarded && reg.loop_guard {
+        args.push("--loop".to_string());
     }
     let mut h = json!({
         "type": "command",
@@ -195,6 +201,7 @@ mod tests {
             home: PathBuf::from("/home/me"),
             content_mode: ContentMode::Full,
             guard: false,
+            loop_guard: false,
         }
     }
 
@@ -286,6 +293,7 @@ mod tests {
             home: PathBuf::from(r"C:\Users\me"),
             content_mode: ContentMode::Metadata,
             guard: false,
+            loop_guard: false,
         };
         let value = codex_notify_override(&windows, "l", None);
         let doc: toml::Value = toml::from_str(&value).unwrap();
@@ -342,5 +350,26 @@ mod tests {
                 .iter()
                 .any(|a| a == "--guard")
         );
+    }
+
+    #[test]
+    fn a_loop_registration_adds_the_loop_flag_and_waits() {
+        let mut looped = reg();
+        looped.loop_guard = true;
+        let v: Value = serde_json::from_str(&claude_settings_json(&looped, &[])).unwrap();
+        let pre = &v["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert!(pre.get("async").is_none(), "must wait: {pre}");
+        let args = pre["args"].as_array().unwrap();
+        assert!(args.iter().any(|a| a == "--loop"), "{pre}");
+        assert!(
+            !args.iter().any(|a| a == "--guard"),
+            "no budget guard asked"
+        );
+        looped.guard = true;
+        let v: Value = serde_json::from_str(&claude_settings_json(&looped, &[])).unwrap();
+        let args = v["hooks"]["PreToolUse"][0]["hooks"][0]["args"]
+            .as_array()
+            .unwrap();
+        assert!(args.iter().any(|a| a == "--guard") && args.iter().any(|a| a == "--loop"));
     }
 }

@@ -2596,11 +2596,18 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
     };
     // the budget guard: only on a PreToolUse registered with --guard, and
     // only ever a refusal past the launch's own limits (fail-open)
-    if args.has("guard")
+    // `--loop` adds the loop policy rules and fails closed for write tools
+    if (args.has("guard") || args.has("loop"))
         && ev.event == "PreToolUse"
         && let Some(id) = ev.launch_id.clone()
-        && let hooks::guard::Verdict::Block(reason) =
-            hooks::guard::check(&resolved.db_path, &id, HOOK_BUSY_CAP)
+        && let hooks::guard::Verdict::Block(reason) = hooks::guard::check_tool(
+            &resolved.db_path,
+            &id,
+            HOOK_BUSY_CAP,
+            payload.get("tool_name").and_then(|v| v.as_str()),
+            payload.get("tool_input"),
+            args.has("loop"),
+        )
     {
         ev.payload.insert(
             "agent_mux_guard".into(),
