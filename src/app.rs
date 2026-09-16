@@ -13,6 +13,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
+pub mod about;
 pub mod loops;
 pub mod loops_view;
 mod skills_view;
@@ -36,6 +37,8 @@ pub enum Mode {
     NewLoop(Box<loops::LoopDialogState>),
     /// `x` on a loop: remove the registry entry (files stay).
     ConfirmRemoveLoop,
+    /// The About overlay (`v`): version, build stamp, paths, this session.
+    About(Box<about::AboutState>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -94,6 +97,9 @@ pub enum Action {
     EditLoop,
     EnterConfirmRemoveLoop,
     ToggleKillSwitch,
+    OpenAbout,
+    /// About mode: App routes the key to the AboutState it owns.
+    AboutKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
     LoopsKey,
     /// NewLoop mode: App routes the key to the LoopDialogState it owns.
@@ -392,6 +398,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::EnterConfirmRemoveLoop
                 }
+                KeyCode::Char('v') | KeyCode::Char('V') => Action::OpenAbout,
                 KeyCode::Char('K') => Action::ToggleKillSwitch,
                 KeyCode::Char('E') => Action::OpenLoopsView,
                 KeyCode::Char('h') | KeyCode::Char('H')
@@ -448,6 +455,15 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::TraceBrowser(_) => Action::BrowserKey,
         Mode::SkillsView(_) => Action::SkillsKey,
         Mode::SkillLauncher(_) => Action::SkillLauncherKey,
+        Mode::About(_) => match key.code {
+            KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
+            KeyCode::Esc
+            | KeyCode::Char('q')
+            | KeyCode::Char('v')
+            | KeyCode::Char('V')
+            | KeyCode::Enter => Action::CancelToControl,
+            _ => Action::AboutKey,
+        },
         Mode::LoopsView(_) => Action::LoopsKey,
         Mode::NewLoop(_) => Action::LoopDialogKey,
         Mode::ConfirmRemoveLoop => match key.code {
@@ -1830,6 +1846,8 @@ pub struct App {
     pub loops_loaded: bool,
     /// Readiness audits cached per workspace.
     pub loop_audits: loops::AuditCache,
+    /// The configuration file that was accepted, for the About overlay.
+    pub config_path: Option<std::path::PathBuf>,
 }
 
 impl App {
@@ -1904,6 +1922,7 @@ impl App {
             last_schedule_pass: None,
             loops_loaded: false,
             loop_audits: std::collections::HashMap::new(),
+            config_path: None,
         }
     }
 
@@ -3240,6 +3259,21 @@ impl App {
                     };
                 }
             }
+            Action::OpenAbout => self.open_about(),
+            Action::AboutKey => {
+                if let Mode::About(state) = &mut self.mode {
+                    let page = state.viewport_rows.get().max(1) as isize;
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => state.scroll(1),
+                        KeyCode::Up | KeyCode::Char('k') => state.scroll(-1),
+                        KeyCode::PageDown | KeyCode::Char(' ') => state.scroll(page),
+                        KeyCode::PageUp => state.scroll(-page),
+                        KeyCode::Home => state.scroll_offset = 0,
+                        KeyCode::End => state.scroll_offset = state.max_scroll(),
+                        _ => {}
+                    }
+                }
+            }
             Action::OpenLoopsView => self.open_loops_view(),
             Action::LoopsKey => self.handle_loops_view_key(key),
             Action::LoopDialogKey => self.handle_loop_dialog_key(key),
@@ -3783,6 +3817,36 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// `v`: what this binary is, where its files are, what this session
+    /// runs. The facts are gathered once, here, never on the draw path.
+    pub fn open_about(&mut self) {
+        let facts = about::AboutFacts {
+            config_path: self.config_path.as_deref(),
+            trace_db: self.trace_db_path.as_deref(),
+            runtime_dir: self
+                .runtime_dir
+                .clone()
+                .unwrap_or_else(crate::tracing::analysis::default_snapshot_dir),
+            run_id: &self.app_run_id,
+            sessions: self.sessions.len(),
+            traced_sessions: self.sessions.iter().filter(|s| s.trace.is_some()).count(),
+            skills: self.skills.len(),
+            loops: self.loop_registry.loops.len(),
+            loops_paused: self
+                .loop_registry
+                .loops
+                .iter()
+                .filter(|l| l.paused())
+                .count(),
+            loops_kill_switch: self.loop_registry.pause_all,
+        };
+        self.mode = Mode::About(Box::new(about::AboutState {
+            rows: about::rows(&facts),
+            scroll_offset: 0,
+            viewport_rows: std::cell::Cell::new(24),
+        }));
     }
 
     /// `S`: opens the Skills view over the current screen.

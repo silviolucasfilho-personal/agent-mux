@@ -204,6 +204,7 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut app = App::new(cfg.profiles, trace_rt, tx);
     app.agents = config::resolve_agents(cfg.agents.as_ref());
+    app.config_path = cfg.loaded_from.clone();
     if hide_sidebar {
         app.sidebar_hidden = true;
     }

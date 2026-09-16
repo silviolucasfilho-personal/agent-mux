@@ -1,3 +1,4 @@
+use crate::app::about::{AboutRow, AboutState};
 use crate::app::loops::{LoopDialogState, LoopField, LoopStatus};
 use crate::app::loops_view::{LoopRow, LoopsPane, LoopsTab, LoopsViewState};
 use crate::app::{
@@ -263,6 +264,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::Help => draw_help(f),
         Mode::SkillsView(view) => draw_skills_view(f, view, app),
         Mode::SkillLauncher(launcher) => draw_skill_launcher(f, launcher, app),
+        Mode::About(state) => draw_about(f, state),
         Mode::LoopsView(view) => draw_loops_view(f, view, app),
         Mode::NewLoop(dialog) => draw_loop_dialog(f, dialog, app),
         Mode::ConfirmRemoveLoop => draw_confirm(
@@ -1550,6 +1552,7 @@ fn draw_help(f: &mut Frame) {
         row("h", "launch / attach the selected agent (agents)"),
         row("S", "skills view: every skill, where installed, when used"),
         row("E / K", "loops view / kill switch: pause every loop"),
+        row("v", "about: version, build time, paths and this session"),
         row(
             "n",
             "new session (pick the trace backend: SQLite, Langfuse, both)",
@@ -3715,6 +3718,77 @@ fn draw_loops_view(f: &mut Frame, view: &LoopsViewState, app: &App) {
         Style::default().fg(Color::Black).bg(Color::Cyan),
     );
     f.render_widget(Paragraph::new(footer_text), footer);
+}
+
+/// The About overlay (`v`): the rows `app::about` gathered, one per line.
+fn draw_about(f: &mut Frame, state: &AboutState) {
+    let label = Style::default().fg(Color::DarkGray);
+    let head = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let lines: Vec<Line> = state
+        .rows
+        .iter()
+        .map(|row| match row {
+            AboutRow::Heading(text) => Line::styled(format!("  {text}"), head),
+            AboutRow::Field(name, value) => Line::from(vec![
+                Span::styled(format!("    {name:<9} "), label),
+                Span::raw(value.clone()),
+            ]),
+            AboutRow::Continuation(text) => Line::styled(
+                format!("              {text}"),
+                Style::default().fg(Color::Gray),
+            ),
+            AboutRow::Note(text) => Line::styled(format!("  {text}"), Style::default()),
+            AboutRow::Blank => Line::raw(""),
+        })
+        .collect();
+    let widest = state
+        .rows
+        .iter()
+        .map(|row| match row {
+            AboutRow::Heading(t) | AboutRow::Note(t) => t.chars().count() + 2,
+            AboutRow::Field(n, v) => n.chars().count() + v.chars().count() + 6,
+            AboutRow::Continuation(t) => t.chars().count() + 14,
+            AboutRow::Blank => 0,
+        })
+        .max()
+        .unwrap_or(40);
+    let width = (widest as u16 + 4)
+        .min(f.area().width.saturating_sub(4))
+        .max(40);
+    let height = (lines.len() as u16 + 3).min(f.area().height.saturating_sub(2));
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(" About agent-mux ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+    state.viewport_rows.set(usize::from(body.height));
+    let shown: Vec<Line> = lines
+        .into_iter()
+        .skip(state.scroll_offset.min(state.max_scroll()))
+        .collect();
+    f.render_widget(Paragraph::new(shown), body);
+    let more = if state.max_scroll() > 0 {
+        "  [↑/↓] scroll"
+    } else {
+        ""
+    };
+    f.render_widget(
+        Paragraph::new(Line::styled(
+            format!("  [Esc] close  [?] keys{more}"),
+            label,
+        )),
+        footer,
+    );
 }
 
 fn draw_confirm(f: &mut Frame, message: &str) {

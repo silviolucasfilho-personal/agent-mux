@@ -283,7 +283,9 @@ fn check(label: &str, ok: bool, detail: &str) {
     println!("  [{mark}] {label}: {detail}");
 }
 
-fn on_path(command: &str) -> Option<PathBuf> {
+/// The first runnable `command` on `PATH`, for readiness checks and the
+/// About overlay.
+pub fn on_path(command: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     #[cfg(unix)]
     fn runnable(p: &Path) -> bool {

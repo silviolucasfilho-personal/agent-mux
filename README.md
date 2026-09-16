@@ -126,7 +126,7 @@ Terminal rendering and telemetry are separate paths. The PTY's escape sequences 
 | Source | Responsibility |
 | --- | --- |
 | [src/main.rs](src/main.rs), [src/events.rs](src/events.rs) | Command dispatch, terminal lifecycle, `AppEvent` channel, ticks, drawing, shutdown. |
-| [build.rs](build.rs), [src/build_info.rs](src/build_info.rs) | The build stamp baked in at compile time (version, timestamp, branch, commit, dirty flag, profile, target) and its formatting for `--version`, the help overlay and `trace doctor`. |
+| [build.rs](build.rs), [src/build_info.rs](src/build_info.rs), [src/app/about.rs](src/app/about.rs) | The build stamp baked in at compile time (version, timestamp, branch, commit, dirty flag, profile, target); its formatting for `--version`, the help overlay and `trace doctor`; and the About overlay's rows. |
 | [src/app.rs](src/app.rs), [src/keys.rs](src/keys.rs), [src/ui.rs](src/ui.rs) | `App` state machine and every overlay's state, key encoding, all rendering. |
 | [src/session.rs](src/session.rs), [src/status.rs](src/status.rs) | PTY spawn/read/write, VT parser with 1,000 lines of scrollback, working/idle/attention status, bell counting. |
 | [src/mouse.rs](src/mouse.rs), [src/selection.rs](src/selection.rs), [src/search.rs](src/search.rs) | Mouse routing and encoding, terminal text selection, scrollback search. |
@@ -380,6 +380,7 @@ Search (`src/search.rs`) turns the status bar into `Search: <query>  <n/m>`; it 
 | `r` | Active: respawn, only when the selected session has exited (new PTY, same profile and directory, tracing replanned; an agent session keeps its skill id). Agents: picker/attach. Loops: run now (pre-flight still applies). History: resume. |
 | `p`, `a`, `e`, `x` (Loops focused) | Pause / resume, add, edit, remove (confirmation) the selected loop. |
 | `E` | Loops view (section 4.10), from any section. |
+| `v` | About overlay (section 4.7): version, build date and time, branch and commit, the config, store and runtime paths, this session's counts, and the harnesses on `PATH`. |
 | `K` | Kill switch: pause every loop; again to resume. Shown in the Loops title and the status bar while on. |
 | `h` | Agents focused: open the harness picker. |
 | `S` | Skills view (section 4.4), from any section. |
@@ -508,9 +509,42 @@ Opened by `T`. Backed by a **read-only** SQLite connection (`store::open_ro`) to
 
 **Other keys.** `Tab`/`→` and `BackTab`/`←` cycle panes; `a` toggles project scope; `r` resumes the selected session by provider (`claude`, `codex`, `antigravity`; anything else warns); mouse wheel moves the focused list by three rows or scrolls expanded detail.
 
-### 4.7 Help and confirmations
+### 4.7 Help, About and confirmations
 
-`draw_help` lists Control, Attached, scrollback, Session Logs and Trace Browser keys, including `h`, `v`, `Space` and plain `Ctrl+F`, in an 84-column overlay. `draw_confirm` shows `Kill this session? [y/n]` or `Sessions are still working. Quit anyway? [y/n]`.
+`draw_help` lists Control, Attached, scrollback, Loops, Skills view, Session Logs and Trace Browser keys in an 84-column overlay, and closes with the one-line build stamp (`build_info::short()`). `draw_confirm` shows `Kill this session? [y/n]`, `Sessions are still working. Quit anyway? [y/n]` or `Remove this loop from the registry? …`.
+
+**About** (`v`, `Mode::About`, `draw_about`, `src/app/about.rs`) answers "what am I running and where does it keep things":
+
+```text
+┌ About agent-mux ─────────────────────────────────────────────────────────────────┐
+│  agent-mux 0.1.0                                                                 │
+│  A terminal multiplexer for Claude Code, Codex CLI and Antigravity,              │
+│  with a local SQLite trace store and scheduled loops.                            │
+│                                                                                  │
+│  Build                                                                           │
+│    built     2026-09-16T11:48:35-03:00 (10 s ago, debug)                         │
+│              2026-09-16T14:48:35Z UTC                                            │
+│    branch    feat/loop-engineering @ 29b29076 (uncommitted changes at build time)│
+│    target    aarch64-apple-darwin                                                │
+│    binary    ~/.cargo/bin/agent-mux                                              │
+│                                                                                  │
+│  This session                                                                    │
+│    config    ~/.agent-mux/profiles.toml                                          │
+│    store     ~/.agent-mux/traces.db (18.6 MiB)                                    │
+│    runtime   ~/.agent-mux/snapshots                                              │
+│    run id    80e6eb06-472a-4f66-a7c0-f0a6c5097d10                                │
+│    sessions  2 live · 1 traced                                                   │
+│    agents    1 package(s)                                                        │
+│    loops     3 registered · 1 paused                                             │
+│                                                                                  │
+│  Harnesses on PATH                                                               │
+│    claude    ~/.local/bin/claude                                                 │
+│    …                                                                             │
+│  [Esc] close  [?] keys                                                           │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Every fact is gathered once by `App::open_about` when the overlay opens — the store is stat-ed and `PATH` is searched there, never on the draw path. Paths under the home directory are shown with `~`. The box sizes itself to its widest row and scrolls with `↑`/`↓`, `PageUp`/`PageDown`, `Home`/`End` when the terminal is short. `?` switches to the key reference, `Esc`, `q`, `v` or `Enter` closes.
 
 ### 4.8 Session persistence
 
@@ -537,6 +571,7 @@ Opened by `T`. Backed by a **read-only** SQLite connection (`store::open_ro`) to
 | Trace Browser Turns | `Vec<TraceStat>` | `list_traces` | `trace_stats` view | session change, live refresh |
 | Trace Browser Detail | `Vec<ObservationView>` | `list_observations` | `observations` | turn change, live refresh |
 | Trace Browser search | `Vec<TraceStat>` | `search` + `find_trace` | `traces_fts`, `observations_fts` | on `Enter` |
+| About overlay | `AboutState.rows` | `App::open_about` → `about::rows` | `build_info` constants, `config.loaded_from`, store `metadata`, the registry, `PATH` | once, when `v` opens it |
 | Verdict marks | `HashMap<trace_id, f64>` | `scores::latest_trace_scores` | `scores` | observation load, after `s` |
 
 ---
