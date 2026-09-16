@@ -127,12 +127,12 @@ pub fn clean_up_snapshot(root: &Path, run_id: &str) -> Result<(), ServiceError> 
     let safe_run_id = sanitize_id(run_id);
     let target_file = root.join(format!("{safe_run_id}.json"));
 
-    if target_file.exists() {
-        if let Ok(meta) = fs::symlink_metadata(&target_file) {
-            if !meta.file_type().is_symlink() && is_owned_by_current_user(&meta) {
-                let _ = fs::remove_file(&target_file);
-            }
-        }
+    if target_file.exists()
+        && let Ok(meta) = fs::symlink_metadata(&target_file)
+        && !meta.file_type().is_symlink()
+        && is_owned_by_current_user(&meta)
+    {
+        let _ = fs::remove_file(&target_file);
     }
 
     Ok(())

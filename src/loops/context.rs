@@ -167,6 +167,316 @@ pub fn sweep(runtime_dir: &Path, max_age: std::time::Duration) -> usize {
     n
 }
 
+/// The context of a run recomputed from the store, the registry and the
+/// workspace files: what `agent_mux_get_loop_context` answers. `run_id`
+/// picks a run; otherwise the newest run of the workspace's first loop.
+pub fn live(
+    db: &Path,
+    workspace: Option<&Path>,
+    run_id: Option<&str>,
+) -> Result<ContextDoc, String> {
+    use crate::loops::{patterns, registry, store as lstore};
+    let conn = crate::tracing::store::open_ro(db)?;
+    let reg = registry::registry_path()
+        .map(|p| registry::load(&p))
+        .unwrap_or_default();
+    let run = match run_id {
+        Some(id) => lstore::get_run(&conn, id).map_err(|e| e.to_string())?,
+        None => None,
+    };
+    let entry = match (&run, workspace) {
+        (Some(r), _) => reg.find(&r.loop_id).cloned().or_else(|| {
+            reg.loops
+                .iter()
+                .find(|l| l.workspace.to_string_lossy() == r.workspace)
+                .cloned()
+        }),
+        (None, Some(ws)) => reg.for_workspace(ws).first().map(|l| (*l).clone()),
+        (None, None) => None,
+    }
+    .ok_or_else(|| match run_id {
+        Some(id) => format!("no loop registered for run {id}"),
+        None => "no loop registered for this workspace".to_string(),
+    })?;
+    let run = match run {
+        Some(r) => Some(r),
+        None => lstore::recent_runs(&conn, &entry.id, 1)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .next(),
+    };
+    let pattern = patterns::find(&entry.pattern).ok_or("unknown pattern")?;
+    let now = crate::loops::now();
+    let spend = lstore::spend_since(
+        &conn,
+        &entry.id,
+        crate::loops::to_ns(crate::loops::utc_midnight(now)),
+    )
+    .unwrap_or_default();
+    let percent = if entry.max_tokens_per_day == 0 {
+        0
+    } else {
+        ((spend.tokens.max(0) as u128 * 100) / entry.max_tokens_per_day as u128) as u32
+    };
+    let breaker = if pattern.breaker {
+        match crate::loops::breaker::load(&entry.workspace.join(crate::loops::LEDGER_JSON)) {
+            Ok(l) => {
+                let v = crate::loops::breaker::check(&l, &Default::default());
+                Breaker {
+                    applicable: true,
+                    status: Some(if v.tripped() {
+                        "tripped".into()
+                    } else {
+                        "ok".into()
+                    }),
+                    reason: Some(v.reason),
+                    iterations: v.iterations,
+                    consecutive_failures: l
+                        .attempts
+                        .iter()
+                        .rev()
+                        .take_while(|a| a.outcome == crate::loops::breaker::AttemptOutcome::Failure)
+                        .count(),
+                }
+            }
+            Err(_) => Breaker {
+                applicable: true,
+                status: Some("no ledger".into()),
+                ..Default::default()
+            },
+        }
+    } else {
+        Breaker::default()
+    };
+    let gate = crate::loops::gate::load(&entry.workspace.join(crate::loops::GATE_YAML))
+        .unwrap_or_else(|_| crate::loops::gate::default_config());
+    let activity = lstore::activity_count(
+        &conn,
+        &entry.workspace.to_string_lossy(),
+        crate::loops::to_ns(now - time::Duration::days(14)),
+    )
+    .unwrap_or(0);
+    let audit = crate::loops::readiness::audit(&entry.workspace, activity);
+    let recent = lstore::recent_runs(&conn, &entry.id, 5).unwrap_or_default();
+    let inbox_waiting = lstore::inbox(&conn).map(|v| v.len()).unwrap_or(0);
+    let kill_switch = reg.pause_all
+        || [pattern.state_file.as_str(), crate::loops::LOOP_MD]
+            .iter()
+            .any(|f| {
+                std::fs::read_to_string(entry.workspace.join(f))
+                    .is_ok_and(|t| crate::loops::run::kill_switch_active(&t))
+            });
+    let summary = |r: &lstore::LoopRun| RunSummary {
+        id: r.id.clone(),
+        outcome: r.outcome.as_str().into(),
+        items_found: r.items_found,
+        actions_taken: r.actions_taken,
+        escalations: r.escalations,
+        tokens: r.tokens,
+    };
+    let (run_info, worktree, previous) = match &run {
+        Some(r) => (
+            RunInfo {
+                id: r.id.clone(),
+                pattern: r.pattern.clone(),
+                level_configured: r.level,
+                level_effective: r.effective_level,
+                level_reason: r.detail_str("level_reason").map(str::to_string),
+            },
+            r.worktree.as_ref().map(|p| WorktreeInfo {
+                path: p.clone(),
+                branch: r.branch.clone().unwrap_or_default(),
+                base: String::new(),
+            }),
+            recent.iter().find(|x| x.id != r.id).map(summary),
+        ),
+        None => (
+            RunInfo {
+                id: String::new(),
+                pattern: entry.pattern.clone(),
+                level_configured: entry.level,
+                level_effective: entry.level,
+                level_reason: None,
+            },
+            None,
+            recent.first().map(summary),
+        ),
+    };
+    Ok(ContextDoc {
+        schema_version: SCHEMA_VERSION,
+        as_of: crate::loops::format_timestamp(now),
+        run: run_info,
+        workspace: entry.workspace.to_string_lossy().into_owned(),
+        worktree,
+        files: Files {
+            state: pattern.state_file.clone(),
+            run_log: crate::loops::RUN_LOG_MD.into(),
+            constraints: crate::loops::CONSTRAINTS_MD.into(),
+            ledger: pattern
+                .breaker
+                .then(|| crate::loops::LEDGER_JSON.to_string()),
+            gate: crate::loops::GATE_YAML.into(),
+        },
+        budget: Budget {
+            runs_today: spend.runs,
+            max_runs_per_day: entry.max_runs_per_day,
+            tokens_today: spend.tokens,
+            max_tokens_per_day: entry.max_tokens_per_day,
+            percent,
+            mode: if percent >= 100 {
+                "blocked".into()
+            } else if percent >= 80 {
+                "report-only".into()
+            } else {
+                "normal".into()
+            },
+        },
+        breaker,
+        gate: Gate {
+            denylist: gate.denylist.clone(),
+            max_files: gate.max_files,
+            auto_merge_allowlist: gate.auto_merge_allowlist.clone(),
+        },
+        readiness: Some(Readiness {
+            score: audit.score,
+            level: audit.level_str().into(),
+            findings: audit
+                .findings
+                .iter()
+                .filter(|f| f.level != crate::loops::readiness::FindingLevel::Ok)
+                .take(5)
+                .map(|f| format!("{} {}", f.level.glyph(), f.message))
+                .collect(),
+        }),
+        previous_run: previous,
+        recent_runs: recent.iter().map(summary).collect(),
+        inbox_waiting,
+        kill_switch,
+        human_gates: pattern.human_gates.clone(),
+    })
+}
+
+/// `trace doctor`'s loops section: (ok, label, detail) lines.
+pub fn doctor_lines(
+    db: &Path,
+    settings: &crate::config::LoopRunnerSettings,
+) -> Vec<(bool, String, String)> {
+    use crate::loops::{patterns, registry, scaffold};
+    let mut out = Vec::new();
+    let path = registry::registry_path();
+    let reg = path.as_ref().map(|p| registry::load(p)).unwrap_or_default();
+    out.push((
+        true,
+        "registry".into(),
+        format!(
+            "{} ({} loop(s){})",
+            path.as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "no home".into()),
+            reg.loops.len(),
+            if reg.pause_all { ", PAUSED" } else { "" }
+        ),
+    ));
+    out.push((
+        settings.enabled,
+        "scheduler".into(),
+        format!(
+            "{} · max {} concurrent · timeout {} s · catch-up {}",
+            if settings.enabled {
+                "on"
+            } else {
+                "off ([loops] enabled = false)"
+            },
+            settings.max_concurrent,
+            settings.run_timeout_s,
+            if settings.catch_up_once {
+                "once"
+            } else {
+                "skip"
+            }
+        ),
+    ));
+    let exe = crate::tracing::hooks::register::current_exe();
+    out.push((
+        exe.is_some(),
+        "claude guard".into(),
+        if exe.is_some() {
+            "per-launch PreToolUse with --loop (ceiling L3)".into()
+        } else {
+            "binary path not absolute: loops run at L1".into()
+        },
+    ));
+    let home = crate::skill::install::home_dir();
+    let codex = crate::tracing::hooks::install::codex_status(&home, exe.as_deref());
+    out.push((
+        codex.installed && !codex.stale,
+        "codex guard".into(),
+        if codex.installed && !codex.stale {
+            "installed hooks.json (ceiling L3)".into()
+        } else {
+            format!("{} — Codex loops run at L1", codex.note)
+        },
+    ));
+    let git = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    out.push((
+        git.is_some(),
+        "git".into(),
+        git.unwrap_or_else(|| "not found: L2+ worktrees unavailable".into()),
+    ));
+    match crate::tracing::store::open_ro(db) {
+        Ok(conn) => {
+            let inbox = crate::loops::store::inbox(&conn)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            out.push((
+                true,
+                "store".into(),
+                format!("loop_runs readable · {inbox} in the inbox"),
+            ));
+        }
+        Err(e) => out.push((false, "store".into(), e)),
+    }
+    for l in &reg.loops {
+        let Some(p) = patterns::find(&l.pattern) else {
+            out.push((false, l.pattern.clone(), "unknown pattern".into()));
+            continue;
+        };
+        let files = scaffold::contract_files(&l.workspace, p);
+        let missing: Vec<&str> = files
+            .iter()
+            .filter(|f| !f.present)
+            .map(|f| f.name.as_str())
+            .collect();
+        let stale = files.iter().any(|f| f.stale);
+        let ok = missing.is_empty() && !stale && l.workspace.is_dir();
+        let detail = if !l.workspace.is_dir() {
+            "workspace missing".to_string()
+        } else if !missing.is_empty() {
+            format!("missing {}", missing.join(", "))
+        } else if stale {
+            "state file stale (Last run older than 14 days)".into()
+        } else {
+            format!(
+                "every {} at {}{}",
+                crate::loops::format_interval(l.interval_s),
+                l.level.as_str(),
+                if l.paused() { " (paused)" } else { "" }
+            )
+        };
+        out.push((
+            ok,
+            format!("{} @ {}", l.pattern, l.workspace_name()),
+            detail,
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

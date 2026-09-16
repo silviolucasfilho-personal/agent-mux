@@ -660,15 +660,14 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         draw_loop_preview(f, area, app);
         return;
     }
-    if (!app.sidebar_hidden
+    if ((!app.sidebar_hidden
         && app.sidebar_section == SidebarSection::History
         && matches!(app.mode, Mode::Control))
-        || app.sessions.is_empty()
+        || app.sessions.is_empty())
+        && let Some(hist) = app.history_sessions.get(app.selected_history)
     {
-        if let Some(hist) = app.history_sessions.get(app.selected_history) {
-            draw_history_preview(f, area, hist, !app.sessions.is_empty());
-            return;
-        }
+        draw_history_preview(f, area, hist, !app.sessions.is_empty());
+        return;
     }
     let Some(session) = app.sessions.get(app.selected) else {
         let block = Block::default().borders(Borders::ALL).title("agent-mux");
@@ -709,12 +708,13 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         (matches!(app.mode, Mode::Attached) && !screen.hide_cursor() && scroll_offset == 0)
             .then(|| screen.cursor_position())
     };
-    if let Some((row, col)) = cursor {
-        if inner.width > 0 && inner.height > 0 {
-            let col = col.min(inner.width.saturating_sub(1));
-            let row = row.min(inner.height.saturating_sub(1));
-            f.set_cursor_position((inner.x + col, inner.y + row));
-        }
+    if let Some((row, col)) = cursor
+        && inner.width > 0
+        && inner.height > 0
+    {
+        let col = col.min(inner.width.saturating_sub(1));
+        let row = row.min(inner.height.saturating_sub(1));
+        f.set_cursor_position((inner.x + col, inner.y + row));
     }
     if let Some(sel) = app.displayed_selection() {
         let (len, offset) = session.scroll_view();
@@ -1192,32 +1192,32 @@ fn draw_trace_briefing_preview(
                     ),
                 ])];
 
-                if let Some(ref act) = card.current_activity.value {
-                    if !act.is_empty() {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                "  ⚡ Right Now:  ",
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                act,
-                                Style::default()
-                                    .fg(Color::White)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]));
-                    }
+                if let Some(ref act) = card.current_activity.value
+                    && !act.is_empty()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "  ⚡ Right Now:  ",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            act,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
                 }
 
-                if let Some(ref goal) = card.initial_goal.value {
-                    if !goal.is_empty() {
-                        lines.push(Line::from(vec![
-                            Span::styled("  🎯 Goal:       ", Style::default().fg(Color::Cyan)),
-                            Span::styled(goal, Style::default().fg(Color::Gray)),
-                        ]));
-                    }
+                if let Some(ref goal) = card.initial_goal.value
+                    && !goal.is_empty()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled("  🎯 Goal:       ", Style::default().fg(Color::Cyan)),
+                        Span::styled(goal, Style::default().fg(Color::Gray)),
+                    ]));
                 }
 
                 if !card.files_modified.is_empty() {
@@ -1256,21 +1256,14 @@ fn draw_trace_briefing_preview(
                     }
                 }
 
-                if let Some(ref out) = card.last_assistant_output {
-                    if let Some(ref text) = out.value {
-                        if !text.is_empty() {
-                            lines.push(Line::from(vec![
-                                Span::styled(
-                                    "  💬 Last Out:   ",
-                                    Style::default().fg(Color::DarkGray),
-                                ),
-                                Span::styled(
-                                    format!("\"{text}\""),
-                                    Style::default().fg(Color::DarkGray),
-                                ),
-                            ]));
-                        }
-                    }
+                if let Some(ref out) = card.last_assistant_output
+                    && let Some(ref text) = out.value
+                    && !text.is_empty()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled("  💬 Last Out:   ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("\"{text}\""), Style::default().fg(Color::DarkGray)),
+                    ]));
                 }
 
                 lines.push(Line::from(vec![

@@ -31,10 +31,10 @@ use std::path::PathBuf;
 
 /// Fallback location for the traces database if not configured.
 pub fn default_trace_db_path() -> PathBuf {
-    if let Ok(p) = std::env::var("AGENT_MUX_TRACE_DB") {
-        if !p.trim().is_empty() {
-            return PathBuf::from(p.trim());
-        }
+    if let Ok(p) = std::env::var("AGENT_MUX_TRACE_DB")
+        && !p.trim().is_empty()
+    {
+        return PathBuf::from(p.trim());
     }
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -44,10 +44,10 @@ pub fn default_trace_db_path() -> PathBuf {
 
 /// Fallback location for live session snapshots if not configured.
 pub fn default_snapshot_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("AGENT_MUX_RUNTIME_DIR") {
-        if !p.trim().is_empty() {
-            return PathBuf::from(p.trim());
-        }
+    if let Ok(p) = std::env::var("AGENT_MUX_RUNTIME_DIR")
+        && !p.trim().is_empty()
+    {
+        return PathBuf::from(p.trim());
     }
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

@@ -10,6 +10,7 @@
 //! diagnostics behind `trace loops`.
 
 pub mod breaker;
+pub mod cli;
 pub mod context;
 pub mod cost;
 pub mod gate;

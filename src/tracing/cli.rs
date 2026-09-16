@@ -1458,6 +1458,13 @@ fn doctor() -> anyhow::Result<()> {
     for (ok, label, detail) in crate::mcp::doctor_lines(&resolved.db_path, &resolved.home) {
         check(&label, ok, &detail);
     }
+    println!("\nloops (Loop Engineering):");
+    let loop_settings = config::resolve_loops(cfg.loops.as_ref());
+    for (ok, label, detail) in
+        crate::loops::context::doctor_lines(&resolved.db_path, &loop_settings)
+    {
+        check(&label, ok, &detail);
+    }
     println!(
         "\nA provider marked [!!] still gets a launch row per session; turn traces need\nits transcript machinery above to be in place."
     );

@@ -1,6 +1,6 @@
 # Loop Engineering: scheduled, gated loops from the sidebar
 
-Status: Proposed for review, revision 2 after the 2026-09-15 review; implementation is not authorized by this document.
+Status: Implemented on 2026-09-15 (see the plan of the same date). Deviations from revision 2: the Loops view's inbox shows `git diff --stat` inline (open point 1 resolved yes); loop skills are not installable at user level (open point 2 resolved no); `max_concurrent` defaults to 1 globally (open point 3); `loop inbox` and `loop decide` were added to the CLI; the run id is the RFC 3339 start time with a `-N` suffix on a same-second collision; the Codex hook payload tool names matched by the guard are listed in `guard.rs`; `kill_switch_active` ignores a backticked mention of the literal so the scaffolded `LOOP.md` does not pause its own loops.
 Date: 2026-09-15
 Baseline: `070020f` (master after PR #21: Agents sidebar, briefing hydration, MCP server).
 Design reference: the loop-engineering method (Cobus Greyling, repository at `../loop-engineering`, commit `0948ac1`), read on 2026-09-15 for its patterns, readiness ladder, file conventions and safety rules. **Nothing from that repository or its npm packages is copied, vendored, installed or executed by agent-mux.** Every skill, template and algorithm named below is authored and tested in this repository; the file formats agent-mux writes follow the method's conventions so a repository that already uses them keeps working.

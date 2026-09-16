@@ -20,7 +20,7 @@ pub const SERVER_NAME: &str = "agent-mux";
 pub const USAGE: &str = "agent-mux mcp <command>
 
   serve --stdio [--db PATH] [--workspace DIR | --all-workspaces | --workspace-from-env]
-                                serve the eight read-only trace tools over stdio
+                                serve the nine read-only trace tools over stdio
   install agy                   register this binary with `agy mcp add` (no per-launch flag exists)
   uninstall agy                 remove it with `agy mcp remove`
   status [claude|codex|agy]     how each harness reaches the server

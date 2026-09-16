@@ -5,8 +5,10 @@ use tempfile::TempDir;
 fn seed_store(_suffix: &str) -> TempDir {
     let temp = tempfile::tempdir().unwrap();
     let db_path = temp.path().join("traces.db");
-    let mut opts = store::OpenOptions::default();
-    opts.run_id = "test-run".to_string();
+    let opts = store::OpenOptions {
+        run_id: "test-run".to_string(),
+        ..Default::default()
+    };
     let _ = store::open_rw(&db_path, opts).unwrap();
     temp
 }

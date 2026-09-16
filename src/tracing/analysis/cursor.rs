@@ -31,7 +31,7 @@ impl CursorCodec {
     /// Computes an authentication HMAC/hash for given payload bytes.
     fn compute_tag(&self, payload_bytes: &[u8]) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(&self.key);
+        hasher.update(self.key);
         hasher.update(b"cursor_auth_v1");
         hasher.update(payload_bytes);
         let result = hasher.finalize();
@@ -113,7 +113,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())

@@ -52,6 +52,7 @@ async fn main() -> Result<()> {
             Some("trace") => return agent_mux::tracing::cli::run(&args[2..]),
             Some("mcp") => return agent_mux::mcp::run(&args[2..]),
             Some("run") => return agent_mux::tracing::experiments::run_cli(&args[2..]).await,
+            Some("loop") => return agent_mux::loops::cli::run(&args[2..]).await,
             Some("langfuse") => {
                 eprintln!(
                     "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\
@@ -88,17 +89,15 @@ async fn main() -> Result<()> {
     if matches!(
         crossterm::terminal::supports_keyboard_enhancement(),
         Ok(true)
-    ) {
-        if crossterm::execute!(
-            stdout(),
-            crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-            )
+    ) && crossterm::execute!(
+        stdout(),
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         )
-        .is_ok()
-        {
-            KEYBOARD_ENHANCED.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
+    )
+    .is_ok()
+    {
+        KEYBOARD_ENHANCED.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -208,6 +207,8 @@ async fn main() -> Result<()> {
     let size = terminal.size()?;
     app.set_terminal_size(size.height, size.width);
     app.restore_saved_sessions();
+    app.loops = config::resolve_loops(cfg.loops.as_ref());
+    app.load_loop_registry();
 
     let mut draw_err = None;
     let mut current_cursor_style = crossterm::cursor::SetCursorStyle::DefaultUserShape;

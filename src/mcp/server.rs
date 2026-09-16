@@ -31,7 +31,7 @@ fn schema_of<T: schemars::JsonSchema>() -> Value {
     serde_json::to_value(schemars::schema_for!(T)).unwrap_or_else(|_| json!({"type": "object"}))
 }
 
-/// The eight read-only tools, in the order `tools/list` returns them.
+/// The nine read-only tools, in the order `tools/list` returns them.
 pub fn tool_catalog() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
@@ -74,7 +74,84 @@ pub fn tool_catalog() -> Vec<ToolSpec> {
             description: "Reader version, database availability, collector freshness and the tools this server offers. Never needs the database.",
             input_schema: schema_of::<HealthArgs>(),
         },
+        ToolSpec {
+            name: "agent_mux_get_loop_context",
+            description: "The Loop Engineering context of a loop run, recomputed now: effective level and why, today's budget against the caps, circuit breaker state, gate globs, readiness score, recent runs and the human inbox. Defaults to the calling run (AGENT_MUX_LOOP_RUN_ID) or the workspace's loop.",
+            input_schema: schema_of::<LoopContextArgs>(),
+        },
     ]
+}
+
+/// Arguments of `agent_mux_get_loop_context`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoopContextArgs {
+    /// A run id (`loop_runs.id`); absent means the calling run or the
+    /// workspace's most recent run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
+/// The loop context tool: outside `TraceService` because it reads the
+/// registry and the workspace files besides the store.
+fn loop_context_result(service: &TraceService, arguments: Value) -> Value {
+    let args: LoopContextArgs = match serde_json::from_value(if arguments.is_null() {
+        json!({})
+    } else {
+        arguments
+    }) {
+        Ok(a) => a,
+        Err(e) => {
+            return tool_error(&ServiceError::InvalidArgument(format!(
+                "invalid arguments for get_loop_context: {e}"
+            )));
+        }
+    };
+    let run_id = args
+        .run_id
+        .or_else(|| std::env::var("AGENT_MUX_LOOP_RUN_ID").ok())
+        .filter(|s| !s.trim().is_empty());
+    let config = service.config();
+    let workspace = config
+        .scope
+        .workspace_path()
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var("AGENT_MUX_LOOP_WORKSPACE")
+                .ok()
+                .map(PathBuf::from)
+        });
+    if !config.db_path.is_file() {
+        return tool_error(&ServiceError::DbUnavailable(format!(
+            "no trace store at {}",
+            config.db_path.display()
+        )));
+    }
+    match crate::loops::context::live(&config.db_path, workspace.as_deref(), run_id.as_deref()) {
+        Ok(doc) => {
+            let value = json!({
+                "schema_version": 1,
+                "as_of": doc.as_of,
+                "scope": {
+                    "workspace": workspace.as_ref().map(|w| w.to_string_lossy().into_owned()),
+                    "all_workspaces": workspace.is_none(),
+                },
+                "window": Value::Null,
+                "data": doc,
+                "coverage": { "status": "complete" },
+                "warnings": [],
+                "next_cursor": Value::Null,
+                "truncated": false,
+            });
+            let text = serde_json::to_string(&value).unwrap_or_default();
+            json!({
+                "content": [{ "type": "text", "text": text }],
+                "structuredContent": value,
+                "isError": false,
+            })
+        }
+        Err(e) => tool_error(&ServiceError::NotFound(e)),
+    }
 }
 
 pub fn tool_names() -> Vec<&'static str> {
@@ -175,6 +252,9 @@ pub fn handle_message(service: &TraceService, line: &str) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+            if name == "agent_mux_get_loop_context" {
+                return Some(rpc_result(id, loop_context_result(service, arguments)));
+            }
             match Request::from_tool_call(name, arguments) {
                 Err(e) => tool_error(&e),
                 Ok(request) => match service.execute(request) {
@@ -356,9 +436,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_contains_exactly_eight_read_tools() {
+    fn catalog_contains_exactly_nine_read_tools() {
         let names = tool_names();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 9);
+        assert!(names.contains(&"agent_mux_get_loop_context"));
         assert!(names.contains(&"agent_mux_get_briefing"));
         assert!(names.contains(&"agent_mux_compare_runs"));
         assert!(

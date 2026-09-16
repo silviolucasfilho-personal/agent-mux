@@ -280,6 +280,8 @@ pub fn kill_switch_active(text: &str) -> bool {
     text.lines().any(|l| {
         let t = l.trim();
         t.contains(crate::loops::KILL_SWITCH)
+            // a backticked mention (the templates explain the switch) is not a switch
+            && !t.contains(&format!("`{}`", crate::loops::KILL_SWITCH))
             && !t.starts_with("<!--")
             && !t.starts_with('#')
             && !t.starts_with('-')
@@ -518,6 +520,9 @@ mod tests {
         assert!(kill_switch_active("Last run: x\nloop-pause-all\n"));
         assert!(!kill_switch_active(
             "- Command or issue label: `loop-pause-all`\n"
+        ));
+        assert!(!kill_switch_active(
+            "Kill switch: put the literal `loop-pause-all` in the state file.\n"
         ));
         assert!(!kill_switch_active(
             "## Kill switch\n<!-- loop-pause-all -->\n"
