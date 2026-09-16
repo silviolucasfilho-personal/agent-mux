@@ -4,39 +4,39 @@
   "level": "L1",
   "attempts": [
     {
-      "iteration": 13,
-      "timestamp": "2026-09-16T12:17:59Z",
+      "iteration": 21,
+      "timestamp": "2026-09-16T16:18:42Z",
       "action": "pr-babysitter",
       "outcome": "noop",
-      "tokensUsed": 120929
+      "tokensUsed": 91063
     },
     {
-      "iteration": 14,
-      "timestamp": "2026-09-16T12:33:38Z",
+      "iteration": 22,
+      "timestamp": "2026-09-16T16:33:40Z",
       "action": "pr-babysitter",
       "outcome": "noop",
-      "tokensUsed": 333164
+      "tokensUsed": 95789
     },
     {
-      "iteration": 15,
-      "timestamp": "2026-09-16T12:45:25Z",
+      "iteration": 23,
+      "timestamp": "2026-09-16T16:48:41Z",
       "action": "pr-babysitter",
       "outcome": "noop",
-      "tokensUsed": 117855
+      "tokensUsed": 95984
     },
     {
-      "iteration": 16,
-      "timestamp": "2026-09-16T12:47:40Z",
+      "iteration": 24,
+      "timestamp": "2026-09-16T17:03:41Z",
       "action": "pr-babysitter",
       "outcome": "noop",
-      "tokensUsed": 93447
+      "tokensUsed": 96053
     },
     {
-      "iteration": 17,
-      "timestamp": "2026-09-16T14:16:28Z",
+      "iteration": 25,
+      "timestamp": "2026-09-16T17:18:41Z",
       "action": "pr-babysitter",
       "outcome": "noop",
-      "tokensUsed": 91259
+      "tokensUsed": 98344
     }
   ]
 }
