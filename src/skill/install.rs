@@ -28,6 +28,17 @@ pub fn skills_root(harness: Harness, home: &Path) -> PathBuf {
     }
 }
 
+/// The directory a harness scans for project-level skills under a
+/// workspace. Antigravity reads skills at user level only (probed with
+/// agy 1.2.3), so it has none.
+pub fn project_skills_root(harness: Harness, workspace: &Path) -> Option<PathBuf> {
+    match harness {
+        Harness::Claude => Some(workspace.join(".claude").join("skills")),
+        Harness::Codex => Some(workspace.join(".codex").join("skills")),
+        Harness::Antigravity => None,
+    }
+}
+
 #[derive(Debug)]
 pub enum InstallError {
     /// The directory exists and was not written by agent-mux.
@@ -102,7 +113,38 @@ pub fn install(
     home: &Path,
     force: bool,
 ) -> Result<InstallReport, InstallError> {
-    let dir = skills_root(harness, home).join(&def.id);
+    install_into(
+        def,
+        harness,
+        &skills_root(harness, home).join(&def.id),
+        force,
+    )
+}
+
+/// Writes the package under the workspace's project-level skill
+/// directory, the way `install` writes it under the home. Refuses a
+/// directory without a manifest unless `force`; Antigravity is refused.
+pub fn install_project(
+    def: &SkillDefinition,
+    harness: Harness,
+    workspace: &Path,
+    force: bool,
+) -> Result<InstallReport, InstallError> {
+    let Some(root) = project_skills_root(harness, workspace) else {
+        return Err(InstallError::Io(std::io::Error::other(
+            "Antigravity reads skills at user level only; no project install",
+        )));
+    };
+    install_into(def, harness, &root.join(&def.id), force)
+}
+
+fn install_into(
+    def: &SkillDefinition,
+    harness: Harness,
+    dir: &Path,
+    force: bool,
+) -> Result<InstallReport, InstallError> {
+    let dir = dir.to_path_buf();
     let existing = manifest_hash(&dir);
     if dir.exists() && existing.is_none() && !force {
         return Err(InstallError::Foreign(dir));
@@ -164,5 +206,60 @@ pub fn uninstall(id: &str, harness: Harness, home: &Path) -> Result<bool, Instal
 impl From<serde_json::Error> for InstallError {
     fn from(e: serde_json::Error) -> Self {
         InstallError::Io(std::io::Error::other(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skill::parse_skill;
+
+    fn def() -> SkillDefinition {
+        parse_skill(
+            "---\nname: loop-rules\ndescription: the rules of a run\n---\n\n# body\n",
+            None,
+            Vec::new(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn project_install_lands_under_the_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let ws = temp.path();
+        let d = def();
+        let report = install_project(&d, Harness::Claude, ws, false).unwrap();
+        assert_eq!(report.dir, ws.join(".claude/skills/loop-rules"));
+        assert!(ws.join(".claude/skills/loop-rules/SKILL.md").is_file());
+        assert!(
+            ws.join(".claude/skills/loop-rules")
+                .join(MANIFEST)
+                .is_file()
+        );
+        assert!(
+            install_project(&d, Harness::Claude, ws, false)
+                .unwrap()
+                .unchanged
+        );
+        let codex = install_project(&d, Harness::Codex, ws, false).unwrap();
+        assert_eq!(codex.dir, ws.join(".codex/skills/loop-rules"));
+        assert!(
+            std::fs::read_to_string(codex.dir.join("SKILL.md"))
+                .unwrap()
+                .contains("Invoke with $loop-rules.")
+        );
+        assert!(install_project(&d, Harness::Antigravity, ws, false).is_err());
+        assert!(project_skills_root(Harness::Antigravity, ws).is_none());
+        // a foreign directory is refused without force
+        let foreign = ws.join(".claude/skills/other");
+        std::fs::create_dir_all(&foreign).unwrap();
+        let mut other = def();
+        other.id = "other".into();
+        assert!(matches!(
+            install_project(&other, Harness::Claude, ws, false),
+            Err(InstallError::Foreign(_))
+        ));
+        assert!(install_project(&other, Harness::Claude, ws, true).is_ok());
     }
 }

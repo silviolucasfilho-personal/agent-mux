@@ -32,6 +32,7 @@ Prefer the MCP tool; use the CLI command (`"$AGENT_MUX_BIN" trace …`, add `--j
 | Two launches side by side | `agent_mux_compare_runs` (`a`, `b`) | `trace compare <a> <b>` |
 | Loop metrics per turn | — | `trace loops [session-key] --json` |
 | Subagents: invocations, latency, cost, failures | — | `trace agents --json` |
+| Loop runs (Loop Engineering): outcomes, spend, inbox | — | `loop ls --json`, `loop status --json`, `trace sql "SELECT * FROM loop_run_stats" --json` |
 | Anything else, read-only SQL | — | `trace sql "<SELECT …>" --json` |
 
 Deep procedures, thresholds and report shapes live next to this file: `reference/sessions.md`, `reference/skills.md`, `reference/agents.md`. Ad-hoc SQL examples for `trace sql` are developer material in the agent-mux repository (`docs/trace-sql-examples.md`); the tools and commands above answer the same questions without SQL.

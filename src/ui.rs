@@ -1,3 +1,5 @@
+use crate::app::loops::{LoopDialogState, LoopField, LoopStatus};
+use crate::app::loops_view::{LoopRow, LoopsPane, LoopsTab, LoopsViewState};
 use crate::app::{
     App, BrowserPane, DialogContentMode, DialogField, DialogState, HistoryPane, HistoryState,
     InstallLabel, Mode, NoticeLevel, SidebarSection, SkillRow, SkillsPane, SkillsTab,
@@ -32,18 +34,35 @@ pub fn sidebar_window(selected: usize, len: usize, visible: usize) -> usize {
 }
 
 /// Splits the sidebar height into 25% active sessions, dynamic rows for Agents, and remaining history sessions.
-pub fn sidebar_areas(total_height: u16, agent_count: usize) -> (Rect, Rect, Rect) {
+pub fn sidebar_areas(
+    total_height: u16,
+    agent_count: usize,
+    loop_count: usize,
+) -> (Rect, Rect, Rect, Rect) {
     let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
-    let agent_rows = (agent_count.max(1) as u16 + 2)
-        .min(total_height.saturating_sub(8) / 2)
-        .max(3);
-    let [active, skills, history] = Layout::vertical([
-        Constraint::Percentage(25),
+    // Active keeps its quarter; agents and loops take what their rows need
+    // up to a third of the rest each; history gets at least four rows. On a
+    // short terminal the loops block shrinks first, then the agents block,
+    // so the active list and its click map never move.
+    let active_rows = side_area.height / 4;
+    let rest = side_area.height.saturating_sub(active_rows);
+    let cap = rest.saturating_sub(4) / 3;
+    let mut agent_rows = (agent_count.max(1) as u16 + 2).min(cap).max(3);
+    let mut loop_rows = (loop_count.max(1) as u16 + 2).min(cap).max(3);
+    if agent_rows + loop_rows + 4 > rest {
+        loop_rows = rest.saturating_sub(agent_rows + 4).max(2);
+    }
+    if agent_rows + loop_rows + 4 > rest {
+        agent_rows = rest.saturating_sub(loop_rows + 4).max(2);
+    }
+    let [active, skills, loops, history] = Layout::vertical([
+        Constraint::Length(active_rows),
         Constraint::Length(agent_rows),
+        Constraint::Length(loop_rows),
         Constraint::Min(4),
     ])
     .areas(side_area);
-    (active, skills, history)
+    (active, skills, loops, history)
 }
 
 /// Char-boundary-safe truncation with an ellipsis. Byte slicing here
@@ -244,16 +263,122 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::Help => draw_help(f),
         Mode::SkillsView(view) => draw_skills_view(f, view, app),
         Mode::SkillLauncher(launcher) => draw_skill_launcher(f, launcher, app),
+        Mode::LoopsView(view) => draw_loops_view(f, view, app),
+        Mode::NewLoop(dialog) => draw_loop_dialog(f, dialog, app),
+        Mode::ConfirmRemoveLoop => draw_confirm(
+            f,
+            "Remove this loop from the registry? Its files in the workspace stay. [y/n]",
+        ),
         _ => {}
     }
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let (active_area, agents_area, history_area) = sidebar_areas(area.height, app.skills.len());
+    let (active_area, agents_area, loops_area, history_area) =
+        sidebar_areas(area.height, app.skills.len(), app.loop_registry.loops.len());
 
     draw_active_sidebar(f, active_area, app, now);
     draw_agents_sidebar(f, agents_area, app);
+    draw_loops_sidebar(f, loops_area, app);
     draw_history_sidebar(f, history_area, app);
+}
+
+fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
+    let is_focused =
+        app.sidebar_section == SidebarSection::Loops && matches!(app.mode, Mode::Control);
+    let n = app.loop_registry.loops.len();
+    let title = if app.loop_registry.pause_all {
+        format!("Loops [{}] PAUSED", n)
+    } else if n == 0 {
+        "Loops [0]".to_string()
+    } else {
+        format!("Loops [{}/{}]", (app.selected_loop + 1).min(n), n)
+    };
+    let border_style = if is_focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let title_style = if app.loop_registry.pause_all {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if is_focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(format!(" {title} "), title_style));
+    if n == 0 {
+        let hint = Paragraph::new(
+            "no loops
+
+[a] add a loop",
+        )
+        .block(block);
+        f.render_widget(hint, area);
+        return;
+    }
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = sidebar_window(app.selected_loop, n, visible);
+    let end = (start + visible.max(1)).min(n);
+    let name_width = usize::from(area.width.saturating_sub(2))
+        .saturating_sub(12)
+        .max(6);
+    let items: Vec<ListItem> = app.loop_registry.loops[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, entry)| {
+            let i = start + offset;
+            let is_selected = i == app.selected_loop;
+            let marker = if is_selected && is_focused {
+                "> "
+            } else if is_selected {
+                "* "
+            } else {
+                "  "
+            };
+            let (status, right) = app.loop_row(entry);
+            let line = Line::from(vec![
+                Span::raw(marker),
+                Span::styled(
+                    format!("{} ", status.glyph()),
+                    Style::default().fg(status.color()),
+                ),
+                Span::styled(
+                    format!(
+                        "{:<w$}",
+                        truncate_chars(&entry.pattern, name_width),
+                        w = name_width
+                    ),
+                    if is_selected {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+                Span::styled(
+                    format!(" {} ", entry.level.as_str()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(format!("{right:>4}"), Style::default().fg(status.color())),
+            ]);
+            let item = ListItem::new(line);
+            if is_selected && is_focused {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
 }
 
 fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
@@ -528,15 +653,21 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         }
         return;
     }
-    if (!app.sidebar_hidden
+    if !app.sidebar_hidden
+        && app.sidebar_section == SidebarSection::Loops
+        && matches!(app.mode, Mode::Control)
+    {
+        draw_loop_preview(f, area, app);
+        return;
+    }
+    if ((!app.sidebar_hidden
         && app.sidebar_section == SidebarSection::History
         && matches!(app.mode, Mode::Control))
-        || app.sessions.is_empty()
+        || app.sessions.is_empty())
+        && let Some(hist) = app.history_sessions.get(app.selected_history)
     {
-        if let Some(hist) = app.history_sessions.get(app.selected_history) {
-            draw_history_preview(f, area, hist, !app.sessions.is_empty());
-            return;
-        }
+        draw_history_preview(f, area, hist, !app.sessions.is_empty());
+        return;
     }
     let Some(session) = app.sessions.get(app.selected) else {
         let block = Block::default().borders(Borders::ALL).title("agent-mux");
@@ -577,12 +708,13 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         (matches!(app.mode, Mode::Attached) && !screen.hide_cursor() && scroll_offset == 0)
             .then(|| screen.cursor_position())
     };
-    if let Some((row, col)) = cursor {
-        if inner.width > 0 && inner.height > 0 {
-            let col = col.min(inner.width.saturating_sub(1));
-            let row = row.min(inner.height.saturating_sub(1));
-            f.set_cursor_position((inner.x + col, inner.y + row));
-        }
+    if let Some((row, col)) = cursor
+        && inner.width > 0
+        && inner.height > 0
+    {
+        let col = col.min(inner.width.saturating_sub(1));
+        let row = row.min(inner.height.saturating_sub(1));
+        f.set_cursor_position((inner.x + col, inner.y + row));
     }
     if let Some(sel) = app.displayed_selection() {
         let (len, offset) = session.scroll_view();
@@ -1060,32 +1192,32 @@ fn draw_trace_briefing_preview(
                     ),
                 ])];
 
-                if let Some(ref act) = card.current_activity.value {
-                    if !act.is_empty() {
-                        lines.push(Line::from(vec![
-                            Span::styled(
-                                "  ⚡ Right Now:  ",
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                act,
-                                Style::default()
-                                    .fg(Color::White)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]));
-                    }
+                if let Some(ref act) = card.current_activity.value
+                    && !act.is_empty()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "  ⚡ Right Now:  ",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            act,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
                 }
 
-                if let Some(ref goal) = card.initial_goal.value {
-                    if !goal.is_empty() {
-                        lines.push(Line::from(vec![
-                            Span::styled("  🎯 Goal:       ", Style::default().fg(Color::Cyan)),
-                            Span::styled(goal, Style::default().fg(Color::Gray)),
-                        ]));
-                    }
+                if let Some(ref goal) = card.initial_goal.value
+                    && !goal.is_empty()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled("  🎯 Goal:       ", Style::default().fg(Color::Cyan)),
+                        Span::styled(goal, Style::default().fg(Color::Gray)),
+                    ]));
                 }
 
                 if !card.files_modified.is_empty() {
@@ -1124,21 +1256,14 @@ fn draw_trace_briefing_preview(
                     }
                 }
 
-                if let Some(ref out) = card.last_assistant_output {
-                    if let Some(ref text) = out.value {
-                        if !text.is_empty() {
-                            lines.push(Line::from(vec![
-                                Span::styled(
-                                    "  💬 Last Out:   ",
-                                    Style::default().fg(Color::DarkGray),
-                                ),
-                                Span::styled(
-                                    format!("\"{text}\""),
-                                    Style::default().fg(Color::DarkGray),
-                                ),
-                            ]));
-                        }
-                    }
+                if let Some(ref out) = card.last_assistant_output
+                    && let Some(ref text) = out.value
+                    && !text.is_empty()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled("  💬 Last Out:   ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("\"{text}\""), Style::default().fg(Color::DarkGray)),
+                    ]));
                 }
 
                 lines.push(Line::from(vec![
@@ -1365,8 +1490,20 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                             "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [t/T] trace  [?] help  [q] quit",
                         ),
                         SidebarSection::Agents => Line::raw(
-                            "[b] sidebar  [Enter/h] launch agent  [Tab] history  [n] new  [S] skills  [?] help  [q] quit",
+                            "[b] sidebar  [Enter/h] launch agent  [Tab] loops  [n] new  [S] skills  [?] help  [q] quit",
                         ),
+                        SidebarSection::Loops => {
+                            if app.loop_registry.pause_all {
+                                Line::styled(
+                                    "‖ LOOPS PAUSED  [K] resume all  [Enter] details  [r] run now  [p] pause  [a] add  [e] edit  [x] remove",
+                                    Style::default().fg(Color::Yellow),
+                                )
+                            } else {
+                                Line::raw(
+                                    "[b] sidebar  [Enter] details  [r] run now  [p] pause  [a] add  [e] edit  [x] remove  [K] kill  [?] help",
+                                )
+                            }
+                        }
                         SidebarSection::History => Line::raw(
                             "[b] sidebar  [Enter/r] restart  [a] all  [n] new  [l] logs  [S] skills  [?] help  [q] quit",
                         ),
@@ -1405,13 +1542,14 @@ fn draw_help(f: &mut Frame) {
         row("b", "toggle sidebar (hide / full harness)"),
         row("j/k, ↑/↓", "select session"),
         row("1-9", "jump to session N"),
-        row("Tab", "cycle active / agents / history sections"),
+        row("Tab", "cycle active / agents / loops / history sections"),
         row(
             "Enter",
             "attach (active), launch agent (agents), or restart (history)",
         ),
         row("h", "launch / attach the selected agent (agents)"),
         row("S", "skills view: every skill, where installed, when used"),
+        row("E / K", "loops view / kill switch: pause every loop"),
         row(
             "n",
             "new session (pick the trace backend: SQLite, Langfuse, both)",
@@ -1445,6 +1583,17 @@ fn draw_help(f: &mut Frame) {
         row("Tab, ←/→", "switch pane"),
         row("a", "toggle this project / all projects"),
         row("r or Enter", "resume the selected session"),
+        Line::raw(""),
+        Line::styled("Loops section", head),
+        row(
+            "Enter",
+            "details (Loops view) · r run now · p pause / resume",
+        ),
+        row("a / e / x", "add a loop · edit it · remove it (files stay)"),
+        row(
+            "Loops view",
+            "Tab or 1-5 tabs · a/x decide an inbox item · T traces",
+        ),
         Line::raw(""),
         Line::styled("Skills view", head),
         row("Tab, ←/→", "next tab / focus the list or the detail pane"),
@@ -2998,6 +3147,570 @@ fn draw_skill_executions(f: &mut Frame, area: Rect, view: &SkillsViewState) {
         })
         .collect();
     f.render_widget(List::new(items), area);
+}
+
+/// The Loops section preview: one card for the selected loop.
+fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::DarkGray);
+    let Some(entry) = app.selected_loop() else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Loops ");
+        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [a] add a loop (pattern, harness, cadence, level)   [E] Loops view   [?] help\n\n  Week one: report-only (L1). Promote to L2 when the readiness audit allows it.";
+        f.render_widget(Paragraph::new(text).block(block), area);
+        return;
+    };
+    let profile = if entry.profile.is_empty() {
+        entry.harness.clone()
+    } else {
+        format!("{} ({})", entry.profile, entry.harness)
+    };
+    let title = format!(
+        " {} · {} · {} ",
+        entry.pattern,
+        truncate_path_chars(&entry.workspace.to_string_lossy(), 40),
+        profile
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let row =
+        |k: &str, v: String| Line::from(vec![Span::styled(format!(" {k:<11}"), key), Span::raw(v)]);
+    let mut lines: Vec<Line> = Vec::new();
+    let card = app.loop_cards.get(&entry.id);
+    let (status, right) = app.loop_row(entry);
+    let next = match card.and_then(|c| c.next_in_s) {
+        Some(s) if s <= 0 => "due now".to_string(),
+        Some(s) => format!("next run in {}", crate::app::loops::long_duration(s as u64)),
+        None => "no next run".to_string(),
+    };
+    let status_text = match status {
+        LoopStatus::Running => "running".to_string(),
+        LoopStatus::Paused => {
+            let why = entry
+                .paused_reason
+                .as_deref()
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default();
+            if app.loop_registry.pause_all {
+                "paused by the kill switch (K)".to_string()
+            } else if card.is_some_and(|c| c.kill_switch_in_files) {
+                "paused: loop-pause-all in the workspace files".to_string()
+            } else {
+                format!("paused{why}")
+            }
+        }
+        LoopStatus::NeedsHuman => "waiting on a decision (inbox)".to_string(),
+        LoopStatus::Failed => "last run failed or blocked".to_string(),
+        LoopStatus::Scheduled => "scheduled".to_string(),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" Status     ", key),
+        Span::styled(
+            format!("{} {status_text}", status.glyph()),
+            Style::default().fg(status.color()),
+        ),
+        Span::raw(format!(
+            " · {next} · every {} · level {} ({})",
+            crate::loops::format_interval(entry.interval_s),
+            entry.level.as_str(),
+            entry.level.label()
+        )),
+    ]));
+    let _ = right;
+    match card {
+        None => {
+            lines.push(Line::styled(" loading…", dim));
+        }
+        Some(c) => {
+            match &c.last_run {
+                Some(r) => {
+                    let when = r
+                        .started_ns
+                        .map(|ns| crate::loops::format_timestamp(crate::loops::from_ns(ns)))
+                        .unwrap_or_else(|| r.id.clone());
+                    let n = |v: Option<i64>| v.map(|x| x.to_string()).unwrap_or_else(|| "-".into());
+                    lines.push(row(
+                        "Last run",
+                        format!(
+                            "{when} · {} · {} found · {} action · {} escalated",
+                            r.outcome.as_str(),
+                            n(r.items_found),
+                            n(r.actions_taken),
+                            n(r.escalations)
+                        ),
+                    ));
+                    let verifier = r
+                        .detail
+                        .get("verifier")
+                        .map(|v| {
+                            match (
+                                v.get("ran").and_then(|b| b.as_bool()),
+                                v.get("verdict").and_then(|s| s.as_str()),
+                            ) {
+                                (Some(true), Some(vd)) => format!("verifier: {vd}"),
+                                (Some(true), None) => "verifier: ran".to_string(),
+                                _ => {
+                                    if r.effective_level == crate::loops::Level::L1 {
+                                        "verifier: not required at L1".to_string()
+                                    } else {
+                                        "verifier: did not run".to_string()
+                                    }
+                                }
+                            }
+                        })
+                        .unwrap_or_default();
+                    lines.push(row(
+                        "",
+                        format!(
+                            "{} tokens · {} · {} · {}{}",
+                            r.tokens
+                                .map(|t| crate::loops::format_tokens(t.max(0) as u64))
+                                .unwrap_or_else(|| "-".into()),
+                            r.cost_usd
+                                .map(|c| format!("${c:.2}"))
+                                .unwrap_or_else(|| "$-".into()),
+                            r.duration_s()
+                                .map(|s| format!("{s} s"))
+                                .unwrap_or_else(|| "-".into()),
+                            verifier,
+                            r.detail_str("reason")
+                                .map(|x| format!(" · {x}"))
+                                .unwrap_or_default()
+                        ),
+                    ));
+                }
+                None => lines.push(row("Last run", "none yet".into())),
+            }
+            lines.push(row(
+                "Budget",
+                format!(
+                    "today {}/{} runs · {}/{} tokens ({} %) · {}{}",
+                    c.runs_today,
+                    entry.max_runs_per_day,
+                    crate::loops::format_tokens(c.tokens_today.max(0) as u64),
+                    crate::loops::format_tokens(entry.max_tokens_per_day),
+                    c.percent,
+                    c.budget_mode(),
+                    entry
+                        .max_cost_usd_per_run
+                        .map(|v| format!(" · ${v:.2}/run cap"))
+                        .unwrap_or_default()
+                ),
+            ));
+            lines.push(row(
+                "Breaker",
+                format!(
+                    "{} │ Kill switch {}",
+                    c.breaker
+                        .clone()
+                        .unwrap_or_else(|| "n/a (report-only pattern)".into()),
+                    if app.loop_registry.pause_all || c.kill_switch_in_files {
+                        "ON"
+                    } else {
+                        "off"
+                    }
+                ),
+            ));
+            match &c.readiness {
+                Some((score, level, warnings)) => {
+                    let filled = (*score as usize * 20 / 100).min(20);
+                    lines.push(row(
+                        "Readiness",
+                        format!(
+                            "{}{}  {score}/100  {level} · ceiling {}",
+                            "█".repeat(filled),
+                            "░".repeat(20 - filled),
+                            c.ceiling.as_str()
+                        ),
+                    ));
+                    for w in warnings {
+                        lines.push(row("", w.clone()));
+                    }
+                }
+                None => lines.push(row("Readiness", "workspace not found".into())),
+            }
+            lines.push(row("Inbox", format!("{} waiting", c.inbox)));
+            let files: Vec<String> = c
+                .files
+                .iter()
+                .map(|fl| {
+                    let short = fl
+                        .name
+                        .trim_end_matches(".md")
+                        .trim_end_matches(".yaml")
+                        .trim_end_matches(".json")
+                        .replace("loop-", "");
+                    format!(
+                        "{} {}",
+                        short,
+                        if !fl.present {
+                            "✗"
+                        } else if fl.stale {
+                            "!"
+                        } else {
+                            "✓"
+                        }
+                    )
+                })
+                .collect();
+            lines.push(row("Files", files.join("  ")));
+            if let Some(e) = &c.store_error {
+                lines.push(Line::styled(
+                    format!(" {e}"),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            let recent: Vec<String> = c
+                .recent
+                .iter()
+                .take(4)
+                .map(|r| {
+                    let when = r
+                        .started_ns
+                        .map(|ns| crate::loops::format_timestamp(crate::loops::from_ns(ns)))
+                        .unwrap_or_else(|| r.id.clone());
+                    format!(
+                        "{} {} {}",
+                        when.get(5..16).unwrap_or(&when),
+                        r.outcome.as_str(),
+                        r.tokens
+                            .map(|t| crate::loops::format_tokens(t.max(0) as u64))
+                            .unwrap_or_else(|| "-".into())
+                    )
+                })
+                .collect();
+            if !recent.is_empty() {
+                lines.push(row("Recent", recent.join(" │ ")));
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        " [Enter] details  [r] run now  [p] pause  [e] edit  [x] remove  [K] kill switch  [E] loops view",
+        dim,
+    ));
+    f.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
+    let width = 78.min(f.area().width.saturating_sub(4)).max(40);
+    let height = 24.min(f.area().height.saturating_sub(2)).max(16);
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+    let title = if dialog.editing.is_some() {
+        " Edit loop "
+    } else {
+        " Add loop "
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let dim = Style::default().fg(Color::DarkGray);
+    let sel = |on: bool| {
+        if on {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        }
+    };
+    let pattern = dialog.pattern();
+    let mut lines: Vec<Line> = Vec::new();
+    let field = |label: &str, value: String, on: bool| {
+        Line::from(vec![
+            Span::styled(format!("{label:<12}"), dim),
+            Span::styled(value, sel(on)),
+        ])
+    };
+    lines.push(field(
+        "Workspace",
+        format!("{} ", dialog.workspace),
+        dialog.field == LoopField::Workspace,
+    ));
+    lines.push(Line::styled(
+        "            ←/→ pick a known directory, or type a path",
+        dim,
+    ));
+    lines.push(field(
+        "Pattern",
+        pattern
+            .map(|p| format!("{} — {}", p.id, p.name))
+            .unwrap_or_default(),
+        dialog.field == LoopField::Pattern,
+    ));
+    if let Some(p) = pattern {
+        lines.push(Line::styled(
+            format!(
+                "            {} · week one {} · risk {} · cost {}",
+                truncate_chars(&p.goal, 48),
+                p.week_one_level.as_str(),
+                p.risk,
+                p.token_cost
+            ),
+            dim,
+        ));
+    }
+    let profile_text = if dialog.no_profiles {
+        "no Claude Code or Codex profile in profiles.toml".to_string()
+    } else {
+        dialog
+            .profiles
+            .get(dialog.profile_idx)
+            .map(|(n, h)| format!("{n} ({})", h.as_str()))
+            .unwrap_or_default()
+    };
+    lines.push(field(
+        "Profile",
+        profile_text,
+        dialog.field == LoopField::Profile,
+    ));
+    lines.push(Line::styled(
+        "            Antigravity: not supported for loops yet (see docs/loops.md)",
+        dim,
+    ));
+    lines.push(field(
+        "Every",
+        format!("{} ", dialog.every),
+        dialog.field == LoopField::Every,
+    ));
+    let level_line: Vec<Span> = {
+        let mut spans = vec![Span::styled(format!("{:<12}", "Level"), dim)];
+        for (i, l) in [
+            crate::loops::Level::L1,
+            crate::loops::Level::L2,
+            crate::loops::Level::L3,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let blocked = dialog.level_notes[i].is_some();
+            let on = dialog.level == l;
+            let style = if on && dialog.field == LoopField::Level {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else if on {
+                Style::default().fg(Color::Cyan)
+            } else if blocked {
+                dim
+            } else {
+                Style::default()
+            };
+            spans.push(Span::styled(
+                format!("[{}{}] ", l.as_str(), if blocked { " ✗" } else { "" }),
+                style,
+            ));
+        }
+        spans.push(Span::styled(
+            format!("({}, week one: report only)", dialog.level.label()),
+            dim,
+        ));
+        spans
+    };
+    lines.push(Line::from(level_line));
+    if let Some(note) = &dialog.level_notes[match dialog.level {
+        crate::loops::Level::L1 => 0,
+        crate::loops::Level::L2 => 1,
+        crate::loops::Level::L3 => 2,
+    }] {
+        lines.push(Line::styled(
+            format!("            ✗ {note}"),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    lines.push(field(
+        "Runs/day",
+        format!("{} ", dialog.max_runs),
+        dialog.field == LoopField::MaxRuns,
+    ));
+    lines.push(field(
+        "Tokens/day",
+        format!("{} ", dialog.max_tokens),
+        dialog.field == LoopField::MaxTokens,
+    ));
+    lines.push(field(
+        "USD/run",
+        format!(
+            "{} ",
+            if dialog.max_cost.is_empty() {
+                "(no cap)".to_string()
+            } else {
+                dialog.max_cost.clone()
+            }
+        ),
+        dialog.field == LoopField::MaxCost,
+    ));
+    lines.push(field(
+        "Scaffold",
+        if dialog.scaffold {
+            "[x] write missing skills and contract files (never overwrites)".into()
+        } else {
+            "[ ] register only".into()
+        },
+        dialog.field == LoopField::Scaffold,
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(format!("  {}", dialog.audit_note), dim));
+    if let Some(e) = &dialog.error {
+        lines.push(Line::styled(
+            format!("  {e}"),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "  [Tab/↑/↓] field  [←/→ / Space] choose  [Enter] save  [Esc] cancel",
+        dim,
+    ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_loops_view(f: &mut Frame, view: &LoopsViewState, app: &App) {
+    let width = (f.area().width * 96 / 100).clamp(60, 220);
+    let height = (f.area().height * 92 / 100).clamp(18, 70);
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+    let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Min(0)]).areas(body);
+
+    let title = if view.pause_all {
+        format!(" Loops ({}) PAUSED ", view.loops.len())
+    } else {
+        format!(" Loops ({}) ", view.loops.len())
+    };
+    let left_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(view.focus == LoopsPane::Loops))
+        .title(title);
+    if view.loops.is_empty() {
+        let p = Paragraph::new("\n  no loops yet\n\n  [a] in the Loops section")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(left_block);
+        f.render_widget(p, left);
+    } else {
+        let visible = usize::from(left.height.saturating_sub(2));
+        let start = sidebar_window(view.selected, view.rows.len(), visible);
+        let end = (start + visible.max(1)).min(view.rows.len());
+        let items: Vec<ListItem> = view.rows[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, row)| {
+                let i = start + offset;
+                let is_sel = i == view.selected;
+                let marker = if is_sel { "> " } else { "  " };
+                let line = match row {
+                    LoopRow::Header(ws) => Line::styled(
+                        truncate_path_chars(ws, usize::from(left.width.saturating_sub(3))),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    LoopRow::Loop(idx) => {
+                        let Some(entry) = view.loops.get(*idx) else {
+                            return ListItem::new(Line::raw(""));
+                        };
+                        let (status, right) = app.loop_row(entry);
+                        Line::from(vec![
+                            Span::raw(marker),
+                            Span::styled(
+                                format!("{} ", status.glyph()),
+                                Style::default().fg(status.color()),
+                            ),
+                            Span::raw(format!("{} ", entry.pattern)),
+                            Span::styled(
+                                format!("{} {}", entry.level.as_str(), right),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ])
+                    }
+                };
+                let item = ListItem::new(line);
+                if is_sel && view.focus == LoopsPane::Loops {
+                    item.style(Style::default().add_modifier(Modifier::REVERSED))
+                } else if is_sel {
+                    item.style(Style::default().fg(Color::Cyan))
+                } else {
+                    item
+                }
+            })
+            .collect();
+        f.render_widget(List::new(items).block(left_block), left);
+    }
+
+    let mut title_spans = vec![Span::raw(" ")];
+    for (i, tab) in LoopsTab::ALL.into_iter().enumerate() {
+        if i > 0 {
+            title_spans.push(Span::raw(" | "));
+        }
+        let label = if tab == LoopsTab::Inbox && !view.inbox.is_empty() {
+            format!("{} ({})", tab.label(), view.inbox.len())
+        } else {
+            tab.label().to_string()
+        };
+        title_spans.push(if tab == view.tab {
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(label, Style::default().fg(Color::DarkGray))
+        });
+    }
+    if let Some(l) = view.selected_loop() {
+        title_spans.push(Span::raw(format!(
+            " · {} @ {} ",
+            l.pattern,
+            l.workspace_name()
+        )));
+    } else {
+        title_spans.push(Span::raw(" "));
+    }
+    let right_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(view.focus == LoopsPane::Detail))
+        .title(Line::from(title_spans));
+    let inner = right_block.inner(right);
+    view.viewport_rows.set(usize::from(inner.height));
+    f.render_widget(right_block, right);
+    let lines: Vec<Line> = view
+        .detail_lines
+        .iter()
+        .skip(view.scroll_offset)
+        .cloned()
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+
+    let footer_text = Line::styled(
+        match view.tab {
+            LoopsTab::Inbox => {
+                " [Tab/1-5] tab  [←/→] pane  [↑/↓] select  [a] applied  [x] rejected  [T] traces  [Esc] close"
+            }
+            LoopsTab::Runs => {
+                " [Tab/1-5] tab  [←/→] pane  [↑/↓] select  [Enter] attach/traces  [r] run now  [p] pause  [Esc] close"
+            }
+            _ => {
+                " [Tab/1-5] tab  [←/→] pane  [↑/↓] scroll  [r] run now  [p] pause  [R] reload  [Esc] close"
+            }
+        },
+        Style::default().fg(Color::Black).bg(Color::Cyan),
+    );
+    f.render_widget(Paragraph::new(footer_text), footer);
 }
 
 fn draw_confirm(f: &mut Frame, message: &str) {

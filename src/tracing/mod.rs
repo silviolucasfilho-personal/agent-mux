@@ -114,8 +114,50 @@ pub struct LaunchPlan {
     /// as `metadata.skill_id` / `metadata.skill_harness` so a skill's
     /// executions are found by id rather than by session name.
     pub skill: Option<(String, String)>,
+    /// A loop run: the keys written to `launches.metadata.loop_*` and the
+    /// policy the `PreToolUse` guard enforces. Set through `attach_loop`.
+    pub loop_launch: Option<crate::loops::LoopLaunch>,
     profile_name: String,
     dir: PathBuf,
+}
+
+impl LaunchPlan {
+    /// Marks the plan as a loop run. On Claude the per-launch `--settings`
+    /// hook document is recomputed so `PreToolUse` waits for the guard
+    /// with `--loop` (fail-closed for write tools); Codex reads the same
+    /// policy through its installed hooks and needs no argument.
+    pub fn attach_loop(&mut self, launch: crate::loops::LoopLaunch, home: &Path) {
+        if self.provider == Provider::Claude
+            && self.hooks_registered
+            && let Some(exe) = hooks::register::current_exe()
+        {
+            let reg = hooks::register::Registration {
+                exe,
+                home: home.to_path_buf(),
+                content_mode: self.content_mode,
+                guard: self.guard.is_some(),
+                loop_guard: true,
+            };
+            let user_files = [
+                home.join(".claude").join("settings.json"),
+                self.dir.join(".claude").join("settings.json"),
+                self.dir.join(".claude").join("settings.local.json"),
+            ];
+            let settings = hooks::register::claude_settings_json(&reg, &user_files);
+            match self.extra_args.iter().position(|a| a == "--settings") {
+                Some(i) if i + 1 < self.extra_args.len() => self.extra_args[i + 1] = settings,
+                _ => {
+                    self.extra_args.push("--settings".into());
+                    self.extra_args.push(settings);
+                }
+            }
+        }
+        self.loop_launch = Some(launch);
+    }
+
+    pub fn is_loop(&self) -> bool {
+        self.loop_launch.is_some()
+    }
 }
 
 pub struct TraceRuntime {
@@ -484,6 +526,7 @@ impl TraceRuntime {
             guard: None,
             profile_name: profile.name.clone(),
             skill: None,
+            loop_launch: None,
             dir: dir.to_path_buf(),
         })
     }
@@ -659,6 +702,7 @@ impl TraceRuntime {
                 home: self.settings.home.clone(),
                 content_mode,
                 guard: guard.is_some(),
+                loop_guard: false,
             };
             match provider {
                 Provider::Claude => {
@@ -705,6 +749,7 @@ impl TraceRuntime {
             guard,
             profile_name: profile.name.clone(),
             skill: None,
+            loop_launch: None,
             dir: dir.to_path_buf(),
         })
     }
@@ -810,6 +855,31 @@ impl TraceRuntime {
                 "skill_harness".into(),
                 serde_json::Value::from(harness.as_str()),
             );
+        }
+        if let Some(lp) = &plan.loop_launch {
+            meta.insert(
+                "loop_id".into(),
+                serde_json::Value::from(lp.loop_id.as_str()),
+            );
+            meta.insert(
+                "loop_run_id".into(),
+                serde_json::Value::from(lp.run_id.as_str()),
+            );
+            meta.insert(
+                "loop_pattern".into(),
+                serde_json::Value::from(lp.pattern.as_str()),
+            );
+            meta.insert(
+                "loop_level".into(),
+                serde_json::Value::from(lp.level.as_str()),
+            );
+            meta.insert(
+                "loop_workspace".into(),
+                serde_json::Value::from(lp.workspace.as_str()),
+            );
+            if let Ok(policy) = serde_json::to_value(&lp.policy) {
+                meta.insert("loop_policy".into(), policy);
+            }
         }
         launch.metadata = Some(serde_json::Value::Object(meta));
         self.send(StoreOp::Launch(launch));

@@ -142,6 +142,77 @@ pub struct AgentsConfig {
     pub mcp: Option<String>,
 }
 
+/// Global `[loops]` table: the Loop Engineering scheduler
+/// (`docs/superpowers/specs/2026-09-15-loop-engineering-design.md`).
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct LoopRunnerConfig {
+    /// The in-TUI scheduler (default true). `false` leaves manual runs
+    /// (`r`, `agent-mux loop run`) only.
+    pub enabled: Option<bool>,
+    /// Loop runs live at a time, across workspaces (default 1).
+    pub max_concurrent: Option<u32>,
+    /// `"once"` (default): a slot missed while agent-mux was closed fires
+    /// at startup; `"skip"`: wait for the next slot.
+    pub catch_up: Option<String>,
+    /// A run past this many seconds is killed and recorded as failed
+    /// (default 900).
+    pub run_timeout_s: Option<u64>,
+    /// Where L2+ runs get their worktrees, relative to the workspace
+    /// (default `.loop-worktrees`).
+    pub worktrees_dir: Option<String>,
+}
+
+/// `[loops]` resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopRunnerSettings {
+    pub enabled: bool,
+    pub max_concurrent: u32,
+    pub catch_up_once: bool,
+    pub run_timeout_s: u64,
+    pub worktrees_dir: String,
+}
+
+impl Default for LoopRunnerSettings {
+    fn default() -> Self {
+        LoopRunnerSettings {
+            enabled: true,
+            max_concurrent: 1,
+            catch_up_once: true,
+            run_timeout_s: 900,
+            worktrees_dir: ".loop-worktrees".into(),
+        }
+    }
+}
+
+pub fn resolve_loops(cfg: Option<&LoopRunnerConfig>) -> LoopRunnerSettings {
+    let mut out = LoopRunnerSettings::default();
+    if let Some(c) = cfg {
+        if let Some(e) = c.enabled {
+            out.enabled = e;
+        }
+        if let Some(m) = c.max_concurrent.filter(|m| *m > 0) {
+            out.max_concurrent = m;
+        }
+        match c.catch_up.as_deref().map(str::trim) {
+            Some("skip") => out.catch_up_once = false,
+            Some("once") | None => {}
+            Some(_) => {}
+        }
+        if let Some(t) = c.run_timeout_s.filter(|t| *t >= 30) {
+            out.run_timeout_s = t;
+        }
+        if let Some(d) = c
+            .worktrees_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
+            out.worktrees_dir = d.to_string();
+        }
+    }
+    out
+}
+
 /// `[agents]` resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentsSettings {
@@ -179,6 +250,9 @@ pub struct Config {
     pub tracing: Option<TracingConfig>,
     #[serde(default)]
     pub agents: Option<AgentsConfig>,
+    /// The Loop Engineering scheduler (`[loops]`).
+    #[serde(default)]
+    pub loops: Option<LoopRunnerConfig>,
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
@@ -556,6 +630,7 @@ pub fn load() -> anyhow::Result<Config> {
         profiles: Config::default_profiles(),
         tracing: None,
         agents: None,
+        loops: None,
         hide_sidebar: false,
         loaded_from: None,
         legacy_langfuse_section: false,
@@ -580,6 +655,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
         profiles: Config::default_profiles(),
         tracing: None,
         agents: None,
+        loops: None,
         hide_sidebar: false,
         loaded_from: None,
         legacy_langfuse_section: false,

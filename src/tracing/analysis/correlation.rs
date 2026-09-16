@@ -25,12 +25,12 @@ pub fn resolve_binding(
         let mut rows = stmt.query([launch_id])?;
         if let Some(row) = rows.next()? {
             let db_key: Option<String> = row.get(0)?;
-            if let (Some(db_k), Some(req_k)) = (&db_key, native_key) {
-                if db_k != req_k {
-                    return Err(AnalysisError::Correlation(format!(
-                        "Launch '{launch_id}' bound to '{db_k}' contradicts requested native key '{req_k}'"
-                    )));
-                }
+            if let (Some(db_k), Some(req_k)) = (&db_key, native_key)
+                && db_k != req_k
+            {
+                return Err(AnalysisError::Correlation(format!(
+                    "Launch '{launch_id}' bound to '{db_k}' contradicts requested native key '{req_k}'"
+                )));
             }
             return Ok(Some(Binding {
                 launch_id: launch_id.to_string(),

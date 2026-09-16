@@ -745,21 +745,21 @@ impl TraceService {
         let db_available = self.config.db_path.exists();
         let mut collector_freshness = None;
 
-        if db_available {
-            if let Ok(conn) = Connection::open_with_flags(
+        if db_available
+            && let Ok(conn) = Connection::open_with_flags(
                 &self.config.db_path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            ) {
-                let latest: Option<i64> = conn
-                    .query_row("SELECT MAX(start_ns) FROM traces", [], |r| r.get(0))
-                    .optional()
-                    .unwrap_or(None);
+            )
+        {
+            let latest: Option<i64> = conn
+                .query_row("SELECT MAX(start_ns) FROM traces", [], |r| r.get(0))
+                .optional()
+                .unwrap_or(None);
 
-                if let Some(ns) = latest {
-                    if let Ok(dt) = OffsetDateTime::from_unix_timestamp_nanos(ns as i128) {
-                        collector_freshness = dt.format(&Rfc3339).ok();
-                    }
-                }
+            if let Some(ns) = latest
+                && let Ok(dt) = OffsetDateTime::from_unix_timestamp_nanos(ns as i128)
+            {
+                collector_freshness = dt.format(&Rfc3339).ok();
             }
         }
 
@@ -974,10 +974,10 @@ impl TraceService {
                     continue;
                 }
 
-                if let Some(ref req_prov) = args.provider {
-                    if provider.as_deref() != Some(req_prov.as_str()) {
-                        continue;
-                    }
+                if let Some(ref req_prov) = args.provider
+                    && provider.as_deref() != Some(req_prov.as_str())
+                {
+                    continue;
                 }
 
                 let first_seen = OffsetDateTime::from_unix_timestamp_nanos(first_seen_ns as i128)
@@ -1011,13 +1011,12 @@ impl TraceService {
 
         // Augment with live session states
         for item in &mut items {
-            if let Some(ref key) = item.session_key {
-                if let Some(ls) = live
+            if let Some(ref key) = item.session_key
+                && let Some(ls) = live
                     .iter()
                     .find(|s| s.session_key.as_deref() == Some(key.as_str()))
-                {
-                    item.runtime_state = ls.state;
-                }
+            {
+                item.runtime_state = ls.state;
             }
         }
         if let Some(ref req_state) = args.runtime_state {
@@ -1288,40 +1287,38 @@ impl TraceService {
                  FROM observations
                  WHERE trace_id = ?1
                  ORDER BY start_ns ASC, id ASC",
-            ) {
-                if let Ok(obs_rows) = obs_stmt.query_map(params![t_id], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Option<String>>(1)?
-                            .unwrap_or_else(|| "unknown".into()),
-                        r.get::<_, Option<String>>(2)?
-                            .unwrap_or_else(|| "tool".into()),
-                        r.get::<_, i64>(3)?,
-                        r.get::<_, Option<i64>>(4)?,
-                        r.get::<_, Option<String>>(5)?.as_deref() == Some("ERROR"),
-                        r.get::<_, Option<String>>(6)?,
-                    ))
-                }) {
-                    for o in obs_rows.flatten() {
-                        let (o_id, o_name, o_type, o_start_ns, o_end_ns, is_err, status_msg) = o;
-                        let o_start_time =
-                            OffsetDateTime::from_unix_timestamp_nanos(o_start_ns as i128)
-                                .ok()
-                                .and_then(|dt| dt.format(&Rfc3339).ok())
-                                .unwrap_or_default();
-                        let o_dur_ms =
-                            o_end_ns.map(|e| ((e.saturating_sub(o_start_ns)) / 1_000_000) as u64);
+            ) && let Ok(obs_rows) = obs_stmt.query_map(params![t_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?
+                        .unwrap_or_else(|| "unknown".into()),
+                    r.get::<_, Option<String>>(2)?
+                        .unwrap_or_else(|| "tool".into()),
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, Option<String>>(5)?.as_deref() == Some("ERROR"),
+                    r.get::<_, Option<String>>(6)?,
+                ))
+            }) {
+                for o in obs_rows.flatten() {
+                    let (o_id, o_name, o_type, o_start_ns, o_end_ns, is_err, status_msg) = o;
+                    let o_start_time =
+                        OffsetDateTime::from_unix_timestamp_nanos(o_start_ns as i128)
+                            .ok()
+                            .and_then(|dt| dt.format(&Rfc3339).ok())
+                            .unwrap_or_default();
+                    let o_dur_ms =
+                        o_end_ns.map(|e| ((e.saturating_sub(o_start_ns)) / 1_000_000) as u64);
 
-                        obs.push(TimelineObservationItem {
-                            id: o_id,
-                            name: o_name,
-                            observation_type: o_type,
-                            start_time: o_start_time,
-                            duration_ms: o_dur_ms,
-                            is_error: is_err,
-                            error_message: status_msg,
-                        });
-                    }
+                    obs.push(TimelineObservationItem {
+                        id: o_id,
+                        name: o_name,
+                        observation_type: o_type,
+                        start_time: o_start_time,
+                        duration_ms: o_dur_ms,
+                        is_error: is_err,
+                        error_message: status_msg,
+                    });
                 }
             }
 
@@ -1520,32 +1517,32 @@ impl TraceService {
                 .and_then(|dt| dt.format(&Rfc3339).ok())
                 .unwrap_or_default();
 
-            if let Some(ref text) = in_opt {
-                if text.to_lowercase().contains(&args.query.to_lowercase()) {
-                    matches.push(SearchMatchItem {
-                        source_id: format!("trace:{id}:input"),
-                        source_type: "trace_input".into(),
-                        session_key: s_key.clone(),
-                        launch_id: l_id.clone(),
-                        provider: prov.clone(),
-                        timestamp: ts.clone(),
-                        snippet: super::evidence::snippet(text, 150),
-                    });
-                }
+            if let Some(ref text) = in_opt
+                && text.to_lowercase().contains(&args.query.to_lowercase())
+            {
+                matches.push(SearchMatchItem {
+                    source_id: format!("trace:{id}:input"),
+                    source_type: "trace_input".into(),
+                    session_key: s_key.clone(),
+                    launch_id: l_id.clone(),
+                    provider: prov.clone(),
+                    timestamp: ts.clone(),
+                    snippet: super::evidence::snippet(text, 150),
+                });
             }
 
-            if let Some(ref text) = out_opt {
-                if text.to_lowercase().contains(&args.query.to_lowercase()) {
-                    matches.push(SearchMatchItem {
-                        source_id: format!("trace:{id}:output"),
-                        source_type: "trace_output".into(),
-                        session_key: s_key,
-                        launch_id: l_id,
-                        provider: prov,
-                        timestamp: ts,
-                        snippet: super::evidence::snippet(text, 150),
-                    });
-                }
+            if let Some(ref text) = out_opt
+                && text.to_lowercase().contains(&args.query.to_lowercase())
+            {
+                matches.push(SearchMatchItem {
+                    source_id: format!("trace:{id}:output"),
+                    source_type: "trace_output".into(),
+                    session_key: s_key,
+                    launch_id: l_id,
+                    provider: prov,
+                    timestamp: ts,
+                    snippet: super::evidence::snippet(text, 150),
+                });
             }
         }
 
@@ -1852,8 +1849,8 @@ fn parse_window(
         .format(&Rfc3339)
         .map_err(|e| ServiceError::Internal(e.to_string()))?;
 
-    let since_ns = (since_dt.unix_timestamp_nanos() / 1) as i64;
-    let until_ns = (until_dt.unix_timestamp_nanos() / 1) as i64;
+    let since_ns = since_dt.unix_timestamp_nanos() as i64;
+    let until_ns = until_dt.unix_timestamp_nanos() as i64;
 
     Ok((
         since_ns,

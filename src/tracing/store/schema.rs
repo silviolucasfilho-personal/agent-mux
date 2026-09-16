@@ -1,9 +1,9 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 11;
+pub const SCHEMA_VERSION: i32 = 12;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
 // uses a separate database rather than silently replacing its history.
@@ -652,4 +652,48 @@ BEGIN
     'delete'
   );
 END;
+"#;
+
+// Loop Engineering: one row per scheduled loop run (`agent-mux loop …`,
+// the Loops sidebar). Blocked runs are rows too, so the day's caps count
+// them; they never reach `loop-run-log.md`.
+const V12: &str = r#"
+CREATE TABLE IF NOT EXISTS loop_runs (
+  id               TEXT PRIMARY KEY,
+  loop_id          TEXT NOT NULL,
+  workspace        TEXT NOT NULL,
+  pattern          TEXT NOT NULL,
+  harness          TEXT NOT NULL,
+  level            TEXT NOT NULL CHECK (level IN ('L1','L2','L3')),
+  effective_level  TEXT NOT NULL CHECK (effective_level IN ('L1','L2','L3')),
+  launch_id        TEXT REFERENCES launches (id),
+  scheduled_ns     INTEGER NOT NULL,
+  started_ns       INTEGER,
+  ended_ns         INTEGER,
+  outcome          TEXT NOT NULL CHECK (outcome IN ('report-only','fix-proposed','escalated','no-op','blocked','failed')),
+  items_found      INTEGER,
+  actions_taken    INTEGER,
+  escalations      INTEGER,
+  tokens           INTEGER,
+  cost_usd         REAL,
+  readiness_score  INTEGER,
+  worktree         TEXT,
+  branch           TEXT,
+  decision         TEXT CHECK (decision IN ('applied','rejected')),
+  decided_ns       INTEGER,
+  detail           TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS loop_runs_by_loop ON loop_runs (loop_id, scheduled_ns DESC);
+CREATE INDEX IF NOT EXISTS loop_runs_inbox ON loop_runs (outcome) WHERE decision IS NULL;
+CREATE VIEW IF NOT EXISTS loop_run_stats AS
+SELECT loop_id, pattern, workspace,
+       COUNT(*)                                            AS runs,
+       SUM(outcome = 'fix-proposed')                       AS fixes_proposed,
+       SUM(outcome = 'escalated')                          AS escalated,
+       SUM(outcome = 'blocked')                            AS blocked,
+       SUM(outcome = 'failed')                             AS failed,
+       COALESCE(SUM(tokens), 0)                            AS tokens,
+       COALESCE(SUM(cost_usd), 0)                          AS cost_usd,
+       MAX(started_ns)                                     AS last_started_ns
+FROM loop_runs GROUP BY loop_id;
 "#;
