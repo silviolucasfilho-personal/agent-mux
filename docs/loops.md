@@ -54,6 +54,8 @@ Registry: `loops/registry.toml` (embedded). Every skill reads `$AGENT_MUX_LOOP_C
 | L2 | assisted: one fix, verifier, human decides | a worktree `.loop-worktrees/<run>` on branch `loop/<run>`; the state file, run log and ledger stay in the workspace (`$AGENT_MUX_LOOP_STATE`, absolute paths in the context) | guard: denylist, `maxFiles`, no push or merge; post-run gate re-check; inbox |
 | L3 | unattended | worktree | same guard; readiness ≥ 78 with verifier, cost observability and fresh activity |
 
+A loop run passes `--dangerously-skip-permissions` (Claude Code) or `--yolo` (Codex) whatever the profile says: print mode cannot answer an approval prompt, and the guard, the gate and the worktree are the controls instead.
+
 Per-harness ceiling: Claude Code L3 (per-launch guard with `--loop`, fail-closed for write tools); Codex L3 with `agent-mux trace hooks install codex`, else L1; Antigravity not supported (section 8).
 
 The effective level of a run can be lower than the configured one: tokens today at 80 % or more of the cap, a stale state file (`Last run` older than 14 days), a readiness gate that no longer holds, or a missing guard cap the run at L1; the reason travels in the context and the preview.
@@ -87,7 +89,7 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 | Run capped at L1: no path guard | Codex: `agent-mux trace hooks install codex`; Claude: the binary must run from an absolute path |
 | `verifier_missing` on a fix | the skill did not hand the change to `loop-verifier`; treat the fix as unverified |
 | Run failed: "the harness did not find /loop-…" | the skill file is missing from the run's directory; edit the loop with Scaffold on or run `agent-mux loop init`, and commit `.claude/skills` if you want it in every checkout |
-| Run finished but did nothing | print mode cannot answer permission prompts: set `bypass_approvals = true` on the loop's profile |
+| Run finished but did nothing | look at the session's scrollback (attach to it in Active); a loop run always bypasses the harness's own approval prompts because print mode has nobody to answer them, and the guard is the control |
 | Nothing runs | `[loops] enabled = false`, the kill switch, or the loop is paused; `agent-mux trace doctor` has a `loops` section |
 
 ## 10. Command line

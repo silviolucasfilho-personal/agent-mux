@@ -1242,9 +1242,12 @@ impl App {
             entry.pattern,
             state_path.display(),
         );
+        // A print-mode run has nobody to answer an approval prompt, so the
+        // harness's own prompts are bypassed; the PreToolUse guard (gate,
+        // report-only, no push) and the worktree are the controls.
         let options = crate::harness::LaunchOptions {
             model: profile.model.clone(),
-            bypass_approvals: profile.bypass_approvals.unwrap_or(false),
+            bypass_approvals: true,
             resume: crate::harness::Resume::Off,
             one_shot: Some(prompt),
         };
@@ -1256,13 +1259,7 @@ impl App {
                     args.insert(args.len() - 2, format!("{cap}"));
                 }
             }
-            Harness::Codex => {
-                if !profile.bypass_approvals.unwrap_or(false) {
-                    let at = args.len().saturating_sub(1);
-                    args.insert(at, "-s".into());
-                    args.insert(at + 1, "workspace-write".into());
-                }
-            }
+            Harness::Codex => {}
             Harness::Antigravity => return Err("Antigravity is not supported for loops".into()),
         }
         if Harness::detect(&profile.command) != Some(harness) {
