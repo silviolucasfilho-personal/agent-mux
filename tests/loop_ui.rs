@@ -126,6 +126,13 @@ fn the_hint_lines_fit_a_hundred_columns_and_the_help_fits() {
         screen.contains("[Esc] or [?] to close"),
         "the overlay fits:\n{screen}"
     );
+    // the build stamp closes the overlay, inside its 84-column box
+    assert!(
+        screen.contains(&format!("agent-mux {}", agent_mux::build_info::VERSION)),
+        "the version line:\n{screen}"
+    );
+    assert!(screen.contains(agent_mux::build_info::COMMIT), "{screen}");
+    assert!(screen.contains("built "), "{screen}");
 }
 
 #[test]

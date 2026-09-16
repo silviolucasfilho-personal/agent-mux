@@ -17,6 +17,8 @@ You are one run of a scheduled loop over the open pull requests of this reposito
 
 ## Procedure
 
+**Early exit, before anything else.** Do step 1 (the one listing call), then build the run fingerprint: one line per PR from the step 1 JSON, `number|updatedAt|mergeStateStatus|reviewDecision|<number of checks>`, sorted. Compare it with the `Fingerprint:` line at the bottom of the state file. When it is identical and no High Priority item carries a `Loop action:` this run must continue, do not fetch any log: rewrite only the `Last run:` and `Run log:` lines, keep every section as it is, and finish with outcome `no-op`. The whole run must stay under 5k tokens. Otherwise carry on and write the new fingerprint in the footer.
+
 1. `gh pr list --state open --limit 50 --json number,title,url,isDraft,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup,author,updatedAt` — one call. If `gh` is missing or not authenticated, record that as the single High Priority item and skip to the state file.
 2. For each PR, in order:
    - `mergeable = CONFLICTING` or `mergeStateStatus = DIRTY` → **High Priority** (conflicts).
@@ -62,6 +64,7 @@ Last run: <RFC3339>
 
 ---
 Run log: <timestamp> | <findings> findings | <actions> actions | <escalations> escalations
+Fingerprint: <the run fingerprint, one line>
 ```
 
 ## Rules

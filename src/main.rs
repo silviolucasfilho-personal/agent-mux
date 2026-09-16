@@ -60,6 +60,12 @@ async fn main() -> Result<()> {
                 );
                 return Ok(());
             }
+            Some("--version") | Some("-V") | Some("version") => {
+                for line in agent_mux::build_info::lines() {
+                    println!("{line}");
+                }
+                return Ok(());
+            }
             Some("skill") => {
                 if let Err(err) = agent_mux::skill::cli::handle_skill_cli(&args[2..]) {
                     eprintln!("{err}");

@@ -1237,6 +1237,10 @@ fn doctor_langfuse(resolved: &ResolvedTracing, cfg: &config::Config) {
 
 fn doctor() -> anyhow::Result<()> {
     println!("agent-mux trace doctor\n");
+    for line in crate::build_info::lines() {
+        println!("{line}");
+    }
+    println!();
     let cfg = config::load()?;
     match &cfg.loaded_from {
         Some(path) => println!("config file: {}", path.display()),
