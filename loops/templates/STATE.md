@@ -20,3 +20,4 @@ Last run: (set by loop on each run)
 
 ---
 Run log: (timestamp) | findings | actions | escalations
+Fingerprint: (set by loop on each run; an unchanged fingerprint ends the next run early)

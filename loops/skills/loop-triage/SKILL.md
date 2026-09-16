@@ -19,6 +19,8 @@ You are one run of a scheduled loop. You have a budget, a level and a state file
 
 Stay inside these bounds; do not explore beyond them.
 
+**Early exit, before anything else.** Do step 1 (the one listing call), then build the run fingerprint: `git rev-parse HEAD`, the sorted `git status --porcelain` output and the sorted `git branch --no-merged HEAD` list, joined with `|`. Compare it with the `Fingerprint:` line at the bottom of the state file. When it is identical and no High Priority item carries a `Loop action:` this run must continue, do not run the tests, the linter or the grep: rewrite only the `Last run:` and `Run log:` lines, keep every section as it is, and finish with outcome `no-op`. The whole run must stay under 5k tokens. Otherwise carry on and write the new fingerprint in the footer.
+
 1. Detect the project kind from the root: `Cargo.toml` → `cargo test --no-run` then `cargo test 2>&1 | tail -40`; `package.json` → `npm test --silent 2>&1 | tail -40`; `pyproject.toml` → `pytest -q 2>&1 | tail -40`; otherwise skip tests and say so.
 2. Lint the same way when a linter is configured (`cargo clippy --all-targets 2>&1 | tail -20`, `npm run lint --silent 2>&1 | tail -20`). One invocation each; never install tools.
 3. `git status --porcelain` and `git branch --no-merged HEAD --sort=-committerdate | head -10` for uncommitted work and stale branches (older than 30 days by `git log -1 --format=%cr <branch>`).
@@ -60,6 +62,7 @@ Last run: <RFC3339, e.g. 2026-09-16T08:00:00Z>
 
 ---
 Run log: <timestamp> | <findings> findings | <actions> actions | <escalations> escalations
+Fingerprint: <the run fingerprint, one line>
 ```
 
 ## Rules

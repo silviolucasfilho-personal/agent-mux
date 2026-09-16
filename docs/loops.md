@@ -44,7 +44,7 @@ The literal `loop-pause-all` on a line of its own in the state file or `LOOP.md`
 | changelog-drafter | 1d | L1 | `changelog-drafter-state.md` | loop-changelog, loop-rules, verifier | 1 | 100k | no |
 | issue-triage | 1d | L1 | `issue-triage-state.md` | loop-issue-triage, loop-rules, verifier | 12 | 80k | no |
 
-Registry: `loops/registry.toml` (embedded). Every skill reads `$AGENT_MUX_LOOP_CONTEXT` first, follows a bounded procedure, only edits the state file at L1, may call `loop-fix` for one item at L2, hands changes to `loop-verifier`, rewrites the state file, and ends with a fenced `loop-result` block (`outcome`, `items_found`, `actions_taken`, `escalations`, `summary`).
+Registry: `loops/registry.toml` (embedded). Every skill reads `$AGENT_MUX_LOOP_CONTEXT` first, makes its one listing call and compares a fingerprint of it with the `Fingerprint:` line in the state file: unchanged means the run rewrites `Last run:` and ends as `no-op` under 5k tokens (the early exit the cost model assumes); otherwise it follows a bounded procedure, only edits the state file at L1, may call `loop-fix` for one item at L2, hands changes to `loop-verifier`, rewrites the state file, and ends with a fenced `loop-result` block (`outcome`, `items_found`, `actions_taken`, `escalations`, `summary`).
 
 ## 4. Levels and what enforces them
 

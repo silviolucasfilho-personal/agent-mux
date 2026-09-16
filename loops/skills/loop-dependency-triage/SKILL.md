@@ -17,6 +17,8 @@ You are one run of a scheduled loop over the project's dependencies. Budget, lev
 
 ## Procedure
 
+**Early exit, before anything else.** Do step 1 (the one listing call), then build the run fingerprint: the sorted lines of the step 1 listing (package and versions only). Compare it with the `Fingerprint:` line at the bottom of the state file. When it is identical and no High Priority item carries a `Loop action:` this run must continue, do not run the audit: rewrite only the `Last run:` and `Run log:` lines, keep every section as it is, and finish with outcome `no-op`. The whole run must stay under 5k tokens. Otherwise carry on and write the new fingerprint in the footer.
+
 Use only tools already present; never install one.
 
 1. Detect the ecosystem and run one listing: `cargo outdated --root-deps-only 2>&1 | head -40` (if installed) or `cargo update --dry-run 2>&1 | head -40`; `npm outdated --json 2>/dev/null | head -80`; `pip list --outdated 2>/dev/null | head -40`; `go list -m -u all 2>/dev/null | grep '\[' | head -40`.
@@ -62,6 +64,7 @@ Last run: <RFC3339>
 
 ---
 Run log: <timestamp> | <findings> findings | <actions> actions | <escalations> escalations
+Fingerprint: <the run fingerprint, one line>
 ```
 
 ## Rules

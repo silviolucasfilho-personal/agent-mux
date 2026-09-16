@@ -16,6 +16,8 @@ You are one run of a scheduled loop that reads recent merges and lists their lef
 
 ## Procedure
 
+**Early exit, before anything else.** Do step 1 (the one listing call), then build the run fingerprint: `git rev-parse HEAD` and the count of merges in the step 1 window. Compare it with the `Fingerprint:` line at the bottom of the state file. When it is identical and no High Priority item carries a `Loop action:` this run must continue, do not diff or grep the merged files: rewrite only the `Last run:` and `Run log:` lines, keep every section as it is, and finish with outcome `no-op`. The whole run must stay under 5k tokens. Otherwise carry on and write the new fingerprint in the footer.
+
 1. Window: `git log --merges --since="<previous_run.id or 7 days ago>" --format="%h %s" | head -30`. No merges → `no-op` unless open items remain.
 2. For the files those merges touched (`git diff --name-only <first>^..HEAD | head -100`):
    - feature flags: `grep -rn "feature_flag\|FEATURE_\|is_enabled(\"" <files>`; a flag whose both branches exist and one is unreachable after the merge is a **dead flag** (Watch List, or High Priority when it guards user-facing behaviour).
@@ -58,6 +60,7 @@ Last run: <RFC3339>
 
 ---
 Run log: <timestamp> | <findings> findings | <actions> actions | <escalations> escalations
+Fingerprint: <the run fingerprint, one line>
 ```
 
 ## Rules

@@ -16,6 +16,8 @@ You are one run of a scheduled loop that drafts release notes. Budget, level and
 
 ## Procedure
 
+**Early exit, before anything else.** Do step 1 (the one listing call), then build the run fingerprint: the last tag and `git rev-parse HEAD`. Compare it with the `Fingerprint:` line at the bottom of the state file. When it is identical and no High Priority item carries a `Loop action:` this run must continue, do not read any commit: rewrite only the `Last run:` and `Run log:` lines, keep every section as it is, and finish with outcome `no-op`. The whole run must stay under 5k tokens. Otherwise carry on and write the new fingerprint in the footer.
+
 1. `git describe --tags --abbrev=0 2>/dev/null` gives the last tag; none → use `--since="30 days ago"`.
 2. `git log <tag>..HEAD --merges --format="%h %s%n%b" | head -120` and, for repositories that squash, `git log <tag>..HEAD --no-merges --format="%h %s" | head -80`. One pass; no per-commit diffs except to disambiguate a title (`git show --stat <sha> | head -20`, at most five).
 3. Group entries: **Added**, **Changed**, **Fixed**, **Removed**, **Security**, **Breaking**. Drop merge-noise (version bumps, "merge branch", CI-only changes) into Recent Noise.
@@ -56,6 +58,7 @@ Last run: <RFC3339>
 
 ---
 Run log: <timestamp> | <findings> findings | <actions> actions | <escalations> escalations
+Fingerprint: <the run fingerprint, one line>
 ```
 
 ## Rules
