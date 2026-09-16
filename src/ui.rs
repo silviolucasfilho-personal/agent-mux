@@ -1463,6 +1463,10 @@ fn draw_help(f: &mut Frame) {
         row("r", "resume the selected session"),
         Line::raw(""),
         Line::styled("  [Esc] or [?] to close", dim),
+        Line::styled(
+            format!("  {}", crate::build_info::short()),
+            Style::default().fg(Color::DarkGray),
+        ),
     ];
     let height = (lines.len() as u16 + 2).min(f.area().height.saturating_sub(2));
     let width = 84.min(f.area().width.saturating_sub(4)).max(40);

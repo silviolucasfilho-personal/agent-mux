@@ -42,6 +42,7 @@ agent-mux --hide-sidebar      # --full-screen and -b do the same
 One-shot commands are dispatched in [src/main.rs](src/main.rs) before any terminal setup:
 
 ```sh
+agent-mux --version           # version, build date and time, branch and commit
 agent-mux trace help          # every trace subcommand
 agent-mux trace doctor        # config, store health, provider readiness, hooks
 agent-mux trace path          # where the SQLite store is
@@ -49,7 +50,20 @@ agent-mux skill list
 agent-mux run --help
 ```
 
-There is no general-purpose argument parser: `main` matches only `trace`, `run`, `skill` and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI. A plain launch uses built-in Claude Code, Codex and Antigravity profiles when no usable configuration exists. Local tracing is on by default and needs no credentials. The database is created by a writer (TUI startup, `trace import`, `agent-mux run`); read commands do not create one.
+There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `run`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI.
+
+`--version` prints the stamp [build.rs](build.rs) bakes in at compile time and [src/build_info.rs](src/build_info.rs) formats:
+
+```text
+agent-mux 0.1.0
+built     2026-09-16T11:29:38-03:00 (4 s ago, debug)
+          2026-09-16T14:29:38Z UTC
+branch    master @ 070020f0
+target    aarch64-apple-darwin
+binary    /Users/me/.cargo/bin/agent-mux
+```
+
+The branch and commit describe the checkout the binary was **compiled** from, not the directory it runs in; when the current directory sits on another branch, a line says so, which is how you catch a stale `cargo install`. The build script emits no `rerun-if-changed` directive, so Cargo rescans the package and refreshes the stamp whenever a source file changes; a branch switch that touches no file keeps the previous stamp until the next rebuild. The same one-line form (`build_info::short()`) closes the help overlay (`?`), and the full stamp opens `trace doctor`. A plain launch uses built-in Claude Code, Codex and Antigravity profiles when no usable configuration exists. Local tracing is on by default and needs no credentials. The database is created by a writer (TUI startup, `trace import`, `agent-mux run`); read commands do not create one.
 
 ### Suggested first exploration
 
@@ -109,6 +123,7 @@ Terminal rendering and telemetry are separate paths. The PTY's escape sequences 
 | Source | Responsibility |
 | --- | --- |
 | [src/main.rs](src/main.rs), [src/events.rs](src/events.rs) | Command dispatch, terminal lifecycle, `AppEvent` channel, ticks, drawing, shutdown. |
+| [build.rs](build.rs), [src/build_info.rs](src/build_info.rs) | The build stamp baked in at compile time (version, timestamp, branch, commit, dirty flag, profile, target) and its formatting for `--version`, the help overlay and `trace doctor`. |
 | [src/app.rs](src/app.rs), [src/keys.rs](src/keys.rs), [src/ui.rs](src/ui.rs) | `App` state machine and every overlay's state, key encoding, all rendering. |
 | [src/session.rs](src/session.rs), [src/status.rs](src/status.rs) | PTY spawn/read/write, VT parser with 1,000 lines of scrollback, working/idle/attention status, bell counting. |
 | [src/mouse.rs](src/mouse.rs), [src/selection.rs](src/selection.rs), [src/search.rs](src/search.rs) | Mouse routing and encoding, terminal text selection, scrollback search. |
@@ -1330,7 +1345,8 @@ The remaining analysis-service requests are listed in section 10.
 
 | Command | What it does |
 | --- | --- |
-| `trace doctor` | Config path and resolved settings, Langfuse credential source and probe, store size, `user_version`, journal mode, `quick_check`, FTS5 compile option, row counts, unpriced models, overlapping price patterns, provider executables and data directories, `claude --help` support for `--session-id`, hook mode and installer status, 24 h hook activity. |
+| `--version`, `-V`, `version` | The build stamp: version, build date and time (local and UTC, with the age), the branch and commit it was compiled from, the target, and the running binary's path. |
+| `trace doctor` | The build stamp, config path and resolved settings, Langfuse credential source and probe, store size, `user_version`, journal mode, `quick_check`, FTS5 compile option, row counts, unpriced models, overlapping price patterns, provider executables and data directories, `claude --help` support for `--session-id`, hook mode and installer status, 24 h hook activity. |
 | `trace path` | Prints the resolved store path. |
 | `trace briefing [--since RFC3339] [--until RFC3339] [--provider P] [--workspace DIR \| --all-workspaces] [--db PATH] [--json] [--limit N] [--cursor T]` | `TraceService::Briefing` over store evidence plus live snapshots. Defaults: current workspace, last 24 h. The only `trace` command with `--db`. |
 | `trace ls \| list [--all] [--project DIR] [--since 7d] [--limit N] [--json]` | `list_sessions`; current project slug unless `--all`; limit 50; JSON is one object per line. |

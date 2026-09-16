@@ -283,7 +283,8 @@ fn check(label: &str, ok: bool, detail: &str) {
     println!("  [{mark}] {label}: {detail}");
 }
 
-fn on_path(command: &str) -> Option<PathBuf> {
+/// The first runnable `command` on `PATH`, for readiness checks.
+pub fn on_path(command: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     #[cfg(unix)]
     fn runnable(p: &Path) -> bool {
@@ -1237,6 +1238,10 @@ fn doctor_langfuse(resolved: &ResolvedTracing, cfg: &config::Config) {
 
 fn doctor() -> anyhow::Result<()> {
     println!("agent-mux trace doctor\n");
+    for line in crate::build_info::lines() {
+        println!("{line}");
+    }
+    println!();
     let cfg = config::load()?;
     match &cfg.loaded_from {
         Some(path) => println!("config file: {}", path.display()),

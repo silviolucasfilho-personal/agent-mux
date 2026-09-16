@@ -24,6 +24,7 @@ vt100 = "0.16.2"
 schemars = "1.2.2"
 
 [dev-dependencies]
+time = { version = "0.3.55", default-features = false, features = ["std"] }
 
 [patch.crates-io]
 vt100 = { path = "vendor/vt100" }
