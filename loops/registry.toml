@@ -1,0 +1,173 @@
+# The loop patterns agent-mux schedules. Every field deserializes into
+# `crate::loops::Pattern`. Skills are listed triage first; the scaffolder
+# installs each one from `loops/skills/<name>/SKILL.md`. Priority is the
+# scheduler order when several loops are due: the loops that unblock the
+# others run first.
+
+[[patterns]]
+id = "ci-sweeper"
+name = "CI Sweeper"
+goal = "Keep the default branch green: find failing checks, tell flaky from real, and propose one fix per run."
+default_interval_s = 900
+week_one_level = "L2"
+state_file = "ci-sweeper-state.md"
+skills = ["loop-ci-triage", "loop-fix", "loop-rules"]
+verifier = true
+breaker = true
+human_gates = ["infra-failures", "max-attempts", "security-tests"]
+risk = "medium"
+token_cost = "very-high"
+max_runs_per_day = 96
+max_tokens_per_day = 1000000
+priority = 1
+
+[patterns.cost]
+tokens_noop = 5000
+tokens_report = 50000
+tokens_action = 200000
+stable_fraction = 0.35
+early_exit_required = true
+
+[[patterns]]
+id = "pr-babysitter"
+name = "PR Babysitter"
+goal = "Watch open pull requests for conflicts, red or missing checks and stalled reviews, and nudge or fix the smallest thing that unblocks them."
+default_interval_s = 900
+week_one_level = "L1"
+state_file = "pr-babysitter-state.md"
+skills = ["loop-pr-triage", "loop-fix", "loop-rules"]
+verifier = false
+breaker = true
+human_gates = ["security", "payments", "auth", "max-fix-attempts"]
+risk = "medium"
+token_cost = "high"
+max_runs_per_day = 288
+max_tokens_per_day = 2000000
+priority = 2
+
+[patterns.cost]
+tokens_noop = 3000
+tokens_report = 80000
+tokens_action = 250000
+stable_fraction = 0.35
+early_exit_required = true
+
+[[patterns]]
+id = "dependency-sweeper"
+name = "Dependency Sweeper"
+goal = "Report outdated and vulnerable dependencies and propose one safe patch-level bump per run; major bumps and CVEs go to a human."
+default_interval_s = 86400
+week_one_level = "L2"
+state_file = "dependency-sweeper-state.md"
+skills = ["loop-dependency-triage", "loop-fix", "loop-rules"]
+verifier = true
+breaker = true
+human_gates = ["major-bumps", "high-sev-cve", "denylisted-packages", "max-attempts"]
+risk = "medium"
+token_cost = "medium"
+max_runs_per_day = 4
+max_tokens_per_day = 500000
+priority = 3
+
+[patterns.cost]
+tokens_noop = 5000
+tokens_report = 60000
+tokens_action = 300000
+stable_fraction = 0.35
+early_exit_required = true
+
+[[patterns]]
+id = "post-merge-cleanup"
+name = "Post-Merge Cleanup"
+goal = "After merges, list what was left behind: dead feature flags, stale TODOs, merged branches, docs that no longer match, and propose one cleanup."
+default_interval_s = 86400
+week_one_level = "L1"
+state_file = "post-merge-state.md"
+skills = ["loop-post-merge", "loop-fix", "loop-rules"]
+verifier = false
+breaker = true
+human_gates = ["architectural-debt", "feature-flags", "large-diffs"]
+risk = "low"
+token_cost = "low"
+max_runs_per_day = 1
+max_tokens_per_day = 200000
+priority = 4
+
+[patterns.cost]
+tokens_noop = 5000
+tokens_report = 40000
+tokens_action = 150000
+stable_fraction = 0.35
+early_exit_required = false
+
+[[patterns]]
+id = "changelog-drafter"
+name = "Changelog Drafter"
+goal = "Turn the merges since the last tag into a draft release-notes section a human edits and publishes."
+default_interval_s = 86400
+week_one_level = "L1"
+state_file = "changelog-drafter-state.md"
+skills = ["loop-changelog", "loop-rules"]
+verifier = true
+breaker = false
+human_gates = ["breaking-changes", "security", "major-features", "marketing-sensitive"]
+risk = "low"
+token_cost = "low"
+max_runs_per_day = 1
+max_tokens_per_day = 100000
+priority = 5
+
+[patterns.cost]
+tokens_noop = 5000
+tokens_report = 35000
+tokens_action = 80000
+stable_fraction = 0.35
+early_exit_required = false
+
+[[patterns]]
+id = "daily-triage"
+name = "Daily Triage"
+goal = "Once a day, read the repository the way a careful maintainer would: failing tests, lint, stale branches, open TODOs, and write down what deserves attention."
+default_interval_s = 86400
+week_one_level = "L1"
+state_file = "STATE.md"
+skills = ["loop-triage", "loop-fix", "loop-rules"]
+verifier = false
+breaker = false
+human_gates = ["design-decisions", "multi-file-refactors"]
+risk = "low"
+token_cost = "low"
+max_runs_per_day = 2
+max_tokens_per_day = 100000
+priority = 6
+
+[patterns.cost]
+tokens_noop = 5000
+tokens_report = 50000
+tokens_action = 200000
+stable_fraction = 0.35
+early_exit_required = false
+
+[[patterns]]
+id = "issue-triage"
+name = "Issue Triage"
+goal = "Sort open issues: unanswered, likely duplicates, stale, missing labels; draft replies and labels for a human to apply."
+default_interval_s = 86400
+week_one_level = "L1"
+state_file = "issue-triage-state.md"
+skills = ["loop-issue-triage", "loop-rules"]
+verifier = true
+breaker = false
+human_gates = ["security", "p0-p1", "ambiguous-duplicates", "stale-closures"]
+risk = "low"
+token_cost = "low"
+max_runs_per_day = 12
+max_tokens_per_day = 80000
+priority = 7
+
+[patterns.cost]
+tokens_noop = 3000
+tokens_report = 30000
+tokens_action = 60000
+stable_fraction = 0.35
+early_exit_required = false

@@ -33,6 +33,8 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 | `[agent] hydrate` | none | Snapshots Rust writes before launch; `["briefing"]` is the only value. Needs `trace.read`. |
 | `[agent] mcp` | `auto` with `trace.read`, else `off` | Whether the launch registers the agent-mux MCP server (Claude and Codex per launch; Antigravity through `agent-mux mcp install agy`). |
 
+Loop skills (`loops/skills/loop-*`) are **not** packages of this kind: they are installed at project level into a workspace by the loop scaffolder (`<workspace>/.claude/skills/<name>/SKILL.md`, `<workspace>/.codex/skills/<name>/SKILL.md`, plus the `loop-verifier` agent) and never appear in the Agents sidebar. See `docs/loops.md`.
+
 ## 2. Discovery
 
 - Compiled-in: Heimdall (`skills/heimdall` in the repository, embedded with `include_str!`). Always present.

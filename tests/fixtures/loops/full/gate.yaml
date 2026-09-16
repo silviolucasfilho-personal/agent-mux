@@ -1,0 +1,7 @@
+version: 1
+denylist:
+  - "**/.env"
+  - "**/secrets/**"
+maxFiles: 10
+autoMergeAllowlist:
+  - "docs/**"

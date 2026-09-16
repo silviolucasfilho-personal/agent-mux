@@ -12,6 +12,10 @@ Heimdall briefs the user on active and recent sessions and evaluates skills and 
 
 Invocation per harness: `/heimdall` (Claude Code, Antigravity), `$heimdall` (Codex). Install with `agent-mux skill install heimdall`; the Agents sidebar launcher installs it automatically before each launch.
 
+## Loops (`src/loops/`, `loops/`)
+
+Loop Engineering: scheduled, bounded, gated runs against one workspace from the Loops sidebar section (`Tab`, `E` for the view, `K` kill switch) and `agent-mux loop …`. The nine loop skills under `loops/skills`, the verifier under `loops/agents` and the templates under `loops/templates` are agent-mux's own and are installed at project level into the workspace by the scaffolder; they are not Agents-sidebar packages. Facts a run reasons about (budget, breaker, readiness, tokens, files touched) are computed in Rust and handed over in `$AGENT_MUX_LOOP_CONTEXT`; the `PreToolUse` guard enforces the `gate.yaml` denylist, report-only runs and the no-push rule. Claude Code and Codex only; Antigravity is deferred (spec section 16). Guide: `docs/loops.md`; design: `docs/superpowers/specs/2026-09-15-loop-engineering-design.md`. Nothing from another vendor is vendored or executed.
+
 ## Working in this repository
 
 - `cargo build`, `cargo test`, `cargo clippy --all-targets`, `cargo fmt`.

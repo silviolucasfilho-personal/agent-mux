@@ -20,6 +20,7 @@ This README is the developer onboarding guide to the **implemented code in this 
 12. [Experiments, comparison and scores](#12-experiments-comparison-and-scores)
 13. [Langfuse export](#13-langfuse-export)
 14. [Developing, testing and troubleshooting](#14-developing-testing-and-troubleshooting)
+15. [Loop Engineering](#15-loop-engineering)
 
 ---
 
@@ -50,7 +51,7 @@ agent-mux skill list
 agent-mux run --help
 ```
 
-There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `run`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI.
+There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `run`, `loop`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI.
 
 `--version` prints the stamp [build.rs](build.rs) bakes in at compile time and [src/build_info.rs](src/build_info.rs) formats:
 
@@ -58,7 +59,7 @@ There is no general-purpose argument parser: `main` matches only `trace`, `mcp`,
 agent-mux 0.1.0
 built     2026-09-16T11:29:38-03:00 (4 s ago, debug)
           2026-09-16T14:29:38Z UTC
-branch    master @ 070020f0
+branch    feat/loops @ 72f7f2a1 (uncommitted changes at build time)
 target    aarch64-apple-darwin
 binary    /Users/me/.cargo/bin/agent-mux
 ```
@@ -88,6 +89,8 @@ The branch and commit describe the checkout the binary was **compiled** from, no
 | Hook event | A provider lifecycle callback stored in `hook_events`; used for correlation, exact timing, subagent nesting and the budget guard. |
 | Skill package | `SKILL.md` + optional `skill.toml` + `reference/*.md`, installed into a harness skill directory. The only package type agent-mux manages. |
 | Subagent | A child agent invoked by a harness. Represented as `type = 'agent'` observations; not an agent-mux package type. |
+| Loop | A scheduled, bounded agent run against one workspace (section 15): registry entry in `~/.agent-mux/loops.json`, contract files in the workspace, runs in `loop_runs`. Not the per-turn "loop diagnostics" of `trace loops`. |
+| Loop run | One launch of a loop: an ordinary traced session with `launches.metadata.loop_*` and a `loop_runs` row; blocked runs are rows without a launch. |
 
 ---
 
@@ -123,13 +126,14 @@ Terminal rendering and telemetry are separate paths. The PTY's escape sequences 
 | Source | Responsibility |
 | --- | --- |
 | [src/main.rs](src/main.rs), [src/events.rs](src/events.rs) | Command dispatch, terminal lifecycle, `AppEvent` channel, ticks, drawing, shutdown. |
-| [build.rs](build.rs), [src/build_info.rs](src/build_info.rs) | The build stamp baked in at compile time (version, timestamp, branch, commit, dirty flag, profile, target) and its formatting for `--version`, the help overlay and `trace doctor`. |
+| [build.rs](build.rs), [src/build_info.rs](src/build_info.rs), [src/app/about.rs](src/app/about.rs) | The build stamp baked in at compile time (version, timestamp, branch, commit, dirty flag, profile, target); its formatting for `--version`, the help overlay and `trace doctor`; and the About overlay's rows. |
 | [src/app.rs](src/app.rs), [src/keys.rs](src/keys.rs), [src/ui.rs](src/ui.rs) | `App` state machine and every overlay's state, key encoding, all rendering. |
 | [src/session.rs](src/session.rs), [src/status.rs](src/status.rs) | PTY spawn/read/write, VT parser with 1,000 lines of scrollback, working/idle/attention status, bell counting. |
 | [src/mouse.rs](src/mouse.rs), [src/selection.rs](src/selection.rs), [src/search.rs](src/search.rs) | Mouse routing and encoding, terminal text selection, scrollback search. |
 | [src/config.rs](src/config.rs), [src/harness.rs](src/harness.rs) | TOML configuration and resolution, harness detection and flag composition. |
 | [src/history.rs](src/history.rs), [src/transcript.rs](src/transcript.rs), [src/persistence.rs](src/persistence.rs) | Provider transcript discovery, JSONL parsers for all three providers, saved sessions. |
 | [src/skill/](src/skill/) | Package discovery, per-harness rendering, managed installation, `skill` CLI, launch composition. |
+| [src/loops/](src/loops/), [src/app/loops.rs](src/app/loops.rs), [src/app/loops_view.rs](src/app/loops_view.rs), [loops/](loops/) | Loop Engineering: patterns, registry, readiness, gate, breaker, cost, run log, scheduler, worktrees, context, `loop_runs` store access, `loop` CLI; the App's scheduler pass and run lifecycle; the Loops view; the embedded skills, verifier and templates. |
 | [src/tracing/mod.rs](src/tracing/mod.rs) | `TraceRuntime`, launch planning, per-launch pipeline task, finalize and shutdown. |
 | [src/tracing/hooks/](src/tracing/hooks/) | Hook payload parsing (`mod.rs`), per-launch registration (`register.rs`), persistent installers (`install.rs`), feed reader (`feed.rs`), budget guard (`guard.rs`). |
 | [src/tracing/correlate.rs](src/tracing/correlate.rs), [src/tracing/tail.rs](src/tracing/tail.rs) | Bind a launch to a provider transcript; follow a file incrementally. |
@@ -257,6 +261,7 @@ mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 | `tracing.models` | Price rows: `id`, optional `provider`, `match` patterns, `input`, `output`, optional `cache_read`, `cache_write`, `cache_write_1h`, `reasoning` (USD per million tokens). Rows with an empty id or negative input/output are dropped silently. |
 | Per-profile `[profiles.tracing]` | `enabled`, `provider`, `content_mode`, `inject_session_id`, `hooks`, `backend`, `max_cost_usd`, `max_turns` override the global defaults for that profile. |
 | `[agents] hydrate`, `mcp` | `true` and `"auto"` by default (`config::resolve_agents`). `hydrate = false` writes no briefing snapshots; `mcp = "off"` never registers the MCP server, whatever a package declares. |
+| `[loops] enabled`, `max_concurrent`, `catch_up`, `run_timeout_s`, `worktrees_dir` | `true`, `1`, `"once"`, `900`, `".loop-worktrees"` (`config::resolve_loops`). `enabled = false` leaves manual runs only; `catch_up = "skip"` moves a slot missed while agent-mux was closed to the next one; the timeout floors at 30 s. |
 
 Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secret_key`, `flush_interval_ms` default 3,000) or from `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` then `LANGFUSE_BASE_URL` for the host (default `https://cloud.langfuse.com`). If the `[tracing.langfuse]` sub-table exists at all, the legacy `[tracing] host/public_key/secret_key` fields are ignored entirely; they are used only when the sub-table is absent, and trip a migration notice. Both keys must resolve or the remote backend is unavailable and launches fall back to local. A trailing `/` or `/api/public` is stripped from the host.
 
@@ -329,6 +334,13 @@ Title `Agents [<sel>/<count>]`; rows show the package icon (default `⚡`), disp
 - **Population:** `skill::load_skills`: user packages under `AGENT_MUX_SKILLS_DIR` or `~/.agent-mux/skills`, then compiled-in Heimdall unless shadowed by id, sorted by display name. Every agent-mux package is an agent here; the read-only Skills view (`S`) is the place to inspect skills and their usage.
 - **Refresh:** loaded at startup and rescanned when `Tab` moves from Active into Agents and when the Skills view opens.
 
+#### Loops sidebar (`draw_loops_sidebar`)
+
+Title `Loops [<sel>/<count>]`, or `Loops [<count>] PAUSED` in yellow while the kill switch is on. Rows show a status glyph (`○` scheduled, `●` running, `‖` paused, `!` waiting on a human, `✗` last run failed or blocked), the pattern id, the configured level, and a right column with the countdown to the next run (`due`, `6h`, `12m`), `now` while running, `—` when paused or `in2` with two inbox items.
+
+- **Population:** `App.loop_registry` (`~/.agent-mux/loops.json`, `AGENT_MUX_LOOPS_FILE` in tests) loaded by `load_loop_registry` at startup, which also applies the catch-up rule and sweeps old context snapshots. Status and the right column come from `App.loop_cards`, rebuilt every second by `refresh_loop_cards` from the registry, the store (`spend_since`, `recent_runs`, `inbox`), the ledger, the workspace files and a readiness audit cached 60 s per workspace.
+- **Keys:** `Enter` details (Loops view), `r` run now, `p` pause / resume, `a` add, `e` edit, `x` remove (confirmation; files stay), `K` kill switch, `E` Loops view.
+
 #### History sidebar (`draw_history_sidebar`)
 
 Title `History [<sel>/<count>]`; rows show `[C]` (Claude, magenta) or `[A]` (Antigravity, blue) and a truncated title.
@@ -339,13 +351,15 @@ Title `History [<sel>/<count>]`; rows show `[C]` (Claude, magenta) or `[A]` (Ant
 
 #### Main pane (`draw_main`)
 
-Selection order: with the sidebar visible and Agents focused in Control mode, the agent preview; with History focused (or no sessions at all), the history preview; otherwise the selected session's terminal.
+Selection order: with the sidebar visible and Agents focused in Control mode, the agent preview; Loops focused, the loop preview; History focused (or no sessions at all), the history preview; otherwise the selected session's terminal.
 
 - **Terminal:** title `<profile> — <dir> [<status>] <badge> [SCROLL ↑ n/len]`. Rendered with `tui_term::PseudoTerminal` from the session's `vt100` screen. The child cursor is shown only when attached, visible and at the live bottom. Selection highlight is reversed video; search matches get a yellow background, the current match white bold.
 - **History preview:** `Title`, `Provider`, `Session ID`, `Directory`, `Turns`, `Modified`, `Transcript` path, and the `[Enter]/[r]`, `[Tab]`, `[a]` actions.
 - **Generic agent preview** (`draw_generic_agent_preview`): id, origin (built-in, package directory, or custom), harnesses and default, description, then the `SKILL.md` body with light Markdown styling, and a footer whose `[Enter]` label says Launch or Attach.
 - **Telemetry briefing** (`draw_trace_briefing_preview`), the agent preview for a package that declares `trace.read` (Heimdall does): line 1 `Trace Store | Scope | Sessions | Turns | Tools | Tokens | Cost`; line 2 `Cache Status: Refreshed Ns ago` plus any refresh warning; then one card per session: `Session [launch or key] (provider) [RuntimeState] — cwd`, optional `⚡ Right Now`, `🎯 Goal`, `📝 Files`, `💻 Commands`, `💬 Last Out`, and always `📊 Metrics: turns | tools | tokens | cost`.
   - **Population:** `App::refresh_briefing_if_needed` runs only while the sidebar is visible, Agents is focused, the mode is Control and the selected agent has `trace.read`. At most once per second and one in flight. It opens its own read-only connection and calls `analysis::query::briefing(conn, cwd, now-24h, now, live_sessions)` in `spawn_blocking`; live sessions are the mux's own panes mapped to runtime states. The result arrives as `AnalysisUpdated`; stale revisions are dropped and the previous briefing stays visible if a refresh fails. The SQL is listed in section 8.
+
+- **Loop preview** (`draw_loop_preview`): the selected loop's card: `Status` (glyph, next run, cadence, level), `Last run` (time, outcome, found / action / escalated, tokens, cost, duration, verifier), `Budget` (today's runs and tokens against the caps, the mode `normal` / `report-only` / `blocked`), `Breaker` and the kill switch, a 20-cell `Readiness` bar with score, level, ceiling and up to three warnings, `Inbox`, `Files` (state, LOOP.md, budget, run-log, constraints, gate, ledger with `✓ ! ✗`), and `Recent` runs. With no loops the pane explains what a loop is and how to add one.
 
 #### Status bar and search (`draw_status_bar`)
 
@@ -359,11 +373,15 @@ Search (`src/search.rs`) turns the status bar into `Search: <query>  <n/m>`; it 
 
 | Key | Action (and guard) |
 | --- | --- |
-| `j`/`k`, `↓`/`↑` | Move within the focused section; at the edges continue into the adjacent section (Active ↔ Agents ↔ History). |
-| `Tab`, `BackTab` | Both advance Active → Agents → History → Active (BackTab does **not** reverse). Entering Agents rescans packages. With the sidebar hidden, cycle active sessions. |
+| `j`/`k`, `↓`/`↑` | Move within the focused section; at the edges continue into the adjacent section (Active ↔ Agents ↔ Loops ↔ History). |
+| `Tab`, `BackTab` | Both advance Active → Agents → Loops → History → Active (BackTab does **not** reverse). Entering Agents rescans packages. With the sidebar hidden, cycle active sessions. |
 | `1`-`9` | Select active session; only when Active is focused or the sidebar is hidden. |
-| `Enter` | Active: attach. Agents: open the harness picker, or attach to the running agent session. History: resume. |
-| `r` | Active: respawn, only when the selected session has exited (new PTY, same profile and directory, tracing replanned; an agent session keeps its skill id). Agents: picker/attach. History: resume. |
+| `Enter` | Active: attach. Agents: open the harness picker, or attach to the running agent session. Loops: the Loops view on the selected loop. History: resume. |
+| `r` | Active: respawn, only when the selected session has exited (new PTY, same profile and directory, tracing replanned; an agent session keeps its skill id). Agents: picker/attach. Loops: run now (pre-flight still applies). History: resume. |
+| `p`, `a`, `e`, `x` (Loops focused) | Pause / resume, add, edit, remove (confirmation) the selected loop. |
+| `E` | Loops view (section 4.10), from any section. |
+| `v` | About overlay (section 4.7): version, build date and time, branch and commit, the config, store and runtime paths, this session's counts, and the harnesses on `PATH`. |
+| `K` | Kill switch: pause every loop; again to resume. Shown in the Loops title and the status bar while on. |
 | `h` | Agents focused: open the harness picker. |
 | `S` | Skills view (section 4.4), from any section. |
 | `n` | New session dialog. |
@@ -371,13 +389,13 @@ Search (`src/search.rs`) turns the status bar into `Search: <query>  <n/m>`; it 
 | `t` | Toggle tracing on the selected session (Active focused or sidebar hidden). Starting requires a live supported session and an available runtime; `plan_attach` back-dates the correlation window by one hour and injects nothing. |
 | `T` | Trace Browser (any section). |
 | `x` | Active focused or sidebar hidden: remove an exited session immediately, otherwise ask before killing. |
-| `a` | History focused: toggle current-project / all-projects scope. |
+| `a` | History focused: toggle current-project / all-projects scope. Loops focused: add a loop. |
 | `b`, `Ctrl+Shift+B` | Toggle the sidebar. |
 | `?`, `F1` | Help overlay (closes with `Esc`, `q`, `?`, `Enter`, `F1`). |
 | `q` | Quit immediately, or open the quit confirmation if any session is `working`. |
 | `Ctrl+Q` | Immediately after a detach: send a literal Ctrl+Q to the child and reattach. Any other key consumes the pending chord. |
 
-Kill and quit confirmations accept `y`, `Y`, `Enter`; `n`, `N`, `Esc` cancel.
+Kill, quit and remove-loop confirmations accept `y`, `Y`, `Enter`; `n`, `N`, `Esc` cancel.
 
 #### Attached mode
 
@@ -387,7 +405,7 @@ Reserved in both Control and Attached mode: `Shift+↑/↓` scroll three lines; 
 
 #### Mouse
 
-Clicks select sidebar rows. Wheel over the Agents or History sidebar moves that selection; elsewhere in Control mode it scrolls the selected terminal. In the main pane, dragging selects and button release copies to the clipboard. While attached, `mouse::route_wheel` decides: Shift or not attached → local scroll; Codex inline transcript → local; the child asked for mouse reports → forwarded in SGR or legacy encoding; alternate screen without mouse capture → three arrow keys; otherwise local. `Alt`+click on the live screen moves the child cursor with arrow keys. Drag ownership is latched on button-down so a modifier change mid-drag cannot retarget it. See `src/mouse.rs` and `src/selection.rs`.
+Clicks select sidebar rows. Wheel over the Agents, Loops or History sidebar moves that selection; elsewhere in Control mode it scrolls the selected terminal. In the main pane, dragging selects and button release copies to the clipboard. While attached, `mouse::route_wheel` decides: Shift or not attached → local scroll; Codex inline transcript → local; the child asked for mouse reports → forwarded in SGR or legacy encoding; alternate screen without mouse capture → three arrow keys; otherwise local. `Alt`+click on the live screen moves the child cursor with arrow keys. Drag ownership is latched on button-down so a modifier change mid-drag cannot retarget it. See `src/mouse.rs` and `src/selection.rs`.
 
 ### 4.3 New session dialog (`draw_new_session_dialog`)
 
@@ -491,9 +509,42 @@ Opened by `T`. Backed by a **read-only** SQLite connection (`store::open_ro`) to
 
 **Other keys.** `Tab`/`→` and `BackTab`/`←` cycle panes; `a` toggles project scope; `r` resumes the selected session by provider (`claude`, `codex`, `antigravity`; anything else warns); mouse wheel moves the focused list by three rows or scrolls expanded detail.
 
-### 4.7 Help and confirmations
+### 4.7 Help, About and confirmations
 
-`draw_help` lists Control, Attached, scrollback, Session Logs and Trace Browser keys, including `h`, `v`, `Space` and plain `Ctrl+F`, in an 84-column overlay. `draw_confirm` shows `Kill this session? [y/n]` or `Sessions are still working. Quit anyway? [y/n]`.
+`draw_help` lists Control, Attached, scrollback, Loops, Skills view, Session Logs and Trace Browser keys in an 84-column overlay, and closes with the one-line build stamp (`build_info::short()`). `draw_confirm` shows `Kill this session? [y/n]`, `Sessions are still working. Quit anyway? [y/n]` or `Remove this loop from the registry? …`.
+
+**About** (`v`, `Mode::About`, `draw_about`, `src/app/about.rs`) answers "what am I running and where does it keep things":
+
+```text
+┌ About agent-mux ─────────────────────────────────────────────────────────────────┐
+│  agent-mux 0.1.0                                                                 │
+│  A terminal multiplexer for Claude Code, Codex CLI and Antigravity,              │
+│  with a local SQLite trace store and scheduled loops.                            │
+│                                                                                  │
+│  Build                                                                           │
+│    built     2026-09-16T11:48:35-03:00 (10 s ago, debug)                         │
+│              2026-09-16T14:48:35Z UTC                                            │
+│    branch    feat/loop-engineering @ 29b29076 (uncommitted changes at build time)│
+│    target    aarch64-apple-darwin                                                │
+│    binary    ~/.cargo/bin/agent-mux                                              │
+│                                                                                  │
+│  This session                                                                    │
+│    config    ~/.agent-mux/profiles.toml                                          │
+│    store     ~/.agent-mux/traces.db (18.6 MiB)                                    │
+│    runtime   ~/.agent-mux/snapshots                                              │
+│    run id    80e6eb06-472a-4f66-a7c0-f0a6c5097d10                                │
+│    sessions  2 live · 1 traced                                                   │
+│    agents    1 package(s)                                                        │
+│    loops     3 registered · 1 paused                                             │
+│                                                                                  │
+│  Harnesses on PATH                                                               │
+│    claude    ~/.local/bin/claude                                                 │
+│    …                                                                             │
+│  [Esc] close  [?] keys                                                           │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Every fact is gathered once by `App::open_about` when the overlay opens — the store is stat-ed and `PATH` is searched there, never on the draw path. Paths under the home directory are shown with `~`. The box sizes itself to its widest row and scrolls with `↑`/`↓`, `PageUp`/`PageDown`, `Home`/`End` when the terminal is short. `?` switches to the key reference, `Esc`, `q`, `v` or `Enter` closes.
 
 ### 4.8 Session persistence
 
@@ -511,15 +562,25 @@ Opened by `T`. Backed by a **read-only** SQLite connection (`store::open_ro`) to
 | Skills view rows | `SkillsViewState.rows` | `SkillsViewState::reload` | `skill::load_skills`, `inventory_all`, `install::status` | open, `r` |
 | Skills view Details | `SkillsViewState.detail_lines` | `rebuild_detail` | package, install state, `skill_stats` via `skill_reports` | selection change |
 | Skills view Executions | `.launches`, `.turns` | `load_executions` | `skill_launches`, `traces_with_skill_detail` | selection change, 500 ms while visible |
+| Loops rows and preview | `App.loop_registry`, `App.loop_cards` | `load_loop_registry`, `refresh_loop_cards` | `loops.json`; `spend_since`, `recent_runs`, `inbox`; ledger, contract files, `readiness::audit` (60 s cache) | startup; every 1 s; after every loop action |
+| Loops view Runs / Inbox | `LoopsViewState.runs`, `.inbox` | `load_runs`, `load_inbox` | `recent_runs`, `inbox` | open, selection change, 1 s while visible |
+| Loops view Readiness / Budget / Files | `LoopsViewState.detail_lines` | `rebuild_detail` | `readiness::audit`, `spend_since`, `cost::estimate`, `contract_files`, `.loop-worktrees/manifest.json` | tab or selection change |
 | History rows and preview | `App.history_sessions` | `history::discover_sessions` | `~/.claude/projects/*/*.jsonl`, Antigravity `transcript.jsonl` | startup, PTY exit, `a` |
 | Session Logs left/right | `HistoryState.sessions`, `.log_lines` | `HistoryState::new`, `load_selected_log` | same files, parsed by `transcript.rs` | open, `a`, selection change |
 | Trace Browser Sessions | `Vec<SessionStat>` | `list_sessions` | `session_stats` view | open, 500 ms live refresh |
 | Trace Browser Turns | `Vec<TraceStat>` | `list_traces` | `trace_stats` view | session change, live refresh |
 | Trace Browser Detail | `Vec<ObservationView>` | `list_observations` | `observations` | turn change, live refresh |
 | Trace Browser search | `Vec<TraceStat>` | `search` + `find_trace` | `traces_fts`, `observations_fts` | on `Enter` |
+| About overlay | `AboutState.rows` | `App::open_about` → `about::rows` | `build_info` constants, `config.loaded_from`, store `metadata`, the registry, `PATH` | once, when `v` opens it |
 | Verdict marks | `HashMap<trace_id, f64>` | `scores::latest_trace_scores` | `scores` | observation load, after `s` |
 
 ---
+
+### 4.10 Loops: the add-loop dialog and the Loops view
+
+**Add / edit loop** (`a` / `e` in the Loops section, `draw_loop_dialog`, `LoopDialogState`): fields Workspace (`←/→` over the directories of open sessions, the current directory, profile `default_dir`s, history and existing loops, or typed), Pattern (the seven patterns with goal, week-one level, risk and cost tier), Profile (only profiles whose command is `claude` or `codex`; Antigravity is not offered), Every (`<n>m|h|d`, at least `5m`, prefilled with the pattern's default), Level (`L1` preselected; `L2`/`L3` are marked `✗` with the reason when the readiness audit, the git repository or the harness guard ceiling refuses them), Runs/day and Tokens/day (the pattern's caps), USD/run (blank = no cap; otherwise the profile's budget guard and, on Claude, `--max-budget-usd`), Scaffold (write missing files and skills, never overwriting). `Tab`/`↑`/`↓` move, `←`/`→`/`Space` choose, `Enter` validates and saves, `Esc` cancels. The footer line shows the workspace's readiness and the guard ceiling.
+
+**Loops view** (`E`, `Mode::LoopsView`, `draw_loops_view`, `src/app/loops_view.rs`): a left list of loops grouped by workspace and a right pane with five tabs (`Tab`, or `1`-`5`): **Runs** (every `loop_runs` row of the loop, newest first: time, outcome, effective level, found / actions / escalations, tokens, cost, duration, verifier, files; the selected run expands its block reason, cap reason, summary, gate violation, files and launch id; `Enter` attaches to a live run or opens its traces, `T` opens the traces), **Inbox** (runs of every loop with outcome `fix-proposed` or `escalated` and no decision: branch, worktree, files, verdict, `git diff --stat`; `a` applied, `x` rejected), **Readiness** (the audit's score bar, findings and recommendations, the three level gates, the activity evidence), **Budget** (today's runs and tokens per loop with the mode, the cost estimate of the selected loop at its cadence and level, the last seven days of tokens), **Files** (the contract files with present / missing / stale, the installed skills and verifier paths, the worktree manifest). `r` runs the selected loop now, `p` pauses or resumes it, `R` reloads the registry, `Esc` closes.
 
 ## 5. Trace capture pipeline
 
@@ -820,6 +881,8 @@ If spend or turns is strictly greater than the limit it denies with:
 
 Any error, missing row or delay permits: the guard fails open. It can stop Claude (per-launch synchronous `PreToolUse`) and Codex (installed `hooks.json`), never Antigravity. The pipeline surfaces a block as `traces.metadata.guard_blocked` and a `budget guard` loop warning.
 
+**Loop policy** (`guard::check_tool`). A loop run's launch row also carries `metadata.loop_policy = { report_only, reason, state_file, run_log, denylist, max_files, worktree }`, and the hook receives the raw `tool_name` and `tool_input`. Rules, first hit wins: (1) a shell command (`Bash`, `shell`, `local_shell`, `exec_command`, …) containing `git push`, `git merge`, `git rebase` or `gh pr merge` → `agent-mux loop: pushing and merging are human gates`; (2) a write tool (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `apply_patch`, `write_file`) whose path matches a `denylist` glob (globset, dot-directories included) → `… is on the gate.yaml denylist`; (3) `report_only` and the path is not the state file, the run log or under `.loop-context/` → `… this run is report-only (<reason>)`; (4) distinct files already written on the launch at or above `max_files` → `… gate.yaml maxFiles is N`; (5) the budget guard. On a Claude loop launch the per-launch hook carries `--loop` and **fails closed**: when the store or the policy cannot be read, write tools are denied with `agent-mux loop guard unavailable, retry` and read tools permitted. Codex reads the same policy through its installed hooks and stays fail-open; the post-run gate re-check is its backstop.
+
 ### 6.6 How hook rows are consumed
 
 `HookFeed` (`feed.rs`) opens the store read-only (100 ms busy timeout) and polls:
@@ -891,7 +954,7 @@ Note that the CLI's `open_ro` wrapper in `cli.rs` calls `migrate_in_place` befor
 | 10 | `SELECT 1;` compatibility marker for a discarded experiment. |
 | 11 | Change journal `trace_changes` with triggers on sessions, launches, traces and observations; `meta.store_uuid`. |
 
-### 7.3 DDL catalog (effective schema after v11)
+### 7.3 DDL catalog (effective schema after v12)
 
 Tables, quoted from `src/tracing/store/schema.rs` with later column changes applied:
 
@@ -1137,6 +1200,39 @@ END;
 
 `store::read_changes(conn, after_seq)` and `latest_change_seq` read the journal; `meta.store_uuid` identifies the store.
 
+#### `loop_runs` (v12)
+
+```sql
+CREATE TABLE loop_runs (
+  id               TEXT PRIMARY KEY,                 -- RFC3339 UTC; the run_id in loop-run-log.md
+  loop_id          TEXT NOT NULL,
+  workspace        TEXT NOT NULL,
+  pattern          TEXT NOT NULL,
+  harness          TEXT NOT NULL,
+  level            TEXT NOT NULL CHECK (level IN ('L1','L2','L3')),
+  effective_level  TEXT NOT NULL CHECK (effective_level IN ('L1','L2','L3')),
+  launch_id        TEXT REFERENCES launches (id),
+  scheduled_ns     INTEGER NOT NULL,
+  started_ns       INTEGER,
+  ended_ns         INTEGER,
+  outcome          TEXT NOT NULL CHECK (outcome IN ('report-only','fix-proposed','escalated','no-op','blocked','failed')),
+  items_found      INTEGER, actions_taken INTEGER, escalations INTEGER,
+  tokens           INTEGER, cost_usd REAL, readiness_score INTEGER,
+  worktree         TEXT, branch TEXT,
+  decision         TEXT CHECK (decision IN ('applied','rejected')), decided_ns INTEGER,
+  detail           TEXT NOT NULL DEFAULT '{}'   -- reason, level_reason, verifier{ran,verdict}, files[], gate_violation, verifier_missing, diff_stat, final_message, exit_code, timed_out, summary
+);
+CREATE INDEX loop_runs_by_loop ON loop_runs (loop_id, scheduled_ns DESC);
+CREATE INDEX loop_runs_inbox ON loop_runs (outcome) WHERE decision IS NULL;
+CREATE VIEW loop_run_stats AS
+SELECT loop_id, pattern, workspace, COUNT(*) AS runs, SUM(outcome = 'fix-proposed') AS fixes_proposed,
+       SUM(outcome = 'escalated') AS escalated, SUM(outcome = 'blocked') AS blocked, SUM(outcome = 'failed') AS failed,
+       COALESCE(SUM(tokens), 0) AS tokens, COALESCE(SUM(cost_usd), 0) AS cost_usd, MAX(started_ns) AS last_started_ns
+FROM loop_runs GROUP BY loop_id;
+```
+
+The migration is idempotent (`IF NOT EXISTS`) so a store whose `user_version` was reset still upgrades. `loop_runs` is written through `open_aux` by the App and the `loop` CLI (`loops::store::upsert_run`), never by the writer thread.
+
 ### 7.4 Row models (`store/model.rs`)
 
 `StoreOp::{Launch(LaunchRow), Session(SessionRow), Trace(TraceRow), Observation(ObservationRow)}` is the writer's input. Every `Option` field means "unknown at this write" and never erases a stored value. All timestamps are Unix **nanoseconds** (`i64`); views convert to milliseconds. `TraceRow` carries `provider` and `session_id` only to create the session stub; `ObservationRow` carries `usage_raw` (provider keys as observed) and `usage: NormalizedUsage`; `metadata` is a JSON object merged with `json_patch`. There is no `HookEventRow`: `hooks::HookEvent` is written directly.
@@ -1292,6 +1388,12 @@ All read queries take a plain `rusqlite::Connection` so callers can use a read-o
 | Trace Browser Detail (list, timeline, loop) | `list_observations` | `SELECT * FROM observations WHERE trace_id = ?1 ORDER BY start_ns, rid` |
 | Tree view; `trace show --tree` | `list_observations_tree` → `nest_observations` | same rows, reordered parent-first in Rust with a `depth` |
 | Browser `/`; `trace search` | `search` | `SELECT t.id, t.name, t.start_ns, snippet(traces_fts, -1, '[', ']', '…', 12) FROM traces_fts f JOIN traces t ON t.rid = f.rowid WHERE traces_fts MATCH ?1 ORDER BY rank LIMIT ?2` and the same over `observations_fts`/`observations`; merged newest first |
+| Loops pre-flight and preview; `loop status` | `loops::store::spend_since` | `SELECT COUNT(*), COALESCE(SUM(tokens), 0), COALESCE(SUM(cost_usd), 0) FROM loop_runs WHERE loop_id = ?1 AND started_ns >= ?2 AND outcome != 'blocked'` (`?2` = UTC midnight) |
+| Loops preview, context snapshot, Loops view Runs | `loops::store::recent_runs` | `SELECT … FROM loop_runs WHERE loop_id = ?1 ORDER BY scheduled_ns DESC LIMIT ?2` |
+| Loops view Inbox; `loop inbox` | `loops::store::inbox` | `SELECT … FROM loop_runs WHERE outcome IN ('fix-proposed','escalated') AND decision IS NULL ORDER BY started_ns DESC` |
+| Readiness audit (store evidence) | `loops::store::activity_count` | `SELECT COUNT(*) FROM loop_runs WHERE workspace = ?1 AND ended_ns >= ?2 AND outcome NOT IN ('blocked','failed')` |
+| Post-run accounting | `loops::store::run_facts` | `launch_stats` over `trace_stats`; `SELECT … FROM observations o JOIN traces t … WHERE t.launch_id = ?1 AND o.type = 'agent'` for the verifier; write-tool observations' `input` for files touched; `experiments::final_message` |
+| Loop guard `max_files` | `loops::store::files_touched` | the same write-tool observation scan, per launch |
 | `trace doctor` | `counts`, `unpriced_models` | `SELECT COUNT(*) FROM sessions | launches | traces | observations`, `… FROM traces WHERE status = 'open'`, `… FROM runs WHERE ended_ns IS NULL`; `SELECT model, COUNT(*) FROM observations WHERE type = 'generation' AND usage IS NOT NULL AND model_id IS NULL AND model IS NOT NULL AND model NOT LIKE '<%' GROUP BY model ORDER BY COUNT(*) DESC` |
 | Active sidebar badge | `launch_stats` | `SELECT COUNT(*), SUM(total_tokens), SUM(total_cost_usd) FROM trace_stats WHERE launch_id = ?1` and `SELECT o.name FROM observations o JOIN traces t ON t.id = o.trace_id WHERE t.launch_id = ?1 AND o.end_ns IS NULL AND o.type IN ('tool','agent') ORDER BY o.start_ns DESC LIMIT 1` |
 | Browser scope toggle | `session_project_slugs` | `SELECT DISTINCT project_slug FROM sessions WHERE project_slug IS NOT NULL` |
@@ -1346,7 +1448,7 @@ The remaining analysis-service requests are listed in section 10.
 | Command | What it does |
 | --- | --- |
 | `--version`, `-V`, `version` | The build stamp: version, build date and time (local and UTC, with the age), the branch and commit it was compiled from, the target, and the running binary's path. |
-| `trace doctor` | The build stamp, config path and resolved settings, Langfuse credential source and probe, store size, `user_version`, journal mode, `quick_check`, FTS5 compile option, row counts, unpriced models, overlapping price patterns, provider executables and data directories, `claude --help` support for `--session-id`, hook mode and installer status, 24 h hook activity. |
+| `trace doctor` | The build stamp, config path and resolved settings, Langfuse credential source and probe, store size, `user_version`, journal mode, `quick_check`, FTS5 compile option, row counts, unpriced models, overlapping price patterns, provider executables and data directories, `claude --help` support for `--session-id`, hook mode and installer status, 24 h hook activity, the MCP server self-test, and a `loops` section (registry, scheduler, per-harness guard ceiling, `git`, the inbox, one line per loop with missing or stale files). |
 | `trace path` | Prints the resolved store path. |
 | `trace briefing [--since RFC3339] [--until RFC3339] [--provider P] [--workspace DIR \| --all-workspaces] [--db PATH] [--json] [--limit N] [--cursor T]` | `TraceService::Briefing` over store evidence plus live snapshots. Defaults: current workspace, last 24 h. The only `trace` command with `--db`. |
 | `trace ls \| list [--all] [--project DIR] [--since 7d] [--limit N] [--json]` | `list_sessions`; current project slug unless `--all`; limit 50; JSON is one object per line. |
@@ -1378,6 +1480,7 @@ The remaining analysis-service requests are listed in section 10.
 | `mcp serve --stdio [--db PATH] [--workspace DIR \| --all-workspaces \| --workspace-from-env]` | The read-only MCP server (section 6.7); started by harnesses, usable by hand for debugging. |
 | `mcp install \| uninstall agy`, `mcp status [claude\|codex\|agy]` | Antigravity's installed entry through `agy mcp add|remove`; how each harness reaches the server. |
 | `run --experiment <name> --variant <label> --prompt <text> [--harness H] [--profile P] [--model M] [--bypass] [--cwd DIR] [--check CMD] [--repeat N] [--timeout SECS] [--max-cost USD] [--max-turns N]` | Section 12. |
+| `loop ls [--json]`, `loop add --workspace DIR --pattern ID [--profile P] [--harness claude\|codex] [--every 1d] [--level L1] [--max-runs-per-day N] [--max-tokens-per-day N] [--max-cost USD] [--no-scaffold]`, `loop rm ID`, `loop run ID [--now]`, `loop pause [ID\|--all]`, `loop resume [ID\|--all]`, `loop init DIR --pattern ID --harness H`, `loop audit DIR [--json]`, `loop status [ID] [--json]`, `loop cost --pattern ID [--every 15m] [--level L2] [--with-caching] [--json]`, `loop inbox [--json]`, `loop decide RUN applied\|rejected` | Section 15. `loop run` exits 0 report-only/no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. |
 
 Examples:
 
@@ -1397,7 +1500,7 @@ agent-mux trace sql 'SELECT skill, turns_loaded, turns_unused FROM skill_stats O
 
 ### 10.1 `TraceService` (`analysis/service.rs`)
 
-An in-process, typed, read-only service. Requests: `Briefing`, `ListSessions`, `GetSession`, `Timeline`, `Search`, `AnalyzeSkills`, `CompareRuns`, `Health` (with `agent_mux_*` tool names and closed JSON schemas). `trace briefing`, the briefing snapshot written at agent launch, and the stdio MCP server (`agent-mux mcp serve`, section 6.7) use it; there is no network server. Rules:
+An in-process, typed, read-only service. Requests: `Briefing`, `ListSessions`, `GetSession`, `Timeline`, `Search`, `AnalyzeSkills`, `CompareRuns`, `Health` (with `agent_mux_*` tool names and closed JSON schemas). The MCP server adds a ninth tool outside the service, `agent_mux_get_loop_context` (`loops::context::live`), which reads the loop registry and the workspace files besides the store. `trace briefing`, the briefing snapshot written at agent launch, and the stdio MCP server (`agent-mux mcp serve`, section 6.7) use it; there is no network server. Rules:
 
 - Each request opens a fresh `READ_ONLY | NO_MUTEX` connection and installs a progress handler every 50 VM steps that interrupts at the deadline: 5 s for `AnalyzeSkills` and `CompareRuns`, 2 s otherwise. `Health` never needs the database.
 - Admission: 4 concurrent, 16 waiting per instance; a full queue returns `BUSY`.
@@ -1598,6 +1701,53 @@ It builds a temporary project and home with `alpha`/`beta` skills and a `verifie
 - [docs/skills.md](docs/skills.md): package format, installation, invocation.
 - [skills/heimdall/reference/](skills/heimdall/reference/): analysis playbooks and thresholds.
 - [docs/trace-sql-examples.md](docs/trace-sql-examples.md): ad-hoc SQL for `trace sql`, with the tool or command that answers the same question.
+- [docs/loops.md](docs/loops.md): Loop Engineering operator guide (week one, files, levels, inbox, Antigravity status).
 - [docs/superpowers/specs/](docs/superpowers/specs/), [docs/superpowers/plans/](docs/superpowers/plans/): historical designs.
 
 The implementation is best-effort capture with provider-dependent evidence, heuristic attribution and loop warnings, an in-process analysis service, and optional remote export. It does not infer task success from process exit, recreate lost hook events from terminal output, manage packages other than skills, provide a full database restore through `trace import`, or expose a network analysis server (the MCP server is local stdio only). Known limitations at the time of writing: analysis cursors are keyed per process (section 10.1), CLI writers ignore `retention_days`, read commands other than `doctor` migrate an old store in place, and the Skills view accepts mouse wheel input but not clicks.
+
+---
+
+## 15. Loop Engineering
+
+A **loop** is a scheduled, bounded agent run against one workspace, driven from the Loops sidebar section (4.1), the add-loop dialog and the Loops view (4.10), and `agent-mux loop …` (9). agent-mux is the scheduler, the observer and the enforcer; the skills are its own (`loops/skills`, nine of them, plus `loops/agents/loop-verifier.md` and eight templates, embedded with `include_str!`); the files a workspace keeps follow the loop-engineering method's conventions. Nothing from another vendor is installed or executed. Operator guide: [docs/loops.md](docs/loops.md); design: `docs/superpowers/specs/2026-09-15-loop-engineering-design.md`.
+
+### 15.1 Modules
+
+| Module | Role |
+| --- | --- |
+| `loops/registry.toml`, `src/loops/patterns.rs` | The seven patterns: cadence, week-one level, state file, skills, verifier, breaker, gates, caps, priority, token profile. |
+| `src/loops/registry.rs` | `~/.agent-mux/loops.json` (`AGENT_MUX_LOOPS_FILE`): `Registry { version, pause_all, loops: [LoopEntry] }`, atomic save, resolve by id, prefix or `pattern@workspace`. |
+| `src/loops/schedule.rs` | Due loops in priority order (ci-sweeper, pr-babysitter, dependency-sweeper, post-merge-cleanup, changelog-drafter, daily-triage, issue-triage), `max_concurrent`, one run per workspace, the catch-up rule. |
+| `src/loops/run.rs` | Pre-flight (section 15.2), the `loop-result` block, outcome derivation, the run-log entry. |
+| `src/loops/readiness.rs` | The Loop Ready audit: additive weights (base 7, state file 18, triage 14, LOOP.md 9, AGENTS.md 9, skills 14/7, verifier 14, safety 4+4, GitHub 6+4, MCP 3, worktree 3, registry 2, cost 3+3+2+2, governance 3×4, constraints 4+2, activity 14, harness/memory/fleet for parity), clamped to 100; gates L1 ≥ 38 + state, L2 ≥ 58 + triage, L3 ≥ 78 + verifier + state + cost observability + fresh activity; the 14-day activity window with the 60 s future tolerance; `store:<n> runs` as agent-mux's own evidence. |
+| `src/loops/gate.rs` | `gate.yaml` (a hand-written YAML subset: `version`, `denylist`, `maxFiles`, `autoMergeAllowlist`), globset matching, `check(action, paths)`. |
+| `src/loops/breaker.rs` | `loop-ledger.json`: attempts, error signatures (timestamps, hex, paths, digits normalized), trigram similarity, the four triggers, prune with `repeated`. |
+| `src/loops/cost.rs` | Runs/day from the interval, the realistic mix per level, the verifier multiplier, prompt caching, the five warnings. |
+| `src/loops/runlog.rs` | `loop-run-log.md`: one JSON line after the marker, replace by `run_id`, 30-day prune of ISO ids. |
+| `src/loops/worktree.rs` | `git worktree add -b loop/<run> <ws>/.loop-worktrees/<run> <base>`, `manifest.json` under a lock file, changes and `diff --stat`, remove, stale sweep. |
+| `src/loops/context.rs` | The context snapshot (`<runtime>/loops/<run>.json`, `$AGENT_MUX_LOOP_CONTEXT`), `live` for the MCP tool, the doctor lines. |
+| `src/loops/store.rs` | `loop_runs` rows, spend, inbox, decisions, activity, run facts from the traces. |
+| `src/loops/scaffold.rs` | Project-level installation of skills, the verifier and the contract files (never overwriting), `contract_files`. |
+| `src/app/loops.rs` | The App side: registry, cards, scheduler pass on the tick, `start_loop_run`, `post_run`, inbox decisions, the dialog. |
+| `src/tracing/hooks/guard.rs` `check_tool` | The loop policy rules (6.5). |
+
+### 15.2 A run, end to end
+
+1. **Due**: on the 250 ms tick, at most once a second, `schedule::due` picks loops whose `next_run_at` passed, not paused, not live, not sharing a workspace with a live run, within `max_concurrent`.
+2. **Pre-flight** (`run::preflight`, in order): kill switch (`K` or the literal `loop-pause-all` in the state file or `LOOP.md`) → workspace exists (git repository for L2+) → runs today `< max_runs_per_day` → tokens today `< 100 %` of `max_tokens_per_day` (≥ 80 % forces report-only) → breaker (fix patterns) → readiness (`audit.allows(level)`; a stale state file caps at L1) → harness resolves → the triage skill is installed in the workspace → concurrency. A block writes a `loop_runs` row with `detail.reason`, advances `next_run_at`, pauses the loop on a breaker trip, and never touches `loop-run-log.md`.
+3. **Isolation**: L1 runs in the workspace; L2+ in a fresh worktree on `loop/<run_id>` (the run id is the RFC 3339 start time, `:` → `-` in paths). The worktree only holds committed files, so `worktree::seed_loop_files` copies the untracked `loop-*` skills and the verifier into it (ignored by the change detectors); the state file, run log and ledger stay in the workspace and the context carries their absolute paths (`$AGENT_MUX_LOOP_STATE`).
+4. **Context**: `context::write` produces the snapshot (run and effective level with its reason, files, budget, breaker, gate, readiness, previous and recent runs, inbox count, human gates).
+5. **Launch**: the loop's profile (by name, else the first for the harness), `LaunchOptions { one_shot: "<invocation> Run the <pattern> loop … Update <state file>. Finish with a loop-result block. <hydration hint>" }` composed through `harness::compose` (`claude -p … --dangerously-skip-permissions`, `codex exec … --yolo`: a print-mode run has nobody to answer approval prompts, so they are always bypassed and the guard is the control), `--max-budget-usd` on Claude when a USD cap is set (also the profile's budget guard), the per-launch MCP registration, the environment `AGENT_MUX_LOOP_ID/RUN_ID/PATTERN/LEVEL/CONTEXT/WORKSPACE`, and `LaunchPlan::attach_loop` writing `launches.metadata.loop_*` and `loop_policy` (on Claude, the `--settings` hook document is recomputed with `--loop`). The session appears in Active as `<pattern> ↻ <workspace>`.
+6. **Timeout**: `[loops] run_timeout_s` kills the session; the run is `failed` and the loop pauses.
+7. **Post-run** (1.2 s after exit, so the writer flushed): `store::run_facts` (tokens and cost from `trace_stats`, the verifier observation and its verdict, files touched, the final message), the worktree's changes, the state file before/after; outcome from the `loop-result` block or derived (`Unknown command: /<skill>` in the session's output is a `failed` run, not a no-op); the gate re-check over every touched path (a hit → `escalated`, pause); `verifier_missing` on an unverified fix; the row, the run-log line (`tokens_estimate` from the store, `source: agent-mux`), the ledger attempt, the registry (`last_run_id`, auto-pause on failure), the worktree (removed when unchanged, kept for the inbox otherwise), a notice.
+8. **Inbox**: `a` applied (worktree removed, branch kept for you to merge), `x` rejected (both removed); `loop_runs.decision` records it.
+
+### 15.3 Per-harness ceiling
+
+| Harness | Guard | Worktree | Ceiling |
+| --- | --- | --- | --- |
+| Claude Code 2.1.273 | per launch, `--loop`, fail-closed for write tools | yes | L3 |
+| Codex 0.154.0 with `trace hooks install codex` | installed `hooks.json`, fail-open | yes | L3 |
+| Codex without installed hooks | none | yes | L1 (the state-file rule is enforced by the skill and the post-run check) |
+| Antigravity 1.2.3 | not supported for loops | — | see [docs/loops.md](docs/loops.md) §8 and the spec's section 16 |

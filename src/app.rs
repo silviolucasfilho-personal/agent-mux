@@ -13,6 +13,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
+pub mod about;
+pub mod loops;
+pub mod loops_view;
 mod skills_view;
 pub use skills_view::*;
 
@@ -28,6 +31,14 @@ pub enum Mode {
     Help,
     SkillsView(Box<SkillsViewState>),
     SkillLauncher(SkillLauncherState),
+    /// The Loops view (`E`): runs, inbox, readiness, budget, files.
+    LoopsView(Box<loops_view::LoopsViewState>),
+    /// The add / edit loop dialog (`a` / `e` in the Loops section).
+    NewLoop(Box<loops::LoopDialogState>),
+    /// `x` on a loop: remove the registry entry (files stay).
+    ConfirmRemoveLoop,
+    /// The About overlay (`v`): version, build stamp, paths, this session.
+    About(Box<about::AboutState>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,6 +46,7 @@ pub enum SidebarSection {
     #[default]
     Active,
     Agents,
+    Loops,
     History,
 }
 
@@ -77,6 +89,21 @@ pub enum Action {
     SkillsKey,
     /// SkillLauncher mode: App routes the key to the SkillLauncherState it owns.
     SkillLauncherKey,
+    /// Loops section and view.
+    OpenLoopsView,
+    LoopRunNow,
+    LoopTogglePause,
+    OpenNewLoop,
+    EditLoop,
+    EnterConfirmRemoveLoop,
+    ToggleKillSwitch,
+    OpenAbout,
+    /// About mode: App routes the key to the AboutState it owns.
+    AboutKey,
+    /// LoopsView mode: App routes the key to the LoopsViewState it owns.
+    LoopsKey,
+    /// NewLoop mode: App routes the key to the LoopDialogState it owns.
+    LoopDialogKey,
 }
 
 /// Severity of a status-bar notice. The old single `error: Option<String>`
@@ -327,6 +354,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                                 Action::Attach
                             }
                             SidebarSection::Agents => Action::OpenSkillLauncher,
+                            SidebarSection::Loops => Action::OpenLoopsView,
                             SidebarSection::History => Action::RestartHistorySession,
                             _ => Action::None,
                         }
@@ -345,10 +373,34 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                                 _ => Action::None,
                             },
                             SidebarSection::Agents => Action::OpenSkillLauncher,
+                            SidebarSection::Loops => Action::LoopRunNow,
                             SidebarSection::History => Action::RestartHistorySession,
                         }
                     }
                 }
+                KeyCode::Char('p')
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
+                {
+                    Action::LoopTogglePause
+                }
+                KeyCode::Char('a')
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
+                {
+                    Action::OpenNewLoop
+                }
+                KeyCode::Char('e')
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
+                {
+                    Action::EditLoop
+                }
+                KeyCode::Char('x')
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
+                {
+                    Action::EnterConfirmRemoveLoop
+                }
+                KeyCode::Char('v') | KeyCode::Char('V') => Action::OpenAbout,
+                KeyCode::Char('K') => Action::ToggleKillSwitch,
+                KeyCode::Char('E') => Action::OpenLoopsView,
                 KeyCode::Char('h') | KeyCode::Char('H')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Agents =>
                 {
@@ -403,6 +455,24 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::TraceBrowser(_) => Action::BrowserKey,
         Mode::SkillsView(_) => Action::SkillsKey,
         Mode::SkillLauncher(_) => Action::SkillLauncherKey,
+        Mode::About(_) => match key.code {
+            KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
+            KeyCode::Esc
+            | KeyCode::Char('q')
+            | KeyCode::Char('v')
+            | KeyCode::Char('V')
+            | KeyCode::Enter => Action::CancelToControl,
+            _ => Action::AboutKey,
+        },
+        Mode::LoopsView(_) => Action::LoopsKey,
+        Mode::NewLoop(_) => Action::LoopDialogKey,
+        Mode::ConfirmRemoveLoop => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                Action::EnterConfirmRemoveLoop
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
+            _ => Action::None,
+        },
         Mode::ConfirmKill => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::KillSelected,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
@@ -1759,6 +1829,25 @@ pub struct App {
     pub live_snapshot_revision: u64,
     /// Instant of the last published live snapshot.
     pub last_snapshot_published: Option<Instant>,
+    /// The Loop Engineering registry (`~/.agent-mux/loops.json`).
+    pub loop_registry: crate::loops::registry::Registry,
+    /// Where the registry is saved (tests override).
+    pub loops_file: Option<std::path::PathBuf>,
+    /// `[loops]` resolved.
+    pub loops: crate::config::LoopRunnerSettings,
+    pub selected_loop: usize,
+    /// Loop runs currently live, by session id.
+    pub live_loop_runs: Vec<loops::LiveLoopRun>,
+    /// Preview cards per loop id, refreshed while the section is visible.
+    pub loop_cards: std::collections::HashMap<String, loops::LoopCard>,
+    pub last_loop_card_refresh: Option<Instant>,
+    pub last_schedule_pass: Option<Instant>,
+    /// The scheduler skips its passes until `load_loop_registry` ran.
+    pub loops_loaded: bool,
+    /// Readiness audits cached per workspace.
+    pub loop_audits: loops::AuditCache,
+    /// The configuration file that was accepted, for the About overlay.
+    pub config_path: Option<std::path::PathBuf>,
 }
 
 impl App {
@@ -1823,6 +1912,17 @@ impl App {
             app_run_id,
             live_snapshot_revision: 0,
             last_snapshot_published: None,
+            loop_registry: crate::loops::registry::Registry::default(),
+            loops_file: None,
+            loops: crate::config::LoopRunnerSettings::default(),
+            selected_loop: 0,
+            live_loop_runs: Vec::new(),
+            loop_cards: std::collections::HashMap::new(),
+            last_loop_card_refresh: None,
+            last_schedule_pass: None,
+            loops_loaded: false,
+            loop_audits: std::collections::HashMap::new(),
+            config_path: None,
         }
     }
 
@@ -1913,8 +2013,13 @@ impl App {
         if let Mode::SkillsView(view) = &mut self.mode {
             view.refresh_if_live(now);
         }
+        if let Mode::LoopsView(view) = &mut self.mode {
+            view.refresh_if_live(now);
+        }
         self.publish_live_snapshot_if_needed(now);
         self.refresh_briefing_if_needed(now);
+        self.refresh_loop_cards_if_needed(now);
+        self.scheduler_pass(now);
     }
 
     /// Publishes live session snapshot bounded to 1MiB every second if needed.
@@ -2183,10 +2288,27 @@ impl App {
     fn spawn_traced_with_env(
         &mut self,
         id: usize,
+        profile: Profile,
+        dir: std::path::PathBuf,
+        env: &[(String, String)],
+        skill_id: Option<&str>,
+    ) -> anyhow::Result<Session> {
+        self.spawn_traced_full(id, profile, dir, env, skill_id, None, &[])
+    }
+
+    /// The one spawn path: `spawn_traced_with_env` plus, for a loop run,
+    /// the launch row's loop keys and policy and extra harness arguments
+    /// (the MCP registration the loop composed itself).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_traced_full(
+        &mut self,
+        id: usize,
         mut profile: Profile,
         dir: std::path::PathBuf,
         env: &[(String, String)],
         skill_id: Option<&str>,
+        loop_launch: Option<crate::loops::LoopLaunch>,
+        loop_args: &[String],
     ) -> anyhow::Result<Session> {
         prepare_nested_tui(&mut profile);
         let (rows, cols) = self.pane_size;
@@ -2200,10 +2322,16 @@ impl App {
                 .unwrap_or("unknown");
             p.skill = Some((skill.to_string(), harness.to_string()));
         }
+        let is_loop = loop_launch.is_some();
+        if let (Some(p), Some(launch)) = (plan.as_mut(), loop_launch) {
+            let home = self.skill_home();
+            p.attach_loop(launch, &home);
+        }
         let mut extra_args: Vec<String> = match &plan {
             Some(p) => p.extra_args.clone(),
             None => Vec::new(),
         };
+        extra_args.extend(loop_args.iter().cloned());
         let mut extra_env: Vec<(String, String)> = match &plan {
             Some(p) => p.extra_env.clone(),
             None => Vec::new(),
@@ -2213,6 +2341,7 @@ impl App {
         // from Rust: the briefing snapshot and the MCP registration.
         let mut briefing_path = None;
         if let Some(def) = skill_id
+            .filter(|_| !is_loop)
             .and_then(|sid| self.skills.iter().find(|s| s.id == sid))
             .cloned()
         {
@@ -2702,8 +2831,11 @@ impl App {
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
-            let (active_rect, agents_rect, history_rect) =
-                ui::sidebar_areas(self.pane_size.0 + 3, self.skills.len());
+            let (active_rect, agents_rect, loops_rect, history_rect) = ui::sidebar_areas(
+                self.pane_size.0 + 3,
+                self.skills.len(),
+                self.loop_registry.loops.len(),
+            );
             if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
                 if ev.row > active_rect.y
                     && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
@@ -2736,6 +2868,20 @@ impl App {
                         ui::sidebar_window(self.selected_agent, self.skills.len(), visible) + row;
                     if idx < self.skills.len() {
                         self.selected_agent = idx;
+                    }
+                }
+                return;
+            } else if ev.row >= loops_rect.y && ev.row < loops_rect.y + loops_rect.height {
+                self.sidebar_section = SidebarSection::Loops;
+                if ev.row > loops_rect.y
+                    && ev.row < loops_rect.y + loops_rect.height.saturating_sub(1)
+                {
+                    let visible = usize::from(loops_rect.height.saturating_sub(2));
+                    let row = usize::from(ev.row - loops_rect.y - 1);
+                    let n = self.loop_registry.loops.len();
+                    let idx = ui::sidebar_window(self.selected_loop, n, visible) + row;
+                    if idx < n {
+                        self.selected_loop = idx;
                     }
                 }
                 return;
@@ -2795,8 +2941,23 @@ impl App {
             ) =>
             {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
-                    let (_, agents_rect, history_rect) =
-                        ui::sidebar_areas(self.pane_size.0 + 3, self.skills.len());
+                    let (_, agents_rect, loops_rect, history_rect) = ui::sidebar_areas(
+                        self.pane_size.0 + 3,
+                        self.skills.len(),
+                        self.loop_registry.loops.len(),
+                    );
+                    if ev.row >= loops_rect.y
+                        && ev.row < loops_rect.y + loops_rect.height
+                        && !self.loop_registry.loops.is_empty()
+                    {
+                        if matches!(ev.kind, MouseEventKind::ScrollUp) {
+                            self.selected_loop = self.selected_loop.saturating_sub(1);
+                        } else {
+                            self.selected_loop =
+                                (self.selected_loop + 1).min(self.loop_registry.loops.len() - 1);
+                        }
+                        return;
+                    }
                     if ev.row >= agents_rect.y
                         && ev.row < agents_rect.y + agents_rect.height
                         && !self.skills.is_empty()
@@ -3020,6 +3181,16 @@ impl App {
                                 && self.selected_agent + 1 < self.skills.len()
                             {
                                 self.selected_agent += 1;
+                            } else {
+                                self.sidebar_section = SidebarSection::Loops;
+                                self.selected_loop = 0;
+                            }
+                        }
+                        SidebarSection::Loops => {
+                            if !self.loop_registry.loops.is_empty()
+                                && self.selected_loop + 1 < self.loop_registry.loops.len()
+                            {
+                                self.selected_loop += 1;
                             } else if !self.history_sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::History;
                                 self.selected_history = 0;
@@ -3051,12 +3222,21 @@ impl App {
                                 self.selected = self.sessions.len() - 1;
                             }
                         }
+                        SidebarSection::Loops => {
+                            if self.selected_loop > 0 {
+                                self.selected_loop -= 1;
+                            } else {
+                                self.sidebar_section = SidebarSection::Agents;
+                                self.selected_agent = self.skills.len().saturating_sub(1);
+                            }
+                        }
                         SidebarSection::History => {
                             if self.selected_history > 0 {
                                 self.selected_history -= 1;
                             } else {
-                                self.sidebar_section = SidebarSection::Agents;
-                                self.selected_agent = self.skills.len().saturating_sub(1);
+                                self.sidebar_section = SidebarSection::Loops;
+                                self.selected_loop =
+                                    self.loop_registry.loops.len().saturating_sub(1);
                             }
                         }
                     }
@@ -3073,11 +3253,48 @@ impl App {
                             self.reload_skills();
                             SidebarSection::Agents
                         }
-                        SidebarSection::Agents => SidebarSection::History,
+                        SidebarSection::Agents => SidebarSection::Loops,
+                        SidebarSection::Loops => SidebarSection::History,
                         SidebarSection::History => SidebarSection::Active,
                     };
                 }
             }
+            Action::OpenAbout => self.open_about(),
+            Action::AboutKey => {
+                if let Mode::About(state) = &mut self.mode {
+                    let page = state.viewport_rows.get().max(1) as isize;
+                    match key.code {
+                        KeyCode::Down | KeyCode::Char('j') => state.scroll(1),
+                        KeyCode::Up | KeyCode::Char('k') => state.scroll(-1),
+                        KeyCode::PageDown | KeyCode::Char(' ') => state.scroll(page),
+                        KeyCode::PageUp => state.scroll(-page),
+                        KeyCode::Home => state.scroll_offset = 0,
+                        KeyCode::End => state.scroll_offset = state.max_scroll(),
+                        _ => {}
+                    }
+                }
+            }
+            Action::OpenLoopsView => self.open_loops_view(),
+            Action::LoopsKey => self.handle_loops_view_key(key),
+            Action::LoopDialogKey => self.handle_loop_dialog_key(key),
+            Action::LoopRunNow => self.run_selected_loop_now(),
+            Action::LoopTogglePause => self.toggle_selected_loop_pause(),
+            Action::OpenNewLoop => self.open_loop_dialog(None),
+            Action::EditLoop => {
+                let id = self.selected_loop().map(|l| l.id.clone());
+                if id.is_some() {
+                    self.open_loop_dialog(id);
+                }
+            }
+            Action::EnterConfirmRemoveLoop => {
+                if matches!(self.mode, Mode::ConfirmRemoveLoop) {
+                    self.remove_selected_loop();
+                    self.mode = Mode::Control;
+                } else if self.selected_loop().is_some() {
+                    self.mode = Mode::ConfirmRemoveLoop;
+                }
+            }
+            Action::ToggleKillSwitch => self.toggle_kill_switch(),
             Action::OpenSkillsView => self.open_skills_view(),
             Action::SkillsKey => self.handle_skills_key(key),
             Action::OpenSkillLauncher => {
@@ -3602,13 +3819,47 @@ impl App {
         }
     }
 
+    /// `v`: what this binary is, where its files are, what this session
+    /// runs. The facts are gathered once, here, never on the draw path.
+    pub fn open_about(&mut self) {
+        let facts = about::AboutFacts {
+            config_path: self.config_path.as_deref(),
+            trace_db: self.trace_db_path.as_deref(),
+            runtime_dir: self
+                .runtime_dir
+                .clone()
+                .unwrap_or_else(crate::tracing::analysis::default_snapshot_dir),
+            run_id: &self.app_run_id,
+            sessions: self.sessions.len(),
+            traced_sessions: self.sessions.iter().filter(|s| s.trace.is_some()).count(),
+            skills: self.skills.len(),
+            loops: self.loop_registry.loops.len(),
+            loops_paused: self
+                .loop_registry
+                .loops
+                .iter()
+                .filter(|l| l.paused())
+                .count(),
+            loops_kill_switch: self.loop_registry.pause_all,
+        };
+        self.mode = Mode::About(Box::new(about::AboutState {
+            rows: about::rows(&facts),
+            scroll_offset: 0,
+            viewport_rows: std::cell::Cell::new(24),
+        }));
+    }
+
     /// `S`: opens the Skills view over the current screen.
     fn open_skills_view(&mut self) {
         self.reload_skills();
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let install_home = self.skill_home();
         // A test override of the install home is the whole home: harness
-        // definitions are read from the same tree the installs land in.
+        // definitions are read from the same tree the installs land in, and
+        // the project scan runs there too rather than in the real cwd.
+        let cwd = match &self.skill_install_home {
+            Some(h) => h.clone(),
+            None => std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        };
+        let install_home = self.skill_home();
         let home = match &self.skill_install_home {
             Some(h) => h.clone(),
             None => self
@@ -3967,6 +4218,7 @@ impl App {
                 trace.mark_exited(code);
             }
             self.record_experiment_link(i);
+            self.finish_loop_run_for_session(id);
             // if we were attached to it, drop back to Control
             if self.attached() == Some(i) {
                 self.mode = Mode::Control;

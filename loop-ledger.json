@@ -1,0 +1,42 @@
+{
+  "goal": "Watch open pull requests for conflicts, red or missing checks and stalled reviews, and nudge or fix the smallest thing that unblocks them.",
+  "pattern": "pr-babysitter",
+  "level": "L1",
+  "attempts": [
+    {
+      "iteration": 21,
+      "timestamp": "2026-09-16T16:18:42Z",
+      "action": "pr-babysitter",
+      "outcome": "noop",
+      "tokensUsed": 91063
+    },
+    {
+      "iteration": 22,
+      "timestamp": "2026-09-16T16:33:40Z",
+      "action": "pr-babysitter",
+      "outcome": "noop",
+      "tokensUsed": 95789
+    },
+    {
+      "iteration": 23,
+      "timestamp": "2026-09-16T16:48:41Z",
+      "action": "pr-babysitter",
+      "outcome": "noop",
+      "tokensUsed": 95984
+    },
+    {
+      "iteration": 24,
+      "timestamp": "2026-09-16T17:03:41Z",
+      "action": "pr-babysitter",
+      "outcome": "noop",
+      "tokensUsed": 96053
+    },
+    {
+      "iteration": 25,
+      "timestamp": "2026-09-16T17:18:41Z",
+      "action": "pr-babysitter",
+      "outcome": "noop",
+      "tokensUsed": 98344
+    }
+  ]
+}

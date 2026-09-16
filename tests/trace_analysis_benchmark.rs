@@ -78,7 +78,7 @@ fn seed_benchmark_store(
     )
     .unwrap();
 
-    let now_ns = OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 - 3600_000_000_000;
+    let now_ns = OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 - 3_600_000_000_000;
     let ws_str = ws_path.to_string_lossy().to_string();
 
     let tx = conn.transaction().unwrap();

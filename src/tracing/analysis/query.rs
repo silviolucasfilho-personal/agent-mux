@@ -145,6 +145,7 @@ pub fn briefing(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_session_card(
     conn: &Connection,
     session_key: Option<&str>,
@@ -322,8 +323,8 @@ fn build_session_card(
              GROUP BY o.name
              ORDER BY COUNT(*) DESC"
         );
-        if let Ok(mut stmt) = conn.prepare(&sql) {
-            if let Ok(rows) =
+        if let Ok(mut stmt) = conn.prepare(&sql)
+            && let Ok(rows) =
                 stmt.query_map(rusqlite::params_from_iter(filter_params.iter()), |r| {
                     Ok((
                         r.get::<_, Option<String>>(0)?
@@ -331,11 +332,10 @@ fn build_session_card(
                         r.get::<_, i64>(1)?,
                     ))
                 })
-            {
-                for (name, count) in rows.flatten() {
-                    total_tools += count;
-                    tool_counts.push(ToolCountSummary { name, count });
-                }
+        {
+            for (name, count) in rows.flatten() {
+                total_tools += count;
+                tool_counts.push(ToolCountSummary { name, count });
             }
         }
 
@@ -358,16 +358,16 @@ fn build_session_card(
                 })
             {
                 for (name, input) in rows.flatten() {
-                    if let Some(file_path) = extract_target_file(&name, &input) {
-                        if seen_files.insert(file_path.clone()) {
-                            files_modified.push(Evidence::observed(
-                                file_path,
-                                EvidenceSource::Hook,
-                                None,
-                            ));
-                            if files_modified.len() >= 10 {
-                                break;
-                            }
+                    if let Some(file_path) = extract_target_file(&name, &input)
+                        && seen_files.insert(file_path.clone())
+                    {
+                        files_modified.push(Evidence::observed(
+                            file_path,
+                            EvidenceSource::Hook,
+                            None,
+                        ));
+                        if files_modified.len() >= 10 {
+                            break;
                         }
                     }
                 }
@@ -393,16 +393,16 @@ fn build_session_card(
                 })
             {
                 for (name, input) in rows.flatten() {
-                    if let Some(cmd) = extract_command(&name, &input) {
-                        if seen_cmds.insert(cmd.clone()) {
-                            recent_commands.push(Evidence::observed(
-                                snippet(&cmd, 60),
-                                EvidenceSource::Hook,
-                                None,
-                            ));
-                            if recent_commands.len() >= 5 {
-                                break;
-                            }
+                    if let Some(cmd) = extract_command(&name, &input)
+                        && seen_cmds.insert(cmd.clone())
+                    {
+                        recent_commands.push(Evidence::observed(
+                            snippet(&cmd, 60),
+                            EvidenceSource::Hook,
+                            None,
+                        ));
+                        if recent_commands.len() >= 5 {
+                            break;
                         }
                     }
                 }
@@ -417,25 +417,24 @@ fn build_session_card(
                AND o.end_ns IS NULL AND o.type IN ('tool', 'agent')
              ORDER BY o.start_ns DESC LIMIT 10"
         );
-        if let Ok(mut stmt) = conn.prepare(&sql) {
-            if let Ok(rows) =
+        if let Ok(mut stmt) = conn.prepare(&sql)
+            && let Ok(rows) =
                 stmt.query_map(rusqlite::params_from_iter(filter_params.iter()), |r| {
                     Ok((
                         r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                         r.get::<_, Option<String>>(1)?.unwrap_or_default(),
                     ))
                 })
-            {
-                for (name, input) in rows.flatten() {
-                    let clue = if let Some(cmd) = extract_command(&name, &input) {
-                        format!("{name}: {}", snippet(&cmd, 30))
-                    } else if let Some(path) = extract_target_file(&name, &input) {
-                        format!("{name}: {path}")
-                    } else {
-                        name
-                    };
-                    db_active_tools.push(clue);
-                }
+        {
+            for (name, input) in rows.flatten() {
+                let clue = if let Some(cmd) = extract_command(&name, &input) {
+                    format!("{name}: {}", snippet(&cmd, 30))
+                } else if let Some(path) = extract_target_file(&name, &input) {
+                    format!("{name}: {path}")
+                } else {
+                    name
+                };
+                db_active_tools.push(clue);
             }
         }
     }

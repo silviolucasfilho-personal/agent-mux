@@ -101,9 +101,12 @@ async fn test_sidebar_split_navigation() {
     // Starts in Active section
     assert_eq!(app.sidebar_section, SidebarSection::Active);
 
-    // Tab cycles: Active -> Agents -> History -> Active
+    // Tab cycles: Active -> Agents -> Loops -> History -> Active
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Agents);
+
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Loops);
 
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
@@ -115,7 +118,9 @@ async fn test_sidebar_split_navigation() {
     app.handle_key(&key(KeyCode::Down), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Agents);
 
-    // Down in Agents transitions into History
+    // Down in Agents transitions into Loops, and (with no loops) on into History
+    app.handle_key(&key(KeyCode::Down), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Loops);
     app.handle_key(&key(KeyCode::Down), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
     assert_eq!(app.selected_history, 0);
@@ -128,7 +133,9 @@ async fn test_sidebar_split_navigation() {
     app.handle_key(&key(KeyCode::Up), Instant::now());
     assert_eq!(app.selected_history, 0);
 
-    // Up at top of History transitions to Agents
+    // Up at top of History transitions to Loops, then Agents
+    app.handle_key(&key(KeyCode::Up), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Loops);
     app.handle_key(&key(KeyCode::Up), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Agents);
 
@@ -219,8 +226,8 @@ async fn test_sidebar_mouse_click_selection() {
         },
     ];
 
-    let (active_rect, agents_rect, history_rect) =
-        agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.skills.len());
+    let (active_rect, agents_rect, _loops_rect, history_rect) =
+        agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.skills.len(), 0);
 
     // Click in history area
     let click_hist = MouseEvent {

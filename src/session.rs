@@ -348,6 +348,26 @@ impl Session {
         (self.scrollback_len, self.parser.screen().scrollback())
     }
 
+    /// Every row of scrollback and screen as plain text, oldest first,
+    /// trailing blanks trimmed. The scroll offset is restored.
+    pub fn text_dump(&mut self) -> String {
+        let len = self.probe_scrollback_len();
+        let saved = self.parser.screen().scrollback();
+        let screen_rows = usize::from(self.parser.screen().size().0);
+        let mut out = String::new();
+        for row in 0..len + screen_rows {
+            let cells = crate::selection::row_cells(&mut self.parser, len, row);
+            let mut line = String::new();
+            for (_, contents) in &cells {
+                line.push_str(if contents.is_empty() { " " } else { contents });
+            }
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+        self.parser.screen_mut().set_scrollback(saved);
+        out
+    }
+
     /// vt100 doesn't expose scrollback length; set_scrollback self-clamps,
     /// so probing with usize::MAX and restoring reads it in O(1).
     fn probe_scrollback_len(&mut self) -> usize {
