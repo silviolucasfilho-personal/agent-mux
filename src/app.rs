@@ -3788,10 +3788,14 @@ impl App {
     /// `S`: opens the Skills view over the current screen.
     fn open_skills_view(&mut self) {
         self.reload_skills();
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let install_home = self.skill_home();
         // A test override of the install home is the whole home: harness
-        // definitions are read from the same tree the installs land in.
+        // definitions are read from the same tree the installs land in, and
+        // the project scan runs there too rather than in the real cwd.
+        let cwd = match &self.skill_install_home {
+            Some(h) => h.clone(),
+            None => std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        };
+        let install_home = self.skill_home();
         let home = match &self.skill_install_home {
             Some(h) => h.clone(),
             None => self

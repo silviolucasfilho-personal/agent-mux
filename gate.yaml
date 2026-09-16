@@ -1,0 +1,25 @@
+# Path gate for loop runs. agent-mux refuses writes to any path matching
+# `denylist` while a run executes, caps the number of files a run may
+# change, and re-checks the diff after the run. `autoMergeAllowlist` is
+# recorded for a future level; nothing is auto-merged today.
+version: 1
+
+denylist:
+  - "**/.env"
+  - "**/.env.*"
+  - "**/secrets/**"
+  - "**/auth/**"
+  - "**/payments/**"
+  - "**/migrations/**"
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/id_rsa*"
+  - "**/credentials*"
+  - "**/.github/workflows/**"
+  - "**/infra/**"
+
+maxFiles: 10
+
+autoMergeAllowlist:
+  - "docs/**"
+  - "**/*.md"

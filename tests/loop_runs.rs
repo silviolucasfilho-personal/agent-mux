@@ -51,7 +51,8 @@ pwd > \"$d/cwd.txt\"
 if [ -n \"$AGENT_MUX_LOOP_CONTEXT\" ]; then cp \"$AGENT_MUX_LOOP_CONTEXT\" \"$d/context.json\"; fi
 sleep {sleep}
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-cat > '{state}' <<EOS
+state=\"${{AGENT_MUX_LOOP_STATE:-{state}}}\"
+cat > \"$state\" <<EOS
 # Loop State — test
 
 Last run: $now
@@ -302,7 +303,12 @@ async fn an_l1_run_launches_in_the_workspace_and_is_accounted_for() {
     let prompt = &args[p + 1];
     assert!(prompt.starts_with("/loop-triage "), "{prompt}");
     assert!(prompt.contains("$AGENT_MUX_LOOP_CONTEXT"), "{prompt}");
-    assert!(prompt.contains("Update STATE.md"), "{prompt}");
+    assert!(prompt.contains("Update the state file at"), "{prompt}");
+    assert!(prompt.contains("STATE.md"), "{prompt}");
+    assert!(
+        !prompt.contains("AGENT_MUX_BRIEFING"),
+        "no briefing hint on a loop run"
+    );
     assert!(args.iter().any(|a| a == "--mcp-config"), "{args:?}");
     assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
     let cwd = std::fs::read_to_string(f.bin.join("cwd.txt")).unwrap();
@@ -330,7 +336,11 @@ async fn an_l1_run_launches_in_the_workspace_and_is_accounted_for() {
     assert_eq!(ctx["schema_version"], 1);
     assert_eq!(ctx["run"]["id"], run_id);
     assert_eq!(ctx["run"]["level_effective"], "L1");
-    assert_eq!(ctx["files"]["state"], "STATE.md");
+    assert_eq!(
+        Path::new(ctx["files"]["state"].as_str().unwrap()),
+        f.ws.join("STATE.md"),
+        "absolute, in the workspace"
+    );
     assert_eq!(ctx["budget"]["mode"], "normal");
     assert!(ctx.get("worktree").is_none(), "no worktree at L1");
     assert!(
@@ -401,6 +411,19 @@ async fn an_l2_run_works_in_a_worktree_and_its_fix_reaches_the_inbox() {
     );
     let env = env_map(&f.bin.join("env.txt"));
     assert_eq!(env["AGENT_MUX_LOOP_LEVEL"], "L2");
+    // the untracked loop skills were seeded into the worktree so the
+    // harness finds them, and the state file stays in the workspace
+    assert!(
+        wt_path
+            .join(".claude/skills/loop-ci-triage/SKILL.md")
+            .is_file(),
+        "seeded skill"
+    );
+    assert!(wt_path.join(".claude/agents/loop-verifier.md").is_file());
+    assert_eq!(
+        Path::new(&env["AGENT_MUX_LOOP_STATE"]),
+        f.ws.join("ci-sweeper-state.md")
+    );
     let ctx: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(f.bin.join("context.json")).unwrap())
             .unwrap();
@@ -651,4 +674,30 @@ async fn the_kill_switch_blocks_every_run() {
     f.app.on_tick(Instant::now());
     assert!(f.app.sessions.is_empty());
     f.app.kill_all();
+}
+
+#[tokio::test]
+async fn a_loop_whose_skill_is_not_installed_is_blocked_before_launch() {
+    let spec = FakeSpec {
+        state_file: "STATE.md",
+        extra_file: None,
+        exit_code: 0,
+        sleep_s: 0,
+    };
+    let mut f = fixture("daily-triage", Level::L1, &spec);
+    std::fs::remove_dir_all(f.ws.join(".claude/skills/loop-triage")).unwrap();
+    assert!(f.app.start_loop_run(&f.loop_id.clone()).is_none());
+    assert!(f.app.sessions.is_empty());
+    let conn = agent_mux::tracing::store::open_ro(&f.db).unwrap();
+    let rows = lstore::recent_runs(&conn, &f.loop_id, 5).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, Outcome::Blocked);
+    assert!(
+        rows[0]
+            .detail_str("reason")
+            .unwrap()
+            .contains("not installed"),
+        "{:?}",
+        rows[0].detail
+    );
 }

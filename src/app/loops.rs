@@ -938,6 +938,11 @@ impl App {
             guard_available: harness.is_some_and(|h| self.guard_available(h)),
             harness_resolves: harness.is_some()
                 && crate::session::resolve_command(&profile.command).is_some(),
+            skill_installed: harness.is_some_and(|h| {
+                crate::loops::scaffold::project_skills_dir(h, &entry.workspace)
+                    .map(|d| d.join(pattern.triage_skill()).join("SKILL.md").is_file())
+                    .unwrap_or(false)
+            }),
             concurrency_blocked: None,
         };
         let run_id = self.fresh_run_id(conn.as_ref(), wall);
@@ -1085,13 +1090,21 @@ impl App {
         } else {
             None
         };
+        if let Some(w) = &worktree {
+            // the scaffolded skills are usually untracked, so a fresh
+            // worktree lacks them; copy them in (ignored by change checks)
+            worktree::seed_loop_files(&entry.workspace, &w.path);
+        }
         let cwd = worktree
             .as_ref()
             .map(|w| w.path.clone())
             .unwrap_or_else(|| entry.workspace.clone());
         let state_file = pattern.state_file.clone();
-        let state_path = cwd.join(&state_file);
+        // the state file, run log and ledger are the loop's memory: they
+        // live in the workspace whatever directory the run executes in
+        let state_path = entry.workspace.join(&state_file);
         let state_before = std::fs::read_to_string(&state_path).ok();
+        let abs = |name: &str| entry.workspace.join(name).to_string_lossy().into_owned();
         let gate = crate::loops::gate::load(&entry.workspace.join(crate::loops::GATE_YAML))
             .unwrap_or_else(|_| crate::loops::gate::default_config());
         let ledger_name = pattern
@@ -1171,11 +1184,11 @@ impl App {
                     base: w.base.clone(),
                 }),
             files: crate::loops::context::Files {
-                state: state_file.clone(),
-                run_log: crate::loops::RUN_LOG_MD.into(),
-                constraints: crate::loops::CONSTRAINTS_MD.into(),
-                ledger: ledger_name,
-                gate: crate::loops::GATE_YAML.into(),
+                state: abs(&state_file),
+                run_log: abs(crate::loops::RUN_LOG_MD),
+                constraints: abs(crate::loops::CONSTRAINTS_MD),
+                ledger: ledger_name.as_deref().map(abs),
+                gate: abs(crate::loops::GATE_YAML),
             },
             budget: crate::loops::context::Budget {
                 runs_today: spend.runs,
@@ -1224,11 +1237,10 @@ impl App {
             t.max_cost_usd = Some(cap);
         }
         let prompt = format!(
-            "{} Run the {} loop for this workspace. Facts for this run are in $AGENT_MUX_LOOP_CONTEXT (read it first). Update {}. Finish with a loop-result block. {}",
+            "{} Run the {} loop for this workspace. Facts for this run are in $AGENT_MUX_LOOP_CONTEXT (read it first). Update the state file at {}. Finish with a loop-result block.",
             invocation(pattern.triage_skill(), harness),
             entry.pattern,
-            state_file,
-            crate::skill::launch::HYDRATION_HINT,
+            state_path.display(),
         );
         let options = crate::harness::LaunchOptions {
             model: profile.model.clone(),
@@ -1283,6 +1295,10 @@ impl App {
             (
                 "AGENT_MUX_LOOP_CONTEXT".into(),
                 context_path.to_string_lossy().into_owned(),
+            ),
+            (
+                "AGENT_MUX_LOOP_STATE".into(),
+                state_path.to_string_lossy().into_owned(),
             ),
             (
                 "AGENT_MUX_LOOP_WORKSPACE".into(),
@@ -1421,6 +1437,13 @@ impl App {
                 Status::Exited(code) => code,
                 _ => None,
             });
+        let screen_text = self
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == live.session_id)
+            .map(|s| s.text_dump())
+            .unwrap_or_default();
+        let missing_skill = run::skill_missing(&screen_text);
         let conn_ro = self
             .trace_db_path
             .as_deref()
@@ -1469,6 +1492,7 @@ impl App {
             high_priority_grew: high_grew,
             verifier_verdict: facts.as_ref().and_then(|f| f.verifier_verdict.clone()),
             permission_refused,
+            skill_missing: missing_skill.is_some(),
         };
         let mut outcome = run::derive_outcome(result.as_ref(), &observed);
 
@@ -1546,6 +1570,13 @@ impl App {
                 "final_message",
                 m.chars().take(2000).collect::<String>().into(),
             );
+        }
+        if let Some(name) = &missing_skill {
+            let why = format!(
+                "the harness did not find {name}: the loop's skill is missing from the run's directory"
+            );
+            row.set_detail("reason", why.clone().into());
+            pause_reason.get_or_insert(why);
         }
         if outcome == Outcome::Failed {
             pause_reason.get_or_insert_with(|| "last run failed".into());

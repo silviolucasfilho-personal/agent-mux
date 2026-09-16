@@ -29,6 +29,9 @@ pub struct PreflightInput {
     /// with installed hooks).
     pub guard_available: bool,
     pub harness_resolves: bool,
+    /// The pattern's triage skill exists in the workspace for the harness
+    /// (`.claude/skills/<skill>/SKILL.md` or the Codex equivalent).
+    pub skill_installed: bool,
     /// Another run is live for this loop or its workspace, or no slot.
     pub concurrency_blocked: Option<String>,
 }
@@ -49,6 +52,7 @@ impl Default for PreflightInput {
             state_stale: false,
             guard_available: false,
             harness_resolves: false,
+            skill_installed: true,
             concurrency_blocked: None,
         }
     }
@@ -130,6 +134,12 @@ pub fn preflight(entry: &LoopEntry, input: &PreflightInput) -> Preflight {
     }
     if !input.harness_resolves {
         return blocked("the profile's command is not installed", false);
+    }
+    if !input.skill_installed {
+        return blocked(
+            "the loop's skill is not installed in the workspace: edit the loop with Scaffold on, or run `agent-mux loop init`",
+            false,
+        );
     }
     let mut level = entry.level;
     let mut reason: Option<String> = None;
@@ -228,11 +238,17 @@ pub struct Observed {
     pub high_priority_grew: bool,
     pub verifier_verdict: Option<String>,
     pub permission_refused: bool,
+    /// The harness reported the skill as an unknown command.
+    pub skill_missing: bool,
 }
 
 /// Spec section 8.6 step 2.
 pub fn derive_outcome(result: Option<&LoopResult>, obs: &Observed) -> Outcome {
-    if obs.timed_out || obs.exit_code.is_some_and(|c| c != 0) || obs.permission_refused {
+    if obs.timed_out
+        || obs.exit_code.is_some_and(|c| c != 0)
+        || obs.permission_refused
+        || obs.skill_missing
+    {
         return Outcome::Failed;
     }
     if let Some(r) = result
@@ -255,6 +271,22 @@ pub fn derive_outcome(result: Option<&LoopResult>, obs: &Observed) -> Outcome {
         return Outcome::ReportOnly;
     }
     Outcome::NoOp
+}
+
+/// The harness could not find the loop's skill: Claude Code prints
+/// `Unknown command: /<skill>` and exits 0. Returns the offending name.
+pub fn skill_missing(output: &str) -> Option<String> {
+    output.lines().find_map(|l| {
+        let t = l.trim();
+        t.strip_prefix("Unknown command:")
+            .or_else(|| t.strip_prefix("Unknown skill:"))
+            .map(|rest| {
+                rest.trim()
+                    .trim_matches(|c: char| c == '`' || c == '"')
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty())
+    })
 }
 
 /// The `## High Priority` section of a state file, for the "grew" test.
@@ -516,6 +548,21 @@ mod tests {
         assert_eq!(
             high_priority_items("## High Priority (x)\n- [ ] a\n- [ ] b\n## Watch List\n- c\n"),
             2
+        );
+        assert_eq!(
+            skill_missing("hi\nUnknown command: /loop-pr-triage\nbye"),
+            Some("/loop-pr-triage".into())
+        );
+        assert!(skill_missing("all good").is_none());
+        assert_eq!(
+            derive_outcome(
+                Some(&r),
+                &Observed {
+                    skill_missing: true,
+                    ..Default::default()
+                }
+            ),
+            Outcome::Failed
         );
         assert!(kill_switch_active("Last run: x\nloop-pause-all\n"));
         assert!(!kill_switch_active(

@@ -185,10 +185,94 @@ pub fn create(
     Ok(Worktree { path, branch, base })
 }
 
+/// The loop assets a run needs inside its worktree. They are usually
+/// untracked in the workspace (the scaffolder wrote them, nobody
+/// committed them yet), so a fresh worktree lacks them; `seed_loop_files`
+/// copies them in and the change detectors ignore them.
+pub const SEEDED_PREFIXES: [&str; 4] = [
+    ".claude/skills/loop-",
+    ".codex/skills/loop-",
+    ".claude/agents/loop-verifier.md",
+    ".codex/agents/verifier.toml",
+];
+
+fn is_seeded_path(rel: &str) -> bool {
+    let rel = rel.trim_start_matches("./");
+    SEEDED_PREFIXES.iter().any(|p| rel.starts_with(p))
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for e in std::fs::read_dir(from)? {
+            let e = e?;
+            copy_tree(&e.path(), &to.join(e.file_name()))?;
+        }
+    } else if !to.exists() {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(from, to)?;
+    }
+    Ok(())
+}
+
+/// Copies the workspace's loop skills and verifier into the worktree when
+/// the worktree does not have them (untracked files are not part of a
+/// fresh worktree). Returns the relative paths seeded.
+pub fn seed_loop_files(workspace: &Path, wt: &Path) -> Vec<String> {
+    let mut seeded = Vec::new();
+    for dir in [".claude/skills", ".codex/skills"] {
+        let Ok(entries) = std::fs::read_dir(workspace.join(dir)) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("loop-") {
+                continue;
+            }
+            let rel = format!("{dir}/{name}");
+            let dest = wt.join(&rel);
+            if dest.exists() {
+                continue;
+            }
+            if copy_tree(&e.path(), &dest).is_ok() {
+                seeded.push(rel);
+            }
+        }
+    }
+    for rel in [
+        ".claude/agents/loop-verifier.md",
+        ".codex/agents/verifier.toml",
+    ] {
+        let src = workspace.join(rel);
+        let dest = wt.join(rel);
+        if src.is_file() && !dest.exists() && copy_tree(&src, &dest).is_ok() {
+            seeded.push(rel.to_string());
+        }
+    }
+    seeded
+}
+
+/// `git status --porcelain` paths of the worktree, without the seeded
+/// loop assets.
+fn dirty_paths(wt: &Worktree) -> Vec<String> {
+    git(
+        &wt.path,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .unwrap_or_default()
+    .lines()
+    .filter(|l| l.len() > 3)
+    .map(|l| l[3..].trim().trim_matches('"').to_string())
+    .filter(|p| !is_seeded_path(p))
+    .collect()
+}
+
 /// True when the worktree has uncommitted or committed changes against
-/// its base.
+/// its base, the seeded loop assets aside.
 pub fn has_changes(wt: &Worktree) -> bool {
-    let dirty = git(&wt.path, &["status", "--porcelain"]).is_ok_and(|s| !s.is_empty());
+    let dirty = !dirty_paths(wt).is_empty();
     let ahead = git(
         &wt.path,
         &["rev-list", "--count", &format!("{}..HEAD", wt.base)],
@@ -213,14 +297,8 @@ pub fn changed_files(wt: &Worktree) -> Vec<String> {
         .lines()
         .map(str::to_string)
         .collect();
-    for line in git(&wt.path, &["status", "--porcelain"])
-        .unwrap_or_default()
-        .lines()
-    {
-        if line.len() > 3 {
-            files.push(line[3..].trim().to_string());
-        }
-    }
+    files.extend(dirty_paths(wt));
+    files.retain(|p| !is_seeded_path(p));
     files.sort();
     files.dedup();
     files
@@ -361,6 +439,50 @@ mod tests {
         let m = load_manifest(&ws.join(".loop-worktrees"));
         assert_eq!(m.worktrees[0].status, "rejected");
         assert!(!ws.join(".loop-worktrees/.manifest.mutex").exists());
+    }
+
+    #[test]
+    fn untracked_loop_skills_are_seeded_and_ignored_by_change_detection() {
+        let temp = repo();
+        let ws = temp.path();
+        std::fs::create_dir_all(ws.join(".claude/skills/loop-triage")).unwrap();
+        std::fs::write(ws.join(".claude/skills/loop-triage/SKILL.md"), "# s\n").unwrap();
+        std::fs::create_dir_all(ws.join(".claude/agents")).unwrap();
+        std::fs::write(ws.join(".claude/agents/loop-verifier.md"), "# v\n").unwrap();
+        std::fs::create_dir_all(ws.join(".claude/skills/other")).unwrap();
+        std::fs::write(ws.join(".claude/skills/other/SKILL.md"), "# o\n").unwrap();
+        let wt = create(
+            ws,
+            ".loop-worktrees",
+            "r1",
+            "daily-triage",
+            "2026-09-16T00:00:00Z",
+        )
+        .unwrap();
+        assert!(
+            !wt.path.join(".claude/skills/loop-triage/SKILL.md").exists(),
+            "untracked"
+        );
+        let seeded = seed_loop_files(ws, &wt.path);
+        assert_eq!(
+            seeded,
+            vec![
+                ".claude/skills/loop-triage",
+                ".claude/agents/loop-verifier.md"
+            ],
+            "only loop assets, not other skills"
+        );
+        assert!(
+            wt.path
+                .join(".claude/skills/loop-triage/SKILL.md")
+                .is_file()
+        );
+        assert!(!has_changes(&wt), "seeded files are not a change");
+        assert!(changed_files(&wt).is_empty());
+        assert!(seed_loop_files(ws, &wt.path).is_empty(), "idempotent");
+        std::fs::write(wt.path.join("fix.txt"), "x\n").unwrap();
+        assert!(has_changes(&wt));
+        assert_eq!(changed_files(&wt), vec!["fix.txt"]);
     }
 
     #[test]
