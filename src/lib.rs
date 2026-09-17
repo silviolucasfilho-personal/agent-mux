@@ -1,6 +1,8 @@
 pub mod app;
+pub mod assets;
 pub mod build_info;
 pub mod config;
+pub mod config_cli;
 pub mod events;
 pub mod harness;
 pub mod history;
@@ -9,6 +11,7 @@ pub mod loops;
 pub mod mcp;
 pub mod mouse;
 pub mod persistence;
+pub mod prompts;
 pub mod search;
 pub mod selection;
 pub mod session;

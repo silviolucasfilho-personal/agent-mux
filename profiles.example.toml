@@ -1,5 +1,12 @@
 # Copy to profiles.toml (same directory as the exe, or ~/.agent-mux/profiles.toml)
 #
+# The editor the Configuration view (C) and `agent-mux config edit` open;
+# $VISUAL, then $EDITOR, then vi when unset. A GUI editor must block until
+# the file is closed. Everything else agent-mux ships (prompts, skills, loop
+# patterns, loop skills, agents, templates) is edited from that view; see
+# docs/configuration.md.
+# editor = "code --wait"
+#
 # Note: a cwd-relative ./profiles.toml wins the search even when it contains
 # only a [tracing] section — the built-in default profiles are used and any
 # ~/.agent-mux/profiles.toml is shadowed. If you customize profiles, keep

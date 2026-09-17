@@ -6,6 +6,7 @@ use crate::app::{
     InstallLabel, Mode, NoticeLevel, SidebarSection, SkillRow, SkillsPane, SkillsTab,
     SkillsViewState, TraceBrowserState,
 };
+use crate::app::{ConfigPane, ConfigRow, ConfigViewState, Pending};
 use crate::status::Status;
 use crate::tracing::cli::{fmt_cost, fmt_ms, fmt_time, fmt_tokens};
 use crate::tracing::store::query::LaunchStats;
@@ -267,6 +268,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::About(state) => draw_about(f, state),
         Mode::LoopsView(view) => draw_loops_view(f, view, app),
         Mode::NewLoop(dialog) => draw_loop_dialog(f, dialog, app),
+        Mode::ConfigView(view) => draw_config_view(f, view),
         Mode::ConfirmRemoveLoop => draw_confirm(
             f,
             "Remove this loop from the registry? Its files in the workspace stay. [y/n]",
@@ -1484,15 +1486,15 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
             Mode::Control => {
                 if app.sidebar_hidden {
                     Line::raw(
-                        "[b] sidebar  [Tab] select  [Enter] attach  [n] new  [l] logs  [S] skills  [t/T] trace  [?] help  [q] quit",
+                        "[b] sidebar  [Tab] select  [Enter] attach  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
                     )
                 } else {
                     match app.sidebar_section {
                         SidebarSection::Active => Line::raw(
-                            "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [t/T] trace  [?] help  [q] quit",
+                            "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
                         ),
                         SidebarSection::Agents => Line::raw(
-                            "[b] sidebar  [Enter/h] launch agent  [Tab] loops  [n] new  [S] skills  [?] help  [q] quit",
+                            "[b] sidebar  [Enter/h] launch agent  [Tab] loops  [n] new  [S] skills  [C] config  [?] help  [q] quit",
                         ),
                         SidebarSection::Loops => {
                             if app.loop_registry.pause_all {
@@ -1507,13 +1509,13 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                             }
                         }
                         SidebarSection::History => Line::raw(
-                            "[b] sidebar  [Enter/r] restart  [a] all  [n] new  [l] logs  [S] skills  [?] help  [q] quit",
+                            "[b] sidebar  [Enter/r] restart  [a] all  [n] new  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
                         ),
                     }
                 }
             }
             _ => Line::raw(
-                "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [t/T] trace  [?] help  [q] quit",
+                "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
             ),
         }
     };
@@ -1551,6 +1553,10 @@ fn draw_help(f: &mut Frame) {
         ),
         row("h", "launch / attach the selected agent (agents)"),
         row("S", "skills view: every skill, where installed, when used"),
+        row(
+            "C",
+            "configuration: edit every prompt, skill, loop pattern, loop skill, agent and template",
+        ),
         row("E / K", "loops view / kill switch: pause every loop"),
         row("v", "about: version, build time, paths and this session"),
         row(
@@ -2959,6 +2965,113 @@ fn draw_skills_view(f: &mut Frame, view: &SkillsViewState, app: &App) {
         Style::default().fg(Color::Black).bg(Color::Cyan),
     );
     f.render_widget(Paragraph::new(footer_text), footer);
+}
+
+/// The Configuration view: items grouped by kind on the left, the selected
+/// item's source, status, uses and effective text on the right.
+fn draw_config_view(f: &mut Frame, view: &ConfigViewState) {
+    let width = (f.area().width * 96 / 100).clamp(60, 200);
+    let height = (f.area().height * 92 / 100).clamp(18, 60);
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+    let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(38), Constraint::Min(0)]).areas(body);
+
+    let left_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(view.focus == ConfigPane::List))
+        .title(format!(
+            " Configuration ({})  {} ",
+            view.item_count(),
+            view.root.display()
+        ));
+    let visible = usize::from(left.height.saturating_sub(2));
+    let start = sidebar_window(view.selected, view.rows.len(), visible);
+    let end = (start + visible.max(1)).min(view.rows.len());
+    let name_width = usize::from(left.width.saturating_sub(4))
+        .saturating_sub(10)
+        .max(8);
+    let items: Vec<ListItem> = view.rows[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, row)| {
+            let i = start + offset;
+            let is_sel = i == view.selected;
+            let line = match row {
+                ConfigRow::Header(kind) => Line::styled(
+                    kind.title().to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                ConfigRow::Item(idx) => {
+                    let Some(asset) = view.catalog.assets.get(*idx) else {
+                        return ListItem::new(Line::raw(""));
+                    };
+                    let marker = if is_sel { "> " } else { "  " };
+                    // the id without its group prefix keeps rows short
+                    let short = asset
+                        .id
+                        .strip_prefix("loops/skills/")
+                        .or_else(|| asset.id.strip_prefix("loops/agents/"))
+                        .or_else(|| asset.id.strip_prefix("loops/templates/"))
+                        .or_else(|| asset.id.strip_prefix("loops/"))
+                        .or_else(|| asset.id.strip_prefix("skills/"))
+                        .unwrap_or(&asset.id);
+                    let mut name: String = short.chars().take(name_width).collect();
+                    if short.chars().count() > name_width {
+                        name.pop();
+                        name.push('…');
+                    }
+                    let (label, style) = ConfigViewState::source_label(asset);
+                    Line::from(vec![
+                        Span::raw(format!("{marker}{name:<name_width$} ")),
+                        Span::styled(label, style),
+                    ])
+                }
+            };
+            let item = ListItem::new(line);
+            if is_sel && view.focus == ConfigPane::List {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else if is_sel {
+                item.style(Style::default().fg(Color::Cyan))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items).block(left_block), left);
+
+    let title = view
+        .selected_asset()
+        .map(|a| format!(" {} ", a.id))
+        .unwrap_or_else(|| " Configuration ".into());
+    let right_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(view.focus == ConfigPane::Detail))
+        .title(title);
+    let inner = right_block.inner(right);
+    view.viewport_rows.set(usize::from(inner.height));
+    f.render_widget(right_block, right);
+    let lines: Vec<Line> = view
+        .detail_lines
+        .iter()
+        .skip(view.scroll_offset)
+        .take(usize::from(inner.height))
+        .cloned()
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+
+    let footer_style = if matches!(view.pending, Pending::None) {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::Black).bg(Color::Yellow)
+    };
+    f.render_widget(
+        Paragraph::new(Line::styled(view.footer(), footer_style)),
+        footer,
+    );
 }
 
 /// The Executions tab: launches of the skill on this harness, then the

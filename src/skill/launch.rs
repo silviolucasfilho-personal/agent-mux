@@ -9,9 +9,11 @@ use crate::harness::Harness;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Sentence appended to the opening prompt when a briefing snapshot is
-/// written for the launch. It names the environment variables rather than
-/// a path so a restored session (whose prompt is saved) still resolves.
+/// The built-in sentence appended to the opening prompt when a briefing
+/// snapshot is written for the launch; `[skill] hydration_hint` in the
+/// library's prompts.toml replaces it. It names the environment variables
+/// rather than a path so a restored session (whose prompt is saved) still
+/// resolves.
 pub const HYDRATION_HINT: &str = "Read the briefing snapshot at $AGENT_MUX_BRIEFING (JSON, schema_version 1, taken at $AGENT_MUX_BRIEFING_AS_OF) before running any command; use the agent-mux MCP tools when $AGENT_MUX_MCP is not \"unavailable\", otherwise the agent-mux trace CLI, for anything newer.";
 
 /// The result of writing a launch's briefing snapshot.
@@ -238,7 +240,7 @@ pub fn build_skill_launch_full(
     let mut prompt = opening_prompt(def, harness);
     if hydrated {
         prompt.push(' ');
-        prompt.push_str(HYDRATION_HINT);
+        prompt.push_str(&crate::prompts::Prompts::current().hydration_hint);
     }
     let mut args: Vec<String> = Vec::new();
     if let Some(m) = base

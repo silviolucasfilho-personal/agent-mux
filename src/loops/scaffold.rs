@@ -1,6 +1,8 @@
 //! The pattern library on disk: the embedded skills, verifier and
 //! templates, and the scaffolder that writes a workspace's contract files
-//! without ever overwriting one.
+//! without ever overwriting one. The scaffolder writes the *effective*
+//! text: a file in the configuration library (`crate::assets`) replaces
+//! the embedded one of the same name.
 
 use super::{
     BUDGET_MD, CONSTRAINTS_MD, GATE_YAML, LEDGER_JSON, LOOP_MD, Level, Pattern, RUN_LOG_MD,
@@ -40,12 +42,13 @@ pub fn embedded_skill(name: &str) -> Option<&'static str> {
         .map(|(_, text)| text)
 }
 
-/// The verifier agent, Claude's file shape (frontmatter + body).
+/// The embedded verifier agent, Claude's file shape (frontmatter + body).
 pub fn verifier_body() -> &'static str {
     include_str!("../../loops/agents/loop-verifier.md")
 }
 
-const TEMPLATES: &[(&str, &str)] = &[
+/// The embedded workspace templates as (file name, text).
+pub const TEMPLATES: &[(&str, &str)] = &[
     ("STATE.md", include_str!("../../loops/templates/STATE.md")),
     ("LOOP.md", include_str!("../../loops/templates/LOOP.md")),
     (
@@ -68,6 +71,7 @@ const TEMPLATES: &[(&str, &str)] = &[
     ("AGENTS.md", include_str!("../../loops/templates/AGENTS.md")),
 ];
 
+/// The embedded template text; `assets::template` gives the effective one.
 pub fn template(name: &str) -> Option<&'static str> {
     TEMPLATES.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
 }
@@ -102,10 +106,17 @@ impl ScaffoldReport {
 
 /// Wraps the verifier body into Codex's agent TOML.
 pub fn codex_verifier_toml(body: &str) -> String {
+    codex_agent_toml("loop-verifier", body)
+}
+
+/// Wraps a Claude-shaped agent file (frontmatter + body) into Codex's
+/// agent TOML under `name`.
+pub fn codex_agent_toml(name: &str, body: &str) -> String {
     let (description, text) = split_agent_frontmatter(body);
     let escaped = text.replace("\"\"\"", "\\\"\"\"");
     format!(
-        "name = \"loop-verifier\"\ndescription = \"{}\"\n\n[system_prompt]\ncontent = \"\"\"\n{}\n\"\"\"\n",
+        "name = \"{}\"\ndescription = \"{}\"\n\n[system_prompt]\ncontent = \"\"\"\n{}\n\"\"\"\n",
+        name.replace('\\', "\\\\").replace('"', "\\\""),
         description.replace('\\', "\\\\").replace('"', "\\\""),
         escaped.trim_end()
     )
@@ -176,12 +187,37 @@ pub fn verifier_path(harness: Harness, workspace: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Where a loop agent goes for a harness: the verifier keeps its historical
+/// Codex file name, every other agent is `<name>.md` / `<name>.toml`.
+pub fn agent_path(harness: Harness, workspace: &Path, name: &str) -> Option<PathBuf> {
+    if name == "loop-verifier" {
+        return verifier_path(harness, workspace);
+    }
+    match harness {
+        Harness::Claude => Some(
+            workspace
+                .join(".claude")
+                .join("agents")
+                .join(format!("{name}.md")),
+        ),
+        Harness::Codex => Some(
+            workspace
+                .join(".codex")
+                .join("agents")
+                .join(format!("{name}.toml")),
+        ),
+        Harness::Antigravity => None,
+    }
+}
+
 fn not_supported() -> std::io::Error {
     std::io::Error::other("Antigravity is not supported for loops")
 }
 
 /// Writes every missing contract file and skill for `pattern` into
-/// `workspace`; existing files are skipped, never overwritten.
+/// `workspace`; existing files are skipped, never overwritten. Skills,
+/// agents and templates come from the configuration library
+/// (`assets::root()`) when it has them, else from the embedded set.
 pub fn scaffold(
     workspace: &Path,
     pattern: &Pattern,
@@ -189,29 +225,55 @@ pub fn scaffold(
     level: Level,
     caps: &Caps,
 ) -> std::io::Result<ScaffoldReport> {
+    scaffold_with_library(
+        &crate::assets::root(),
+        workspace,
+        pattern,
+        harness,
+        level,
+        caps,
+    )
+}
+
+/// `scaffold` reading skills, agents and templates from `library`.
+pub fn scaffold_with_library(
+    library: &Path,
+    workspace: &Path,
+    pattern: &Pattern,
+    harness: Harness,
+    level: Level,
+    caps: &Caps,
+) -> std::io::Result<ScaffoldReport> {
+    use crate::assets;
     let skills_dir = project_skills_dir(harness, workspace).ok_or_else(not_supported)?;
-    let verifier = verifier_path(harness, workspace).ok_or_else(not_supported)?;
+    verifier_path(harness, workspace).ok_or_else(not_supported)?;
     let project = project_name(workspace);
     let mut report = ScaffoldReport::default();
+    let template = |name: &str| assets::template(library, name).unwrap_or_default();
 
     // 1. skills
     for name in &pattern.skills {
-        if let Some(text) = embedded_skill(name) {
-            report.put(skills_dir.join(name).join("SKILL.md"), text)?;
+        if let Some(text) = assets::loop_skill(library, name) {
+            report.put(skills_dir.join(name).join("SKILL.md"), &text)?;
         }
     }
-    // 2. verifier
-    if pattern.verifier {
-        let content = match harness {
-            Harness::Codex => codex_verifier_toml(verifier_body()),
-            _ => verifier_body().to_string(),
+    // 2. agents: the verifier when the pattern uses one, and every agent
+    // the library adds
+    for (name, body) in assets::loop_agents(library) {
+        if name == "loop-verifier" && !pattern.verifier {
+            continue;
+        }
+        let Some(path) = agent_path(harness, workspace, &name) else {
+            continue;
         };
-        report.put(verifier, &content)?;
+        let content = match harness {
+            Harness::Codex => codex_agent_toml(&name, &body),
+            _ => body,
+        };
+        report.put(path, &content)?;
     }
     // 3. state file
-    let state = template("STATE.md")
-        .unwrap_or_default()
-        .replace("{{PROJECT}}", &project);
+    let state = template("STATE.md").replace("{{PROJECT}}", &project);
     report.put(workspace.join(&pattern.state_file), &state)?;
     // 4. LOOP.md
     let gates = pattern
@@ -221,7 +283,6 @@ pub fn scaffold(
         .collect::<Vec<_>>()
         .join("\n");
     let loop_md = template("LOOP.md")
-        .unwrap_or_default()
         .replace("{{PROJECT}}", &project)
         .replace("{{PATTERN}}", &pattern.id)
         .replace("{{CADENCE}}", &format_interval(pattern.default_interval_s))
@@ -244,35 +305,23 @@ pub fn scaffold(
         spawns
     );
     let budget = template("loop-budget.md")
-        .unwrap_or_default()
         .replace("{{PROJECT}}", &project)
         .replace("{{ROW}}", &row);
     report.put(workspace.join(BUDGET_MD), &budget)?;
-    let run_log = template("loop-run-log.md")
-        .unwrap_or_default()
-        .replace("{{PROJECT}}", &project);
+    let run_log = template("loop-run-log.md").replace("{{PROJECT}}", &project);
     report.put(workspace.join(RUN_LOG_MD), &run_log)?;
-    let constraints = template("loop-constraints.md")
-        .unwrap_or_default()
-        .replace("{{PROJECT}}", &project);
+    let constraints = template("loop-constraints.md").replace("{{PROJECT}}", &project);
     report.put(workspace.join(CONSTRAINTS_MD), &constraints)?;
-    report.put(
-        workspace.join(GATE_YAML),
-        template("gate.yaml").unwrap_or_default(),
-    )?;
+    report.put(workspace.join(GATE_YAML), &template("gate.yaml"))?;
     if pattern.breaker {
         let ledger = template("loop-ledger.json")
-            .unwrap_or_default()
             .replace("{{GOAL}}", &pattern.goal.replace('"', "'"))
             .replace("{{PATTERN}}", &pattern.id)
             .replace("{{LEVEL}}", level.as_str());
         report.put(workspace.join(LEDGER_JSON), &ledger)?;
     }
     // 6. AGENTS.md
-    report.put(
-        workspace.join("AGENTS.md"),
-        template("AGENTS.md").unwrap_or_default(),
-    )?;
+    report.put(workspace.join("AGENTS.md"), &template("AGENTS.md"))?;
     Ok(report)
 }
 

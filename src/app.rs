@@ -14,7 +14,9 @@ use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
 pub mod about;
+mod config_view;
 pub mod dir_picker;
+pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
 mod skills_view;
@@ -40,6 +42,20 @@ pub enum Mode {
     ConfirmRemoveLoop,
     /// The About overlay (`v`): version, build stamp, paths, this session.
     About(Box<about::AboutState>),
+    /// The Configuration view (`C`): every prompt, skill, loop and agent.
+    ConfigView(Box<ConfigViewState>),
+}
+
+/// An external editor the main loop must run for the App: it leaves the
+/// alternate screen, runs `command` with `path` appended, comes back and
+/// calls `App::editor_finished`. Recorded rather than run here so the App
+/// stays testable without a terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorRequest {
+    pub path: std::path::PathBuf,
+    /// The catalog id being edited, for the reload afterwards.
+    pub asset_id: String,
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -105,6 +121,10 @@ pub enum Action {
     LoopsKey,
     /// NewLoop mode: App routes the key to the LoopDialogState it owns.
     LoopDialogKey,
+    /// `C`: the Configuration view.
+    OpenConfigView,
+    /// ConfigView mode: App routes the key to the ConfigViewState it owns.
+    ConfigKey,
 }
 
 /// Severity of a status-bar notice. The old single `error: Option<String>`
@@ -421,6 +441,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 }
                 KeyCode::Char('T') => Action::OpenTraceBrowser,
                 KeyCode::Char('S') => Action::OpenSkillsView,
+                KeyCode::Char('C') => Action::OpenConfigView,
                 KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
                 KeyCode::Char('x')
                     if ctx.sidebar_hidden || ctx.sidebar_section == SidebarSection::Active =>
@@ -467,6 +488,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         },
         Mode::LoopsView(_) => Action::LoopsKey,
         Mode::NewLoop(_) => Action::LoopDialogKey,
+        Mode::ConfigView(_) => Action::ConfigKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 Action::EnterConfirmRemoveLoop
@@ -1777,6 +1799,13 @@ pub struct App {
     pub loop_audits: loops::AuditCache,
     /// The configuration file that was accepted, for the About overlay.
     pub config_path: Option<std::path::PathBuf>,
+    /// The configuration library root (`assets::root()` unless a test
+    /// overrides it).
+    pub library_root: Option<std::path::PathBuf>,
+    /// `editor` from the settings; `$VISUAL`/`$EDITOR`/`vi` otherwise.
+    pub editor: Option<String>,
+    /// An editor the main loop must run before the next frame.
+    pub editor_request: Option<EditorRequest>,
 }
 
 impl App {
@@ -1852,6 +1881,9 @@ impl App {
             loops_loaded: false,
             loop_audits: std::collections::HashMap::new(),
             config_path: None,
+            library_root: None,
+            editor: None,
+            editor_request: None,
         }
     }
 
@@ -2726,6 +2758,18 @@ impl App {
             }
             return;
         }
+        if let Mode::ConfigView(ref mut view) = self.mode {
+            let delta = match ev.kind {
+                MouseEventKind::ScrollUp => -3,
+                MouseEventKind::ScrollDown => 3,
+                _ => return,
+            };
+            match view.focus {
+                ConfigPane::List => view.step(delta, &self.loop_registry),
+                ConfigPane::Detail => view.scroll(delta),
+            }
+            return;
+        }
         if let Mode::SessionHistory(ref mut history) = self.mode {
             if matches!(ev.kind, MouseEventKind::ScrollUp) {
                 history.scroll_offset = history.scroll_offset.saturating_sub(3);
@@ -3226,6 +3270,8 @@ impl App {
             Action::ToggleKillSwitch => self.toggle_kill_switch(),
             Action::OpenSkillsView => self.open_skills_view(),
             Action::SkillsKey => self.handle_skills_key(key),
+            Action::OpenConfigView => self.open_config_view(),
+            Action::ConfigKey => self.handle_config_key(key),
             Action::OpenSkillLauncher => {
                 let Some(skill) = self.selected_agent() else {
                     return;
@@ -3779,6 +3825,324 @@ impl App {
     }
 
     /// `S`: opens the Skills view over the current screen.
+    /// The configuration library root.
+    pub fn library_root(&self) -> std::path::PathBuf {
+        self.library_root
+            .clone()
+            .unwrap_or_else(crate::assets::root)
+    }
+
+    fn open_config_view(&mut self) {
+        let root = self.library_root();
+        self.mode = Mode::ConfigView(Box::new(ConfigViewState::new(
+            &root,
+            self.config_path.as_deref(),
+            &self.loop_registry,
+        )));
+    }
+
+    /// Records an editor request for `path`; the main loop runs it and
+    /// calls `editor_finished`.
+    fn request_editor(&mut self, path: std::path::PathBuf, asset_id: String) {
+        let command = crate::assets::editor_command(self.editor.as_deref());
+        self.editor_request = Some(EditorRequest {
+            path,
+            asset_id,
+            command,
+        });
+    }
+
+    pub fn take_editor_request(&mut self) -> Option<EditorRequest> {
+        self.editor_request.take()
+    }
+
+    /// After the editor returns: rescans the library, re-validates the
+    /// item, reloads whatever reads it, and reports.
+    pub fn editor_finished(&mut self, request: EditorRequest, result: Result<(), String>) {
+        if let Err(e) = result {
+            self.notice = Some(Notice::error(format!("editor: {e}")));
+        }
+        let root = self.library_root();
+        let catalog = crate::assets::Catalog::load(&root, self.config_path.as_deref());
+        let asset = catalog.get(&request.asset_id).cloned();
+        let kind = asset.as_ref().map(|a| a.kind);
+        self.reload_after_config_change(kind);
+        if let Mode::ConfigView(view) = &mut self.mode {
+            view.reload(&self.loop_registry);
+            view.select_id(&request.asset_id, &self.loop_registry);
+        }
+        if self.notice.is_some() {
+            return;
+        }
+        self.notice = Some(match asset {
+            Some(a) if a.valid() => {
+                let extra = match a.kind {
+                    crate::assets::Kind::LoopSkill | crate::assets::Kind::LoopAgent => {
+                        let stale = catalog
+                            .workspace_copies(&a, &self.loop_registry)
+                            .iter()
+                            .filter(|c| !c.same)
+                            .count();
+                        if stale > 0 {
+                            format!("; {stale} workspace copy(ies) differ, u pushes them")
+                        } else {
+                            String::new()
+                        }
+                    }
+                    _ => String::new(),
+                };
+                Notice::info(format!("saved {}{extra}", a.id))
+            }
+            Some(a) => Notice::warn(format!(
+                "{}: {}",
+                a.id,
+                a.problems.first().cloned().unwrap_or_default()
+            )),
+            None => Notice::info(format!("{} was removed", request.asset_id)),
+        });
+    }
+
+    /// Reloads the state that reads a kind of configuration item.
+    fn reload_after_config_change(&mut self, kind: Option<crate::assets::Kind>) {
+        use crate::assets::Kind;
+        match kind {
+            Some(Kind::Skill) => self.reload_skills(),
+            Some(Kind::LoopPattern)
+            | Some(Kind::LoopSkill)
+            | Some(Kind::LoopAgent)
+            | Some(Kind::LoopTemplate) => {
+                crate::loops::patterns::reload();
+                self.loop_audits.clear();
+            }
+            Some(Kind::Settings) => self.reload_settings(),
+            Some(Kind::Prompts) | None => {}
+        }
+    }
+
+    /// Re-reads `profiles.toml`: profiles, agents, loops settings and the
+    /// editor apply immediately; the tracing runtime keeps its startup
+    /// configuration.
+    fn reload_settings(&mut self) {
+        let path = match &self.config_path {
+            Some(p) => p.clone(),
+            None => self.library_root().join("profiles.toml"),
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.notice = Some(Notice::warn(format!("{}: {e}", path.display())));
+                return;
+            }
+        };
+        match crate::config::parse(&text) {
+            Ok(cfg) => {
+                if !cfg.profiles.is_empty() {
+                    self.profiles = cfg.profiles;
+                }
+                self.agents = crate::config::resolve_agents(cfg.agents.as_ref());
+                self.loops = crate::config::resolve_loops(cfg.loops.as_ref());
+                self.editor = cfg.editor;
+                self.config_path = Some(path);
+            }
+            Err(e) => {
+                self.notice = Some(Notice::error(format!("{}: {e}", path.display())));
+            }
+        }
+    }
+
+    fn handle_config_key(&mut self, key: &KeyEvent) {
+        use crate::assets::Kind;
+        let Mode::ConfigView(view) = &mut self.mode else {
+            return;
+        };
+        let page = view.viewport_rows.get().max(1) as isize;
+        // a footer question first
+        match &mut view.pending {
+            Pending::Reset => {
+                let yes = matches!(
+                    key.code,
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
+                );
+                let no = matches!(
+                    key.code,
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
+                );
+                if !yes && !no {
+                    return;
+                }
+                view.pending = Pending::None;
+                if !yes {
+                    return;
+                }
+                let Some(asset) = view.selected_asset().cloned() else {
+                    return;
+                };
+                let notice = match view.catalog.reset(&asset) {
+                    Ok(()) => Notice::info(format!("{} reset", asset.id)),
+                    Err(e) => Notice::warn(e),
+                };
+                self.notice = Some(notice);
+                self.reload_after_config_change(Some(asset.kind));
+                if let Mode::ConfigView(view) = &mut self.mode {
+                    view.reload(&self.loop_registry);
+                }
+                return;
+            }
+            Pending::Push => {
+                let yes = matches!(
+                    key.code,
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
+                );
+                let no = matches!(
+                    key.code,
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
+                );
+                if !yes && !no {
+                    return;
+                }
+                view.pending = Pending::None;
+                if !yes {
+                    return;
+                }
+                let report = view.catalog.push(&self.loop_registry, false);
+                view.reload(&self.loop_registry);
+                self.notice = Some(if report.errors.is_empty() {
+                    Notice::info(format!(
+                        "pushed {} file(s), {} unchanged{}",
+                        report.written.len(),
+                        report.unchanged.len(),
+                        if report.skipped_loops.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", skipped {}", report.skipped_loops.join(", "))
+                        }
+                    ))
+                } else {
+                    Notice::error(report.errors.join("; "))
+                });
+                return;
+            }
+            Pending::NewName { kind, input } => {
+                match key.code {
+                    KeyCode::Esc => view.pending = Pending::None,
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        input.push(c);
+                    }
+                    KeyCode::Enter => {
+                        let (kind, name) = (*kind, input.clone());
+                        view.pending = Pending::None;
+                        match view.catalog.new_item(kind, &name) {
+                            Ok(path) => {
+                                let id = path
+                                    .strip_prefix(&view.root)
+                                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                                    .unwrap_or_else(|_| path.display().to_string());
+                                view.reload(&self.loop_registry);
+                                view.select_id(&id, &self.loop_registry);
+                                self.request_editor(path, id);
+                            }
+                            Err(e) => self.notice = Some(Notice::warn(e)),
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            Pending::None => {}
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if view.focus == ConfigPane::Detail {
+                    view.focus = ConfigPane::List;
+                } else {
+                    self.mode = Mode::Control;
+                }
+            }
+            KeyCode::Right | KeyCode::Tab => view.focus = ConfigPane::Detail,
+            KeyCode::Left | KeyCode::BackTab => view.focus = ConfigPane::List,
+            KeyCode::Down | KeyCode::Char('j') => match view.focus {
+                ConfigPane::List => view.step(1, &self.loop_registry),
+                ConfigPane::Detail => view.scroll(1),
+            },
+            KeyCode::Up | KeyCode::Char('k') => match view.focus {
+                ConfigPane::List => view.step(-1, &self.loop_registry),
+                ConfigPane::Detail => view.scroll(-1),
+            },
+            KeyCode::PageDown => match view.focus {
+                ConfigPane::List => view.step(page, &self.loop_registry),
+                ConfigPane::Detail => view.scroll(page),
+            },
+            KeyCode::PageUp => match view.focus {
+                ConfigPane::List => view.step(-page, &self.loop_registry),
+                ConfigPane::Detail => view.scroll(-page),
+            },
+            KeyCode::Home => view.scroll_offset = 0,
+            KeyCode::End => view.scroll_offset = view.max_scroll(),
+            KeyCode::Enter | KeyCode::Char('e') => {
+                let Some(asset) = view.selected_asset().cloned() else {
+                    return;
+                };
+                match view.catalog.create_override(&asset) {
+                    Ok(path) => self.request_editor(path, asset.id),
+                    Err(e) => self.notice = Some(Notice::warn(e)),
+                }
+            }
+            KeyCode::Char('n') => {
+                let kind = view.selected_kind();
+                match kind {
+                    Some(k) if k.creatable() => {
+                        view.pending = Pending::NewName {
+                            kind: k,
+                            input: String::new(),
+                        };
+                    }
+                    Some(Kind::LoopPattern) => {
+                        self.notice = Some(Notice::info(
+                            "add a [[patterns]] table to loops/registry.toml (Enter edits it)",
+                        ));
+                    }
+                    Some(k) => {
+                        self.notice = Some(Notice::info(format!(
+                            "{} items are edited in place; n creates skills, loop skills and loop agents",
+                            k.label()
+                        )));
+                    }
+                    None => {}
+                }
+            }
+            KeyCode::Char('R') => match view.selected_asset() {
+                Some(a) if a.kind == Kind::Settings => {
+                    self.notice = Some(Notice::info(
+                        "profiles.toml is never deleted; edit it instead",
+                    ));
+                }
+                Some(a) if a.source == crate::assets::Source::Builtin => {
+                    self.notice = Some(Notice::info(format!(
+                        "{} already uses the built-in text",
+                        a.id
+                    )));
+                }
+                Some(_) => view.pending = Pending::Reset,
+                None => {}
+            },
+            KeyCode::Char('u') => {
+                if self.loop_registry.loops.is_empty() {
+                    self.notice = Some(Notice::info("no registered loops to push into"));
+                } else {
+                    view.pending = Pending::Push;
+                }
+            }
+            KeyCode::Char('r') => {
+                view.reload(&self.loop_registry);
+                self.notice = Some(Notice::info("configuration rescanned"));
+            }
+            _ => {}
+        }
+    }
+
     fn open_skills_view(&mut self) {
         self.reload_skills();
         // A test override of the install home is the whole home: harness

@@ -44,7 +44,7 @@ The literal `loop-pause-all` on a line of its own in the state file or `LOOP.md`
 | changelog-drafter | 1d | L1 | `changelog-drafter-state.md` | loop-changelog, loop-rules, verifier | 1 | 100k | no |
 | issue-triage | 1d | L1 | `issue-triage-state.md` | loop-issue-triage, loop-rules, verifier | 12 | 80k | no |
 
-Registry: `loops/registry.toml` (embedded). Every skill reads `$AGENT_MUX_LOOP_CONTEXT` first, makes its one listing call and compares a fingerprint of it with the `Fingerprint:` line in the state file: unchanged means the run rewrites `Last run:` and ends as `no-op` under 5k tokens (the early exit the cost model assumes); otherwise it follows a bounded procedure, only edits the state file at L1, may call `loop-fix` for one item at L2, hands changes to `loop-verifier`, rewrites the state file, and ends with a fenced `loop-result` block (`outcome`, `items_found`, `actions_taken`, `escalations`, `summary`).
+Registry: `loops/registry.toml` (embedded), merged by id with `~/.agent-mux/loops/registry.toml` when you add or replace patterns; the skills, the verifier and the templates are overridden the same way under `~/.agent-mux/loops/` (the Configuration view `C`, `agent-mux config`, `docs/configuration.md`). A pattern may carry its own `prompt`, replacing `[loop] run` of `prompts.toml` for its runs. Every skill reads `$AGENT_MUX_LOOP_CONTEXT` first, makes its one listing call and compares a fingerprint of it with the `Fingerprint:` line in the state file: unchanged means the run rewrites `Last run:` and ends as `no-op` under 5k tokens (the early exit the cost model assumes); otherwise it follows a bounded procedure, only edits the state file at L1, may call `loop-fix` for one item at L2, hands changes to `loop-verifier`, rewrites the state file, and ends with a fenced `loop-result` block (`outcome`, `items_found`, `actions_taken`, `escalations`, `summary`).
 
 ## 4. Levels and what enforces them
 
@@ -89,6 +89,7 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 | Run capped at L1: no path guard | Codex: `agent-mux trace hooks install codex`; Claude: the binary must run from an absolute path |
 | `verifier_missing` on a fix | the skill did not hand the change to `loop-verifier`; treat the fix as unverified |
 | Run failed: "the harness did not find /loop-…" | the skill file is missing from the run's directory; edit the loop with Scaffold on or run `agent-mux loop init`, and commit `.claude/skills` if you want it in every checkout |
+| An edited loop skill or agent does not reach a workspace | the scaffolder never overwrites; press `u` in the Configuration view or run `agent-mux config push` |
 | Run finished but did nothing | look at the session's scrollback (attach to it in Active); a loop run always bypasses the harness's own approval prompts because print mode has nobody to answer them, and the guard is the control |
 | Nothing runs | `[loops] enabled = false`, the kill switch, or the loop is paused; `agent-mux trace doctor` has a `loops` section |
 

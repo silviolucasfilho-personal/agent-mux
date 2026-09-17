@@ -1,13 +1,11 @@
 # PR Babysitter — agent-mux
 
-Last run: 2026-09-16T17:33:21Z
+Last run: 2026-09-17T17:35:17Z
 
 ## High Priority (loop is acting or waiting on human)
 
-- [ ] #22 Loop Engineering: a Loops sidebar section with scheduled, gated runs — conflicts (and still no CI)
-  https://github.com/silviolucasfilho-personal/agent-mux/pull/22 (feat/loop-engineering → master, DIRTY / CONFLICTING, no review yet, last updated 2026-09-16T17:25:57Z)
-  Loop action: reported only. The PR changed bucket cause this run: it was CLEAN / MERGEABLE at 17:18:21Z and is now DIRTY / CONFLICTING after the push at 17:25:57Z — master has moved under the branch. Conflicts are a human gate under the loop rules: no rebase, no merge, no push to a PR branch, at any level. Effective level is L2 and the budget is normal (14% of the token cap), but loop-fix applies only to a red-CI PR, and this PR has no checks at all — statusCheckRollup is still empty because the repository has no .github/workflows directory, and adding one matches gate.denylist (**/.github/workflows/**). So both of this PR's blockers are outside what the loop may touch. Carried over from 2026-09-16T17:18:21Z; same High Priority bucket, new reason.
-  Human decision: needed — two of them. (1) Resolve the conflict with master by hand (rebase or merge locally, then push). (2) Add a CI workflow (cargo test / clippy) under .github/workflows, or accept merging #22 with no automated checks.
+- (none — the queue is empty)
+  Carried-over item #22 (Loop Engineering: a Loops sidebar section with scheduled, gated runs) left this bucket: it was merged by a human at 2026-09-16T17:40:26Z, seven minutes after the previous run reported it as DIRTY / CONFLICTING with no CI. Both human decisions from that entry were resolved outside the loop (conflict resolved and merged; no CI workflow was added, which is the accepted outcome for now). #24 (Feat/loop engineering) opened and merged today at 2026-09-17T17:02:16Z without ever appearing in a run.
 
 ## Watch List
 
@@ -15,8 +13,8 @@ Last run: 2026-09-16T17:33:21Z
 
 ## Recent Noise (ignored this run)
 
-- (none — no drafts open)
+- (none — no open pull requests, no drafts)
 
 ---
-Run log: 2026-09-16T17:33:21Z | 1 findings | 0 actions | 0 escalations
-Fingerprint: 22|2026-09-16T17:25:57Z|DIRTY||0
+Run log: 2026-09-17T17:35:17Z | 0 findings | 0 actions | 0 escalations
+Fingerprint: (empty — no open pull requests)

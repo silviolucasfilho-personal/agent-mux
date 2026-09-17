@@ -256,6 +256,10 @@ pub struct Config {
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
+    /// The editor the Configuration view and `agent-mux config edit` open
+    /// (`"code --wait"`); `$VISUAL`, then `$EDITOR`, then `vi` otherwise.
+    #[serde(default)]
+    pub editor: Option<String>,
     /// Which file `load()` accepted. Not part of the TOML.
     #[serde(skip)]
     pub loaded_from: Option<PathBuf>,
@@ -632,6 +636,7 @@ pub fn load() -> anyhow::Result<Config> {
         agents: None,
         loops: None,
         hide_sidebar: false,
+        editor: None,
         loaded_from: None,
         legacy_langfuse_section: false,
     })
@@ -657,6 +662,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
         agents: None,
         loops: None,
         hide_sidebar: false,
+        editor: None,
         loaded_from: None,
         legacy_langfuse_section: false,
     })

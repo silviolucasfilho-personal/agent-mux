@@ -21,6 +21,7 @@ This README is the developer onboarding guide to the **implemented code in this 
 13. [Langfuse export](#13-langfuse-export)
 14. [Developing, testing and troubleshooting](#14-developing-testing-and-troubleshooting)
 15. [Loop Engineering](#15-loop-engineering)
+16. [Configuration library: prompts, skills, loops and agents](#16-configuration-library-prompts-skills-loops-and-agents)
 
 ---
 
@@ -273,6 +274,8 @@ Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secr
 | `~/.agent-mux/traces.db`, `-wal`, `-shm` | SQLite store (created `0600`) and WAL sidecars. |
 | `~/.agent-mux/sessions.json` / `AGENT_MUX_SESSIONS_FILE` | Saved sessions for restart. |
 | `~/.agent-mux/skills/<id>/` / `AGENT_MUX_SKILLS_DIR` | User skill packages; a matching id shadows the bundled one. |
+| `~/.agent-mux/prompts.toml`, `loops/registry.toml`, `loops/skills/`, `loops/agents/`, `loops/templates/` / `AGENT_MUX_LIBRARY_DIR` | The configuration library: file-by-file overrides of every compiled-in prompt, pattern, loop skill, agent and template, edited from the Configuration view (`C`) or `agent-mux config` ([docs/configuration.md](docs/configuration.md)). |
+| `editor` (top-level key in `profiles.toml`), `VISUAL`, `EDITOR` | The editor the Configuration view and `config edit` open, in that order; `vi` otherwise. |
 | `~/.agent-mux/snapshots/` / `AGENT_MUX_RUNTIME_DIR` | Live-state snapshots, one file per run. |
 | `AGENT_MUX_TRACE_DB` | Store path override. Skill launches from the TUI receive the store the TUI writes (which honours a configured `db_path`); the CLI-less fallback in `skill::launch` uses this variable or the home default. |
 | `AGENT_MUX`, `AGENT_MUX_SESSION_ID`, `AGENT_MUX_EXE` | Set on every traced child: marker, the **launch id**, and the binary path (the last only when hooks are registered). |
@@ -384,6 +387,7 @@ Search (`src/search.rs`) turns the status bar into `Search: <query>  <n/m>`; it 
 | `K` | Kill switch: pause every loop; again to resume. Shown in the Loops title and the status bar while on. |
 | `h` | Agents focused: open the harness picker. |
 | `S` | Skills view (section 4.4), from any section. |
+| `C` | Configuration view (section 16), from any section: edit every prompt, skill, loop pattern, loop skill, agent and template in your editor. |
 | `n` | New session dialog. |
 | `l` | Session Logs dialog. |
 | `t` | Toggle tracing on the selected session (Active focused or sidebar hidden). Starting requires a live supported session and an available runtime; `plan_attach` back-dates the correlation window by one hour and injects nothing. |
@@ -511,7 +515,7 @@ Opened by `T`. Backed by a **read-only** SQLite connection (`store::open_ro`) to
 
 ### 4.7 Help, About and confirmations
 
-`draw_help` lists Control, Attached, scrollback, Loops, Skills view, Session Logs and Trace Browser keys in an 84-column overlay, and closes with the one-line build stamp (`build_info::short()`). `draw_confirm` shows `Kill this session? [y/n]`, `Sessions are still working. Quit anyway? [y/n]` or `Remove this loop from the registry? …`.
+`draw_help` lists Control (including `C` for the Configuration view), Attached, scrollback, Loops, Skills view, Session Logs and Trace Browser keys in an 84-column overlay, and closes with the one-line build stamp (`build_info::short()`). `draw_confirm` shows `Kill this session? [y/n]`, `Sessions are still working. Quit anyway? [y/n]` or `Remove this loop from the registry? …`.
 
 **About** (`v`, `Mode::About`, `draw_about`, `src/app/about.rs`) answers "what am I running and where does it keep things":
 
@@ -1477,6 +1481,7 @@ The remaining analysis-service requests are listed in section 10.
 | `trace hooks install\|uninstall codex\|agy` | Section 6. |
 | `trace hook …` | Internal hook entry point. |
 | `skill list \| show <id> [--harness H] \| install <id> [--harness H\|all] [--force] \| uninstall <id> [--harness H] \| status [id]` | Section 11. |
+| `config ls [--json] \| show <id> [--builtin] \| path [<id>] \| edit <id> \| reset <id> \| new skill\|loop-skill\|loop-agent <name> \| check \| push [--dry-run]` | The configuration library (section 16): `edit` and `new` write under `~/.agent-mux` and run the editor; `push` rewrites loop skills and agents in registered loop workspaces; `check` exits 1 on an invalid item. |
 | `mcp serve --stdio [--db PATH] [--workspace DIR \| --all-workspaces \| --workspace-from-env]` | The read-only MCP server (section 6.7); started by harnesses, usable by hand for debugging. |
 | `mcp install \| uninstall agy`, `mcp status [claude\|codex\|agy]` | Antigravity's installed entry through `agy mcp add|remove`; how each harness reaches the server. |
 | `run --experiment <name> --variant <label> --prompt <text> [--harness H] [--profile P] [--model M] [--bypass] [--cwd DIR] [--check CMD] [--repeat N] [--timeout SECS] [--max-cost USD] [--max-turns N]` | Section 12. |
@@ -1702,6 +1707,7 @@ It builds a temporary project and home with `alpha`/`beta` skills and a `verifie
 - [skills/heimdall/reference/](skills/heimdall/reference/): analysis playbooks and thresholds.
 - [docs/trace-sql-examples.md](docs/trace-sql-examples.md): ad-hoc SQL for `trace sql`, with the tool or command that answers the same question.
 - [docs/loops.md](docs/loops.md): Loop Engineering operator guide (week one, files, levels, inbox, Antigravity status).
+- [docs/configuration.md](docs/configuration.md): the configuration library, the Configuration view and `agent-mux config`.
 - [docs/superpowers/specs/](docs/superpowers/specs/), [docs/superpowers/plans/](docs/superpowers/plans/): historical designs.
 
 The implementation is best-effort capture with provider-dependent evidence, heuristic attribution and loop warnings, an in-process analysis service, and optional remote export. It does not infer task success from process exit, recreate lost hook events from terminal output, manage packages other than skills, provide a full database restore through `trace import`, or expose a network analysis server (the MCP server is local stdio only). Known limitations at the time of writing: analysis cursors are keyed per process (section 10.1), CLI writers ignore `retention_days`, read commands other than `doctor` migrate an old store in place, and the Skills view accepts mouse wheel input but not clicks.
@@ -1751,3 +1757,21 @@ A **loop** is a scheduled, bounded agent run against one workspace, driven from 
 | Codex 0.154.0 with `trace hooks install codex` | installed `hooks.json`, fail-open | yes | L3 |
 | Codex without installed hooks | none | yes | L1 (the state-file rule is enforced by the skill and the post-run check) |
 | Antigravity 1.2.3 | not supported for loops | — | see [docs/loops.md](docs/loops.md) §8 and the spec's section 16 |
+
+---
+
+## 16. Configuration library: prompts, skills, loops and agents
+
+Every text a harness reads from agent-mux is compiled in and shadowed file by file from `~/.agent-mux/` ([src/assets.rs](src/assets.rs), [docs/configuration.md](docs/configuration.md)):
+
+| Item | Compiled-in source | Library file | Read by |
+| --- | --- | --- | --- |
+| Prompts | [src/prompts.toml](src/prompts.toml) | `prompts.toml` (keys merge) | the loop launch (`[loop] run`, [src/app/loops.rs](src/app/loops.rs)) and the hydrated skill launch (`[skill] hydration_hint`, [src/skill/launch.rs](src/skill/launch.rs)), at launch time |
+| Settings | [profiles.example.toml](profiles.example.toml) | `profiles.toml` | `config::load`; profiles, agents, loops and `editor` reload after an edit |
+| Skill packages | [skills/heimdall/](skills/heimdall/) | `skills/<id>/…` | `skill::load_skills` (unchanged: a matching id shadows) |
+| Loop patterns | [loops/registry.toml](loops/registry.toml) | `loops/registry.toml` (ids merge) | `loops::patterns::all()`, cached, `reload()` after an edit |
+| Loop skills | [loops/skills/](loops/skills/) | `loops/skills/<name>/SKILL.md` | the scaffolder and `config push` |
+| Loop agents | [loops/agents/loop-verifier.md](loops/agents/loop-verifier.md) | `loops/agents/<name>.md` | the scaffolder and `config push`; Codex receives `<name>.toml` |
+| Templates | [loops/templates/](loops/templates/) | `loops/templates/<file>` | the scaffolder |
+
+`assets::Catalog` enumerates the items with their source (`built-in`, `override`, `user`) and validation problems (frontmatter names, `skill.toml` shape, registry invariants, prompt placeholders, template markers, `gate.yaml` and ledger syntax); the Configuration view (`Mode::ConfigView`, [src/app/config_view.rs](src/app/config_view.rs), `draw_config_view`) and `agent-mux config` ([src/config_cli.rs](src/config_cli.rs)) are two fronts on it. Editing runs the user's editor: the `App` records an `EditorRequest`, and the main loop parks the input thread, leaves the alternate screen, runs the command, re-enters and calls `App::editor_finished`, which rescans, re-validates and reloads the consumers. `Pattern` gained an optional `prompt` that replaces `[loop] run` for that pattern. Tests: `tests/config_library.rs` (catalog, scaffolder, CLI, a headless run opening with the library prompt) and `tests/config_ui.rs` (the view).

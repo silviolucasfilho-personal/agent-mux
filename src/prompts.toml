@@ -1,0 +1,21 @@
+# The prompts agent-mux composes itself. A copy of this file at
+# ~/.agent-mux/prompts.toml replaces the keys it sets; keys it leaves out
+# keep these values. Edit it from the Configuration view (C) or with
+# `agent-mux config edit prompts.toml`.
+
+[loop]
+# The opening prompt of every loop run. Placeholders, filled per run:
+#   {invocation}  the triage skill as this harness invokes it (/loop-triage or $loop-triage)
+#   {pattern}     the pattern id (daily-triage, pr-babysitter, …)
+#   {state_file}  absolute path of the state file the run rewrites
+#   {workspace}   absolute path of the workspace
+#   {level}       the effective level of the run (L1, L2, L3)
+#   {harness}     claude or codex
+# A pattern's own `prompt` in loops/registry.toml replaces this text for that pattern.
+run = "{invocation} Run the {pattern} loop for this workspace. Facts for this run are in $AGENT_MUX_LOOP_CONTEXT (read it first). Update the state file at {state_file}. Finish with a loop-result block."
+
+[skill]
+# Appended to the opening prompt of a skill launch that received a briefing
+# snapshot (`[agent] hydrate = ["briefing"]` in the package's skill.toml).
+# The opening sentence itself is `startup_prompt` in that skill.toml.
+hydration_hint = "Read the briefing snapshot at $AGENT_MUX_BRIEFING (JSON, schema_version 1, taken at $AGENT_MUX_BRIEFING_AS_OF) before running any command; use the agent-mux MCP tools when $AGENT_MUX_MCP is not \"unavailable\", otherwise the agent-mux trace CLI, for anything newer."

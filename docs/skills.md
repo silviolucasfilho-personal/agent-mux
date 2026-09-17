@@ -38,7 +38,7 @@ Loop skills (`loops/skills/loop-*`) are **not** packages of this kind: they are 
 ## 2. Discovery
 
 - Compiled-in: Heimdall (`skills/heimdall` in the repository, embedded with `include_str!`). Always present.
-- User packages: `~/.agent-mux/skills/<id>/` (or `AGENT_MUX_SKILLS_DIR`). A user package with the same id shadows the compiled-in one.
+- User packages: `~/.agent-mux/skills/<id>/` (or `AGENT_MUX_SKILLS_DIR`). A user package with the same id shadows the compiled-in one. The Configuration view (`C`) and `agent-mux config edit heimdall/SKILL.md` create that copy for you and open it in your editor; `n` / `agent-mux config new skill <name>` scaffold a new package (`docs/configuration.md`).
 - The Agents sidebar rescans when you switch to it with Tab; the Skills view (`S`) rescans when it opens and on `r`. Packages that fail to load are reported by `agent-mux skill list`.
 
 ## 3. Harness syntax

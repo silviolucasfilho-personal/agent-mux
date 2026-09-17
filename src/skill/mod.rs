@@ -42,6 +42,25 @@ const BUILTIN_HEIMDALL_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Every compiled-in Heimdall file as (path inside the package, text).
+pub fn builtin_files() -> Vec<(&'static str, &'static str)> {
+    let mut v = vec![
+        ("SKILL.md", BUILTIN_HEIMDALL_SKILL),
+        ("skill.toml", BUILTIN_HEIMDALL_TOML),
+    ];
+    v.extend(BUILTIN_HEIMDALL_FILES.iter().copied());
+    v
+}
+
+/// Checks a `skill.toml` text alone (shape and harness names).
+pub fn parse_skill_toml(text: &str) -> Result<(), String> {
+    let meta: SkillMeta = toml::from_str(text).map_err(|e| e.to_string())?;
+    for h in meta.harnesses.iter().chain(meta.default_harness.iter()) {
+        let _: Harness = h.parse()?;
+    }
+    Ok(())
+}
+
 /// A snapshot agent-mux computes in Rust and hands to the agent at launch
 /// (`[agent] hydrate` in skill.toml).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

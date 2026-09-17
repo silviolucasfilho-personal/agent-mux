@@ -1227,11 +1227,22 @@ impl App {
             let t = profile.tracing.get_or_insert_with(Default::default);
             t.max_cost_usd = Some(cap);
         }
-        let prompt = format!(
-            "{} Run the {} loop for this workspace. Facts for this run are in $AGENT_MUX_LOOP_CONTEXT (read it first). Update the state file at {}. Finish with a loop-result block.",
-            invocation(pattern.triage_skill(), harness),
-            entry.pattern,
-            state_path.display(),
+        // the opening prompt: the pattern's own, else `[loop] run` of the
+        // library's prompts.toml, else the built-in text
+        let template = match &pattern.prompt {
+            Some(p) if !p.trim().is_empty() => p.clone(),
+            _ => crate::prompts::Prompts::current().loop_run,
+        };
+        let prompt = crate::prompts::render_loop_run(
+            &template,
+            &crate::prompts::LoopVars {
+                invocation: &invocation(pattern.triage_skill(), harness),
+                pattern: &entry.pattern,
+                state_file: &state_path.display().to_string(),
+                workspace: &entry.workspace.display().to_string(),
+                level: effective_level.as_str(),
+                harness: harness.as_str(),
+            },
         );
         // A print-mode run has nobody to answer an approval prompt, so the
         // harness's own prompts are bypassed; the PreToolUse guard (gate,

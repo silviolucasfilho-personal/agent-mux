@@ -14,6 +14,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 static KEYBOARD_ENHANCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set while an external editor owns the terminal: the input thread stops
+/// polling stdin so the editor receives every key.
+static INPUT_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The input thread's acknowledgement that it is parked.
+static INPUT_IDLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
@@ -53,6 +58,7 @@ async fn main() -> Result<()> {
             Some("mcp") => return agent_mux::mcp::run(&args[2..]),
             Some("run") => return agent_mux::tracing::experiments::run_cli(&args[2..]).await,
             Some("loop") => return agent_mux::loops::cli::run(&args[2..]).await,
+            Some("config") => return agent_mux::config_cli::run(&args[2..]),
             Some("langfuse") => {
                 eprintln!(
                     "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\
@@ -113,11 +119,24 @@ async fn main() -> Result<()> {
 
     let (tx, mut rx) = mpsc::channel::<AppEvent>(1024);
 
-    // keyboard + resize -> channel (blocking crossterm reads on own thread)
+    // keyboard + resize -> channel (crossterm polls on its own thread; it
+    // parks while an external editor owns the terminal)
     {
         let tx = tx.clone();
         std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
             loop {
+                if INPUT_PAUSED.load(Ordering::SeqCst) {
+                    INPUT_IDLE.store(true, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(15));
+                    continue;
+                }
+                INPUT_IDLE.store(false, Ordering::SeqCst);
+                match crossterm::event::poll(Duration::from_millis(100)) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(_) => break,
+                }
                 match crossterm::event::read() {
                     Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                         if tx.blocking_send(AppEvent::Key(k)).is_err() {
@@ -205,6 +224,7 @@ async fn main() -> Result<()> {
     let mut app = App::new(cfg.profiles, trace_rt, tx);
     app.agents = config::resolve_agents(cfg.agents.as_ref());
     app.config_path = cfg.loaded_from.clone();
+    app.editor = cfg.editor.clone();
     if hide_sidebar {
         app.sidebar_hidden = true;
     }
@@ -233,6 +253,10 @@ async fn main() -> Result<()> {
         if app.should_quit {
             break;
         }
+        if let Some(request) = app.take_editor_request() {
+            let result = run_editor(&mut terminal, &request);
+            app.editor_finished(request, result);
+        }
         if let Err(e) = terminal.draw(|f| ui::draw(f, &app, Instant::now())) {
             draw_err = Some(e);
             break;
@@ -260,6 +284,63 @@ async fn main() -> Result<()> {
         return Err(e.into());
     }
     Ok(())
+}
+
+/// Hands the terminal to an external editor and takes it back: the input
+/// thread parks, raw mode and the alternate screen are left, the command
+/// runs to completion, the TUI re-enters and redraws in full. Sessions keep
+/// running meanwhile; their output queues in the channel.
+fn run_editor(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    request: &agent_mux::app::EditorRequest,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let (program, args) = match request.command.split_first() {
+        Some((p, rest)) => (p.clone(), rest.to_vec()),
+        None => return Err("no editor configured".into()),
+    };
+    INPUT_PAUSED.store(true, Ordering::SeqCst);
+    let parked_by = Instant::now() + Duration::from_millis(400);
+    while !INPUT_IDLE.load(Ordering::SeqCst) && Instant::now() < parked_by {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let enhanced = KEYBOARD_ENHANCED.load(Ordering::SeqCst);
+    restore_terminal();
+    let status = std::process::Command::new(&program)
+        .args(&args)
+        .arg(&request.path)
+        .status();
+    let back = (|| -> std::io::Result<()> {
+        enable_raw_mode()?;
+        crossterm::execute!(
+            stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            SetCursorStyle::DefaultUserShape
+        )?;
+        if enhanced
+            && crossterm::execute!(
+                stdout(),
+                crossterm::event::PushKeyboardEnhancementFlags(
+                    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                )
+            )
+            .is_ok()
+        {
+            KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+        }
+        terminal.clear()?;
+        Ok(())
+    })();
+    INPUT_PAUSED.store(false, Ordering::SeqCst);
+    if let Err(e) = back {
+        return Err(format!("could not re-enter the TUI: {e}"));
+    }
+    match status {
+        Ok(st) if st.success() => Ok(()),
+        Ok(st) => Err(format!("{program} exited with {st}")),
+        Err(e) => Err(format!("cannot run {program}: {e}")),
+    }
 }
 
 fn handle_event(app: &mut App, event: AppEvent) {

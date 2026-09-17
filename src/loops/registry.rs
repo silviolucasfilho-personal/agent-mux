@@ -238,6 +238,7 @@ mod tests {
                 stable_fraction: 0.35,
                 early_exit_required: false,
             },
+            prompt: None,
         }
     }
 

@@ -16,6 +16,10 @@ Invocation per harness: `/heimdall` (Claude Code, Antigravity), `$heimdall` (Cod
 
 Loop Engineering: scheduled, bounded, gated runs against one workspace from the Loops sidebar section (`Tab`, `E` for the view, `K` kill switch) and `agent-mux loop …`. The nine loop skills under `loops/skills`, the verifier under `loops/agents` and the templates under `loops/templates` are agent-mux's own and are installed at project level into the workspace by the scaffolder; they are not Agents-sidebar packages. Facts a run reasons about (budget, breaker, readiness, tokens, files touched) are computed in Rust and handed over in `$AGENT_MUX_LOOP_CONTEXT`; the `PreToolUse` guard enforces the `gate.yaml` denylist, report-only runs and the no-push rule. Claude Code and Codex only; Antigravity is deferred (spec section 16). Guide: `docs/loops.md`; design: `docs/superpowers/specs/2026-09-15-loop-engineering-design.md`. Nothing from another vendor is vendored or executed.
 
+## Configuration library (`src/assets.rs`, `src/prompts.rs`, `src/config_cli.rs`, `src/app/config_view.rs`)
+
+Every compiled-in text (the prompts in `src/prompts.toml`, the Heimdall files, `loops/registry.toml`, the loop skills, the verifier, the templates) is shadowed file by file from `~/.agent-mux/` (`$AGENT_MUX_LIBRARY_DIR`); `prompts.toml` and `registry.toml` merge by key and by pattern id. The Configuration view (`C`) and `agent-mux config ls|show|path|edit|reset|new|check|push` list, edit (external editor: `editor` in profiles.toml, `$VISUAL`, `$EDITOR`, `vi`), reset, create and push items. Consumers read the effective text: `loops::patterns::all()` (cached, `reload()`), `loops::scaffold` (`scaffold_with_library`), the loop launch prompt (`prompts::render_loop_run`, a pattern's `prompt` first) and the hydration hint. When you add a compiled-in asset, register it in `Catalog::load` so it is editable. Guide: `docs/configuration.md`; design: `docs/superpowers/specs/2026-09-17-configuration-library-design.md`.
+
 ## Working in this repository
 
 - `cargo build`, `cargo test`, `cargo clippy --all-targets`, `cargo fmt`.

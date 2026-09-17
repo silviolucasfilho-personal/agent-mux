@@ -151,6 +151,10 @@ pub struct Pattern {
     /// Scheduler order: lower runs first when several loops are due.
     pub priority: u8,
     pub cost: PatternCost,
+    /// The opening prompt of a run, replacing `[loop] run` of prompts.toml;
+    /// same placeholders (`crate::prompts::LOOP_PLACEHOLDERS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 impl Pattern {
