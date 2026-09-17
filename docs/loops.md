@@ -9,7 +9,7 @@ Design: `docs/superpowers/specs/2026-09-15-loop-engineering-design.md`. Not to b
 ## 1. Week one
 
 1. Open agent-mux, `Tab` to the **Loops** section (between Agents and History), press `a`.
-2. Pick the workspace (a directory of an open session, a profile's `default_dir`, or a typed path), a pattern, a Claude Code or Codex profile, the cadence, `L1`, and leave **Scaffold** on. `Enter`.
+2. Pick the workspace with the same directory picker as the New session dialog (it starts on the directory of an open session, the current directory or a profile's `default_dir`; `↓` into the subfolder list, `→`/`←` to enter or go up, type in the list to search subfolders three levels deep), a pattern, a Claude Code or Codex profile, the cadence, `L1`, and leave **Scaffold** on. `Enter`.
 3. agent-mux writes the missing contract files and skills into the workspace (never overwriting), registers the loop in `~/.agent-mux/loops.json`, and shows the readiness score.
 4. Press `r` to run once now, or wait for the slot. The run appears in **Active** as an ordinary session (name `<pattern> ↻ <workspace>`); attach to watch it.
 5. The preview card shows the outcome, tokens, cost and duration of the last run; `loop-run-log.md` in the workspace gains one line per completed run.

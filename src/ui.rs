@@ -1675,74 +1675,29 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
         lines.push(Line::styled(format!("{marker}{}", p.name), style));
     }
     lines.push(Line::raw(""));
-    let dir_style = if matches!(dialog.field, DialogField::Dir) && dialog.dir_selected_idx.is_none()
-    {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-    };
-    lines.push(Line::from(vec![
-        Span::raw("Directory: "),
-        Span::styled(dialog.dir.clone(), dir_style),
-    ]));
-    lines.push(Line::styled(
-        "  Select subfolder: (↑/↓ choose, → open, Enter select)",
-        Style::default().fg(Color::DarkGray),
-    ));
-    if dialog.dir_entries.is_empty() {
-        lines.push(Line::styled(
-            "    (no subdirectories)",
-            Style::default().fg(Color::DarkGray),
-        ));
-    } else {
-        // the subfolder list is the flexible part: on a short terminal it
-        // shrinks so the fields below it stay on screen
-        let fixed_rows = app.profiles.len()
-            + 12
-            + if dialog.harness.is_some() { 6 } else { 0 }
-            + if dialog.fields().contains(&DialogField::MaxCost) {
-                4
-            } else {
-                0
-            }
-            + if dialog.fields().contains(&DialogField::Experiment) {
-                4
-            } else {
-                0
-            };
-        let max_visible = usize::from(height).saturating_sub(fixed_rows).clamp(1, 4);
-        let selected = dialog.dir_selected_idx.unwrap_or(0);
-        let start = if selected >= max_visible {
-            selected + 1 - max_visible
+    // the subfolder list is the flexible part: on a short terminal it
+    // shrinks so the fields below it stay on screen
+    let fixed_rows = app.profiles.len()
+        + 12
+        + if dialog.harness.is_some() { 6 } else { 0 }
+        + if dialog.fields().contains(&DialogField::MaxCost) {
+            4
+        } else {
+            0
+        }
+        + if dialog.fields().contains(&DialogField::Experiment) {
+            4
         } else {
             0
         };
-        let end = (start + max_visible).min(dialog.dir_entries.len());
-        for (idx, entry) in dialog.dir_entries[start..end].iter().enumerate() {
-            let actual_idx = start + idx;
-            let is_sel = dialog.dir_selected_idx == Some(actual_idx);
-            let marker = if is_sel { "> " } else { "  " };
-            let style = if is_sel && matches!(dialog.field, DialogField::Dir) {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else if entry == ".." {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default().fg(Color::Blue)
-            };
-            let display_name = if entry == ".." {
-                ".. (parent directory)".to_string()
-            } else {
-                format!("{entry}/")
-            };
-            lines.push(Line::styled(format!("    {marker}{display_name}"), style));
-        }
-        if dialog.dir_entries.len() > max_visible {
-            lines.push(Line::styled(
-                format!("      ... ({} total directories)", dialog.dir_entries.len()),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-    }
+    let max_visible = usize::from(height).saturating_sub(fixed_rows).clamp(1, 4);
+    lines.extend(dir_picker_lines(
+        "Directory: ",
+        &dialog.dir,
+        &dialog.dir_picker,
+        matches!(dialog.field, DialogField::Dir),
+        max_visible,
+    ));
     lines.push(Line::raw(""));
 
     // Tracing Option
@@ -3417,9 +3372,104 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// The directory picker shared by the New session dialog (Directory) and
+/// the loop dialog (Workspace): the path line, a hint or the search line,
+/// up to `max_visible` subfolder rows and an overflow count.
+fn dir_picker_lines(
+    label: &str,
+    path: &str,
+    picker: &crate::app::dir_picker::DirPicker,
+    active: bool,
+    max_visible: usize,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines: Vec<Line> = Vec::new();
+    let path_style = if active && !picker.in_list() {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    lines.push(Line::from(vec![
+        Span::raw(label.to_string()),
+        Span::styled(path.to_string(), path_style),
+    ]));
+    let rows = picker.rows();
+    if picker.query.is_empty() {
+        lines.push(Line::styled(
+            "  Select subfolder: ↑/↓ · → open · ← up · Enter pick · type to search",
+            dim,
+        ));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  Search: ", dim),
+            Span::styled(
+                picker.query.clone(),
+                if active {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    dim
+                },
+            ),
+            Span::styled(
+                format!(
+                    "  ({} match{}, {} levels deep, Esc clears)",
+                    rows.len(),
+                    if rows.len() == 1 { "" } else { "es" },
+                    crate::app::dir_picker::SEARCH_DEPTH
+                ),
+                dim,
+            ),
+        ]));
+    }
+    if rows.is_empty() {
+        lines.push(Line::styled(
+            if picker.query.is_empty() {
+                "    (no subdirectories)"
+            } else {
+                "    (no matches)"
+            },
+            dim,
+        ));
+        return lines;
+    }
+    let max_visible = max_visible.max(1);
+    let selected = picker.selected.unwrap_or(0).min(rows.len() - 1);
+    let start = if selected >= max_visible {
+        selected + 1 - max_visible
+    } else {
+        0
+    };
+    let end = (start + max_visible).min(rows.len());
+    for (idx, entry) in rows[start..end].iter().enumerate() {
+        let actual_idx = start + idx;
+        let is_sel = picker.selected == Some(actual_idx);
+        let marker = if is_sel { "> " } else { "  " };
+        let style = if is_sel && active {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else if entry == ".." {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Blue)
+        };
+        let display_name = if entry == ".." {
+            ".. (parent directory)".to_string()
+        } else {
+            format!("{entry}/")
+        };
+        lines.push(Line::styled(format!("    {marker}{display_name}"), style));
+    }
+    if rows.len() > max_visible {
+        lines.push(Line::styled(
+            format!("      ... ({} total directories)", rows.len()),
+            dim,
+        ));
+    }
+    lines
+}
+
 fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
-    let width = 78.min(f.area().width.saturating_sub(4)).max(40);
-    let height = 24.min(f.area().height.saturating_sub(2)).max(16);
+    let width = 84.min(f.area().width.saturating_sub(4)).max(40);
+    let height = 30.min(f.area().height.saturating_sub(2)).max(16);
     let area = centered(f.area(), width, height);
     f.render_widget(Clear, area);
     let title = if dialog.editing.is_some() {
@@ -3444,14 +3494,15 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
             Span::styled(value, sel(on)),
         ])
     };
-    lines.push(field(
-        "Workspace",
-        format!("{} ", dialog.workspace),
+    // the subfolder list shrinks on a short terminal so the fields below
+    // it stay on screen: 22 rows are fixed (border, fields, notes, footer)
+    let max_visible = usize::from(height).saturating_sub(22).clamp(1, 4);
+    lines.extend(dir_picker_lines(
+        &format!("{:<12}", "Workspace"),
+        &dialog.workspace,
+        &dialog.dir_picker,
         dialog.field == LoopField::Workspace,
-    ));
-    lines.push(Line::styled(
-        "            ←/→ pick a known directory, or type a path",
-        dim,
+        max_visible,
     ));
     lines.push(field(
         "Pattern",
@@ -3579,7 +3630,7 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "  [Tab/↑/↓] field  [←/→ / Space] choose  [Enter] save  [Esc] cancel",
+        "  [Tab/↑/↓] field  [←/→ / Space] choose  [↓ type] search folders  [Enter] save  [Esc] cancel",
         dim,
     ));
     f.render_widget(Paragraph::new(lines).block(block), area);

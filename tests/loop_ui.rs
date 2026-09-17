@@ -204,6 +204,10 @@ fn the_dialog_lists_no_antigravity_profile_and_validates() {
     let screen = render(&app, 120, 40);
     assert!(screen.contains("Add loop"), "{screen}");
     assert!(screen.contains("Antigravity: not supported"), "{screen}");
+    assert!(
+        screen.contains("Select subfolder"),
+        "the Workspace field is the shared directory picker: {screen}"
+    );
 
     // an empty workspace path is refused with a field error
     if let Mode::NewLoop(d) = &mut app.mode {

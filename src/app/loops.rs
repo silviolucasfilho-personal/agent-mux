@@ -3,6 +3,7 @@
 //! cards and the add/edit dialog. Pure decisions live in `crate::loops`;
 //! this file is where they meet sessions, the store and the files.
 
+use super::dir_picker::PickerEvent;
 use super::{App, Mode, Notice, SidebarSection};
 use crate::config::Profile;
 use crate::harness::Harness;
@@ -193,7 +194,9 @@ pub struct LoopDialogState {
     pub editing: Option<String>,
     pub field: LoopField,
     pub workspace: String,
-    pub workspace_choices: Vec<String>,
+    /// The subfolder list and search under the Workspace field: the same
+    /// picker as the New session dialog's Directory.
+    pub dir_picker: super::dir_picker::DirPicker,
     pub pattern_idx: usize,
     /// `(profile name, harness)` of the eligible profiles.
     pub profiles: Vec<(String, Harness)>,
@@ -224,11 +227,12 @@ impl LoopDialogState {
             .collect();
         let no_profiles = eligible.is_empty();
         let pattern = patterns::find("daily-triage").or_else(|| patterns::all().first());
+        let workspace = workspaces.into_iter().next().unwrap_or_default();
         let mut d = LoopDialogState {
             editing: None,
             field: LoopField::Workspace,
-            workspace: workspaces.first().cloned().unwrap_or_default(),
-            workspace_choices: workspaces,
+            dir_picker: super::dir_picker::DirPicker::for_path(&workspace),
+            workspace,
             pattern_idx: patterns::all()
                 .iter()
                 .position(|p| p.id == "daily-triage")
@@ -256,6 +260,7 @@ impl LoopDialogState {
         let mut d = Self::new(profiles, workspaces);
         d.editing = Some(entry.id.clone());
         d.workspace = entry.workspace.to_string_lossy().into_owned();
+        d.dir_picker.refresh(&d.workspace);
         if let Some(i) = patterns::all().iter().position(|p| p.id == entry.pattern) {
             d.pattern_idx = i;
         }
@@ -310,19 +315,6 @@ impl LoopDialogState {
 
     fn cycle(&mut self, delta: isize) {
         match self.field {
-            LoopField::Workspace => {
-                if !self.workspace_choices.is_empty() {
-                    let at = self
-                        .workspace_choices
-                        .iter()
-                        .position(|w| *w == self.workspace)
-                        .map(|i| i as isize)
-                        .unwrap_or(-1);
-                    let len = self.workspace_choices.len() as isize;
-                    let next = ((at + delta).rem_euclid(len)) as usize;
-                    self.workspace = self.workspace_choices[next].clone();
-                }
-            }
             LoopField::Pattern => {
                 let len = patterns::all().len() as isize;
                 if len > 0 {
@@ -352,7 +344,6 @@ impl LoopDialogState {
 
     fn text_mut(&mut self) -> Option<&mut String> {
         match self.field {
-            LoopField::Workspace => Some(&mut self.workspace),
             LoopField::Every => Some(&mut self.every),
             LoopField::MaxRuns => Some(&mut self.max_runs),
             LoopField::MaxTokens => Some(&mut self.max_tokens),
@@ -1752,6 +1743,9 @@ impl App {
 
     // ----- dialog -------------------------------------------------------
 
+    /// Known directories, most relevant first: open sessions, the current
+    /// directory, profile defaults, past sessions, registered loops. The
+    /// first one seeds the Workspace field; the picker navigates from there.
     fn workspace_choices(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut push = |p: &Path| {
@@ -1849,6 +1843,30 @@ impl App {
             return;
         };
         let mut refresh = false;
+        // The Workspace field is the shared directory picker: it gets the
+        // key first and the dialog only sees what it does not take.
+        if dialog.field == LoopField::Workspace {
+            let LoopDialogState {
+                dir_picker,
+                workspace,
+                ..
+            } = &mut **dialog;
+            match dir_picker.handle_key(key, workspace) {
+                PickerEvent::Submit => {
+                    let d = (**dialog).clone();
+                    self.confirm_loop_dialog(d);
+                    return;
+                }
+                PickerEvent::Consumed { path_changed } => {
+                    dialog.error = None;
+                    if path_changed {
+                        self.refresh_loop_dialog_audit();
+                    }
+                    return;
+                }
+                PickerEvent::Ignored => {}
+            }
+        }
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Control;
@@ -1859,53 +1877,59 @@ impl App {
                 self.confirm_loop_dialog(d);
                 return;
             }
-            KeyCode::Tab | KeyCode::Down => dialog.step_field(1),
-            KeyCode::BackTab | KeyCode::Up => dialog.step_field(-1),
+            KeyCode::Tab | KeyCode::Down => {
+                dialog.step_field(1);
+                dialog.dir_picker.leave();
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                dialog.step_field(-1);
+                dialog.dir_picker.leave();
+            }
             KeyCode::Left => {
                 dialog.cycle(-1);
-                refresh = matches!(
-                    dialog.field,
-                    LoopField::Workspace | LoopField::Profile | LoopField::Pattern
-                );
+                refresh = matches!(dialog.field, LoopField::Profile | LoopField::Pattern);
             }
             KeyCode::Right | KeyCode::Char(' ')
                 if !matches!(
                     dialog.field,
-                    LoopField::Workspace
-                        | LoopField::Every
+                    LoopField::Every
                         | LoopField::MaxRuns
                         | LoopField::MaxTokens
                         | LoopField::MaxCost
                 ) || key.code == KeyCode::Right =>
             {
                 dialog.cycle(1);
-                refresh = matches!(
-                    dialog.field,
-                    LoopField::Workspace | LoopField::Profile | LoopField::Pattern
-                );
+                refresh = matches!(dialog.field, LoopField::Profile | LoopField::Pattern);
             }
             KeyCode::Backspace => {
                 if let Some(t) = dialog.text_mut() {
                     t.pop();
-                    refresh = dialog.field == LoopField::Workspace;
                 }
             }
             KeyCode::Char(c) => {
                 if let Some(t) = dialog.text_mut() {
                     t.push(c);
-                    refresh = dialog.field == LoopField::Workspace;
                 }
             }
             _ => {}
         }
         dialog.error = None;
         if refresh {
-            let mut d = (**dialog).clone();
-            self.refresh_dialog_audit(&mut d);
-            if let Mode::NewLoop(dialog) = &mut self.mode {
-                dialog.audit_note = d.audit_note;
-                dialog.level_notes = d.level_notes;
-            }
+            self.refresh_loop_dialog_audit();
+        }
+    }
+
+    /// Re-runs the readiness audit for the open dialog's workspace and
+    /// profile and writes the notes back into it.
+    fn refresh_loop_dialog_audit(&mut self) {
+        let Mode::NewLoop(dialog) = &self.mode else {
+            return;
+        };
+        let mut d = (**dialog).clone();
+        self.refresh_dialog_audit(&mut d);
+        if let Mode::NewLoop(dialog) = &mut self.mode {
+            dialog.audit_note = d.audit_note;
+            dialog.level_notes = d.level_notes;
         }
     }
 
