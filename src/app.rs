@@ -14,6 +14,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
 pub mod about;
+pub mod dir_picker;
 pub mod loops;
 pub mod loops_view;
 mod skills_view;
@@ -605,8 +606,8 @@ pub struct DialogState {
     pub dir_edited: bool,
     pub field: DialogField,
     pub error: Option<String>,
-    pub dir_entries: Vec<String>,
-    pub dir_selected_idx: Option<usize>,
+    /// The subfolder list and search under the Directory field.
+    pub dir_picker: dir_picker::DirPicker,
     pub tracing_enabled: bool,
     pub content_mode: DialogContentMode,
     /// Where this launch's traces go.
@@ -637,8 +638,7 @@ impl DialogState {
     pub fn new(profiles: &[Profile]) -> Self {
         let first = profiles.first();
         let dir = default_dir_for_profile(first);
-        let resolved = resolve_working_dir(&dir);
-        let dir_entries = list_subdirectories(&resolved);
+        let dir_picker = dir_picker::DirPicker::for_path(&dir);
         let tracing_enabled = first
             .and_then(|p| p.tracing.as_ref())
             .and_then(|l| l.enabled)
@@ -663,8 +663,7 @@ impl DialogState {
             dir_edited: false,
             field: DialogField::Profile,
             error: None,
-            dir_entries,
-            dir_selected_idx: None,
+            dir_picker,
             tracing_enabled,
             content_mode,
             backend,
@@ -821,17 +820,7 @@ impl DialogState {
     }
 
     pub fn refresh_dir_entries(&mut self) {
-        let resolved = resolve_working_dir(&self.dir);
-        self.dir_entries = list_subdirectories(&resolved);
-        if let Some(idx) = self.dir_selected_idx
-            && idx >= self.dir_entries.len()
-        {
-            self.dir_selected_idx = if self.dir_entries.is_empty() {
-                None
-            } else {
-                Some(self.dir_entries.len() - 1)
-            };
-        }
+        self.dir_picker.refresh(&self.dir);
     }
 
     fn set_profile(&mut self, idx: usize, profiles: &[Profile]) {
@@ -878,22 +867,14 @@ impl DialogState {
     }
 
     pub fn navigate_to_parent(&mut self) {
-        let resolved = resolve_working_dir(&self.dir);
-        if let Some(parent) = resolved.parent() {
-            self.dir = parent.to_string_lossy().into_owned();
+        if self.dir_picker.navigate_to_parent(&mut self.dir) {
             self.dir_edited = true;
-            self.dir_selected_idx = None;
-            self.refresh_dir_entries();
         }
     }
 
     pub fn navigate_into(&mut self, sub: &str) {
-        let resolved = resolve_working_dir(&self.dir);
-        let target = resolved.join(sub);
-        self.dir = target.to_string_lossy().into_owned();
+        self.dir_picker.navigate_into(&mut self.dir, sub);
         self.dir_edited = true;
-        self.dir_selected_idx = None;
-        self.refresh_dir_entries();
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent, profiles: &[Profile]) -> DialogResult {
@@ -901,12 +882,12 @@ impl DialogState {
             KeyCode::Esc => return DialogResult::Cancel,
             KeyCode::Tab => {
                 self.step_field(1);
-                self.dir_selected_idx = None;
+                self.dir_picker.leave();
                 return DialogResult::Consumed;
             }
             KeyCode::BackTab => {
                 self.step_field(-1);
-                self.dir_selected_idx = None;
+                self.dir_picker.leave();
                 return DialogResult::Consumed;
             }
             _ => {}
@@ -925,69 +906,17 @@ impl DialogState {
                 }
                 _ => {}
             },
-            DialogField::Dir => match key.code {
-                KeyCode::Enter => {
-                    if let Some(idx) = self.dir_selected_idx
-                        && let Some(entry) = self.dir_entries.get(idx).cloned()
-                    {
-                        if entry == ".." {
-                            self.navigate_to_parent();
-                            return DialogResult::Consumed;
-                        } else {
-                            self.navigate_into(&entry);
-                            return DialogResult::Submit;
-                        }
-                    }
+            DialogField::Dir => match self.dir_picker.handle_key(key, &mut self.dir) {
+                dir_picker::PickerEvent::Submit => {
+                    self.dir_edited = true;
                     return DialogResult::Submit;
                 }
-                KeyCode::Right => {
-                    if let Some(idx) = self.dir_selected_idx
-                        && let Some(entry) = self.dir_entries.get(idx).cloned()
-                    {
-                        if entry == ".." {
-                            self.navigate_to_parent();
-                        } else {
-                            self.navigate_into(&entry);
-                        }
-                    } else if !self.dir_entries.is_empty() {
-                        self.dir_selected_idx = Some(0);
+                dir_picker::PickerEvent::Consumed { path_changed } => {
+                    if path_changed {
+                        self.dir_edited = true;
                     }
                 }
-                KeyCode::Left => {
-                    self.navigate_to_parent();
-                }
-                KeyCode::Down => {
-                    if self.dir_entries.is_empty() {
-                        self.dir_selected_idx = None;
-                    } else {
-                        self.dir_selected_idx = match self.dir_selected_idx {
-                            None => Some(0),
-                            Some(i) => Some((i + 1).min(self.dir_entries.len().saturating_sub(1))),
-                        };
-                    }
-                }
-                KeyCode::Up => {
-                    if let Some(i) = self.dir_selected_idx {
-                        if i == 0 {
-                            self.dir_selected_idx = None;
-                        } else {
-                            self.dir_selected_idx = Some(i - 1);
-                        }
-                    }
-                }
-                KeyCode::Char(c) => {
-                    self.dir.push(c);
-                    self.dir_edited = true;
-                    self.dir_selected_idx = None;
-                    self.refresh_dir_entries();
-                }
-                KeyCode::Backspace => {
-                    self.dir.pop();
-                    self.dir_edited = true;
-                    self.dir_selected_idx = None;
-                    self.refresh_dir_entries();
-                }
-                _ => {}
+                dir_picker::PickerEvent::Ignored => {}
             },
             DialogField::Tracing => match key.code {
                 KeyCode::Enter => return DialogResult::Submit,
@@ -5012,20 +4941,25 @@ mod dialog_tests {
         let mut d = DialogState::new(&profiles);
         d.handle_key(&key(KeyCode::Tab), &profiles); // switch to Dir field
         assert!(matches!(d.field, DialogField::Dir));
-        assert!(d.dir_entries.contains(&"sub_a".to_string()));
-        assert!(d.dir_entries.contains(&"sub_b".to_string()));
+        assert!(d.dir_picker.rows().contains(&"sub_a".to_string()));
+        assert!(d.dir_picker.rows().contains(&"sub_b".to_string()));
 
         // Down arrow selects first entry
         d.handle_key(&key(KeyCode::Down), &profiles);
-        assert_eq!(d.dir_selected_idx, Some(0));
+        assert_eq!(d.dir_picker.selected, Some(0));
 
         // Up arrow goes back to text field
         d.handle_key(&key(KeyCode::Up), &profiles);
-        assert_eq!(d.dir_selected_idx, None);
+        assert_eq!(d.dir_picker.selected, None);
 
         // Find index of sub_a
-        let sub_a_idx = d.dir_entries.iter().position(|e| e == "sub_a").unwrap();
-        d.dir_selected_idx = Some(sub_a_idx);
+        let sub_a_idx = d
+            .dir_picker
+            .rows()
+            .iter()
+            .position(|e| e == "sub_a")
+            .unwrap();
+        d.dir_picker.selected = Some(sub_a_idx);
 
         // Right arrow descends into sub_a
         d.handle_key(&key(KeyCode::Right), &profiles);

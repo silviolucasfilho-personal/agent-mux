@@ -414,7 +414,7 @@ Opened by `n`. State is `DialogState`; the visible field list is computed by `Di
 | Field | Shown when | Behaviour |
 | --- | --- | --- |
 | Profile | always | One row per configured profile; `↑/↓` or `j/k` cycle. Changing profile reseeds directory, tracing, backend, content mode, model, approvals and budget from the profile. |
-| Directory | always | Typed path plus a subfolder list (non-hidden directories and `..`, up to four visible). `→` enters, `←` goes to the parent, `↑/↓` choose, `Enter` selects. Empty, `.` and `~/…` resolve at launch. |
+| Directory | always | The directory picker (`src/app/dir_picker.rs`, shared with the loop dialog's Workspace): typed path plus a subfolder list (non-hidden directories and `..`, up to four visible). `↓` moves into the list, `↑/↓` choose, `→` enters, `←` goes to the parent, `Enter` selects. Typing while in the list searches subfolders up to three levels deep (`a/b/c` rows, case-insensitive, hidden, `node_modules` and `target` skipped, 200 rows at most); `Backspace` shortens the search and `Esc` clears it before it cancels the dialog. Empty, `.` and `~/…` resolve at launch. |
 | Tracing | always | `[●] Enabled` / `[○] Disabled`; `Space`, `t`, `←/→` toggle. |
 | Backend | always | Local SQLite → Langfuse → Both; cycles only when Langfuse credentials resolved, otherwise shows `(Langfuse: not configured — see agent-mux trace doctor)`. |
 | Content Mode | always | `[Full]` prompts, tool I/O, skills and subagents, or `[Metadata]` timings, tokens and cost only. |

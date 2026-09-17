@@ -4,13 +4,6 @@
   "level": "L1",
   "attempts": [
     {
-      "iteration": 21,
-      "timestamp": "2026-09-16T16:18:42Z",
-      "action": "pr-babysitter",
-      "outcome": "noop",
-      "tokensUsed": 91063
-    },
-    {
       "iteration": 22,
       "timestamp": "2026-09-16T16:33:40Z",
       "action": "pr-babysitter",
@@ -37,6 +30,13 @@
       "action": "pr-babysitter",
       "outcome": "noop",
       "tokensUsed": 98344
+    },
+    {
+      "iteration": 26,
+      "timestamp": "2026-09-16T17:33:53Z",
+      "action": "pr-babysitter",
+      "outcome": "noop",
+      "tokensUsed": 106399
     }
   ]
 }
