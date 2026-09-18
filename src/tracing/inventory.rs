@@ -762,6 +762,23 @@ impl SkillReport {
     }
 }
 
+/// Count prompts that contained one of the skill's trigger phrases in a turn
+/// that did not load it.
+pub fn missed_trigger_count(def: &Definition, prompts: &[PromptRow]) -> i64 {
+    if def.triggers.is_empty() {
+        return 0;
+    }
+    let names = def.store_names();
+    prompts
+        .iter()
+        .filter(|p| {
+            let text = p.input.to_lowercase();
+            def.triggers.iter().any(|t| text.contains(t.as_str()))
+                && !p.skills.iter().any(|s| names.contains(s))
+        })
+        .count() as i64
+}
+
 pub fn skill_reports(
     defs: &[Definition],
     stats: &[SkillStat],
@@ -775,18 +792,7 @@ pub fn skill_reports(
         if let Some(i) = stat_idx {
             used.insert(i);
         }
-        let missed = if def.triggers.is_empty() {
-            0
-        } else {
-            prompts
-                .iter()
-                .filter(|p| {
-                    let text = p.input.to_lowercase();
-                    def.triggers.iter().any(|t| text.contains(t.as_str()))
-                        && !p.skills.iter().any(|s| names.contains(s))
-                })
-                .count() as i64
-        };
+        let missed = missed_trigger_count(def, prompts);
         out.push(SkillReport {
             name: def.name.clone(),
             def: Some(def.clone()),

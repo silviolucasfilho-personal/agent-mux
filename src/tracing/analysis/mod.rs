@@ -10,10 +10,14 @@ pub mod model;
 pub mod query;
 pub mod scope;
 pub mod service;
+pub mod skills;
 
 pub use agents::{
     AgentCostShareFact, AgentDefinitionFact, AgentDossier, AgentFact, AgentFailureFact,
     AgentInvocationFact, analyze_agents,
+};
+pub use skills::{
+    SkillDossier, SkillEvidence, SkillEvidenceKind, SkillFact, analyze_skills_for_dossier,
 };
 pub use correlation::resolve_binding;
 pub use evidence::{extract_command, extract_target_file, snippet};
