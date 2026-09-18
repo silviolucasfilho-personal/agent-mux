@@ -39,48 +39,37 @@ pub fn sidebar_window(selected: usize, len: usize, visible: usize) -> usize {
     }
 }
 
-/// Splits the sidebar height into 25% active sessions, dynamic rows for Agents, and remaining history sessions.
+/// Splits the sidebar into active sessions, three equally sized development
+/// sections, and a compact history section.
 pub fn sidebar_areas(
     total_height: u16,
-    agent_count: usize,
-    loop_count: usize,
-    workflow_count: usize,
+    _agent_count: usize,
+    _loop_count: usize,
+    _workflow_count: usize,
 ) -> (Rect, Rect, Rect, Rect, Rect) {
     let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
-    // Active keeps its quarter; agents, loops and workflows take what their
-    // rows need up to a quarter of the rest each; history gets at least
-    // four rows. On a short terminal the workflows block shrinks first,
-    // then loops, then agents, so the active list and its click map never
-    // move.
+    // Active keeps its quarter. History is capped at four rows; on a short
+    // terminal it yields rows until Agents, Loops and Workflows can each keep
+    // two. The three development sections share every remaining row.
     let active_rows = side_area.height / 4;
     let rest = side_area.height.saturating_sub(active_rows);
-    let cap = rest.saturating_sub(4) / 4;
-    let mut agent_rows = (agent_count.max(1) as u16 + 2).min(cap).max(3);
-    let mut loop_rows = (loop_count.max(1) as u16 + 2).min(cap).max(3);
-    let mut workflow_rows = (workflow_count.max(1) as u16 + 2).min(cap).max(3);
-    if agent_rows + loop_rows + workflow_rows + 4 > rest {
-        workflow_rows = rest.saturating_sub(agent_rows + loop_rows + 4).max(2);
-    }
-    if agent_rows + loop_rows + workflow_rows + 4 > rest {
-        loop_rows = rest.saturating_sub(agent_rows + workflow_rows + 4).max(2);
-    }
-    if agent_rows + loop_rows + workflow_rows + 4 > rest {
-        agent_rows = rest.saturating_sub(loop_rows + workflow_rows + 4).max(2);
-    }
-    // on a terminal too short for every floor, history gives way before
-    // the active block does
-    let history_min = if agent_rows + loop_rows + workflow_rows + 4 <= rest {
-        4
+    let history_rows = if rest == 0 {
+        0
     } else {
-        rest.saturating_sub(agent_rows + loop_rows + workflow_rows)
-            .max(1)
+        rest.saturating_sub(6).clamp(1, 4)
     };
+    let development_rows = rest.saturating_sub(history_rows);
+    let shared_rows = development_rows / 3;
+    let remainder = development_rows % 3;
+    let agent_rows = shared_rows + u16::from(remainder > 0);
+    let loop_rows = shared_rows + u16::from(remainder > 1);
+    let workflow_rows = shared_rows;
     let [active, skills, loops, workflows, history] = Layout::vertical([
         Constraint::Length(active_rows),
         Constraint::Length(agent_rows),
         Constraint::Length(loop_rows),
         Constraint::Length(workflow_rows),
-        Constraint::Min(history_min),
+        Constraint::Length(history_rows),
     ])
     .areas(side_area);
     (active, skills, loops, workflows, history)
