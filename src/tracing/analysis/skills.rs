@@ -264,7 +264,10 @@ pub fn analyze_skills_for_dossier(
     }
     for s in &observed_skills {
         // If this observed name maps to a known definition name, it's already represented
-        let canon = defs_by_name.get(s).map(|d| d.name.clone()).unwrap_or_else(|| s.clone());
+        let canon = defs_by_name
+            .get(s)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| s.clone());
         if seen_keys.insert(canon.clone()) {
             all_skill_keys.push(canon);
         }
@@ -302,7 +305,9 @@ pub fn analyze_skills_for_dossier(
         // Traces where skill was loaded but no observation was attributed to it
         let mut unused_traces: Vec<&TraceRow> = Vec::new();
         for t in &loaded_traces {
-            let was_used = store_names.iter().any(|s| obs_by_trace_and_skill.contains(&(t.id.clone(), s.clone())));
+            let was_used = store_names
+                .iter()
+                .any(|s| obs_by_trace_and_skill.contains(&(t.id.clone(), s.clone())));
             if !was_used {
                 unused_traces.push(t);
             }
@@ -318,8 +323,15 @@ pub fn analyze_skills_for_dossier(
         let matching_obs: Vec<&ObsRow> = obs_rows
             .iter()
             .filter(|o| {
-                o.skill.as_ref().map(|s| store_names.contains(s)).unwrap_or(false)
-                    || (o.obs_type == "skill" && o.name.as_ref().map(|n| store_names.contains(n)).unwrap_or(false))
+                o.skill
+                    .as_ref()
+                    .map(|s| store_names.contains(s))
+                    .unwrap_or(false)
+                    || (o.obs_type == "skill"
+                        && o.name
+                            .as_ref()
+                            .map(|n| store_names.contains(n))
+                            .unwrap_or(false))
             })
             .collect();
 
@@ -416,7 +428,10 @@ pub fn analyze_skills_for_dossier(
             let snippet_text = if is_metadata {
                 None
             } else {
-                t.input.as_deref().filter(|s| !s.trim().is_empty()).map(|s| snippet(s, 120))
+                t.input
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| snippet(s, 120))
             };
             if snippet_text.is_some() || is_metadata {
                 unused_examples.push(SkillEvidence {
@@ -496,8 +511,12 @@ pub fn analyze_skills_for_dossier(
         if turns_loaded == 0 && attributed_calls == 0 {
             limitations.push("never_used_in_window".into());
         }
-        let had_metadata = matching_obs.iter().any(|o| o.content_mode.as_deref() == Some("metadata"))
-            || loaded_traces.iter().any(|t| t.content_mode.as_deref() == Some("metadata"));
+        let had_metadata = matching_obs
+            .iter()
+            .any(|o| o.content_mode.as_deref() == Some("metadata"))
+            || loaded_traces
+                .iter()
+                .any(|t| t.content_mode.as_deref() == Some("metadata"));
         if had_metadata {
             limitations.push("content_withheld".into());
         }
@@ -520,8 +539,8 @@ pub fn analyze_skills_for_dossier(
             p50_ms,
             p95_ms,
             max_ms,
-            tokens: Some(total_tokens).filter(|_| attributed_calls > 0),
-            cost_usd: Some(total_cost).filter(|_| attributed_calls > 0),
+            tokens: (attributed_calls > 0).then_some(total_tokens),
+            cost_usd: (attributed_calls > 0).then_some(total_cost),
             first_seen,
             last_seen,
             lint,
@@ -536,7 +555,11 @@ pub fn analyze_skills_for_dossier(
             .cmp(&a.has_activity())
             .then_with(|| b.turns_unused.cmp(&a.turns_unused))
             .then_with(|| b.errors.cmp(&a.errors))
-            .then_with(|| b.cost_usd.unwrap_or(0.0).total_cmp(&a.cost_usd.unwrap_or(0.0)))
+            .then_with(|| {
+                b.cost_usd
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.cost_usd.unwrap_or(0.0))
+            })
             .then_with(|| a.key.cmp(&b.key))
     });
 
@@ -717,15 +740,9 @@ mod tests {
             defined_skill("never-used", vec!["never used trigger"]),
         ];
 
-        let facts = analyze_skills_for_dossier(
-            &conn,
-            Path::new("/work/a"),
-            1_000,
-            10_000,
-            &definitions,
-            3,
-        )
-        .unwrap();
+        let facts =
+            analyze_skills_for_dossier(&conn, Path::new("/work/a"), 1_000, 10_000, &definitions, 3)
+                .unwrap();
 
         let audit = facts.skills.iter().find(|s| s.key == "audit").unwrap();
         assert_eq!((audit.turns_loaded, audit.turns_unused), (6, 4));

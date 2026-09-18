@@ -17,9 +17,6 @@ pub use agents::{
     AgentCostShareFact, AgentDefinitionFact, AgentDossier, AgentFact, AgentFailureFact,
     AgentInvocationFact, analyze_agents,
 };
-pub use skills::{
-    SkillDossier, SkillEvidence, SkillEvidenceKind, SkillFact, analyze_skills_for_dossier,
-};
 pub use correlation::resolve_binding;
 pub use dossier::{
     CoverageStatus, DossierBuildError, DossierConfig, DossierError, DossierHealth, DossierInputs,
@@ -41,6 +38,9 @@ pub use service::{
     AnalyzeSkillsArgs, BriefingArgs, BriefingData, CompareRunsArgs, GetSessionArgs, HealthArgs,
     Limits, ListSessionsArgs, ListSessionsData, Request, SearchArgs, ServiceConfig, ServiceError,
     TimelineArgs, TraceService,
+};
+pub use skills::{
+    SkillDossier, SkillEvidence, SkillEvidenceKind, SkillFact, analyze_skills_for_dossier,
 };
 use std::path::PathBuf;
 

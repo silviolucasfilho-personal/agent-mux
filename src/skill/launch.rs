@@ -104,7 +104,10 @@ pub fn hydrate(
                                 Ok(snaps) => {
                                     let avail = !snaps.is_empty();
                                     (
-                                        snaps.into_iter().flat_map(|s| s.sessions).collect::<Vec<_>>(),
+                                        snaps
+                                            .into_iter()
+                                            .flat_map(|s| s.sessions)
+                                            .collect::<Vec<_>>(),
                                         avail,
                                     )
                                 }

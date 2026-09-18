@@ -1,6 +1,6 @@
 # Heimdall Rust dossier: one startup read, tools only for drill-down
 
-Status: Proposed
+Status: Implemented on 2026-09-18
 Date: 2026-09-17
 Baseline: `6c263b7` plus the current uncommitted Workflows implementation
 

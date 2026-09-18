@@ -151,7 +151,9 @@ pub fn analyze_agents(
                 id: r.get(0)?,
                 trace_id: r.get(1)?,
                 session_key: r.get(2)?,
-                agent_type: r.get::<_, Option<String>>(3)?.unwrap_or_else(|| "unknown".into()),
+                agent_type: r
+                    .get::<_, Option<String>>(3)?
+                    .unwrap_or_else(|| "unknown".into()),
                 start_ns: r.get(4)?,
                 dur_ms: r.get::<_, i64>(5)?.max(0) as u64,
                 tokens: r.get(6)?,
@@ -197,7 +199,10 @@ pub fn analyze_agents(
 
     let mut children_by_parent: HashMap<String, Vec<RawChild>> = HashMap::new();
     for c in child_rows {
-        children_by_parent.entry(c.parent_id.clone()).or_default().push(c);
+        children_by_parent
+            .entry(c.parent_id.clone())
+            .or_default()
+            .push(c);
     }
 
     // 3. Query session total costs for sessions with matching agent invocations
@@ -360,7 +365,9 @@ pub fn analyze_agents(
         // Compute maximum session cost share
         let mut cost_by_session: HashMap<String, f64> = HashMap::new();
         for i in invocations {
-            *cost_by_session.entry(i.raw.session_key.clone()).or_default() += i.cost;
+            *cost_by_session
+                .entry(i.raw.session_key.clone())
+                .or_default() += i.cost;
         }
 
         let mut max_share_fact: Option<AgentCostShareFact> = None;
@@ -379,7 +386,9 @@ pub fn analyze_agents(
             };
             match &max_share_fact {
                 Some(curr) if curr.share > candidate.share => {}
-                Some(curr) if (curr.share - candidate.share).abs() < f64::EPSILON && curr.agent_cost_usd >= candidate.agent_cost_usd => {}
+                Some(curr)
+                    if (curr.share - candidate.share).abs() < f64::EPSILON
+                        && curr.agent_cost_usd >= candidate.agent_cost_usd => {}
                 _ => {
                     max_share_fact = Some(candidate);
                 }
@@ -390,7 +399,9 @@ pub fn analyze_agents(
         let mut failure_counts: HashMap<(String, String), i64> = HashMap::new();
         for i in invocations {
             for (tool, sig) in &i.child_failures {
-                *failure_counts.entry((tool.clone(), sig.clone())).or_default() += 1;
+                *failure_counts
+                    .entry((tool.clone(), sig.clone()))
+                    .or_default() += 1;
             }
         }
         let mut recurring: Vec<AgentFailureFact> = failure_counts
@@ -411,12 +422,23 @@ pub fn analyze_agents(
 
         // Examples: 3 newest failures, or 3 slowest if none failed
         let mut example_candidates: Vec<&ProcessedInvocation> = if failures > 0 {
-            let mut failed_invs: Vec<&ProcessedInvocation> = invocations.iter().filter(|i| i.failed).collect();
-            failed_invs.sort_by(|a, b| b.raw.start_ns.cmp(&a.raw.start_ns).then_with(|| a.raw.id.cmp(&b.raw.id)));
+            let mut failed_invs: Vec<&ProcessedInvocation> =
+                invocations.iter().filter(|i| i.failed).collect();
+            failed_invs.sort_by(|a, b| {
+                b.raw
+                    .start_ns
+                    .cmp(&a.raw.start_ns)
+                    .then_with(|| a.raw.id.cmp(&b.raw.id))
+            });
             failed_invs
         } else {
             let mut all_invs: Vec<&ProcessedInvocation> = invocations.iter().collect();
-            all_invs.sort_by(|a, b| b.raw.dur_ms.cmp(&a.raw.dur_ms).then_with(|| b.raw.start_ns.cmp(&a.raw.start_ns)));
+            all_invs.sort_by(|a, b| {
+                b.raw
+                    .dur_ms
+                    .cmp(&a.raw.dur_ms)
+                    .then_with(|| b.raw.start_ns.cmp(&a.raw.start_ns))
+            });
             all_invs
         };
         example_candidates.truncate(examples_per_category);
@@ -473,8 +495,8 @@ pub fn analyze_agents(
             max_ms,
             child_tools,
             child_tool_errors,
-            tokens: Some(total_tokens).filter(|_| count > 0),
-            cost_usd: Some(total_cost).filter(|_| count > 0),
+            tokens: (count > 0).then_some(total_tokens),
+            cost_usd: (count > 0).then_some(total_cost),
             maximum_session_cost_share: max_share_fact,
             recurring_failures: recurring,
             examples,
@@ -531,7 +553,11 @@ pub fn analyze_agents(
         b.has_activity()
             .cmp(&a.has_activity())
             .then_with(|| b.failures.cmp(&a.failures))
-            .then_with(|| b.cost_usd.unwrap_or(0.0).total_cmp(&a.cost_usd.unwrap_or(0.0)))
+            .then_with(|| {
+                b.cost_usd
+                    .unwrap_or(0.0)
+                    .total_cmp(&a.cost_usd.unwrap_or(0.0))
+            })
             .then_with(|| b.p90_ms.cmp(&a.p90_ms))
             .then_with(|| a.agent_type.cmp(&b.agent_type))
     });
@@ -723,7 +749,11 @@ mod tests {
         )
         .unwrap();
 
-        let reviewer = dossier.agents.iter().find(|a| a.agent_type == "reviewer").unwrap();
+        let reviewer = dossier
+            .agents
+            .iter()
+            .find(|a| a.agent_type == "reviewer")
+            .unwrap();
         assert_eq!(reviewer.invocations, 5);
         assert_eq!(reviewer.failures, 2);
         assert_eq!(reviewer.child_tools, 7); // direct children only
@@ -731,14 +761,28 @@ mod tests {
         assert_eq!((reviewer.p50_ms, reviewer.p90_ms), (Some(30), Some(90)));
         assert_eq!(reviewer.recurring_failures[0].tool_name, "Bash");
         assert_eq!(
-            reviewer.maximum_session_cost_share.as_ref().unwrap().session_key,
+            reviewer
+                .maximum_session_cost_share
+                .as_ref()
+                .unwrap()
+                .session_key,
             "claude:a"
         );
         assert_eq!(
-            dossier.agents.iter().find(|a| a.agent_type == "idle-reviewer").unwrap().invocations,
+            dossier
+                .agents
+                .iter()
+                .find(|a| a.agent_type == "idle-reviewer")
+                .unwrap()
+                .invocations,
             0
         );
-        assert!(dossier.agents.iter().all(|a| a.agent_type != "outside-workspace"));
+        assert!(
+            dossier
+                .agents
+                .iter()
+                .all(|a| a.agent_type != "outside-workspace")
+        );
     }
 
     #[test]
@@ -777,17 +821,14 @@ mod tests {
             [],
         ).unwrap();
 
-        let dossier = analyze_agents(
-            &conn,
-            Path::new("/work/meta"),
-            1_000,
-            10_000,
-            &[],
-            3,
-        )
-        .unwrap();
+        let dossier =
+            analyze_agents(&conn, Path::new("/work/meta"), 1_000, 10_000, &[], 3).unwrap();
 
-        let agent = dossier.agents.iter().find(|a| a.agent_type == "meta-agent").unwrap();
+        let agent = dossier
+            .agents
+            .iter()
+            .find(|a| a.agent_type == "meta-agent")
+            .unwrap();
         assert_eq!(agent.invocations, 1);
         assert_eq!(agent.failures, 1);
         assert_eq!(agent.examples.len(), 1);

@@ -554,7 +554,9 @@ pub struct Finding {
 }
 
 /// A finding serializable across JSON and schema boundaries.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 pub struct DefinitionFinding {
     pub level: String,
     pub rule: String,

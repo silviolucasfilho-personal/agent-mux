@@ -359,7 +359,12 @@ fn table_driven_harness_launch_construction() {
         match harness {
             agent_mux::harness::Harness::Claude => {
                 assert_eq!(launch.profile.command, "claude");
-                assert!(launch.profile.args.contains(&"--dangerously-skip-permissions".to_string()));
+                assert!(
+                    launch
+                        .profile
+                        .args
+                        .contains(&"--dangerously-skip-permissions".to_string())
+                );
             }
             agent_mux::harness::Harness::Codex => {
                 assert_eq!(launch.profile.command, "codex");
@@ -367,8 +372,18 @@ fn table_driven_harness_launch_construction() {
             }
             agent_mux::harness::Harness::Antigravity => {
                 assert_eq!(launch.profile.command, "agy");
-                assert!(launch.profile.args.contains(&"--dangerously-skip-permissions".to_string()));
-                assert!(launch.profile.args.contains(&"--prompt-interactive".to_string()));
+                assert!(
+                    launch
+                        .profile
+                        .args
+                        .contains(&"--dangerously-skip-permissions".to_string())
+                );
+                assert!(
+                    launch
+                        .profile
+                        .args
+                        .contains(&"--prompt-interactive".to_string())
+                );
             }
         }
     }

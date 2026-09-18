@@ -209,13 +209,12 @@ impl From<AnalysisError> for DossierBuildError {
 }
 
 fn format_rfc3339(dt: OffsetDateTime) -> String {
-    dt.format(&Rfc3339).unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
+    dt.format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
 /// Executes one section closure, isolating any failure to that section.
-pub(crate) fn orchestrate_section<T: Default, F>(
-    f: F,
-) -> (DossierSection<T>, u64)
+pub(crate) fn orchestrate_section<T: Default, F>(f: F) -> (DossierSection<T>, u64)
 where
     F: FnOnce() -> Result<(T, usize, Vec<String>, bool), AnalysisError>,
 {
@@ -274,10 +273,7 @@ struct ProgressHandlerGuard<'a>(&'a Connection);
 
 impl<'a> ProgressHandlerGuard<'a> {
     fn install(conn: &'a Connection, deadline: Instant) -> Self {
-        let _ = conn.progress_handler(
-            20,
-            Some(move || Instant::now() >= deadline),
-        );
+        let _ = conn.progress_handler(20, Some(move || Instant::now() >= deadline));
         ProgressHandlerGuard(conn)
     }
 }
@@ -372,34 +368,34 @@ pub fn finalize_dossier(
     // Step 2: Remove lowest-ranked zero-activity definition rows
     while sync_serialized_bytes(&mut dossier)? > config.max_bytes {
         let mut removed = false;
-        if let Some(skill) = dossier.skills.data.skills.last() {
-            if !skill.has_activity() {
-                dossier.skills.data.skills.pop();
-                dossier.skills.truncated = true;
-                dossier.skills.status = CoverageStatus::Partial;
-                let warn = "Zero-activity definition rows omitted to fit byte limit".to_string();
-                if !dossier.skills.warnings.contains(&warn) {
-                    dossier.skills.warnings.push(warn);
-                }
-                removed = true;
-                if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
-                    return Ok(dossier);
-                }
+        if let Some(skill) = dossier.skills.data.skills.last()
+            && !skill.has_activity()
+        {
+            dossier.skills.data.skills.pop();
+            dossier.skills.truncated = true;
+            dossier.skills.status = CoverageStatus::Partial;
+            let warn = "Zero-activity definition rows omitted to fit byte limit".to_string();
+            if !dossier.skills.warnings.contains(&warn) {
+                dossier.skills.warnings.push(warn);
+            }
+            removed = true;
+            if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                return Ok(dossier);
             }
         }
-        if let Some(agent) = dossier.agents.data.agents.last() {
-            if !agent.has_activity() {
-                dossier.agents.data.agents.pop();
-                dossier.agents.truncated = true;
-                dossier.agents.status = CoverageStatus::Partial;
-                let warn = "Zero-activity definition rows omitted to fit byte limit".to_string();
-                if !dossier.agents.warnings.contains(&warn) {
-                    dossier.agents.warnings.push(warn);
-                }
-                removed = true;
-                if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
-                    return Ok(dossier);
-                }
+        if let Some(agent) = dossier.agents.data.agents.last()
+            && !agent.has_activity()
+        {
+            dossier.agents.data.agents.pop();
+            dossier.agents.truncated = true;
+            dossier.agents.status = CoverageStatus::Partial;
+            let warn = "Zero-activity definition rows omitted to fit byte limit".to_string();
+            if !dossier.agents.warnings.contains(&warn) {
+                dossier.agents.warnings.push(warn);
+            }
+            removed = true;
+            if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                return Ok(dossier);
             }
         }
         if !removed {
@@ -702,9 +698,8 @@ mod tests {
         assert_eq!(skill_sec.status, CoverageStatus::Full);
         assert_eq!(skill_sec.data.total_observed, 2);
 
-        let (agent_sec, _): (DossierSection<AgentDossier>, _) = orchestrate_section(|| {
-            Err(AnalysisError::Correlation("simulated failure".into()))
-        });
+        let (agent_sec, _): (DossierSection<AgentDossier>, _) =
+            orchestrate_section(|| Err(AnalysisError::Correlation("simulated failure".into())));
         assert_eq!(agent_sec.status, CoverageStatus::Unavailable);
         assert_eq!(agent_sec.errors.len(), 1);
         assert_eq!(agent_sec.errors[0].code, "SECTION_QUERY_FAILED");
