@@ -125,6 +125,17 @@ require_matrix() {
   fi
 }
 
+verify_heimdall_startup() {
+  echo "== Verifying Heimdall zero startup tool call contract =="
+  # Verify that any Heimdall session launched in the matrix made zero tool calls during turn 1
+  tool_count="$(sqlite3 "$db" "SELECT COUNT(*) FROM observations o JOIN traces t ON t.id = o.trace_id JOIN sessions s ON s.key = t.session_key JOIN launches l ON l.session_key = s.key WHERE json_extract(l.metadata, '$.skill_id') = 'heimdall' AND t.ordinal = 1 AND o.type = 'tool';")"
+  if [[ "$tool_count" -gt 0 ]]; then
+    echo "Heimdall made $tool_count tool calls during startup prompt! Expected 0." >&2
+    return 1
+  fi
+  echo "Heimdall startup contract verified (0 tool calls in startup turn)."
+}
+
 for harness in claude codex agy; do
   for attempt in 1 2; do
     echo "== $harness (attempt $attempt) =="
@@ -135,4 +146,5 @@ for harness in claude codex agy; do
   done
 done
 verify
+verify_heimdall_startup
 echo "Live provider matrix completed. Database: $db"
