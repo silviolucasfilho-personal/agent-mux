@@ -40,7 +40,7 @@ The existing design rules remain:
 
 ## 3. Chosen design
 
-Add a typed, bounded `HeimdallDossier` builder to `src/tracing/analysis/`. The builder opens one read-only SQLite connection, captures one `as_of` timestamp, reads live snapshots once, scans definitions once, and produces all startup sections under a single coverage contract.
+Add a typed, bounded `HeimdallDossier` builder to `src/tracing/analysis/`. Hydration opens one read-only SQLite connection, captures one `as_of` timestamp and reads live snapshots once; the builder receives those inputs, scans definitions once, and produces all startup sections under a single coverage contract.
 
 The dossier is an analysis product rather than an agent runtime. Its types and builder do not launch Heimdall, render prose, apply Heimdall's thresholds or know about a harness. The `dossier` hydration kind is generic and can be requested by another `trace.read` package later; Heimdall is the first package to opt in.
 
@@ -204,12 +204,12 @@ Create `src/tracing/analysis/dossier.rs`. It owns the public dossier types, `Dos
 The section implementations delegate to focused APIs:
 
 - `query.rs`: existing session briefing and session evidence;
-- `metrics.rs`: scoped skill performance metrics;
+- a new `skills.rs` under `analysis/`: scoped skill performance, trigger and evidence facts;
 - a new `agents.rs` under `analysis/`: scoped subagent aggregates and examples;
 - `inventory.rs`: definition discovery, trigger matching and lint;
 - `store::query`: low-level reusable rows only where they are already canonical.
 
-`DossierBuilder` receives an open `rusqlite::Connection`, workspace, definition roots or home, live sessions, `as_of`, and `DossierConfig`. This makes one-connection behavior testable and prevents it from resolving global paths internally.
+`DossierBuilder` receives an open `rusqlite::Connection`, the resolved database path, workspace, definition roots or home, live sessions plus their availability flag, `as_of`, and `DossierConfig`. This makes one-connection behavior testable and prevents it from resolving global paths internally.
 
 ```rust
 pub struct DossierConfig {
@@ -220,6 +220,7 @@ pub struct DossierConfig {
     pub max_skill_rows: usize,          // 30
     pub max_agent_rows: usize,          // 30
     pub examples_per_category: usize,   // 3
+    pub deadline: std::time::Duration,  // 5 s
 }
 ```
 
