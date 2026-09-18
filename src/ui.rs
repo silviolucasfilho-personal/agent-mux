@@ -25,6 +25,30 @@ use tui_term::widget::PseudoTerminal;
 
 pub const SIDEBAR_WIDTH: u16 = 30;
 
+#[derive(Clone, Copy)]
+struct PlatformKeys {
+    page_scroll: &'static str,
+    word_navigation: &'static str,
+}
+
+const fn platform_keys_for(macos: bool) -> PlatformKeys {
+    if macos {
+        PlatformKeys {
+            page_scroll: "Fn+↑/↓ (PgUp/PgDn)",
+            word_navigation: "Option+←/→",
+        }
+    } else {
+        PlatformKeys {
+            page_scroll: "PgUp/PgDn",
+            word_navigation: "Ctrl+←/→",
+        }
+    }
+}
+
+fn platform_keys() -> PlatformKeys {
+    platform_keys_for(cfg!(target_os = "macos"))
+}
+
 /// First visible index of the sidebar's session list: 0 until the selected
 /// row would fall below the window, then scrolled just far enough to keep
 /// it on the last row. Pure — the mouse handler uses the same math to map a
@@ -1650,6 +1674,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
 /// Full keybinding reference — the one place every chord (including the
 /// otherwise invisible Ctrl+Shift ones) is written down in the UI.
 fn draw_help(f: &mut Frame) {
+    let platform_keys = platform_keys();
     let key_style = Style::default().fg(Color::Cyan);
     let dim = Style::default().fg(Color::DarkGray);
     let head = Style::default()
@@ -1701,7 +1726,8 @@ fn draw_help(f: &mut Frame) {
         Line::raw(""),
         Line::styled("Scrollback, selection & search", head),
         row("Shift+↑/↓", "scroll three lines"),
-        row("PgUp/PgDn", "scroll one page (Fn+↑/↓ on macOS)"),
+        row(platform_keys.page_scroll, "scroll one page"),
+        row(platform_keys.word_navigation, "move by word in text fields"),
         row("Shift+Home/End", "jump to top / back to live"),
         row("mouse", "wheel to scroll, drag to select text"),
         row("Ctrl+Shift+C/V", "copy selection / paste"),
@@ -4792,6 +4818,17 @@ mod tests {
                 "help overlay missing {needle}: {text}"
             );
         }
+    }
+
+    #[test]
+    fn platform_key_labels_follow_terminal_conventions() {
+        let mac = platform_keys_for(true);
+        assert_eq!(mac.page_scroll, "Fn+↑/↓ (PgUp/PgDn)");
+        assert_eq!(mac.word_navigation, "Option+←/→");
+
+        let other = platform_keys_for(false);
+        assert_eq!(other.page_scroll, "PgUp/PgDn");
+        assert_eq!(other.word_navigation, "Ctrl+←/→");
     }
 
     #[test]
