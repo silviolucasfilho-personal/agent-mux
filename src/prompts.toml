@@ -16,9 +16,9 @@ run = "{invocation} Run the {pattern} loop for this workspace. Facts for this ru
 
 [skill]
 # Appended to the opening prompt of a skill launch that received a briefing
-# snapshot (`[agent] hydrate = ["briefing"]` in the package's skill.toml).
+# snapshot (`[agent] hydrate = ["briefing"]` or `["dossier"]` in the package's skill.toml).
 # The opening sentence itself is `startup_prompt` in that skill.toml.
-hydration_hint = "Read the briefing snapshot at $AGENT_MUX_BRIEFING (JSON, schema_version 1, taken at $AGENT_MUX_BRIEFING_AS_OF) before running any command; use the agent-mux MCP tools when $AGENT_MUX_MCP is not \"unavailable\", otherwise the agent-mux trace CLI, for anything newer."
+hydration_hint = "Read the briefing snapshot at $AGENT_MUX_BRIEFING (taken at $AGENT_MUX_BRIEFING_AS_OF, schema in $AGENT_MUX_BRIEFING_SCHEMA) before running any command; answer your default report from it and use tools only for newer or narrower questions."
 
 [workflow]
 # The opening prompt of every workflow session that runs a step skill.

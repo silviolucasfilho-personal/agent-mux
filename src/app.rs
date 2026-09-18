@@ -2420,10 +2420,12 @@ impl App {
                 .runtime_dir
                 .clone()
                 .unwrap_or_else(crate::tracing::analysis::default_snapshot_dir);
+            let home = self.skill_home();
             if let Some(h) = crate::skill::launch::hydrate(
                 def,
                 self.trace_db_path.as_deref(),
                 dir,
+                &home,
                 &runtime_dir,
                 &key,
             ) {
@@ -2433,6 +2435,10 @@ impl App {
                 ));
                 prep.env
                     .push(("AGENT_MUX_BRIEFING_AS_OF".into(), h.as_of.clone()));
+                prep.env.push((
+                    "AGENT_MUX_BRIEFING_SCHEMA".into(),
+                    h.schema_version.to_string(),
+                ));
                 if let Some(e) = &h.error {
                     self.notice =
                         Some(Notice::warn(format!("{} briefing snapshot: {e}", def.name)));

@@ -14,13 +14,14 @@ use std::time::{Duration, SystemTime};
 /// library's prompts.toml replaces it. It names the environment variables
 /// rather than a path so a restored session (whose prompt is saved) still
 /// resolves.
-pub const HYDRATION_HINT: &str = "Read the briefing snapshot at $AGENT_MUX_BRIEFING (JSON, schema_version 1, taken at $AGENT_MUX_BRIEFING_AS_OF) before running any command; use the agent-mux MCP tools when $AGENT_MUX_MCP is not \"unavailable\", otherwise the agent-mux trace CLI, for anything newer.";
+pub const HYDRATION_HINT: &str = "Read the briefing snapshot at $AGENT_MUX_BRIEFING (taken at $AGENT_MUX_BRIEFING_AS_OF, schema in $AGENT_MUX_BRIEFING_SCHEMA) before running any command; answer your default report from it and use tools only for newer or narrower questions.";
 
 /// The result of writing a launch's briefing snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hydrated {
     pub path: PathBuf,
     pub as_of: String,
+    pub schema_version: u32,
     /// False when the file holds a typed error envelope instead of data.
     pub ok: bool,
     pub error: Option<String>,
@@ -40,23 +41,28 @@ fn now_rfc3339() -> String {
 /// Computes every snapshot the package asks for and writes it to
 /// `<runtime_dir>/briefings/<key>.json` (temp file + rename, owner-only).
 /// A failure never blocks the launch: the file then holds
-/// `{"schema_version":1,"as_of":…,"error":{"code","message"}}`.
+/// `{"schema_version":1,"as_of":…,"error":{"code","message"}}` or
+/// `{"schema_version":2,"as_of":…,"error":{"code","message"}}`.
 /// Returns `None` when the package asks for nothing.
 pub fn hydrate(
     def: &SkillDefinition,
     trace_db: Option<&Path>,
     cwd: &Path,
+    home: &Path,
     runtime_dir: &Path,
     key: &str,
 ) -> Option<Hydrated> {
-    if !def.hydrate.contains(&Hydration::Briefing) {
+    let wants_briefing = def.hydrate.contains(&Hydration::Briefing);
+    let wants_dossier = def.hydrate.contains(&Hydration::Dossier);
+    if !wants_briefing && !wants_dossier {
         return None;
     }
-    use crate::tracing::analysis::{BriefingArgs, Request, Scope, ServiceConfig, TraceService};
+
+    let schema_version = if wants_dossier { 2 } else { 1 };
     let now = now_rfc3339();
-    let error_envelope = |code: &str, message: &str| {
+    let error_envelope = |code: &str, message: &str, schema: u32| {
         serde_json::json!({
-            "schema_version": 1,
+            "schema_version": schema,
             "as_of": now,
             "error": { "code": code, "message": message },
         })
@@ -65,32 +71,108 @@ pub fn hydrate(
         None => {
             let m = "tracing is off; there is no trace store to brief from";
             (
-                error_envelope("DB_UNAVAILABLE", m),
+                error_envelope("DB_UNAVAILABLE", m, schema_version),
                 false,
                 Some(m.to_string()),
                 now.clone(),
             )
         }
         Some(db) => {
-            let scope = Scope::workspace(cwd).unwrap_or_else(|_| Scope::all_workspaces());
-            let outcome = TraceService::new(ServiceConfig::new(db.to_path_buf(), scope))
-                .and_then(|svc| svc.execute(Request::Briefing(BriefingArgs::default())));
-            match outcome {
-                Ok(envelope) => {
-                    let as_of = envelope.as_of.clone();
-                    (
-                        serde_json::to_value(&envelope).unwrap_or(serde_json::Value::Null),
-                        true,
-                        None,
-                        as_of,
-                    )
+            if wants_dossier {
+                match crate::tracing::store::open_ro(db) {
+                    Err(err) => (
+                        error_envelope("DB_UNAVAILABLE", &err, 2),
+                        false,
+                        Some(err),
+                        now.clone(),
+                    ),
+                    Ok(conn) => {
+                        let as_of_dt = time::OffsetDateTime::now_utc();
+                        let as_of_str = as_of_dt
+                            .format(&time::format_description::well_known::Rfc3339)
+                            .unwrap_or_else(|_| now.clone());
+                        let now_ns = as_of_dt.unix_timestamp_nanos() as i64;
+                        let snap_dir = if runtime_dir.join("snapshots").exists() {
+                            runtime_dir.join("snapshots")
+                        } else if runtime_dir.exists() {
+                            runtime_dir.to_path_buf()
+                        } else {
+                            crate::tracing::analysis::default_snapshot_dir()
+                        };
+                        let (live_sessions, live_available) =
+                            match crate::tracing::analysis::read_snapshots(&snap_dir, now_ns) {
+                                Ok(snaps) => {
+                                    let avail = !snaps.is_empty();
+                                    (
+                                        snaps.into_iter().flat_map(|s| s.sessions).collect::<Vec<_>>(),
+                                        avail,
+                                    )
+                                }
+                                Err(_) => (Vec::new(), false),
+                            };
+                        let inputs = crate::tracing::analysis::dossier::DossierInputs {
+                            conn: &conn,
+                            db_path: db,
+                            workspace: cwd,
+                            home,
+                            live_sessions: &live_sessions,
+                            live_snapshot_available: live_available,
+                            as_of: as_of_dt,
+                        };
+                        match crate::tracing::analysis::dossier::build_dossier(
+                            inputs,
+                            crate::tracing::analysis::dossier::DossierConfig::default(),
+                        ) {
+                            Ok(dossier) => (
+                                serde_json::to_value(&dossier).unwrap_or(serde_json::Value::Null),
+                                true,
+                                None,
+                                as_of_str,
+                            ),
+                            Err(e) => {
+                                let code = match &e {
+                                    crate::tracing::analysis::dossier::DossierBuildError::TooLarge(_) => {
+                                        "DOSSIER_TOO_LARGE"
+                                    }
+                                    crate::tracing::analysis::dossier::DossierBuildError::SchemaUnsupported(_) => {
+                                        "SCHEMA_UNSUPPORTED"
+                                    }
+                                    _ => "BUILD_FAILED",
+                                };
+                                (
+                                    error_envelope(code, &e.to_string(), 2),
+                                    false,
+                                    Some(e.to_string()),
+                                    as_of_str,
+                                )
+                            }
+                        }
+                    }
                 }
-                Err(e) => (
-                    error_envelope(e.code(), &e.to_string()),
-                    false,
-                    Some(e.to_string()),
-                    now.clone(),
-                ),
+            } else {
+                use crate::tracing::analysis::{
+                    BriefingArgs, Request, Scope, ServiceConfig, TraceService,
+                };
+                let scope = Scope::workspace(cwd).unwrap_or_else(|_| Scope::all_workspaces());
+                let outcome = TraceService::new(ServiceConfig::new(db.to_path_buf(), scope))
+                    .and_then(|svc| svc.execute(Request::Briefing(BriefingArgs::default())));
+                match outcome {
+                    Ok(envelope) => {
+                        let as_of = envelope.as_of.clone();
+                        (
+                            serde_json::to_value(&envelope).unwrap_or(serde_json::Value::Null),
+                            true,
+                            None,
+                            as_of,
+                        )
+                    }
+                    Err(e) => (
+                        error_envelope(e.code(), &e.to_string(), 1),
+                        false,
+                        Some(e.to_string()),
+                        now.clone(),
+                    ),
+                }
             }
         }
     };
@@ -100,6 +182,7 @@ pub fn hydrate(
         return Some(Hydrated {
             path,
             as_of,
+            schema_version,
             ok: false,
             error: Some(format!("cannot write briefing snapshot: {e}")),
         });
@@ -107,6 +190,7 @@ pub fn hydrate(
     Some(Hydrated {
         path,
         as_of,
+        schema_version,
         ok,
         error,
     })

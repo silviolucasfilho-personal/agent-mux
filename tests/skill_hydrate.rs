@@ -144,13 +144,17 @@ async fn a_traced_agent_launch_gets_a_snapshot_and_a_registered_mcp_server() {
     assert!(snapshot.is_file());
     let doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&snapshot).unwrap()).unwrap();
-    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["schema_version"], 2);
     assert!(doc.get("error").is_none(), "a real envelope: {doc}");
+    assert!(doc["sessions"]["data"]["sessions"].is_array());
+    assert!(doc["skills"]["data"]["skills"].is_array());
+    assert!(doc["agents"]["data"]["agents"].is_array());
     assert_eq!(
-        doc["data"]["total_sessions"], 0,
+        doc["sessions"]["data"]["total_sessions"], 0,
         "empty store, valid briefing"
     );
     assert_eq!(doc["as_of"], env["AGENT_MUX_BRIEFING_AS_OF"]);
+    assert_eq!(env["AGENT_MUX_BRIEFING_SCHEMA"], "2");
     assert_eq!(env["AGENT_MUX_MCP"], "registered");
     assert_eq!(env["AGENT_MUX_WORKSPACE"], f.workdir.to_string_lossy());
     assert_eq!(env["AGENT_MUX_SKILL_ID"], "heimdall");
@@ -165,7 +169,10 @@ async fn a_traced_agent_launch_gets_a_snapshot_and_a_registered_mcp_server() {
         .iter()
         .find(|a| a.starts_with("/heimdall "))
         .expect("the opening prompt");
-    assert!(prompt.ends_with(HYDRATION_HINT), "{prompt}");
+    assert!(
+        prompt.contains("use tools only for newer or narrower questions"),
+        "{prompt}"
+    );
     let i = args
         .iter()
         .position(|a| a == "--mcp-config")
@@ -214,7 +221,9 @@ async fn without_tracing_the_snapshot_is_a_typed_error_and_mcp_is_unavailable() 
     let doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&env["AGENT_MUX_BRIEFING"]).unwrap())
             .unwrap();
+    assert_eq!(doc["schema_version"], 2);
     assert_eq!(doc["error"]["code"], "DB_UNAVAILABLE");
+    assert_eq!(env["AGENT_MUX_BRIEFING_SCHEMA"], "2");
     assert_eq!(env["AGENT_MUX_MCP"], "unavailable");
     assert!(
         app.notice
@@ -273,4 +282,94 @@ fn the_sweep_removes_only_old_snapshots() {
         sweep_briefings(&temp.path().join("nowhere"), Duration::from_secs(1)),
         0
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn custom_package_with_briefing_hydration_gets_schema_1_snapshot() {
+    let f = fixture();
+    let reader_dir = f.home.join("skills/reader");
+    std::fs::create_dir_all(&reader_dir).unwrap();
+    std::fs::write(
+        reader_dir.join("SKILL.md"),
+        "---\nname: reader\ndescription: Custom reader.\ncapabilities: [\"trace.read\"]\n---\nPrompt.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        reader_dir.join("skill.toml"),
+        "capabilities = [\"trace.read\"]\n[agent]\nhydrate = [\"briefing\"]\nmcp = \"auto\"\n",
+    )
+    .unwrap();
+
+    let mut app = app_with_runtime(&f);
+    app.reload_skills();
+    app.sidebar_section = SidebarSection::Agents;
+    app.selected_agent = app.skills.iter().position(|s| s.id == "reader").unwrap();
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    app.handle_key(&key(KeyCode::Char('1')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
+
+    wait_for(&f.bin.join("env.txt"));
+    let env = env_map(&f.bin.join("env.txt"));
+    let snapshot = PathBuf::from(&env["AGENT_MUX_BRIEFING"]);
+    assert!(snapshot.is_file());
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&snapshot).unwrap()).unwrap();
+    assert_eq!(doc["schema_version"], 1);
+    assert!(doc.get("error").is_none());
+    assert_eq!(doc["data"]["total_sessions"], 0);
+    assert!(doc.get("skills").is_none());
+    assert!(doc.get("agents").is_none());
+    assert_eq!(env["AGENT_MUX_BRIEFING_SCHEMA"], "1");
+
+    app.kill_all();
+    assert!(!snapshot.exists(), "removed on exit");
+}
+
+#[test]
+fn table_driven_harness_launch_construction() {
+    let def = agent_mux::skill::builtin_skills()
+        .into_iter()
+        .find(|s| s.id == "heimdall")
+        .unwrap();
+    let base = Profile {
+        name: "Test".into(),
+        command: "test".into(),
+        args: vec![],
+        default_dir: None,
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    let ws = Path::new("/work");
+
+    for harness in [
+        agent_mux::harness::Harness::Claude,
+        agent_mux::harness::Harness::Codex,
+        agent_mux::harness::Harness::Antigravity,
+    ] {
+        let launch =
+            agent_mux::skill::launch::build_skill_launch(&def, harness, &base, ws).unwrap();
+        let prompt = launch.profile.args.last().unwrap();
+        assert!(
+            prompt.contains("use tools only for newer or narrower questions"),
+            "prompt should contain hint for {harness:?}: {prompt}"
+        );
+        match harness {
+            agent_mux::harness::Harness::Claude => {
+                assert_eq!(launch.profile.command, "claude");
+                assert!(launch.profile.args.contains(&"--dangerously-skip-permissions".to_string()));
+            }
+            agent_mux::harness::Harness::Codex => {
+                assert_eq!(launch.profile.command, "codex");
+                assert!(launch.profile.args.contains(&"--yolo".to_string()));
+            }
+            agent_mux::harness::Harness::Antigravity => {
+                assert_eq!(launch.profile.command, "agy");
+                assert!(launch.profile.args.contains(&"--dangerously-skip-permissions".to_string()));
+                assert!(launch.profile.args.contains(&"--prompt-interactive".to_string()));
+            }
+        }
+    }
 }
