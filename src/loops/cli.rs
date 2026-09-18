@@ -27,6 +27,9 @@ pub const USAGE: &str = "agent-mux loop <command>
                                            scaffold only
   audit <dir> [--json]                     the Loop Ready score of a workspace
   status [<id>] [--json]                   the preview card as text
+  report <id> [--run <run_id>] [--json]    what a run found and who has to act
+  runs <id> [--all] [--json]               the run timeline, quiet runs folded
+  show <run_id> [--json]                   one run in full
   cost --pattern <id> [--every 15m] [--level L2] [--with-caching] [--json]
                                            token estimate per day
   inbox [--json]                           runs waiting on a decision
@@ -54,6 +57,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--max-runs-per-day",
     "--max-tokens-per-day",
     "--max-cost",
+    "--run",
 ];
 
 impl Args {
@@ -178,6 +182,9 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         Some("audit") => audit(&Args::parse(rest)),
         Some("status") => status(&Args::parse(rest)),
         Some("cost") => cost(&Args::parse(rest)),
+        Some("report") => report(&Args::parse(rest)),
+        Some("runs") => runs_cmd(&Args::parse(rest)),
+        Some("show") => show(&Args::parse(rest)),
         Some("inbox") => inbox(&Args::parse(rest)),
         Some("decide") => decide(&Args::parse(rest)),
         Some("help") | Some("--help") | Some("-h") | None => {
@@ -1029,4 +1036,312 @@ async fn run_loop(args: &Args) -> anyhow::Result<()> {
         Outcome::Failed => 2,
     };
     std::process::exit(code);
+}
+
+/// `agent-mux loop report <id>`: the report of one run — what it found,
+/// who has to act, what moved since the run before it. The same reading
+/// as the Loops view's Report tab.
+fn report(args: &Args) -> anyhow::Result<()> {
+    let (_, registry) = load_registry()?;
+    let id = args
+        .positional
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: agent-mux loop report <id> [--run <run_id>]"))?;
+    let entry = resolve_entry(&registry, id)?;
+    let cfg = crate::config::load()?;
+    let conn = open_ro(&cfg);
+    let runs = conn
+        .as_ref()
+        .and_then(|c| lstore::recent_runs(c, &entry.id, 50).ok())
+        .unwrap_or_default();
+    let run = match args.value("run") {
+        Some(want) => runs.iter().find(|r| r.id.starts_with(want)),
+        None => runs.first(),
+    };
+    let runtime = crate::tracing::analysis::default_snapshot_dir();
+    let (text, from_snapshot) =
+        match run.and_then(|r| crate::loops::state::read_snapshot(&runtime, &entry.id, &r.id)) {
+            Some(t) => (Some(t), true),
+            None => {
+                let newest = runs.first().map(|r| r.id.as_str());
+                let is_newest = run.is_none() || run.map(|r| r.id.as_str()) == newest;
+                let p = patterns::find(&entry.pattern);
+                let file = p.and_then(|p| {
+                    is_newest
+                        .then(|| std::fs::read_to_string(entry.workspace.join(&p.state_file)).ok())
+                        .flatten()
+                });
+                (file, false)
+            }
+        };
+    if let Some(r) = run {
+        for l in run_lines(r) {
+            println!("{l}");
+        }
+    } else {
+        println!("{} · no runs yet", entry.pattern);
+    }
+    let Some(text) = text else {
+        println!("  no report kept for this run");
+        return Ok(());
+    };
+    let report = crate::loops::state::parse(&text);
+    if args.has("json") {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if report.is_empty() {
+        println!("  the state file does not follow the loop shape");
+        return Ok(());
+    }
+    use crate::loops::state::SectionKind;
+    for kind in [
+        SectionKind::NeedsYou,
+        SectionKind::Watching,
+        SectionKind::Ignored,
+        SectionKind::Other,
+    ] {
+        let Some(section) = report.of_kind(kind) else {
+            continue;
+        };
+        let items = report.items_of(kind);
+        if items.is_empty() && section.notes.is_empty() {
+            continue;
+        }
+        println!();
+        println!("{} ({})", kind.label(), items.len());
+        for item in &items {
+            println!("  {}", item.headline());
+            if let Some(s) = &item.status {
+                println!("    {s}");
+            }
+            if kind != SectionKind::NeedsYou {
+                continue;
+            }
+            if let Some(d) = &item.human_decision {
+                println!("    Decide    {d}");
+            }
+            if let Some(a) = &item.loop_action {
+                println!("    Loop did  {a}");
+            }
+        }
+        for n in &section.notes {
+            println!("    note  {n}");
+        }
+    }
+    if let Some(m) = run.and_then(|r| r.detail_str("final_message")) {
+        println!();
+        println!("What the run said");
+        for l in m.lines() {
+            println!("  {l}");
+        }
+    }
+    println!();
+    println!(
+        "{} · last run {}",
+        if from_snapshot {
+            "the report this run wrote"
+        } else {
+            "the workspace's state file"
+        },
+        report.last_run.unwrap_or_default()
+    );
+    Ok(())
+}
+
+/// `agent-mux loop runs <id>`: the timeline, newest first, quiet runs folded.
+fn runs_cmd(args: &Args) -> anyhow::Result<()> {
+    let (_, registry) = load_registry()?;
+    let id = args
+        .positional
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: agent-mux loop runs <id> [--all] [--json]"))?;
+    let entry = resolve_entry(&registry, id)?;
+    let cfg = crate::config::load()?;
+    let Some(conn) = open_ro(&cfg) else {
+        anyhow::bail!("tracing is off — no runs recorded");
+    };
+    let runs = lstore::recent_runs(&conn, &entry.id, 100)?;
+    if args.has("json") {
+        let v: Vec<serde_json::Value> = runs
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id, "outcome": r.outcome.as_str(), "word": r.outcome.word(),
+                    "level": r.effective_level.as_str(), "items_found": r.items_found,
+                    "actions_taken": r.actions_taken, "escalations": r.escalations,
+                    "tokens": r.tokens, "cost_usd": r.cost_usd, "duration_s": r.duration_s(),
+                    "detail": r.detail,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    if runs.is_empty() {
+        println!("no runs yet — agent-mux loop run {}", &entry.id[..8]);
+        return Ok(());
+    }
+    let all = args.has("all");
+    let mut i = 0usize;
+    while i < runs.len() {
+        let key = crate::loops::run_fold_key(&runs[i]);
+        if let Some(k) = key.filter(|_| !all) {
+            let mut j = i + 1;
+            while j < runs.len() && crate::loops::run_fold_key(&runs[j]).as_deref() == Some(&k) {
+                j += 1;
+            }
+            if j - i >= 2 {
+                println!(
+                    "{} … {}   {k} ×{}",
+                    when_of(&runs[j - 1]),
+                    when_of(&runs[i]),
+                    j - i
+                );
+                i = j;
+                continue;
+            }
+        }
+        for l in run_lines(&runs[i]) {
+            println!("{l}");
+        }
+        i += 1;
+    }
+    println!();
+    println!(
+        "agent-mux loop report {} --run <run_id> reads one run",
+        &entry.id[..8]
+    );
+    Ok(())
+}
+
+/// `agent-mux loop show <run_id>`: one run in full.
+fn show(args: &Args) -> anyhow::Result<()> {
+    let id = args
+        .positional
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("usage: agent-mux loop show <run_id>"))?;
+    let cfg = crate::config::load()?;
+    let Some(conn) = open_ro(&cfg) else {
+        anyhow::bail!("tracing is off — no runs recorded");
+    };
+    let runs = lstore::all_recent_runs(&conn, 500)?;
+    let run = runs
+        .iter()
+        .find(|r| r.id.starts_with(id))
+        .ok_or_else(|| anyhow::anyhow!("no run {id:?}"))?;
+    if args.has("json") {
+        println!("{}", serde_json::to_string_pretty(&run.detail)?);
+        return Ok(());
+    }
+    for l in run_lines(run) {
+        println!("{l}");
+    }
+    println!("  pattern   {} · {}", run.pattern, run.workspace);
+    println!(
+        "  level     {} (configured {})",
+        run.effective_level.as_str(),
+        run.level.as_str()
+    );
+    if let Some(v) = run.detail_str("level_reason") {
+        println!("  capped    {v}");
+    }
+    if let Some(v) = run.detail_str("gate_violation") {
+        println!("  gate      VIOLATION {v}");
+    }
+    let files: Vec<String> = run
+        .detail
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| f.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    println!(
+        "  touched   {}",
+        if files.is_empty() {
+            "no files".to_string()
+        } else {
+            format!("{} · {}", files.len(), files.join(", "))
+        }
+    );
+    if let Some(b) = &run.branch {
+        println!("  branch    {b}  (merge it yourself; agent-mux never merges)");
+    }
+    if let Some(w) = &run.worktree {
+        println!("  worktree  {w}");
+    }
+    if let Some(l) = &run.launch_id {
+        println!("  launch    {l}");
+    }
+    if let Some(m) = run.detail_str("final_message") {
+        println!("  said");
+        for l in m.lines() {
+            println!("    {l}");
+        }
+    }
+    if let Some(stat) = run.detail_str("diff_stat") {
+        println!("  diff --stat");
+        for l in stat.lines() {
+            println!("    {l}");
+        }
+    }
+    Ok(())
+}
+
+fn when_of(r: &lstore::LoopRun) -> String {
+    crate::workflows::report::format_when(r.started_ns.unwrap_or(r.scheduled_ns))
+}
+
+/// The two lines every surface leads a run with.
+fn run_lines(r: &lstore::LoopRun) -> Vec<String> {
+    let facts = match r.outcome {
+        crate::loops::Outcome::Blocked => r
+            .detail_str("reason")
+            .unwrap_or("no reason recorded")
+            .to_string(),
+        _ => {
+            let mut f: Vec<String> = Vec::new();
+            if let Some(n) = r.items_found {
+                f.push(format!("{n} found"));
+            }
+            if let Some(n) = r.escalations.filter(|n| *n > 0) {
+                f.push(format!("{n} for you"));
+            }
+            if let Some(n) = r.actions_taken.filter(|n| *n > 0) {
+                f.push(format!("{n} action"));
+            }
+            if let Some(t) = r.tokens {
+                f.push(format!(
+                    "{} tokens",
+                    crate::loops::format_tokens(t.max(0) as u64)
+                ));
+            }
+            if r.tokens.is_some_and(|t| t > 0) {
+                f.push(crate::workflows::report::Cost::of(r.cost_usd, &r.harness).text());
+            }
+            if let Some(d) = r.duration_s() {
+                f.push(crate::workflows::report::format_duration(d));
+            }
+            f.join(" · ")
+        }
+    };
+    let mut out = vec![format!(
+        "{}   {}   {}   {facts}",
+        when_of(r),
+        r.outcome.word().to_uppercase(),
+        r.effective_level.as_str()
+    )];
+    if let Some(s) = r.detail_str("summary") {
+        out.push(format!("  {s}"));
+    } else if let Some(d) = r
+        .detail
+        .get("delta")
+        .and_then(|v| serde_json::from_value::<crate::loops::state::Delta>(v.clone()).ok())
+    {
+        out.push(format!("  {}", d.summary()));
+    }
+    out
 }

@@ -9,11 +9,13 @@ use crate::harness::Harness;
 use crate::workflows::document::Isolation;
 use crate::workflows::interp::RunStatus;
 use crate::workflows::library::Entry;
+use crate::workflows::report::{self, Block, ColumnKind, Report, RunView, Status};
 use crate::workflows::store::{self as wstore, WorkflowRun, WorkflowStep};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::cell::{Cell, RefCell};
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// What the dialog starts: a run of a document, or the planner.
@@ -323,28 +325,31 @@ pub enum ViewPane {
     Detail,
 }
 
+/// The four tabs of the detail pane. `Report` is what the run answered,
+/// `Steps` the ledger it answered from; the journal is part of `Steps`,
+/// because a session row and a journal entry are the same thing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewTab {
-    Progress,
-    Document,
+    Report,
+    Steps,
     Result,
-    Journal,
+    Document,
 }
 
 impl ViewTab {
     pub const ALL: [ViewTab; 4] = [
-        ViewTab::Progress,
-        ViewTab::Document,
+        ViewTab::Report,
+        ViewTab::Steps,
         ViewTab::Result,
-        ViewTab::Journal,
+        ViewTab::Document,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            ViewTab::Progress => "Progress",
-            ViewTab::Document => "Document",
+            ViewTab::Report => "Report",
+            ViewTab::Steps => "Steps",
             ViewTab::Result => "Result",
-            ViewTab::Journal => "Journal",
+            ViewTab::Document => "Document",
         }
     }
 }
@@ -391,6 +396,20 @@ pub struct WorkflowsViewState {
     detail_rev: u64,
     pub pending: ViewPending,
     last_refresh: Instant,
+    /// `<runtime>/workflows/<run>/` holds the notes and the null reasons a
+    /// finished run wrote about itself.
+    runtime: Option<PathBuf>,
+    cache: Option<RunFacts>,
+}
+
+/// One stored run's report, its step rows and the reason each null answer
+/// gave, built once per selection.
+struct RunFacts {
+    run_id: String,
+    status: String,
+    report: Report,
+    steps: Vec<WorkflowStep>,
+    reasons: BTreeMap<String, String>,
 }
 
 /// The detail pane's lines wrapped to one width; invalidated by a rebuild
@@ -412,7 +431,7 @@ pub struct ViewFacts<'a> {
 }
 
 impl WorkflowsViewState {
-    pub fn new(db_path: Option<&Path>, facts: &ViewFacts<'_>) -> Self {
+    pub fn new(db_path: Option<&Path>, runtime: Option<&Path>, facts: &ViewFacts<'_>) -> Self {
         let (conn, error) = match db_path.map(crate::tracing::store::open_ro) {
             Some(Ok(c)) => (Some(c), None),
             Some(Err(e)) => (None, Some(e)),
@@ -425,7 +444,7 @@ impl WorkflowsViewState {
             rows: Vec::new(),
             selected: 0,
             focus: ViewPane::Runs,
-            tab: ViewTab::Progress,
+            tab: ViewTab::Report,
             scroll_offset: 0,
             viewport_rows: Cell::new(0),
             detail_lines: Vec::new(),
@@ -434,6 +453,8 @@ impl WorkflowsViewState {
             detail_rev: 0,
             pending: ViewPending::None,
             last_refresh: Instant::now(),
+            runtime: runtime.map(Path::to_path_buf),
+            cache: None,
         };
         v.reload(facts);
         v
@@ -473,6 +494,11 @@ impl WorkflowsViewState {
             .and_then(|k| self.rows.iter().position(|r| *r == k))
             .unwrap_or(0);
         self.ensure_selectable();
+        if let (Some(c), Some(RunRow::Stored(id))) = (&self.cache, self.rows.get(self.selected))
+            && c.run_id != *id
+        {
+            self.cache = None;
+        }
         self.rebuild_detail(facts);
     }
 
@@ -653,6 +679,7 @@ impl WorkflowsViewState {
     }
 
     pub fn rebuild_detail(&mut self, facts: &ViewFacts<'_>) {
+        let tab = self.tab;
         let dim = Style::default().fg(Color::DarkGray);
         let key = Style::default().fg(Color::Yellow);
         let red = Style::default().fg(Color::Red);
@@ -689,9 +716,9 @@ impl WorkflowsViewState {
                             }
                         }
                     }
-                    lines.push(Line::styled("  ────────────────────────────────────────", dim));
-                    match self.tab {
-                        ViewTab::Document | ViewTab::Progress => {
+                    lines.push(rule());
+                    match tab {
+                        ViewTab::Document | ViewTab::Report => {
                             let text = if p.document.is_empty() {
                                 p.raw.clone().unwrap_or_default()
                             } else {
@@ -707,21 +734,62 @@ impl WorkflowsViewState {
             }
             Some(RunRow::Live(id)) => {
                 if let Some(r) = facts.live.iter().find(|r| r.run_id == id) {
-                    lines.push(row("Workflow", format!("{} ({})", r.name, r.source)));
-                    lines.push(row("Harness", r.harness.display_name().to_string()));
-                    lines.push(row("Workspace", r.workspace.display().to_string()));
-                    lines.push(row("Progress", r.progress()));
-                    lines.push(row(
-                        "Budget",
-                        match r.state.doc.budget_tokens {
-                            Some(b) => format!("{}k of {}k tokens", r.state.tokens_spent / 1000, b / 1000),
-                            None => "none".into(),
-                        },
-                    ));
-                    lines.push(Line::styled("  ────────────────────────────────────────", dim));
-                    match self.tab {
-                        ViewTab::Progress => {
+                    let status = r.state.status();
+                    let (status_word, result) = match &status {
+                        RunStatus::Running => ("running".to_string(), serde_json::Value::Null),
+                        RunStatus::Finished(v) => ("finished".to_string(), v.clone()),
+                        RunStatus::BudgetExhausted(v) => ("budget-exhausted".to_string(), v.clone()),
+                        RunStatus::Failed(e) => (format!("failed: {e}"), serde_json::Value::Null),
+                        RunStatus::Cancelled => ("cancelled".to_string(), serde_json::Value::Null),
+                    };
+                    let view = RunView {
+                        workflow: &r.name,
+                        status: status_word.split(':').next().unwrap_or("running"),
+                        harness: r.harness.as_str(),
+                        workspace: &r.workspace.display().to_string(),
+                        sessions: r.state.records.len() as i64,
+                        tokens: r.state.tokens_spent,
+                        cost_usd: Some(r.state.cost_spent),
+                        duration_s: None,
+                        result: &result,
+                        error: None,
+                        notes: &r.state.notes,
+                        doc: Some(&r.state.doc),
+                        steps: &[],
+                    };
+                    let rep = report::build(view);
+                    match tab {
+                        ViewTab::Report => {
+                            lines.extend(headline_lines(&rep));
+                            lines.push(Line::styled(
+                                format!(
+                                    "  {} · {}",
+                                    r.progress(),
+                                    match r.state.doc.budget_tokens {
+                                        Some(b) => format!(
+                                            "{} of {} tokens",
+                                            crate::loops::format_tokens(r.state.tokens_spent),
+                                            crate::loops::format_tokens(b)
+                                        ),
+                                        None => "no budget".into(),
+                                    }
+                                ),
+                                dim,
+                            ));
+                            lines.push(rule());
+                            // Per-step progress: the bar fills as sessions settle.
+                            let mut done: BTreeMap<String, (usize, usize, u64)> = BTreeMap::new();
+                            for rec in &r.state.records {
+                                let e = done.entry(rec.key.step.clone()).or_default();
+                                e.0 += 1;
+                                if rec.outcome.kind() != "null" {
+                                    e.1 += 1;
+                                }
+                                e.2 += rec.tokens;
+                            }
                             for (step, state) in r.state.step_states() {
+                                let (started, ok, tokens) =
+                                    done.get(&step).copied().unwrap_or((0, 0, 0));
                                 let style = match state {
                                     "done" => green,
                                     "running" => Style::default().fg(Color::Cyan),
@@ -729,33 +797,80 @@ impl WorkflowsViewState {
                                     _ => Style::default(),
                                 };
                                 lines.push(Line::from(vec![
-                                    Span::raw(format!("  {step:<24} ")),
-                                    Span::styled(state.to_string(), style),
+                                    Span::raw(format!("  {step:<18} ")),
+                                    Span::styled(format!("{state:<8} "), style),
+                                    Span::raw(format!(
+                                        "{:<16} {}",
+                                        if started == 0 {
+                                            String::new()
+                                        } else {
+                                            format!("{ok}/{started} answered")
+                                        },
+                                        if tokens == 0 {
+                                            String::new()
+                                        } else {
+                                            format!("{} tokens", crate::loops::format_tokens(tokens))
+                                        }
+                                    )),
                                 ]));
                             }
-                            lines.push(Line::raw(""));
-                            for s in &r.sessions {
-                                let state = if s.exited_at.is_some() { "settling" } else { "running" };
-                                lines.push(Line::from(vec![
-                                    Span::raw(format!("    {:<28} ", s.key.label())),
-                                    Span::styled(
-                                        format!("{state} on {} · Enter attaches", s.harness.as_str()),
-                                        Style::default().fg(Color::Cyan),
+                            if !r.sessions.is_empty() {
+                                lines.push(Line::raw(""));
+                                for s in &r.sessions {
+                                    let state = if s.exited_at.is_some() { "settling" } else { "running" };
+                                    lines.push(Line::from(vec![
+                                        Span::raw(format!("  {:<28} ", s.key.label())),
+                                        Span::styled(
+                                            format!("{state} on {} · Enter attaches", s.harness.as_str()),
+                                            Style::default().fg(Color::Cyan),
+                                        ),
+                                    ]));
+                                }
+                            }
+                            if !r.state.notes.is_empty() {
+                                lines.push(Line::raw(""));
+                                lines.push(Line::styled("  Notes", key));
+                                for n in r.state.notes.iter().rev().take(20) {
+                                    lines.push(Line::styled(format!("    · {n}"), dim));
+                                }
+                            }
+                        }
+                        ViewTab::Steps => {
+                            lines.extend(headline_lines(&rep));
+                            lines.push(rule());
+                            let mut by_step: Vec<(String, Vec<&crate::workflows::interp::SessionRecord>)> =
+                                Vec::new();
+                            for rec in &r.state.records {
+                                match by_step.iter_mut().find(|(s, _)| *s == rec.key.step) {
+                                    Some((_, v)) => v.push(rec),
+                                    None => by_step.push((rec.key.step.clone(), vec![rec])),
+                                }
+                            }
+                            for (step, recs) in by_step {
+                                let ok = recs.iter().filter(|r| r.outcome.kind() != "null").count();
+                                let tokens: u64 = recs.iter().map(|r| r.tokens).sum();
+                                lines.push(Line::styled(
+                                    format!(
+                                        "  {step} · {ok}/{} answered · {} tokens",
+                                        recs.len(),
+                                        crate::loops::format_tokens(tokens)
                                     ),
-                                ]));
-                            }
-                            for rec in r.state.records.iter().rev().take(30) {
-                                lines.push(Line::from(vec![
-                                    Span::raw(format!("    {:<28} ", rec.key.label())),
-                                    Span::styled(
-                                        format!("{} · {} tokens", rec.outcome.kind(), rec.tokens),
-                                        if rec.outcome.kind() == "null" { red } else { dim },
-                                    ),
-                                ]));
-                            }
-                            lines.push(Line::raw(""));
-                            for n in r.state.notes.iter().rev().take(20) {
-                                lines.push(Line::styled(format!("  · {n}"), dim));
+                                    key,
+                                ));
+                                for rec in recs {
+                                    let null = rec.outcome.kind() == "null";
+                                    lines.push(Line::from(vec![
+                                        Span::raw(format!("    {:<28} ", rec.key.label())),
+                                        Span::styled(
+                                            format!(
+                                                "{:<8} {} tokens",
+                                                rec.outcome.kind(),
+                                                crate::loops::format_tokens(rec.tokens)
+                                            ),
+                                            if null { red } else { dim },
+                                        ),
+                                    ]));
+                                }
                             }
                         }
                         ViewTab::Document => {
@@ -763,7 +878,7 @@ impl WorkflowsViewState {
                                 lines.push(Line::raw(format!("  {l}")));
                             }
                         }
-                        ViewTab::Result => match r.state.status() {
+                        ViewTab::Result => match status {
                             RunStatus::Running => {
                                 lines.push(Line::styled(
                                     "  still running · the steps that have finished so far",
@@ -791,70 +906,39 @@ impl WorkflowsViewState {
                                 lines.push(Line::styled("  cancelled", dim))
                             }
                         },
-                        ViewTab::Journal => {
-                            for rec in &r.state.records {
-                                lines.push(Line::raw(format!(
-                                    "  {:<28} {:<7} {} tokens",
-                                    rec.key.label(),
-                                    rec.outcome.kind(),
-                                    rec.tokens
-                                )));
-                            }
-                        }
                     }
                 }
             }
             Some(RunRow::Stored(id)) => {
                 if let Some(r) = self.stored.iter().find(|r| r.id == id).cloned() {
-                    lines.push(row("Workflow", format!("{} ({})", r.workflow, r.source)));
-                    lines.push(row("Harness", format!("{} · {}", r.harness, r.profile)));
-                    lines.push(row("Workspace", r.workspace.clone()));
-                    lines.push(Line::from(vec![
-                        Span::styled("  Status    ", key),
-                        Span::styled(
-                            r.status.clone(),
-                            match r.status.as_str() {
-                                "finished" => green,
-                                "running" => Style::default().fg(Color::Cyan),
-                                _ => red,
-                            },
-                        ),
-                    ]));
-                    lines.push(row(
-                        "Sessions",
-                        format!(
-                            "{} · {}k tokens · ${:.2}",
-                            r.sessions,
-                            r.tokens.unwrap_or(0) / 1000,
-                            r.cost_usd.unwrap_or(0.0)
-                        ),
-                    ));
-                    if let Some(e) = &r.error {
-                        lines.push(Line::styled(format!("  Error     {e}"), red));
-                    }
-                    let recent = facts.recent.iter().find(|x| x.run_id == r.id);
-                    lines.push(Line::styled("  ────────────────────────────────────────", dim));
-                    match self.tab {
-                        ViewTab::Progress | ViewTab::Journal => {
-                            let steps: Vec<WorkflowStep> = self
-                                .conn
-                                .as_ref()
-                                .and_then(|c| wstore::steps_of(c, &r.id).ok())
-                                .unwrap_or_default();
-                            for s in &steps {
-                                lines.push(Line::from(vec![
-                                    Span::raw(format!("  {:<28} {:<14} ", s.session, s.phase)),
-                                    Span::styled(
-                                        format!("{} · {} tokens", s.kind, s.tokens.unwrap_or(0)),
-                                        if s.kind == "null" { red } else { dim },
-                                    ),
-                                ]));
+                    let facts_for_run = self.run_facts(&r, facts);
+                    match tab {
+                        ViewTab::Report => {
+                            lines.extend(headline_lines(&facts_for_run.report));
+                            lines.push(Line::styled(
+                                format!(
+                                    "  {} · {} · {}",
+                                    started_range(&r),
+                                    r.harness,
+                                    r.workspace
+                                ),
+                                dim,
+                            ));
+                            if let Some(e) = &r.error {
+                                lines.push(Line::styled(format!("  Error     {e}"), red));
                             }
-                            if let Some(rec) = recent {
+                            lines.push(rule());
+                            lines.extend(report_lines(&facts_for_run.report));
+                        }
+                        ViewTab::Steps => {
+                            lines.extend(headline_lines(&facts_for_run.report));
+                            lines.push(rule());
+                            lines.extend(steps_lines(
+                                &facts_for_run.steps,
+                                &facts_for_run.reasons,
+                            ));
+                            if !facts_for_run.report.headline.counts.is_empty() {
                                 lines.push(Line::raw(""));
-                                for n in &rec.notes {
-                                    lines.push(Line::styled(format!("  · {n}"), dim));
-                                }
                             }
                             lines.push(Line::styled(
                                 "  r resumes this run from its journal",
@@ -877,13 +961,99 @@ impl WorkflowsViewState {
         self.scroll_offset = self.scroll_offset.min(self.max_scroll());
     }
 
+    /// The report of a stored run, with the step rows and the per-session
+    /// reasons behind it. Cached: the view rebuilds every second and a
+    /// report costs one query and two small file reads.
+    fn run_facts(&mut self, r: &WorkflowRun, facts: &ViewFacts<'_>) -> &RunFacts {
+        if self
+            .cache
+            .as_ref()
+            .is_some_and(|c| c.run_id == r.id && c.status == r.status)
+        {
+            return self.cache.as_ref().unwrap();
+        }
+        let steps: Vec<WorkflowStep> = self
+            .conn
+            .as_ref()
+            .and_then(|c| wstore::steps_of(c, &r.id).ok())
+            .unwrap_or_default();
+        let doc = crate::workflows::document::parse(&r.document).ok();
+        let (mut notes, reasons) = self.run_files(&r.id);
+        if notes.is_empty()
+            && let Some(rec) = facts.recent.iter().find(|x| x.run_id == r.id)
+        {
+            notes = rec.notes.clone();
+        }
+        let report = report::build(RunView {
+            workflow: &r.workflow,
+            status: &r.status,
+            harness: &r.harness,
+            workspace: &r.workspace,
+            sessions: r.sessions,
+            tokens: r.tokens.unwrap_or(0).max(0) as u64,
+            cost_usd: r.cost_usd,
+            duration_s: duration_s(r),
+            result: &r.result,
+            error: r.error.as_deref(),
+            notes: &notes,
+            doc: doc.as_ref(),
+            steps: &steps,
+        });
+        self.cache = Some(RunFacts {
+            run_id: r.id.clone(),
+            status: r.status.clone(),
+            report,
+            steps,
+            reasons,
+        });
+        self.cache.as_ref().unwrap()
+    }
+
+    /// `result.json` for the notes, `journal.jsonl` for the reason a
+    /// session answered `null`. Both are written by the run itself, so a
+    /// finished run explains its own gaps without a schema change.
+    fn run_files(&self, run_id: &str) -> (Vec<String>, BTreeMap<String, String>) {
+        let mut notes = Vec::new();
+        let mut reasons = BTreeMap::new();
+        let Some(dir) = self
+            .runtime
+            .as_ref()
+            .map(|r| r.join("workflows").join(run_id))
+        else {
+            return (notes, reasons);
+        };
+        if let Ok(text) = std::fs::read_to_string(dir.join("result.json"))
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(a) = v.get("notes").and_then(|n| n.as_array())
+        {
+            notes = a
+                .iter()
+                .filter_map(|n| n.as_str().map(str::to_string))
+                .collect();
+        }
+        if let Ok(text) = std::fs::read_to_string(dir.join("journal.jsonl")) {
+            for line in text.lines() {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                if let (Some(k), Some(reason)) = (
+                    v.get("key").and_then(|k| k.as_str()),
+                    v.get("reason").and_then(|r| r.as_str()),
+                ) {
+                    reasons.insert(k.to_string(), reason.to_string());
+                }
+            }
+        }
+        (notes, reasons)
+    }
+
     pub fn footer(&self) -> String {
         match &self.pending {
             ViewPending::Cancel => " Cancel this run? [y/n]".into(),
             ViewPending::SaveName(n) => {
                 format!(" Save to the library as: {n}_   [Enter] save  [Esc] cancel")
             }
-            ViewPending::None => " [Tab] tabs  [→] detail  [PgDn/End] scroll  [Enter] run/attach  [r] resume  [s] save  [x] cancel  [Esc] close".into(),
+            ViewPending::None => " [Tab] Report/Steps/Result/Document  [→] detail  [PgDn/End] scroll  [Enter] run/attach  [r] resume  [s] save  [x] cancel  [Esc] close".into(),
         }
     }
 }
@@ -971,5 +1141,297 @@ impl std::fmt::Debug for WorkflowsViewState {
             .field("selected", &self.selected)
             .field("tab", &self.tab)
             .finish()
+    }
+}
+
+fn rule() -> Line<'static> {
+    Line::styled(
+        "  ────────────────────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    )
+}
+
+fn duration_s(r: &WorkflowRun) -> Option<i64> {
+    let end = r.ended_ns?;
+    Some((end - r.started_ns) / 1_000_000_000)
+}
+
+fn started_range(r: &WorkflowRun) -> String {
+    report::format_range(r.started_ns, r.ended_ns)
+}
+
+fn status_style(s: Status) -> Style {
+    Style::default().fg(match s {
+        Status::Ok => Color::Green,
+        Status::Running => Color::Cyan,
+        Status::Attention => Color::Yellow,
+        Status::Failed => Color::Red,
+    })
+}
+
+fn badge_style(badge: &str) -> Style {
+    match badge.to_ascii_lowercase().as_str() {
+        "high" | "critical" | "blocker" | "bug" => Style::default().fg(Color::Red),
+        "medium" | "low" | "question" => Style::default().fg(Color::Yellow),
+        _ => Style::default().fg(Color::Cyan),
+    }
+}
+
+/// The three lines every surface leads with: verdict, counts, cost.
+fn headline_lines(rep: &Report) -> Vec<Line<'static>> {
+    let h = &rep.headline;
+    let dim = Style::default().fg(Color::DarkGray);
+    vec![
+        Line::from(vec![
+            Span::styled(format!("  {} ", h.status.glyph()), status_style(h.status)),
+            Span::styled(
+                format!("{:<12} ", h.status_word),
+                status_style(h.status).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(h.verdict.clone()),
+        ]),
+        Line::styled(format!("  {}", h.one_line()), dim),
+    ]
+}
+
+/// The report's blocks as rows of the detail pane.
+fn report_lines(rep: &Report) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::Yellow);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for block in &rep.blocks {
+        if !out.is_empty() {
+            out.push(Line::raw(""));
+        }
+        match block {
+            Block::Outline {
+                title,
+                bytes,
+                headings,
+                lead,
+            } => {
+                out.push(Line::from(vec![
+                    Span::styled(format!("  {} ", cap_first(title)), key),
+                    Span::styled(format!("({})", report::human_bytes(*bytes)), dim),
+                ]));
+                if headings.is_empty() && !lead.is_empty() {
+                    out.push(Line::raw(format!("    {lead}")));
+                }
+                for h in headings.iter().take(24) {
+                    let indent = "  ".repeat(h.level.saturating_sub(1));
+                    out.push(Line::raw(format!("    {indent}{}", h.text)));
+                }
+            }
+            Block::Table {
+                title,
+                columns,
+                rows,
+            } => {
+                let votes = columns.iter().any(|c| c.kind == ColumnKind::Number);
+                out.push(Line::from(vec![
+                    Span::styled(format!("  {title} ({})", rows.len()), key),
+                    Span::styled(
+                        if votes {
+                            "                                            votes".into()
+                        } else {
+                            String::new()
+                        },
+                        dim,
+                    ),
+                ]));
+                for r in rows.iter().take(60) {
+                    out.push(row_line(r, false));
+                    if let Some(d) = &r.detail {
+                        out.push(Line::styled(
+                            format!("      {}", report::short(d, 100)),
+                            dim,
+                        ));
+                    }
+                }
+            }
+            Block::Dropped { title, rows } => {
+                out.push(Line::styled(format!("  {title}"), key));
+                for r in rows.iter().take(40) {
+                    out.push(row_line(r, true));
+                    for reason in r.reasons.iter().take(3) {
+                        out.push(Line::styled(
+                            format!("      refuted: {}", report::short(reason, 96)),
+                            dim,
+                        ));
+                    }
+                }
+            }
+            Block::Evidence {
+                step,
+                badge,
+                fields,
+            } => {
+                let mut head = vec![Span::styled(format!("  {} ", cap_first(step)), key)];
+                if let Some(b) = badge {
+                    head.push(Span::styled(b.to_uppercase(), badge_style(b)));
+                }
+                out.push(Line::from(head));
+                for (name, values) in fields {
+                    if values.is_empty() {
+                        continue;
+                    }
+                    out.push(Line::styled(format!("    {name}"), dim));
+                    for v in values.iter().take(6) {
+                        out.push(Line::raw(format!("      · {}", report::short(v, 96))));
+                    }
+                    if values.len() > 6 {
+                        out.push(Line::styled(
+                            format!("      + {} more", values.len() - 6),
+                            dim,
+                        ));
+                    }
+                }
+            }
+            Block::List { title, rows } => {
+                out.push(Line::styled(format!("  {title}"), key));
+                for (name, said) in rows.iter().take(40) {
+                    out.push(Line::from(vec![
+                        Span::raw(format!("    {:<44} ", report::short(name, 44))),
+                        Span::styled(report::short(said, 52), dim),
+                    ]));
+                }
+            }
+            Block::Notes(notes) => {
+                out.push(Line::styled("  Notes", key));
+                for n in notes.iter().take(20) {
+                    out.push(Line::styled(format!("    · {n}"), dim));
+                }
+            }
+            Block::Text(t) => {
+                for l in t.lines().take(200) {
+                    out.push(Line::raw(format!("  {l}")));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn row_line(r: &report::Row, dropped: bool) -> Line<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut spans = vec![Span::raw("    ")];
+    if let Some(b) = &r.badge {
+        spans.push(Span::styled(
+            format!("{:<8} ", b.to_uppercase()),
+            if dropped { dim } else { badge_style(b) },
+        ));
+    }
+    if let Some(l) = &r.location {
+        spans.push(Span::styled(
+            format!("{:<30} ", report::short(l, 30)),
+            if dropped {
+                dim
+            } else {
+                Style::default().fg(Color::Cyan)
+            },
+        ));
+    }
+    spans.push(Span::styled(
+        format!("{:<44}", report::short(&r.title, 44)),
+        if dropped { dim } else { Style::default() },
+    ));
+    if let Some((against, cast)) = r.votes {
+        spans.push(Span::styled(format!("  {against}/{cast}"), dim));
+    }
+    Line::from(spans)
+}
+
+/// The ledger: one group per step, one row per session, with the reason a
+/// null answer gave.
+fn steps_lines(steps: &[WorkflowStep], reasons: &BTreeMap<String, String>) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::Yellow);
+    let red = Style::default().fg(Color::Red);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    if steps.is_empty() {
+        out.push(Line::styled("  (no sessions recorded)", dim));
+        return out;
+    }
+    let mut order: Vec<String> = Vec::new();
+    for s in steps {
+        if !order.contains(&s.step_id) {
+            order.push(s.step_id.clone());
+        }
+    }
+    for step_id in order {
+        let group: Vec<&WorkflowStep> = steps.iter().filter(|s| s.step_id == step_id).collect();
+        let ok = group.iter().filter(|s| s.kind != "null").count();
+        let tokens: u64 = group
+            .iter()
+            .map(|s| s.tokens.unwrap_or(0).max(0) as u64)
+            .sum();
+        let phase = group.first().map(|s| s.phase.clone()).unwrap_or_default();
+        out.push(Line::from(vec![
+            Span::styled(format!("  {phase} · {step_id}"), key),
+            Span::styled(
+                format!(
+                    " · {} session(s) · {ok} answered · {} tokens",
+                    group.len(),
+                    crate::loops::format_tokens(tokens)
+                ),
+                dim,
+            ),
+        ]));
+
+        for s in group {
+            let null = s.kind == "null";
+            let dur = match (s.started_ns, s.ended_ns) {
+                (Some(a), Some(b)) if b > a => report::format_duration((b - a) / 1_000_000_000),
+                _ => "-".into(),
+            };
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!("    {} ", if null { "✗" } else { "✓" }),
+                    if null {
+                        red
+                    } else {
+                        Style::default().fg(Color::Green)
+                    },
+                ),
+                Span::raw(format!("{:<26} ", s.session)),
+                Span::styled(
+                    format!(
+                        "{:<7} {:>8} {:>8}",
+                        s.kind,
+                        crate::loops::format_tokens(s.tokens.unwrap_or(0).max(0) as u64),
+                        dur
+                    ),
+                    dim,
+                ),
+            ]));
+            if let Some(r) = reasons.get(&s.session) {
+                out.push(Line::styled(
+                    format!("        reason  {}", report::short(r, 96)),
+                    red,
+                ));
+            }
+            if let Some(files) = s.changed_files.as_array()
+                && !files.is_empty()
+            {
+                let list: Vec<String> = files
+                    .iter()
+                    .filter_map(|f| f.as_str().map(str::to_string))
+                    .take(6)
+                    .collect();
+                out.push(Line::styled(
+                    format!("        changed {}", list.join(", ")),
+                    dim,
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn cap_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
     }
 }

@@ -4,7 +4,7 @@
 
 use crate::app::workflows::{PlanRequest, WorkflowRunRequest};
 use crate::harness::Harness;
-use crate::workflows::{library, store as wstore};
+use crate::workflows::{library, report as wreport, store as wstore};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -618,32 +618,115 @@ fn status(args: &Args) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
+    let notes = run_notes(&run.id);
+    let doc = crate::workflows::document::parse(&run.document).ok();
+    let report = wreport::build(wreport::RunView {
+        workflow: &run.workflow,
+        status: &run.status,
+        harness: &run.harness,
+        workspace: &run.workspace,
+        sessions: run.sessions,
+        tokens: run.tokens.unwrap_or(0).max(0) as u64,
+        cost_usd: run.cost_usd,
+        duration_s: run.ended_ns.map(|e| (e - run.started_ns) / 1_000_000_000),
+        result: &run.result,
+        error: run.error.as_deref(),
+        notes: &notes,
+        doc: doc.as_ref(),
+        steps: &steps,
+    });
+    // `--result` pipes the answer alone; `--steps` prints the ledger.
+    if args.flag("--result") {
+        match &run.result {
+            serde_json::Value::Null => {}
+            serde_json::Value::String(s) => println!("{s}"),
+            other => println!("{}", serde_json::to_string_pretty(other)?),
+        }
+        return Ok(());
+    }
+    if args.flag("--steps") {
+        let reasons = run_reasons(&run.id);
+        for s in &steps {
+            let dur = match (s.started_ns, s.ended_ns) {
+                (Some(a), Some(b)) if b > a => wreport::format_duration((b - a) / 1_000_000_000),
+                _ => "-".into(),
+            };
+            println!(
+                "  {} {:<26} {:<14} {:<7} {:>8} {:>8}",
+                if s.kind == "null" { "✗" } else { "✓" },
+                s.session,
+                s.phase,
+                s.kind,
+                crate::loops::format_tokens(s.tokens.unwrap_or(0).max(0) as u64),
+                dur
+            );
+            if let Some(r) = reasons.get(&s.session) {
+                println!("      reason  {r}");
+            }
+        }
+        return Ok(());
+    }
+    for l in wreport::text_lines(&report) {
+        println!("{l}");
+    }
+    println!();
     println!(
-        "{} {} on {} in {}: {}",
-        run.workflow,
-        &run.id[..8],
-        run.harness,
-        run.workspace,
-        run.status
+        "  result: agent-mux workflow status {} --result",
+        &run.id[..8]
     );
-    for s in &steps {
-        println!(
-            "  {:<28} {:<14} {:<8} {} tokens",
-            s.session,
-            s.phase,
-            s.kind,
-            s.tokens.unwrap_or(0)
-        );
-    }
-    if let Some(e) = &run.error {
-        println!("error: {e}");
-    }
-    match &run.result {
-        serde_json::Value::Null => {}
-        serde_json::Value::String(s) => println!("{s}"),
-        other => println!("{}", serde_json::to_string_pretty(other)?),
-    }
+    println!(
+        "  steps:  agent-mux workflow status {} --steps",
+        &run.id[..8]
+    );
     Ok(())
+}
+
+/// The notes and the null reasons a finished run wrote about itself.
+fn run_dir(run_id: &str) -> Option<std::path::PathBuf> {
+    Some(crate::workflows::context::run_dir(
+        &crate::tracing::analysis::default_snapshot_dir(),
+        run_id,
+    ))
+}
+
+fn run_notes(run_id: &str) -> Vec<String> {
+    let Some(dir) = run_dir(run_id) else {
+        return Vec::new();
+    };
+    std::fs::read_to_string(dir.join("result.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| {
+            v.get("notes").and_then(|n| {
+                n.as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(str::to_string))
+                        .collect()
+                })
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn run_reasons(run_id: &str) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(dir) = run_dir(run_id) else {
+        return out;
+    };
+    if let Ok(text) = std::fs::read_to_string(dir.join("journal.jsonl")) {
+        for line in text.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if let (Some(k), Some(r)) = (
+                v.get("key").and_then(|k| k.as_str()),
+                v.get("reason").and_then(|r| r.as_str()),
+            ) {
+                out.insert(k.to_string(), r.to_string());
+            }
+        }
+    }
+    out
 }
 
 fn save(args: &Args) -> anyhow::Result<()> {

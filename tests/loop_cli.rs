@@ -286,3 +286,138 @@ fn inbox_is_empty_on_a_fresh_store() {
         "{err}"
     );
 }
+
+/// `loop report`, `loop runs` and `loop show` read a stored run the way the
+/// Loops view does: the report first, the ledger behind it.
+#[test]
+fn report_runs_and_show_read_a_stored_run() {
+    use agent_mux::loops::store as lstore;
+
+    let f = fixture();
+    let ws = f.workspace.to_string_lossy().into_owned();
+    let (ok, _, err) = run(
+        &f,
+        &[
+            "add",
+            "--workspace",
+            &ws,
+            "--pattern",
+            "pr-babysitter",
+            "--profile",
+            "Claude Code",
+            "--no-scaffold",
+        ],
+    );
+    assert!(ok, "{err}");
+    let reg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&f.loops_file).unwrap()).unwrap();
+    let loop_id = reg["loops"][0]["id"].as_str().unwrap().to_string();
+
+    // one escalated run, then three quiet ones
+    let db_path = {
+        let cfg = std::fs::read_to_string(f.home.join(".agent-mux/profiles.toml")).unwrap();
+        let line = cfg.lines().find(|l| l.starts_with("db_path")).unwrap();
+        PathBuf::from(line.split('"').nth(1).unwrap())
+    };
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let store = agent_mux::tracing::store::open_rw(
+        &db_path,
+        agent_mux::tracing::store::OpenOptions::default(),
+    )
+    .unwrap();
+    drop(store);
+    let conn = agent_mux::tracing::store::open_aux(&db_path).unwrap();
+    let write = |id: &str, outcome: agent_mux::loops::Outcome, detail: serde_json::Value| {
+        let t = agent_mux::loops::parse_timestamp(id).unwrap();
+        lstore::upsert_run(
+            &conn,
+            &lstore::LoopRun {
+                id: id.into(),
+                loop_id: loop_id.clone(),
+                workspace: ws.clone(),
+                pattern: "pr-babysitter".into(),
+                harness: "claude".into(),
+                level: agent_mux::loops::Level::L1,
+                effective_level: agent_mux::loops::Level::L1,
+                launch_id: None,
+                scheduled_ns: agent_mux::loops::to_ns(t),
+                started_ns: Some(agent_mux::loops::to_ns(t)),
+                ended_ns: Some(agent_mux::loops::to_ns(t) + 63_000_000_000),
+                outcome,
+                items_found: Some(8),
+                actions_taken: Some(0),
+                escalations: Some(2),
+                tokens: Some(417_000),
+                cost_usd: Some(1.18),
+                readiness_score: Some(100),
+                worktree: None,
+                branch: None,
+                decision: None,
+                decided_ns: None,
+                detail,
+            },
+        )
+        .unwrap();
+    };
+    write(
+        "2026-09-17T17:36:53Z",
+        agent_mux::loops::Outcome::Escalated,
+        serde_json::json!({"summary": "#2238 conflicts and #1919 is blocked",
+                           "verifier": {"ran": false, "verdict": null}, "exit_code": 0,
+                           "final_message": "Two items need a human."}),
+    );
+    for id in [
+        "2026-09-17T17:21:53Z",
+        "2026-09-17T17:06:53Z",
+        "2026-09-17T16:51:53Z",
+    ] {
+        write(
+            id,
+            agent_mux::loops::Outcome::NoOp,
+            serde_json::json!({"quiet": true}),
+        );
+    }
+    drop(conn);
+
+    // the run's own copy of the state file
+    let runtime = f.home.join(".agent-mux").join("snapshots");
+    agent_mux::loops::state::write_snapshot(
+        &runtime,
+        &loop_id,
+        "2026-09-17T17:36:53Z",
+        "# PR Babysitter\n\nLast run: 2026-09-17T17:36:53Z\n\n\
+         ## High Priority (loop is acting or waiting on human)\n\n\
+         - [ ] #2238 the spec-wave bump — conflicts on workflow files\n  \
+         Loop action: reported only.\n  Human decision: rebase it on develop.\n\n\
+         ## Watch List\n\n- #2237 bump vitest — CLEAN\n",
+    )
+    .unwrap();
+
+    let (ok, out, err) = run(&f, &["report", &loop_id[..8]]);
+    assert!(ok, "{err}");
+    assert!(out.contains("NEEDS YOU"), "{out}");
+    assert!(
+        out.contains("8 found") && out.contains("2 for you"),
+        "{out}"
+    );
+    assert!(out.contains("Needs you (1)"), "{out}");
+    assert!(out.contains("#2238 the spec-wave bump"), "{out}");
+    assert!(out.contains("Decide    rebase it on develop."), "{out}");
+    assert!(out.contains("Watching (1)"), "{out}");
+    assert!(out.contains("What the run said"), "{out}");
+
+    let (ok, out, err) = run(&f, &["runs", &loop_id[..8]]);
+    assert!(ok, "{err}");
+    assert!(out.contains("quiet ×3"), "quiet runs fold\n{out}");
+    assert!(out.contains("NEEDS YOU"), "{out}");
+    let (ok, out, err) = run(&f, &["runs", &loop_id[..8], "--all"]);
+    assert!(ok, "{err}");
+    assert!(!out.contains("quiet ×3"), "--all unfolds them\n{out}");
+    assert_eq!(out.matches("QUIET").count(), 3, "{out}");
+
+    let (ok, out, err) = run(&f, &["show", "2026-09-17T17:36"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("pr-babysitter"), "{out}");
+    assert!(out.contains("touched   no files"), "{out}");
+    assert!(out.contains("Two items need a human."), "{out}");
+}

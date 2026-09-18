@@ -1613,6 +1613,33 @@ impl App {
                 row.branch = None;
             }
         }
+        // The report this run wrote. The state file is rewritten in place
+        // every run, so a copy is kept per run: it is what the Report tab
+        // of an older run shows, and what the next run's "since last run"
+        // line is computed against.
+        if let Some(p) = patterns::find(&live.pattern) {
+            let path = live.workspace.join(&p.state_file);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                let runtime = self.loops_runtime_dir();
+                let cur = crate::loops::state::parse(&text);
+                if let Some(prev) =
+                    crate::loops::state::previous_snapshot(&runtime, &live.loop_id, &live.run_id)
+                {
+                    let prev = crate::loops::state::parse(&prev);
+                    let delta = crate::loops::state::delta(&prev, &cur);
+                    if delta.is_empty() {
+                        row.set_detail("quiet", true.into());
+                    } else if let Ok(v) = serde_json::to_value(&delta) {
+                        row.set_detail("delta", v);
+                    }
+                }
+                if crate::loops::state::write_snapshot(&runtime, &live.loop_id, &live.run_id, &text)
+                    .is_ok()
+                {
+                    row.set_detail("state_snapshot", true.into());
+                }
+            }
+        }
         self.write_run_row(&row);
 
         // run log and ledger in the workspace
@@ -1674,18 +1701,33 @@ impl App {
         }
         let _ = self.save_loop_registry();
         self.invalidate_audit(&live.workspace);
-        self.notice = Some(match (&pause_reason, outcome) {
-            (Some(r), _) => Notice::warn(format!("{} paused: {r}", live.pattern)),
-            (None, Outcome::FixProposed) => Notice::info(format!(
-                "{} proposed a fix on {} — decide in the Loops view inbox (E)",
+        // The notice says what the run found and who has to act, in the
+        // words the Report tab uses. A quiet run posts nothing: on a
+        // fifteen-minute loop a notice per run is noise.
+        let what = row
+            .detail_str("summary")
+            .map(|s| s.chars().take(90).collect::<String>())
+            .or_else(|| run_delta_summary(&row))
+            .unwrap_or_else(|| outcome.word().to_string());
+        let quiet = row.detail.get("quiet").is_some() || outcome == Outcome::NoOp;
+        self.notice = match (&pause_reason, outcome) {
+            (Some(r), _) => Some(Notice::warn(format!("{} paused: {r}", live.pattern))),
+            (None, Outcome::FixProposed) => Some(Notice::info(format!(
+                "{}: fix ready on {} · {what} · E to decide",
                 live.pattern,
                 row.branch.as_deref().unwrap_or("its worktree")
-            )),
-            (None, Outcome::Escalated) => {
-                Notice::warn(format!("{} escalated — see the inbox (E)", live.pattern))
-            }
-            (None, o) => Notice::info(format!("{} finished: {}", live.pattern, o.as_str())),
-        });
+            ))),
+            (None, Outcome::Escalated) => Some(Notice::warn(format!(
+                "{}: {} need you · {what} · E to read",
+                live.pattern,
+                row.escalations.unwrap_or(0).max(1)
+            ))),
+            (None, _) if quiet => None,
+            (None, _) => Some(Notice::info(format!(
+                "{}: {what} · E to read",
+                live.pattern
+            ))),
+        };
         self.refresh_loop_cards(Instant::now());
     }
 
@@ -2046,8 +2088,10 @@ impl App {
 
     pub fn open_loops_view(&mut self) {
         let selected = self.selected_loop().map(|l| l.id.clone());
+        let runtime = self.loops_runtime_dir();
         let view = super::loops_view::LoopsViewState::new(
             self.trace_db_path.as_deref(),
+            Some(runtime.as_path()),
             &self.loop_registry,
             selected.as_deref(),
             &self.loops.worktrees_dir,
@@ -2091,22 +2135,26 @@ impl App {
             KeyCode::PageDown => view.step_detail(page),
             KeyCode::PageUp => view.step_detail(-page),
             KeyCode::Char('1') => {
-                view.tab = LoopsTab::Runs;
+                view.tab = LoopsTab::Report;
                 view.rebuild_detail();
             }
             KeyCode::Char('2') => {
-                view.tab = LoopsTab::Inbox;
+                view.tab = LoopsTab::Runs;
                 view.rebuild_detail();
             }
             KeyCode::Char('3') => {
-                view.tab = LoopsTab::Readiness;
+                view.tab = LoopsTab::Inbox;
                 view.rebuild_detail();
             }
             KeyCode::Char('4') => {
-                view.tab = LoopsTab::Budget;
+                view.tab = LoopsTab::Readiness;
                 view.rebuild_detail();
             }
             KeyCode::Char('5') => {
+                view.tab = LoopsTab::Budget;
+                view.rebuild_detail();
+            }
+            KeyCode::Char('6') => {
                 view.tab = LoopsTab::Files;
                 view.rebuild_detail();
             }
@@ -2256,3 +2304,10 @@ impl App {
 
 /// Audits cached per workspace on the App.
 pub type AuditCache = HashMap<PathBuf, (Instant, crate::loops::readiness::Audit)>;
+
+/// The one-line changelog a run stored, for the notice and the card.
+pub fn run_delta_summary(row: &LoopRun) -> Option<String> {
+    let d: crate::loops::state::Delta =
+        serde_json::from_value(row.detail.get("delta")?.clone()).ok()?;
+    (!d.is_empty()).then(|| d.summary())
+}

@@ -217,11 +217,21 @@ fn run_executes_a_library_workflow_headlessly_and_status_reports_it() {
     let (code, out, err) = run(&f, &["runs"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("two") && out.contains("finished"), "{out}");
+    // `status` reads as a report: the headline, then what the run answered
     let (code, out, _) = run(&f, &["status", &run_id[..8]]);
     assert_eq!(code, 0);
     assert!(out.contains("two") && out.contains("finished"), "{out}");
+    assert!(out.contains("2/2 answered"), "{out}");
+    assert!(out.contains("B the end"), "{out}");
+    // the ledger is one flag away, with a row per session
+    let (code, out, _) = run(&f, &["status", &run_id[..8], "--steps"]);
+    assert_eq!(code, 0);
     assert!(out.contains("  a ") || out.contains("a  "), "{out}");
-    assert!(out.contains("B the end"));
+    assert!(out.contains("✓"), "{out}");
+    // `--result` pipes the answer alone
+    let (code, out, _) = run(&f, &["status", &run_id[..8], "--result"]);
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "B the end");
     let (code, out, _) = run(&f, &["status", &run_id, "--json"]);
     assert_eq!(code, 0);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();

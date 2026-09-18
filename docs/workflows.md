@@ -11,19 +11,57 @@ Design: `docs/superpowers/specs/2026-09-17-workflows-design.md`. The idea follow
 1. `Tab` to the **Workflows** section (between Loops and History). The seven built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`. The main pane describes the selected one: its steps by phase, its args, the last run.
 2. `Enter` opens the run dialog: the workspace (the shared directory picker), the profile (one per harness the document allows), one field per declared arg, a token budget, a USD cap, and the isolation default. `Enter` again starts the run.
 3. Each session appears in **Active** as `<workflow> ▸ <step>`; attach to watch it. The section row shows `▶ done/started`.
-4. `W` opens the Workflows view: the phase tree with every session's state, the notes the interpreter wrote (items dropped, branches skipped, rounds without new items), the document, the result, the journal.
-5. When the run finishes, the notice reports sessions and tokens; the preview card shows the last run; the result is in the view's **Result** tab, in `agent-mux workflow status <run>`, and in `result.json` under the run directory.
+4. `W` opens the Workflows view: the run's report, the step ledger behind it, the document and the result.
+5. When the run finishes, the notice leads with what the run answered; the preview card shows the last run; the report is in the view and in `agent-mux workflow status <run>`, and the raw result in the **Result** tab and in `result.json` under the run directory.
 
-### Reading a result in the view
+### Reading a run in the view
 
-A result is usually longer and wider than the pane, so the detail side wraps every line instead of cutting it off and scrolls over the wrapped rows; the pane title carries the position (`12–41/380`). While a run is still going, the **Result** tab shows the steps that have already finished, one block each.
+`W` opens the view on the **Report** tab: what the run answered, the
+evidence behind it, and what it dropped on the way. The report is built
+from the document's schemas, so a new document gets one without saying
+anything: a `file` (and `line`) field becomes an openable location, a
+schema enum such as `severity` becomes a badge the rows group by, a
+`verify` step's boolean becomes a votes column plus a **Refuted** block
+carrying each refuter's reason, and an object step that is not the output
+(a critique, a classification) appears as its own block instead of being
+lost.
+
+```text
+✓ finished   Review of the branch
+1 finding · 1 high · 1 refuted · 7/7 answered · 1.9M tokens · $3.10 · 6m 12s
+Sep 18 10:02 → 10:08 · claude · /Users/me/code/agent-mux
+────────────────────────────────────────
+Report (3 KB)
+  Review of the branch
+    High
+Findings (1)                                            votes
+  HIGH     src/app/loops.rs:1572   final_message is cut at 2000 bytes   1/3
+      a long narrative loses its loop-result block
+Refuted (1)
+  LOW      src/ui.rs:40            not a bug                           2/3
+      refuted: the caller checks it
+Notes
+  · find: dropped 1 duplicate item(s)
+```
+
+A text answer is shown as its heading outline; the **Result** tab has the
+text itself, wrapped and scrollable, with the position in the pane title
+(`12–41/380`). A harness with no prices in `pricing.toml` reads `unpriced
+(agy)`, never `$0.00`.
+
+The **Steps** tab is the ledger: one group per step, one row per session,
+with its kind, tokens and duration, and under a session that answered
+`null` the reason it gave (read from the run's journal). The journal is
+part of this tab; there is no separate one. While a run is going the Report
+tab shows the same headline with a per-step progress line and the sessions
+in flight.
 
 | Key | In the view |
 | --- | --- |
-| `Tab`, `Shift+Tab` | Progress → Document → Result → Journal. The tab change goes back to the top. |
+| `Tab`, `Shift+Tab` | Report → Steps → Result → Document. The tab change goes back to the top. |
 | `↑` `↓` / `j` `k` | The runs list when the left pane has focus (`←`), the result when the right one does (`→`). |
-| `PgUp`, `PgDn`, `Space` | Scroll the result by a screen, whichever pane has focus. |
-| `Home` / `g`, `End` / `G` | Top and bottom of the result. |
+| `PgUp`, `PgDn`, `Space` | Scroll by a screen, whichever pane has focus. |
+| `Home` / `g`, `End` / `G` | Top and bottom. |
 | Wheel | Scrolls the pane that has focus. |
 
 ### Writing a prompt in a field
@@ -196,7 +234,9 @@ agent-mux workflow run <name> --workspace DIR [--harness claude|codex|agy] [--pr
     [--resume RUN_ID] [--json]                       exit 0 finished, 1 failed, 2 cancelled, 3 budget
 agent-mux workflow plan "<task>" --workspace DIR [--harness H] [--run] [--save NAME] [--json]
 agent-mux workflow runs [--json]
-agent-mux workflow status <run_id> [--json]
+agent-mux workflow status <run_id> [--json] [--result] [--steps]
+                                                     the report; --result the answer alone,
+                                                     --steps the session ledger with reasons
 agent-mux workflow save <run_id> <name>
 ```
 

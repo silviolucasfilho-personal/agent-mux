@@ -13,6 +13,7 @@ pub mod interp;
 pub mod journal;
 pub mod library;
 pub mod planner;
+pub mod report;
 pub mod result;
 pub mod store;
 
