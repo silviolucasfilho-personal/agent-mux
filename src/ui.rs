@@ -3099,7 +3099,7 @@ fn draw_skills_view(f: &mut Frame, view: &SkillsViewState, app: &App) {
     }
 
     let footer_text = Line::styled(
-        " [Tab] tab  [←/→] pane  [↑/↓] select  [1-3] harness  [r] rescan  [T] traces  [Esc] close",
+        " [e] edit  [v] validate  [Tab] tab  [↑/↓] select  [1-3] harness  [r] rescan  [T] traces  [Esc] close",
         Style::default().fg(Color::Black).bg(Color::Cyan),
     );
     f.render_widget(Paragraph::new(footer_text), footer);

@@ -291,6 +291,100 @@ fn workbench_restores_the_selected_skill_and_harness() {
     );
 }
 
+#[test]
+fn e_edits_a_managed_package_and_keeps_workbench_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = app_in(temp.path(), vec![shell_profile("test")]);
+    app.library_root = Some(temp.path().to_path_buf());
+    app.editor = Some("true".into());
+    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
+
+    app.handle_key(&key(KeyCode::Char('e')), Instant::now());
+    let request = app.take_editor_request().expect("skill editor request");
+    assert_eq!(request.asset_id, "skills/heimdall/SKILL.md");
+    assert_eq!(request.path, temp.path().join("skills/heimdall/SKILL.md"));
+    assert!(request.path.is_file(), "built-in text is materialized");
+    assert!(matches!(app.mode, Mode::SkillsView(_)));
+
+    std::fs::write(
+        &request.path,
+        "---\nname: heimdall\ndescription: Edited test package.\n---\nBody.\n",
+    )
+    .unwrap();
+    app.editor_finished(request, Ok(()));
+    assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
+    let Mode::SkillsView(view) = &app.mode else {
+        panic!()
+    };
+    assert_eq!(
+        view.selected_package().unwrap().0.description,
+        "Edited test package."
+    );
+    assert!(app.notice.as_ref().unwrap().text.contains("saved"));
+
+    app.handle_key(&key(KeyCode::Char('e')), Instant::now());
+    let request = app.take_editor_request().unwrap();
+    std::fs::write(
+        &request.path,
+        "---\nname: other\ndescription: Wrong package id.\n---\nBody.\n",
+    )
+    .unwrap();
+    app.editor_finished(request, Ok(()));
+    assert_eq!(
+        selected(&app),
+        Some(("heimdall".into(), Harness::Claude)),
+        "an invalid edit remains selected so it can be repaired"
+    );
+    assert!(
+        app.notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("frontmatter name"),
+        "{:?}",
+        app.notice
+    );
+    app.handle_key(&key(KeyCode::Char('v')), Instant::now());
+    assert!(
+        app.notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("frontmatter name")
+    );
+}
+
+#[test]
+fn v_validates_the_current_package_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = app_in(temp.path(), vec![shell_profile("test")]);
+    let dir = temp.path().join("skills/plain");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: plain\ndescription: Valid package.\n---\nBody.\n",
+    )
+    .unwrap();
+    app.reload_skills();
+    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
+    let Mode::SkillsView(view) = &mut app.mode else {
+        panic!()
+    };
+    assert!(view.select_package("plain", Harness::Claude));
+
+    app.handle_key(&key(KeyCode::Char('v')), Instant::now());
+    assert_eq!(app.notice.as_ref().unwrap().text, "plain is valid");
+
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: other\ndescription: Broken identity.\n---\n",
+    )
+    .unwrap();
+    app.handle_key(&key(KeyCode::Char('v')), Instant::now());
+    let notice = &app.notice.as_ref().unwrap().text;
+    assert!(notice.contains("frontmatter name"), "{notice}");
+}
+
 #[tokio::test]
 async fn s_opens_a_read_only_view_grouped_by_harness() {
     let temp = tempfile::tempdir().unwrap();

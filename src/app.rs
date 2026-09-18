@@ -4036,6 +4036,22 @@ impl App {
         if request.asset_id.starts_with("workflows/") {
             self.reload_workflow_list();
         }
+        let skill_validation = request
+            .asset_id
+            .strip_prefix("skills/")
+            .and_then(|rest| rest.strip_suffix("/SKILL.md"))
+            .map(|id| {
+                let result = request
+                    .path
+                    .parent()
+                    .ok_or_else(|| format!("{} has no package directory", request.path.display()))
+                    .and_then(|dir| {
+                        crate::skill::load_skill_dir(dir)
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                    });
+                (id.to_string(), result)
+            });
         let root = self.library_root();
         let catalog = crate::assets::Catalog::load(&root, self.config_path.as_deref());
         let asset = catalog.get(&request.asset_id).cloned();
@@ -4045,7 +4061,26 @@ impl App {
             view.reload(&self.loop_registry);
             view.select_id(&request.asset_id, &self.loop_registry);
         }
+        if let Mode::SkillsView(view) = &mut self.mode {
+            let selected = view.selected_identity();
+            if skill_validation
+                .as_ref()
+                .is_none_or(|(_, validation)| validation.is_ok())
+            {
+                view.reload();
+                if let Some((id, harness)) = selected {
+                    view.select_package(&id, harness);
+                }
+            }
+        }
         if self.notice.is_some() {
+            return;
+        }
+        if let Some((id, validation)) = skill_validation {
+            self.notice = Some(match validation {
+                Ok(()) => Notice::info(format!("saved skills/{id}/SKILL.md")),
+                Err(error) => Notice::warn(error),
+            });
             return;
         }
         self.notice = Some(match asset {
@@ -4345,6 +4380,17 @@ impl App {
     }
 
     fn handle_skills_key(&mut self, key: &KeyEvent) {
+        match key.code {
+            KeyCode::Char('e') => {
+                self.edit_selected_skill();
+                return;
+            }
+            KeyCode::Char('v') => {
+                self.validate_selected_skill();
+                return;
+            }
+            _ => {}
+        }
         let Mode::SkillsView(view) = &mut self.mode else {
             return;
         };
@@ -4443,6 +4489,67 @@ impl App {
             KeyCode::End => view.scroll_offset = view.max_scroll(),
             _ => {}
         }
+    }
+
+    fn edit_selected_skill(&mut self) {
+        let selected = match &self.mode {
+            Mode::SkillsView(view) => view.selected_package().map(|(skill, _)| skill.clone()),
+            _ => None,
+        };
+        let Some(skill) = selected else {
+            self.notice = Some(Notice::info(
+                "native harness skills are read-only here; edit their source path directly",
+            ));
+            return;
+        };
+        let asset_id = format!("skills/{}/SKILL.md", skill.id);
+        let path = if let Some(dir) = skill.dir {
+            dir.join("SKILL.md")
+        } else {
+            let catalog = crate::assets::Catalog::load(
+                &self.library_root(),
+                self.config_path.as_deref(),
+            );
+            let Some(asset) = catalog.get(&asset_id) else {
+                self.notice = Some(Notice::error(format!(
+                    "configuration entry for {} was not found",
+                    skill.id
+                )));
+                return;
+            };
+            match catalog.create_override(asset) {
+                Ok(path) => path,
+                Err(error) => {
+                    self.notice = Some(Notice::warn(error));
+                    return;
+                }
+            }
+        };
+        self.request_editor(path, asset_id);
+    }
+
+    fn validate_selected_skill(&mut self) {
+        let selected = match &self.mode {
+            Mode::SkillsView(view) => view.selected_package().map(|(skill, _)| skill.clone()),
+            _ => None,
+        };
+        let Some(skill) = selected else {
+            self.notice = Some(Notice::info(
+                "native harness skills are not validated as agent-mux packages",
+            ));
+            return;
+        };
+        let package_dir = skill.dir.or_else(|| {
+            let override_dir = self.library_root().join("skills").join(&skill.id);
+            override_dir.join("SKILL.md").is_file().then_some(override_dir)
+        });
+        self.notice = Some(match package_dir {
+            Some(dir) => match crate::skill::load_skill_dir(&dir) {
+                Ok(_) => Notice::info(format!("{} is valid", skill.id)),
+                Err(error) => Notice::warn(error.to_string()),
+            },
+            None => Notice::info(format!("{} is valid (built-in)", skill.id)),
+        });
     }
 
     /// Launches a harness session around `skill_id`, or attaches to the one
