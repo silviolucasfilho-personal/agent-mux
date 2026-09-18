@@ -5,7 +5,7 @@
 //! and bounded 64 KiB response.
 
 use crate::tracing::analysis::agents::{AgentDossier, analyze_agents};
-use crate::tracing::analysis::model::{AnalysisError, LiveSession, SessionCard};
+use crate::tracing::analysis::model::{AnalysisError, LiveSession, RuntimeState, SessionCard};
 use crate::tracing::analysis::query::briefing;
 use crate::tracing::analysis::skills::{SkillDossier, analyze_skills_for_dossier};
 use crate::tracing::inventory;
@@ -249,6 +249,9 @@ where
                 {
                     "QUERY_TIMEOUT"
                 }
+                AnalysisError::Sqlite(e) if e.to_string().contains("interrupted") => {
+                    "QUERY_TIMEOUT"
+                }
                 _ => "SECTION_QUERY_FAILED",
             };
             (
@@ -264,6 +267,199 @@ where
             )
         }
     }
+}
+
+/// Builds the schema-v2 Heimdall startup dossier from the provided inputs.
+struct ProgressHandlerGuard<'a>(&'a Connection);
+
+impl<'a> ProgressHandlerGuard<'a> {
+    fn install(conn: &'a Connection, deadline: Instant) -> Self {
+        let _ = conn.progress_handler(
+            20,
+            Some(move || Instant::now() >= deadline),
+        );
+        ProgressHandlerGuard(conn)
+    }
+}
+
+impl<'a> Drop for ProgressHandlerGuard<'a> {
+    fn drop(&mut self) {
+        let _ = self.0.progress_handler(0, None::<fn() -> bool>);
+    }
+}
+
+/// Syncs `dossier.health.bytes` with the serialized byte length iteratively.
+fn sync_serialized_bytes(dossier: &mut HeimdallDossier) -> Result<usize, DossierBuildError> {
+    for _ in 0..5 {
+        let bytes = serde_json::to_vec(dossier)
+            .map_err(|e| DossierBuildError::Analysis(AnalysisError::Correlation(e.to_string())))?
+            .len();
+        if dossier.health.bytes == bytes {
+            return Ok(bytes);
+        }
+        dossier.health.bytes = bytes;
+    }
+    let final_bytes = serde_json::to_vec(dossier)
+        .map_err(|e| DossierBuildError::Analysis(AnalysisError::Correlation(e.to_string())))?
+        .len();
+    dossier.health.bytes = final_bytes;
+    Ok(final_bytes)
+}
+
+/// Enforces the byte budget by reducing examples, zero-activity definitions,
+/// and metric rows in deterministic order.
+pub fn finalize_dossier(
+    mut dossier: HeimdallDossier,
+    config: &DossierConfig,
+) -> Result<HeimdallDossier, DossierBuildError> {
+    if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+        return Ok(dossier);
+    }
+
+    // Step 1: Remove examples from lowest-ranked rows first
+    let has_any_examples = |d: &HeimdallDossier| {
+        d.skills.data.skills.iter().any(|s| !s.examples.is_empty())
+            || d.agents.data.agents.iter().any(|a| !a.examples.is_empty())
+    };
+
+    while sync_serialized_bytes(&mut dossier)? > config.max_bytes && has_any_examples(&dossier) {
+        let mut removed = false;
+        if let Some(skill) = dossier
+            .skills
+            .data
+            .skills
+            .iter_mut()
+            .rev()
+            .find(|s| !s.examples.is_empty())
+        {
+            skill.examples.clear();
+            dossier.skills.truncated = true;
+            dossier.skills.status = CoverageStatus::Partial;
+            let warn = "Examples omitted to fit byte limit".to_string();
+            if !dossier.skills.warnings.contains(&warn) {
+                dossier.skills.warnings.push(warn);
+            }
+            removed = true;
+            if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                return Ok(dossier);
+            }
+        }
+        if let Some(agent) = dossier
+            .agents
+            .data
+            .agents
+            .iter_mut()
+            .rev()
+            .find(|a| !a.examples.is_empty())
+        {
+            agent.examples.clear();
+            dossier.agents.truncated = true;
+            dossier.agents.status = CoverageStatus::Partial;
+            let warn = "Examples omitted to fit byte limit".to_string();
+            if !dossier.agents.warnings.contains(&warn) {
+                dossier.agents.warnings.push(warn);
+            }
+            removed = true;
+            if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                return Ok(dossier);
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+
+    // Step 2: Remove lowest-ranked zero-activity definition rows
+    while sync_serialized_bytes(&mut dossier)? > config.max_bytes {
+        let mut removed = false;
+        if let Some(skill) = dossier.skills.data.skills.last() {
+            if !skill.has_activity() {
+                dossier.skills.data.skills.pop();
+                dossier.skills.truncated = true;
+                dossier.skills.status = CoverageStatus::Partial;
+                let warn = "Zero-activity definition rows omitted to fit byte limit".to_string();
+                if !dossier.skills.warnings.contains(&warn) {
+                    dossier.skills.warnings.push(warn);
+                }
+                removed = true;
+                if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                    return Ok(dossier);
+                }
+            }
+        }
+        if let Some(agent) = dossier.agents.data.agents.last() {
+            if !agent.has_activity() {
+                dossier.agents.data.agents.pop();
+                dossier.agents.truncated = true;
+                dossier.agents.status = CoverageStatus::Partial;
+                let warn = "Zero-activity definition rows omitted to fit byte limit".to_string();
+                if !dossier.agents.warnings.contains(&warn) {
+                    dossier.agents.warnings.push(warn);
+                }
+                removed = true;
+                if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                    return Ok(dossier);
+                }
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+
+    // Step 3: Remove lowest-ranked metric rows
+    while sync_serialized_bytes(&mut dossier)? > config.max_bytes {
+        let mut removed = false;
+        if !dossier.skills.data.skills.is_empty() {
+            dossier.skills.data.skills.pop();
+            dossier.skills.truncated = true;
+            dossier.skills.status = CoverageStatus::Partial;
+            let warn = "Metric rows omitted to fit byte limit".to_string();
+            if !dossier.skills.warnings.contains(&warn) {
+                dossier.skills.warnings.push(warn);
+            }
+            removed = true;
+            if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                return Ok(dossier);
+            }
+        }
+        if !dossier.agents.data.agents.is_empty() {
+            dossier.agents.data.agents.pop();
+            dossier.agents.truncated = true;
+            dossier.agents.status = CoverageStatus::Partial;
+            let warn = "Metric rows omitted to fit byte limit".to_string();
+            if !dossier.agents.warnings.contains(&warn) {
+                dossier.agents.warnings.push(warn);
+            }
+            removed = true;
+            if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                return Ok(dossier);
+            }
+        }
+        if !dossier.sessions.data.sessions.is_empty() {
+            dossier.sessions.data.sessions.pop();
+            dossier.sessions.truncated = true;
+            dossier.sessions.status = CoverageStatus::Partial;
+            let warn = "Session cards omitted to fit byte limit".to_string();
+            if !dossier.sessions.warnings.contains(&warn) {
+                dossier.sessions.warnings.push(warn);
+            }
+            removed = true;
+            if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                return Ok(dossier);
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+
+    let final_bytes = sync_serialized_bytes(&mut dossier)?;
+    if final_bytes > config.max_bytes {
+        return Err(DossierBuildError::TooLarge(final_bytes));
+    }
+
+    Ok(dossier)
 }
 
 /// Builds the schema-v2 Heimdall startup dossier from the provided inputs.
@@ -316,6 +512,10 @@ pub fn build_dossier(
     // 4. Scan inventory definitions once
     let definitions = inventory::inventory_all(inputs.workspace, inputs.home);
 
+    // Install progress handler with deadline for section queries
+    let deadline_instant = build_start + config.deadline;
+    let guard = ProgressHandlerGuard::install(inputs.conn, deadline_instant);
+
     // 5. Build Sessions section
     let (sessions_section, sessions_ms) = orchestrate_section(|| {
         let b = briefing(
@@ -328,7 +528,23 @@ pub fn build_dossier(
         let total_matching = b.cards.len();
         let truncated = b.cards.len() > config.max_session_cards;
         let mut cards = b.cards;
+        cards.sort_by(|a, b| {
+            let a_live = a.runtime_state != RuntimeState::Exited;
+            let b_live = b.runtime_state != RuntimeState::Exited;
+            b_live
+                .cmp(&a_live)
+                .then_with(|| b.last_active_ns.cmp(&a.last_active_ns))
+                .then_with(|| a.session_key.cmp(&b.session_key))
+        });
         cards.truncate(config.max_session_cards);
+
+        let mut warnings = b.warnings;
+        if truncated {
+            warnings.push(format!(
+                "Session cards capped at {} (total matching: {})",
+                config.max_session_cards, total_matching
+            ));
+        }
 
         let data = SessionDossier {
             sessions: cards,
@@ -338,7 +554,7 @@ pub fn build_dossier(
             total_tokens: b.total_tokens,
             total_cost_usd: b.total_cost_usd,
         };
-        Ok((data, total_matching, b.warnings, truncated))
+        Ok((data, total_matching, warnings, truncated))
     });
 
     // 6. Build Skills section
@@ -354,7 +570,14 @@ pub fn build_dossier(
         let total_matching = d.skills.len();
         let truncated = d.skills.len() > config.max_skill_rows;
         d.skills.truncate(config.max_skill_rows);
-        Ok((d, total_matching, Vec::new(), truncated))
+        let mut warnings = Vec::new();
+        if truncated {
+            warnings.push(format!(
+                "Skill rows capped at {} (total matching: {})",
+                config.max_skill_rows, total_matching
+            ));
+        }
+        Ok((d, total_matching, warnings, truncated))
     });
 
     // 7. Build Agents section
@@ -370,8 +593,18 @@ pub fn build_dossier(
         let total_matching = d.agents.len();
         let truncated = d.agents.len() > config.max_agent_rows;
         d.agents.truncate(config.max_agent_rows);
-        Ok((d, total_matching, Vec::new(), truncated))
+        let mut warnings = Vec::new();
+        if truncated {
+            warnings.push(format!(
+                "Agent rows capped at {} (total matching: {})",
+                config.max_agent_rows, total_matching
+            ));
+        }
+        Ok((d, total_matching, warnings, truncated))
     });
+
+    // Explicitly drop progress handler guard before health queries
+    drop(guard);
 
     // 8. Health telemetry
     let content_mode = inputs
@@ -419,7 +652,7 @@ pub fn build_dossier(
         examples_per_category: config.examples_per_category,
     };
 
-    let mut dossier = HeimdallDossier {
+    let dossier = HeimdallDossier {
         schema_version: 2,
         as_of: as_of_str,
         scope: DossierScope {
@@ -432,12 +665,7 @@ pub fn build_dossier(
         agents: agents_section,
     };
 
-    // Calculate preliminary serialized size
-    if let Ok(bytes) = serde_json::to_vec(&dossier) {
-        dossier.health.bytes = bytes.len();
-    }
-
-    Ok(dossier)
+    finalize_dossier(dossier, &config)
 }
 
 #[cfg(test)]

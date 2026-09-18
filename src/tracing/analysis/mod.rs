@@ -24,7 +24,7 @@ pub use correlation::resolve_binding;
 pub use dossier::{
     CoverageStatus, DossierBuildError, DossierConfig, DossierError, DossierHealth, DossierInputs,
     DossierScope, DossierSection, DossierWindow, DossierWindows, HeimdallDossier, SessionDossier,
-    build_dossier,
+    build_dossier, finalize_dossier,
 };
 pub use evidence::{extract_command, extract_target_file, snippet};
 pub use live::{
