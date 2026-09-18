@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod correlation;
 pub mod cursor;
+pub mod dossier;
 pub mod evidence;
 pub mod live;
 pub mod metrics;
@@ -20,6 +21,11 @@ pub use skills::{
     SkillDossier, SkillEvidence, SkillEvidenceKind, SkillFact, analyze_skills_for_dossier,
 };
 pub use correlation::resolve_binding;
+pub use dossier::{
+    CoverageStatus, DossierBuildError, DossierConfig, DossierError, DossierHealth, DossierInputs,
+    DossierScope, DossierSection, DossierWindow, DossierWindows, HeimdallDossier, SessionDossier,
+    build_dossier,
+};
 pub use evidence::{extract_command, extract_target_file, snippet};
 pub use live::{
     LiveSnapshot, MAX_SNAPSHOT_BYTES, clean_up_snapshot, is_stale, publish_snapshot, read_snapshots,
