@@ -3099,7 +3099,7 @@ fn draw_skills_view(f: &mut Frame, view: &SkillsViewState, app: &App) {
     }
 
     let footer_text = Line::styled(
-        " [Tab] tab  [←/→] pane  [↑/↓] select  [1-3] harness  [r] rescan  [T] traces  [Esc] close",
+        " [e] edit  [v] check  [l] run  [Tab] details/runs  [↑/↓] select  [1-3] harness  [T] trace  [Esc] close",
         Style::default().fg(Color::Black).bg(Color::Cyan),
     );
     f.render_widget(Paragraph::new(footer_text), footer);
@@ -3242,7 +3242,7 @@ fn draw_skill_executions(f: &mut Frame, area: Rect, view: &SkillsViewState) {
                 lines.push((Line::raw(""), None));
                 lines.push((
                     Line::styled(
-                        "  launch it with Enter, or `agent-mux trace import --discover` for past sessions",
+                        "  run it with l, or `agent-mux trace import --discover` for past sessions",
                         dim,
                     ),
                     None,

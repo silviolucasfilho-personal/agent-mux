@@ -70,9 +70,13 @@ The same preparation runs for sessions restored at startup and for respawns.
 
 A skill is a **singleton**: one live session per skill id. While it runs, the sidebar shows `<name> [<harness>]` and the Skills view shows `running [<harness>]`, Enter attaches to it, and asking for another harness attaches with a warning. Close the session to start it on another harness. Restored sessions count.
 
-## 5. The Skills view
+## 5. The Skills workbench
 
-Press `S` for a read-only view of every skill under each harness it declares: agent-mux packages and the harness's own native skills, each with its install state (`installed ✓`, `stale`, `not managed`, `not installed`, or `running [harness]`). The Details tab shows the package, where it is installed for that harness and the store's statistics; the Executions tab lists the sessions launched with it and the turns that loaded it, and `T` opens the Trace Browser on one of them. `1`-`3` filter by harness, `r` rescans. Installing and launching happen elsewhere: the Agents sidebar and the CLI below.
+Press `S` for the workbench view of every skill under each harness it declares: agent-mux packages and the harness's own native skills, each with its install state (`installed ✓`, `stale`, `not managed`, `not installed`, or `running [harness]`). The Details tab shows the package, where it is installed for that harness and the store's statistics; the Executions tab lists the sessions launched with it and the turns that loaded it.
+
+For an agent-mux package, `e` opens its `SKILL.md` in the configured external editor. A compiled-in skill is first copied to the configuration library as an override. The workbench validates the saved package when the editor returns and keeps an invalid edit selected so it can be repaired. `v` validates again without launching. Harness-native skills remain read-only because agent-mux does not own their source.
+
+`l` installs the selected package for that row's harness and launches it, or attaches when that singleton skill is already running. Opening `S` again returns to the same skill and the Executions tab. `T` opens the selected execution in the Trace Browser. `1`-`3` filter by harness and `r` rescans.
 
 ## 6. CLI
 

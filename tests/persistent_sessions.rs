@@ -157,9 +157,12 @@ async fn test_sidebar_split_navigation() {
     app.handle_key(&key(KeyCode::Down), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Agents);
 
-    // Down in Agents transitions into Loops, (with no loops) on into
-    // Workflows, and past the last workflow into History
-    app.handle_key(&key(KeyCode::Down), Instant::now());
+    // Down traverses every discovered skill before transitioning into Loops.
+    // App::new intentionally reads the user's library, so this must not assume
+    // the machine has exactly one visible skill.
+    while app.sidebar_section == SidebarSection::Agents {
+        app.handle_key(&key(KeyCode::Down), Instant::now());
+    }
     assert_eq!(app.sidebar_section, SidebarSection::Loops);
     app.handle_key(&key(KeyCode::Down), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Workflows);
@@ -187,8 +190,10 @@ async fn test_sidebar_split_navigation() {
     app.handle_key(&key(KeyCode::Up), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Agents);
 
-    // Up in Agents transitions back to Active
-    app.handle_key(&key(KeyCode::Up), Instant::now());
+    // Up traverses the discovered skills before returning to Active.
+    while app.sidebar_section == SidebarSection::Agents {
+        app.handle_key(&key(KeyCode::Up), Instant::now());
+    }
     assert_eq!(app.sidebar_section, SidebarSection::Active);
 
     app.kill_all();
