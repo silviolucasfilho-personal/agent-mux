@@ -147,20 +147,24 @@ pub fn parse_skill_toml(text: &str) -> Result<(), String> {
 pub enum Hydration {
     /// `Request::Briefing` scoped to the launch workspace, last 24 hours.
     Briefing,
+    /// Schema-v2 dossier containing sessions, skills, agents, and health.
+    Dossier,
 }
 
 impl Hydration {
-    pub const ALL: [Hydration; 1] = [Hydration::Briefing];
+    pub const ALL: [Hydration; 2] = [Hydration::Briefing, Hydration::Dossier];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Hydration::Briefing => "briefing",
+            Hydration::Dossier => "dossier",
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim() {
             "briefing" => Some(Hydration::Briefing),
+            "dossier" => Some(Hydration::Dossier),
             _ => None,
         }
     }
@@ -432,6 +436,11 @@ pub fn parse_skill(
         if !hydrate.contains(&h) {
             hydrate.push(h);
         }
+    }
+    if hydrate.contains(&Hydration::Briefing) && hydrate.contains(&Hydration::Dossier) {
+        return Err(err(
+            "`briefing` and `dossier` hydration are mutually exclusive; choose one".into(),
+        ));
     }
     let mcp = match agent.mcp.as_deref() {
         Some(m) => McpMode::parse(m).ok_or_else(|| {

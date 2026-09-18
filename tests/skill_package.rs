@@ -50,7 +50,7 @@ fn builtin_heimdall_is_a_complete_package() {
             "reference/skills.md"
         ]
     );
-    assert_eq!(h.hydrate, vec![Hydration::Briefing]);
+    assert_eq!(h.hydrate, vec![Hydration::Dossier]);
     assert_eq!(h.mcp, McpMode::Auto);
     assert!(h.warnings.is_empty());
     for needle in [
@@ -72,6 +72,27 @@ fn builtin_heimdall_is_a_complete_package() {
         fs::read_to_string("skills/heimdall/SKILL.md").unwrap(),
         agent_mux::skill::BUILTIN_HEIMDALL_SKILL
     );
+}
+
+#[test]
+fn dossier_hydration_is_valid_and_exclusive_with_briefing() {
+    let dossier = parse_skill(
+        "---\nname: audit\ndescription: Use when asked to \"audit\".\n---\nBody.\n",
+        Some("capabilities = [\"trace.read\"]\n[agent]\nhydrate = [\"dossier\"]\n"),
+        vec![],
+        None,
+    )
+    .unwrap();
+    assert_eq!(dossier.hydrate, vec![Hydration::Dossier]);
+
+    let both = parse_skill(
+        "---\nname: audit\ndescription: Use when asked to \"audit\".\n---\nBody.\n",
+        Some("capabilities = [\"trace.read\"]\n[agent]\nhydrate = [\"briefing\", \"dossier\"]\n"),
+        vec![],
+        None,
+    )
+    .unwrap_err();
+    assert!(both.message.contains("mutually exclusive"));
 }
 
 #[test]
