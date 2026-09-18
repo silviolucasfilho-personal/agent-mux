@@ -1,6 +1,6 @@
 //! The Agents sidebar (Heimdall on the main screen: navigation, the harness
-//! picker, the one-session rule) and the read-only Skills view (`S`):
-//! grouping by harness, navigation, the harness filter, install state.
+//! picker, the one-session rule) and the Skills workbench (`S`): grouping by
+//! harness, editing, validation, launching, navigation, and install state.
 
 use agent_mux::app::{App, Mode, SidebarSection, SkillRow, SkillsPane, SkillsTab};
 use agent_mux::config::Profile;
@@ -352,6 +352,13 @@ fn e_edits_a_managed_package_and_keeps_workbench_context() {
             .text
             .contains("frontmatter name")
     );
+    app.handle_key(&key(KeyCode::Char('l')), Instant::now());
+    assert!(app.sessions.is_empty());
+    let notice = &app.notice.as_ref().unwrap().text;
+    assert!(
+        notice.contains("invalid") && notice.contains("not launched"),
+        "{notice}"
+    );
 }
 
 #[test]
@@ -385,8 +392,48 @@ fn v_validates_the_current_package_content() {
     assert!(notice.contains("frontmatter name"), "{notice}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn s_opens_a_read_only_view_grouped_by_harness() {
+async fn l_launches_the_selected_harness_and_reopening_s_restores_executions() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = fake_claude(&temp.path().join("bin"));
+    let profile = Profile {
+        name: "Claude Code".into(),
+        command: script.to_string_lossy().into_owned(),
+        args: vec![],
+        default_dir: Some(temp.path().to_string_lossy().into_owned()),
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    let mut app = app_in(temp.path(), vec![profile]);
+    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
+    assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
+
+    app.handle_key(&key(KeyCode::Char('l')), Instant::now());
+    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
+    assert_eq!(
+        app.sessions[app.selected].skill_id.as_deref(),
+        Some("heimdall")
+    );
+    assert!(
+        temp.path()
+            .join(".claude/skills/heimdall/SKILL.md")
+            .is_file()
+    );
+
+    app.mode = Mode::Control;
+    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
+    assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
+    let Mode::SkillsView(view) = &app.mode else {
+        panic!()
+    };
+    assert_eq!(view.tab, SkillsTab::Executions);
+    app.kill_all();
+}
+
+#[tokio::test]
+async fn s_opens_the_workbench_grouped_by_harness() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = app_in(temp.path(), vec![shell_profile("test")]);
     app.handle_key(&key(KeyCode::Char('S')), Instant::now());
@@ -423,7 +470,7 @@ async fn s_opens_a_read_only_view_grouped_by_harness() {
         "the view is read-only: {text}"
     );
 
-    // Enter only moves focus; the row is still not installed afterwards
+    // Enter only moves focus; explicit l is required to launch.
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     let Mode::SkillsView(v) = &app.mode else {
         panic!()

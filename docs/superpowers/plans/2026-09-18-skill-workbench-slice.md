@@ -31,11 +31,11 @@
 - Produces: `SkillsViewState::select_package(&mut self, id: &str, harness: Harness) -> bool`
 - Produces: `SkillsViewState::selected_identity(&self) -> Option<(String, Harness)>`
 
-- [ ] **Step 1: Write a failing test** proving a reopened Skills view can restore a package and harness by stable identity.
-- [ ] **Step 2: Run** `cargo test --test skill_ui workbench_restores_the_selected_skill_and_harness -- --exact` and confirm it fails because the selection API is absent.
-- [ ] **Step 3: Implement** public stable identity access and selection using the existing row key logic, then reload executions and details through `on_selection_changed`.
-- [ ] **Step 4: Run the focused test and** `cargo test --test persistent_sessions`.
-- [ ] **Step 5: Commit** the stable navigation behavior.
+- [x] **Step 1: Write a failing test** proving a reopened Skills view can restore a package and harness by stable identity.
+- [x] **Step 2: Run** `cargo test --test skill_ui workbench_restores_the_selected_skill_and_harness -- --exact` and confirm it fails because the selection API is absent.
+- [x] **Step 3: Implement** public stable identity access and selection using the existing row key logic, then reload executions and details through `on_selection_changed`.
+- [x] **Step 4: Run the focused test and** `cargo test --test persistent_sessions`.
+- [x] **Step 5: Commit** the stable navigation behavior.
 
 ### Task 2: Edit and validate from the Skills view
 
@@ -48,11 +48,11 @@
 - Consumes: selected managed package from `SkillsViewState::selected_package`.
 - Produces: `e` materializes a built-in override or opens a user package's `SKILL.md`; `v` reloads the selected package with `skill::load_skill_dir` and reports a concrete validation result.
 
-- [ ] **Step 1: Write failing tests** proving `e` creates and opens `skills/<id>/SKILL.md`, the editor return stays on the selected skill, and `v` reports valid or invalid package content.
-- [ ] **Step 2: Run the focused tests** and confirm they fail because Skills view keys do not edit or validate.
-- [ ] **Step 3: Implement** `edit_selected_skill`, `validate_selected_skill`, and Skills-view editor reload. Built-ins use `Catalog::create_override`; user packages open their own `SKILL.md`. Native skills receive a read-only notice.
-- [ ] **Step 4: Update** the Skills footer and empty execution hint to advertise named actions.
-- [ ] **Step 5: Run** `cargo test --test skill_ui` and commit.
+- [x] **Step 1: Write failing tests** proving `e` creates and opens `skills/<id>/SKILL.md`, the editor return stays on the selected skill, and `v` reports valid or invalid package content.
+- [x] **Step 2: Run the focused tests** and confirm they fail because Skills view keys do not edit or validate.
+- [x] **Step 3: Implement** `edit_selected_skill`, `validate_selected_skill`, and Skills-view editor reload. Built-ins use `Catalog::create_override`; user packages open their own `SKILL.md`. Native skills receive a read-only notice.
+- [x] **Step 4: Update** the Skills footer and empty execution hint to advertise named actions.
+- [x] **Step 5: Run** `cargo test --test skill_ui` and commit.
 
 ### Task 3: Launch, rerun, and inspect without losing context
 
@@ -67,9 +67,9 @@
 - Consumes: `(skill_id, harness)` from the selected package row.
 - Produces: `l` launches or attaches using `App::launch_skill`; opening `S` again restores the most recent workbench selection; the Executions tab continues to refresh and `T` opens the selected trace.
 
-- [ ] **Step 1: Write failing tests** proving `l` launches the selected harness and reopening `S` restores that row with Executions selected.
-- [ ] **Step 2: Run the focused tests** and confirm the missing behavior.
-- [ ] **Step 3: Add** an app-level skill workbench bookmark, update it before edit/launch/trace transitions, and apply it in `open_skills_view`.
-- [ ] **Step 4: Document** the edit/validate/launch/trace journey and shortcuts in `docs/skills.md`.
-- [ ] **Step 5: Run** `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo build`.
-- [ ] **Step 6: Commit** the complete slice.
+- [x] **Step 1: Write failing tests** proving `l` launches the selected harness and reopening `S` restores that row with Executions selected.
+- [x] **Step 2: Run the focused tests** and confirm the missing behavior.
+- [x] **Step 3: Add** an app-level skill workbench bookmark, update it before edit/launch/trace transitions, and apply it in `open_skills_view`.
+- [x] **Step 4: Document** the edit/validate/launch/trace journey and shortcuts in `docs/skills.md`.
+- [x] **Step 5: Run** `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo build`.
+- [x] **Step 6: Commit** the complete slice.

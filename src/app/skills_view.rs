@@ -365,7 +365,10 @@ impl SkillsViewState {
                 harness: row_harness,
             } => {
                 *row_harness == harness
-                    && self.packages.get(*index).is_some_and(|package| package.id == id)
+                    && self
+                        .packages
+                        .get(*index)
+                        .is_some_and(|package| package.id == id)
             }
             _ => false,
         }) else {
