@@ -553,6 +553,24 @@ pub struct Finding {
     pub message: String,
 }
 
+/// A finding serializable across JSON and schema boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct DefinitionFinding {
+    pub level: String,
+    pub rule: String,
+    pub message: String,
+}
+
+impl From<&Finding> for DefinitionFinding {
+    fn from(value: &Finding) -> Self {
+        Self {
+            level: value.level.as_str().to_string(),
+            rule: value.rule.to_string(),
+            message: value.message.clone(),
+        }
+    }
+}
+
 pub struct LintContext<'a> {
     /// Tool names the harness has — a built-in floor plus every tool the
     /// store has seen it call. Empty means unknown: the rule is skipped.

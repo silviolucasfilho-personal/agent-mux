@@ -1,5 +1,6 @@
 //! Shared trace analysis, evidence models, and correlation services.
 
+pub mod agents;
 pub mod correlation;
 pub mod cursor;
 pub mod evidence;
@@ -10,6 +11,10 @@ pub mod query;
 pub mod scope;
 pub mod service;
 
+pub use agents::{
+    AgentCostShareFact, AgentDefinitionFact, AgentDossier, AgentFact, AgentFailureFact,
+    AgentInvocationFact, analyze_agents,
+};
 pub use correlation::resolve_binding;
 pub use evidence::{extract_command, extract_target_file, snippet};
 pub use live::{
