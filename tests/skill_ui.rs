@@ -268,6 +268,29 @@ async fn skill_sessions_survive_a_restart() {
 
 // ------------------------------------------------------------ Skills view
 
+#[test]
+fn workbench_restores_the_selected_skill_and_harness() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = app_in(temp.path(), vec![shell_profile("test")]);
+    std::fs::create_dir_all(temp.path().join("skills/plain")).unwrap();
+    std::fs::write(
+        temp.path().join("skills/plain/SKILL.md"),
+        "---\nname: plain\ndescription: Plain test skill.\n---\nBody.\n",
+    )
+    .unwrap();
+    app.reload_skills();
+    app.handle_key(&key(KeyCode::Char('S')), Instant::now());
+
+    let Mode::SkillsView(view) = &mut app.mode else {
+        panic!()
+    };
+    assert!(view.select_package("plain", Harness::Codex));
+    assert_eq!(
+        view.selected_identity(),
+        Some(("plain".to_string(), Harness::Codex))
+    );
+}
+
 #[tokio::test]
 async fn s_opens_a_read_only_view_grouped_by_harness() {
     let temp = tempfile::tempdir().unwrap();

@@ -344,6 +344,38 @@ impl SkillsViewState {
         }
     }
 
+    /// Stable identity used when returning to the workbench after an edit,
+    /// launch, or trace drill-down. Native definitions are intentionally not
+    /// returned because agent-mux does not own their lifecycle.
+    pub fn selected_identity(&self) -> Option<(String, Harness)> {
+        self.selected_package()
+            .map(|(package, harness)| (package.id.clone(), harness))
+    }
+
+    /// Restores a managed package row by stable identity. Clears a harness
+    /// filter when it would hide the requested row.
+    pub fn select_package(&mut self, id: &str, harness: Harness) -> bool {
+        if self.harness_filter.is_some_and(|filter| filter != harness) {
+            self.harness_filter = None;
+            self.rebuild_rows();
+        }
+        let Some(selected) = self.rows.iter().position(|row| match row {
+            SkillRow::Package {
+                index,
+                harness: row_harness,
+            } => {
+                *row_harness == harness
+                    && self.packages.get(*index).is_some_and(|package| package.id == id)
+            }
+            _ => false,
+        }) else {
+            return false;
+        };
+        self.selected = selected;
+        self.on_selection_changed();
+        true
+    }
+
     pub fn selected_native(&self) -> Option<&Definition> {
         match self.selected_row()? {
             SkillRow::Native { index } => self.native.get(*index),
