@@ -62,6 +62,42 @@ async fn test_persistence_roundtrip_across_restarts() {
 }
 
 #[tokio::test]
+async fn uppercase_x_removes_every_exited_session_and_keeps_running_sessions() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sessions_path = temp_dir.path().join("saved_sessions.json");
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![make_echo_profile("test-agent")], None, tx);
+    app.set_pane_size(24, 80);
+    app.set_sessions_file(&sessions_path);
+
+    for _ in 0..3 {
+        app.mode = Mode::NewSession(agent_mux::app::DialogState::new(&app.profiles));
+        app.handle_key(&key(KeyCode::Enter), Instant::now());
+    }
+    let running_id = app.sessions[1].id;
+    for index in [0, 2] {
+        app.sessions[index].kill();
+        app.sessions[index].tracker.on_exit(Some(0));
+    }
+    app.selected = 2;
+
+    app.handle_key(&key(KeyCode::Char('X')), Instant::now());
+
+    assert_eq!(app.sessions.len(), 1);
+    assert_eq!(app.sessions[0].id, running_id);
+    assert_eq!(app.selected, 0);
+    let saved = agent_mux::persistence::load_saved_sessions(&sessions_path);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].profile.name, "test-agent");
+
+    app.handle_key(&key(KeyCode::Char('X')), Instant::now());
+    assert_eq!(app.sessions.len(), 1);
+    assert_eq!(app.sessions[0].id, running_id);
+    assert_eq!(app.selected, 0);
+    app.kill_all();
+}
+
+#[tokio::test]
 async fn test_sidebar_split_navigation() {
     let (tx, _rx) = mpsc::channel(32);
     let mut app = App::new(vec![make_echo_profile("echo1")], None, tx);
@@ -109,6 +145,9 @@ async fn test_sidebar_split_navigation() {
     assert_eq!(app.sidebar_section, SidebarSection::Loops);
 
     app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
+
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
 
     app.handle_key(&key(KeyCode::Tab), Instant::now());
@@ -118,10 +157,15 @@ async fn test_sidebar_split_navigation() {
     app.handle_key(&key(KeyCode::Down), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Agents);
 
-    // Down in Agents transitions into Loops, and (with no loops) on into History
+    // Down in Agents transitions into Loops, (with no loops) on into
+    // Workflows, and past the last workflow into History
     app.handle_key(&key(KeyCode::Down), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Loops);
     app.handle_key(&key(KeyCode::Down), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
+    while app.sidebar_section == SidebarSection::Workflows {
+        app.handle_key(&key(KeyCode::Down), Instant::now());
+    }
     assert_eq!(app.sidebar_section, SidebarSection::History);
     assert_eq!(app.selected_history, 0);
 
@@ -133,8 +177,12 @@ async fn test_sidebar_split_navigation() {
     app.handle_key(&key(KeyCode::Up), Instant::now());
     assert_eq!(app.selected_history, 0);
 
-    // Up at top of History transitions to Loops, then Agents
+    // Up at top of History transitions to Workflows, through it to Loops, then Agents
     app.handle_key(&key(KeyCode::Up), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
+    while app.sidebar_section == SidebarSection::Workflows {
+        app.handle_key(&key(KeyCode::Up), Instant::now());
+    }
     assert_eq!(app.sidebar_section, SidebarSection::Loops);
     app.handle_key(&key(KeyCode::Up), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Agents);
@@ -226,8 +274,8 @@ async fn test_sidebar_mouse_click_selection() {
         },
     ];
 
-    let (active_rect, agents_rect, _loops_rect, history_rect) =
-        agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.skills.len(), 0);
+    let (active_rect, agents_rect, _loops_rect, _workflows_rect, history_rect) =
+        agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.skills.len(), 0, 0);
 
     // Click in history area
     let click_hist = MouseEvent {

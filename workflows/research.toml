@@ -1,0 +1,60 @@
+# Answer a question about the workspace: a multi-modal sweep, deep reads
+# of what it surfaces, a synthesis, and a completeness critic.
+[workflow]
+name = "research"
+description = "Sweep the workspace by several search modes, deep-read what they surface, synthesize an answer and have a critic list what is missing."
+when_to_use = "Answering a non-trivial question about a codebase where one search angle would miss things."
+output = "answer"
+
+[args.question]
+description = "The question to answer."
+required = true
+
+[schemas.leads]
+fields.leads = { type = "array", items = "lead", required = true }
+[schemas.lead]
+fields.path = { type = "string", required = true }
+fields.why = { type = "string", required = true }
+[schemas.reading]
+fields.path = { type = "string", required = true }
+fields.facts = { type = "array", items = "string", required = true }
+fields.open_questions = { type = "array", items = "string", required = true }
+[schemas.critique]
+fields.missing = { type = "array", items = "string", required = true }
+fields.confidence = { type = "string", enum = ["high", "medium", "low"], required = true }
+
+[[steps]]
+id = "sweep"
+kind = "fanout"
+phase = "Sweep"
+over = ["by file and directory names", "by symbol and identifier", "by git history", "by documentation and comments"]
+skill = "wf-search"
+args = { mode = "{item}", question = "{args.question}" }
+result = "leads"
+
+[[steps]]
+id = "read"
+kind = "pipeline"
+phase = "Read"
+over = "sweep[*].leads[*]"
+dedupe_by = ["path"]
+skill = "wf-deep-read"
+args = { path = "{item.path}", why = "{item.why}", question = "{args.question}" }
+result = "reading"
+
+[[steps]]
+id = "answer"
+kind = "single"
+phase = "Synthesize"
+skill = "wf-synthesize"
+input = "read"
+args = { subject = "the answer to: {args.question}", shape = "the answer first, then the evidence per file, then open questions" }
+
+[[steps]]
+id = "critique"
+kind = "single"
+phase = "Critique"
+skill = "wf-critic"
+input = "answer"
+args = { question = "{args.question}" }
+result = "critique"

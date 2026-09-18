@@ -1,0 +1,44 @@
+# Classify a request, then run the branch that fits it.
+[workflow]
+name = "triage-route"
+description = "Classify a request as a bug, a feature or a question, then run the branch that fits: reproduce and localize, design, or answer."
+when_to_use = "Incoming requests of unknown shape (issues, messages) that deserve different handling."
+output = "wrap"
+
+[args.request]
+description = "The request text."
+required = true
+
+[schemas.label]
+fields.label = { type = "string", enum = ["bug", "feature", "question"], required = true }
+fields.reason = { type = "string", required = true }
+
+[[steps]]
+id = "classify"
+kind = "route"
+phase = "Classify"
+skill = "wf-classify"
+args = { request = "{args.request}" }
+result = "label"
+branches = { bug = ["reproduce"], feature = ["design"], question = ["answer"] }
+
+[[steps]]
+id = "reproduce"
+skill = "wf-triage-bug"
+args = { request = "{args.request}" }
+
+[[steps]]
+id = "design"
+skill = "wf-triage-feature"
+args = { request = "{args.request}" }
+
+[[steps]]
+id = "answer"
+prompt = "Answer this question about the workspace, citing files: {args.request}"
+
+[[steps]]
+id = "wrap"
+kind = "single"
+phase = "Report"
+skill = "wf-synthesize"
+args = { subject = "the triage of: {args.request}", shape = "the classification, then the branch's findings ({reproduce}{design}{answer})" }

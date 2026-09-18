@@ -20,3 +20,4 @@ pub mod status;
 pub mod tracing;
 pub mod transcript;
 pub mod ui;
+pub mod workflows;

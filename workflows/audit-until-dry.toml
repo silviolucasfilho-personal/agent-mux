@@ -1,0 +1,40 @@
+# Loop-until-dry discovery: keep spawning finders until two rounds add
+# nothing new, then verify every finding through three lenses.
+[workflow]
+name = "audit-until-dry"
+description = "Keep searching for issues on a topic until two consecutive rounds find nothing new, then verify each finding through three lenses."
+when_to_use = "Thorough audits where the number of issues is unknown: security, error handling, concurrency, resource leaks."
+output = "confirmed"
+
+[args.topic]
+description = "What to audit for: 'injection', 'unchecked errors', 'races', 'leaked resources'."
+required = true
+
+[schemas.findings]
+fields.findings = { type = "array", items = "finding", required = true }
+[schemas.finding]
+fields.file = { type = "string", required = true }
+fields.line = { type = "integer" }
+fields.title = { type = "string", required = true }
+fields.why = { type = "string", required = true }
+[schemas.verdict]
+fields.refuted = { type = "boolean", required = true }
+fields.reason = { type = "string", required = true }
+
+[[steps]]
+id = "sweep"
+kind = "until"
+phase = "Find"
+skill = "wf-find"
+args = { topic = "{args.topic}" }
+result = "findings"
+dedupe_by = ["file", "line"]
+rounds_without_new = 2
+max_rounds = 8
+
+[[steps]]
+id = "confirmed"
+kind = "pipeline"
+phase = "Verify"
+over = "sweep"
+verify = { skill = "wf-refute", votes = 3, result = "verdict", keep = "refuted < 2" }

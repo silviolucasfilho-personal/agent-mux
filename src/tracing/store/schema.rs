@@ -1,9 +1,9 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 12;
+pub const SCHEMA_VERSION: i32 = 13;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
 // uses a separate database rather than silently replacing its history.
@@ -696,4 +696,50 @@ SELECT loop_id, pattern, workspace,
        COALESCE(SUM(cost_usd), 0)                          AS cost_usd,
        MAX(started_ns)                                     AS last_started_ns
 FROM loop_runs GROUP BY loop_id;
+"#;
+
+// v13: Workflows. One row per run and one per session (`workflow_steps`),
+// written by the App; `launches.metadata` carries `workflow_run_id`,
+// `workflow_step` and `workflow_phase` for the same sessions.
+const V13: &str = r#"
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id             TEXT PRIMARY KEY,
+  workflow       TEXT NOT NULL,
+  source         TEXT NOT NULL,
+  document_hash  TEXT NOT NULL,
+  document       TEXT NOT NULL,
+  workspace      TEXT NOT NULL,
+  harness        TEXT NOT NULL,
+  profile        TEXT NOT NULL,
+  args           TEXT NOT NULL DEFAULT 'null',
+  budget_tokens  INTEGER,
+  started_ns     INTEGER NOT NULL,
+  ended_ns       INTEGER,
+  status         TEXT NOT NULL CHECK (status IN ('running','finished','failed','cancelled','budget-exhausted')),
+  sessions       INTEGER NOT NULL DEFAULT 0,
+  tokens         INTEGER,
+  cost_usd       REAL,
+  result         TEXT NOT NULL DEFAULT 'null',
+  error          TEXT,
+  resumed_from   TEXT
+);
+CREATE INDEX IF NOT EXISTS workflow_runs_recent ON workflow_runs (started_ns DESC);
+CREATE TABLE IF NOT EXISTS workflow_steps (
+  run_id         TEXT NOT NULL REFERENCES workflow_runs (id),
+  session        TEXT NOT NULL,
+  step_id        TEXT NOT NULL,
+  item           TEXT NOT NULL DEFAULT 'null',
+  launch_id      TEXT,
+  phase          TEXT NOT NULL,
+  harness        TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  started_ns     INTEGER,
+  ended_ns       INTEGER,
+  tokens         INTEGER,
+  cost_usd       REAL,
+  worktree       TEXT,
+  changed_files  TEXT NOT NULL DEFAULT 'null',
+  result         TEXT NOT NULL DEFAULT 'null',
+  PRIMARY KEY (run_id, session)
+);
 "#;

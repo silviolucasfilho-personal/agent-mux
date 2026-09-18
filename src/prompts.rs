@@ -29,6 +29,12 @@ pub struct Prompts {
     pub loop_run: String,
     /// `[skill] hydration_hint`.
     pub hydration_hint: String,
+    /// `[workflow] run`: a workflow session running a step skill.
+    pub workflow_run: String,
+    /// `[workflow] inline`: the preamble of an inline prompt step.
+    pub workflow_inline: String,
+    /// `[workflow] plan`: the planner's opening prompt.
+    pub workflow_plan: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -37,6 +43,8 @@ struct Doc {
     loop_: LoopDoc,
     #[serde(default)]
     skill: SkillDoc,
+    #[serde(default)]
+    workflow: WorkflowDoc,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -47,6 +55,13 @@ struct LoopDoc {
 #[derive(Debug, Default, Deserialize)]
 struct SkillDoc {
     hydration_hint: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WorkflowDoc {
+    run: Option<String>,
+    inline: Option<String>,
+    plan: Option<String>,
 }
 
 /// The values filled into `loop.run`.
@@ -67,6 +82,9 @@ impl Prompts {
         Prompts {
             loop_run: doc.loop_.run.unwrap_or_default(),
             hydration_hint: doc.skill.hydration_hint.unwrap_or_default(),
+            workflow_run: doc.workflow.run.unwrap_or_default(),
+            workflow_inline: doc.workflow.inline.unwrap_or_default(),
+            workflow_plan: doc.workflow.plan.unwrap_or_default(),
         }
     }
 
@@ -79,6 +97,15 @@ impl Prompts {
         }
         if let Some(h) = doc.skill.hydration_hint {
             p.hydration_hint = h;
+        }
+        if let Some(r) = doc.workflow.run {
+            p.workflow_run = r;
+        }
+        if let Some(i) = doc.workflow.inline {
+            p.workflow_inline = i;
+        }
+        if let Some(pl) = doc.workflow.plan {
+            p.workflow_plan = pl;
         }
         Ok(p)
     }
@@ -149,7 +176,45 @@ pub fn validate(text: &str) -> Vec<String> {
     {
         problems.push("skill.hydration_hint is empty".into());
     }
+    for (key, text, needs_invocation) in [
+        ("workflow.run", &doc.workflow.run, true),
+        ("workflow.inline", &doc.workflow.inline, false),
+        ("workflow.plan", &doc.workflow.plan, true),
+    ] {
+        if let Some(t) = text {
+            if t.trim().is_empty() {
+                problems.push(format!("{key} is empty"));
+            } else if needs_invocation && !t.contains("{invocation}") {
+                problems.push(format!("{key} does not name {{invocation}}"));
+            }
+            for p in placeholders(t) {
+                if !WORKFLOW_PLACEHOLDERS.contains(&p.as_str()) {
+                    problems.push(format!("{key}: unknown placeholder {{{p}}}"));
+                }
+            }
+        }
+    }
     problems
+}
+
+/// Placeholders the `[workflow]` prompts accept.
+pub const WORKFLOW_PLACEHOLDERS: &[&str] = &["invocation", "workflow", "step", "context", "plan"];
+
+/// Fills a `[workflow]` prompt.
+pub fn render_workflow(
+    template: &str,
+    invocation: &str,
+    workflow: &str,
+    step: &str,
+    context: &str,
+    plan: &str,
+) -> String {
+    template
+        .replace("{invocation}", invocation)
+        .replace("{workflow}", workflow)
+        .replace("{step}", step)
+        .replace("{context}", context)
+        .replace("{plan}", plan)
 }
 
 /// Problems with one loop run template (also used for a pattern's `prompt`).

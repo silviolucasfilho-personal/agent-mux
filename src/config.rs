@@ -162,6 +162,81 @@ pub struct LoopRunnerConfig {
     pub worktrees_dir: Option<String>,
 }
 
+/// `[workflows]`: the workflow runtime.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct WorkflowsConfig {
+    pub enabled: Option<bool>,
+    /// Sessions at a time across runs (default min(4, cpus - 2), ceiling 16).
+    pub max_concurrent: Option<u32>,
+    pub session_timeout_s: Option<u64>,
+    pub run_timeout_s: Option<u64>,
+    pub max_sessions: Option<usize>,
+    /// `"none"` (default) | `"worktree"`.
+    pub default_isolation: Option<String>,
+    /// `"always"` (default) | `"never"`.
+    pub dynamic_approval: Option<String>,
+    pub default_budget_tokens: Option<u64>,
+}
+
+/// `[workflows]` resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowSettings {
+    pub enabled: bool,
+    pub max_concurrent: u32,
+    pub session_timeout_s: u64,
+    pub run_timeout_s: u64,
+    pub max_sessions: usize,
+    pub default_isolation_worktree: bool,
+    pub dynamic_approval: bool,
+    pub default_budget_tokens: u64,
+}
+
+impl Default for WorkflowSettings {
+    fn default() -> Self {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        WorkflowSettings {
+            enabled: true,
+            max_concurrent: cpus.saturating_sub(2).clamp(1, 4) as u32,
+            session_timeout_s: 900,
+            run_timeout_s: 7200,
+            max_sessions: 1000,
+            default_isolation_worktree: false,
+            dynamic_approval: true,
+            default_budget_tokens: 0,
+        }
+    }
+}
+
+pub fn resolve_workflows(cfg: Option<&WorkflowsConfig>) -> WorkflowSettings {
+    let mut s = WorkflowSettings::default();
+    let Some(c) = cfg else {
+        return s;
+    };
+    if let Some(e) = c.enabled {
+        s.enabled = e;
+    }
+    if let Some(m) = c.max_concurrent {
+        s.max_concurrent = m.clamp(1, 16);
+    }
+    if let Some(t) = c.session_timeout_s {
+        s.session_timeout_s = t.max(30);
+    }
+    if let Some(t) = c.run_timeout_s {
+        s.run_timeout_s = t.max(60);
+    }
+    if let Some(n) = c.max_sessions {
+        s.max_sessions = n.max(1);
+    }
+    s.default_isolation_worktree = c.default_isolation.as_deref() == Some("worktree");
+    s.dynamic_approval = c.dynamic_approval.as_deref() != Some("never");
+    if let Some(b) = c.default_budget_tokens {
+        s.default_budget_tokens = b;
+    }
+    s
+}
+
 /// `[loops]` resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopRunnerSettings {
@@ -253,6 +328,9 @@ pub struct Config {
     /// The Loop Engineering scheduler (`[loops]`).
     #[serde(default)]
     pub loops: Option<LoopRunnerConfig>,
+    /// The workflow runtime (`[workflows]`).
+    #[serde(default)]
+    pub workflows: Option<WorkflowsConfig>,
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
@@ -635,6 +713,7 @@ pub fn load() -> anyhow::Result<Config> {
         tracing: None,
         agents: None,
         loops: None,
+        workflows: None,
         hide_sidebar: false,
         editor: None,
         loaded_from: None,
@@ -661,6 +740,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
         tracing: None,
         agents: None,
         loops: None,
+        workflows: None,
         hide_sidebar: false,
         editor: None,
         loaded_from: None,

@@ -480,7 +480,7 @@ impl App {
         registry::save(&path, &self.loop_registry)
     }
 
-    fn loops_runtime_dir(&self) -> PathBuf {
+    pub fn loops_runtime_dir(&self) -> PathBuf {
         self.runtime_dir
             .clone()
             .unwrap_or_else(crate::tracing::analysis::default_snapshot_dir)
@@ -1339,6 +1339,7 @@ impl App {
             &env,
             Some(pattern.triage_skill()),
             Some(launch),
+            None,
             &extra_args,
         ) {
             Ok(s) => s,

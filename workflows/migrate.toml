@@ -1,0 +1,55 @@
+# Discover every site of a mechanical migration, transform each one in
+# its own worktree, verify each result.
+[workflow]
+name = "migrate"
+description = "Discover every site of a mechanical change, transform each in an isolated worktree, and verify each result with tests."
+when_to_use = "Repetitive migrations across many files: an API rename, a deprecated call, a pattern to replace."
+output = "verified"
+default_isolation = "worktree"
+
+[args.pattern]
+description = "What to find: the old API, call shape or pattern."
+required = true
+[args.replacement]
+description = "What each site should become, in words the transformer can follow."
+required = true
+
+[schemas.sites]
+fields.sites = { type = "array", items = "site", required = true }
+[schemas.site]
+fields.path = { type = "string", required = true }
+fields.summary = { type = "string", required = true }
+[schemas.change]
+fields.path = { type = "string", required = true }
+fields.changed = { type = "boolean", required = true }
+fields.summary = { type = "string", required = true }
+[schemas.verdict]
+fields.refuted = { type = "boolean", required = true }
+fields.reason = { type = "string", required = true }
+
+[[steps]]
+id = "sites"
+kind = "single"
+phase = "Discover"
+skill = "wf-discover-sites"
+isolation = "none"
+args = { pattern = "{args.pattern}" }
+result = "sites"
+
+[[steps]]
+id = "transformed"
+kind = "pipeline"
+phase = "Transform"
+over = "sites.sites[*]"
+skill = "wf-transform"
+args = { path = "{item.path}", pattern = "{args.pattern}", replacement = "{args.replacement}" }
+result = "change"
+concurrency = 3
+
+[[steps]]
+id = "verified"
+kind = "pipeline"
+phase = "Verify"
+over = "transformed"
+keep = "changed == true"
+verify = { skill = "wf-verify-site", votes = 1, result = "verdict", keep = "refuted < 1" }

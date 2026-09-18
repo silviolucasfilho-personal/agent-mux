@@ -78,13 +78,19 @@ fn render(app: &App, width: u16, height: u16) -> String {
 #[test]
 fn the_sidebar_has_four_sections_and_tab_visits_loops() {
     let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
-    let (active, agents, loops, history) = agent_mux::ui::sidebar_areas(33, 1, 0);
+    let (active, agents, loops, _workflows, history) = agent_mux::ui::sidebar_areas(33, 1, 0, 0);
     assert!(active.height >= 3 && agents.height >= 3 && loops.height >= 3 && history.height >= 4);
     assert_eq!(loops.y, agents.y + agents.height);
-    assert_eq!(history.y, loops.y + loops.height);
-    // a short terminal still fits every block
-    let (a, b, c, d) = agent_mux::ui::sidebar_areas(13, 1, 0);
-    assert_eq!(a.height + b.height + c.height + d.height, 12);
+    assert_eq!(_workflows.y, loops.y + loops.height);
+    assert_eq!(history.y, _workflows.y + _workflows.height);
+    // a short terminal still fits every block: history gives way first and
+    // the active quarter never moves; sixteen rows give history its four
+    let (a, b, c, w, d) = agent_mux::ui::sidebar_areas(13, 1, 0, 0);
+    assert_eq!(a.height + b.height + c.height + w.height + d.height, 12);
+    assert_eq!(a.height, 3);
+    assert!(d.height >= 3);
+    let (a, b, c, w, d) = agent_mux::ui::sidebar_areas(16, 1, 0, 0);
+    assert_eq!(a.height + b.height + c.height + w.height + d.height, 15);
     assert!(d.height >= 4);
 
     app.handle_key(&key(KeyCode::Tab), Instant::now());
@@ -97,6 +103,8 @@ fn the_sidebar_has_four_sections_and_tab_visits_loops() {
         screen.contains("No loops yet"),
         "the preview explains loops:\n{screen}"
     );
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
 }

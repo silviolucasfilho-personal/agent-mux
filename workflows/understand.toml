@@ -1,0 +1,44 @@
+# Map a codebase: one reader per top-level area, then one synthesis.
+[workflow]
+name = "understand"
+description = "Read each top-level area of the workspace in parallel and synthesize one structured map of the codebase."
+when_to_use = "Getting oriented in an unfamiliar repository, or answering a question that spans several subsystems."
+output = "map"
+
+[args.question]
+description = "What the map should answer; empty for a general orientation."
+default = ""
+
+[schemas.areas]
+fields.areas = { type = "array", items = "string", required = true, description = "Top-level directories or modules worth a reader each, at most 8." }
+[schemas.area_notes]
+fields.area = { type = "string", required = true }
+fields.purpose = { type = "string", required = true }
+fields.entry_points = { type = "array", items = "string", required = true }
+fields.depends_on = { type = "array", items = "string", required = true }
+fields.notes = { type = "string", required = true }
+
+[[steps]]
+id = "areas"
+kind = "single"
+phase = "Scope"
+skill = "wf-read-map"
+args = { mode = "list-areas", question = "{args.question}" }
+result = "areas"
+
+[[steps]]
+id = "read"
+kind = "fanout"
+phase = "Read"
+over = "areas.areas[*]"
+skill = "wf-read-map"
+args = { mode = "read-area", area = "{item}", question = "{args.question}" }
+result = "area_notes"
+
+[[steps]]
+id = "map"
+kind = "single"
+phase = "Synthesize"
+skill = "wf-synthesize"
+input = "read"
+args = { subject = "the codebase map ({args.question})", shape = "an overview, then one section per area with purpose, entry points and dependencies, then how the areas fit together" }

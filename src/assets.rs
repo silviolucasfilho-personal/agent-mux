@@ -60,13 +60,15 @@ pub enum Kind {
     LoopSkill,
     LoopAgent,
     LoopTemplate,
+    Workflow,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [
+    pub const ALL: [Kind; 8] = [
         Kind::Prompts,
         Kind::Settings,
         Kind::Skill,
+        Kind::Workflow,
         Kind::LoopPattern,
         Kind::LoopSkill,
         Kind::LoopAgent,
@@ -82,6 +84,7 @@ impl Kind {
             Kind::LoopSkill => "loop skill",
             Kind::LoopAgent => "loop agent",
             Kind::LoopTemplate => "loop template",
+            Kind::Workflow => "workflow",
         }
     }
 
@@ -95,12 +98,16 @@ impl Kind {
             Kind::LoopSkill => "Loop skills",
             Kind::LoopAgent => "Loop agents",
             Kind::LoopTemplate => "Loop templates",
+            Kind::Workflow => "Workflows",
         }
     }
 
     /// Kinds `Catalog::new_item` can create.
     pub fn creatable(self) -> bool {
-        matches!(self, Kind::Skill | Kind::LoopSkill | Kind::LoopAgent)
+        matches!(
+            self,
+            Kind::Skill | Kind::LoopSkill | Kind::LoopAgent | Kind::Workflow
+        )
     }
 
     /// The word `agent-mux config new` takes.
@@ -109,6 +116,7 @@ impl Kind {
             Kind::Skill => Some("skill"),
             Kind::LoopSkill => Some("loop-skill"),
             Kind::LoopAgent => Some("loop-agent"),
+            Kind::Workflow => Some("workflow"),
             _ => None,
         }
     }
@@ -178,8 +186,16 @@ impl Asset {
         match self.kind {
             Kind::Prompts => crate::prompts::LOOP_PLACEHOLDERS
                 .iter()
+                .chain(crate::prompts::WORKFLOW_PLACEHOLDERS.iter())
                 .map(|p| format!("{{{p}}}"))
-                .collect(),
+                .collect::<Vec<_>>()
+                .into_iter()
+                .fold(Vec::new(), |mut v, p| {
+                    if !v.contains(&p) {
+                        v.push(p);
+                    }
+                    v
+                }),
             Kind::LoopTemplate => TEMPLATE_PLACEHOLDERS
                 .iter()
                 .map(|p| format!("{{{{{p}}}}}"))
@@ -269,6 +285,7 @@ impl Catalog {
             problems: Vec::new(),
         });
         cat.scan_skills();
+        cat.scan_workflows();
         cat.push_builtin(
             Kind::LoopPattern,
             "loops/registry.toml",
@@ -348,24 +365,26 @@ impl Catalog {
     /// subtree, file by file.
     fn scan_skills(&mut self) {
         let dir = skills_dir(&self.root);
-        for (rel, text) in crate::skill::builtin_files() {
-            let id = format!("skills/heimdall/{rel}");
-            let path = dir.join("heimdall").join(rel);
-            let source = if path.is_file() {
-                Source::Override
-            } else {
-                Source::Builtin
-            };
-            self.assets.push(Asset {
-                kind: Kind::Skill,
-                id,
-                path,
-                builtin: Some(text),
-                repo_path: Some("skills/heimdall/"),
-                source,
-                name: "heimdall".into(),
-                problems: Vec::new(),
-            });
+        for pkg in crate::skill::builtin_packages() {
+            for (rel, text) in pkg.all_files() {
+                let id = format!("skills/{}/{rel}", pkg.id);
+                let path = dir.join(pkg.id).join(rel);
+                let source = if path.is_file() {
+                    Source::Override
+                } else {
+                    Source::Builtin
+                };
+                self.assets.push(Asset {
+                    kind: Kind::Skill,
+                    id,
+                    path,
+                    builtin: Some(text),
+                    repo_path: Some(pkg.repo_dir),
+                    source,
+                    name: pkg.id.to_string(),
+                    problems: Vec::new(),
+                });
+            }
         }
         for pkg in sorted_dirs(&dir) {
             let Some(pkg_name) = pkg.file_name().and_then(|n| n.to_str()) else {
@@ -394,6 +413,23 @@ impl Catalog {
                     pkg_name.to_string(),
                 );
             }
+        }
+    }
+
+    fn scan_workflows(&mut self) {
+        for (name, text) in crate::workflows::library::BUILTIN {
+            self.push_builtin(
+                Kind::Workflow,
+                &format!("workflows/{name}.toml"),
+                text,
+                "workflows/",
+            );
+        }
+        for f in sorted_files(&self.root.join("workflows"), "toml") {
+            let Some(stem) = f.file_stem().and_then(|n| n.to_str()).map(str::to_string) else {
+                continue;
+            };
+            self.push_user(Kind::Workflow, format!("workflows/{stem}.toml"), f, stem);
         }
     }
 
@@ -438,6 +474,10 @@ impl Catalog {
     }
 
     fn validate_all(&mut self) {
+        let skill_infos: Vec<crate::workflows::document::SkillInfo> = {
+            let (skills, _) = crate::skill::load_skills(Some(&skills_dir(&self.root)));
+            crate::workflows::library::skill_infos(&skills)
+        };
         let loop_skill_names: Vec<String> = self
             .assets
             .iter()
@@ -470,6 +510,7 @@ impl Catalog {
                 Kind::LoopSkill => validate_loop_skill(&a.name, &a.effective()),
                 Kind::LoopAgent => validate_loop_agent(&a.name, &a.effective()),
                 Kind::LoopTemplate => validate_template(&a.name, &a.effective()),
+                Kind::Workflow => validate_workflow(&a.name, &a.effective(), &skill_infos),
             };
             self.assets[i].problems = problems;
         }
@@ -592,6 +633,10 @@ impl Catalog {
                     .join("agents")
                     .join(format!("{name}.md"));
                 (path, loop_agent_skeleton(name))
+            }
+            Kind::Workflow => {
+                let path = self.root.join("workflows").join(format!("{name}.toml"));
+                (path, crate::workflows::library::skeleton(name))
             }
             other => {
                 return Err(format!(
@@ -876,6 +921,27 @@ fn validate_loop_agent(name: &str, text: &str) -> Vec<String> {
     frontmatter_problems(text, name, &format!("{name}.md"))
 }
 
+fn validate_workflow(
+    name: &str,
+    text: &str,
+    skills: &[crate::workflows::document::SkillInfo],
+) -> Vec<String> {
+    match crate::workflows::parse(text) {
+        Ok(doc) => {
+            let mut p = crate::workflows::validate(&doc, Some(skills));
+            let stem = name.trim_end_matches(".toml");
+            if doc.name != stem {
+                p.push(format!(
+                    "workflow.name {:?} must equal the file name {stem:?}",
+                    doc.name
+                ));
+            }
+            p
+        }
+        Err(p) => p,
+    }
+}
+
 fn validate_template(name: &str, text: &str) -> Vec<String> {
     let mut problems = Vec::new();
     let mut rest = text;
@@ -1006,7 +1072,11 @@ mod tests {
         let count = |k: Kind| cat.by_kind(k).count();
         assert_eq!(count(Kind::Prompts), 1);
         assert_eq!(count(Kind::Settings), 1);
-        assert_eq!(count(Kind::Skill), 5, "Heimdall's five files");
+        assert_eq!(
+            count(Kind::Skill),
+            41,
+            "Heimdall, the planner and sixteen step skills"
+        );
         assert_eq!(count(Kind::LoopPattern), 1);
         assert_eq!(count(Kind::LoopSkill), 9);
         assert_eq!(count(Kind::LoopAgent), 1);
@@ -1023,7 +1093,7 @@ mod tests {
         assert_eq!(cat.find("loop-verifier").unwrap().kind, Kind::LoopAgent);
         assert!(cat.find("SKILL.md").is_err(), "ambiguous");
         assert!(cat.find("nothing-like-this").is_err());
-        assert_eq!(cat.get("prompts.toml").unwrap().placeholders().len(), 6);
+        assert_eq!(cat.get("prompts.toml").unwrap().placeholders().len(), 10);
     }
 
     #[test]
@@ -1096,7 +1166,7 @@ mod tests {
         assert_eq!(docs.source, Source::User);
         assert!(docs.valid(), "{:?}", docs.problems);
         assert!(cat.find("auditor").unwrap().valid());
-        assert_eq!(cat.by_kind(Kind::Skill).count(), 7);
+        assert_eq!(cat.by_kind(Kind::Skill).count(), 43);
         let notes = cat.find("skills/my-notes/SKILL.md").unwrap();
         assert!(notes.valid(), "{:?}", notes.problems);
         assert_eq!(

@@ -325,6 +325,13 @@ impl ConfigViewState {
                     Style::default(),
                 ));
             }
+            Kind::Workflow => {
+                lines.push(row(
+                    "Used by",
+                    "the Workflows section and `agent-mux workflow run`".into(),
+                    Style::default(),
+                ));
+            }
             Kind::Settings => {
                 lines.push(row(
                     "Reload",

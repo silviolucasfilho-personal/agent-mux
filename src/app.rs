@@ -20,6 +20,9 @@ pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
 mod skills_view;
+pub mod text_area;
+pub mod workflows;
+pub mod workflows_view;
 pub use skills_view::*;
 
 #[derive(Debug)]
@@ -44,6 +47,10 @@ pub enum Mode {
     About(Box<about::AboutState>),
     /// The Configuration view (`C`): every prompt, skill, loop and agent.
     ConfigView(Box<ConfigViewState>),
+    /// The run / compose dialog of the Workflows section.
+    WorkflowDialog(Box<workflows_view::WorkflowDialogState>),
+    /// The Workflows view (`W`): runs, planned documents, results.
+    WorkflowsView(Box<workflows_view::WorkflowsViewState>),
 }
 
 /// An external editor the main loop must run for the App: it leaves the
@@ -64,6 +71,7 @@ pub enum SidebarSection {
     Active,
     Agents,
     Loops,
+    Workflows,
     History,
 }
 
@@ -87,6 +95,7 @@ pub enum Action {
     KillSelected,
     EnterConfirmKill,
     RemoveSelected,
+    RemoveExited,
     RespawnSelected,
     ToggleTracing,
     ToggleSidebar,
@@ -125,6 +134,15 @@ pub enum Action {
     OpenConfigView,
     /// ConfigView mode: App routes the key to the ConfigViewState it owns.
     ConfigKey,
+    /// Workflows section: Enter (run dialog or the view), c (compose), e, x.
+    OpenWorkflowRun,
+    OpenWorkflowPlan,
+    EditWorkflow,
+    CancelWorkflow,
+    /// `W`: the Workflows view.
+    OpenWorkflowsView,
+    WorkflowsKey,
+    WorkflowDialogKey,
 }
 
 /// Severity of a status-bar notice. The old single `error: Option<String>`
@@ -353,6 +371,12 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 };
             }
             match key.code {
+                _ if !ctx.sidebar_hidden
+                    && ctx.sidebar_section == SidebarSection::Workflows
+                    && App::workflows_section_action(key).is_some() =>
+                {
+                    App::workflows_section_action(key).unwrap_or(Action::None)
+                }
                 KeyCode::Char('b') | KeyCode::Char('B') => Action::ToggleSidebar,
                 KeyCode::Tab | KeyCode::BackTab => Action::ToggleSidebarSection,
                 KeyCode::Char('j') | KeyCode::Down => Action::MoveDown,
@@ -395,6 +419,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                             },
                             SidebarSection::Agents => Action::OpenSkillLauncher,
                             SidebarSection::Loops => Action::LoopRunNow,
+                            SidebarSection::Workflows => Action::OpenWorkflowRun,
                             SidebarSection::History => Action::RestartHistorySession,
                         }
                     }
@@ -419,6 +444,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::EnterConfirmRemoveLoop
                 }
+                KeyCode::Char('W') => Action::OpenWorkflowsView,
                 KeyCode::Char('v') | KeyCode::Char('V') => Action::OpenAbout,
                 KeyCode::Char('K') => Action::ToggleKillSwitch,
                 KeyCode::Char('E') => Action::OpenLoopsView,
@@ -451,6 +477,11 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                         Some(_) => Action::EnterConfirmKill,
                         None => Action::None,
                     }
+                }
+                KeyCode::Char('X')
+                    if ctx.sidebar_hidden || ctx.sidebar_section == SidebarSection::Active =>
+                {
+                    Action::RemoveExited
                 }
                 KeyCode::Char('q') => {
                     if ctx.any_working {
@@ -489,6 +520,8 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::LoopsView(_) => Action::LoopsKey,
         Mode::NewLoop(_) => Action::LoopDialogKey,
         Mode::ConfigView(_) => Action::ConfigKey,
+        Mode::WorkflowDialog(_) => Action::WorkflowDialogKey,
+        Mode::WorkflowsView(_) => Action::WorkflowsKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 Action::EnterConfirmRemoveLoop
@@ -1750,6 +1783,10 @@ pub struct App {
     /// Skill packages, loaded at startup and rescanned when the Skills
     /// view opens; `launch_skill` resolves ids against this list.
     pub skills: Vec<crate::skill::SkillDefinition>,
+    /// Packages with `hidden = true`: workflow step skills and the
+    /// planner. Installed and launched by workflows, never listed in the
+    /// Agents sidebar.
+    pub hidden_skills: Vec<crate::skill::SkillDefinition>,
     /// Where packages are installed for a harness; `None` is the real home.
     /// Tests point this at a temporary directory.
     pub skill_install_home: Option<std::path::PathBuf>,
@@ -1806,6 +1843,18 @@ pub struct App {
     pub editor: Option<String>,
     /// An editor the main loop must run before the next frame.
     pub editor_request: Option<EditorRequest>,
+    /// Workflow runs with sessions in flight.
+    pub live_workflow_runs: Vec<workflows::LiveWorkflowRun>,
+    /// Finished runs since startup, newest first (the store has the rows).
+    pub recent_workflow_runs: Vec<workflows::RecentWorkflowRun>,
+    pub workflows: crate::config::WorkflowSettings,
+    pub last_workflow_pass: Option<Instant>,
+    /// Planner sessions in flight and the documents they produced.
+    pub live_workflow_plans: Vec<workflows::LivePlan>,
+    pub planned_workflows: Vec<workflows::PlannedWorkflow>,
+    /// The Workflows section's list and selection.
+    pub workflow_list: Vec<crate::workflows::library::Entry>,
+    pub selected_workflow: usize,
 }
 
 impl App {
@@ -1826,6 +1875,7 @@ impl App {
             history_sessions = history::discover_sessions(None, None, cur_dir.as_deref(), true);
         }
         let (skills, _) = crate::skill::load_skills(None);
+        let (hidden_skills, skills): (Vec<_>, Vec<_>) = skills.into_iter().partition(|s| s.hidden);
         crate::skill::launch::sweep_briefings(
             &crate::tracing::analysis::default_snapshot_dir(),
             std::time::Duration::from_secs(24 * 3600),
@@ -1856,6 +1906,7 @@ impl App {
             sidebar_hidden: false,
             terminal_size: (27, 112),
             skills,
+            hidden_skills,
             skill_install_home: None,
             skills_dir: None,
             selected_agent: 0,
@@ -1884,6 +1935,14 @@ impl App {
             library_root: None,
             editor: None,
             editor_request: None,
+            live_workflow_runs: Vec::new(),
+            recent_workflow_runs: Vec::new(),
+            workflows: crate::config::WorkflowSettings::default(),
+            last_workflow_pass: None,
+            live_workflow_plans: Vec::new(),
+            planned_workflows: Vec::new(),
+            workflow_list: Vec::new(),
+            selected_workflow: 0,
         }
     }
 
@@ -1892,6 +1951,8 @@ impl App {
     pub fn reload_skills(&mut self) {
         let keep = self.selected_agent().map(|s| s.id.clone());
         let (skills, _) = crate::skill::load_skills(self.skills_dir.as_deref());
+        let (hidden, skills): (Vec<_>, Vec<_>) = skills.into_iter().partition(|s| s.hidden);
+        self.hidden_skills = hidden;
         self.skills = skills;
         self.selected_agent = keep
             .and_then(|id| self.skills.iter().position(|s| s.id == id))
@@ -1908,6 +1969,14 @@ impl App {
         self.skill_install_home
             .clone()
             .unwrap_or_else(crate::skill::install::home_dir)
+    }
+
+    /// A package by id, listed or hidden.
+    pub fn find_skill(&self, id: &str) -> Option<&crate::skill::SkillDefinition> {
+        self.skills
+            .iter()
+            .chain(self.hidden_skills.iter())
+            .find(|s| s.id == id)
     }
 
     /// Index of the live session running `skill_id`. Skills are singletons:
@@ -1981,6 +2050,9 @@ impl App {
         self.refresh_briefing_if_needed(now);
         self.refresh_loop_cards_if_needed(now);
         self.scheduler_pass(now);
+        self.workflow_pass(now);
+        self.workflow_plan_pass(now);
+        self.refresh_workflows_view(now);
     }
 
     /// Publishes live session snapshot bounded to 1MiB every second if needed.
@@ -2254,7 +2326,7 @@ impl App {
         env: &[(String, String)],
         skill_id: Option<&str>,
     ) -> anyhow::Result<Session> {
-        self.spawn_traced_full(id, profile, dir, env, skill_id, None, &[])
+        self.spawn_traced_full(id, profile, dir, env, skill_id, None, None, &[])
     }
 
     /// The one spawn path: `spawn_traced_with_env` plus, for a loop run,
@@ -2269,6 +2341,7 @@ impl App {
         env: &[(String, String)],
         skill_id: Option<&str>,
         loop_launch: Option<crate::loops::LoopLaunch>,
+        workflow_launch: Option<crate::workflows::WorkflowLaunch>,
         loop_args: &[String],
     ) -> anyhow::Result<Session> {
         prepare_nested_tui(&mut profile);
@@ -2283,7 +2356,10 @@ impl App {
                 .unwrap_or("unknown");
             p.skill = Some((skill.to_string(), harness.to_string()));
         }
-        let is_loop = loop_launch.is_some();
+        let is_loop = loop_launch.is_some() || workflow_launch.is_some();
+        if let (Some(p), Some(w)) = (plan.as_mut(), workflow_launch) {
+            p.workflow = Some(w);
+        }
         if let (Some(p), Some(launch)) = (plan.as_mut(), loop_launch) {
             let home = self.skill_home();
             p.attach_loop(launch, &home);
@@ -2758,6 +2834,15 @@ impl App {
             }
             return;
         }
+        if matches!(self.mode, Mode::WorkflowsView(_)) {
+            let delta = match ev.kind {
+                MouseEventKind::ScrollUp => -3,
+                MouseEventKind::ScrollDown => 3,
+                _ => return,
+            };
+            self.scroll_workflows_view(delta);
+            return;
+        }
         if let Mode::ConfigView(ref mut view) = self.mode {
             let delta = match ev.kind {
                 MouseEventKind::ScrollUp => -3,
@@ -2804,11 +2889,13 @@ impl App {
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
-            let (active_rect, agents_rect, loops_rect, history_rect) = ui::sidebar_areas(
-                self.pane_size.0 + 3,
-                self.skills.len(),
-                self.loop_registry.loops.len(),
-            );
+            let (active_rect, agents_rect, loops_rect, workflows_rect, history_rect) =
+                ui::sidebar_areas(
+                    self.pane_size.0 + 3,
+                    self.skills.len(),
+                    self.loop_registry.loops.len(),
+                    self.workflow_list.len(),
+                );
             if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
                 if ev.row > active_rect.y
                     && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
@@ -2844,7 +2931,27 @@ impl App {
                     }
                 }
                 return;
-            } else if ev.row >= loops_rect.y && ev.row < loops_rect.y + loops_rect.height {
+            } else if ev.row >= workflows_rect.y
+                && ev.row < workflows_rect.y + workflows_rect.height
+            {
+                if ev.row > workflows_rect.y
+                    && ev.row < workflows_rect.y + workflows_rect.height.saturating_sub(1)
+                {
+                    let visible = usize::from(workflows_rect.height.saturating_sub(2));
+                    let row = usize::from(ev.row - workflows_rect.y - 1);
+                    let idx = ui::sidebar_window(
+                        self.selected_workflow,
+                        self.workflow_list.len(),
+                        visible,
+                    ) + row;
+                    if idx < self.workflow_list.len() {
+                        self.sidebar_section = SidebarSection::Workflows;
+                        self.selected_workflow = idx;
+                    }
+                }
+                return;
+            }
+            if ev.row >= loops_rect.y && ev.row < loops_rect.y + loops_rect.height {
                 self.sidebar_section = SidebarSection::Loops;
                 if ev.row > loops_rect.y
                     && ev.row < loops_rect.y + loops_rect.height.saturating_sub(1)
@@ -2914,11 +3021,13 @@ impl App {
             ) =>
             {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
-                    let (_, agents_rect, loops_rect, history_rect) = ui::sidebar_areas(
-                        self.pane_size.0 + 3,
-                        self.skills.len(),
-                        self.loop_registry.loops.len(),
-                    );
+                    let (_, agents_rect, loops_rect, _workflows_rect, history_rect) =
+                        ui::sidebar_areas(
+                            self.pane_size.0 + 3,
+                            self.skills.len(),
+                            self.loop_registry.loops.len(),
+                            self.workflow_list.len(),
+                        );
                     if ev.row >= loops_rect.y
                         && ev.row < loops_rect.y + loops_rect.height
                         && !self.loop_registry.loops.is_empty()
@@ -3164,6 +3273,17 @@ impl App {
                                 && self.selected_loop + 1 < self.loop_registry.loops.len()
                             {
                                 self.selected_loop += 1;
+                            } else {
+                                self.sidebar_section = SidebarSection::Workflows;
+                                self.reload_workflow_list();
+                                self.selected_workflow = 0;
+                            }
+                        }
+                        SidebarSection::Workflows => {
+                            if !self.workflow_list.is_empty()
+                                && self.selected_workflow + 1 < self.workflow_list.len()
+                            {
+                                self.selected_workflow += 1;
                             } else if !self.history_sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::History;
                                 self.selected_history = 0;
@@ -3203,13 +3323,22 @@ impl App {
                                 self.selected_agent = self.skills.len().saturating_sub(1);
                             }
                         }
-                        SidebarSection::History => {
-                            if self.selected_history > 0 {
-                                self.selected_history -= 1;
+                        SidebarSection::Workflows => {
+                            if self.selected_workflow > 0 {
+                                self.selected_workflow -= 1;
                             } else {
                                 self.sidebar_section = SidebarSection::Loops;
                                 self.selected_loop =
                                     self.loop_registry.loops.len().saturating_sub(1);
+                            }
+                        }
+                        SidebarSection::History => {
+                            if self.selected_history > 0 {
+                                self.selected_history -= 1;
+                            } else {
+                                self.sidebar_section = SidebarSection::Workflows;
+                                self.reload_workflow_list();
+                                self.selected_workflow = self.workflow_list.len().saturating_sub(1);
                             }
                         }
                     }
@@ -3227,7 +3356,11 @@ impl App {
                             SidebarSection::Agents
                         }
                         SidebarSection::Agents => SidebarSection::Loops,
-                        SidebarSection::Loops => SidebarSection::History,
+                        SidebarSection::Loops => {
+                            self.reload_workflow_list();
+                            SidebarSection::Workflows
+                        }
+                        SidebarSection::Workflows => SidebarSection::History,
                         SidebarSection::History => SidebarSection::Active,
                     };
                 }
@@ -3272,6 +3405,13 @@ impl App {
             Action::SkillsKey => self.handle_skills_key(key),
             Action::OpenConfigView => self.open_config_view(),
             Action::ConfigKey => self.handle_config_key(key),
+            Action::OpenWorkflowRun => self.open_workflow_run(),
+            Action::OpenWorkflowPlan => self.open_workflow_plan(),
+            Action::EditWorkflow => self.edit_selected_workflow(),
+            Action::CancelWorkflow => self.cancel_selected_workflow(),
+            Action::OpenWorkflowsView => self.open_workflows_view(),
+            Action::WorkflowsKey => self.handle_workflows_view_key(key),
+            Action::WorkflowDialogKey => self.handle_workflow_dialog_key(key),
             Action::OpenSkillLauncher => {
                 let Some(skill) = self.selected_agent() else {
                     return;
@@ -3357,6 +3497,20 @@ impl App {
                     if self.selected >= self.sessions.len() {
                         self.selected = self.sessions.len().saturating_sub(1);
                     }
+                    if self.sessions.is_empty() && !self.history_sessions.is_empty() {
+                        self.sidebar_section = SidebarSection::History;
+                    }
+                    let _ = self.save_active_sessions();
+                }
+            }
+            Action::RemoveExited => {
+                let before = self.sessions.len();
+                let now = Instant::now();
+                self.sessions
+                    .retain(|session| !matches!(session.status(now), Status::Exited(_)));
+                if self.sessions.len() != before {
+                    self.selection = None;
+                    self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
                     if self.sessions.is_empty() && !self.history_sessions.is_empty() {
                         self.sidebar_section = SidebarSection::History;
                     }
@@ -3862,6 +4016,20 @@ impl App {
         if let Err(e) = result {
             self.notice = Some(Notice::error(format!("editor: {e}")));
         }
+        if request.asset_id == "dialog:text" {
+            self.dialog_editor_finished(&request.path);
+            return;
+        }
+        if let Some(plan_id) = request.asset_id.strip_prefix("plan:") {
+            self.reload_planned_after_edit(plan_id);
+            if self.notice.is_none() {
+                self.notice = Some(Notice::info("planned document updated"));
+            }
+            return;
+        }
+        if request.asset_id.starts_with("workflows/") {
+            self.reload_workflow_list();
+        }
         let root = self.library_root();
         let catalog = crate::assets::Catalog::load(&root, self.config_path.as_deref());
         let asset = catalog.get(&request.asset_id).cloned();
@@ -3915,7 +4083,7 @@ impl App {
                 self.loop_audits.clear();
             }
             Some(Kind::Settings) => self.reload_settings(),
-            Some(Kind::Prompts) | None => {}
+            Some(Kind::Workflow) | Some(Kind::Prompts) | None => {}
         }
     }
 
@@ -4490,6 +4658,12 @@ impl App {
         if let Some(i) = self.session_index(id) {
             self.sessions[i].process_output(bytes, now, focused);
         }
+        if !self.live_workflow_runs.is_empty() {
+            self.capture_workflow_output(id, bytes);
+        }
+        if !self.live_workflow_plans.is_empty() {
+            self.capture_plan_output(id, bytes);
+        }
         if self.search.is_some() && self.sessions.get(self.selected).map(|s| s.id) == Some(id) {
             self.rerun_search();
         }
@@ -4512,6 +4686,8 @@ impl App {
             }
             self.record_experiment_link(i);
             self.finish_loop_run_for_session(id);
+            self.finish_workflow_session_for_session(id);
+            self.finish_plan_for_session(id);
             // if we were attached to it, drop back to Control
             if self.attached() == Some(i) {
                 self.mode = Mode::Control;
@@ -4746,6 +4922,37 @@ mod dispatch_tests {
             dispatch(&Mode::Control, &key(KeyCode::Char('x')), &exited),
             Action::RemoveSelected
         ));
+    }
+
+    #[test]
+    fn uppercase_x_clears_all_exited_sessions_from_active() {
+        let running = ctx(Some(Status::Working));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('X')), &running),
+            Action::RemoveExited
+        ));
+
+        let mut hidden = ctx(Some(Status::Working));
+        hidden.sidebar_hidden = true;
+        hidden.sidebar_section = SidebarSection::Agents;
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('X')), &hidden),
+            Action::RemoveExited
+        ));
+
+        for section in [
+            SidebarSection::Agents,
+            SidebarSection::Loops,
+            SidebarSection::Workflows,
+            SidebarSection::History,
+        ] {
+            let mut visible = ctx(Some(Status::Working));
+            visible.sidebar_section = section;
+            assert!(matches!(
+                dispatch(&Mode::Control, &key(KeyCode::Char('X')), &visible),
+                Action::None
+            ));
+        }
     }
 
     #[test]

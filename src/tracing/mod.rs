@@ -117,6 +117,8 @@ pub struct LaunchPlan {
     /// A loop run: the keys written to `launches.metadata.loop_*` and the
     /// policy the `PreToolUse` guard enforces. Set through `attach_loop`.
     pub loop_launch: Option<crate::loops::LoopLaunch>,
+    /// A workflow session: the keys written to `launches.metadata.workflow_*`.
+    pub workflow: Option<crate::workflows::WorkflowLaunch>,
     profile_name: String,
     dir: PathBuf,
 }
@@ -527,6 +529,7 @@ impl TraceRuntime {
             profile_name: profile.name.clone(),
             skill: None,
             loop_launch: None,
+            workflow: None,
             dir: dir.to_path_buf(),
         })
     }
@@ -750,6 +753,7 @@ impl TraceRuntime {
             profile_name: profile.name.clone(),
             skill: None,
             loop_launch: None,
+            workflow: None,
             dir: dir.to_path_buf(),
         })
     }
@@ -854,6 +858,24 @@ impl TraceRuntime {
             meta.insert(
                 "skill_harness".into(),
                 serde_json::Value::from(harness.as_str()),
+            );
+        }
+        if let Some(w) = &plan.workflow {
+            meta.insert(
+                "workflow_run_id".into(),
+                serde_json::Value::from(w.run_id.as_str()),
+            );
+            meta.insert(
+                "workflow".into(),
+                serde_json::Value::from(w.workflow.as_str()),
+            );
+            meta.insert(
+                "workflow_step".into(),
+                serde_json::Value::from(w.step.as_str()),
+            );
+            meta.insert(
+                "workflow_phase".into(),
+                serde_json::Value::from(w.phase.as_str()),
             );
         }
         if let Some(lp) = &plan.loop_launch {

@@ -22,6 +22,7 @@ This README is the developer onboarding guide to the **implemented code in this 
 14. [Developing, testing and troubleshooting](#14-developing-testing-and-troubleshooting)
 15. [Loop Engineering](#15-loop-engineering)
 16. [Configuration library: prompts, skills, loops and agents](#16-configuration-library-prompts-skills-loops-and-agents)
+17. [Workflows](#17-workflows)
 
 ---
 
@@ -163,7 +164,7 @@ Terminal rendering and telemetry are separate paths. The PTY's escape sequences 
 | Langfuse exporter | OS thread (optional) | `langfuse/mod.rs` | Batches OTLP spans and posts them. |
 | Briefing refresh | `spawn_blocking` | `app.rs` | Runs the Heimdall briefing query off the UI thread. |
 | Hook process | Separate process per hook event | harness | `agent-mux trace hook …` invoked by the CLI; writes one `hook_events` row and exits. |
-| MCP server | Separate process per agent session | harness | `agent-mux mcp serve --stdio` started by the harness for an agent launch; answers the eight `agent_mux_*` tools from `TraceService` and exits on EOF. |
+| MCP server | Separate process per agent session | harness | `agent-mux mcp serve --stdio` started by the harness for an agent launch; answers the ten `agent_mux_*` tools from `TraceService` and exits on EOF. |
 
 ### Event loop
 
@@ -274,6 +275,8 @@ Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secr
 | `~/.agent-mux/traces.db`, `-wal`, `-shm` | SQLite store (created `0600`) and WAL sidecars. |
 | `~/.agent-mux/sessions.json` / `AGENT_MUX_SESSIONS_FILE` | Saved sessions for restart. |
 | `~/.agent-mux/skills/<id>/` / `AGENT_MUX_SKILLS_DIR` | User skill packages; a matching id shadows the bundled one. |
+| `~/.agent-mux/workflows/<name>.toml` | Workflow documents; a name matching a built-in replaces it (section 17). |
+| `AGENT_MUX_WORKFLOW_CONTEXT`, `AGENT_MUX_WORKFLOW_RUN_ID`, `AGENT_MUX_WORKFLOW`, `AGENT_MUX_WORKFLOW_STEP`, `AGENT_MUX_WORKFLOW_PLAN` | Set on workflow sessions and the planner session (section 17). |
 | `~/.agent-mux/prompts.toml`, `loops/registry.toml`, `loops/skills/`, `loops/agents/`, `loops/templates/` / `AGENT_MUX_LIBRARY_DIR` | The configuration library: file-by-file overrides of every compiled-in prompt, pattern, loop skill, agent and template, edited from the Configuration view (`C`) or `agent-mux config` ([docs/configuration.md](docs/configuration.md)). |
 | `editor` (top-level key in `profiles.toml`), `VISUAL`, `EDITOR` | The editor the Configuration view and `config edit` open, in that order; `vi` otherwise. |
 | `~/.agent-mux/snapshots/` / `AGENT_MUX_RUNTIME_DIR` | Live-state snapshots, one file per run. |
@@ -388,11 +391,14 @@ Search (`src/search.rs`) turns the status bar into `Search: <query>  <n/m>`; it 
 | `h` | Agents focused: open the harness picker. |
 | `S` | Skills view (section 4.4), from any section. |
 | `C` | Configuration view (section 16), from any section: edit every prompt, skill, loop pattern, loop skill, agent and template in your editor. |
+| `W` | Workflows view (section 17), from any section: runs, planned documents, results, journal. |
+| `Enter`, `c`, `e`, `x` (Workflows section) | Run the selected workflow (or open the view when a run is live), compose a workflow for a task with the planner, edit the document, cancel the live run. |
 | `n` | New session dialog. |
 | `l` | Session Logs dialog. |
 | `t` | Toggle tracing on the selected session (Active focused or sidebar hidden). Starting requires a live supported session and an available runtime; `plan_attach` back-dates the correlation window by one hour and injects nothing. |
 | `T` | Trace Browser (any section). |
 | `x` | Active focused or sidebar hidden: remove an exited session immediately, otherwise ask before killing. |
+| `X` | Active focused or sidebar hidden: remove all exited sessions, leaving running sessions untouched. |
 | `a` | History focused: toggle current-project / all-projects scope. Loops focused: add a loop. |
 | `b`, `Ctrl+Shift+B` | Toggle the sidebar. |
 | `?`, `F1` | Help overlay (closes with `Esc`, `q`, `?`, `Enter`, `F1`). |
@@ -1481,7 +1487,8 @@ The remaining analysis-service requests are listed in section 10.
 | `trace hooks install\|uninstall codex\|agy` | Section 6. |
 | `trace hook …` | Internal hook entry point. |
 | `skill list \| show <id> [--harness H] \| install <id> [--harness H\|all] [--force] \| uninstall <id> [--harness H] \| status [id]` | Section 11. |
-| `config ls [--json] \| show <id> [--builtin] \| path [<id>] \| edit <id> \| reset <id> \| new skill\|loop-skill\|loop-agent <name> \| check \| push [--dry-run]` | The configuration library (section 16): `edit` and `new` write under `~/.agent-mux` and run the editor; `push` rewrites loop skills and agents in registered loop workspaces; `check` exits 1 on an invalid item. |
+| `config ls [--json] \| show <id> [--builtin] \| path [<id>] \| edit <id> \| reset <id> \| new skill\|loop-skill\|loop-agent\|workflow <name> \| check \| push [--dry-run]` | The configuration library (section 16): `edit` and `new` write under `~/.agent-mux` and run the editor; `push` rewrites loop skills and agents in registered loop workspaces; `check` exits 1 on an invalid item. |
+| `workflow ls [--json] \| show <name> \| check [<name>] \| skills \| run <name> --workspace DIR [--harness H] [--profile P] [--arg k=v …] [--budget N] [--max-cost USD] [--isolation none\|worktree] [--resume RUN] [--json] \| plan "<task>" --workspace DIR [--harness H] [--run] [--save NAME] [--json] \| runs [--json] \| status <run> [--json] \| save <run> <name>` | Workflows (section 17). `run` and `plan` drive a private App headlessly; `run` exits 0 finished, 1 failed, 2 cancelled, 3 budget exhausted. |
 | `mcp serve --stdio [--db PATH] [--workspace DIR \| --all-workspaces \| --workspace-from-env]` | The read-only MCP server (section 6.7); started by harnesses, usable by hand for debugging. |
 | `mcp install \| uninstall agy`, `mcp status [claude\|codex\|agy]` | Antigravity's installed entry through `agy mcp add|remove`; how each harness reaches the server. |
 | `run --experiment <name> --variant <label> --prompt <text> [--harness H] [--profile P] [--model M] [--bypass] [--cwd DIR] [--check CMD] [--repeat N] [--timeout SECS] [--max-cost USD] [--max-turns N]` | Section 12. |
@@ -1577,7 +1584,7 @@ agent-mux skill status heimdall           # not installed | present, not managed
 agent-mux skill uninstall heimdall --harness codex
 ```
 
-**Heimdall** (`skills/heimdall/`, compiled in with `include_str!`; icon `⚡`, default harness `agy`, capability `trace.read`, `[agent] hydrate = ["briefing"]`, `mcp = "auto"`) briefs on active and recent sessions and evaluates skills and subagents, read-only. It starts from the briefing snapshot in `$AGENT_MUX_BRIEFING`, prefers the eight `agent_mux_*` MCP tools when `$AGENT_MUX_MCP` is not `unavailable`, and falls back to the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`). `SKILL.md` carries the tool-to-CLI table and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); `reference/sessions.md`, `skills.md`, `agents.md` hold thresholds and report shapes. Ad-hoc SQL for `trace sql` is developer material in [docs/trace-sql-examples.md](docs/trace-sql-examples.md), not part of the package. See [docs/skills.md](docs/skills.md).
+**Heimdall** (`skills/heimdall/`, compiled in with `include_str!`; icon `⚡`, default harness `agy`, capability `trace.read`, `[agent] hydrate = ["briefing"]`, `mcp = "auto"`) briefs on active and recent sessions and evaluates skills and subagents, read-only. It starts from the briefing snapshot in `$AGENT_MUX_BRIEFING`, prefers the ten `agent_mux_*` MCP tools when `$AGENT_MUX_MCP` is not `unavailable`, and falls back to the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`). `SKILL.md` carries the tool-to-CLI table and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); `reference/sessions.md`, `skills.md`, `agents.md` hold thresholds and report shapes. Ad-hoc SQL for `trace sql` is developer material in [docs/trace-sql-examples.md](docs/trace-sql-examples.md), not part of the package. See [docs/skills.md](docs/skills.md).
 
 ---
 
@@ -1708,6 +1715,7 @@ It builds a temporary project and home with `alpha`/`beta` skills and a `verifie
 - [docs/trace-sql-examples.md](docs/trace-sql-examples.md): ad-hoc SQL for `trace sql`, with the tool or command that answers the same question.
 - [docs/loops.md](docs/loops.md): Loop Engineering operator guide (week one, files, levels, inbox, Antigravity status).
 - [docs/configuration.md](docs/configuration.md): the configuration library, the Configuration view and `agent-mux config`.
+- [docs/workflows.md](docs/workflows.md): workflows, the document format, step skills, the planner and `agent-mux workflow`.
 - [docs/superpowers/specs/](docs/superpowers/specs/), [docs/superpowers/plans/](docs/superpowers/plans/): historical designs.
 
 The implementation is best-effort capture with provider-dependent evidence, heuristic attribution and loop warnings, an in-process analysis service, and optional remote export. It does not infer task success from process exit, recreate lost hook events from terminal output, manage packages other than skills, provide a full database restore through `trace import`, or expose a network analysis server (the MCP server is local stdio only). Known limitations at the time of writing: analysis cursors are keyed per process (section 10.1), CLI writers ignore `retention_days`, read commands other than `doctor` migrate an old store in place, and the Skills view accepts mouse wheel input but not clicks.
@@ -1775,3 +1783,24 @@ Every text a harness reads from agent-mux is compiled in and shadowed file by fi
 | Templates | [loops/templates/](loops/templates/) | `loops/templates/<file>` | the scaffolder |
 
 `assets::Catalog` enumerates the items with their source (`built-in`, `override`, `user`) and validation problems (frontmatter names, `skill.toml` shape, registry invariants, prompt placeholders, template markers, `gate.yaml` and ledger syntax); the Configuration view (`Mode::ConfigView`, [src/app/config_view.rs](src/app/config_view.rs), `draw_config_view`) and `agent-mux config` ([src/config_cli.rs](src/config_cli.rs)) are two fronts on it. Editing runs the user's editor: the `App` records an `EditorRequest`, and the main loop parks the input thread, leaves the alternate screen, runs the command, re-enters and calls `App::editor_finished`, which rescans, re-validates and reloads the consumers. `Pattern` gained an optional `prompt` that replaces `[loop] run` for that pattern. Tests: `tests/config_library.rs` (catalog, scaffolder, CLI, a headless run opening with the library prompt) and `tests/config_ui.rs` (the view).
+
+---
+
+## 17. Workflows
+
+A workflow runs several harness sessions with one focused goal each and composes their answers ([docs/workflows.md](docs/workflows.md); design [docs/superpowers/specs/2026-09-17-workflows-design.md](docs/superpowers/specs/2026-09-17-workflows-design.md)). The shape follows loops and Heimdall: a TOML document, step skills, and Rust that interprets, executes and accounts.
+
+| Piece | Where | Notes |
+| --- | --- | --- |
+| Document model | [src/workflows/document.rs](src/workflows/document.rs) | `[workflow]`, `[args]`, `[schemas]`, `[[steps]]`; kinds `single`, `fanout`, `pipeline`, `route`, `tournament`, `until`; paths, predicates, `{…}` interpolation, static validation |
+| Interpreter | [src/workflows/interp.rs](src/workflows/interp.rs) | A pure state machine: `next()` hands out sessions, `complete()` takes results; per-item chains, verify votes, transforms, brackets, rounds, budget, caps, cancel, journal replay |
+| Results | [src/workflows/result.rs](src/workflows/result.rs) | The fenced `workflow-result` block, validated against the step's schema; one retry on mismatch |
+| Sessions | [src/app/workflows.rs](src/app/workflows.rs), [src/workflows/harness.rs](src/workflows/harness.rs), [src/workflows/context.rs](src/workflows/context.rs) | Spawned through `spawn_traced_full` with `launches.metadata.workflow_*`; print mode per harness (probe table in the plan); raw stdout captured for the envelope; context file per session; worktree per isolated session |
+| Journal and store | [src/workflows/journal.rs](src/workflows/journal.rs), [src/workflows/store.rs](src/workflows/store.rs) | `journal.jsonl` per run; `workflow_runs` and `workflow_steps` (schema v13) |
+| Library and built-ins | [src/workflows/library.rs](src/workflows/library.rs), [workflows/](workflows/), [workflows/skills/](workflows/skills/) | Seven documents and sixteen `wf-*` step skills compiled in; `~/.agent-mux/workflows` overrides; `Kind::Workflow` in the configuration catalog |
+| Planner | [src/workflows/planner.rs](src/workflows/planner.rs), [skills/workflow-author/](skills/workflow-author/) | Inventory and context for the `workflow-author` skill; the document extracted from a fenced `workflow-toml` block and validated before it runs |
+| UI | `SidebarSection::Workflows`, [src/app/workflows_view.rs](src/app/workflows_view.rs), `draw_workflows_*` in [src/ui.rs](src/ui.rs) | The section, its preview, the run and compose dialogs, the `W` view |
+| Text fields | [src/app/text_area.rs](src/app/text_area.rs), `text_area_lines` in [src/ui.rs](src/ui.rs) | The task and the arguments are whole prompts: a multi-line field with a cursor, word wrap, visual-row movement, `Alt+Enter` for a newline, `Ctrl+V` paste and `Ctrl+E` to compose in `$EDITOR`. The other dialogs keep their single-line inputs. |
+| CLI and MCP | [src/workflows/cli.rs](src/workflows/cli.rs), `agent_mux_get_workflow_run` | `agent-mux workflow …`; a read tool for a run's progress |
+
+Tests: `tests/workflow_runs.rs` (fake `claude`, `codex` and `agy` through real PTY sessions: a built-in run, mixed harnesses, the schema retry, timeouts, cancel, resume), `tests/workflow_cli.rs`, `tests/workflow_ui.rs`, and the unit tests of every module.

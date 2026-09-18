@@ -1,0 +1,6 @@
+# agent-mux metadata: a workflow step skill. hidden = true keeps it out of
+# the Agents sidebar; it is installed per harness before a workflow session.
+name = "Search"
+icon = "⋯"
+hidden = true
+harnesses = ["claude", "codex", "agy"]

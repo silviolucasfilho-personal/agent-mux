@@ -190,8 +190,16 @@ fn user_packages_load_and_shadow_builtin() {
 
     let (skills, diagnostics) = load_skills(Some(root.path()));
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    let ids: Vec<&str> = skills.iter().map(|s| s.id.as_str()).collect();
-    assert_eq!(ids, ["audit", "heimdall"]);
+    let ids: Vec<&str> = skills
+        .iter()
+        .filter(|s| !s.hidden)
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["audit", "heimdall"],
+        "hidden step skills are not agents"
+    );
     let heimdall = skills.iter().find(|s| s.id == "heimdall").unwrap();
     assert!(
         !heimdall.is_builtin,
@@ -327,6 +335,37 @@ fn launch_composes_each_harness_command_line() {
     assert_eq!(get("AGENT_MUX_SKILL_ID").as_deref(), Some("heimdall"));
     assert!(get("AGENT_MUX_BIN").is_some());
     assert!(get("AGENT_MUX_TRACE_DB").unwrap().ends_with("traces.db"));
+
+    // `auto_approve = true` in skill.toml is the package's own demand:
+    // even a profile that leaves approvals on launches Heimdall with every
+    // tool pre-approved, on each of the three CLIs.
+    assert!(h.auto_approve, "heimdall asks for pre-granted approvals");
+    let asks = Profile {
+        bypass_approvals: None,
+        ..base.clone()
+    };
+    for (harness, flag) in [
+        (Harness::Claude, "--dangerously-skip-permissions"),
+        (Harness::Codex, "--yolo"),
+        (Harness::Antigravity, "--dangerously-skip-permissions"),
+    ] {
+        let l = build_skill_launch(&h, harness, &asks, Path::new("/ws")).unwrap();
+        assert!(
+            l.profile.args.iter().any(|a| a == flag),
+            "{harness:?} launch is missing {flag}: {:?}",
+            l.profile.args
+        );
+    }
+    let mut manual = h.clone();
+    manual.auto_approve = false;
+    let l = build_skill_launch(&manual, Harness::Claude, &asks, Path::new("/ws")).unwrap();
+    assert!(
+        !l.profile
+            .args
+            .iter()
+            .any(|a| a == "--dangerously-skip-permissions"),
+        "a package that does not ask keeps the profile's setting"
+    );
 
     let mut only_claude = h.clone();
     only_claude.harnesses = vec![Harness::Claude];

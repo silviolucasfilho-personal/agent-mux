@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
             Some("run") => return agent_mux::tracing::experiments::run_cli(&args[2..]).await,
             Some("loop") => return agent_mux::loops::cli::run(&args[2..]).await,
             Some("config") => return agent_mux::config_cli::run(&args[2..]),
+            Some("workflow") => return agent_mux::workflows::cli::run(&args[2..]).await,
             Some("langfuse") => {
                 eprintln!(
                     "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\
@@ -235,6 +236,7 @@ async fn main() -> Result<()> {
     app.set_terminal_size(size.height, size.width);
     app.restore_saved_sessions();
     app.loops = config::resolve_loops(cfg.loops.as_ref());
+    app.workflows = config::resolve_workflows(cfg.workflows.as_ref());
     app.load_loop_registry();
 
     let mut draw_err = None;

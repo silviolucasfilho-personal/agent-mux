@@ -1,6 +1,10 @@
 use crate::app::about::{AboutRow, AboutState};
 use crate::app::loops::{LoopDialogState, LoopField, LoopStatus};
 use crate::app::loops_view::{LoopRow, LoopsPane, LoopsTab, LoopsViewState};
+use crate::app::workflows_view::{
+    DialogField as WfField, DialogPurpose, RunRow, ViewPane, ViewPending, WorkflowDialogState,
+    WorkflowsViewState,
+};
 use crate::app::{
     App, BrowserPane, DialogContentMode, DialogField, DialogState, HistoryPane, HistoryState,
     InstallLabel, Mode, NoticeLevel, SidebarSection, SkillRow, SkillsPane, SkillsTab,
@@ -40,31 +44,46 @@ pub fn sidebar_areas(
     total_height: u16,
     agent_count: usize,
     loop_count: usize,
-) -> (Rect, Rect, Rect, Rect) {
+    workflow_count: usize,
+) -> (Rect, Rect, Rect, Rect, Rect) {
     let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
-    // Active keeps its quarter; agents and loops take what their rows need
-    // up to a third of the rest each; history gets at least four rows. On a
-    // short terminal the loops block shrinks first, then the agents block,
-    // so the active list and its click map never move.
+    // Active keeps its quarter; agents, loops and workflows take what their
+    // rows need up to a quarter of the rest each; history gets at least
+    // four rows. On a short terminal the workflows block shrinks first,
+    // then loops, then agents, so the active list and its click map never
+    // move.
     let active_rows = side_area.height / 4;
     let rest = side_area.height.saturating_sub(active_rows);
-    let cap = rest.saturating_sub(4) / 3;
+    let cap = rest.saturating_sub(4) / 4;
     let mut agent_rows = (agent_count.max(1) as u16 + 2).min(cap).max(3);
     let mut loop_rows = (loop_count.max(1) as u16 + 2).min(cap).max(3);
-    if agent_rows + loop_rows + 4 > rest {
-        loop_rows = rest.saturating_sub(agent_rows + 4).max(2);
+    let mut workflow_rows = (workflow_count.max(1) as u16 + 2).min(cap).max(3);
+    if agent_rows + loop_rows + workflow_rows + 4 > rest {
+        workflow_rows = rest.saturating_sub(agent_rows + loop_rows + 4).max(2);
     }
-    if agent_rows + loop_rows + 4 > rest {
-        agent_rows = rest.saturating_sub(loop_rows + 4).max(2);
+    if agent_rows + loop_rows + workflow_rows + 4 > rest {
+        loop_rows = rest.saturating_sub(agent_rows + workflow_rows + 4).max(2);
     }
-    let [active, skills, loops, history] = Layout::vertical([
+    if agent_rows + loop_rows + workflow_rows + 4 > rest {
+        agent_rows = rest.saturating_sub(loop_rows + workflow_rows + 4).max(2);
+    }
+    // on a terminal too short for every floor, history gives way before
+    // the active block does
+    let history_min = if agent_rows + loop_rows + workflow_rows + 4 <= rest {
+        4
+    } else {
+        rest.saturating_sub(agent_rows + loop_rows + workflow_rows)
+            .max(1)
+    };
+    let [active, skills, loops, workflows, history] = Layout::vertical([
         Constraint::Length(active_rows),
         Constraint::Length(agent_rows),
         Constraint::Length(loop_rows),
-        Constraint::Min(4),
+        Constraint::Length(workflow_rows),
+        Constraint::Min(history_min),
     ])
     .areas(side_area);
-    (active, skills, loops, history)
+    (active, skills, loops, workflows, history)
 }
 
 /// Char-boundary-safe truncation with an ellipsis. Byte slicing here
@@ -269,6 +288,8 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::LoopsView(view) => draw_loops_view(f, view, app),
         Mode::NewLoop(dialog) => draw_loop_dialog(f, dialog, app),
         Mode::ConfigView(view) => draw_config_view(f, view),
+        Mode::WorkflowDialog(dialog) => draw_workflow_dialog(f, dialog),
+        Mode::WorkflowsView(view) => draw_workflows_view(f, view, app),
         Mode::ConfirmRemoveLoop => draw_confirm(
             f,
             "Remove this loop from the registry? Its files in the workspace stay. [y/n]",
@@ -278,13 +299,113 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let (active_area, agents_area, loops_area, history_area) =
-        sidebar_areas(area.height, app.skills.len(), app.loop_registry.loops.len());
+    let (active_area, agents_area, loops_area, workflows_area, history_area) = sidebar_areas(
+        area.height,
+        app.skills.len(),
+        app.loop_registry.loops.len(),
+        app.workflow_list.len(),
+    );
 
     draw_active_sidebar(f, active_area, app, now);
     draw_agents_sidebar(f, agents_area, app);
     draw_loops_sidebar(f, loops_area, app);
+    draw_workflows_sidebar(f, workflows_area, app);
     draw_history_sidebar(f, history_area, app);
+}
+
+fn draw_workflows_sidebar(f: &mut Frame, area: Rect, app: &App) {
+    let is_focused =
+        app.sidebar_section == SidebarSection::Workflows && matches!(app.mode, Mode::Control);
+    let n = app.workflow_list.len();
+    let live = app.live_workflow_runs.len();
+    let title = if live > 0 {
+        format!(
+            "Workflows [{}/{}] {live} running",
+            (app.selected_workflow + 1).min(n),
+            n
+        )
+    } else if n == 0 {
+        "Workflows [0]".to_string()
+    } else {
+        format!("Workflows [{}/{}]", (app.selected_workflow + 1).min(n), n)
+    };
+    let border_style = if is_focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let title_style = if is_focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(format!(" {title} "), title_style));
+    if n == 0 {
+        let hint = Paragraph::new(
+            "no workflows
+
+[c] compose one",
+        )
+        .block(block);
+        f.render_widget(hint, area);
+        return;
+    }
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = sidebar_window(app.selected_workflow, n, visible);
+    let end = (start + visible.max(1)).min(n);
+    let name_width = usize::from(area.width.saturating_sub(2))
+        .saturating_sub(9)
+        .max(6);
+    let items: Vec<ListItem> = app.workflow_list[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, entry)| {
+            let i = start + offset;
+            let is_selected = i == app.selected_workflow;
+            let marker = if is_selected && is_focused {
+                "> "
+            } else if is_selected {
+                "* "
+            } else {
+                "  "
+            };
+            let (glyph, right) = app.workflow_row(entry);
+            let line = Line::from(vec![
+                Span::raw(marker),
+                Span::styled(
+                    format!("{} ", glyph.glyph()),
+                    Style::default().fg(glyph.color()),
+                ),
+                Span::styled(
+                    format!(
+                        "{:<w$}",
+                        truncate_chars(&entry.name, name_width),
+                        w = name_width
+                    ),
+                    if is_selected {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+                Span::styled(format!(" {right:>4}"), Style::default().fg(glyph.color())),
+            ]);
+            let item = ListItem::new(line);
+            if is_selected && is_focused {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
 }
 
 fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
@@ -662,6 +783,13 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         && matches!(app.mode, Mode::Control)
     {
         draw_loop_preview(f, area, app);
+        return;
+    }
+    if !app.sidebar_hidden
+        && app.sidebar_section == SidebarSection::Workflows
+        && matches!(app.mode, Mode::Control)
+    {
+        draw_workflow_preview(f, area, app);
         return;
     }
     if ((!app.sidebar_hidden
@@ -1491,7 +1619,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     match app.sidebar_section {
                         SidebarSection::Active => Line::raw(
-                            "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
+                            "[b] side [Enter] attach [n] new [S] skills [C] config [X] clear exited [t/T] trace [?] help [q] quit",
                         ),
                         SidebarSection::Agents => Line::raw(
                             "[b] sidebar  [Enter/h] launch agent  [Tab] loops  [n] new  [S] skills  [C] config  [?] help  [q] quit",
@@ -1508,6 +1636,9 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                                 )
                             }
                         }
+                        SidebarSection::Workflows => Line::raw(
+                            "[b] sidebar  [Enter] run / view  [c] compose  [e] edit  [x] cancel  [W] view  [K] kill  [?] help",
+                        ),
                         SidebarSection::History => Line::raw(
                             "[b] sidebar  [Enter/r] restart  [a] all  [n] new  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
                         ),
@@ -1558,6 +1689,7 @@ fn draw_help(f: &mut Frame) {
             "configuration: edit every prompt, skill, loop pattern, loop skill, agent and template",
         ),
         row("E / K", "loops view / kill switch: pause every loop"),
+        row("W", "workflows view: runs, planned documents, results"),
         row("v", "about: version, build time, paths and this session"),
         row(
             "n",
@@ -1570,6 +1702,7 @@ fn draw_help(f: &mut Frame) {
             "badge glyphs: traced locally, to Langfuse, to both",
         ),
         row("x / r", "kill session / respawn or restart"),
+        row("X", "clear all exited sessions"),
         row("q", "quit"),
         Line::raw(""),
         Line::styled("Attached mode", head),
@@ -1593,6 +1726,11 @@ fn draw_help(f: &mut Frame) {
         row("a", "toggle this project / all projects"),
         row("r or Enter", "resume the selected session"),
         Line::raw(""),
+        Line::styled("Workflows section", head),
+        row(
+            "Enter / c / e / x",
+            "run (or view when live) · compose for a task · edit · cancel",
+        ),
         Line::styled("Loops section", head),
         row(
             "Enter",
@@ -3963,6 +4101,519 @@ fn draw_confirm(f: &mut Frame, message: &str) {
     f.render_widget(Paragraph::new(message).block(block), area);
 }
 
+/// The Workflows section preview: one card for the selected document.
+fn draw_workflow_preview(f: &mut Frame, area: Rect, app: &App) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::DarkGray);
+    let Some(entry) = app.selected_workflow_entry() else {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Workflows ");
+        let text = "\n  No workflows.\n\n  A workflow runs several harness sessions with one focused goal each and\n  composes their answers: fan-out, verification votes, tournaments, loops until done.\n\n  [c] compose one for a task   [W] Workflows view   [?] help";
+        f.render_widget(Paragraph::new(text).block(block), area);
+        return;
+    };
+    let (glyph, _) = app.workflow_row(entry);
+    let title = format!(" {} · {} ", entry.name, entry.source.label());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(Span::styled(title, Style::default().fg(glyph.color())));
+    let mut lines: Vec<Line> = Vec::new();
+    let row = |k: &str, v: String| {
+        Line::from(vec![Span::styled(format!("  {k:<10}"), key), Span::raw(v)])
+    };
+    match &entry.doc {
+        Some(doc) => {
+            lines.push(Line::raw(format!("  {}", doc.description)));
+            if let Some(w) = &doc.when_to_use {
+                lines.push(Line::styled(format!("  {w}"), dim));
+            }
+            lines.push(Line::raw(""));
+            for s in &doc.steps {
+                let phase = s.phase.clone().unwrap_or_else(|| s.id.clone());
+                let detail = match s.kind {
+                    crate::workflows::document::StepKind::Fanout
+                    | crate::workflows::document::StepKind::Pipeline => match &s.over {
+                        Some(crate::workflows::document::Over::Inline(v)) => {
+                            format!("×{}", v.len())
+                        }
+                        _ => "×k".into(),
+                    },
+                    crate::workflows::document::StepKind::Tournament => {
+                        format!("n={}", s.n.unwrap_or(0))
+                    }
+                    crate::workflows::document::StepKind::Until => {
+                        format!("≤{} rounds", s.max_rounds)
+                    }
+                    _ => String::new(),
+                };
+                let verify = s
+                    .verify
+                    .as_ref()
+                    .map(|v| format!(" · verify ×{}", v.votes))
+                    .unwrap_or_default();
+                let actor = match &s.actor {
+                    Some(crate::workflows::document::Actor::Skill(n)) => n.clone(),
+                    Some(crate::workflows::document::Actor::Prompt(_)) => "prompt".into(),
+                    None => "transform".into(),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {phase:<14}"), key),
+                    Span::raw(format!(
+                        "{} ({} {detail}{verify}) · {actor}",
+                        s.id,
+                        s.kind.label()
+                    )),
+                ]));
+            }
+            if !doc.args.is_empty() {
+                lines.push(Line::raw(""));
+                for (k, a) in &doc.args {
+                    lines.push(row(
+                        &format!("arg {k}"),
+                        format!(
+                            "{}{}",
+                            a.description.clone().unwrap_or_default(),
+                            if a.required { " (required)" } else { "" }
+                        ),
+                    ));
+                }
+            }
+            lines.push(Line::styled(
+                format!(
+                    "  harness {}",
+                    match &doc.harness {
+                        crate::workflows::document::HarnessFilter::Any => "any".to_string(),
+                        crate::workflows::document::HarnessFilter::Only(l) => l.join(", "),
+                    }
+                ),
+                dim,
+            ));
+        }
+        None => {
+            for p in &entry.problems {
+                lines.push(Line::styled(
+                    format!("  ! {p}"),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    if let Some(r) = app.live_run_of(&entry.name) {
+        lines.push(row(
+            "Running",
+            format!(
+                "{} on {} · {}",
+                &r.run_id[..8],
+                r.harness.as_str(),
+                r.progress()
+            ),
+        ));
+        for (step, state) in r.state.step_states() {
+            lines.push(Line::styled(
+                format!("             {step:<24} {state}"),
+                dim,
+            ));
+        }
+        lines.push(Line::styled(
+            "  [Enter] the Workflows view   [x] cancel",
+            dim,
+        ));
+    } else if let Some(r) = app
+        .recent_workflow_runs
+        .iter()
+        .find(|r| r.name == entry.name)
+    {
+        lines.push(row(
+            "Last run",
+            format!(
+                "{} on {} · {} sessions · {}k tokens · ${:.2}",
+                r.status,
+                r.harness,
+                r.sessions,
+                r.tokens / 1000,
+                r.cost_usd
+            ),
+        ));
+        if let Some(e) = &r.error {
+            lines.push(Line::styled(
+                format!("             {e}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        lines.push(Line::styled("  [Enter] run again   [W] results", dim));
+    } else {
+        lines.push(Line::styled(
+            "  [Enter] run   [c] compose for a task   [e] edit   [W] view",
+            dim,
+        ));
+    }
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// A dialog text field over several rows: the label, then the wrapped
+/// text with the cursor on it. An unfocused field shows one line. The
+/// width drawn with is written back so `↑`/`↓` move by visual row.
+fn text_area_lines(
+    label: &str,
+    ta: &crate::app::text_area::TextArea,
+    active: bool,
+    rows: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    const LABEL: usize = 12;
+    let dim = Style::default().fg(Color::DarkGray);
+    // a long label (`arg replacement`) must not eat into the text
+    let label = truncate_chars(label, LABEL - 1);
+    let content = width.saturating_sub(LABEL).max(8);
+    ta.width.set(content);
+    let mut out: Vec<Line> = Vec::new();
+    if !active {
+        let text = ta.preview(content);
+        out.push(Line::from(vec![
+            Span::styled(format!("{label:<LABEL$}"), dim),
+            if text.is_empty() {
+                Span::styled("(empty)", dim)
+            } else {
+                Span::raw(text)
+            },
+        ]));
+        return out;
+    }
+    let visual = ta.rows();
+    let (cur_row, cur_col) = ta.cursor_at(&visual);
+    let rows = rows.max(1);
+    let start = cur_row
+        .saturating_sub(rows - 1)
+        .min(visual.len().saturating_sub(1));
+    let end = (start + rows).min(visual.len());
+    for (n, row) in visual[start..end].iter().enumerate() {
+        let i = start + n;
+        let text = &ta.text[row.start..row.end];
+        let head = if i == start {
+            Span::styled(format!("{label:<LABEL$}"), dim)
+        } else {
+            Span::raw(" ".repeat(LABEL))
+        };
+        let mut spans = vec![head];
+        if i == cur_row {
+            // the cursor cell is reversed; at the end of a row it is a space
+            let before: String = text.chars().take(cur_col).collect();
+            let at: String = text.chars().skip(cur_col).take(1).collect();
+            let after: String = text.chars().skip(cur_col + 1).collect();
+            spans.push(Span::raw(before));
+            spans.push(Span::styled(
+                if at.is_empty() { " ".to_string() } else { at },
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+            if !after.is_empty() {
+                spans.push(Span::raw(after));
+            }
+        } else {
+            spans.push(Span::raw(text.to_string()));
+        }
+        out.push(Line::from(spans));
+    }
+    if end < visual.len() {
+        out.push(Line::styled(
+            format!("{}… {} more line(s)", " ".repeat(LABEL), visual.len() - end),
+            dim,
+        ));
+    }
+    out
+}
+
+fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
+    let width = 92.min(f.area().width.saturating_sub(4)).max(40);
+    let height = 34.min(f.area().height.saturating_sub(2)).max(14);
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+    let inner_width = usize::from(width.saturating_sub(2));
+    let title = match &dialog.purpose {
+        DialogPurpose::Run { name } => format!(" Run {name} "),
+        DialogPurpose::Plan => " Compose a workflow ".to_string(),
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let dim = Style::default().fg(Color::DarkGray);
+    let sel = |on: bool| {
+        if on {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        }
+    };
+    let field = |label: &str, value: String, on: bool| {
+        Line::from(vec![
+            Span::styled(format!("{label:<12}"), dim),
+            Span::styled(value, sel(on)),
+        ])
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::styled(format!("  {}", dialog.description), dim));
+    if dialog.purpose == DialogPurpose::Plan {
+        lines.extend(text_area_lines(
+            "Task",
+            &dialog.task,
+            dialog.field == WfField::Task,
+            dialog.rows_for(WfField::Task),
+            inner_width,
+        ));
+        if dialog.field == WfField::Task {
+            lines.push(Line::styled(
+                "            what the composed workflow should do; Alt+Enter newline, Ctrl+E editor, Ctrl+V paste",
+                dim,
+            ));
+        }
+    }
+    let max_visible = usize::from(height).saturating_sub(18).clamp(1, 4);
+    lines.extend(dir_picker_lines(
+        &format!("{:<12}", "Workspace"),
+        &dialog.workspace,
+        &dialog.dir_picker,
+        dialog.field == WfField::Workspace,
+        max_visible,
+    ));
+    let profile_text = if dialog.profiles.is_empty() {
+        "no profile for this workflow's harnesses in profiles.toml".to_string()
+    } else {
+        dialog
+            .profiles
+            .get(dialog.profile_idx)
+            .map(|(n, h)| format!("{n} ({})", h.as_str()))
+            .unwrap_or_default()
+    };
+    lines.push(field(
+        "Profile",
+        profile_text,
+        dialog.field == WfField::Profile,
+    ));
+    for (i, name) in dialog.arg_names.iter().enumerate() {
+        if let Some(ta) = dialog.args.get(i) {
+            // the name alone: the help line under it says it is an argument
+            lines.extend(text_area_lines(
+                name,
+                ta,
+                dialog.field == WfField::Arg(i),
+                dialog.rows_for(WfField::Arg(i)),
+                inner_width,
+            ));
+        }
+        if let Some(h) = dialog.arg_help.get(i)
+            && !h.is_empty()
+        {
+            lines.push(Line::styled(format!("            {h}"), dim));
+        }
+    }
+    lines.push(field(
+        "Budget",
+        format!("{} tokens ", dialog.budget.text),
+        dialog.field == WfField::Budget,
+    ));
+    if dialog.purpose != DialogPurpose::Plan {
+        lines.push(field(
+            "Max cost",
+            format!("{} USD ", dialog.max_cost.text),
+            dialog.field == WfField::MaxCost,
+        ));
+        lines.push(field(
+            "Isolation",
+            match dialog.isolation {
+                crate::workflows::document::Isolation::None => "none".into(),
+                crate::workflows::document::Isolation::Worktree => "worktree".into(),
+            },
+            dialog.field == WfField::Isolation,
+        ));
+        if !dialog.estimate.is_empty() {
+            lines.push(Line::styled(
+                format!("  sessions: {}", dialog.estimate),
+                dim,
+            ));
+        }
+    }
+    lines.push(Line::raw(""));
+    if let Some(e) = &dialog.error {
+        lines.push(Line::styled(
+            format!("  {e}"),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    lines.push(Line::styled(
+        "  [Enter] start  [Tab] field  [Alt+Enter] newline  [Ctrl+E] editor  [Ctrl+V] paste  [Esc] cancel",
+        dim,
+    ));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_workflows_view(f: &mut Frame, view: &WorkflowsViewState, app: &App) {
+    let width = (f.area().width * 96 / 100).clamp(60, 220);
+    let height = (f.area().height * 92 / 100).clamp(18, 70);
+    let area = centered(f.area(), width, height);
+    f.render_widget(Clear, area);
+    let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(32), Constraint::Min(0)]).areas(body);
+    let facts = app.view_facts();
+    let left_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(view.focus == ViewPane::Runs))
+        .title(format!(
+            " Workflow runs ({}) ",
+            view.rows
+                .iter()
+                .filter(|r| !matches!(r, RunRow::Header(_)))
+                .count()
+        ));
+    if view.rows.is_empty() {
+        let p = Paragraph::new("\n  no runs yet\n\n  Enter on a workflow, or c to compose one")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(left_block);
+        f.render_widget(p, left);
+    } else {
+        let visible = usize::from(left.height.saturating_sub(2));
+        let start = sidebar_window(view.selected, view.rows.len(), visible);
+        let end = (start + visible.max(1)).min(view.rows.len());
+        let items: Vec<ListItem> = view.rows[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, row)| {
+                let i = start + offset;
+                let is_sel = i == view.selected;
+                let marker = if is_sel { "> " } else { "  " };
+                let line = match row {
+                    RunRow::Header(h) => Line::styled(
+                        h.to_string(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    RunRow::Planned(id) => {
+                        let p = facts.planned.iter().find(|p| p.id == *id);
+                        Line::from(vec![
+                            Span::raw(marker),
+                            Span::styled("? ", Style::default().fg(Color::Yellow)),
+                            Span::raw(p.map(|p| p.name.clone()).unwrap_or_default()),
+                            Span::styled(
+                                p.map(|p| {
+                                    if p.valid() { " valid" } else { " problems" }.to_string()
+                                })
+                                .unwrap_or_default(),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ])
+                    }
+                    RunRow::Live(id) => {
+                        let r = facts.live.iter().find(|r| r.run_id == *id);
+                        Line::from(vec![
+                            Span::raw(marker),
+                            Span::styled("▶ ", Style::default().fg(Color::Cyan)),
+                            Span::raw(r.map(|r| r.name.clone()).unwrap_or_default()),
+                            Span::styled(
+                                r.map(|r| format!(" {}", r.progress())).unwrap_or_default(),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ])
+                    }
+                    RunRow::Stored(id) => {
+                        let r = view.stored.iter().find(|r| r.id == *id);
+                        let (g, c) = match r.map(|r| r.status.as_str()) {
+                            Some("finished") => ("✓", Color::Green),
+                            Some("running") => ("▶", Color::Cyan),
+                            _ => ("!", Color::Red),
+                        };
+                        Line::from(vec![
+                            Span::raw(marker),
+                            Span::styled(format!("{g} "), Style::default().fg(c)),
+                            Span::raw(r.map(|r| r.workflow.clone()).unwrap_or_default()),
+                            Span::styled(
+                                r.map(|r| format!(" {} · {}", &r.id[..8], r.harness))
+                                    .unwrap_or_default(),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ])
+                    }
+                };
+                let item = ListItem::new(line);
+                if is_sel && view.focus == ViewPane::Runs {
+                    item.style(Style::default().add_modifier(Modifier::REVERSED))
+                } else if is_sel {
+                    item.style(Style::default().fg(Color::Cyan))
+                } else {
+                    item
+                }
+            })
+            .collect();
+        f.render_widget(List::new(items).block(left_block), left);
+    }
+
+    // the detail pane's size, known before its block is built, so the title
+    // can carry an accurate scroll position on the very first frame
+    view.measure(
+        right.width.saturating_sub(2),
+        right.height.saturating_sub(2),
+    );
+    let mut title_spans = vec![Span::raw(" ")];
+    for (i, tab) in crate::app::workflows_view::ViewTab::ALL
+        .into_iter()
+        .enumerate()
+    {
+        if i > 0 {
+            title_spans.push(Span::raw(" | "));
+        }
+        title_spans.push(if tab == view.tab {
+            Span::styled(
+                tab.label(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(tab.label(), Style::default().fg(Color::DarkGray))
+        });
+    }
+    // the scroll position comes before the run's name: the name is the part
+    // a narrow pane may cut off
+    if let Some(pos) = view.scroll_position() {
+        title_spans.push(Span::styled(
+            format!(" · {pos}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    let name = view.selected_title(&facts);
+    if !name.is_empty() {
+        title_spans.push(Span::raw(format!(" · {name} ")));
+    } else {
+        title_spans.push(Span::raw(" "));
+    }
+    let right_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(view.focus == ViewPane::Detail))
+        .title(Line::from(title_spans));
+    let inner = right_block.inner(right);
+    f.render_widget(right_block, right);
+    // Long result lines are wrapped, not cut off: `visible_rows` records the
+    // pane's size so the scroll counts the rows actually drawn.
+    f.render_widget(
+        Paragraph::new(view.visible_rows(inner.width, inner.height)),
+        inner,
+    );
+    let footer_style = if matches!(view.pending, ViewPending::None) {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::Black).bg(Color::Yellow)
+    };
+    f.render_widget(
+        Paragraph::new(Line::styled(view.footer(), footer_style)),
+        footer,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4145,6 +4796,7 @@ mod tests {
             "fold / unfold the selected subtree",
             "also sent to Langfuse",
             "resume the selected session",
+            "clear all exited sessions",
         ] {
             assert!(
                 text.contains(needle),
@@ -4160,6 +4812,15 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         assert!(buffer_text(&terminal).contains("[?] help"));
+    }
+
+    #[test]
+    fn active_control_hint_advertises_clear_exited() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let app = App::new(Config::default_profiles(), None, tx);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        assert!(buffer_text(&terminal).contains("[X] clear exited"));
     }
 
     #[test]

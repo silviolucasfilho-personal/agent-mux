@@ -7,6 +7,18 @@
 # docs/configuration.md.
 # editor = "code --wait"
 #
+# Workflows (docs/workflows.md): sessions at a time across runs, timeouts,
+# the isolation default, whether a planned document waits for approval.
+# [workflows]
+# enabled = true
+# max_concurrent = 4
+# session_timeout_s = 900
+# run_timeout_s = 7200
+# max_sessions = 1000
+# default_isolation = "none"
+# dynamic_approval = "always"
+# default_budget_tokens = 0
+#
 # Note: a cwd-relative ./profiles.toml wins the search even when it contains
 # only a [tracing] section — the built-in default profiles are used and any
 # ~/.agent-mux/profiles.toml is shadowed. If you customize profiles, keep

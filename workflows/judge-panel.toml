@@ -1,0 +1,32 @@
+# Several independent attempts at one design task, judged pairwise until
+# one wins, then a synthesis that grafts the best of the rest.
+[workflow]
+name = "judge-panel"
+description = "Generate independent approaches to a task from different angles, judge them pairwise, and synthesize from the winner."
+when_to_use = "Design questions with a wide solution space, where one attempt iterated would anchor too early."
+output = "synthesis"
+
+[args.task]
+description = "The design task."
+required = true
+
+[schemas.winner]
+fields.winner = { type = "string", enum = ["a", "b"], required = true }
+fields.reason = { type = "string", required = true }
+
+[[steps]]
+id = "best"
+kind = "tournament"
+phase = "Attempt and judge"
+n = 4
+skill = "wf-attempt"
+args = { task = "{args.task}", angle = "{index}" }
+judge = "wf-judge"
+
+[[steps]]
+id = "synthesis"
+kind = "single"
+phase = "Synthesize"
+skill = "wf-synthesize"
+input = "best"
+args = { subject = "the winning approach to: {args.task}", shape = "the recommended design, its trade-offs, and what to borrow from the other attempts" }

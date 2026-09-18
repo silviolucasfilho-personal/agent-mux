@@ -19,3 +19,14 @@ run = "{invocation} Run the {pattern} loop for this workspace. Facts for this ru
 # snapshot (`[agent] hydrate = ["briefing"]` in the package's skill.toml).
 # The opening sentence itself is `startup_prompt` in that skill.toml.
 hydration_hint = "Read the briefing snapshot at $AGENT_MUX_BRIEFING (JSON, schema_version 1, taken at $AGENT_MUX_BRIEFING_AS_OF) before running any command; use the agent-mux MCP tools when $AGENT_MUX_MCP is not \"unavailable\", otherwise the agent-mux trace CLI, for anything newer."
+
+[workflow]
+# The opening prompt of every workflow session that runs a step skill.
+# Placeholders: {invocation} the step skill as this harness invokes it,
+# {workflow} the workflow name, {step} the session label (find[2]),
+# {context} the absolute path of the session's context file.
+run = "{invocation} You are session {step} of the {workflow} workflow. Read the context file at {context} first (also in $AGENT_MUX_WORKFLOW_CONTEXT); it holds your args, inputs and the result schema. Finish with the answer the skill describes."
+# Sent before an inline `prompt` step's own text. Same placeholders.
+inline = "You are session {step} of the {workflow} workflow, run by agent-mux. Read the context file at {context} first (also in $AGENT_MUX_WORKFLOW_CONTEXT): it holds args, inputs, budget and, when the step expects a structured answer, result_schema. Do not ask questions; there is nobody to answer. If result_schema is present, end your answer with exactly one fenced block tagged workflow-result containing JSON that matches it, and nothing after it. The task:"
+# The planner's opening prompt. {invocation} is the workflow-author skill, {plan} the planner context file.
+plan = "{invocation} Compose a workflow for the task in the planner context at {plan} (also in $AGENT_MUX_WORKFLOW_PLAN). Answer with one fenced workflow-toml block."

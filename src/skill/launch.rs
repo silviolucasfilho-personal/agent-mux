@@ -252,7 +252,11 @@ pub fn build_skill_launch_full(
         args.push("--model".into());
         args.push(m.to_string());
     }
-    let bypass = base.bypass_approvals.unwrap_or(false);
+    // `auto_approve` in skill.toml is the package's own demand, so it wins
+    // over a base profile that leaves approvals on: the flags below are the
+    // three CLIs' spellings of the same thing (checked against `--help` on
+    // claude 2.1.274, codex 0.154.0 and agy 1.2.4).
+    let bypass = def.auto_approve || base.bypass_approvals.unwrap_or(false);
     match harness {
         Harness::Claude => {
             if bypass {

@@ -126,7 +126,7 @@ fn the_server_speaks_initialize_list_and_call_over_stdio() {
     srv.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}));
     let list = srv.recv();
     let tools = list["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 10);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"agent_mux_get_briefing") && names.contains(&"agent_mux_get_health"));
     for t in tools {

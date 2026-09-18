@@ -31,7 +31,7 @@ fn schema_of<T: schemars::JsonSchema>() -> Value {
     serde_json::to_value(schemars::schema_for!(T)).unwrap_or_else(|_| json!({"type": "object"}))
 }
 
-/// The nine read-only tools, in the order `tools/list` returns them.
+/// The ten read-only tools, in the order `tools/list` returns them.
 pub fn tool_catalog() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
@@ -79,7 +79,87 @@ pub fn tool_catalog() -> Vec<ToolSpec> {
             description: "The Loop Engineering context of a loop run, recomputed now: effective level and why, today's budget against the caps, circuit breaker state, gate globs, readiness score, recent runs and the human inbox. Defaults to the calling run (AGENT_MUX_LOOP_RUN_ID) or the workspace's loop.",
             input_schema: schema_of::<LoopContextArgs>(),
         },
+        ToolSpec {
+            name: "agent_mux_get_workflow_run",
+            description: "A workflow run: its document, status, args, sessions (step, phase, harness, result kind, tokens, cost) and result. Defaults to the calling run (AGENT_MUX_WORKFLOW_RUN_ID); an id prefix is accepted.",
+            input_schema: schema_of::<WorkflowRunArgs>(),
+        },
     ]
+}
+
+/// Arguments of `agent_mux_get_workflow_run`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRunArgs {
+    /// A run id (`workflow_runs.id`) or unique prefix; absent means the
+    /// calling run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
+/// The workflow run tool: the run row, its sessions and its result.
+fn workflow_run_result(service: &TraceService, arguments: Value) -> Value {
+    let args: WorkflowRunArgs = match serde_json::from_value(if arguments.is_null() {
+        json!({})
+    } else {
+        arguments
+    }) {
+        Ok(a) => a,
+        Err(e) => {
+            return tool_error(&ServiceError::InvalidArgument(format!(
+                "invalid arguments for get_workflow_run: {e}"
+            )));
+        }
+    };
+    let Some(run_id) = args
+        .run_id
+        .or_else(|| std::env::var("AGENT_MUX_WORKFLOW_RUN_ID").ok())
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return tool_error(&ServiceError::InvalidArgument(
+            "run_id is required outside a workflow session".into(),
+        ));
+    };
+    let config = service.config();
+    let conn = match crate::tracing::store::open_ro(&config.db_path) {
+        Ok(c) => c,
+        Err(e) => return tool_error(&ServiceError::DbUnavailable(e)),
+    };
+    let run = match crate::workflows::store::resolve_run(&conn, &run_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return tool_error(&ServiceError::NotFound(format!("no workflow run {run_id}")));
+        }
+        Err(e) => return tool_error(&ServiceError::DbUnavailable(e.to_string())),
+    };
+    let steps = crate::workflows::store::steps_of(&conn, &run.id).unwrap_or_default();
+    let value = json!({
+        "schema_version": 1,
+        "scope": { "workspace": run.workspace, "all_workspaces": false },
+        "window": Value::Null,
+        "data": {
+            "id": run.id, "workflow": run.workflow, "source": run.source, "status": run.status,
+            "harness": run.harness, "profile": run.profile, "args": run.args,
+            "budget_tokens": run.budget_tokens, "started_ns": run.started_ns, "ended_ns": run.ended_ns,
+            "sessions": steps.iter().map(|s| json!({
+                "session": s.session, "step": s.step_id, "phase": s.phase, "harness": s.harness,
+                "kind": s.kind, "tokens": s.tokens, "cost_usd": s.cost_usd, "launch_id": s.launch_id,
+                "worktree": s.worktree, "changed_files": s.changed_files, "result": s.result,
+            })).collect::<Vec<_>>(),
+            "tokens": run.tokens, "cost_usd": run.cost_usd, "result": run.result, "error": run.error,
+            "document": run.document,
+        },
+        "coverage": { "status": "complete" },
+        "warnings": [],
+        "next_cursor": Value::Null,
+        "truncated": false,
+    });
+    let text = serde_json::to_string(&value).unwrap_or_default();
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": value,
+        "isError": false,
+    })
 }
 
 /// Arguments of `agent_mux_get_loop_context`.
@@ -254,6 +334,9 @@ pub fn handle_message(service: &TraceService, line: &str) -> Option<Value> {
             let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
             if name == "agent_mux_get_loop_context" {
                 return Some(rpc_result(id, loop_context_result(service, arguments)));
+            }
+            if name == "agent_mux_get_workflow_run" {
+                return Some(rpc_result(id, workflow_run_result(service, arguments)));
             }
             match Request::from_tool_call(name, arguments) {
                 Err(e) => tool_error(&e),
@@ -436,10 +519,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_contains_exactly_nine_read_tools() {
+    fn catalog_contains_exactly_ten_read_tools() {
         let names = tool_names();
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 10);
         assert!(names.contains(&"agent_mux_get_loop_context"));
+        assert!(names.contains(&"agent_mux_get_workflow_run"));
         assert!(names.contains(&"agent_mux_get_briefing"));
         assert!(names.contains(&"agent_mux_compare_runs"));
         assert!(

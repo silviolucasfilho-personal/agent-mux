@@ -210,7 +210,9 @@ impl SkillsViewState {
     pub fn reload(&mut self) {
         let keep = self.selected_key();
         let (packages, _) = crate::skill::load_skills(self.skills_dir.as_deref());
-        self.packages = packages;
+        // workflow step skills and the planner are hidden packages: not
+        // agents, so not listed here either
+        self.packages = packages.into_iter().filter(|p| !p.hidden).collect();
         self.native = inventory_all(&self.cwd, &self.home)
             .into_iter()
             .filter(|d| d.kind == Kind::Skill)

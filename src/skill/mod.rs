@@ -42,14 +42,94 @@ const BUILTIN_HEIMDALL_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// One compiled-in package: its id, where it lives in the repository,
+/// and every file as (path inside the package, text).
+#[derive(Debug, Clone, Copy)]
+pub struct BuiltinPackage {
+    pub id: &'static str,
+    pub repo_dir: &'static str,
+    pub skill_md: &'static str,
+    pub skill_toml: Option<&'static str>,
+    pub files: &'static [(&'static str, &'static str)],
+}
+
+impl BuiltinPackage {
+    /// SKILL.md, skill.toml and the reference files, in that order.
+    pub fn all_files(&self) -> Vec<(&'static str, &'static str)> {
+        let mut v = vec![("SKILL.md", self.skill_md)];
+        if let Some(t) = self.skill_toml {
+            v.push(("skill.toml", t));
+        }
+        v.extend(self.files.iter().copied());
+        v
+    }
+}
+
+macro_rules! wf_skill {
+    ($name:literal) => {
+        BuiltinPackage {
+            id: $name,
+            repo_dir: concat!("workflows/skills/", $name, "/"),
+            skill_md: include_str!(concat!("../../workflows/skills/", $name, "/SKILL.md")),
+            skill_toml: Some(include_str!(concat!(
+                "../../workflows/skills/",
+                $name,
+                "/skill.toml"
+            ))),
+            files: &[],
+        }
+    };
+}
+
+/// Every compiled-in package: Heimdall, the workflow planner and the
+/// workflow step skills.
+pub fn builtin_packages() -> Vec<BuiltinPackage> {
+    vec![
+        BuiltinPackage {
+            id: "heimdall",
+            repo_dir: "skills/heimdall/",
+            skill_md: BUILTIN_HEIMDALL_SKILL,
+            skill_toml: Some(BUILTIN_HEIMDALL_TOML),
+            files: BUILTIN_HEIMDALL_FILES,
+        },
+        BuiltinPackage {
+            id: "workflow-author",
+            repo_dir: "skills/workflow-author/",
+            skill_md: include_str!("../../skills/workflow-author/SKILL.md"),
+            skill_toml: Some(include_str!("../../skills/workflow-author/skill.toml")),
+            files: &[
+                (
+                    "reference/document.md",
+                    include_str!("../../skills/workflow-author/reference/document.md"),
+                ),
+                (
+                    "reference/patterns.md",
+                    include_str!("../../skills/workflow-author/reference/patterns.md"),
+                ),
+            ],
+        },
+        wf_skill!("wf-review-find"),
+        wf_skill!("wf-refute"),
+        wf_skill!("wf-synthesize"),
+        wf_skill!("wf-read-map"),
+        wf_skill!("wf-search"),
+        wf_skill!("wf-deep-read"),
+        wf_skill!("wf-critic"),
+        wf_skill!("wf-find"),
+        wf_skill!("wf-attempt"),
+        wf_skill!("wf-judge"),
+        wf_skill!("wf-discover-sites"),
+        wf_skill!("wf-transform"),
+        wf_skill!("wf-verify-site"),
+        wf_skill!("wf-classify"),
+        wf_skill!("wf-triage-bug"),
+        wf_skill!("wf-triage-feature"),
+    ]
+}
+
 /// Every compiled-in Heimdall file as (path inside the package, text).
 pub fn builtin_files() -> Vec<(&'static str, &'static str)> {
-    let mut v = vec![
-        ("SKILL.md", BUILTIN_HEIMDALL_SKILL),
-        ("skill.toml", BUILTIN_HEIMDALL_TOML),
-    ];
-    v.extend(BUILTIN_HEIMDALL_FILES.iter().copied());
-    v
+    builtin_packages()[0].all_files()
 }
 
 /// Checks a `skill.toml` text alone (shape and harness names).
@@ -145,6 +225,17 @@ pub struct SkillDefinition {
     /// Package directory on disk; `None` for the compiled-in package.
     pub dir: Option<PathBuf>,
     pub is_builtin: bool,
+    /// `hidden = true`: not listed in the Agents sidebar (workflow step
+    /// skills and the planner); still installable and launchable.
+    pub hidden: bool,
+    /// `writes = true`: the skill edits files; a workflow step running it
+    /// must be isolated.
+    pub writes: bool,
+    /// `auto_approve = true`: the session launches with every tool
+    /// permission pre-granted, whichever harness runs it. The package asks
+    /// for this, so a base profile that does not bypass approvals cannot
+    /// leave the skill waiting on a prompt nobody is watching.
+    pub auto_approve: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +264,12 @@ struct SkillMeta {
     capabilities: Vec<String>,
     startup_prompt: Option<String>,
     agent: Option<AgentMeta>,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    writes: bool,
+    #[serde(default)]
+    auto_approve: bool,
 }
 
 /// `[agent]` in skill.toml: what Rust prepares for the agent at launch.
@@ -383,30 +480,39 @@ pub fn parse_skill(
         source_hash: format!("{:x}", hasher.finalize()),
         dir: dir.map(Path::to_path_buf),
         is_builtin: false,
+        hidden: meta.hidden,
+        writes: meta.writes,
+        auto_approve: meta.auto_approve,
     })
 }
 
-/// The compiled-in packages.
+/// The compiled-in packages, parsed.
 pub fn builtin_skills() -> Vec<SkillDefinition> {
-    let files = BUILTIN_HEIMDALL_FILES
-        .iter()
-        .map(|(p, c)| (p.to_string(), c.to_string()))
-        .collect();
-    match parse_skill(
-        BUILTIN_HEIMDALL_SKILL,
-        Some(BUILTIN_HEIMDALL_TOML),
-        files,
-        None,
-    ) {
-        Ok(mut s) => {
-            s.is_builtin = true;
-            vec![s]
-        }
-        Err(e) => {
-            eprintln!("Warning: compiled-in skill package failed to parse: {e}");
-            Vec::new()
+    let mut out = Vec::new();
+    for pkg in builtin_packages() {
+        let files = pkg
+            .files
+            .iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect();
+        match parse_skill(pkg.skill_md, pkg.skill_toml, files, None) {
+            Ok(mut s) => {
+                if s.id != pkg.id {
+                    eprintln!(
+                        "Warning: compiled-in package {} declares name {:?}",
+                        pkg.id, s.id
+                    );
+                }
+                s.is_builtin = true;
+                out.push(s);
+            }
+            Err(e) => eprintln!(
+                "Warning: compiled-in skill package {} failed to parse: {e}",
+                pkg.id
+            ),
         }
     }
+    out
 }
 
 /// `AGENT_MUX_SKILLS_DIR`, else `~/.agent-mux/skills`.
@@ -519,8 +625,17 @@ mod tests {
     #[test]
     fn builtin_heimdall_parses() {
         let s = builtin_skills();
-        assert_eq!(s.len(), 1);
+        assert_eq!(
+            s.len(),
+            builtin_packages().len(),
+            "every compiled-in package parses"
+        );
         assert_eq!(s[0].id, "heimdall");
+        assert!(
+            s.iter().filter(|p| p.hidden).count() >= 17,
+            "step skills and the planner are hidden"
+        );
+        assert!(s.iter().any(|p| p.id == "wf-transform" && p.writes));
         assert!(s[0].is_builtin);
         assert_eq!(s[0].files.len(), 3);
         assert!(s[0].capabilities.iter().any(|c| c == "trace.read"));

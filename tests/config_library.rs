@@ -86,18 +86,18 @@ fn ls_check_show_and_path_describe_the_builtin_set() {
     assert!(out.contains("loops/skills/loop-triage/SKILL.md"));
     assert!(out.contains("skills/heimdall/reference/agents.md"));
     let builtin_rows = out.lines().filter(|l| l.contains("built-in")).count();
-    assert_eq!(builtin_rows, 26, "{out}");
+    assert_eq!(builtin_rows, 69, "{out}");
 
     let (ok, out, _) = run(&f, &["config", "ls", "--json"]);
     assert!(ok);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["items"].as_array().unwrap().len(), 26);
+    assert_eq!(v["items"].as_array().unwrap().len(), 69);
     assert_eq!(v["root"].as_str().unwrap(), f.library.to_string_lossy());
 
     let (ok, out, _) = run(&f, &["config", "check"]);
     assert!(ok);
     assert!(
-        out.contains("26 items, 0 overridden or added, no problems"),
+        out.contains("69 items, 0 overridden or added, no problems"),
         "{out}"
     );
 
@@ -226,7 +226,7 @@ fn new_items_are_listed_as_user_and_deleted_by_reset() {
     }
     let (ok, out, _) = run(&f, &["config", "check"]);
     assert!(ok, "{out}");
-    assert!(out.contains("30 items, 4 overridden or added"), "{out}");
+    assert!(out.contains("73 items, 4 overridden or added"), "{out}");
 
     // the new skill package is a real package: `skill list` sees it
     let (ok, out, err) = run(&f, &["skill", "list"]);

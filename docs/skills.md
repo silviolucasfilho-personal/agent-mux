@@ -32,6 +32,9 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 | `startup_prompt` | none | Appended to the invocation as the session's first message. |
 | `[agent] hydrate` | none | Snapshots Rust writes before launch; `["briefing"]` is the only value. Needs `trace.read`. |
 | `[agent] mcp` | `auto` with `trace.read`, else `off` | Whether the launch registers the agent-mux MCP server (Claude and Codex per launch; Antigravity through `agent-mux mcp install agy`). |
+| `hidden` | `false` | Not listed in the Agents sidebar or the Skills view; still installed and launched by workflows (the `wf-*` step skills, `workflow-author`). |
+| `writes` | `false` | The skill edits files; a workflow step running it must be isolated in a worktree (`docs/workflows.md`). |
+| `auto_approve` | `false` | The session launches with every tool permission pre-granted, whichever harness runs it (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex). The package's own demand: it wins over a profile that leaves approvals on, never the other way round. |
 
 Loop skills (`loops/skills/loop-*`) are **not** packages of this kind: they are installed at project level into a workspace by the loop scaffolder (`<workspace>/.claude/skills/<name>/SKILL.md`, `<workspace>/.codex/skills/<name>/SKILL.md`, plus the `loop-verifier` agent) and never appear in the Agents sidebar. See `docs/loops.md`.
 
@@ -58,7 +61,7 @@ The installed `SKILL.md` is the canonical file with one difference: the descript
 Every package is listed in the Agents section of the sidebar; a `trace.read` package such as Heimdall previews its telemetry briefing in the main pane. Enter opens the harness picker. On confirm agent-mux:
 
 1. installs or refreshes the skill in that harness's directory (manifest hash check; unchanged packages are left alone),
-2. builds the harness command line: model and permission flags from your profile for that harness, then the opening prompt `<invocation> <startup_prompt>` as the positional prompt (Claude Code, Codex) or via `--prompt-interactive` (Antigravity),
+2. builds the harness command line: the model from your profile for that harness and the permission flags from your profile or the package's `auto_approve`, then the opening prompt `<invocation> <startup_prompt>` as the positional prompt (Claude Code, Codex) or via `--prompt-interactive` (Antigravity),
 3. for a package with `[agent] hydrate`, computes the briefing in Rust and writes it to a snapshot file; the prompt ends with a sentence pointing at `$AGENT_MUX_BRIEFING`,
 4. registers the read-only MCP server for the harness when the package's `[agent] mcp` allows it (`$AGENT_MUX_MCP` says `registered`, `installed` or `unavailable`),
 5. spawns the session with `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` (this executable), `AGENT_MUX_TRACE_DB` (the store the TUI writes) and `AGENT_MUX_WORKSPACE` in its environment, and records `skill_id` / `skill_harness` on the launch row so the Executions tab can find it later.
@@ -83,4 +86,4 @@ agent-mux skill status [heimdall]             # installed / stale / not managed,
 
 ## 7. Heimdall
 
-Heimdall starts from the briefing snapshot in `$AGENT_MUX_BRIEFING`, asks follow-up questions through the eight `agent_mux_*` MCP tools when `$AGENT_MUX_MCP` is not `unavailable`, and otherwise uses the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`). It never writes. `SKILL.md` carries the tool-to-CLI table and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); the `reference/` files hold thresholds and report shapes. Ad-hoc SQL lives in `docs/trace-sql-examples.md`. See `skills/heimdall/`.
+Heimdall declares `auto_approve = true`: it only reads, and it is usually launched to report rather than to be watched, so all three CLIs start it with tool permissions already granted. Heimdall starts from the briefing snapshot in `$AGENT_MUX_BRIEFING`, asks follow-up questions through the ten `agent_mux_*` MCP tools when `$AGENT_MUX_MCP` is not `unavailable`, and otherwise uses the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`). It never writes. `SKILL.md` carries the tool-to-CLI table and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); the `reference/` files hold thresholds and report shapes. Ad-hoc SQL lives in `docs/trace-sql-examples.md`. See `skills/heimdall/`.

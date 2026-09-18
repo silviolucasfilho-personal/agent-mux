@@ -1,0 +1,49 @@
+# Review the working tree (or a scope) across dimensions, try to refute
+# every finding with independent votes, report the survivors.
+[workflow]
+name = "review-changes"
+description = "Find issues per review dimension, refute each one with three independent votes, report the survivors."
+when_to_use = "Reviewing a diff, a branch or the working tree for defects with independent verification."
+output = "report"
+
+[args.scope]
+description = "What to review: a path, a git ref range (main..HEAD), or empty for the uncommitted working tree."
+default = ""
+
+[schemas.findings]
+fields.findings = { type = "array", items = "finding", required = true }
+[schemas.finding]
+fields.file = { type = "string", required = true }
+fields.line = { type = "integer" }
+fields.title = { type = "string", required = true }
+fields.why = { type = "string", required = true, description = "The concrete failure: inputs, state, wrong output." }
+fields.severity = { type = "string", enum = ["high", "medium", "low"], required = true }
+[schemas.verdict]
+fields.refuted = { type = "boolean", required = true }
+fields.reason = { type = "string", required = true }
+
+[[steps]]
+id = "find"
+kind = "fanout"
+phase = "Review"
+over = ["correctness", "security", "concurrency and resources", "tests and coverage"]
+skill = "wf-review-find"
+args = { dimension = "{item}", scope = "{args.scope}" }
+result = "findings"
+
+[[steps]]
+id = "confirmed"
+kind = "pipeline"
+phase = "Verify"
+over = "find[*].findings[*]"
+dedupe_by = ["file", "line", "title"]
+verify = { skill = "wf-refute", votes = 3, result = "verdict", keep = "refuted < 2" }
+take = 40
+
+[[steps]]
+id = "report"
+kind = "single"
+phase = "Report"
+skill = "wf-synthesize"
+input = "confirmed"
+args = { subject = "confirmed review findings for {args.scope}", shape = "a review report grouped by severity, one paragraph per finding with file and line" }

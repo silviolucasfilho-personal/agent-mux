@@ -4,6 +4,10 @@ icon = "⚡"
 harnesses = ["claude", "codex", "agy"]
 default_harness = "agy"
 capabilities = ["trace.read"]
+# Heimdall only reads: it runs `agent-mux trace ...` and the read-only MCP
+# tools, often unattended from the sidebar. Every harness launches it with
+# approvals already granted so it never stops on a prompt nobody sees.
+auto_approve = true
 startup_prompt = "Give me the executive briefing of active and recent sessions, then the top skill and agent findings."
 
 # What agent-mux prepares in Rust before the session starts: a briefing

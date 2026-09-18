@@ -1,0 +1,7 @@
+# agent-mux metadata for the planner skill. Hidden from the Agents
+# sidebar: agent-mux launches it for `n` in the Workflows section and for
+# `agent-mux workflow plan`.
+name = "Workflow Author"
+icon = "⋯"
+hidden = true
+harnesses = ["claude", "codex", "agy"]
