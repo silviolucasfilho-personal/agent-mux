@@ -1754,7 +1754,7 @@ fn draw_help(f: &mut Frame) {
         row("a / e / x", "add a loop · edit it · remove it (files stay)"),
         row(
             "Loops view",
-            "Tab or 1-5 tabs · a/x decide an inbox item · T traces",
+            "Tab or 1-6 tabs · Report what a run found · a/x decide an inbox item · T traces",
         ),
         Line::raw(""),
         Line::styled("Skills view", head),
@@ -3467,60 +3467,45 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
         Some(c) => {
             match &c.last_run {
                 Some(r) => {
-                    let when = r
-                        .started_ns
-                        .map(|ns| crate::loops::format_timestamp(crate::loops::from_ns(ns)))
-                        .unwrap_or_else(|| r.id.clone());
-                    let n = |v: Option<i64>| v.map(|x| x.to_string()).unwrap_or_else(|| "-".into());
+                    let when = crate::workflows::report::format_when(
+                        r.started_ns.unwrap_or(r.scheduled_ns),
+                    );
+                    let mut facts: Vec<String> = Vec::new();
+                    if let Some(n) = r.items_found {
+                        facts.push(format!("{n} found"));
+                    }
+                    if let Some(n) = r.escalations.filter(|n| *n > 0) {
+                        facts.push(format!("{n} for you"));
+                    }
+                    if let Some(t) = r.tokens.filter(|t| *t > 0) {
+                        facts.push(format!(
+                            "{} tokens",
+                            crate::loops::format_tokens(t.max(0) as u64)
+                        ));
+                        facts.push(
+                            crate::workflows::report::Cost::of(r.cost_usd, &r.harness).text(),
+                        );
+                    }
+                    if let Some(d) = r.duration_s() {
+                        facts.push(crate::workflows::report::format_duration(d));
+                    }
+                    if r.outcome == crate::loops::Outcome::Blocked
+                        && let Some(reason) = r.detail_str("reason")
+                    {
+                        facts = vec![reason.to_string()];
+                    }
                     lines.push(row(
                         "Last run",
-                        format!(
-                            "{when} · {} · {} found · {} action · {} escalated",
-                            r.outcome.as_str(),
-                            n(r.items_found),
-                            n(r.actions_taken),
-                            n(r.escalations)
-                        ),
+                        format!("{when} · {} · {}", r.outcome.word(), facts.join(" · ")),
                     ));
-                    let verifier = r
-                        .detail
-                        .get("verifier")
-                        .map(|v| {
-                            match (
-                                v.get("ran").and_then(|b| b.as_bool()),
-                                v.get("verdict").and_then(|s| s.as_str()),
-                            ) {
-                                (Some(true), Some(vd)) => format!("verifier: {vd}"),
-                                (Some(true), None) => "verifier: ran".to_string(),
-                                _ => {
-                                    if r.effective_level == crate::loops::Level::L1 {
-                                        "verifier: not required at L1".to_string()
-                                    } else {
-                                        "verifier: did not run".to_string()
-                                    }
-                                }
-                            }
-                        })
-                        .unwrap_or_default();
-                    lines.push(row(
-                        "",
-                        format!(
-                            "{} tokens · {} · {} · {}{}",
-                            r.tokens
-                                .map(|t| crate::loops::format_tokens(t.max(0) as u64))
-                                .unwrap_or_else(|| "-".into()),
-                            r.cost_usd
-                                .map(|c| format!("${c:.2}"))
-                                .unwrap_or_else(|| "$-".into()),
-                            r.duration_s()
-                                .map(|s| format!("{s} s"))
-                                .unwrap_or_else(|| "-".into()),
-                            verifier,
-                            r.detail_str("reason")
-                                .map(|x| format!(" · {x}"))
-                                .unwrap_or_default()
-                        ),
-                    ));
+                    // What the run found, in its own words.
+                    if let Some(s) = r
+                        .detail_str("summary")
+                        .map(str::to_string)
+                        .or_else(|| crate::app::loops::run_delta_summary(r))
+                    {
+                        lines.push(row("", s));
+                    }
                 }
                 None => lines.push(row("Last run", "none yet".into())),
             }
@@ -3603,27 +3588,44 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(Color::Yellow),
                 ));
             }
-            let recent: Vec<String> = c
+            // One glyph per run, newest on the right, with the tally under
+            // it: a week of a fifteen-minute loop in one line.
+            let glyphs: String = c
                 .recent
                 .iter()
-                .take(4)
-                .map(|r| {
-                    let when = r
-                        .started_ns
-                        .map(|ns| crate::loops::format_timestamp(crate::loops::from_ns(ns)))
-                        .unwrap_or_else(|| r.id.clone());
-                    format!(
-                        "{} {} {}",
-                        when.get(5..16).unwrap_or(&when),
-                        r.outcome.as_str(),
-                        r.tokens
-                            .map(|t| crate::loops::format_tokens(t.max(0) as u64))
-                            .unwrap_or_else(|| "-".into())
-                    )
+                .rev()
+                .map(|r| match r.outcome {
+                    crate::loops::Outcome::Escalated => '▮',
+                    crate::loops::Outcome::FixProposed => '▰',
+                    crate::loops::Outcome::ReportOnly => '▪',
+                    crate::loops::Outcome::Failed => '✗',
+                    _ => '▯',
                 })
                 .collect();
+            let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
+            for r in &c.recent {
+                *tally.entry(r.outcome.word()).or_default() += 1;
+            }
+            let tokens: i64 = c.recent.iter().filter_map(|r| r.tokens).sum();
+            let cost: f64 = c.recent.iter().filter_map(|r| r.cost_usd).sum();
+            let recent: Vec<String> = tally
+                .iter()
+                .map(|(word, n)| format!("{n} {word}"))
+                .collect();
             if !recent.is_empty() {
-                lines.push(row("Recent", recent.join(" │ ")));
+                let mut text = format!("{glyphs}  {}", recent.join(" · "));
+                if tokens > 0 {
+                    text.push_str(&format!(
+                        " · {} tokens · {}",
+                        crate::loops::format_tokens(tokens.max(0) as u64),
+                        crate::workflows::report::Cost::of(
+                            (cost > 0.0).then_some(cost),
+                            &c.recent[0].harness
+                        )
+                        .text()
+                    ));
+                }
+                lines.push(row("Recent", text));
             }
         }
     }
@@ -4023,13 +4025,16 @@ fn draw_loops_view(f: &mut Frame, view: &LoopsViewState, app: &App) {
     let footer_text = Line::styled(
         match view.tab {
             LoopsTab::Inbox => {
-                " [Tab/1-5] tab  [←/→] pane  [↑/↓] select  [a] applied  [x] rejected  [T] traces  [Esc] close"
+                " [Tab/1-6] tab  [←/→] pane  [↑/↓] select  [a] applied  [x] rejected  [T] traces  [Esc] close"
+            }
+            LoopsTab::Report => {
+                " [Tab/1-6] tab  [↑/↓] earlier run  [2] the timeline  [r] run now  [T] traces  [Esc] close"
             }
             LoopsTab::Runs => {
-                " [Tab/1-5] tab  [←/→] pane  [↑/↓] select  [Enter] attach/traces  [r] run now  [p] pause  [Esc] close"
+                " [Tab/1-6] tab  [←/→] pane  [↑/↓] select  [1] its report  [Enter] attach/traces  [r] run now  [Esc] close"
             }
             _ => {
-                " [Tab/1-5] tab  [←/→] pane  [↑/↓] scroll  [r] run now  [p] pause  [R] reload  [Esc] close"
+                " [Tab/1-6] tab  [←/→] pane  [↑/↓] scroll  [r] run now  [p] pause  [R] reload  [Esc] close"
             }
         },
         Style::default().fg(Color::Black).bg(Color::Cyan),

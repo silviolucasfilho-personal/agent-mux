@@ -12,7 +12,7 @@ Design: `docs/superpowers/specs/2026-09-15-loop-engineering-design.md`. Not to b
 2. Pick the workspace with the same directory picker as the New session dialog (it starts on the directory of an open session, the current directory or a profile's `default_dir`; `↓` into the subfolder list, `→`/`←` to enter or go up, type in the list to search subfolders three levels deep), a pattern, a Claude Code or Codex profile, the cadence, `L1`, and leave **Scaffold** on. `Enter`.
 3. agent-mux writes the missing contract files and skills into the workspace (never overwriting), registers the loop in `~/.agent-mux/loops.json`, and shows the readiness score.
 4. Press `r` to run once now, or wait for the slot. The run appears in **Active** as an ordinary session (name `<pattern> ↻ <workspace>`); attach to watch it.
-5. The preview card shows the outcome, tokens, cost and duration of the last run; `loop-run-log.md` in the workspace gains one line per completed run.
+5. The preview card shows what the last run found, in the words the report uses (`needs you`, `reported`, `quiet`), with its summary line; `loop-run-log.md` in the workspace gains one line per completed run.
 
 Keep L1 (report-only) for a week. Promote to L2 with `e` when the readiness audit allows it (score ≥ 58 and a triage skill) and you have read a week of state files.
 
@@ -68,17 +68,71 @@ Kill switch (`K`, or the literal in the files) → workspace exists (git reposit
 
 agent-mux reads tokens and cost from the trace store, whether a sub-agent whose name contains `verifier` ran and what it answered (`## Verdict: APPROVE | REJECT | ESCALATE_HUMAN`), the files the run's write tools touched, and the worktree's changes. The outcome is the `loop-result` block when present and consistent, else derived: worktree changed → `fix-proposed`; verifier said `ESCALATE_HUMAN` or the High Priority section grew → `escalated`; state file changed → `report-only`; nothing → `no-op`; non-zero exit or timeout → `failed`. A fix without a verifier observation is flagged `verifier_missing`. A touched path on the denylist forces `escalated` and pauses the loop.
 
-Then: the `loop_runs` row, the run-log line, the ledger attempt (fix patterns), the registry (`next_run_at`, `last_run_id`, auto-pause on failure), and the worktree: removed when nothing changed, kept and listed in the **Inbox** otherwise.
+Then: the `loop_runs` row, the run-log line, the ledger attempt (fix patterns), a copy of the state file under `<runtime>/loops/state/<loop id>/<run id>.md` with the difference against the previous run (`detail.delta`, or `detail.quiet` when nothing moved), the registry (`next_run_at`, `last_run_id`, auto-pause on failure), and the worktree: removed when nothing changed, kept and listed in the **Inbox** otherwise.
 
-## 7. The inbox
+## 7. Reading a run
 
-`E` opens the Loops view; the **Inbox** tab lists runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. `a` marks the run **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed.
+`E` opens the Loops view on the **Report** tab: what the selected run found
+and who has to act. It is the state file the run wrote, parsed into the
+shape every loop skill already keeps.
 
-## 8. Antigravity
+```text
+Sep 17 17:36   NEEDS YOU   L1
+8 found · 2 for you · 417k tokens · $1.18 · 1m 43s
+#2238 conflicts and #1919 is blocked on a missing check
+Since last run  #2238 CLEAN → CONFLICTING after a push
+────────────────────────────────────────
+Needs you (2)
+  #2238 chore(spec-wave): atualiza arquivos para v0.34.2
+    conflicts (CONFLICTING, DIRTY); touches `.github/workflows/**` (denylist)
+    Decide   rebase spec-wave/update-v0.34.2 on develop, or regenerate and close
+    Loop did reported only; conflicts and workflow files are human gates
+Watching (6)
+Ignored (3)
+What the run said
+  The open PR queue has two items that need a human. …
+```
+
+- **Needs you** is `## High Priority`, one card per item: the id and title,
+  the status fragment, then the `Human decision:` and `Loop action:` lines.
+- **Since last run** is the difference against the previous run's report:
+  items that are new, gone, moved bucket or changed status.
+- **What the run said** is the run's final message.
+
+`↑` `↓` step back through the runs; the report follows the selection, so an
+older run shows the report *it* wrote. agent-mux keeps one copy of the state
+file per run under `<runtime>/loops/state/<loop id>/`, pruned after 30 days,
+because the workspace's file is rewritten in place every run.
+
+The **Runs** tab (`2`) is the timeline those reports sit in. A run that
+changed nothing folds away, so a fifteen-minute loop still reads as a
+changelog:
+
+```text
+Sep 17 17:36   NEEDS YOU   L1   8 found · 2 for you · 417k tokens · $1.18 · 1m 43s
+  #2238 conflicts and #1919 is blocked on a missing check
+Sep 17 14:06 … 17:21   quiet ×13   1.1M tokens · $2.60
+Sep 16 16:03 … 17:33   skipped · tokens today 2.2M at the cap of 2.0M ×7
+```
+
+The selected run opens with why it ended that way, the verifier's verdict,
+the files it touched, the first lines of what it said, its launch id, exit
+code and readiness. Outcome words are for the reader (`needs you`,
+`fix ready`, `reported`, `quiet`, `skipped`, `failed`); the values stored in
+`loop_runs.outcome` do not change.
+
+A run whose harness has no prices in `pricing.toml` shows `unpriced
+(<harness>)`, never `$0.00`.
+
+## 8. The inbox
+
+The **Inbox** tab lists runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. `a` marks the run **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed.
+
+## 9. Antigravity
 
 Not supported for loops in this version. agy 1.2.3 requires a `decision` in every `PreToolUse` reply and each value changes permission behaviour, so no selective path guard can be registered; its hooks and MCP entry are global installs, its skills and agents are user-level only, and sub-agent spawning is unverified. The spec's section 16 lists the probes and the two deliveries that bring it in.
 
-## 9. When something trips
+## 10. When something trips
 
 | Symptom | What to do |
 | --- | --- |
@@ -93,9 +147,9 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 | Run finished but did nothing | look at the session's scrollback (attach to it in Active); a loop run always bypasses the harness's own approval prompts because print mode has nobody to answer them, and the guard is the control |
 | Nothing runs | `[loops] enabled = false`, the kill switch, or the loop is paused; `agent-mux trace doctor` has a `loops` section |
 
-## 10. Command line
+## 11. Command line
 
-`agent-mux loop ls|add|rm|run|pause|resume|init|audit|status|cost|inbox|decide` mirror the sidebar; `loop run <id> --now` performs one scheduler pass headlessly (for cron) and exits 0 for report-only or no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. The MCP tool `agent_mux_get_loop_context` gives a running loop its context recomputed now.
+`agent-mux loop ls|add|rm|run|pause|resume|init|audit|status|report|runs|show|cost|inbox|decide` mirror the sidebar; `report <id>` prints what a run found and who has to act (`--run <run_id>` for an older one), `runs <id>` the folded timeline (`--all` unfolds it) and `show <run_id>` one run in full; `loop run <id> --now` performs one scheduler pass headlessly (for cron) and exits 0 for report-only or no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. The MCP tool `agent_mux_get_loop_context` gives a running loop its context recomputed now.
 
 Configuration (`profiles.toml`):
 

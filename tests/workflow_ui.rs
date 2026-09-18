@@ -255,12 +255,12 @@ fn c_opens_the_compose_dialog_and_w_the_view() {
     let text = render(&app, 120, 40);
     assert!(text.contains("Workflow runs (0)"), "{text}");
     assert!(text.contains("no runs yet"), "{text}");
-    assert!(text.contains("Progress"), "{text}");
+    assert!(text.contains("Report"), "{text}");
     press(&mut app, KeyCode::Tab);
     let Mode::WorkflowsView(v) = &app.mode else {
         panic!()
     };
-    assert_eq!(v.tab, agent_mux::app::workflows_view::ViewTab::Document);
+    assert_eq!(v.tab, agent_mux::app::workflows_view::ViewTab::Steps);
     press(&mut app, KeyCode::Esc);
     assert!(matches!(app.mode, Mode::Control));
 }
@@ -577,7 +577,7 @@ fn a_long_result_wraps_and_scrolls_in_the_result_tab() {
     );
     assert!(
         top.lines()
-            .any(|l| l.contains("Result") && l.contains("1–") && l.contains("/96")),
+            .any(|l| l.contains("Result") && l.contains("1–") && l.contains("/89")),
         "the pane title carries the scroll position\n{top}"
     );
     assert!(!top.lines().any(|l| l.contains("very long very long very long very long very long very long very long very long very long")), "no row runs past the pane");
@@ -601,4 +601,152 @@ fn a_long_result_wraps_and_scrolls_in_the_result_tab() {
     };
     assert_eq!(v.scroll_offset, 3);
     assert!(v.max_scroll() > 60, "the wrapped rows outgrow the pane");
+}
+
+/// A finished review run: two findings found, one of them refuted by two of
+/// three voters, and a report written from the survivor.
+#[test]
+fn the_report_tab_leads_with_the_verdict_and_shows_what_was_refuted() {
+    use agent_mux::workflows::store as wstore;
+
+    let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
+    let db = temp.path().join("traces.db");
+    let _store =
+        agent_mux::tracing::store::open_rw(&db, agent_mux::tracing::store::OpenOptions::default())
+            .unwrap();
+    let conn = agent_mux::tracing::store::open_aux(&db).unwrap();
+    let document = r#"
+[workflow]
+name = "review-changes"
+description = "d"
+output = "report"
+[schemas.finding]
+fields.file = { type = "string", required = true }
+fields.line = { type = "integer" }
+fields.title = { type = "string", required = true }
+fields.why = { type = "string", required = true }
+fields.severity = { type = "string", enum = ["high", "medium", "low"], required = true }
+[schemas.verdict]
+fields.refuted = { type = "boolean", required = true }
+fields.reason = { type = "string", required = true }
+[[steps]]
+id = "confirmed"
+kind = "pipeline"
+phase = "Verify"
+over = ["a", "b"]
+verify = { prompt = "refute", votes = 3, result = "verdict", keep = "refuted < 2" }
+[[steps]]
+id = "report"
+kind = "single"
+phase = "Report"
+prompt = "write it"
+input = "confirmed"
+"#;
+    wstore::upsert_run(
+        &conn,
+        &wstore::WorkflowRun {
+            id: "run-00000002".into(),
+            workflow: "review-changes".into(),
+            source: "built-in".into(),
+            document_hash: "h".into(),
+            document: document.into(),
+            workspace: temp.path().display().to_string(),
+            harness: "claude".into(),
+            profile: "Claude Code".into(),
+            args: serde_json::Value::Null,
+            budget_tokens: None,
+            started_ns: 1_000_000_000,
+            ended_ns: Some(373_000_000_000),
+            status: "finished".into(),
+            sessions: 7,
+            tokens: Some(1_900_000),
+            cost_usd: Some(3.1),
+            result: serde_json::Value::String(
+                "# Review of the branch\n\nOne finding survived.\n\n## High\n\nbody".into(),
+            ),
+            error: None,
+            resumed_from: None,
+        },
+    )
+    .unwrap();
+    let kept = serde_json::json!({"file": "src/app/loops.rs", "line": 1572,
+        "title": "final_message is cut at 2000 bytes", "why": "a long narrative loses its block",
+        "severity": "high"});
+    let gone = serde_json::json!({"file": "src/ui.rs", "line": 40, "title": "not a bug",
+        "why": "it reads oddly", "severity": "low"});
+    let step = |session: &str, item: &serde_json::Value, refuted: bool, reason: &str| {
+        wstore::upsert_step(
+            &conn,
+            &wstore::WorkflowStep {
+                run_id: "run-00000002".into(),
+                session: session.into(),
+                step_id: "confirmed".into(),
+                item: item.clone(),
+                launch_id: None,
+                phase: "Verify".into(),
+                harness: "claude".into(),
+                kind: "object".into(),
+                started_ns: Some(0),
+                ended_ns: Some(60_000_000_000),
+                tokens: Some(1000),
+                cost_usd: Some(0.1),
+                worktree: None,
+                changed_files: serde_json::Value::Null,
+                result: serde_json::json!({"refuted": refuted, "reason": reason}),
+            },
+        )
+        .unwrap();
+    };
+    step("confirmed[0]/vote1", &kept, false, "it is real");
+    step("confirmed[0]/vote2", &kept, true, "guarded above");
+    step("confirmed[0]/vote3", &kept, false, "it is real");
+    step("confirmed[1]/vote1", &gone, true, "the caller checks it");
+    step("confirmed[1]/vote2", &gone, true, "unreachable branch");
+    step("confirmed[1]/vote3", &gone, false, "maybe");
+    drop(conn);
+    app.trace_db_path = Some(db);
+
+    press(&mut app, KeyCode::Char('W'));
+    let Mode::WorkflowsView(v) = &app.mode else {
+        panic!("the view is open")
+    };
+    assert_eq!(v.tab, agent_mux::app::workflows_view::ViewTab::Report);
+
+    let out = render(&app, 120, 40);
+    assert!(out.contains("finished"), "{out}");
+    assert!(
+        out.contains("Review of the branch"),
+        "the verdict is the answer's heading\n{out}"
+    );
+    assert!(
+        out.contains("1 finding"),
+        "the kept findings are counted\n{out}"
+    );
+    assert!(out.contains("1 refuted"), "so are the dropped ones\n{out}");
+    assert!(out.contains("1 high"), "{out}");
+    assert!(
+        out.contains("1.9M tokens") && out.contains("$3.10"),
+        "{out}"
+    );
+    assert!(out.contains("6m 12s"), "the duration is human\n{out}");
+    assert!(
+        out.contains("src/app/loops.rs:1572"),
+        "a finding carries its file and line\n{out}"
+    );
+    assert!(out.contains("HIGH"), "{out}");
+    assert!(
+        out.contains("1/3"),
+        "the votes against are on the row\n{out}"
+    );
+    assert!(out.contains("Refuted (1)"), "{out}");
+    assert!(
+        out.contains("the caller checks it"),
+        "a refuter's reason is on screen\n{out}"
+    );
+
+    // the ledger is one tab away and names every session
+    press(&mut app, KeyCode::Tab);
+    let steps = render(&app, 120, 40);
+    assert!(steps.contains("confirmed[0]/vote1"), "{steps}");
+    assert!(steps.contains("Verify · confirmed"), "{steps}");
 }

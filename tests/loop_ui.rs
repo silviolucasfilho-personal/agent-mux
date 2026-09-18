@@ -271,3 +271,189 @@ fn the_dialog_lists_no_antigravity_profile_and_validates() {
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     let _ = PathBuf::new();
 }
+
+/// One stored run of `pattern`, with the detail a finished run carries.
+fn store_run(
+    db: &std::path::Path,
+    loop_id: &str,
+    run_id: &str,
+    outcome: agent_mux::loops::Outcome,
+    detail: serde_json::Value,
+) {
+    use agent_mux::loops::store as lstore;
+    let conn = agent_mux::tracing::store::open_aux(db).unwrap();
+    let started = agent_mux::loops::parse_timestamp(run_id).unwrap();
+    let mut run = lstore::LoopRun {
+        id: run_id.into(),
+        loop_id: loop_id.into(),
+        workspace: "/w".into(),
+        pattern: "pr-babysitter".into(),
+        harness: "claude".into(),
+        level: Level::L1,
+        effective_level: Level::L1,
+        launch_id: None,
+        scheduled_ns: agent_mux::loops::to_ns(started),
+        started_ns: Some(agent_mux::loops::to_ns(started)),
+        ended_ns: Some(agent_mux::loops::to_ns(started) + 63_000_000_000),
+        outcome,
+        items_found: Some(8),
+        actions_taken: Some(0),
+        escalations: Some(2),
+        tokens: Some(417_000),
+        cost_usd: Some(1.18),
+        readiness_score: Some(100),
+        worktree: None,
+        branch: None,
+        decision: None,
+        decided_ns: None,
+        detail,
+    };
+    if outcome == agent_mux::loops::Outcome::NoOp {
+        run.items_found = Some(0);
+        run.escalations = Some(0);
+    }
+    lstore::upsert_run(&conn, &run).unwrap();
+}
+
+const STATE: &str = r#"# PR Babysitter — proj
+
+Last run: 2026-09-17T17:36:53Z
+
+## High Priority (loop is acting or waiting on human)
+
+- [ ] #2238 atualiza arquivos para v0.34.2 — conflicts (CONFLICTING); touches `.github/workflows/**`
+  Loop action: reported only, unchanged since 2026-09-13.
+  Human decision: rebase spec-wave/update-v0.34.2 on develop, then merge.
+
+## Watch List
+
+- #2237 bump vitest from 4.1.10 to 4.1.11 — CLEAN, verify green, no review yet
+
+## Recent Noise (ignored this run)
+
+- (no drafts open)
+
+---
+Run log: 2026-09-17T17:36:53Z | 8 findings | 0 actions | 2 escalations
+Fingerprint: 2238|DIRTY
+"#;
+
+#[test]
+fn the_report_tab_shows_what_the_run_found_and_who_has_to_act() {
+    let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
+    let db = temp.path().join("traces.db");
+    let _store =
+        agent_mux::tracing::store::open_rw(&db, agent_mux::tracing::store::OpenOptions::default())
+            .unwrap();
+    app.trace_db_path = Some(db.clone());
+    let e = entry(&temp, "pr-babysitter");
+    let loop_id = e.id.clone();
+    app.loop_registry.loops.push(e);
+
+    store_run(
+        &db,
+        &loop_id,
+        "2026-09-17T17:36:53Z",
+        agent_mux::loops::Outcome::Escalated,
+        serde_json::json!({
+            "summary": "8 open PRs; #2238 conflicts, #1919 blocked on a missing check",
+            "verifier": {"ran": false, "verdict": null},
+            "files": [],
+            "exit_code": 0,
+            "final_message": "The open PR queue has two items that need a human.",
+            "delta": {"new": [], "gone": [], "moved": [],
+                      "changed": [["#2238", "CLEAN", "CONFLICTING after a push"]]}
+        }),
+    );
+    // the run's own copy of the state file is what the Report tab reads
+    let runtime = app.loops_runtime_dir();
+    agent_mux::loops::state::write_snapshot(&runtime, &loop_id, "2026-09-17T17:36:53Z", STATE)
+        .unwrap();
+
+    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    let out = render(&app, 120, 40);
+    assert!(out.contains("Report"), "the first tab is the report\n{out}");
+    assert!(
+        out.contains("NEEDS YOU"),
+        "the outcome is what the user must do\n{out}"
+    );
+    assert!(
+        out.contains("8 found") && out.contains("2 for you"),
+        "{out}"
+    );
+    assert!(
+        out.contains("417k tokens") && out.contains("$1.18"),
+        "{out}"
+    );
+    assert!(out.contains("1m 03s"), "the duration is human\n{out}");
+    assert!(
+        out.contains("#2238") && out.contains("CONFLICTING after a push"),
+        "the changelog line names what moved\n{out}"
+    );
+    assert!(out.contains("Needs you (1)"), "{out}");
+    assert!(
+        out.contains("Decide"),
+        "the human decision is on screen\n{out}"
+    );
+    assert!(out.contains("rebase spec-wave"), "{out}");
+    assert!(out.contains("Watching (1)"), "{out}");
+    assert!(out.contains("What the run said"), "{out}");
+    // the empty-bucket placeholder is not an item
+    assert!(
+        out.contains("Ignored (0)") || !out.contains("no drafts open"),
+        "{out}"
+    );
+}
+
+#[test]
+fn the_runs_timeline_folds_quiet_runs_and_opens_the_selected_one() {
+    let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
+    let db = temp.path().join("traces.db");
+    let _store =
+        agent_mux::tracing::store::open_rw(&db, agent_mux::tracing::store::OpenOptions::default())
+            .unwrap();
+    app.trace_db_path = Some(db.clone());
+    let e = entry(&temp, "pr-babysitter");
+    let loop_id = e.id.clone();
+    app.loop_registry.loops.push(e);
+
+    store_run(
+        &db,
+        &loop_id,
+        "2026-09-17T17:36:53Z",
+        agent_mux::loops::Outcome::Escalated,
+        serde_json::json!({"summary": "two PRs need a human", "exit_code": 0,
+                           "verifier": {"ran": false, "verdict": null}}),
+    );
+    for (i, when) in [
+        "2026-09-17T17:21:53Z",
+        "2026-09-17T17:06:53Z",
+        "2026-09-17T16:51:53Z",
+    ]
+    .iter()
+    .enumerate()
+    {
+        store_run(
+            &db,
+            &loop_id,
+            when,
+            agent_mux::loops::Outcome::NoOp,
+            serde_json::json!({"quiet": true, "exit_code": i}),
+        );
+    }
+
+    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('2')), Instant::now()); // the Runs timeline
+    let out = render(&app, 120, 40);
+    assert!(
+        out.contains("quiet ×3"),
+        "three quiet runs fold into one row\n{out}"
+    );
+    assert!(out.contains("NEEDS YOU"), "{out}");
+    assert!(out.contains("two PRs need a human"), "{out}");
+    // the selected run opens with why it ended that way
+    assert!(out.contains("Why"), "{out}");
+    assert!(out.contains("Verifier"), "{out}");
+    assert!(out.contains("not required at L1"), "{out}");
+    assert!(out.contains("exit 0"), "the run facts are on screen\n{out}");
+}

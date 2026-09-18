@@ -6,7 +6,7 @@
 
 use crate::loops::registry::{LoopEntry, Registry};
 use crate::loops::store::{self as lstore, LoopRun};
-use crate::loops::{Level, Outcome, format_tokens, from_ns, patterns};
+use crate::loops::{Level, Outcome, format_tokens, patterns};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::path::Path;
@@ -18,8 +18,11 @@ pub enum LoopsPane {
     Detail,
 }
 
+/// `Report` is what the selected run found and who has to act; `Runs` is
+/// the timeline it sits in. The other three are the loop's configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopsTab {
+    Report,
     Runs,
     Inbox,
     Readiness,
@@ -28,7 +31,8 @@ pub enum LoopsTab {
 }
 
 impl LoopsTab {
-    pub const ALL: [LoopsTab; 5] = [
+    pub const ALL: [LoopsTab; 6] = [
+        LoopsTab::Report,
         LoopsTab::Runs,
         LoopsTab::Inbox,
         LoopsTab::Readiness,
@@ -38,6 +42,7 @@ impl LoopsTab {
 
     pub fn label(self) -> &'static str {
         match self {
+            LoopsTab::Report => "Report",
             LoopsTab::Runs => "Runs",
             LoopsTab::Inbox => "Inbox",
             LoopsTab::Readiness => "Readiness",
@@ -77,6 +82,8 @@ pub struct LoopsViewState {
     /// Session ids of live runs, by loop id (from the App).
     pub live: Vec<(String, usize)>,
     worktrees_dir: String,
+    /// Where the per-run copies of the state file are kept.
+    runtime: Option<std::path::PathBuf>,
     last_refresh: Instant,
 }
 
@@ -96,6 +103,7 @@ impl std::fmt::Debug for LoopsViewState {
 impl LoopsViewState {
     pub fn new(
         db_path: Option<&Path>,
+        runtime: Option<&Path>,
         registry: &Registry,
         selected_id: Option<&str>,
         worktrees_dir: &str,
@@ -115,7 +123,7 @@ impl LoopsViewState {
             rows: Vec::new(),
             selected: 0,
             focus: LoopsPane::Loops,
-            tab: LoopsTab::Runs,
+            tab: LoopsTab::Report,
             runs: Vec::new(),
             selected_run: 0,
             inbox: Vec::new(),
@@ -126,6 +134,7 @@ impl LoopsViewState {
             viewport_rows: std::cell::Cell::new(30),
             live: Vec::new(),
             worktrees_dir: worktrees_dir.to_string(),
+            runtime: runtime.map(Path::to_path_buf),
             last_refresh: Instant::now(),
         };
         state.reload(registry);
@@ -253,7 +262,9 @@ impl LoopsViewState {
 
     pub fn step_detail(&mut self, delta: isize) {
         match self.tab {
-            LoopsTab::Runs => {
+            // The Report follows the run selected in the Runs tab; here the
+            // arrows move between runs so the reader can step back in time.
+            LoopsTab::Report | LoopsTab::Runs => {
                 if !self.runs.is_empty() {
                     let max = self.runs.len() as isize - 1;
                     self.selected_run = (self.selected_run as isize + delta).clamp(0, max) as usize;
@@ -321,7 +332,12 @@ impl LoopsViewState {
             return;
         }
         self.last_refresh = now;
-        if self.conn.is_none() || !matches!(self.tab, LoopsTab::Runs | LoopsTab::Inbox) {
+        if self.conn.is_none()
+            || !matches!(
+                self.tab,
+                LoopsTab::Report | LoopsTab::Runs | LoopsTab::Inbox
+            )
+        {
             return;
         }
         self.load_runs();
@@ -366,6 +382,150 @@ impl LoopsViewState {
         lstore::activity_count(conn, &workspace.to_string_lossy(), since).unwrap_or(0)
     }
 
+    /// The state text this run wrote: its own snapshot, or the workspace's
+    /// current file when the run is the newest one (the file is rewritten
+    /// in place, so only the newest run's report is still on disk).
+    fn state_text(&self, entry: &LoopEntry, run: Option<&LoopRun>) -> Option<(String, bool)> {
+        if let (Some(rt), Some(r)) = (&self.runtime, run)
+            && let Some(text) = crate::loops::state::read_snapshot(rt, &entry.id, &r.id)
+        {
+            return Some((text, true));
+        }
+        let newest = self.runs.first().map(|r| r.id.as_str());
+        let is_newest = run.is_none() || run.map(|r| r.id.as_str()) == newest;
+        if !is_newest {
+            return None;
+        }
+        let p = patterns::find(&entry.pattern)?;
+        std::fs::read_to_string(entry.workspace.join(&p.state_file))
+            .ok()
+            .map(|t| (t, false))
+    }
+
+    /// The Report tab: what the selected run found, who has to act, and
+    /// what moved since the run before it.
+    fn report_lines(&self, entry: &LoopEntry) -> Vec<Line<'static>> {
+        let dim = Style::default().fg(Color::DarkGray);
+        let head = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let mut out: Vec<Line<'static>> = Vec::new();
+        let run = self
+            .runs
+            .get(self.selected_run)
+            .or_else(|| self.runs.first());
+        match run {
+            None => {
+                out.push(Line::styled("  no runs yet — [r] runs this loop now", dim));
+                return out;
+            }
+            Some(r) => {
+                out.extend(run_headline(r));
+                if let Some(s) = r.detail_str("summary") {
+                    out.push(Line::raw(format!("  {s}")));
+                }
+                if let Some(d) = run_delta(r) {
+                    out.push(Line::from(vec![
+                        Span::styled("  Since last run  ", dim),
+                        Span::raw(d.summary()),
+                    ]));
+                } else if r.detail.get("quiet").is_some() {
+                    out.push(Line::styled("  Since last run  nothing moved", dim));
+                }
+            }
+        }
+        out.push(Line::styled(
+            "  ────────────────────────────────────────",
+            dim,
+        ));
+        let Some((text, from_snapshot)) = self.state_text(entry, run) else {
+            out.push(Line::styled(
+                "  no report kept for this run — agent-mux keeps one copy of the state file per run",
+                dim,
+            ));
+            if let Some(m) = run.and_then(|r| r.detail_str("final_message")) {
+                out.push(Line::raw(""));
+                out.push(Line::styled("  What the run said", head));
+                for l in m.lines().take(30) {
+                    out.push(Line::raw(format!("    {l}")));
+                }
+            }
+            return out;
+        };
+        let report = crate::loops::state::parse(&text);
+        if report.is_empty() {
+            out.push(Line::styled(
+                "  the state file does not follow the loop shape — showing it as written",
+                dim,
+            ));
+            for l in text.lines().take(60) {
+                out.push(Line::raw(format!("  {l}")));
+            }
+            return out;
+        }
+        for kind in [
+            crate::loops::state::SectionKind::NeedsYou,
+            crate::loops::state::SectionKind::Watching,
+            crate::loops::state::SectionKind::Ignored,
+            crate::loops::state::SectionKind::Other,
+        ] {
+            let Some(section) = report.of_kind(kind) else {
+                continue;
+            };
+            let items = report.items_of(kind);
+            if items.is_empty() && section.notes.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(Line::raw(""));
+            }
+            out.push(Line::styled(
+                format!("  {} ({})", kind.label(), items.len()),
+                head,
+            ));
+            let limit = if kind == crate::loops::state::SectionKind::NeedsYou {
+                20
+            } else {
+                8
+            };
+            for item in items.iter().take(limit) {
+                out.extend(item_lines(item, kind));
+            }
+            if items.len() > limit {
+                out.push(Line::styled(
+                    format!("    + {} more", items.len() - limit),
+                    dim,
+                ));
+            }
+            for n in section.notes.iter().take(4) {
+                out.push(Line::styled(format!("    note  {n}"), dim));
+            }
+        }
+        if let Some(m) = run.and_then(|r| r.detail_str("final_message")) {
+            out.push(Line::raw(""));
+            out.push(Line::styled("  What the run said", head));
+            for l in m.lines().take(24) {
+                out.push(Line::raw(format!("    {l}")));
+            }
+        }
+        out.push(Line::raw(""));
+        out.push(Line::styled(
+            if from_snapshot {
+                format!(
+                    "  the report this run wrote · last run {}",
+                    report.last_run.clone().unwrap_or_default()
+                )
+            } else {
+                format!(
+                    "  the workspace's state file · last run {}",
+                    report.last_run.clone().unwrap_or_default()
+                )
+            },
+            dim,
+        ));
+        out
+    }
+
     /// Lines of the right pane for the current tab.
     pub fn rebuild_detail(&mut self) {
         let dim = Style::default().fg(Color::DarkGray);
@@ -395,37 +555,74 @@ impl LoopsViewState {
             lines.push(Line::raw(""));
         }
         match self.tab {
+            LoopsTab::Report => {
+                lines.extend(self.report_lines(&entry));
+            }
             LoopsTab::Runs => {
-                lines.push(Line::styled(
-                    format!(
-                        "  {:<20} {:<13} {:<3} {:>5} {:>4} {:>4} {:>7} {:>7} {:>6}  {}",
-                        "run",
-                        "outcome",
-                        "lvl",
-                        "found",
-                        "act",
-                        "esc",
-                        "tokens",
-                        "cost",
-                        "dur",
-                        "verifier / files"
-                    ),
-                    head,
-                ));
                 if self.runs.is_empty() {
                     lines.push(Line::styled("  (no runs yet — [r] runs now)", dim));
                 }
-                for (i, r) in self.runs.iter().enumerate() {
+                // A fifteen-minute loop is mostly quiet runs: consecutive
+                // quiet ones fold into one row so the runs that changed
+                // something stay on the screen.
+                let mut i = 0usize;
+                while i < self.runs.len() {
+                    let key = crate::loops::run_fold_key(&self.runs[i])
+                        .filter(|_| i != self.selected_run);
+                    if let Some(k) = key {
+                        let mut j = i + 1;
+                        while j < self.runs.len()
+                            && j != self.selected_run
+                            && crate::loops::run_fold_key(&self.runs[j]).as_deref()
+                                == Some(k.as_str())
+                        {
+                            j += 1;
+                        }
+                        if j - i >= 2 {
+                            let group = &self.runs[i..j];
+                            let tokens: i64 =
+                                group.iter().filter_map(|r| r.tokens).sum::<i64>().max(0);
+                            let cost: f64 = group.iter().filter_map(|r| r.cost_usd).sum::<f64>();
+                            let when = |r: &LoopRun| {
+                                crate::workflows::report::format_when(
+                                    r.started_ns.unwrap_or(r.scheduled_ns),
+                                )
+                            };
+                            let mut text = format!(
+                                "  {} … {}   {k} ×{}",
+                                group.last().map(when).unwrap_or_default(),
+                                group.first().map(when).unwrap_or_default(),
+                                group.len()
+                            );
+                            if tokens > 0 {
+                                text.push_str(&format!(
+                                    "   {} tokens · {}",
+                                    format_tokens(tokens as u64),
+                                    crate::workflows::report::Cost::of(
+                                        (cost > 0.0).then_some(cost),
+                                        &group[0].harness
+                                    )
+                                    .text()
+                                ));
+                            }
+                            lines.push(Line::styled(truncate(&text, 112), dim));
+                            i = j;
+                            continue;
+                        }
+                    }
                     let sel = i == self.selected_run;
                     if sel {
                         self.anchor_line = lines.len();
                     }
-                    lines.push(run_line(r, sel));
+                    for l in run_card(&self.runs[i], sel) {
+                        lines.push(l);
+                    }
                     if sel {
-                        for l in run_detail_lines(r) {
+                        for l in run_detail_lines(&self.runs[i]) {
                             lines.push(l);
                         }
                     }
+                    i += 1;
                 }
             }
             LoopsTab::Inbox => {
@@ -661,101 +858,296 @@ fn outcome_color(o: Outcome) -> Color {
     }
 }
 
-fn run_line(r: &LoopRun, selected: bool) -> Line<'static> {
-    let marker = if selected { "> " } else { "  " };
-    let when = r
-        .started_ns
-        .map(|ns| crate::loops::format_timestamp(from_ns(ns)))
-        .unwrap_or_else(|| r.id.clone());
-    let num = |v: Option<i64>| v.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
-    let verifier = r
-        .detail
-        .get("verifier")
-        .map(|v| {
-            let ran = v.get("ran").and_then(|b| b.as_bool()).unwrap_or(false);
-            let verdict = v.get("verdict").and_then(|s| s.as_str());
-            match (ran, verdict) {
-                (true, Some(v)) => v.to_string(),
-                (true, None) => "ran".into(),
-                (false, _) => "—".into(),
-            }
-        })
-        .unwrap_or_else(|| "—".into());
-    let files = r
+/// One run as two lines: what happened, then what changed.
+fn run_card(r: &LoopRun, selected: bool) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut out = run_headline(r);
+    if selected {
+        let text: String = out[0]
+            .spans
+            .iter()
+            .map(|s| s.content.clone())
+            .collect::<Vec<_>>()
+            .join("");
+        out[0] = Line::styled(text, Style::default().add_modifier(Modifier::REVERSED));
+    }
+    let second = r
+        .detail_str("summary")
+        .map(|s| truncate(s, 104))
+        .or_else(|| run_delta(r).map(|d| d.summary()))
+        .or_else(|| {
+            r.detail
+                .get("quiet")
+                .is_some()
+                .then(|| "nothing moved".to_string())
+        });
+    if let Some(t) = second {
+        out.push(Line::styled(format!("    {t}"), dim));
+    }
+    if r.detail.get("verifier_missing").is_some() {
+        out.push(Line::styled(
+            "    ⚠ a fix with no verifier observation — treat it as unverified",
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    out
+}
+
+/// The expanded detail of the selected run: why the outcome is what it is,
+/// what the run touched, what it said, and where to look next.
+fn run_detail_lines(r: &LoopRun) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let key = Style::default().fg(Color::Yellow);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut row = |k: &str, v: String, style: Style| {
+        out.push(Line::from(vec![
+            Span::styled(format!("      {k:<9}"), key),
+            Span::styled(v, style),
+        ]));
+    };
+    let why = why_line(r);
+    if !why.is_empty() {
+        row("Why", why, Style::default());
+    }
+    if let Some(v) = r.detail_str("level_reason") {
+        row("Capped", v.to_string(), dim);
+    }
+    if let Some(v) = r.detail_str("gate_violation") {
+        row(
+            "Gate",
+            format!("VIOLATION {v}"),
+            Style::default().fg(Color::Red),
+        );
+    }
+    row("Verifier", verifier_text(r), dim);
+    let files: Vec<String> = r
         .detail
         .get("files")
         .and_then(|f| f.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    let text = format!(
-        "{marker}{:<20} {:<13} {:<3} {:>5} {:>4} {:>4} {:>7} {:>7} {:>6}  {} / {} file(s){}",
-        when,
-        r.outcome.as_str(),
-        r.effective_level.as_str(),
-        num(r.items_found),
-        num(r.actions_taken),
-        num(r.escalations),
-        r.tokens
-            .map(|t| format_tokens(t.max(0) as u64))
-            .unwrap_or_else(|| "-".into()),
-        r.cost_usd
-            .map(|c| format!("${c:.2}"))
-            .unwrap_or_else(|| "-".into()),
-        r.duration_s()
-            .map(|s| format!("{s}s"))
-            .unwrap_or_else(|| "-".into()),
-        verifier,
-        files,
-        if r.detail.get("verifier_missing").is_some() {
-            " ⚠ no verifier"
-        } else {
-            ""
-        }
-    );
-    let style = if selected {
-        Style::default().add_modifier(Modifier::REVERSED)
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| f.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if files.is_empty() {
+        row("Touched", "no files".into(), dim);
     } else {
-        Style::default().fg(outcome_color(r.outcome))
-    };
-    Line::styled(text, style)
-}
-
-fn run_detail_lines(r: &LoopRun) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(Color::DarkGray);
-    let mut out = Vec::new();
-    let mut row = |k: &str, v: String| {
-        out.push(Line::from(vec![
-            Span::styled(format!("    {k:<10}"), dim),
-            Span::raw(v),
-        ]));
-    };
-    if let Some(v) = r.detail_str("reason") {
-        row("blocked", v.to_string());
+        let list: Vec<String> = files.iter().take(10).cloned().collect();
+        row(
+            "Touched",
+            format!("{} · {}", files.len(), list.join(", ")),
+            Style::default(),
+        );
     }
-    if let Some(v) = r.detail_str("level_reason") {
-        row("capped", v.to_string());
+    if let Some(b) = &r.branch {
+        row(
+            "Branch",
+            format!("{b}  (merge it yourself; agent-mux never merges)"),
+            Style::default(),
+        );
     }
-    if let Some(v) = r.detail_str("summary") {
-        row("summary", v.to_string());
+    if let Some(w) = &r.worktree {
+        row("Worktree", w.clone(), dim);
     }
-    if let Some(v) = r.detail_str("gate_violation") {
-        row("gate", format!("VIOLATION {v}"));
+    if let Some(m) = r.detail_str("final_message") {
+        let first: Vec<&str> = m.lines().filter(|l| !l.trim().is_empty()).take(3).collect();
+        for (i, l) in first.iter().enumerate() {
+            let label = if i == 0 { "Said" } else { "" };
+            out.push(Line::from(vec![
+                Span::styled(format!("      {label:<9}"), key),
+                Span::raw(truncate(l, 100)),
+            ]));
+        }
     }
-    if let Some(files) = r.detail.get("files").and_then(|f| f.as_array())
-        && !files.is_empty()
-    {
-        let list: Vec<String> = files
-            .iter()
-            .filter_map(|f| f.as_str().map(str::to_string))
-            .take(12)
-            .collect();
-        row("files", list.join(", "));
-    }
+    let mut run_facts: Vec<String> = Vec::new();
     if let Some(l) = &r.launch_id {
-        row("launch", l.clone());
+        run_facts.push(format!("launch {}", l.get(..8).unwrap_or(l)));
+    }
+    if let Some(c) = r.detail.get("exit_code").and_then(|c| c.as_i64()) {
+        run_facts.push(format!("exit {c}"));
+    }
+    if r.detail.get("timed_out").is_some() {
+        run_facts.push("timed out".into());
+    }
+    if let Some(s) = r.readiness_score {
+        run_facts.push(format!("readiness {s}"));
     }
     if let Some(d) = r.decision.as_deref() {
-        row("decision", d.to_string());
+        run_facts.push(format!("decided {d}"));
+    }
+    if !run_facts.is_empty() {
+        out.push(Line::from(vec![
+            Span::styled(format!("      {:<9}", "Run"), key),
+            Span::styled(run_facts.join(" · "), dim),
+        ]));
+    }
+    if let Some(stat) = r.detail_str("diff_stat") {
+        out.push(Line::styled("      diff --stat", key));
+        for l in stat.lines().take(12) {
+            out.push(Line::styled(format!("        {l}"), dim));
+        }
+    }
+    out
+}
+
+/// Why this run carries this outcome. Every clause names a fact agent-mux
+/// observed; nothing is inferred beyond them.
+fn why_line(r: &LoopRun) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match r.outcome {
+        Outcome::Blocked => {
+            return format!(
+                "blocked before it started · {}",
+                r.detail_str("reason").unwrap_or("no reason recorded")
+            );
+        }
+        Outcome::Failed => {
+            if let Some(reason) = r.detail_str("reason") {
+                return reason.to_string();
+            }
+            if r.detail.get("timed_out").is_some() {
+                return "the run passed its timeout and was killed".into();
+            }
+            if let Some(c) = r.detail.get("exit_code").and_then(|c| c.as_i64())
+                && c != 0
+            {
+                return format!("the harness exited {c}");
+            }
+            return "the run did not finish cleanly".into();
+        }
+        Outcome::FixProposed => parts.push("the worktree carries a change".into()),
+        Outcome::Escalated => {
+            if verifier_verdict(r) == Some("ESCALATE_HUMAN") {
+                parts.push("the verifier asked for a human".into());
+            }
+            if r.detail_str("gate_violation").is_some() {
+                parts.push("a touched path is on the denylist".into());
+            }
+            if parts.is_empty() {
+                parts.push("the run asked for a decision".into());
+            }
+        }
+        Outcome::ReportOnly => parts.push("the state file was rewritten, nothing else".into()),
+        Outcome::NoOp => parts.push("nothing changed since the run before it".into()),
+    }
+    if let Some(d) = run_delta(r)
+        && !d.is_empty()
+    {
+        parts.push(d.summary());
+    }
+    parts.join(" · ")
+}
+
+fn verifier_verdict(r: &LoopRun) -> Option<&str> {
+    r.detail.get("verifier")?.get("verdict")?.as_str()
+}
+
+fn verifier_text(r: &LoopRun) -> String {
+    let ran = r
+        .detail
+        .get("verifier")
+        .and_then(|v| v.get("ran"))
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    match (ran, verifier_verdict(r), r.effective_level) {
+        (true, Some(v), _) => v.to_string(),
+        (true, None, _) => "ran, no verdict line".into(),
+        (false, _, Level::L1) => "not required at L1".into(),
+        (false, _, _) => "did not run".into(),
+    }
+}
+
+/// `Sep 17 17:36   NEEDS YOU   8 found · 2 for you · 417k · $1.18 · 1m 43s`
+fn run_headline(r: &LoopRun) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let when = crate::workflows::report::format_when(r.started_ns.unwrap_or(r.scheduled_ns));
+    let facts = match r.outcome {
+        // A run that never started has no counts; the reason is the fact.
+        Outcome::Blocked => r
+            .detail_str("reason")
+            .unwrap_or("no reason recorded")
+            .to_string(),
+        _ => {
+            let mut facts: Vec<String> = Vec::new();
+            if let Some(n) = r.items_found {
+                facts.push(format!("{n} found"));
+            }
+            if let Some(n) = r.escalations.filter(|n| *n > 0) {
+                facts.push(format!("{n} for you"));
+            }
+            if let Some(n) = r.actions_taken.filter(|n| *n > 0) {
+                facts.push(format!("{n} action"));
+            }
+            if let Some(t) = r.tokens {
+                facts.push(format!("{} tokens", format_tokens(t.max(0) as u64)));
+            }
+            if r.tokens.is_some_and(|t| t > 0) {
+                facts.push(crate::workflows::report::Cost::of(r.cost_usd, &r.harness).text());
+            }
+            if let Some(d) = r.duration_s() {
+                facts.push(crate::workflows::report::format_duration(d));
+            }
+            facts.join(" · ")
+        }
+    };
+    vec![
+        Line::from(vec![
+            Span::raw(format!("  {when}   ")),
+            Span::styled(
+                r.outcome.word().to_uppercase(),
+                Style::default()
+                    .fg(outcome_color(r.outcome))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("   {}", r.effective_level.as_str()), dim),
+        ]),
+        Line::styled(format!("  {facts}"), dim),
+    ]
+}
+
+fn run_delta(r: &LoopRun) -> Option<crate::loops::state::Delta> {
+    let v = r.detail.get("delta")?;
+    serde_json::from_value(v.clone()).ok()
+}
+
+/// One item of a state-file section: what it is, what the loop did and
+/// what the user has to decide.
+fn item_lines(
+    item: &crate::loops::state::Item,
+    kind: crate::loops::state::SectionKind,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut out = Vec::new();
+    let head = truncate(&item.headline(), 96);
+    out.push(Line::from(vec![
+        Span::raw("    "),
+        Span::styled(
+            head,
+            if kind == crate::loops::state::SectionKind::NeedsYou {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        ),
+    ]));
+    if let Some(s) = &item.status {
+        out.push(Line::styled(format!("      {}", truncate(s, 104)), dim));
+    }
+    if kind != crate::loops::state::SectionKind::NeedsYou {
+        return out;
+    }
+    if let Some(d) = &item.human_decision {
+        out.push(Line::from(vec![
+            Span::styled("      Decide   ", Style::default().fg(Color::Yellow)),
+            Span::raw(truncate(d, 92)),
+        ]));
+    }
+    if let Some(a) = &item.loop_action {
+        out.push(Line::from(vec![
+            Span::styled("      Loop did  ", dim),
+            Span::styled(truncate(a, 92), dim),
+        ]));
     }
     out
 }

@@ -21,6 +21,7 @@ pub mod run;
 pub mod runlog;
 pub mod scaffold;
 pub mod schedule;
+pub mod state;
 pub mod store;
 pub mod worktree;
 
@@ -84,6 +85,20 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// What the outcome means for the reader. `escalated` says what the
+    /// loop did; `needs you` says what the user must do, which is the only
+    /// reason to look at a run list at all. The stored value never changes.
+    pub fn word(self) -> &'static str {
+        match self {
+            Outcome::ReportOnly => "reported",
+            Outcome::FixProposed => "fix ready",
+            Outcome::Escalated => "needs you",
+            Outcome::NoOp => "quiet",
+            Outcome::Blocked => "skipped",
+            Outcome::Failed => "failed",
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Outcome::ReportOnly => "report-only",
@@ -292,6 +307,21 @@ pub fn format_interval(secs: u64) -> String {
         format!("{}m", secs / 60)
     } else {
         format!("{secs}s")
+    }
+}
+
+/// A run with nothing to read: a timeline folds consecutive ones into a
+/// single row. Runs fold together only when they say the same thing, so a
+/// blocked run's reason is part of the key.
+pub fn run_fold_key(r: &store::LoopRun) -> Option<String> {
+    match r.outcome {
+        Outcome::Blocked => Some(format!(
+            "skipped · {}",
+            r.detail_str("reason").unwrap_or("blocked")
+        )),
+        Outcome::NoOp => Some("quiet".into()),
+        _ if r.detail.get("quiet").is_some() => Some("quiet".into()),
+        _ => None,
     }
 }
 

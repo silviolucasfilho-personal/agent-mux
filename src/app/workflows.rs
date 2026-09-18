@@ -1027,12 +1027,37 @@ impl App {
             error: error.clone(),
             notes: live.state.notes.clone(),
         };
+        // The notice leads with what the run answered, not with how many
+        // sessions it took.
+        let answered = live
+            .state
+            .records
+            .iter()
+            .filter(|r| r.outcome.kind() != "null")
+            .count();
+        let verdict = crate::workflows::report::build(crate::workflows::report::RunView {
+            workflow: &live.name,
+            status: status_label,
+            harness: live.harness.as_str(),
+            workspace: "",
+            sessions: live.state.records.len() as i64,
+            tokens: live.state.tokens_spent,
+            cost_usd: Some(live.state.cost_spent),
+            duration_s: None,
+            result: &recent.result,
+            error: error.as_deref(),
+            notes: &live.state.notes,
+            doc: Some(&live.state.doc),
+            steps: &[],
+        })
+        .headline
+        .verdict;
         self.notice = Some(match status_label {
             "finished" => Notice::info(format!(
-                "workflow {} finished: {} sessions, {}k tokens",
+                "{} finished · {verdict} · {answered}/{} answered · {} tokens · W to read",
                 live.name,
                 live.state.records.len(),
-                live.state.tokens_spent / 1000
+                crate::loops::format_tokens(live.state.tokens_spent)
             )),
             "budget-exhausted" => Notice::warn(format!(
                 "workflow {} stopped at the token budget after {} sessions",
@@ -1997,7 +2022,11 @@ impl App {
 
     pub fn open_workflows_view(&mut self) {
         let facts = self.view_facts();
-        let view = WorkflowsViewState::new(self.trace_db_path.as_deref(), &facts);
+        let view = WorkflowsViewState::new(
+            self.trace_db_path.as_deref(),
+            self.runtime_dir.as_deref(),
+            &facts,
+        );
         self.mode = Mode::WorkflowsView(Box::new(view));
     }
 
