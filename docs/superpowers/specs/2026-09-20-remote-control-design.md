@@ -97,7 +97,11 @@ resync, `0x10` input.
 
 Client: `hello`, `select`, `resync`, `key`, `paste`, `catalog`, `launch`,
 `kill`, `launch_skill`, `start_loop`, `start_workflow`, `ping`, plus binary
-input. Server: `hello`, `sessions`, `catalog`, `exit`, `result`, `notice`,
+input. `paste` carries clipboard text the page read itself, because a phone
+often cannot aim a normal paste at xterm's hidden textarea; the server
+wraps it, since it is the side that knows whether bracketed paste is on.
+`resync` is what a tab asks for when it returns from being throttled in the
+background with its socket still open. Server: `hello`, `sessions`, `catalog`, `exit`, `result`, `notice`,
 `pong`, plus binary output and resync. `protocol::CLIENT_FRAMES` and
 `SERVER_FRAMES` are checked against `web/app.js` by a unit test, which is
 the only thing keeping a JS string and a Rust enum in step.

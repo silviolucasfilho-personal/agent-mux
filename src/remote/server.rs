@@ -424,7 +424,12 @@ fn into_command(msg: ClientMsg, client: ClientId, hub: &RemoteHub) -> Option<Rem
                 session: s,
             })
         }
-        ClientMsg::LaunchSkill { id, skill, harness } => {
+        ClientMsg::LaunchSkill {
+            id,
+            skill,
+            harness,
+            dir,
+        } => {
             if !hub.settings.allow_launch {
                 return deny(id, "launching");
             }
@@ -433,6 +438,7 @@ fn into_command(msg: ClientMsg, client: ClientId, hub: &RemoteHub) -> Option<Rem
                 req_id: id,
                 skill,
                 harness,
+                dir,
             })
         }
         ClientMsg::StartLoop { id, loop_id } => {

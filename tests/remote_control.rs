@@ -435,3 +435,71 @@ async fn shutdown_closes_every_client() {
 
     h.finish().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn paste_and_resync_reach_the_session() {
+    let mut h = Harness::default().await;
+    let idx = h
+        .app
+        .launch(shell_profile(&["-c", "cat"]), std::env::temp_dir())
+        .unwrap();
+    let session_id = h.app.sessions[idx].id;
+
+    let mut ws = WsClient::connect(h.addr, TOKEN).expect("upgrade");
+    ws.send_json(serde_json::json!({"t": "hello", "focus": session_id}));
+    h.pump_for(Duration::from_millis(300)).await;
+    assert!(ws.recv_kind(0x02, SHORT).is_some(), "no opening resync");
+
+    // A phone often cannot aim a paste at xterm's hidden textarea, so the
+    // page reads the clipboard itself and the server wraps the text.
+    ws.send_json(serde_json::json!({
+        "t": "paste", "s": session_id, "text": "pasted-from-the-clipboard\n"
+    }));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seen = false;
+    while Instant::now() < deadline && !seen {
+        h.pump_for(Duration::from_millis(100)).await;
+        seen = ws.wait_for_output(
+            session_id,
+            "pasted-from-the-clipboard",
+            Duration::from_millis(200),
+        );
+    }
+    assert!(seen, "the pasted text never reached the session");
+
+    // A tab that was throttled in the background asks for the screen back.
+    ws.send_json(serde_json::json!({"t": "resync", "s": session_id}));
+    h.pump_for(Duration::from_millis(300)).await;
+    let (sid, screen) = ws.recv_kind(0x02, SHORT).expect("a resync on request");
+    assert_eq!(sid, session_id);
+    assert!(!screen.is_empty(), "a resync must carry the screen");
+
+    h.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_skill_launch_reports_what_went_wrong() {
+    let mut h = Harness::default().await;
+    let mut ws = WsClient::connect(h.addr, TOKEN).expect("upgrade");
+    ws.send_json(serde_json::json!({"t": "hello"}));
+    h.pump_for(Duration::from_millis(300)).await;
+
+    // No skills are installed in this harness, so the interesting part is
+    // that the remote says so rather than failing silently -- and that the
+    // directory it carries is accepted by the message shape.
+    ws.send_json(serde_json::json!({
+        "t": "launch_skill", "id": "S1", "skill": "nope",
+        "dir": std::env::temp_dir().to_string_lossy()
+    }));
+    h.pump_for(Duration::from_millis(300)).await;
+
+    let result = ws.recv_json("result", SHORT).expect("a result frame");
+    assert_eq!(result["id"], "S1");
+    assert_eq!(result["ok"], false);
+    assert!(
+        result["error"].as_str().unwrap().contains("nope"),
+        "{result}"
+    );
+
+    h.finish().await;
+}

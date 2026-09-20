@@ -127,10 +127,11 @@ impl App {
                 req_id,
                 skill,
                 harness,
+                dir,
             } => {
                 let allowed = hub.settings.allow_launch;
                 self.remote_guarded(&hub, client, req_id, allowed, "launching", |app| {
-                    app.remote_launch_skill(&skill, harness.as_deref())
+                    app.remote_launch_skill(&skill, harness.as_deref(), dir.as_deref())
                         .map(Outcome::session)
                 });
             }
@@ -280,6 +281,7 @@ impl App {
         &mut self,
         skill_id: &str,
         harness: Option<&str>,
+        dir: Option<&str>,
     ) -> Result<usize, String> {
         let skill = self
             .skills
@@ -297,8 +299,12 @@ impl App {
             }
             None => skill.default_harness,
         };
+        let dir = dir
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(super::resolve_working_dir);
         let idx = self
-            .launch_skill_session(skill_id, harness)
+            .launch_skill_session(skill_id, harness, dir)
             .map_err(|e| e.to_string())?;
         self.sessions
             .get(idx)

@@ -4699,17 +4699,21 @@ impl App {
         skill_id: &str,
         harness: crate::harness::Harness,
     ) -> anyhow::Result<usize> {
-        let idx = self.launch_skill_session(skill_id, harness)?;
+        let idx = self.launch_skill_session(skill_id, harness, None)?;
         self.attach_to_session(idx);
         Ok(idx)
     }
 
-    /// The launch without the attach. A remote client starting a skill must
-    /// not flip the desktop into `Mode::Attached` behind the user's back.
+    /// The launch without the attach, and with a directory a caller can
+    /// choose. A remote client starting a skill must not flip the desktop
+    /// into `Mode::Attached` behind the user's back, and it is typing from
+    /// somewhere else, so `None` (this process's directory, what the
+    /// sidebar uses) is a default rather than the only option.
     pub(crate) fn launch_skill_session(
         &mut self,
         skill_id: &str,
         harness: crate::harness::Harness,
+        dir: Option<std::path::PathBuf>,
     ) -> anyhow::Result<usize> {
         let skill = self
             .skills
@@ -4737,7 +4741,9 @@ impl App {
             .map_err(|e| anyhow::anyhow!("cannot install skill for {}: {e}", harness.as_str()))?;
 
         // 3. Base profile for the harness, or a bare one.
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = dir.unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
         let base = self
             .profiles
             .iter()

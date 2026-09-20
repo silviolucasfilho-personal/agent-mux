@@ -89,6 +89,7 @@ pub enum RemoteCommand {
         req_id: Option<String>,
         skill: String,
         harness: Option<String>,
+        dir: Option<String>,
     },
     StartLoop {
         client: ClientId,

@@ -19,7 +19,7 @@
   const ui = {
     banner: $('banner'), conn: $('conn'), chips: $('chips'), badge: $('badge'),
     add: $('add'), host: $('term-host'), term: $('term'), empty: $('empty'),
-    keys: $('keys'), keyrow2: $('keyrow2'), kb: $('kb'), more: $('more'),
+    keys: $('keys'), keyrow2: $('keyrow2'), kb: $('kb'), more: $('more'), paste: $('paste'),
     sheet: $('sheet'), sheetTabs: $('sheet-tabs'), sheetBody: $('sheet-body'),
     sheetGo: $('sheet-go'), sheetCancel: $('sheet-cancel'),
     menu: $('menu'), menuBody: $('menu-body'), menuCancel: $('menu-cancel'),
@@ -382,6 +382,23 @@
     send({ t: 'key', s: state.sid, key, ch, mods: [...all] });
   }
 
+  async function sendPaste() {
+    if (state.sid === null) return;
+    // xterm's hidden textarea handles a normal paste, but on a phone there
+    // is frequently no way to aim a paste at it. Reading the clipboard
+    // ourselves and letting the server wrap it (it knows whether the app
+    // enabled bracketed paste) is the reliable path.
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      return showBanner('This browser will not share the clipboard; paste into the terminal instead.', 'warn', false);
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) send({ t: 'paste', s: state.sid, text });
+    } catch (e) {
+      showBanner('Clipboard permission denied.', 'warn', false);
+    }
+  }
+
   function clearSticky() {
     state.sticky.ctrl = false;
     state.sticky.alt = false;
@@ -407,6 +424,7 @@
       });
     }
     ui.kb.addEventListener('click', () => term && term.focus());
+    ui.paste.addEventListener('click', sendPaste);
     ui.more.addEventListener('click', () => { ui.keyrow2.hidden = !ui.keyrow2.hidden; fitTerminal(); });
     ui.add.addEventListener('click', () => openLaunchSheet('session'));
     if (!NARROW.matches) ui.keys.classList.add('auto-hidden');
@@ -468,6 +486,12 @@
     return el;
   }
 
+  function label(parent, text) {
+    const l = document.createElement('label');
+    l.textContent = text;
+    parent.appendChild(l);
+  }
+
   function picker(parent, items, key, onPick) {
     const box = document.createElement('div');
     box.className = 'picker';
@@ -503,8 +527,7 @@
 
     if (state.sheetTab === 'session') {
       const profiles = (c.profiles || []).map((p) => ({ value: p.name, label: p.name, sub: p.command, dir: p.default_dir }));
-      field(body, 'Profile', document.createElement('div')).remove();
-      const l = document.createElement('label'); l.textContent = 'Profile'; body.appendChild(l);
+      label(body, 'Profile');
       picker(body, profiles, 'profile', (it) => {
         if (it.dir && !state.sheetPick.dirTouched) state.sheetPick.dir = it.dir;
       });
@@ -512,25 +535,27 @@
       dir.addEventListener('input', () => { state.sheetPick.dir = dir.value; state.sheetPick.dirTouched = true; });
     } else if (state.sheetTab === 'skill') {
       const skills = (c.skills || []).map((s) => ({ value: s.id, label: s.name || s.id, sub: (s.harnesses || []).join('/') }));
-      const l = document.createElement('label'); l.textContent = 'Skill'; body.appendChild(l);
+      label(body, 'Skill');
       picker(body, skills, 'skill');
       const chosen = (c.skills || []).find((s) => s.id === state.sheetPick.skill);
       if (chosen && (chosen.harnesses || []).length > 1) {
-        const l2 = document.createElement('label'); l2.textContent = 'Harness'; body.appendChild(l2);
+        label(body, 'Harness');
         picker(body, chosen.harnesses.map((h) => ({ value: h, label: h })), 'harness');
       }
+      const sdir = field(body, 'Directory', input(state.sheetPick.skillDir || '', 'defaults to the desktop\u2019s directory'));
+      sdir.addEventListener('input', () => { state.sheetPick.skillDir = sdir.value; });
     } else if (state.sheetTab === 'loop') {
       const loops = (c.loops || []).map((lp) => ({
         value: lp.id,
         label: lp.id,
         sub: `${lp.pattern}${lp.paused ? ' · paused' : lp.enabled ? '' : ' · off'}`,
       }));
-      const l = document.createElement('label'); l.textContent = 'Loop'; body.appendChild(l);
+      label(body, 'Loop');
       picker(body, loops, 'loop');
       if (!loops.length) body.appendChild(hint('No loops are registered.'));
     } else {
       const wfs = (c.workflows || []).filter((w) => w.valid).map((w) => ({ value: w.name, label: w.name, sub: w.source }));
-      const l = document.createElement('label'); l.textContent = 'Workflow'; body.appendChild(l);
+      label(body, 'Workflow');
       picker(body, wfs, 'workflow');
       const chosen = (c.workflows || []).find((w) => w.name === state.sheetPick.workflow);
       const ws = field(body, 'Workspace', input(state.sheetPick.workspace || '', '/path/to/repo'));
@@ -559,7 +584,7 @@
       send({ t: 'launch', profile: p.profile, dir: p.dir });
     } else if (state.sheetTab === 'skill') {
       if (!p.skill) return showBanner('Pick a skill.', 'warn', false);
-      send({ t: 'launch_skill', skill: p.skill, harness: p.harness });
+      send({ t: 'launch_skill', skill: p.skill, harness: p.harness, dir: p.skillDir || undefined });
     } else if (state.sheetTab === 'loop') {
       if (!p.loop) return showBanner('Pick a loop.', 'warn', false);
       send({ t: 'start_loop', loop: p.loop });
@@ -624,7 +649,16 @@
     window.addEventListener('orientationchange', () => setTimeout(apply, 250));
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState !== 'visible') return;
-      if (state.phase !== 'ready' && state.phase !== 'stopped') { state.attempts = 0; connect(); }
+      if (state.phase !== 'ready' && state.phase !== 'stopped') {
+        state.attempts = 0;
+        connect();
+      } else if (state.phase === 'ready' && state.sid !== null) {
+        // A background tab is throttled, so frames can have been dropped
+        // while the socket stayed open. Ask for the screen rather than
+        // trusting whatever partial stream arrived.
+        ui.host.classList.add('stale');
+        send({ t: 'resync', s: state.sid });
+      }
     });
     apply();
   }

@@ -90,10 +90,14 @@ paste the token from the desktop.
 - **⌨** opens the keyboard; tapping the terminal does too.
 - **The key bar** sends what a phone keyboard cannot: `Esc`, `Tab`, `^C`,
   arrows, `Enter`. `…` opens a second row with sticky `Ctrl`/`Alt` (tap
-  once, then a letter), `^D`, `^L`, `^Z`, `Home`/`End`, `PgUp`/`PgDn`.
-  Holding an arrow repeats it.
+  once, then a letter), `^D`, `^L`, `^Z`, `Paste`, `Home`/`End`,
+  `PgUp`/`PgDn`. Holding an arrow repeats it. **Paste** reads the device
+  clipboard and sends the text to be wrapped server-side, because a phone
+  frequently cannot aim a normal paste at the terminal; the browser asks
+  for clipboard permission the first time.
 - **+** opens a sheet with four tabs: a new session (profile + directory), a
-  skill, a loop run, or a workflow run.
+  skill (with its own directory, defaulting to the desktop's), a loop run,
+  or a workflow run.
 - **Long-press a chip** for its actions, including **Kill**, which asks a
   second time before it does anything.
 
@@ -105,6 +109,8 @@ Two things to know:
   accurately, because the scaling throws off touch selection.
 - **There is no scrollback right after switching.** A switch redraws from
   the visible screen only. Scrollback fills in again as new output arrives.
+  A tab that was throttled in the background asks for the screen again when
+  you return to it, so a phone that slept does not show a half-drawn frame.
 
 `Ctrl+Q` is deliberately absent from the key bar: on the desktop it is
 agent-mux's own detach key, not something the harness ever sees, so it

@@ -96,6 +96,9 @@ pub enum ClientMsg {
         skill: String,
         #[serde(default)]
         harness: Option<String>,
+        /// Where to run it; the desktop's own directory when absent.
+        #[serde(default)]
+        dir: Option<String>,
     },
     StartLoop {
         #[serde(default)]
@@ -340,6 +343,7 @@ mod tests {
                     id: None,
                     skill: "heimdall".into(),
                     harness: None,
+                    dir: None,
                 },
             ),
             (
