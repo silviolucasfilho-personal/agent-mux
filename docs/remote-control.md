@@ -44,7 +44,11 @@ remote: http://127.0.0.1:7681/?token=k3Jq…  (v shows it again)
 
 Press `v` to see it again — the About overlay carries it under **Remote
 control**, with the bind address, the number of connected clients, and what
-the permissions are set to.
+the permissions are set to. **`y` there copies the URL to the clipboard**,
+token and all, which is the practical way to get it onto a phone: paste it
+into a message to yourself rather than retyping 43 random characters. The
+status bar confirms the copy and reminds you the token is in what you just
+copied.
 
 If the port is taken, the TUI says so in one line and keeps running without
 the remote.

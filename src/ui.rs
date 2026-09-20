@@ -1706,7 +1706,7 @@ fn draw_help(f: &mut Frame) {
         row("W", "workflows view: runs, planned documents, results"),
         row(
             "v",
-            "about: version, build time, paths, this session, remote URL",
+            "about: version, build time, paths, remote URL ([y] copies)",
         ),
         row(
             "n",
@@ -4068,6 +4068,17 @@ fn draw_about(f: &mut Frame, state: &AboutState) {
             AboutRow::Blank => Line::raw(""),
         })
         .collect();
+    let more = if state.max_scroll() > 0 {
+        "  [↑/↓] scroll"
+    } else {
+        ""
+    };
+    let copy = if state.has_remote_url {
+        "  [y] copy remote URL"
+    } else {
+        ""
+    };
+    let footer_text = format!("  [Esc] close  [?] keys{copy}{more}");
     let widest = state
         .rows
         .iter()
@@ -4078,7 +4089,10 @@ fn draw_about(f: &mut Frame, state: &AboutState) {
             AboutRow::Blank => 0,
         })
         .max()
-        .unwrap_or(40);
+        .unwrap_or(40)
+        // The footer advertises the keys; a box too narrow to show it would
+        // hide the only place they are named.
+        .max(footer_text.chars().count());
     let width = (widest as u16 + 4)
         .min(f.area().width.saturating_sub(4))
         .max(40);
@@ -4102,18 +4116,7 @@ fn draw_about(f: &mut Frame, state: &AboutState) {
         .skip(state.scroll_offset.min(state.max_scroll()))
         .collect();
     f.render_widget(Paragraph::new(shown), body);
-    let more = if state.max_scroll() > 0 {
-        "  [↑/↓] scroll"
-    } else {
-        ""
-    };
-    f.render_widget(
-        Paragraph::new(Line::styled(
-            format!("  [Esc] close  [?] keys{more}"),
-            label,
-        )),
-        footer,
-    );
+    f.render_widget(Paragraph::new(Line::styled(footer_text, label)), footer);
 }
 
 fn draw_confirm(f: &mut Frame, message: &str) {
@@ -5404,5 +5407,50 @@ mod tests {
             b.detail_view = DetailView::Tree;
         }
         tiny.draw(|f| draw(f, &app, Instant::now())).unwrap();
+    }
+
+    /// The footer is the only place that advertises the copy key, and the
+    /// hint has to appear exactly when there is a URL to copy.
+    #[test]
+    fn the_about_footer_offers_the_copy_key_only_with_a_remote_url() {
+        use crate::app::about::{AboutRow, AboutState};
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut app = App::new(Vec::new(), None, tx);
+
+        let state = |remote: bool| {
+            Box::new(AboutState {
+                rows: vec![AboutRow::Field(
+                    "url".into(),
+                    "http://127.0.0.1:7681/?token=abc".into(),
+                )],
+                has_remote_url: remote,
+                scroll_offset: 0,
+                viewport_rows: std::cell::Cell::new(10),
+            })
+        };
+
+        app.mode = crate::app::Mode::About(state(true));
+        let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("[y] copy remote URL"), "got: {text}");
+        assert!(text.contains("[Esc] close"), "got: {text}");
+
+        app.mode = crate::app::Mode::About(state(false));
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(!text.contains("copy remote URL"), "got: {text}");
+        assert!(text.contains("[Esc] close"), "got: {text}");
+    }
+
+    #[test]
+    fn the_help_names_the_copy_key() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut app = App::new(Vec::new(), None, tx);
+        app.mode = crate::app::Mode::Help;
+        let mut terminal = Terminal::new(TestBackend::new(100, 60)).unwrap();
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("[y] copies"), "got: {text}");
     }
 }

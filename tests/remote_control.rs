@@ -503,3 +503,75 @@ async fn a_skill_launch_reports_what_went_wrong() {
 
     h.finish().await;
 }
+
+/// `v` then `y`: the URL carries the token, so getting it onto the device
+/// that needs it should not mean retyping 43 random characters.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_about_overlay_offers_the_remote_url_for_copying() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut h = Harness::default().await;
+    // The clipboard itself is not available in a test process; what is
+    // under test is that the key reaches the remote URL and reports it.
+    h.app.clipboard_enabled = false;
+
+    let now = Instant::now();
+    h.app
+        .handle_key(&KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE), now);
+    assert!(
+        matches!(h.app.mode, agent_mux::app::Mode::About(_)),
+        "v should open the About overlay"
+    );
+    h.app
+        .handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), now);
+    let notice = h.app.notice.as_ref().expect("y should report an outcome");
+    assert!(
+        notice.text.contains("clipboard is disabled"),
+        "{}",
+        notice.text
+    );
+
+    // The overlay shows the URL, token and all, and says it can be copied.
+    let has_url = match &h.app.mode {
+        agent_mux::app::Mode::About(state) => {
+            assert!(state.has_remote_url, "the footer hint should be on");
+            state.rows.iter().any(|r| match r {
+                agent_mux::app::about::AboutRow::Field(name, value) => {
+                    name == "url" && value.contains(TOKEN)
+                }
+                _ => false,
+            })
+        }
+        _ => false,
+    };
+    assert!(has_url, "the About overlay should show the remote URL");
+
+    h.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn copying_the_url_says_so_when_the_remote_is_off() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (tx, _rx) = mpsc::channel(16);
+    let mut app = App::new(vec![shell_profile(&[])], None, tx);
+    app.clipboard_enabled = false;
+    assert!(app.remote.is_none());
+
+    let now = Instant::now();
+    app.handle_key(&KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE), now);
+    app.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE), now);
+    let notice = app
+        .notice
+        .as_ref()
+        .expect("y should still report something");
+    assert!(
+        notice.text.contains("remote control is off"),
+        "{}",
+        notice.text
+    );
+    match &app.mode {
+        agent_mux::app::Mode::About(state) => {
+            assert!(!state.has_remote_url, "no hint when there is no URL")
+        }
+        other => panic!("expected the About overlay, got {other:?}"),
+    }
+}

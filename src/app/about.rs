@@ -19,6 +19,8 @@ pub enum AboutRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AboutState {
     pub rows: Vec<AboutRow>,
+    /// Whether the overlay is showing a remote URL worth offering to copy.
+    pub has_remote_url: bool,
     pub scroll_offset: usize,
     /// Interior height, written back by the renderer.
     pub viewport_rows: std::cell::Cell<usize>,
@@ -329,6 +331,7 @@ mod tests {
     fn scrolling_is_clamped_to_the_rows() {
         let mut state = AboutState {
             rows: (0..40).map(|i| AboutRow::Note(i.to_string())).collect(),
+            has_remote_url: false,
             scroll_offset: 0,
             viewport_rows: std::cell::Cell::new(10),
         };

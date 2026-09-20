@@ -1820,7 +1820,8 @@ Off by default. `[remote] enabled = true`, `--remote [addr]` or
 another computer mirrors every session live, types into any of them,
 switches between them, and launches sessions, skills, loop runs and
 workflow runs, or kills a session. The startup notice prints the URL with
-its token; `v` shows it again under **Remote control**.
+its token; `v` shows it again under **Remote control**, where `y` copies it
+to the clipboard.
 
 Guide: [docs/remote-control.md](docs/remote-control.md). Design:
 [docs/superpowers/specs/2026-09-20-remote-control-design.md](docs/superpowers/specs/2026-09-20-remote-control-design.md).

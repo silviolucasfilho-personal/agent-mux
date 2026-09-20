@@ -87,6 +87,8 @@ pub enum SidebarSection {
 pub enum Action {
     None,
     Quit,
+    /// Copy the remote-control URL, token and all, from the About overlay.
+    CopyRemoteUrl,
     EnterConfirmQuit,
     MoveUp,
     MoveDown,
@@ -518,6 +520,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::SkillLauncher(_) => Action::SkillLauncherKey,
         Mode::About(_) => match key.code {
             KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
+            KeyCode::Char('y') | KeyCode::Char('Y') => Action::CopyRemoteUrl,
             KeyCode::Esc
             | KeyCode::Char('q')
             | KeyCode::Char('v')
@@ -2599,6 +2602,37 @@ impl App {
         }
     }
 
+    /// Puts the remote-control URL on the clipboard so it can be sent to
+    /// the device that will use it. The token is in that URL, which is the
+    /// whole point -- and the reason this says so out loud.
+    fn copy_remote_url(&mut self) {
+        let Some(hub) = self.remote.as_ref() else {
+            self.notice = Some(Notice::warn(
+                "remote control is off ([remote] enabled, or --remote)",
+            ));
+            return;
+        };
+        let url = hub.url();
+        let loopback = hub.is_loopback();
+        if !self.clipboard_enabled {
+            self.notice = Some(Notice::warn("clipboard is disabled"));
+            return;
+        }
+        // Cleared first so the check below reads this copy's outcome and
+        // not whatever notice happened to be on screen already.
+        self.notice = None;
+        self.copy_to_clipboard(url);
+        if self.notice.is_none() {
+            self.notice = Some(if loopback {
+                Notice::info("remote URL copied (it carries the access token)")
+            } else {
+                Notice::warn(
+                    "remote URL copied — it carries the access token, and this bind is not encrypted",
+                )
+            });
+        }
+    }
+
     fn copy_selection(&mut self) {
         let Some(sel) = self.displayed_selection().copied() else {
             return;
@@ -3592,6 +3626,7 @@ impl App {
                 self.respawn_selected();
             }
             Action::ToggleTracing => self.toggle_selected_tracing(),
+            Action::CopyRemoteUrl => self.copy_remote_url(),
             Action::CancelToControl => self.mode = Mode::Control,
             Action::DialogKey => self.handle_dialog_key(key),
         }
@@ -4046,6 +4081,7 @@ impl App {
             }),
         };
         self.mode = Mode::About(Box::new(about::AboutState {
+            has_remote_url: facts.remote.is_some(),
             rows: about::rows(&facts),
             scroll_offset: 0,
             viewport_rows: std::cell::Cell::new(24),
