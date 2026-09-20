@@ -212,13 +212,15 @@ impl Response {
         for (k, v) in &self.headers {
             out.push_str(&format!("{k}: {v}\r\n"));
         }
-        if self.status != 101 {
+        // 101 and 304 carry no body, and a 304 with a Content-Length that
+        // does not match the cached entity confuses caches.
+        if self.status != 101 && self.status != 304 {
             out.push_str(&format!("Content-Length: {}\r\n", self.body.len()));
             out.push_str("Connection: close\r\n");
         }
         out.push_str("\r\n");
         let mut bytes = out.into_bytes();
-        if self.status != 101 {
+        if self.status != 101 && self.status != 304 {
             bytes.extend_from_slice(&self.body);
         }
         bytes
@@ -229,6 +231,7 @@ fn reason(status: u16) -> &'static str {
     match status {
         101 => "Switching Protocols",
         200 => "OK",
+        304 => "Not Modified",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",

@@ -155,6 +155,7 @@ timeout, and a 15-second ping.
 | `remote: cannot listen on …` | The port is in use. Pick another with `--remote 9001`. |
 | Typing does nothing | The session may have exited — its chip turns red. The banner shows the write error. |
 | Columns look shifted | A font without the box-drawing glyphs. The page asks for Menlo / DejaVu Sans Mono / Noto Sans Mono first. |
+| The page looks like an older version | It should not: assets revalidate with an ETag, so restarting agent-mux and reloading the tab is enough. If it persists, the tab is holding an old WebSocket — close and reopen it. |
 
 ## 6. Configuration reference
 

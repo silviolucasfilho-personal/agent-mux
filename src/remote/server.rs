@@ -200,9 +200,22 @@ async fn handle_connection(
             let _ = stream.write_all(&res.to_bytes()).await;
         }
         Route::Asset(asset) => {
-            let res = Response::new(200)
-                .body(asset.content_type, Cow::Borrowed(asset.body))
-                .header("Cache-Control", "public, max-age=86400");
+            // `no-cache` means "revalidate", not "do not store": the browser
+            // keeps the bytes and asks whether they changed, which the ETag
+            // answers in a 304. Caching these by age instead was a real bug
+            // -- the assets are compiled into the binary, so every fix was
+            // invisible for a day unless the user thought to hard-reload.
+            let etag = asset.etag();
+            let res = if req.header("if-none-match") == Some(etag.as_str()) {
+                Response::new(304)
+                    .header("ETag", etag)
+                    .header("Cache-Control", "no-cache")
+            } else {
+                Response::new(200)
+                    .body(asset.content_type, Cow::Borrowed(asset.body))
+                    .header("ETag", etag)
+                    .header("Cache-Control", "no-cache")
+            };
             let _ = stream.write_all(&res.to_bytes()).await;
         }
         Route::Index { set_cookie } => {
@@ -630,6 +643,51 @@ mod tests {
             )),
             405
         );
+    }
+
+    #[test]
+    fn assets_revalidate_instead_of_going_stale() {
+        // These files ship inside the binary, so a rebuild changes them and
+        // nothing else does. Caching by age meant a user kept seeing a page
+        // fixed hours earlier; an ETag makes every reload pick up the fix
+        // while still costing only a 304.
+        let js = super::super::web::lookup("app.js").unwrap();
+        let css = super::super::web::lookup("app.css").unwrap();
+        assert_ne!(js.etag(), css.etag(), "different files, different tags");
+        assert_eq!(js.etag(), js.etag(), "the tag is stable for one build");
+        assert!(js.etag().starts_with('"') && js.etag().ends_with('"'));
+
+        let hub = hub();
+        let limits = Limits::default();
+        let asset = match route(&req("GET /assets/app.js HTTP/1.1\r\n\r\n"), &hub, &limits) {
+            Route::Asset(a) => a,
+            other => panic!("expected an asset, got {}", status(&other)),
+        };
+        let fresh = Response::new(200)
+            .body(asset.content_type, Cow::Borrowed(asset.body))
+            .header("ETag", asset.etag())
+            .header("Cache-Control", "no-cache");
+        let text = String::from_utf8(fresh.to_bytes()).unwrap();
+        assert!(text.contains("Cache-Control: no-cache"), "{text:.200}");
+        assert!(
+            !text.contains("max-age"),
+            "age-based caching is the bug: {text:.200}"
+        );
+        assert!(text.contains("ETag: \""), "{text:.200}");
+    }
+
+    #[test]
+    fn a_not_modified_reply_carries_no_body() {
+        let text = String::from_utf8(
+            Response::new(304)
+                .header("ETag", "\"abc\"")
+                .header("Cache-Control", "no-cache")
+                .to_bytes(),
+        )
+        .unwrap();
+        assert!(text.starts_with("HTTP/1.1 304 Not Modified\r\n"), "{text}");
+        assert!(!text.contains("Content-Length"), "{text}");
+        assert!(text.ends_with("\r\n\r\n"), "{text:?}");
     }
 
     #[test]

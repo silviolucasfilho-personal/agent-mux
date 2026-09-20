@@ -59,6 +59,23 @@ pub fn lookup(path: &str) -> Option<&'static Asset> {
     ASSETS.iter().find(|a| a.path == path)
 }
 
+impl Asset {
+    /// A content ETag. These files are compiled into the binary, so they
+    /// change whenever it is rebuilt and never otherwise -- exactly what an
+    /// ETag is for, and why they must not be cached by age instead.
+    pub fn etag(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.body);
+        let mut tag = String::with_capacity(18);
+        tag.push('"');
+        for byte in &digest[..8] {
+            tag.push_str(&format!("{byte:02x}"));
+        }
+        tag.push('"');
+        tag
+    }
+}
+
 pub fn index() -> &'static Asset {
     lookup("index.html").expect("index.html is in ASSETS")
 }
