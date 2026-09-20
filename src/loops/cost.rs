@@ -201,6 +201,8 @@ mod tests {
                 early_exit_required: true,
             },
             prompt: None,
+            model: None,
+            verifier_model: None,
         }
     }
 

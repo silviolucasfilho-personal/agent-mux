@@ -77,10 +77,14 @@ pub fn template(name: &str) -> Option<&'static str> {
 }
 
 /// The caps written into `loop-budget.md`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Caps {
     pub max_runs_per_day: u32,
     pub max_tokens_per_day: u64,
+    /// The model the scaffolded `loop-verifier` agent declares. Empty
+    /// leaves the file as the library wrote it (`model: inherit`: the
+    /// verifier runs on the model of the run that calls it).
+    pub verifier_model: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -107,6 +111,25 @@ impl ScaffoldReport {
 /// Wraps the verifier body into Codex's agent TOML.
 pub fn codex_verifier_toml(body: &str) -> String {
     codex_agent_toml("loop-verifier", body)
+}
+
+/// Rewrites the `model:` line of a Claude-shaped agent file, adding one
+/// when the frontmatter has none. A file without frontmatter is returned
+/// unchanged: agent-mux does not invent a header for someone else's file.
+pub fn set_agent_model(body: &str, model: &str) -> String {
+    let Some(rest) = body.strip_prefix("---\n") else {
+        return body.to_string();
+    };
+    let Some(end) = rest.find("\n---") else {
+        return body.to_string();
+    };
+    let (front, tail) = rest.split_at(end);
+    let mut lines: Vec<String> = front.lines().map(str::to_string).collect();
+    match lines.iter_mut().find(|l| l.starts_with("model:")) {
+        Some(l) => *l = format!("model: {model}"),
+        None => lines.push(format!("model: {model}")),
+    }
+    format!("---\n{}{}", lines.join("\n"), tail)
 }
 
 /// Wraps a Claude-shaped agent file (frontmatter + body) into Codex's
@@ -266,7 +289,15 @@ pub fn scaffold_with_library(
         let Some(path) = agent_path(harness, workspace, &name) else {
             continue;
         };
+        let body = if name == "loop-verifier" && !caps.verifier_model.is_empty() {
+            set_agent_model(&body, &caps.verifier_model)
+        } else {
+            body
+        };
         let content = match harness {
+            // Codex agent files carry name, description and the system
+            // prompt; no model key is verified for them (codex 0.154.0),
+            // so a verifier model reaches Claude Code only.
             Harness::Codex => codex_agent_toml(&name, &body),
             _ => body,
         };
@@ -438,6 +469,7 @@ mod tests {
         let caps = Caps {
             max_runs_per_day: 96,
             max_tokens_per_day: 1_000_000,
+            verifier_model: String::new(),
         };
         let report = scaffold(&ws, pattern, Harness::Claude, Level::L2, &caps).unwrap();
         assert!(report.skipped.is_empty());

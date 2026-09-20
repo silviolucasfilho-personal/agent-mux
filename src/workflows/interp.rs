@@ -631,6 +631,7 @@ impl RunState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn spec_for(
         &self,
         i: usize,
@@ -641,8 +642,13 @@ impl RunState {
         inputs: Value,
         result_schema: Option<String>,
         previous_seen: Option<Value>,
+        // `role`: the session's own harness and model, over the step's.
+        role: &crate::workflows::document::Runner,
     ) -> SessionSpec {
         let step = &self.doc.steps[i];
+        // The role's runner wins over the step's: a refuter or a judge may
+        // be a different, cheaper or stronger, model than the work it reads.
+        let runner = role.over(&crate::workflows::document::Workflow::runner_of(step));
         let results = self.step_results();
         let env = self.env_for(&results, Some(item), Some(index));
         let args: serde_json::Map<String, Value> = step
@@ -670,10 +676,10 @@ impl RunState {
             result_schema,
             phase: step.phase.clone().unwrap_or_else(|| step.id.clone()),
             overrides: Overrides {
-                harness: step.harness.clone(),
-                profile: step.profile.clone(),
-                model: step.model.clone(),
-                effort: step.effort.clone(),
+                harness: runner.harness,
+                profile: runner.profile,
+                model: runner.model,
+                effort: runner.effort,
                 isolation: step.isolation.or(self.doc.default_isolation),
                 cwd: step.cwd.clone(),
                 timeout_s: step.timeout_s,
@@ -758,6 +764,7 @@ impl RunState {
                         self.main_inputs(&step),
                         step.result.clone(),
                         None,
+                        &crate::workflows::document::Runner::default(),
                     );
                     issued = Some((
                         spec,
@@ -781,7 +788,17 @@ impl RunState {
                     };
                     let judge = step.judge.clone().expect("validated");
                     let inputs = serde_json::json!({ "a": candidates[*a], "b": candidates[*b] });
-                    let spec = self.spec_for(i, key, &judge, &Value::Null, p, inputs, None, None);
+                    let spec = self.spec_for(
+                        i,
+                        key,
+                        &judge,
+                        &Value::Null,
+                        p,
+                        inputs,
+                        None,
+                        None,
+                        &step.judge_runner,
+                    );
                     issued = Some((
                         spec,
                         Work::Tournament {
@@ -876,6 +893,7 @@ impl RunState {
                 self.main_inputs(step),
                 step.result.clone(),
                 previous,
+                &crate::workflows::document::Runner::default(),
             );
             return Some((spec, it.clone()));
         }
@@ -900,6 +918,7 @@ impl RunState {
                 inputs,
                 v.result.clone(),
                 None,
+                &v.runner,
             );
             return Some((spec, it.clone()));
         }

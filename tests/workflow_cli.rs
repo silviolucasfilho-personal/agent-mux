@@ -341,3 +341,74 @@ fn plan_reports_a_planner_that_answers_without_a_document() {
     );
     assert!(err.contains("I could not decide."), "{err}");
 }
+
+/// `--step <id>.<key>=<value>` places one step of one run on another model,
+/// and a bad target is refused before anything launches.
+#[test]
+fn a_step_flag_overrides_one_step_for_one_run() {
+    let f = fixture(&[("a", "A about it"), ("b", "B the end")]);
+    std::fs::create_dir_all(f.library.join("workflows")).unwrap();
+    std::fs::write(f.library.join("workflows/two.toml"), TWO).unwrap();
+    let (code, out, err) = run(
+        &f,
+        &[
+            "run",
+            "two",
+            "--workspace",
+            f.ws.to_str().unwrap(),
+            "--arg",
+            "topic=widgets",
+            "--step",
+            "a.model=borrowed-model",
+        ],
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    let calls: Vec<String> = std::fs::read_dir(f.bin.join("calls"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("args-"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert_eq!(calls.len(), 2);
+    let with_model: Vec<&String> = calls
+        .iter()
+        .filter(|c| c.contains("borrowed-model"))
+        .collect();
+    assert_eq!(
+        with_model.len(),
+        1,
+        "only the named step took the model\n{calls:?}"
+    );
+
+    // a step that does not exist, and a key that is not a runner field
+    let (code, _, err) = run(
+        &f,
+        &[
+            "run",
+            "two",
+            "--workspace",
+            f.ws.to_str().unwrap(),
+            "--arg",
+            "topic=widgets",
+            "--step",
+            "nope.model=x",
+        ],
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("no step with that id"), "{err}");
+    let (code, _, err) = run(
+        &f,
+        &[
+            "run",
+            "two",
+            "--workspace",
+            f.ws.to_str().unwrap(),
+            "--arg",
+            "topic=widgets",
+            "--step",
+            "a=oops",
+        ],
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("--step takes"), "{err}");
+}

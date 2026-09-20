@@ -16,14 +16,15 @@ pub const USAGE: &str = "agent-mux loop <command>
   ls [--json]                              every registered loop with next run, spend and readiness
   add --workspace <dir> --pattern <id> [--profile <name>] [--harness claude|codex]
       [--every 1d] [--level L1] [--max-runs-per-day n] [--max-tokens-per-day n]
-      [--max-cost <usd>] [--no-scaffold]  register a loop (and scaffold its files)
+      [--max-cost <usd>] [--model <id>] [--verifier-model <id>] [--no-scaffold]
+                                           register a loop (and scaffold its files)
   rm <id|prefix|pattern@workspace>         remove the registry entry (files stay)
   run <id|prefix|pattern@workspace> [--now]
                                            one scheduler pass for that loop, headless;
                                            exit 0 report-only/no-op, 3 fix-proposed,
                                            4 escalated, 1 blocked, 2 failed
   pause [<id>|--all], resume [<id>|--all]  pause or resume one loop or the kill switch
-  init <dir> --pattern <id> --harness claude|codex [--level L1]
+  init <dir> --pattern <id> --harness claude|codex [--level L1] [--verifier-model <id>]
                                            scaffold only
   audit <dir> [--json]                     the Loop Ready score of a workspace
   status [<id>] [--json]                   the preview card as text
@@ -58,6 +59,8 @@ const VALUE_FLAGS: &[&str] = &[
     "--max-tokens-per-day",
     "--max-cost",
     "--run",
+    "--model",
+    "--verifier-model",
 ];
 
 impl Args {
@@ -207,6 +210,8 @@ fn entry_json(
         "workspace": l.workspace,
         "profile": l.profile,
         "harness": l.harness,
+        "model": l.model,
+        "verifier_model": l.verifier_model,
         "every": format_interval(l.interval_s),
         "interval_s": l.interval_s,
         "level": l.level.as_str(),
@@ -393,11 +398,23 @@ fn add(args: &Args) -> anyhow::Result<()> {
             level.as_str()
         );
     }
+    // The models: what was asked for, else what the pattern suggests.
+    let model = args
+        .value("model")
+        .map(str::to_string)
+        .or_else(|| pattern.model.clone())
+        .unwrap_or_default();
+    let verifier_model = args
+        .value("verifier-model")
+        .map(str::to_string)
+        .or_else(|| pattern.verifier_model.clone())
+        .unwrap_or_default();
     let conn = open_ro(&cfg);
     if !args.has("no-scaffold") {
         let caps = crate::loops::scaffold::Caps {
             max_runs_per_day: max_runs,
             max_tokens_per_day: max_tokens,
+            verifier_model: verifier_model.clone(),
         };
         let report = crate::loops::scaffold::scaffold(&workspace, pattern, harness, level, &caps)?;
         println!(
@@ -428,16 +445,24 @@ fn add(args: &Args) -> anyhow::Result<()> {
     entry.max_runs_per_day = max_runs;
     entry.max_tokens_per_day = max_tokens;
     entry.max_cost_usd_per_run = max_cost;
+    entry.model = model.clone();
+    entry.verifier_model = verifier_model.clone();
     let id = entry.id.clone();
     let next = entry.next_run_at.clone().unwrap_or_default();
     reg.add(entry);
     save_registry(&path, &reg)?;
     println!(
-        "{id}: {} every {} at {} on {} · next run {next}\nreadiness {}/100 {} — {}",
+        "{id}: {} every {} at {} on {}{} · next run {next}\nreadiness {}/100 {} — {}",
         pattern.id,
         format_interval(interval_s),
         level.as_str(),
         harness.as_str(),
+        match (model.is_empty(), verifier_model.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!(" · model {model}"),
+            (true, false) => format!(" · verifier {verifier_model}"),
+            (false, false) => format!(" · model {model} · verifier {verifier_model}"),
+        },
         audit.score,
         audit.level_str(),
         audit.assessment
@@ -569,6 +594,11 @@ fn init(args: &Args) -> anyhow::Result<()> {
     let caps = crate::loops::scaffold::Caps {
         max_runs_per_day: pattern.max_runs_per_day,
         max_tokens_per_day: pattern.max_tokens_per_day,
+        verifier_model: args
+            .value("verifier-model")
+            .map(str::to_string)
+            .or_else(|| pattern.verifier_model.clone())
+            .unwrap_or_default(),
     };
     let report = crate::loops::scaffold::scaffold(&dir, pattern, harness, level, &caps)?;
     for p in &report.written {
@@ -676,6 +706,22 @@ fn status_card(
         l.level.as_str(),
         l.level.label()
     ));
+    // Which model does the work, and which one checks it.
+    if !l.model.is_empty() || !l.verifier_model.is_empty() {
+        lines.push(format!(
+            "  models     run {}{}",
+            if l.model.is_empty() {
+                "the profile's".to_string()
+            } else {
+                l.model.clone()
+            },
+            if l.verifier_model.is_empty() {
+                String::new()
+            } else {
+                format!(" · verifier {}", l.verifier_model)
+            }
+        ));
+    }
     match recent.first() {
         Some(r) => lines.push(format!(
             "  last run   {} · {} · {} found · {} action · {} escalated · {} tokens · ${:.2}{}",

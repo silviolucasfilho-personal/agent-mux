@@ -221,6 +221,7 @@ fn request(
         usd_cap: None,
         isolation: None,
         resume_from: None,
+        step_overrides: Vec::new(),
     }
 }
 
@@ -636,6 +637,7 @@ async fn a_resumed_run_replays_the_journal_without_launching() {
     // a missing journal is an error, not a silent fresh run
     let mut bad = WorkflowRunRequest {
         resume_from: Some("nope".into()),
+        step_overrides: Vec::new(),
         ..request(
             "two",
             TWO,
@@ -709,4 +711,145 @@ async fn start_refuses_invalid_documents_missing_args_and_forbidden_harnesses() 
     assert!(e.contains("unknown step skill"), "{e}");
     assert!(f.app.live_workflow_runs.is_empty());
     let _ = RunStatus::Running;
+}
+
+/// A document that names a harness and a model per role: the step, its
+/// refuters and the judge each run on what they were given.
+const PER_STEP: &str = r#"
+[workflow]
+name = "per-step"
+description = "a model per role"
+output = "wrap"
+[schemas.note]
+fields.note = { type = "string", required = true }
+[schemas.verdict]
+fields.refuted = { type = "boolean", required = true }
+
+[[steps]]
+id = "find"
+kind = "fanout"
+over = ["a"]
+harness = "codex"
+model = "cheap-finder"
+effort = "low"
+prompt = "look"
+result = "note"
+
+[[steps]]
+id = "checked"
+kind = "pipeline"
+over = "find[*]"
+verify = { prompt = "refute it", votes = 1, result = "verdict", harness = "agy", model = "careful-refuter" }
+
+[[steps]]
+id = "wrap"
+model = "writer"
+prompt = "combine"
+"#;
+
+#[tokio::test]
+async fn each_role_of_a_step_runs_on_the_harness_and_model_it_was_given() {
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    let note = "```workflow-result\n{\"note\": \"found\"}\n```";
+    let keep = "```workflow-result\n{\"refuted\": false}\n```";
+    fake_harness(&bin, Harness::Codex, &[("find", note)], None, None);
+    fake_harness(&bin, Harness::Antigravity, &[("checked", keep)], None, None);
+    fake_harness(&bin, Harness::Claude, &[("wrap", "done")], None, None);
+    let mut f = fixture(&bin, temp);
+    let req = request(
+        "per-step",
+        PER_STEP,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    run_to_completion(&mut f, req).await;
+    let recent = &f.app.recent_workflow_runs[0];
+    assert_eq!(
+        recent.status, "finished",
+        "{:?} {:?}",
+        recent.error, recent.notes
+    );
+
+    // the step: codex, its model, and the reasoning effort codex takes
+    let codex = calls(&f.bin, Harness::Codex, "args");
+    assert_eq!(codex.len(), 1, "one find session");
+    assert!(codex[0].contains("--model\ncheap-finder\n"), "{}", codex[0]);
+    assert!(
+        codex[0].contains("model_reasoning_effort=\"low\""),
+        "codex takes the effort as a config override\n{}",
+        codex[0]
+    );
+    // the refuter: its own harness and model, not the step's
+    let agy = calls(&f.bin, Harness::Antigravity, "args");
+    assert_eq!(agy.len(), 1, "one vote");
+    assert!(agy[0].contains("--model\ncareful-refuter\n"), "{}", agy[0]);
+    assert!(
+        !agy[0].contains("cheap-finder"),
+        "the vote does not inherit the step's model\n{}",
+        agy[0]
+    );
+    // the run's own harness and the last step's model
+    let claude = calls(&f.bin, Harness::Claude, "args");
+    assert_eq!(claude.len(), 1);
+    assert!(claude[0].contains("--model\nwriter\n"), "{}", claude[0]);
+}
+
+/// `--step id.model=…` changes one run without touching the document.
+#[tokio::test]
+async fn a_per_run_override_changes_one_step_for_that_run_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fake_harness(&bin, Harness::Claude, &[("wrap", "done")], None, None);
+    let mut f = fixture(&bin, temp);
+    let doc = r#"
+[workflow]
+name = "one"
+description = "d"
+output = "wrap"
+[[steps]]
+id = "wrap"
+prompt = "write"
+"#;
+    let mut req = request(
+        "one",
+        doc,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    req.step_overrides = vec![("wrap".into(), "model".into(), "borrowed-model".into())];
+    run_to_completion(&mut f, req).await;
+    let claude = calls(&f.bin, Harness::Claude, "args");
+    assert!(
+        claude[0].contains("--model\nborrowed-model\n"),
+        "{}",
+        claude[0]
+    );
+
+    // an override that names no step is refused before anything launches
+    let mut req = request(
+        "one",
+        doc,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    req.step_overrides = vec![("nope".into(), "model".into(), "x".into())];
+    let err = f.app.start_workflow_run(req).unwrap_err();
+    assert!(err.contains("no step with that id"), "{err}");
+    let mut req = request(
+        "one",
+        doc,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    req.step_overrides = vec![("wrap".into(), "temperature".into(), "hot".into())];
+    let err = f.app.start_workflow_run(req).unwrap_err();
+    assert!(
+        err.contains("expected harness, profile, model or effort"),
+        "{err}"
+    );
 }

@@ -9,6 +9,11 @@ use crate::selection::{self, Pos, Selection};
 use crate::session::Session;
 use crate::status::Status;
 use crate::ui;
+/// A session runs in agent-mux's own pane, where an approval prompt stops
+/// the work and waits for a keypress nobody is watching for. Launches
+/// bypass the prompts unless the profile or `profiles.toml` says not to.
+pub const DEFAULT_BYPASS_APPROVALS: bool = true;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::time::Instant;
 use tokio::sync::mpsc::Sender;
@@ -680,6 +685,9 @@ pub struct DialogState {
     /// `--model <id>`; blank means the flag is not passed at all.
     pub model: String,
     pub bypass_approvals: bool,
+    /// What `bypass_approvals` falls back to when the profile does not say
+    /// (the top-level `bypass_approvals` in profiles.toml, default true).
+    pub bypass_default: bool,
     pub resume_last: bool,
     /// A one-shot prompt; blank launches interactively.
     pub one_shot: String,
@@ -731,7 +739,10 @@ impl DialogState {
             backend,
             harness: first.and_then(|p| crate::harness::Harness::detect(&p.command)),
             model: first.and_then(|p| p.model.clone()).unwrap_or_default(),
-            bypass_approvals: first.and_then(|p| p.bypass_approvals).unwrap_or(false),
+            bypass_approvals: first
+                .and_then(|p| p.bypass_approvals)
+                .unwrap_or(DEFAULT_BYPASS_APPROVALS),
+            bypass_default: DEFAULT_BYPASS_APPROVALS,
             resume_last: false,
             one_shot: String::new(),
             langfuse_available: false,
@@ -845,6 +856,17 @@ impl DialogState {
     }
 
     /// The options this dialog asks for, ready to render for a harness.
+    /// Applies the configured approval default to a freshly built dialog:
+    /// a profile that states its own `bypass_approvals` still wins.
+    pub fn with_bypass_default(mut self, default: bool, profiles: &[Profile]) -> Self {
+        self.bypass_default = default;
+        self.bypass_approvals = profiles
+            .get(self.profile_idx)
+            .and_then(|p| p.bypass_approvals)
+            .unwrap_or(default);
+        self
+    }
+
     /// Blank text fields become `None`, so nothing empty is ever passed.
     pub fn launch_options(&self) -> crate::harness::LaunchOptions {
         crate::harness::LaunchOptions {
@@ -890,7 +912,7 @@ impl DialogState {
         if let Some(p) = profiles.get(idx) {
             self.harness = crate::harness::Harness::detect(&p.command);
             self.model = p.model.clone().unwrap_or_default();
-            self.bypass_approvals = p.bypass_approvals.unwrap_or(false);
+            self.bypass_approvals = p.bypass_approvals.unwrap_or(self.bypass_default);
             if self.harness.is_none() {
                 // the option fields are gone: do not leave focus on one
                 self.resume_last = false;
@@ -1805,6 +1827,12 @@ pub struct App {
     skill_workbench: Option<SkillWorkbenchBookmark>,
     /// `[agents]`: whether launches get briefing snapshots and MCP.
     pub agents: crate::config::AgentsSettings,
+    /// Antigravity keeps its MCP servers in a global file, so agent-mux
+    /// writes the entry once per run rather than on every launch.
+    agy_mcp_checked: bool,
+    /// Whether a launch bypasses the harness's approval prompts when the
+    /// profile does not say. From `bypass_approvals` in profiles.toml.
+    pub bypass_approvals_default: bool,
     /// Where briefing snapshots are written; `None` is the runtime
     /// directory (`AGENT_MUX_RUNTIME_DIR` or `~/.agent-mux/snapshots`).
     pub runtime_dir: Option<std::path::PathBuf>,
@@ -1921,6 +1949,8 @@ impl App {
             selected_agent: 0,
             skill_workbench: None,
             agents: crate::config::AgentsSettings::default(),
+            agy_mcp_checked: false,
+            bypass_approvals_default: DEFAULT_BYPASS_APPROVALS,
             runtime_dir: None,
             cached_briefing: None,
             cached_briefing_as_of: None,
@@ -2142,12 +2172,16 @@ impl App {
                                 .unwrap_or_default()
                                 .as_nanos() as i64;
                             let since_ns = now_ns - (24 * 3600 * 1_000_000_000);
+                            // The preview list scrolls; fifty cards is far
+                            // more than it shows, and the totals beside it
+                            // stay exact whatever the cap.
                             crate::tracing::analysis::briefing(
                                 &conn,
                                 &workspace,
                                 since_ns,
                                 now_ns,
                                 &live_sessions,
+                                &crate::tracing::analysis::BriefingScan::with_max(50),
                             )
                             .map_err(|e| e.to_string())
                         })();
@@ -2387,15 +2421,44 @@ impl App {
         // An agent launch (fresh, restored or respawned) gets its facts
         // from Rust: the briefing snapshot and the MCP registration.
         let mut briefing_path = None;
-        if let Some(def) = skill_id
+        let def = skill_id
             .filter(|_| !is_loop)
             .and_then(|sid| self.skills.iter().find(|s| s.id == sid))
-            .cloned()
-        {
-            let prep = self.prepare_agent_launch(&def, &profile, &dir);
+            .cloned();
+        let is_agent = def.is_some();
+        if let Some(def) = def {
+            let prep = self.prepare_agent_launch(&def, &dir);
             extra_args.extend(prep.args);
             extra_env.extend(prep.env);
             briefing_path = prep.briefing_path;
+        }
+        // Every session of every harness reaches the trace store: the store
+        // is local, read-only and scoped to this workspace, and a session
+        // that cannot ask what happened in the last one is the odd one out.
+        // `[agents] mcp = "off"` is the single switch; a loop or a workflow
+        // registers before it calls, so it is not done twice.
+        if !is_loop {
+            let wanted = self.agents.mcp == crate::skill::McpMode::Auto;
+            let registration = if wanted {
+                self.ensure_mcp(&profile.command, &dir)
+            } else {
+                crate::mcp::register::Registration::Unavailable("mcp is off".into())
+            };
+            if let crate::mcp::register::Registration::PerLaunch { args } = &registration {
+                extra_args.extend(args.iter().cloned());
+            }
+            // Only an agent launch is told; an ordinary session has no
+            // skill reading the variable to report to.
+            if let (true, true, crate::mcp::register::Registration::Unavailable(why)) =
+                (wanted, is_agent, &registration)
+            {
+                self.notice = Some(Notice::info(format!("runs without MCP tools: {why}")));
+            }
+            extra_env.push(("AGENT_MUX_MCP".into(), registration.env_value().into()));
+            extra_env.push((
+                "AGENT_MUX_WORKSPACE".into(),
+                dir.to_string_lossy().into_owned(),
+            ));
         }
         let mut session = Session::spawn(
             id,
@@ -2414,13 +2477,79 @@ impl App {
         Ok(session)
     }
 
+    /// Whether this process may write a user's global harness
+    /// configuration. `agy mcp add` goes through `agy`, which reads its own
+    /// home whatever this App was told, so a sandboxed App (a test, an
+    /// embedded use) must never reach it: the guard is a real home and a
+    /// binary actually named `agent-mux`.
+    fn may_install_globally(&self) -> bool {
+        if self.skill_install_home.is_some() {
+            return false;
+        }
+        crate::tracing::hooks::register::current_exe()
+            .as_deref()
+            .and_then(|e| e.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .is_some_and(|stem| stem == "agent-mux")
+    }
+
+    /// How this launch reaches the agent-mux MCP server, installing what
+    /// the harness needs first. Claude Code and Codex take the server on
+    /// their command line; Antigravity reads a global file, so the entry is
+    /// written once per run — the same just-in-time install the Agents
+    /// sidebar does for a skill. Never fails a launch.
+    pub fn ensure_mcp(
+        &mut self,
+        command: &str,
+        dir: &std::path::Path,
+    ) -> crate::mcp::register::Registration {
+        let harness = crate::harness::Harness::detect(command);
+        let exe = crate::tracing::hooks::register::current_exe();
+        let home = self.skill_home();
+        // Antigravity has no per-launch flag: it reads a global entry, so
+        // agent-mux writes one before the first agy session of the run. A
+        // failed attempt is reported once and not retried, so a missing
+        // `agy` cannot make every launch shell out.
+        if harness == Some(crate::harness::Harness::Antigravity)
+            && !self.agy_mcp_checked
+            && self.trace_db_path.is_some()
+            && self.may_install_globally()
+            && let Some(exe) = exe.as_deref().filter(|e| e.is_absolute())
+        {
+            let st = crate::mcp::install::agy_status(&home, Some(exe));
+            if !st.installed || !st.current || st.disabled {
+                match crate::mcp::install::install_agy(exe) {
+                    Ok(_) => {
+                        self.agy_mcp_checked = true;
+                        self.notice = Some(Notice::info(
+                            "registered the agent-mux MCP server with Antigravity",
+                        ));
+                    }
+                    Err(e) => {
+                        self.agy_mcp_checked = true;
+                        self.notice =
+                            Some(Notice::warn(format!("Antigravity gets no MCP tools: {e}")));
+                    }
+                }
+            } else {
+                self.agy_mcp_checked = true;
+            }
+        }
+        crate::mcp::register::plan(
+            harness,
+            exe.as_deref(),
+            self.trace_db_path.as_deref(),
+            dir,
+            &home,
+        )
+    }
+
     /// The Rust side of an agent launch: writes the briefing snapshot the
-    /// package asked for and decides how the harness reaches the MCP
-    /// server. Nothing here can fail the launch; problems become notices.
+    /// package asked for. The MCP server is attached by the spawn itself,
+    /// for every session. Nothing here can fail the launch; problems
+    /// become notices.
     fn prepare_agent_launch(
         &mut self,
         def: &crate::skill::SkillDefinition,
-        profile: &Profile,
         dir: &std::path::Path,
     ) -> AgentLaunchPrep {
         let mut prep = AgentLaunchPrep::default();
@@ -2456,39 +2585,6 @@ impl App {
                 prep.briefing_path = Some(h.path);
             }
         }
-        let wanted = def.mcp == crate::skill::McpMode::Auto
-            && self.agents.mcp == crate::skill::McpMode::Auto;
-        let registration = if wanted {
-            let exe = crate::tracing::hooks::register::current_exe();
-            crate::mcp::register::plan(
-                crate::harness::Harness::detect(&profile.command),
-                exe.as_deref(),
-                self.trace_db_path.as_deref(),
-                dir,
-                &self.skill_home(),
-            )
-        } else {
-            crate::mcp::register::Registration::Unavailable("mcp is off".into())
-        };
-        match &registration {
-            crate::mcp::register::Registration::PerLaunch { args } => {
-                prep.args.extend(args.iter().cloned());
-            }
-            crate::mcp::register::Registration::Installed => {}
-            crate::mcp::register::Registration::Unavailable(why) if wanted => {
-                self.notice = Some(Notice::info(format!(
-                    "{} runs without MCP tools: {why}",
-                    def.name
-                )));
-            }
-            crate::mcp::register::Registration::Unavailable(_) => {}
-        }
-        prep.env
-            .push(("AGENT_MUX_MCP".into(), registration.env_value().into()));
-        prep.env.push((
-            "AGENT_MUX_WORKSPACE".into(),
-            dir.to_string_lossy().into_owned(),
-        ));
         prep
     }
 
@@ -3493,6 +3589,7 @@ impl App {
                 };
                 self.mode = Mode::NewSession(
                     DialogState::new(&self.profiles)
+                        .with_bypass_default(self.bypass_approvals_default, &self.profiles)
                         .with_backend_options(default, available, &self.profiles)
                         .with_experiments(self.tracing.is_some()),
                 );
@@ -4683,6 +4780,12 @@ impl App {
                 model: None,
                 bypass_approvals: None,
             });
+        // A profile that says nothing takes the configured default, the
+        // same rule the New session dialog shows.
+        let mut base = base;
+        if base.bypass_approvals.is_none() {
+            base.bypass_approvals = Some(self.bypass_approvals_default);
+        }
         let launch = crate::skill::launch::build_skill_launch_full(
             &skill,
             harness,
@@ -5482,7 +5585,10 @@ mod dialog_tests {
         d.handle_key(&key(KeyCode::Down), &ps);
         assert_eq!(d.harness, Some(crate::harness::Harness::Codex));
         assert_eq!(d.model, "", "codex profile sets no default model");
-        assert!(!d.bypass_approvals);
+        assert!(
+            d.bypass_approvals,
+            "a profile that says nothing takes the configured default"
+        );
 
         // a profile that is not a known CLI hides the four fields
         d.handle_key(&key(KeyCode::Down), &ps);
@@ -5490,6 +5596,55 @@ mod dialog_tests {
         assert_eq!(d.fields().len(), 5);
         d.handle_key(&key(KeyCode::Tab), &ps);
         assert_eq!(d.field, DialogField::Dir, "tab skips what is not shown");
+    }
+
+    #[test]
+    fn approvals_are_bypassed_by_default_and_a_profile_may_say_otherwise() {
+        let mut ps = harness_profiles();
+        // the shipped default is to bypass; a profile that does not state
+        // one takes it
+        let d = DialogState::new(&ps).with_bypass_default(DEFAULT_BYPASS_APPROVALS, &ps);
+        assert!(d.bypass_approvals);
+        assert_eq!(
+            d.launch_options()
+                .render(crate::harness::Harness::Claude)
+                .trailing,
+            vec!["--model", "claude-opus-5", "--dangerously-skip-permissions"]
+        );
+
+        // a profile that opts out keeps its prompts, default or not
+        ps[0].bypass_approvals = Some(false);
+        let d = DialogState::new(&ps).with_bypass_default(true, &ps);
+        assert!(!d.bypass_approvals);
+
+        // and the configuration can turn the default off for everyone
+        ps[0].bypass_approvals = None;
+        let d = DialogState::new(&ps).with_bypass_default(false, &ps);
+        assert!(!d.bypass_approvals);
+        assert!(
+            !d.launch_options()
+                .render(crate::harness::Harness::Codex)
+                .trailing
+                .iter()
+                .any(|a| a == "--yolo")
+        );
+        let d = DialogState::new(&ps).with_bypass_default(true, &ps);
+        assert!(
+            d.launch_options()
+                .render(crate::harness::Harness::Codex)
+                .trailing
+                .iter()
+                .any(|a| a == "--yolo"),
+            "codex spells it --yolo"
+        );
+        assert!(
+            d.launch_options()
+                .render(crate::harness::Harness::Antigravity)
+                .trailing
+                .iter()
+                .any(|a| a == "--dangerously-skip-permissions"),
+            "agy spells it --dangerously-skip-permissions (agy 1.2.6 --help)"
+        );
     }
 
     #[test]

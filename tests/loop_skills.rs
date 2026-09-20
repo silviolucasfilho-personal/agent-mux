@@ -182,6 +182,7 @@ fn scaffold_lands_files_per_harness_and_never_overwrites() {
     let caps = Caps {
         max_runs_per_day: 2,
         max_tokens_per_day: 100_000,
+        verifier_model: String::new(),
     };
     let daily = patterns::find("daily-triage").unwrap();
 

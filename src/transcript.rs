@@ -884,11 +884,21 @@ pub fn parse_antigravity_line(line: &str) -> Vec<TranscriptEvent> {
 
 /// Codex writes environment/instruction prologues as user-role messages at
 /// session start (and per turn); they are context, not conversation.
-fn is_codex_session_prefix(text: &str) -> bool {
+pub fn is_codex_session_prefix(text: &str) -> bool {
     let trimmed = text.trim_start();
     trimmed.starts_with("<user_instructions>")
         || trimmed.starts_with("<environment_context>")
         || trimmed.starts_with("<turn_context>")
+        || trimmed.starts_with("<recommended_plugins>")
+        || trimmed.starts_with("<permissions instructions>")
+        || trimmed.starts_with("<permissions_instructions>")
+        || trimmed.starts_with("<apps_instructions>")
+        || trimmed.starts_with("<plugins_instructions>")
+        || trimmed.starts_with("<skills_instructions>")
+        || trimmed.starts_with("<multi_agent_mode>")
+        || trimmed.starts_with("<skill>")
+        || trimmed.starts_with("<skill\n")
+        || trimmed.starts_with("# AGENTS.md instructions for")
 }
 
 /// Concatenated `text` fields of a Responses-API content array.
@@ -898,6 +908,7 @@ fn codex_content_text(content: Option<&Value>) -> String {
     };
     arr.iter()
         .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+        .filter(|text| !is_codex_session_prefix(text))
         .collect::<Vec<_>>()
         .join("")
 }
@@ -1547,16 +1558,34 @@ mod tests {
             "<user_instructions>",
             "<environment_context>",
             "<turn_context>",
+            "<recommended_plugins>",
+            "<permissions instructions>",
+            "<apps_instructions>",
+            "<plugins_instructions>",
+            "<skills_instructions>",
+            "<multi_agent_mode>",
+            "<skill>",
+            "# AGENTS.md instructions for",
         ] {
             let line = format!(
-                r#"{{"timestamp":"t","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{prefix} lots of context {}"}}]}}}}"#,
-                prefix.replace('<', "</")
+                r#"{{"timestamp":"t","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{prefix} lots of context"}}]}}}}"#
             );
             assert!(
                 parse_codex_line(&line).is_empty(),
                 "prologue {prefix} must be filtered"
             );
         }
+    }
+
+    #[test]
+    fn codex_multi_part_prologue_with_recommended_plugins_is_filtered() {
+        let line = r##"{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>\n- Plugin A\n</recommended_plugins>"},{"type":"input_text","text":"# AGENTS.md instructions for /Users/test/workspace\n<INSTRUCTIONS>..."},{"type":"input_text","text":"<environment_context>\n<cwd>/Users/test/workspace</cwd>\n</environment_context>"}]}}"##;
+        assert!(parse_codex_line(line).is_empty());
+
+        let line_with_user_msg = r#"{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>\n- Plugin A\n</recommended_plugins>"},{"type":"input_text","text":"fix the bug"}]}}"#;
+        let events = parse_codex_line(line_with_user_msg);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], TranscriptEvent::User { text, .. } if text == "fix the bug"));
     }
 
     #[test]

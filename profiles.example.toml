@@ -7,6 +7,12 @@
 # docs/configuration.md.
 # editor = "code --wait"
 #
+# Every launch bypasses the harness's approval prompts (they stop the work
+# in a pane nobody is watching): --dangerously-skip-permissions on Claude
+# Code and Antigravity, --yolo on Codex. Set this to false to keep the
+# prompts for every profile; a profile's own bypass_approvals wins over it.
+# bypass_approvals = true
+#
 # Workflows (docs/workflows.md): sessions at a time across runs, timeouts,
 # the isolation default, whether a planned document waits for approval.
 # [workflows]
@@ -100,13 +106,20 @@
 # cache_write_1h = 4.00         # 1-hour cache writes
 # reasoning = 14.0              # optional; otherwise reasoning tokens bill as output
 
-# Launch defaults per profile. Both are optional: an unset key passes no
-# flag at all, so each CLI keeps its own default. The new-session dialog
-# pre-fills from these and can override them for a single launch, and it
-# also offers resume and a one-shot prompt, which are per-launch only.
+# Launch defaults per profile. `model` is optional: unset passes no flag at
+# all, so the CLI keeps its own default. The new-session dialog pre-fills
+# from these and can override them for a single launch, and it also offers
+# resume and a one-shot prompt, which are per-launch only.
 #
 #   model            --model <id>      (claude, codex, agy)
 #   bypass_approvals --dangerously-skip-permissions (claude, agy), --yolo (codex)
+#
+# Approvals are bypassed by default: agent-mux runs the harness in its own
+# pane, where a permission prompt stops the work waiting for a keypress.
+# Set the top-level `bypass_approvals = false` to keep the prompts for every
+# profile, or the per-profile key below to decide one at a time (the profile
+# wins over the top-level default, and the dialog shows what a launch will
+# do before it starts).
 
 [[profiles]]
 name = "Claude Code"

@@ -32,7 +32,7 @@ pub use model::{
     AnalysisError, Binding, Briefing, Confidence, Evidence, EvidenceSource, LiveSession,
     RuntimeState, SessionCard, SkillMetricRow, TaskOutcome, ToolCountSummary,
 };
-pub use query::briefing;
+pub use query::{BriefingScan, briefing};
 pub use scope::Scope;
 pub use service::{
     AnalyzeSkillsArgs, BriefingArgs, BriefingData, CompareRunsArgs, GetSessionArgs, HealthArgs,

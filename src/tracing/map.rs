@@ -52,11 +52,7 @@ const SECRET_PREFIXES: [&str; 6] = ["sk-", "pk-lf-", "AKIA", "ghp_", "xox", "Bea
 /// Codex repeats environment and instruction preambles as user-shaped
 /// records. They are model context, never the user's turn prompt.
 fn is_codex_context(text: &str) -> bool {
-    let text = text.trim_start();
-    text.starts_with("<user_instructions>")
-        || text.starts_with("<environment_context>")
-        || text.starts_with("<turn_context>")
-        || text.starts_with("# AGENTS.md instructions for")
+    crate::transcript::is_codex_session_prefix(text)
 }
 
 fn is_boundary(prev: Option<char>) -> bool {
@@ -1814,7 +1810,7 @@ impl TurnAssembler {
                     turn.last_nanos = nanos;
                     turn.any_ts_approx |= approx;
                     turn.event_index += 1;
-                    if turn.user_text.is_none() {
+                    if turn.user_text.is_none() && !is_codex_context(&text) {
                         turn.user_text = Some(text);
                     }
                 }
@@ -2703,6 +2699,7 @@ impl TurnAssembler {
         }
         if kind == "user_message"
             && let Some(text) = payload.get("message").and_then(Value::as_str)
+            && !is_codex_context(text)
         {
             self.ensure_live_turn(nanos, &mut ops);
             if let Some(turn) = self.turn.as_mut() {
@@ -3959,6 +3956,47 @@ mod tests {
             "priced via the session model"
         );
         assert_eq!(usage_only.usage.as_ref().unwrap().input, Some(100));
+    }
+
+    #[test]
+    fn codex_context_preambles_do_not_become_session_title_or_user_text() {
+        let mut asm = TurnAssembler::new(
+            MapSettings {
+                provider: Provider::Codex,
+                ..settings(ContentMode::Full)
+            },
+            Some("codex-sess".into()),
+            "watched",
+        );
+        let mut ops = Vec::new();
+        ops.extend(asm.feed(
+            TranscriptEvent::Record {
+                kind: "item_completed".into(),
+                payload: serde_json::json!({
+                    "item": {
+                        "content": [
+                            {"text": "<recommended_plugins>\n- Plugin A\n</recommended_plugins>"},
+                            {"text": "# AGENTS.md instructions for /Users/test/workspace\n<INSTRUCTIONS>..."},
+                            {"text": "<environment_context>\n<cwd>/Users/test/workspace</cwd>\n</environment_context>"}
+                        ]
+                    }
+                }),
+                ts: Some("2026-08-30T10:00:00Z".into()),
+            },
+            0,
+        ));
+        let session_op = ops.iter().find_map(|op| match op {
+            StoreOp::Session(s) if s.title.is_some() => Some(s.title.clone().unwrap()),
+            _ => None,
+        });
+        assert!(session_op.is_none(), "preamble must not set session title");
+
+        ops.extend(asm.feed(user("fix the parser bug", "2026-08-30T10:00:01Z"), 0));
+        let session_title = ops.iter().find_map(|op| match op {
+            StoreOp::Session(s) if s.title.is_some() => Some(s.title.clone().unwrap()),
+            _ => None,
+        });
+        assert_eq!(session_title.as_deref(), Some("fix the parser bug"));
     }
 
     #[test]

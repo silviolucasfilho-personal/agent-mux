@@ -9,18 +9,104 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::Path;
 
+/// What the briefing should scan. A card costs about seven queries, so the
+/// filters and the cap belong in SQL: building every card and then dropping
+/// most of them is what made a briefing over a busy day miss its deadline.
+#[derive(Debug, Clone, Default)]
+pub struct BriefingScan {
+    /// Only sessions of this provider.
+    pub provider: Option<String>,
+    /// Only this session key: one card, for a detail request.
+    pub session_key: Option<String>,
+    /// At most this many historical cards, most recent first. 0 is no cap.
+    pub max_cards: usize,
+}
+
+impl BriefingScan {
+    /// Every card in the window, as the briefing did before it was capped.
+    pub fn all() -> BriefingScan {
+        BriefingScan::default()
+    }
+
+    pub fn with_max(max_cards: usize) -> BriefingScan {
+        BriefingScan {
+            max_cards,
+            ..BriefingScan::default()
+        }
+    }
+
+    fn matches_live(&self, s: &LiveSession) -> bool {
+        if let Some(p) = &self.provider
+            && s.provider.as_deref() != Some(p.as_str())
+        {
+            return false;
+        }
+        if let Some(k) = &self.session_key
+            && s.session_key.as_deref() != Some(k.as_str())
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// The workspace rollup, read from `session_stats` in one query so it stays
+/// exact however few cards the caller asked for.
+#[derive(Debug, Clone, Default)]
+struct Rollup {
+    sessions: i64,
+    turns: i64,
+    tools: i64,
+    tokens: Option<i64>,
+    cost_usd: Option<f64>,
+}
+
+fn rollup(
+    conn: &Connection,
+    ws: &str,
+    since_ns: i64,
+    until_ns: i64,
+    scan: &BriefingScan,
+) -> rusqlite::Result<Rollup> {
+    conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(turn_count), 0),
+                COALESCE(SUM(tool_count), 0),
+                SUM(total_tokens),
+                SUM(total_cost_usd)
+         FROM session_stats
+         WHERE (last_seen_ns >= ?1 AND first_seen_ns < ?2)
+           AND (cwd IS NULL OR cwd = '' OR cwd = ?3)
+           AND (?4 IS NULL OR provider = ?4)
+           AND (?5 IS NULL OR key = ?5)",
+        params![since_ns, until_ns, ws, scan.provider, scan.session_key],
+        |r| {
+            Ok(Rollup {
+                sessions: r.get(0)?,
+                turns: r.get(1)?,
+                tools: r.get(2)?,
+                tokens: r.get(3)?,
+                cost_usd: r.get(4)?,
+            })
+        },
+    )
+}
+
 /// Generates an executive briefing across active and historical sessions within a time window.
 ///
 /// Merges live sessions with historical sessions, deduplicating history already represented
-/// by a live launch. Computes uncapped totals before applying preview display limits.
+/// by a live launch. The rollup totals come from one aggregate query, so they stay exact
+/// whatever `scan.max_cards` caps the cards at; a cap that bites is reported in `warnings`.
 pub fn briefing(
     conn: &Connection,
     workspace: &Path,
     since_ns: i64,
     until_ns: i64,
     live: &[LiveSession],
+    scan: &BriefingScan,
 ) -> Result<Briefing, AnalysisError> {
     let mut cards = Vec::new();
+    let mut warnings = Vec::new();
     let mut seen_session_keys = HashSet::new();
     let mut seen_launch_ids = HashSet::new();
     let ws_str = workspace.to_string_lossy().to_string();
@@ -29,6 +115,9 @@ pub fn briefing(
     for s in live {
         if !s.cwd.as_os_str().is_empty() && s.cwd != workspace {
             // Out of workspace scope
+            continue;
+        }
+        if !scan.matches_live(s) {
             continue;
         }
 
@@ -49,6 +138,7 @@ pub fn briefing(
         )?;
         cards.push(card);
     }
+    let live_cards = cards.len();
 
     // 2. Query Historical Sessions from SQLite
     // Check if sessions or traces table exists
@@ -61,24 +151,47 @@ pub fn briefing(
         .optional()?
         .unwrap_or(false);
 
+    let mut totals = Rollup::default();
     if has_sessions_table {
+        totals = rollup(conn, &ws_str, since_ns, until_ns, scan).unwrap_or_default();
+
+        // The cap is pushed into SQL: the most recent sessions are what a
+        // briefing reads. The key breaks ties, so "the most recent n" is the
+        // same set on every build of the same store.
+        let limit = if scan.max_cards == 0 {
+            -1
+        } else {
+            scan.max_cards as i64
+        };
         let mut stmt = conn.prepare(
             "SELECT key, provider, cwd, first_seen_ns, last_seen_ns
              FROM sessions
              WHERE (last_seen_ns >= ?1 AND first_seen_ns < ?2)
                AND (cwd IS NULL OR cwd = '' OR cwd = ?3)
-             ORDER BY last_seen_ns DESC",
+               AND (?4 IS NULL OR provider = ?4)
+               AND (?5 IS NULL OR key = ?5)
+             ORDER BY last_seen_ns DESC, key DESC LIMIT ?6",
         )?;
 
-        let rows = stmt.query_map(params![since_ns, until_ns, ws_str], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                since_ns,
+                until_ns,
+                ws_str,
+                scan.provider,
+                scan.session_key,
+                limit
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
 
         for row in rows.flatten() {
             let (key, provider, cwd_str, _first_seen, _last_seen) = row;
@@ -105,16 +218,25 @@ pub fn briefing(
         }
     }
 
-    // 3. Roll up workspace scope totals
-    let total_sessions = cards.len();
-    let mut total_turns = 0;
-    let mut total_tools = 0;
-    let mut total_tokens_sum: i64 = 0;
-    let mut has_tokens = false;
-    let mut total_cost_sum: f64 = 0.0;
-    let mut has_cost = false;
+    // 3. Roll up workspace scope totals. A live session the store has not
+    // seen yet is not in the aggregate, so its card is added to it.
+    let mut total_sessions = totals.sessions.max(0) as usize;
+    let mut total_turns = totals.turns;
+    let mut total_tools = totals.tools;
+    let mut total_tokens_sum: i64 = totals.tokens.unwrap_or(0);
+    let mut has_tokens = totals.tokens.is_some();
+    let mut total_cost_sum: f64 = totals.cost_usd.unwrap_or(0.0);
+    let mut has_cost = totals.cost_usd.is_some();
 
-    for card in &cards {
+    for card in cards.iter().take(live_cards) {
+        let counted = card
+            .session_key
+            .as_deref()
+            .is_some_and(|k| session_in_store(conn, k, since_ns, until_ns, &ws_str, scan));
+        if counted {
+            continue;
+        }
+        total_sessions += 1;
         total_turns += card.completed_turns + card.open_turns;
         total_tools += card.total_tools;
         if let Some(tok) = card.total_tokens {
@@ -125,6 +247,15 @@ pub fn briefing(
             total_cost_sum += cost;
             has_cost = true;
         }
+    }
+    if total_sessions < cards.len() {
+        total_sessions = cards.len();
+    }
+    if scan.max_cards > 0 && total_sessions > cards.len() {
+        warnings.push(format!(
+            "{total_sessions} sessions in scope; cards built for the {} most recent",
+            cards.len()
+        ));
     }
 
     Ok(Briefing {
@@ -141,8 +272,31 @@ pub fn briefing(
             None
         },
         total_cost_usd: if has_cost { Some(total_cost_sum) } else { None },
-        warnings: Vec::new(),
+        warnings,
     })
+}
+
+/// Whether the aggregate already counted this live session.
+fn session_in_store(
+    conn: &Connection,
+    key: &str,
+    since_ns: i64,
+    until_ns: i64,
+    ws: &str,
+    scan: &BriefingScan,
+) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM session_stats
+         WHERE key = ?1
+           AND (last_seen_ns >= ?2 AND first_seen_ns < ?3)
+           AND (cwd IS NULL OR cwd = '' OR cwd = ?4)
+           AND (?5 IS NULL OR provider = ?5)",
+        params![key, since_ns, until_ns, ws, scan.provider],
+        |_| Ok(true),
+    )
+    .optional()
+    .unwrap_or(None)
+    .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]

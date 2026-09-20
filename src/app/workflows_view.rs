@@ -1366,13 +1366,20 @@ fn steps_lines(steps: &[WorkflowStep], reasons: &BTreeMap<String, String>) -> Ve
             .map(|s| s.tokens.unwrap_or(0).max(0) as u64)
             .sum();
         let phase = group.first().map(|s| s.phase.clone()).unwrap_or_default();
+        let mut on: Vec<&str> = Vec::new();
+        for g in &group {
+            if !on.contains(&g.harness.as_str()) {
+                on.push(g.harness.as_str());
+            }
+        }
         out.push(Line::from(vec![
             Span::styled(format!("  {phase} · {step_id}"), key),
             Span::styled(
                 format!(
-                    " · {} session(s) · {ok} answered · {} tokens",
+                    " · {} session(s) · {ok} answered · {} tokens · {}",
                     group.len(),
-                    crate::loops::format_tokens(tokens)
+                    crate::loops::format_tokens(tokens),
+                    on.join(", ")
                 ),
                 dim,
             ),
@@ -1396,8 +1403,9 @@ fn steps_lines(steps: &[WorkflowStep], reasons: &BTreeMap<String, String>) -> Ve
                 Span::raw(format!("{:<26} ", s.session)),
                 Span::styled(
                     format!(
-                        "{:<7} {:>8} {:>8}",
+                        "{:<7} {:<8} {:>8} {:>8}",
                         s.kind,
+                        s.harness,
                         crate::loops::format_tokens(s.tokens.unwrap_or(0).max(0) as u64),
                         dur
                     ),

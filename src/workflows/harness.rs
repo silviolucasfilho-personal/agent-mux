@@ -46,6 +46,20 @@ pub fn extra_args(
     v
 }
 
+/// Reasoning effort for the harnesses that take one. Codex reads it from
+/// its config (`-c model_reasoning_effort="high"`, accepted by codex
+/// 0.154.0); Claude Code 2.1.277 and agy 1.2.6 have no such flag, so a
+/// step that asks for one on them gets `None` and a run note.
+pub fn effort_args(harness: Harness, effort: &str) -> Option<Vec<String>> {
+    match harness {
+        Harness::Codex => Some(vec![
+            "-c".into(),
+            format!("model_reasoning_effort=\"{}\"", effort.replace('"', "")),
+        ]),
+        Harness::Claude | Harness::Antigravity => None,
+    }
+}
+
 /// Inserts `extra` before the trailing prompt of a composed command line
 /// (`-p <prompt>` on Claude and Antigravity, the positional prompt on
 /// Codex).

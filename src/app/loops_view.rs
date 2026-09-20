@@ -814,7 +814,25 @@ impl LoopsViewState {
                                 crate::loops::scaffold::verifier_path(h, &entry.workspace)
                         {
                             let glyph = if v.is_file() { "✓" } else { "✗" };
-                            lines.push(Line::raw(format!("  {glyph} {}", v.display())));
+                            // which model checks the work, as the file says
+                            let declared = std::fs::read_to_string(&v)
+                                .ok()
+                                .and_then(|t| {
+                                    t.lines().find_map(|l| {
+                                        l.strip_prefix("model:").map(str::trim).map(str::to_string)
+                                    })
+                                })
+                                .unwrap_or_default();
+                            let want = entry.verifier_model.trim();
+                            let note = match (declared.as_str(), want) {
+                                ("", "") => String::new(),
+                                (d, w) if w.is_empty() || d == w => format!("  model {d}"),
+                                ("", w) => {
+                                    format!("  ! the loop asks for {w}, the file declares none")
+                                }
+                                (d, w) => format!("  ! the loop asks for {w}, the file says {d}"),
+                            };
+                            lines.push(Line::raw(format!("  {glyph} {}{note}", v.display())));
                         }
                     }
                 }
