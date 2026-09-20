@@ -2047,6 +2047,8 @@ pub struct ImportSummary {
     pub turns: usize,
     pub ops: usize,
     pub rejected: usize,
+    /// The transcript carried no turn at all, so nothing was written.
+    pub empty: bool,
 }
 
 /// The clock an offline import should use in place of a live receive time.
@@ -2100,16 +2102,6 @@ pub fn import_transcript(
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (session_id, cwd) = identify_transcript(&text, &abs, provider);
     let session_key = map::session_key(provider, &session_id);
-    let legacy: bool = store.conn().query_row(
-        "SELECT EXISTS(SELECT 1 FROM sessions WHERE key = ?1 AND json_extract(extra, '$.legacy_capture') = 1)",
-        [&session_key], |r| r.get(0),
-    )?;
-    if legacy {
-        // v5 marked rows written by the pre-normalized capture pipeline.
-        // Replacing just this session is transactional and leaves unrelated
-        // sessions (and score records) untouched.
-        store.replace_session_capture(&session_key)?;
-    }
     let cwd = cwd.unwrap_or_else(|| ".".into());
     let launch_id = uuid::Uuid::new_v5(
         &ids::AMX_NS,
@@ -2182,6 +2174,36 @@ pub fn import_transcript(
         .iter()
         .filter(|op| matches!(op, crate::tracing::store::model::StoreOp::Trace(t) if t.status != crate::tracing::store::model::TraceStatus::Open))
         .count();
+    // A transcript can hold nothing but housekeeping records — the settings
+    // and cost-state lines of a session that never received a prompt, or a
+    // slash command the CLI rejected before the first turn. Seeding a session
+    // row for one leaves a permanently empty session in every listing, so
+    // discovery skips it rather than registering a session that never was.
+    if !ops.iter().any(|op| {
+        matches!(
+            op,
+            crate::tracing::store::model::StoreOp::Trace(_)
+                | crate::tracing::store::model::StoreOp::Observation(_)
+        )
+    }) {
+        return Ok(ImportSummary {
+            session_id,
+            turns: 0,
+            ops: 0,
+            rejected: 0,
+            empty: true,
+        });
+    }
+    let legacy: bool = store.conn().query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE key = ?1 AND json_extract(extra, '$.legacy_capture') = 1)",
+        [&session_key], |r| r.get(0),
+    )?;
+    if legacy {
+        // v5 marked rows written by the pre-normalized capture pipeline.
+        // Replacing just this session is transactional and leaves unrelated
+        // sessions (and score records) untouched.
+        store.replace_session_capture(&session_key)?;
+    }
     let end = map::SessionEnd {
         termination: "import",
         exit_code: None,
@@ -2208,6 +2230,7 @@ pub fn import_transcript(
         turns,
         ops: total,
         rejected,
+        empty: false,
     })
 }
 
@@ -2294,8 +2317,17 @@ fn import(args: &Args) -> anyhow::Result<()> {
     }
     let mut store = open_rw(&resolved)?;
     let mut ok = 0usize;
+    let mut empty = 0usize;
     for (path, prov) in &files {
         match import_transcript(&mut store, &resolved, path, *prov, content_mode) {
+            Ok(summary) if summary.empty => {
+                empty += 1;
+                println!(
+                    "skipped {}: no turns in transcript (session {})",
+                    path.display(),
+                    summary.session_id
+                );
+            }
             Ok(summary) => {
                 ok += 1;
                 println!(
@@ -2316,9 +2348,14 @@ fn import(args: &Args) -> anyhow::Result<()> {
     }
     let _ = store.end_run();
     println!(
-        "{ok}/{} file(s) imported into {}",
+        "{ok}/{} file(s) imported into {}{}",
         files.len(),
-        resolved.db_path.display()
+        resolved.db_path.display(),
+        if empty > 0 {
+            format!(" ({empty} without turns)")
+        } else {
+            String::new()
+        }
     );
     Ok(())
 }
@@ -2812,6 +2849,87 @@ mod tests {
         assert!(a.has("full") && a.has("json"));
         assert_eq!(a.value("limit"), Some("5"));
         assert_eq!(a.value("since"), Some("2d"));
+    }
+
+    #[test]
+    fn import_skips_a_transcript_without_turns() {
+        let temp = tempfile::tempdir().unwrap();
+        // A Claude session that was opened and closed without ever receiving
+        // a prompt: settings, an informational system line, cost state, and
+        // nothing else. Cf. the loop runs whose slash command the CLI
+        // rejected — they too never open a turn.
+        let transcript_path = temp.path().join("housekeeping-only.jsonl");
+        let transcript = [
+            r#"{"type":"agent-setting","agentSetting":"claude","sessionId":"empty-one"}"#,
+            r#"{"type":"mode","mode":"normal","sessionId":"empty-one"}"#,
+            r#"{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"empty-one"}"#,
+            r#"{"parentUuid":null,"isSidechain":false,"type":"system","subtype":"informational","content":"agents-md: AGENTS.md loaded","isMeta":false,"timestamp":"2024-03-04T05:06:07Z","uuid":"11111111-1111-1111-1111-111111111111","level":"notice","sessionId":"empty-one","cwd":"/repo"}"#,
+            r#"{"type":"last-prompt","leafUuid":"11111111-1111-1111-1111-111111111111","sessionId":"empty-one"}"#,
+            r#"{"type":"cost-state","sessionId":"empty-one","totalCostUSD":0,"totalDuration":3605825,"modelUsage":{}}"#,
+        ]
+        .join("\n");
+        std::fs::write(&transcript_path, transcript).unwrap();
+
+        let db_path = temp.path().join("traces.db");
+        let resolved = config::resolve_tracing(None, &|key| match key {
+            "AGENT_MUX_TRACE_DB" => Some(db_path.to_string_lossy().into_owned()),
+            "HOME" => Some(temp.path().to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let mut store = open_rw(&resolved).unwrap();
+        let summary = import_transcript(
+            &mut store,
+            &resolved,
+            &transcript_path,
+            Some(Provider::Claude),
+            ContentMode::Full,
+        )
+        .unwrap();
+        assert!(summary.empty);
+        assert_eq!(summary.turns, 0);
+
+        // Nothing at all reaches the store: no session to list, no launch to
+        // attribute it to.
+        let sessions: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        let launches: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM launches", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((sessions, launches), (0, 0));
+
+        // A transcript that does carry a turn still imports from the same
+        // discovery sweep.
+        let real_path = temp.path().join("with-a-turn.jsonl");
+        std::fs::write(
+            &real_path,
+            [
+                r#"{"timestamp":"2024-03-04T05:06:05Z","type":"session_meta","payload":{"id":"real-one","cwd":"/repo"}}"#,
+                r#"{"timestamp":"2024-03-04T05:06:10Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}"#,
+                r#"{"timestamp":"2024-03-04T05:06:11Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect"}]}}"#,
+                r#"{"timestamp":"2024-03-04T05:06:12Z","type":"event_msg","payload":{"type":"task_complete"}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let summary = import_transcript(
+            &mut store,
+            &resolved,
+            &real_path,
+            Some(Provider::Codex),
+            ContentMode::Full,
+        )
+        .unwrap();
+        assert!(!summary.empty);
+        assert_eq!(summary.turns, 1);
+        let sessions: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(sessions, 1);
     }
 
     #[test]

@@ -786,7 +786,11 @@ Because ids are content-derived, replaying a transcript, re-importing a file, or
 
 ### 5.9 Import (`trace import`)
 
-`import_transcript` reuses the identical `parse_line` → `TurnAssembler::feed` path. Provider is `--provider` or `detect_provider`; the session id and cwd come from `session_meta` (Codex), the first UUID-shaped parent directory (Antigravity), or the file stem plus a scan of the first 50 lines (Claude). A session flagged `legacy_capture` has its capture rows replaced transactionally first. `started_ns` is the transcript's first timestamp, then file mtime, then now, so re-imports do not look freshly active. Each line's own timestamp is used as the receive time. Antigravity imports then read the whole conversation database. Ops are applied in chunks of 512, followed by `recompute_session_bounds`. `--discover` enumerates every transcript the history viewer finds plus `rollout-*.jsonl` under `<codex_dir>/sessions` to depth 6.
+`import_transcript` reuses the identical `parse_line` → `TurnAssembler::feed` path. Provider is `--provider` or `detect_provider`; the session id and cwd come from `session_meta` (Codex), the first UUID-shaped parent directory (Antigravity), or the file stem plus a scan of the first 50 lines (Claude). `started_ns` is the transcript's first timestamp, then file mtime, then now, so re-imports do not look freshly active. Each line's own timestamp is used as the receive time. Antigravity imports then read the whole conversation database.
+
+A transcript that yields no trace and no observation is **skipped whole**: no session row, no launch row, nothing. Such files are common — a CLI opened and closed without a prompt writes only its `agent-setting`, `mode`, `permission-mode` and `cost-state` lines, and a slash command the CLI rejects (`Unknown command: /x`) ends the session before the first turn opens. Seeding a session for one leaves a permanently empty row in every listing and in the dossier. `ImportSummary::empty` reports the skip and the CLI prints `skipped <path>: no turns in transcript`; the run's closing line counts them separately.
+
+Once a transcript does carry a turn, a session flagged `legacy_capture` has its capture rows replaced transactionally, ops are applied in chunks of 512, and `recompute_session_bounds` follows. `--discover` enumerates every transcript the history viewer finds plus `rollout-*.jsonl` under `<codex_dir>/sessions` to depth 6.
 
 ### 5.10 Antigravity usage database (`agy_usage.rs`)
 
