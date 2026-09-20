@@ -257,4 +257,51 @@ mod tests {
             );
         }
     }
+
+    /// `hidden` is how the page shows and hides the sheet, the menu, the
+    /// empty state and the second key row. A `display:` rule on any of
+    /// their classes silently outranks the browser's own
+    /// `[hidden] { display: none }`, which pinned the launch sheet open
+    /// over the terminal -- visible only in a browser, which no test here
+    /// has. This asserts the override that makes the attribute win.
+    #[test]
+    fn the_hidden_attribute_beats_every_display_rule() {
+        let html = std::str::from_utf8(index().body).unwrap();
+        let css = std::str::from_utf8(lookup("app.css").unwrap().body).unwrap();
+
+        // Classes carried by elements that rely on `hidden`.
+        let mut classes: Vec<&str> = Vec::new();
+        for tag in html.split('<').filter(|t| t.contains(" hidden")) {
+            let tag = tag.split('>').next().unwrap_or("");
+            if let Some(rest) = tag.split_once("class=\"")
+                && let Some(list) = rest.1.split('"').next()
+            {
+                classes.extend(list.split_whitespace());
+            }
+        }
+        assert!(
+            !classes.is_empty(),
+            "expected the page to hide elements with the hidden attribute"
+        );
+
+        let at_risk: Vec<&&str> = classes
+            .iter()
+            .filter(|c| {
+                css.split(&format!(".{c}")).skip(1).any(|block| {
+                    block
+                        .split('}')
+                        .next()
+                        .is_some_and(|b| b.contains("display:"))
+                })
+            })
+            .collect();
+
+        if !at_risk.is_empty() {
+            assert!(
+                css.contains("[hidden]") && css.contains("display: none !important"),
+                "{at_risk:?} set `display:`, which beats the browser's \
+                 [hidden] rule; app.css needs [hidden] {{ display: none !important }}"
+            );
+        }
+    }
 }

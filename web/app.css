@@ -18,6 +18,12 @@
 
 * { box-sizing: border-box; }
 
+/* The browser's own `[hidden] { display: none }` is an author-beatable UA
+   rule, so any `display:` below (.sheet, .empty, .keyrow) would override it
+   and pin those elements open -- the launch sheet included. `!important`
+   also makes this independent of source order. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
