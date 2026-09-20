@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>agent-mux</title>
+<link rel="stylesheet" href="/assets/vendor/xterm.css">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+
+<div id="banner" class="banner" hidden></div>
+
+<header id="topbar">
+  <span id="conn" class="dot" title="connecting"></span>
+  <nav id="chips" class="chips" aria-label="Sessions"></nav>
+  <span id="badge" class="badge" hidden title="sessions waiting for you"></span>
+  <button id="add" class="icon" title="Launch something" aria-label="Launch">+</button>
+</header>
+
+<main id="term-host">
+  <div id="term"></div>
+  <p id="empty" class="empty" hidden>No sessions.<br>Tap <b>+</b> to start one.</p>
+</main>
+
+<footer id="keys">
+  <div class="keyrow">
+    <button class="key" data-key="esc">Esc</button>
+    <button class="key" data-key="tab">Tab</button>
+    <button class="key" data-char="c" data-mods="ctrl">^C</button>
+    <button class="key" data-key="up" data-repeat="1">&uarr;</button>
+    <button class="key" data-key="down" data-repeat="1">&darr;</button>
+    <button class="key" data-key="left" data-repeat="1">&larr;</button>
+    <button class="key" data-key="right" data-repeat="1">&rarr;</button>
+    <button class="key wide" data-key="enter">Enter</button>
+    <button id="kb" class="key" title="Show the keyboard">&#9000;</button>
+    <button id="more" class="key" title="More keys">&hellip;</button>
+  </div>
+  <div class="keyrow" id="keyrow2" hidden>
+    <button class="key sticky" data-sticky="ctrl">Ctrl</button>
+    <button class="key sticky" data-sticky="alt">Alt</button>
+    <button class="key" data-char="d" data-mods="ctrl">^D</button>
+    <button class="key" data-char="l" data-mods="ctrl">^L</button>
+    <button class="key" data-char="z" data-mods="ctrl">^Z</button>
+    <button class="key" data-key="home">Home</button>
+    <button class="key" data-key="end">End</button>
+    <button class="key" data-key="pageup">PgUp</button>
+    <button class="key" data-key="pagedown">PgDn</button>
+  </div>
+</footer>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-card" role="dialog" aria-label="Launch">
+    <div class="tabs" id="sheet-tabs">
+      <button class="tab" data-tab="session">Session</button>
+      <button class="tab" data-tab="skill">Skill</button>
+      <button class="tab" data-tab="loop">Loop</button>
+      <button class="tab" data-tab="workflow">Workflow</button>
+    </div>
+    <div class="sheet-body" id="sheet-body"></div>
+    <div class="sheet-actions">
+      <button class="btn" id="sheet-cancel">Cancel</button>
+      <button class="btn primary" id="sheet-go">Launch</button>
+    </div>
+  </div>
+</div>
+
+<div id="menu" class="sheet" hidden>
+  <div class="sheet-card" role="dialog" aria-label="Session actions">
+    <div class="sheet-body" id="menu-body"></div>
+    <div class="sheet-actions">
+      <button class="btn" id="menu-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="/assets/vendor/xterm.js"></script>
+<script src="/assets/vendor/addon-unicode11.js"></script>
+<script src="/assets/app.js"></script>
+</body>
+</html>

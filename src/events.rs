@@ -40,6 +40,10 @@ pub enum AppEvent {
         launch_id: String,
         stats: crate::tracing::store::query::LaunchStats,
     },
+    /// One command from a remote-control client. The web server's tasks
+    /// never touch `App`; this is the whole way in, so a remote command is
+    /// applied on the main loop like a keypress.
+    Remote(crate::remote::bridge::RemoteCommand),
     /// Background analysis update delivering cached session briefing facts.
     AnalysisUpdated {
         revision: u64,

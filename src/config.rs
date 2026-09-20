@@ -237,6 +237,83 @@ pub fn resolve_workflows(cfg: Option<&WorkflowsConfig>) -> WorkflowSettings {
     s
 }
 
+/// `[remote]`: the browser remote control. All-optional so a partial
+/// section parses; the real defaults live in `resolve_remote`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct RemoteConfig {
+    pub enabled: Option<bool>,
+    /// `"host:port"`; default `"127.0.0.1:7681"`.
+    pub listen: Option<String>,
+    /// A fixed bearer token; a fresh random one per run when unset.
+    pub token: Option<String>,
+    pub allow_kill: Option<bool>,
+    pub allow_launch: Option<bool>,
+}
+
+/// `[remote]` resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSettings {
+    pub enabled: bool,
+    pub listen: String,
+    /// `None` means "generate a fresh token for this run".
+    pub token: Option<String>,
+    pub allow_kill: bool,
+    pub allow_launch: bool,
+}
+
+impl Default for RemoteSettings {
+    fn default() -> Self {
+        RemoteSettings {
+            enabled: false,
+            // A fixed port so a phone can bookmark the URL across runs; only
+            // the token changes. 7681 is ttyd's conventional port.
+            listen: "127.0.0.1:7681".into(),
+            token: None,
+            allow_kill: true,
+            allow_launch: true,
+        }
+    }
+}
+
+/// Resolves `[remote]` with env fallbacks. Config file first, environment
+/// second, defaults last -- the precedence `resolve_tracing` uses.
+pub fn resolve_remote(
+    cfg: Option<&RemoteConfig>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> RemoteSettings {
+    let mut s = RemoteSettings::default();
+    let c = cfg;
+    s.enabled = match c.and_then(|c| c.enabled) {
+        Some(e) => e,
+        None => matches!(
+            env("AGENT_MUX_REMOTE").as_deref().map(str::trim),
+            Some("1") | Some("true") | Some("yes")
+        ),
+    };
+    if let Some(l) = c
+        .and_then(|c| c.listen.clone())
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| env("AGENT_MUX_REMOTE_LISTEN").filter(|v| !v.trim().is_empty()))
+    {
+        s.listen = l.trim().to_string();
+    }
+    // A short token is worse than no token: it would look like protection
+    // while falling to a handful of guesses. Ignore it and generate one.
+    s.token = c
+        .and_then(|c| c.token.clone())
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| env("AGENT_MUX_REMOTE_TOKEN").filter(|v| !v.trim().is_empty()))
+        .map(|t| t.trim().to_string())
+        .filter(|t| t.chars().count() >= 16);
+    if let Some(k) = c.and_then(|c| c.allow_kill) {
+        s.allow_kill = k;
+    }
+    if let Some(l) = c.and_then(|c| c.allow_launch) {
+        s.allow_launch = l;
+    }
+    s
+}
+
 /// `[loops]` resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopRunnerSettings {
@@ -331,6 +408,9 @@ pub struct Config {
     /// The workflow runtime (`[workflows]`).
     #[serde(default)]
     pub workflows: Option<WorkflowsConfig>,
+    /// The browser remote control (`[remote]`).
+    #[serde(default)]
+    pub remote: Option<RemoteConfig>,
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
@@ -714,6 +794,7 @@ pub fn load() -> anyhow::Result<Config> {
         agents: None,
         loops: None,
         workflows: None,
+        remote: None,
         hide_sidebar: false,
         editor: None,
         loaded_from: None,
@@ -741,6 +822,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
         agents: None,
         loops: None,
         workflows: None,
+        remote: None,
         hide_sidebar: false,
         editor: None,
         loaded_from: None,
@@ -1091,5 +1173,60 @@ mod tests {
             "/home/me/.agent-mux/traces.db"
         )));
         assert!(!is_wsl_drive_mount(Path::new("/mnt/wsl/x")));
+    }
+
+    #[test]
+    fn remote_defaults_are_disabled_and_loopback() {
+        let s = resolve_remote(None, &no_env);
+        assert!(!s.enabled);
+        assert_eq!(s.listen, "127.0.0.1:7681");
+        assert_eq!(s.token, None);
+        assert!(s.allow_kill && s.allow_launch);
+    }
+
+    #[test]
+    fn remote_section_parses_and_overrides_env() {
+        let cfg = parse(
+            r#"
+[remote]
+enabled = true
+listen = "0.0.0.0:9000"
+token = "a-token-long-enough"
+allow_kill = false
+"#,
+        )
+        .unwrap();
+        let env = |k: &str| match k {
+            "AGENT_MUX_REMOTE_LISTEN" => Some("127.0.0.1:1".to_string()),
+            "AGENT_MUX_REMOTE_TOKEN" => Some("ignored-because-config-wins".to_string()),
+            _ => None,
+        };
+        let s = resolve_remote(cfg.remote.as_ref(), &env);
+        assert!(s.enabled);
+        assert_eq!(s.listen, "0.0.0.0:9000");
+        assert_eq!(s.token.as_deref(), Some("a-token-long-enough"));
+        assert!(!s.allow_kill);
+        assert!(s.allow_launch);
+    }
+
+    #[test]
+    fn remote_env_is_the_fallback_when_config_is_silent() {
+        let env = |k: &str| match k {
+            "AGENT_MUX_REMOTE" => Some("1".to_string()),
+            "AGENT_MUX_REMOTE_LISTEN" => Some("0.0.0.0:7000".to_string()),
+            "AGENT_MUX_REMOTE_TOKEN" => Some("env-token-long-enough".to_string()),
+            _ => None,
+        };
+        let s = resolve_remote(None, &env);
+        assert!(s.enabled);
+        assert_eq!(s.listen, "0.0.0.0:7000");
+        assert_eq!(s.token.as_deref(), Some("env-token-long-enough"));
+    }
+
+    #[test]
+    fn remote_rejects_a_token_too_short_to_be_a_secret() {
+        let cfg = parse("[remote]\ntoken = \"short\"\n").unwrap();
+        // Dropped, not fatal: the run generates a real one instead.
+        assert_eq!(resolve_remote(cfg.remote.as_ref(), &no_env).token, None);
     }
 }

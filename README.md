@@ -23,6 +23,8 @@ This README is the developer onboarding guide to the **implemented code in this 
 15. [Loop Engineering](#15-loop-engineering)
 16. [Configuration library: prompts, skills, loops and agents](#16-configuration-library-prompts-skills-loops-and-agents)
 17. [Workflows](#17-workflows)
+18. [Remote control](#18-remote-control)
+19. [Third-party code](#19-third-party-code)
 
 ---
 
@@ -40,6 +42,8 @@ cargo install --path .
 agent-mux
 # Start with the sidebar hidden:
 agent-mux --hide-sidebar      # --full-screen and -b do the same
+# Serve the remote control (section 18); prints a URL with its token:
+agent-mux --remote
 ```
 
 One-shot commands are dispatched in [src/main.rs](src/main.rs) before any terminal setup:
@@ -135,6 +139,7 @@ Terminal rendering and telemetry are separate paths. The PTY's escape sequences 
 | [src/config.rs](src/config.rs), [src/harness.rs](src/harness.rs) | TOML configuration and resolution, harness detection and flag composition. |
 | [src/history.rs](src/history.rs), [src/transcript.rs](src/transcript.rs), [src/persistence.rs](src/persistence.rs) | Provider transcript discovery, JSONL parsers for all three providers, saved sessions. |
 | [src/skill/](src/skill/) | Package discovery, per-harness rendering, managed installation, `skill` CLI, launch composition. |
+| [src/remote/](src/remote/), [src/app/remote.rs](src/app/remote.rs), [web/](web/) | Remote control (section 18): hand-written HTTP/WebSocket server on `tokio::net`, the `AppEvent::Remote` bridge and its fan-out hub, and the vendored xterm.js page embedded with `include_bytes!`. |
 | [src/loops/](src/loops/), [src/app/loops.rs](src/app/loops.rs), [src/app/loops_view.rs](src/app/loops_view.rs), [loops/](loops/) | Loop Engineering: patterns, registry, readiness, gate, breaker, cost, run log, scheduler, worktrees, context, `loop_runs` store access, `loop` CLI; the App's scheduler pass and run lifecycle; the Loops view; the embedded skills, verifier and templates. |
 | [src/tracing/mod.rs](src/tracing/mod.rs) | `TraceRuntime`, launch planning, per-launch pipeline task, finalize and shutdown. |
 | [src/tracing/hooks/](src/tracing/hooks/) | Hook payload parsing (`mod.rs`), per-launch registration (`register.rs`), persistent installers (`install.rs`), feed reader (`feed.rs`), budget guard (`guard.rs`). |
@@ -151,6 +156,7 @@ Terminal rendering and telemetry are separate paths. The PTY's escape sequences 
 | [skills/heimdall/](skills/heimdall/), [docs/skills.md](docs/skills.md), [docs/tracing.md](docs/tracing.md) | Bundled skill; package and tracing references. |
 | [tests/](tests/), [scripts/verify-trace-matrix.sh](scripts/verify-trace-matrix.sh) | Integration tests; opt-in live provider check. |
 | [vendor/vt100/](vendor/vt100/) | Locally patched terminal emulator selected through `[patch.crates-io]`. |
+| [web/vendor/](web/vendor/) | xterm.js and its Unicode 11 addon, pinned and hashed in `VERSIONS` (section 19). |
 
 ### Processes, threads and tasks at runtime
 
@@ -1804,3 +1810,70 @@ A workflow runs several harness sessions with one focused goal each and composes
 | CLI and MCP | [src/workflows/cli.rs](src/workflows/cli.rs), `agent_mux_get_workflow_run` | `agent-mux workflow …`; a read tool for a run's progress |
 
 Tests: `tests/workflow_runs.rs` (fake `claude`, `codex` and `agy` through real PTY sessions: a built-in run, mixed harnesses, the schema retry, timeouts, cancel, resume), `tests/workflow_cli.rs`, `tests/workflow_ui.rs`, and the unit tests of every module.
+
+---
+
+## 18. Remote control
+
+Off by default. `[remote] enabled = true`, `--remote [addr]` or
+`AGENT_MUX_REMOTE=1` makes the running TUI serve a web app so a phone or
+another computer mirrors every session live, types into any of them,
+switches between them, and launches sessions, skills, loop runs and
+workflow runs, or kills a session. The startup notice prints the URL with
+its token; `v` shows it again under **Remote control**.
+
+Guide: [docs/remote-control.md](docs/remote-control.md). Design:
+[docs/superpowers/specs/2026-09-20-remote-control-design.md](docs/superpowers/specs/2026-09-20-remote-control-design.md).
+
+| Piece | Where | What it is |
+| --- | --- | --- |
+| Server | [src/remote/server.rs](src/remote/server.rs), [http.rs](src/remote/http.rs), [ws.rs](src/remote/ws.rs) | `tokio::net::TcpListener`, one task per connection; three routes (`/`, `/assets/<name>`, `/ws`); RFC 6455 framing hand-written on `httparse`, `base64` and `sha1_smol`, all three already transitive. No axum, no hyper, no tungstenite. |
+| Bridge | [src/remote/bridge.rs](src/remote/bridge.rs), [src/app/remote.rs](src/app/remote.rs) | `AppEvent::Remote(RemoteCommand)` in, `RemoteHub` out. A server task never touches `App`, so the remote adds no locking to the terminal path. |
+| Protocol | [src/remote/protocol.rs](src/remote/protocol.rs) | JSON text frames tagged `t`; binary `[kind][session u32 BE][payload]` for output (`0x01`), resync (`0x02`) and input (`0x10`). `CLIENT_FRAMES`/`SERVER_FRAMES` are checked against `web/app.js` by a test. |
+| Client | [web/](web/), [src/remote/web.rs](src/remote/web.rs) | One page, no build step, no npm: `index.html`, `app.css`, `app.js` and a vendored xterm.js, embedded with `include_bytes!` from a fixed table (never a filesystem path join). |
+| Config | `[remote]` in [src/config.rs](src/config.rs) | `enabled`, `listen` (default `127.0.0.1:7681`), `token`, `allow_kill`, `allow_launch`; `AGENT_MUX_REMOTE`, `AGENT_MUX_REMOTE_LISTEN`, `AGENT_MUX_REMOTE_TOKEN`. |
+
+Two invariants worth knowing before touching it:
+
+- **The remote never resizes a PTY.** Every session shares `App.pane_size`,
+  owned by the desktop, so there is no resize message in the protocol and
+  the page scales its terminal with CSS.
+- **A client that falls behind is cut off, not caught up.** Its 256-frame
+  queue overflowing sets `needs_resync`; it receives no further output until
+  one `state_formatted()` snapshot arrives, because a terminal stream with a
+  hole renders worse than a redraw.
+
+Security: a per-run base64url token compared in constant time, moved out of
+`?token=` into an `HttpOnly; SameSite=Strict` cookie so page script never
+reads it; Origin-checked upgrades; CSP and `X-Frame-Options: DENY`;
+`allow_kill`/`allow_launch` enforced in `handle_remote`, not only in the
+page; 8 clients, 1 MiB per message, a 64 KiB/s input bucket, a 45 s idle
+timeout. **No TLS** — loopback by default, Tailscale or an SSH tunnel to go
+further, and an off-loopback bind warns in the status bar and in the page.
+**PTY bytes are mirrored verbatim**: `mask_secrets` guards stored trace
+content and has never applied to the live stream.
+
+Tests: `tests/remote_control.rs` drives a headless `App` and the real server
+over an ephemeral port with a hand-written WebSocket client that shares no
+code with `ws.rs` — routing and auth, the greeting, a `sh -c cat` session
+mirroring and echoing typed input, a named key, the `allow_kill` gate,
+launch, 401/403/503, a 1009 close and a 1001 shutdown — plus the unit tests
+of every module in `src/remote/`.
+
+---
+
+## 19. Third-party code
+
+Two bundles are vendored rather than fetched, so a build needs no network
+and a phone loads nothing from a CDN:
+
+| What | Version | Where | Licence |
+| --- | --- | --- | --- |
+| `vt100` (patched) | 0.16.2 | [vendor/vt100/](vendor/vt100/) | MIT, `vendor/vt100/LICENSE` |
+| xterm.js | 5.5.0 | [web/vendor/xterm.js](web/vendor/xterm.js), `xterm.css` | MIT, `web/vendor/LICENSE-xterm.txt` |
+| `@xterm/addon-unicode11` | 0.8.0 | [web/vendor/addon-unicode11.js](web/vendor/addon-unicode11.js) | MIT, same notice |
+
+`web/vendor/VERSIONS` records each file's upstream URL and SHA-256, why the
+Unicode 11 addon is needed (it is the width table that agrees with vt100's
+`unicode-width`), why `addon-fit` is deliberately absent, and the command to
+refresh them.

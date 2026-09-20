@@ -19,6 +19,7 @@ pub mod dir_picker;
 pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
+pub mod remote;
 mod skills_view;
 pub mod text_area;
 pub mod workflows;
@@ -315,7 +316,7 @@ fn is_ctrl_q(key: &KeyEvent) -> bool {
 /// early and the remainder would land in the child as raw keystrokes
 /// instead of pasted text -- a classic paste-injection: e.g. a copied
 /// snippet ending the bracket then typing `rm -rf ~` as if the user had.
-fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+pub(crate) fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     if bracketed {
         let sanitized = text.replace("\x1b[201~", "");
         let mut b = b"\x1b[200~".to_vec();
@@ -1822,6 +1823,13 @@ pub struct App {
     pub last_briefing_refresh: Option<Instant>,
     /// Persistent identifier for this mux run instance.
     pub app_run_id: String,
+    /// The remote control's fan-out, when `[remote]` is on. `None` in the
+    /// TUI's default configuration and in every test that does not ask for
+    /// it, so the remote costs nothing when it is off.
+    pub remote: Option<std::sync::Arc<crate::remote::bridge::RemoteHub>>,
+    /// The session list as last published to remote clients, so a tick can
+    /// tell whether anything changed without diffing the whole list.
+    remote_last_sessions: Option<remote::SessionsFingerprint>,
     /// Revision counter for published live snapshots.
     pub live_snapshot_revision: u64,
     /// Instant of the last published live snapshot.
@@ -1929,6 +1937,8 @@ impl App {
             briefing_pending: false,
             last_briefing_refresh: None,
             app_run_id,
+            remote: None,
+            remote_last_sessions: None,
             live_snapshot_revision: 0,
             last_snapshot_published: None,
             loop_registry: crate::loops::registry::Registry::default(),
@@ -2057,6 +2067,7 @@ impl App {
             view.refresh_if_live(now);
         }
         self.publish_live_snapshot_if_needed(now);
+        self.remote_tick(now);
         self.refresh_briefing_if_needed(now);
         self.refresh_loop_cards_if_needed(now);
         self.scheduler_pass(now);
@@ -2494,6 +2505,27 @@ impl App {
 
     /// Hands the runtime back to `main` for the post-`kill_all` bounded
     /// shutdown flush.
+    /// Applies one event. The TUI's main loop, the headless runners
+    /// (`agent-mux run`, the loop and workflow CLIs) and the remote-control
+    /// integration test all dispatch through this, so none of them can
+    /// drift from the others on what an event means.
+    pub fn handle_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::Key(k) => self.handle_key(&k, Instant::now()),
+            AppEvent::Resize(cols, rows) => self.set_terminal_size(rows, cols),
+            AppEvent::PtyOutput { id, bytes } => self.handle_pty_output(id, &bytes, Instant::now()),
+            AppEvent::PtyExit { id } => self.handle_pty_exit(id),
+            AppEvent::Mouse(m) => self.handle_mouse(m, Instant::now()),
+            AppEvent::TraceStatus(message) => self.notice = Some(Notice::warn(message)),
+            AppEvent::TraceStats { launch_id, stats } => self.handle_trace_stats(&launch_id, stats),
+            AppEvent::Remote(cmd) => self.handle_remote(cmd, Instant::now()),
+            AppEvent::AnalysisUpdated { revision, result } => {
+                self.handle_analysis_updated(revision, result)
+            }
+            AppEvent::Tick => self.on_tick(Instant::now()),
+        }
+    }
+
     /// Spawns a session from a ready profile, the way the dialog does, and
     /// returns its index. The headless runner's entry point.
     pub fn launch(&mut self, profile: Profile, dir: std::path::PathBuf) -> anyhow::Result<usize> {
@@ -2529,7 +2561,7 @@ impl App {
         matches!(self.mode, Mode::Attached).then_some(self.selected)
     }
 
-    fn session_index(&self, id: usize) -> Option<usize> {
+    pub(crate) fn session_index(&self, id: usize) -> Option<usize> {
         self.sessions.iter().position(|s| s.id == id)
     }
 
@@ -3573,7 +3605,21 @@ impl App {
     /// Control) -- callers must not re-attach or otherwise treat the
     /// session as still live when this returns `false`.
     fn forward_bytes(&mut self, bytes: &[u8]) -> bool {
-        if let Some(s) = self.sessions.get_mut(self.selected)
+        self.write_to_session(self.selected, bytes)
+    }
+
+    /// Writes to one session by id, for a remote client typing into a
+    /// session the desktop is not looking at.
+    pub(crate) fn forward_bytes_to(&mut self, id: usize, bytes: &[u8]) -> bool {
+        match self.session_index(id) {
+            Some(idx) => self.write_to_session(idx, bytes),
+            None => false,
+        }
+    }
+
+    fn write_to_session(&mut self, idx: usize, bytes: &[u8]) -> bool {
+        let attached = self.attached();
+        if let Some(s) = self.sessions.get_mut(idx)
             && let Err(e) = s.write_bytes(bytes)
         {
             // spec: write failure -> status-bar error, session Exited
@@ -3587,7 +3633,11 @@ impl App {
             if let Some(trace) = &s.trace {
                 trace.mark_exited(None);
             }
-            self.mode = Mode::Control;
+            // Only the pane the user is looking at should drop to Control;
+            // a failed remote write to another session must not detach them.
+            if attached == Some(idx) {
+                self.mode = Mode::Control;
+            }
             return false;
         }
         true
@@ -3986,6 +4036,14 @@ impl App {
                 .filter(|l| l.paused())
                 .count(),
             loops_kill_switch: self.loop_registry.pause_all,
+            remote: self.remote.as_ref().map(|hub| about::RemoteFacts {
+                url: hub.url(),
+                addr: hub.addr.to_string(),
+                loopback: hub.is_loopback(),
+                clients: hub.client_count(),
+                allow_kill: hub.settings.allow_kill,
+                allow_launch: hub.settings.allow_launch,
+            }),
         };
         self.mode = Mode::About(Box::new(about::AboutState {
             rows: about::rows(&facts),
@@ -4641,6 +4699,18 @@ impl App {
         skill_id: &str,
         harness: crate::harness::Harness,
     ) -> anyhow::Result<usize> {
+        let idx = self.launch_skill_session(skill_id, harness)?;
+        self.attach_to_session(idx);
+        Ok(idx)
+    }
+
+    /// The launch without the attach. A remote client starting a skill must
+    /// not flip the desktop into `Mode::Attached` behind the user's back.
+    pub(crate) fn launch_skill_session(
+        &mut self,
+        skill_id: &str,
+        harness: crate::harness::Harness,
+    ) -> anyhow::Result<usize> {
         let skill = self
             .skills
             .iter()
@@ -4658,7 +4728,6 @@ impl App {
                     running.map(|h| h.as_str()).unwrap_or("another harness")
                 )));
             }
-            self.attach_to_session(idx);
             return Ok(idx);
         }
 
@@ -4705,7 +4774,6 @@ impl App {
         self.next_id += 1;
         self.sessions.push(session);
         let idx = self.sessions.len() - 1;
-        self.attach_to_session(idx);
         let _ = self.save_active_sessions();
         Ok(idx)
     }
@@ -4851,6 +4919,9 @@ impl App {
         if let Some(i) = self.session_index(id) {
             self.sessions[i].process_output(bytes, now, focused);
         }
+        // After the parser, so a `key` command arriving next reads the same
+        // DECCKM state the remote client has just been shown.
+        self.remote_tap_output(id, bytes);
         if !self.live_workflow_runs.is_empty() {
             self.capture_workflow_output(id, bytes);
         }
@@ -4887,6 +4958,7 @@ impl App {
             }
             self.reload_history_sessions();
             let _ = self.save_active_sessions();
+            self.remote_tap_exit(id, Instant::now());
         }
     }
 

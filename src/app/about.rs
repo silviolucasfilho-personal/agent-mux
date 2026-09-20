@@ -77,6 +77,21 @@ pub struct AboutFacts<'a> {
     pub loops: usize,
     pub loops_paused: usize,
     pub loops_kill_switch: bool,
+    /// The remote control, when it is serving.
+    pub remote: Option<RemoteFacts>,
+}
+
+/// What the About overlay shows about the remote control. The URL carries
+/// the token, which is the point: this screen is how the user gets it onto
+/// another device after the startup notice has scrolled away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFacts {
+    pub url: String,
+    pub addr: String,
+    pub loopback: bool,
+    pub clients: usize,
+    pub allow_kill: bool,
+    pub allow_launch: bool,
 }
 
 /// Builds the overlay's rows. Pure given `facts`, except for the store
@@ -175,6 +190,49 @@ pub fn rows(facts: &AboutFacts<'_>) -> Vec<AboutRow> {
     ));
 
     rows.push(AboutRow::Blank);
+    if let Some(r) = &facts.remote {
+        rows.push(AboutRow::Blank);
+        rows.push(AboutRow::Heading("Remote control".into()));
+        rows.push(AboutRow::Field("url".into(), r.url.clone()));
+        rows.push(AboutRow::Field(
+            "bind".into(),
+            format!(
+                "{} ({})",
+                r.addr,
+                if r.loopback {
+                    "this machine only"
+                } else {
+                    "reachable from the network"
+                }
+            ),
+        ));
+        rows.push(AboutRow::Field(
+            "clients".into(),
+            match r.clients {
+                0 => "none connected".into(),
+                1 => "1 connected".into(),
+                n => format!("{n} connected"),
+            },
+        ));
+        rows.push(AboutRow::Field(
+            "may".into(),
+            match (r.allow_launch, r.allow_kill) {
+                (true, true) => "type · launch · kill".into(),
+                (true, false) => "type · launch".into(),
+                (false, true) => "type · kill".into(),
+                (false, false) => "type only".into(),
+            },
+        ));
+        if !r.loopback {
+            rows.push(AboutRow::Note(
+                "No TLS: the token and every keystroke cross the network in the clear.".into(),
+            ));
+        }
+        rows.push(AboutRow::Note(
+            "Anyone with that URL can type into every session.".into(),
+        ));
+    }
+    rows.push(AboutRow::Blank);
     rows.push(AboutRow::Heading("Harnesses on PATH".into()));
     for (label, command) in [
         ("claude", "claude"),
@@ -210,6 +268,7 @@ mod tests {
             loops: 3,
             loops_paused: 1,
             loops_kill_switch: true,
+            remote: None,
         }
     }
 
@@ -280,5 +339,52 @@ mod tests {
         assert_eq!(state.scroll_offset, 30, "cannot scroll past the end");
         state.scroll(-3);
         assert_eq!(state.scroll_offset, 27);
+    }
+
+    #[test]
+    fn the_remote_section_appears_only_when_it_is_serving() {
+        let plain = rows(&facts());
+        assert!(
+            !plain
+                .iter()
+                .any(|r| matches!(r, AboutRow::Heading(h) if h == "Remote control")),
+            "the section must not show when the remote is off"
+        );
+
+        let mut f = facts();
+        f.remote = Some(RemoteFacts {
+            url: "http://127.0.0.1:7681/?token=abc".into(),
+            addr: "127.0.0.1:7681".into(),
+            loopback: true,
+            clients: 2,
+            allow_kill: false,
+            allow_launch: true,
+        });
+        let rows = rows(&f);
+        assert_eq!(field(&rows, "url"), "http://127.0.0.1:7681/?token=abc");
+        assert!(field(&rows, "bind").contains("this machine only"));
+        assert_eq!(field(&rows, "clients"), "2 connected");
+        assert_eq!(field(&rows, "may"), "type · launch");
+    }
+
+    #[test]
+    fn an_off_loopback_bind_says_there_is_no_tls() {
+        let mut f = facts();
+        f.remote = Some(RemoteFacts {
+            url: "http://0.0.0.0:7681/?token=abc".into(),
+            addr: "0.0.0.0:7681".into(),
+            loopback: false,
+            clients: 0,
+            allow_kill: true,
+            allow_launch: true,
+        });
+        let rows = rows(&f);
+        assert!(field(&rows, "bind").contains("reachable from the network"));
+        assert_eq!(field(&rows, "clients"), "none connected");
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, AboutRow::Note(n) if n.contains("No TLS"))),
+            "an exposed bind must warn"
+        );
     }
 }

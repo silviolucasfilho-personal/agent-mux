@@ -216,6 +216,24 @@ async fn main() -> Result<()> {
     };
 
     let raw_args: Vec<String> = std::env::args().collect();
+
+    // Remote control: off unless [remote] or --remote asks for it. A port
+    // that will not bind is a notice, never a reason not to start the TUI.
+    let mut remote_settings =
+        config::resolve_remote(cfg.remote.as_ref(), &|k| std::env::var(k).ok());
+    agent_mux::remote::apply_remote_cli(&mut remote_settings, &raw_args);
+    let remote = if remote_settings.enabled {
+        match agent_mux::remote::start(remote_settings, tx.clone()).await {
+            Ok(server) => Some(server),
+            Err(e) => {
+                startup_notices.push(format!("remote: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let hide_sidebar = raw_args
         .iter()
         .any(|a| a == "--hide-sidebar" || a == "--full-screen" || a == "-b")
@@ -232,6 +250,13 @@ async fn main() -> Result<()> {
     if let Some(first) = startup_notices.into_iter().next() {
         app.notice = Some(agent_mux::app::Notice::warn(first));
     }
+    if let Some(server) = &remote {
+        app.remote = Some(std::sync::Arc::clone(&server.hub));
+        // Last, so it wins the one notice slot: the user just asked for the
+        // remote and cannot use it without seeing this URL. `v` shows it
+        // again, which is where any other startup notice remains visible.
+        app.notice = Some(server.banner());
+    }
     let size = terminal.size()?;
     app.set_terminal_size(size.height, size.width);
     app.restore_saved_sessions();
@@ -245,10 +270,10 @@ async fn main() -> Result<()> {
         let Some(first) = rx.recv().await else {
             break;
         };
-        handle_event(&mut app, first);
+        app.handle_event(first);
         for _ in 0..MAX_EVENTS_PER_FRAME {
             match rx.try_recv() {
-                Ok(event) => handle_event(&mut app, event),
+                Ok(event) => app.handle_event(event),
                 Err(_) => break,
             }
         }
@@ -279,6 +304,9 @@ async fn main() -> Result<()> {
     // Bounded store flush AFTER kill_all: the main loop is gone, so the
     // runtime's shutdown watch is the pipelines' only exit signal; the
     // deadline caps quit latency.
+    if let Some(server) = remote {
+        server.shutdown(Duration::from_millis(500)).await;
+    }
     if let Some(rt) = app.take_tracing() {
         rt.shutdown(shutdown_flush).await;
     }
@@ -342,23 +370,5 @@ fn run_editor(
         Ok(st) if st.success() => Ok(()),
         Ok(st) => Err(format!("{program} exited with {st}")),
         Err(e) => Err(format!("cannot run {program}: {e}")),
-    }
-}
-
-fn handle_event(app: &mut App, event: AppEvent) {
-    match event {
-        AppEvent::Key(k) => app.handle_key(&k, Instant::now()),
-        AppEvent::Resize(cols, rows) => {
-            app.set_terminal_size(rows, cols);
-        }
-        AppEvent::PtyOutput { id, bytes } => app.handle_pty_output(id, &bytes, Instant::now()),
-        AppEvent::PtyExit { id } => app.handle_pty_exit(id),
-        AppEvent::Mouse(m) => app.handle_mouse(m, Instant::now()),
-        AppEvent::TraceStatus(message) => app.notice = Some(agent_mux::app::Notice::warn(message)),
-        AppEvent::TraceStats { launch_id, stats } => app.handle_trace_stats(&launch_id, stats),
-        AppEvent::AnalysisUpdated { revision, result } => {
-            app.handle_analysis_updated(revision, result);
-        }
-        AppEvent::Tick => app.on_tick(Instant::now()),
     }
 }

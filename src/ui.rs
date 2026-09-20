@@ -1704,7 +1704,10 @@ fn draw_help(f: &mut Frame) {
         ),
         row("E / K", "loops view / kill switch: pause every loop"),
         row("W", "workflows view: runs, planned documents, results"),
-        row("v", "about: version, build time, paths and this session"),
+        row(
+            "v",
+            "about: version, build time, paths, this session, remote URL",
+        ),
         row(
             "n",
             "new session (pick the trace backend: SQLite, Langfuse, both)",

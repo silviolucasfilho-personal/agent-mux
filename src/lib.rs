@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod mouse;
 pub mod persistence;
 pub mod prompts;
+pub mod remote;
 pub mod search;
 pub mod selection;
 pub mod session;

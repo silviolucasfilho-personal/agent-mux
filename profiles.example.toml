@@ -144,3 +144,17 @@ args = []
 # tool_storm = 25              # calls of one tool in a single turn
 # ping_pong = 6                # read/edit alternations on one file in a single turn
 # no_progress = 3              # consecutive turns with an identical tool sequence
+
+# Remote control: serve a small web app so a phone or another computer can
+# watch every session, type into any of them, and start or kill work. Off
+# unless you say otherwise; `--remote` and AGENT_MUX_REMOTE=1 do the same.
+# The startup notice prints the URL with its token, and `v` shows it again.
+# There is no TLS: keep it on loopback and reach it over Tailscale or an SSH
+# tunnel, or accept that a LAN bind is in the clear. Terminal output is
+# mirrored verbatim, including anything secret a tool happens to print.
+# [remote]
+# enabled = true
+# listen = "127.0.0.1:7681"    # "0.0.0.0:7681" to reach it from the network
+# token = "…"                  # a fixed token (16+ chars); omit for one per run
+# allow_kill = true            # may the remote kill sessions
+# allow_launch = true          # may the remote start sessions, skills, loops, workflows

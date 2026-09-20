@@ -1,0 +1,32 @@
+Vendored browser dependencies for the remote control (src/remote/web.rs
+embeds these with include_bytes!; nothing is fetched at build or run time).
+
+Fetched 2026-09-20.
+
+file                  package                       version  sha256
+--------------------  ----------------------------  -------  ----------------------------------------------------------------
+xterm.js              @xterm/xterm                  5.5.0    1f991ac3b4b283ebf96e60ae23a00a52765dd3a2e46fa6fdda9f1aab032f7495
+xterm.css             @xterm/xterm                  5.5.0    ba8e6985669488981ccf40c0cefe3aba80722cb6c92de7ad628b0bd717faf2b6
+addon-unicode11.js    @xterm/addon-unicode11        0.8.0    b0c3be540a9984713aea996966c24ed1a639d11f60d44986b22661e3a8a148d0
+LICENSE-xterm.txt     @xterm/xterm                  5.5.0    b569f629d00f2626a8100df2a1798210535621e42164dfd426a6fe5aac7b0ccd
+
+Why addon-unicode11 is here: vt100 measures cell widths with the
+`unicode-width` crate, and the TUI is full of emoji and box drawing.
+xterm's default width tables disagree on several of those, which would
+shift every column after one. The addon brings xterm to Unicode 11, which
+matches.
+
+Why addon-fit is NOT here: it resizes a terminal to fit its container.
+Every agent-mux session shares one pane size owned by the desktop TUI, and
+the remote must never resize a PTY, so the page scales the element with CSS
+instead. Leaving the addon out removes the temptation.
+
+To refresh, re-run from this directory and update the hashes above:
+
+  curl -sSo xterm.js           https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js
+  curl -sSo xterm.css          https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css
+  curl -sSo LICENSE-xterm.txt  https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/LICENSE
+  curl -sSo addon-unicode11.js https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.js
+  shasum -a 256 xterm.js xterm.css addon-unicode11.js LICENSE-xterm.txt
+
+Both packages are MIT; the text is in LICENSE-xterm.txt.

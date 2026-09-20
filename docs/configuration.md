@@ -108,3 +108,6 @@ An `<id>` is the path under the library or any unique suffix or name: `loop-tria
 | `~/.agent-mux/` / `AGENT_MUX_LIBRARY_DIR` | The library root. |
 | `~/.agent-mux/skills/` / `AGENT_MUX_SKILLS_DIR` | The skills subtree; the variable keeps its earlier meaning. |
 | `editor` in `profiles.toml`, `$VISUAL`, `$EDITOR` | The editor, in that order; `vi` otherwise. |
+| `[remote] enabled` / `AGENT_MUX_REMOTE` | Serve the browser remote control (`1`/`true`/`yes`); off by default. |
+| `[remote] listen` / `AGENT_MUX_REMOTE_LISTEN` | Bind address; `127.0.0.1:7681` by default. |
+| `[remote] token` / `AGENT_MUX_REMOTE_TOKEN` | A fixed bearer token (at least 16 characters); a fresh one per run when unset. |
