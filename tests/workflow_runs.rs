@@ -500,6 +500,11 @@ async fn a_schema_mismatch_is_retried_once_then_becomes_null() {
     assert_eq!(retry, 2);
 }
 
+// Only the step that is meant to hang carries the short timeout. Putting
+// it on the whole run (`workflows.session_timeout_s`) also bounded `after`,
+// whose fake harness has to spawn and answer inside the same two seconds --
+// which it does not reliably do on a loaded machine, so the run finished
+// with a null result and the test failed for a reason it was not testing.
 const SLOW: &str = r#"
 [workflow]
 name = "slow"
@@ -507,6 +512,7 @@ description = "a session that never answers"
 [[steps]]
 id = "slow"
 prompt = "take your time"
+timeout_s = 2
 [[steps]]
 id = "after"
 prompt = "then {slow}"
@@ -524,7 +530,6 @@ async fn a_timed_out_session_is_killed_and_answers_null() {
         None,
     );
     let mut f = fixture(&bin, temp);
-    f.app.workflows.session_timeout_s = 2;
     let req = request(
         "slow",
         SLOW,
