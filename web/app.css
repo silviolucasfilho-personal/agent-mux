@@ -294,3 +294,16 @@ body {
 .btn[disabled] { opacity: 0.5; cursor: default; }
 
 .hint { margin: 8px 0 0; color: var(--dim); font-size: 12px; }
+
+/* ---------- the token form on the 401 page ---------- */
+
+.token-form {
+  margin: auto;
+  padding: 18px;
+  max-width: 420px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.token-form .title { margin: 0 0 4px; }
+.sheet-actions.bare { border: 0; padding: 12px 0 0; }

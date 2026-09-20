@@ -87,7 +87,14 @@ fn security_headers(r: Response) -> Response {
         .header("X-Content-Type-Options", "nosniff")
         .header(
             "Content-Security-Policy",
-            "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; base-uri 'none'; form-action 'self'",
+            // `style-src` has to allow inline: xterm.js injects a stylesheet
+            // for its per-cell font and sizing, and without this the whole
+            // block is refused -- the terminal then renders in the page's
+            // proportional font, with every column out of line. Scripts stay
+            // locked to 'self', which is the restriction that carries the
+            // weight here.
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; \
+             img-src 'self' data:; base-uri 'none'; form-action 'self'",
         )
 }
 
@@ -622,6 +629,30 @@ mod tests {
                 &Limits::default()
             )),
             405
+        );
+    }
+
+    #[test]
+    fn the_policy_lets_xterm_style_itself() {
+        // xterm.js injects a stylesheet for its per-cell font and sizing.
+        // Without `style-src 'unsafe-inline'` the browser refuses the whole
+        // block and the terminal renders in the page's proportional font,
+        // every column out of line -- which looks like a working page, so
+        // nothing but this test and a browser would catch it.
+        let res = security_headers(Response::new(200));
+        let csp = res
+            .headers
+            .iter()
+            .find(|(k, _)| k == "Content-Security-Policy")
+            .map(|(_, v)| v.clone())
+            .expect("a policy");
+        assert!(csp.contains("style-src"), "{csp}");
+        assert!(csp.contains("'unsafe-inline'"), "{csp}");
+        // Scripts stay locked down; that is the restriction that matters.
+        assert!(csp.contains("default-src 'self'"), "{csp}");
+        assert!(
+            !csp.contains("script-src"),
+            "scripts must fall back to default-src: {csp}"
         );
     }
 

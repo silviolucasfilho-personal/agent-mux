@@ -128,7 +128,13 @@ One key table, no second implementation to drift.
   `HttpOnly; SameSite=Strict`, and the page strips the query from its URL.
   The token never reaches page script, browser history or a shared link.
 - **Origin check** on the upgrade; CSP, `X-Frame-Options: DENY`,
-  `Referrer-Policy: no-referrer` on the page.
+  `Referrer-Policy: no-referrer` on the page. The policy allows
+  `style-src 'unsafe-inline'`, which xterm.js requires -- it injects a
+  stylesheet for its per-cell font and sizing, and a refused block leaves
+  the terminal in the page's proportional font with every column out of
+  line. Scripts stay on `default-src 'self'`, which is the restriction
+  carrying the weight; style attributes in markup stay blocked, and a test
+  asserts no page uses one.
 - **Assets from a fixed table**, never a filesystem path join.
 - **Gates in the App**: `allow_kill` and `allow_launch` are enforced in
   `handle_remote`, not only in the page and not only at the parse boundary,

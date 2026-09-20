@@ -159,6 +159,16 @@ mod tests {
                 );
             }
         }
+        // A style attribute is blocked by the policy even with
+        // style-src 'unsafe-inline' unless 'unsafe-hashes' is added, which
+        // it is not -- so pages put their styling in app.css.
+        for name in ["index.html", "unauthorized.html"] {
+            let text = std::str::from_utf8(lookup(name).unwrap().body).unwrap();
+            assert!(
+                !text.contains("style=\""),
+                "{name} uses a style attribute; the CSP blocks it"
+            );
+        }
         // Inline scripts would need a CSP exception; every script has a src.
         let html = std::str::from_utf8(index().body).unwrap();
         for piece in html.split("<script").skip(1) {
