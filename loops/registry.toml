@@ -171,3 +171,51 @@ tokens_report = 30000
 tokens_action = 60000
 stable_fraction = 0.35
 early_exit_required = false
+
+[[patterns]]
+id = "continuous-pr"
+name = "Continuous PR"
+goal = "Pick one ready issue, implement the smallest change that resolves it on a branch, run the tests, and hand the branch to a human as a pull request proposal."
+default_interval_s = 3600
+week_one_level = "L2"
+state_file = "continuous-pr-state.md"
+skills = ["loop-issue-pick", "loop-fix", "loop-rules"]
+verifier = true
+breaker = true
+human_gates = ["security", "migrations", "auth", "payments", "max-attempts"]
+risk = "medium"
+token_cost = "high"
+max_runs_per_day = 12
+max_tokens_per_day = 1500000
+priority = 8
+
+[patterns.cost]
+tokens_noop = 3000
+tokens_report = 80000
+tokens_action = 250000
+stable_fraction = 0.35
+early_exit_required = true
+
+[[patterns]]
+id = "harness-audit"
+name = "Harness Audit"
+goal = "Read how this workspace's loops and sessions have been behaving: readiness, cost, breaker trips, verifier verdicts, and write down what to tune."
+default_interval_s = 86400
+week_one_level = "L1"
+state_file = "harness-audit-state.md"
+skills = ["loop-harness-audit", "loop-rules"]
+verifier = false
+breaker = false
+human_gates = ["config-changes", "level-promotions"]
+risk = "low"
+token_cost = "low"
+max_runs_per_day = 2
+max_tokens_per_day = 100000
+priority = 9
+
+[patterns.cost]
+tokens_noop = 3000
+tokens_report = 30000
+tokens_action = 60000
+stable_fraction = 0.35
+early_exit_required = false

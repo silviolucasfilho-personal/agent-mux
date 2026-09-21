@@ -239,6 +239,7 @@ mod tests {
                 early_exit_required: false,
             },
             prompt: None,
+            agents: Vec::new(),
         }
     }
 

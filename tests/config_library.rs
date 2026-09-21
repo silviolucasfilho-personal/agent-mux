@@ -86,18 +86,18 @@ fn ls_check_show_and_path_describe_the_builtin_set() {
     assert!(out.contains("loops/skills/loop-triage/SKILL.md"));
     assert!(out.contains("skills/heimdall/reference/agents.md"));
     let builtin_rows = out.lines().filter(|l| l.contains("built-in")).count();
-    assert_eq!(builtin_rows, 69, "{out}");
+    assert_eq!(builtin_rows, 75, "{out}");
 
     let (ok, out, _) = run(&f, &["config", "ls", "--json"]);
     assert!(ok);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["items"].as_array().unwrap().len(), 69);
+    assert_eq!(v["items"].as_array().unwrap().len(), 75);
     assert_eq!(v["root"].as_str().unwrap(), f.library.to_string_lossy());
 
     let (ok, out, _) = run(&f, &["config", "check"]);
     assert!(ok);
     assert!(
-        out.contains("69 items, 0 overridden or added, no problems"),
+        out.contains("75 items, 0 overridden or added, no problems"),
         "{out}"
     );
 
@@ -226,7 +226,7 @@ fn new_items_are_listed_as_user_and_deleted_by_reset() {
     }
     let (ok, out, _) = run(&f, &["config", "check"]);
     assert!(ok, "{out}");
-    assert!(out.contains("73 items, 4 overridden or added"), "{out}");
+    assert!(out.contains("79 items, 4 overridden or added"), "{out}");
 
     // the new skill package is a real package: `skill list` sees it
     let (ok, out, err) = run(&f, &["skill", "list"]);
@@ -260,15 +260,19 @@ fn the_scaffolder_writes_library_skills_agents_and_templates() {
 
     let ws = f.home.join("proj");
     std::fs::create_dir_all(&ws).unwrap();
-    let daily = patterns::builtin()
+    let mut daily = patterns::builtin()
         .into_iter()
         .find(|p| p.id == "daily-triage")
         .unwrap();
+    // a pattern names the agents it wants; the verifier alone is the default
+    daily.agents = vec!["auditor".to_string()];
     let caps = Caps {
         max_runs_per_day: 2,
         max_tokens_per_day: 100_000,
     };
-    scaffold_with_library(&f.library, &ws, &daily, Harness::Claude, Level::L1, &caps).unwrap();
+    let report =
+        scaffold_with_library(&f.library, &ws, &daily, Harness::Claude, Level::L1, &caps).unwrap();
+    assert!(report.missing_agents.is_empty());
     assert_eq!(
         std::fs::read_to_string(ws.join(".claude/skills/loop-triage/SKILL.md")).unwrap(),
         "---\nname: loop-triage\ndescription: my triage\n---\n\nmine\n"
@@ -279,14 +283,34 @@ fn the_scaffolder_writes_library_skills_agents_and_templates() {
             .contains("name: loop-fix"),
         "untouched skills stay built-in"
     );
+    let auditor = std::fs::read_to_string(ws.join(".claude/agents/auditor.md")).unwrap();
     assert!(
-        ws.join(".claude/agents/auditor.md").is_file(),
-        "library agents are installed"
+        auditor.starts_with("---\nname: auditor\n"),
+        "listed library agents are installed: {auditor}"
+    );
+    assert!(
+        auditor.contains("---\n\n## Baseline\n\n- Keep the role"),
+        "the prompts.toml preamble follows the frontmatter: {auditor}"
     );
     assert!(
         !ws.join(".claude/agents/loop-verifier.md").exists(),
         "daily-triage has no verifier"
     );
+    let ws3 = f.home.join("proj3");
+    std::fs::create_dir_all(&ws3).unwrap();
+    let mut missing = daily.clone();
+    missing.agents = vec!["nobody".to_string()];
+    let report = scaffold_with_library(
+        &f.library,
+        &ws3,
+        &missing,
+        Harness::Claude,
+        Level::L1,
+        &caps,
+    )
+    .unwrap();
+    assert_eq!(report.missing_agents, vec!["nobody".to_string()]);
+    assert!(!ws3.join(".claude/agents").exists());
     assert_eq!(
         std::fs::read_to_string(ws.join("loop-constraints.md")).unwrap(),
         "# Constraints for proj\n\nmine\n"
@@ -299,6 +323,15 @@ fn the_scaffolder_writes_library_skills_agents_and_templates() {
     let toml = std::fs::read_to_string(ws2.join(".codex/agents/auditor.toml")).unwrap();
     assert!(toml.starts_with("name = \"auditor\"\n"), "{toml}");
     assert!(toml.contains("[system_prompt]"));
+    let doc: toml::Value = toml::from_str(&toml).unwrap();
+    assert!(
+        doc["developer_instructions"]
+            .as_str()
+            .unwrap()
+            .starts_with("## Baseline\n"),
+        "{toml}"
+    );
+    assert!(doc.get("model").is_none(), "`inherit` is not a Codex model");
 }
 
 #[test]

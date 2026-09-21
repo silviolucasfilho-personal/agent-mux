@@ -9,6 +9,7 @@
 //! Not to be confused with `tracing::loops`, the per-turn agentic-loop
 //! diagnostics behind `trace loops`.
 
+pub mod agents;
 pub mod breaker;
 pub mod cli;
 pub mod context;
@@ -170,9 +171,28 @@ pub struct Pattern {
     /// same placeholders (`crate::prompts::LOOP_PLACEHOLDERS`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// The loop agents the scaffolder installs for this pattern, by name
+    /// (`loops/agents/<name>.md`). Empty means the verifier alone when
+    /// `verifier` is true, else no agent; see `effective_agents`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
 }
 
 impl Pattern {
+    /// The agents a workspace of this pattern receives: the listed ones,
+    /// or `loop-verifier` alone when the list is empty and the pattern
+    /// uses a verifier, else none.
+    pub fn effective_agents(&self) -> Vec<String> {
+        if !self.agents.is_empty() {
+            return self.agents.clone();
+        }
+        if self.verifier {
+            vec!["loop-verifier".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// The skill whose invocation opens a run.
     pub fn triage_skill(&self) -> &str {
         self.skills
@@ -214,8 +234,9 @@ pub struct LoopLaunch {
     pub policy: LoopPolicy,
 }
 
-/// The seven state file names the method recognizes.
-pub const STATE_FILES: [&str; 7] = [
+/// The nine state file names the method recognizes, one per built-in
+/// pattern (`loops/registry.toml`); the guard permits writes to these.
+pub const STATE_FILES: [&str; 9] = [
     "STATE.md",
     "pr-babysitter-state.md",
     "ci-sweeper-state.md",
@@ -223,6 +244,8 @@ pub const STATE_FILES: [&str; 7] = [
     "dependency-sweeper-state.md",
     "changelog-drafter-state.md",
     "issue-triage-state.md",
+    "continuous-pr-state.md",
+    "harness-audit-state.md",
 ];
 
 pub const LOOP_MD: &str = "LOOP.md";

@@ -1,4 +1,4 @@
-//! `agent-mux skill <list|show|install|uninstall|status>`.
+//! `agent-mux skill <list|show|install|uninstall|status|import>`.
 
 use super::install::{home_dir, install, status, uninstall};
 use super::render::render_skill_md;
@@ -160,6 +160,32 @@ pub fn handle_skill_cli(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
+        "import" => {
+            let src = args
+                .get(1)
+                .filter(|a| !a.starts_with("--"))
+                .ok_or("usage: agent-mux skill import <dir> [--force]")?;
+            let force = args.iter().any(|a| a == "--force");
+            let report = super::import::import(
+                std::path::Path::new(src),
+                &super::default_skills_dir(),
+                force,
+            )?;
+            println!(
+                "imported {} to {} ({} files)",
+                report.id,
+                report.dir.display(),
+                report.files.len()
+            );
+            for w in &report.warnings {
+                println!("warning: {w}");
+            }
+            println!(
+                "install it with `agent-mux skill install {}` or launch it from the Agents sidebar",
+                report.id
+            );
+            Ok(())
+        }
         other => Err(format!(
             "unknown skill subcommand '{other}'; run `agent-mux skill help`"
         )),
@@ -178,6 +204,9 @@ commands:
                                          claude ~/.claude/skills, codex ~/.codex/skills, agy ~/.gemini/config/skills
   uninstall <id> [--harness H|all]       remove copies agent-mux installed
   status [id]                            installed / stale / not managed, per harness
+  import <dir> [--force]                 copy a SKILL.md package written for one harness into
+                                         ~/.agent-mux/skills/<name>/ (description made a plain
+                                         scalar, reference files kept, content lint printed)
 
 The sidebar launcher installs the chosen skill for its harness before every launch."#
     );

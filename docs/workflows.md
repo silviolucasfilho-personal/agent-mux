@@ -8,7 +8,7 @@ Design: `docs/superpowers/specs/2026-09-17-workflows-design.md`. The idea follow
 
 ## 1. First run
 
-1. `Tab` to the **Workflows** section (between Loops and History). The seven built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`. The main pane describes the selected one: its steps by phase, its args, the last run.
+1. `Tab` to the **Workflows** section (between Loops and History). The eight built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`, `santa-review`. The main pane describes the selected one: its steps by phase, its args, the last run.
 2. `Enter` opens the run dialog: the workspace (the shared directory picker), the profile (one per harness the document allows), one field per declared arg, a token budget, a USD cap, and the isolation default. `Enter` again starts the run.
 3. Each session appears in **Active** as `<workflow> ▸ <step>`; attach to watch it. The section row shows `▶ done/started`.
 4. `W` opens the Workflows view: the run's report, the step ledger behind it, the document and the result.
@@ -151,7 +151,7 @@ args = { subject = "confirmed review findings", shape = "a report grouped by sev
 | `input` | A path handed to the session as `inputs` |
 | `result` | The schema the fenced answer must match |
 | `verify` | `{ skill \| prompt, votes = N, result, keep }`: `N` independent refuter sessions per item; boolean fields are counted and `keep` decides on the counts |
-| `keep` | A predicate on each item's result: `== != < <= > >=`, `and`, `or`, `not`, `has(field)` |
+| `keep` | A predicate on each item's result: `== != < <= > >=`, `in [a, b]`, `not in [a, b]`, `and`, `or`, `not`, `has(field)`. Inside a set a bare word is a string: `severity in [high, medium]`. On a `pipeline` step it runs before the item's votes, so a dropped item costs no refuter session |
 | `dedupe_by`, `take` | Keep the first item per key; keep at most N |
 | `branches` | `route`: `{ label = ["step", …] }`; the classifier's result carries `label`; other branches are skipped |
 | `judge` / `judge_prompt`, `n` | `tournament`: the pairwise judge and how many candidates to generate |
@@ -167,11 +167,17 @@ Paths: `find` is a step's result; `[*]` flattens one level; `.field` descends; `
 | Classify-and-act | `route` with `branches` |
 | Fan-out-and-synthesize | `fanout` then `single` with `input` |
 | Adversarial verification | `verify = { votes = 3, keep = "refuted < 2" }` |
+| Check it twice | `verify = { votes = 2, keep = "refuted == 0" }`: two independent checkers must both fail to refute an item (`santa-review`) |
 | Generate-and-filter | `fanout` + `dedupe_by` + `keep` + `verify` + `take` |
+| Choose the lenses first | a `single` step answers an array, the `fanout` runs `over = "<step>.<field>[*]"`; `review-changes` picks its review dimensions per change this way |
 | Tournament | `tournament` with `judge`; the bracket runs in Rust, byes advance |
 | Loop until done | `until` with `dedupe_by` and `rounds_without_new` |
 
 Per-item chains (the main session, then its votes) run independently; a step waits only for the steps it references. Concurrency is `[workflows] max_concurrent` across runs, shared with loop runs.
+
+The built-in `review-changes` is the worked example of the last two rows. Its first step runs `wf-review-dimensions`, which reads the diff and answers the lenses the change deserves: `correctness`, `concurrency and resources` and `tests and coverage` always; one `<language> conventions and idioms` lens per language in the changed files (at most four); and `security` only when a changed path or hunk touches input handling, shell or process execution, SQL, file paths, authentication, secrets, network calls or CI files. The finders fan out over that array. Before the three refutation votes, `keep = "severity in [high, medium]"` drops the low findings so no session is spent refuting them; the dropped count appears in the run's notes.
+
+`santa-review` is the same review with the other gate: one finder lists everything, and each finding then meets two independent `wf-refute` checkers. `keep = "refuted == 0"` on the votes means a single refutation is enough to drop it, so what reaches the report has passed both.
 
 ## 3. Sessions and harnesses
 
@@ -192,7 +198,7 @@ agent-mux validates it against the schema and retries the session once with the 
 | Path guard | per launch | per launch (after `trace hooks install codex`) | none: rely on isolation and budgets |
 | Worktree isolation | yes | yes | not applied |
 
-Step skills are agent-mux packages (`wf-review-find`, `wf-refute`, `wf-synthesize`, `wf-read-map`, `wf-search`, `wf-deep-read`, `wf-critic`, `wf-find`, `wf-attempt`, `wf-judge`, `wf-discover-sites`, `wf-transform`, `wf-verify-site`, `wf-classify`, `wf-triage-bug`, `wf-triage-feature`) with `hidden = true` in their `skill.toml`, so they stay out of the Agents sidebar. They are installed user-level for the run's harness before the first session. `writes = true` marks a skill that edits files; a step running it must have `isolation = "worktree"`, which the validator enforces.
+Step skills are agent-mux packages (`wf-review-dimensions`, `wf-review-find`, `wf-refute`, `wf-synthesize`, `wf-read-map`, `wf-search`, `wf-deep-read`, `wf-critic`, `wf-find`, `wf-attempt`, `wf-judge`, `wf-discover-sites`, `wf-transform`, `wf-verify-site`, `wf-classify`, `wf-triage-bug`, `wf-triage-feature`) with `hidden = true` in their `skill.toml`, so they stay out of the Agents sidebar. They are installed user-level for the run's harness before the first session. `writes = true` marks a skill that edits files; a step running it must have `isolation = "worktree"`, which the validator enforces.
 
 Mixed harnesses: a step's `harness = "codex"` runs it on Codex whatever the run's harness; `profile` picks a named profile.
 

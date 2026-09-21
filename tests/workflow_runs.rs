@@ -242,6 +242,9 @@ const FINDING: &str = r#"```workflow-result
 const STANDS: &str = r#"```workflow-result
 {"refuted": false, "reason": "it stands"}
 ```"#;
+const DIMENSIONS: &str = r#"```workflow-result
+{"dimensions":["correctness","concurrency and resources","tests and coverage","Rust conventions and idioms"],"reason":"no security trigger touched"}
+```"#;
 
 #[tokio::test]
 async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
@@ -251,6 +254,7 @@ async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
         &bin,
         Harness::Claude,
         &[
+            ("dimensions", DIMENSIONS),
             ("find", FINDING),
             ("confirmed", STANDS),
             ("report", "The review report."),
@@ -272,8 +276,8 @@ async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
     let recent = &f.app.recent_workflow_runs[0];
     assert_eq!(recent.status, "finished", "{:?}", recent.error);
     assert_eq!(recent.result, serde_json::json!("The review report."));
-    // 4 finders (same finding, deduped to one) + 3 votes + 1 report
-    assert_eq!(recent.sessions, 8, "{:?}", recent.notes);
+    // 1 dimensions + 4 finders (same finding, deduped to one) + 3 votes + 1 report
+    assert_eq!(recent.sessions, 9, "{:?}", recent.notes);
     assert!(
         recent
             .notes
@@ -286,7 +290,7 @@ async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
 
     // command lines and environment
     let args = calls(&f.bin, Harness::Claude, "args");
-    assert_eq!(args.len(), 8);
+    assert_eq!(args.len(), 9);
     for a in &args {
         assert!(a.contains("--output-format\njson\n"), "{a}");
         assert!(a.contains("--dangerously-skip-permissions"), "{a}");
@@ -312,6 +316,22 @@ async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
     assert_eq!(finder_ctx["schema_version"], 1);
     assert_eq!(finder_ctx["result_schema"]["required"][0], "findings");
     assert!(finder_ctx["args"]["dimension"].is_string());
+    // the finders' lenses come from the dimensions step
+    let lenses: Vec<String> = ctxs
+        .iter()
+        .map(|c| serde_json::from_str::<serde_json::Value>(c).unwrap())
+        .filter(|c| c["step"]["id"] == "find")
+        .map(|c| c["args"]["dimension"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        lenses.iter().any(|l| l == "Rust conventions and idioms"),
+        "{lenses:?}"
+    );
+    assert!(
+        f.home
+            .join(".claude/skills/wf-review-dimensions/SKILL.md")
+            .is_file()
+    );
     assert_eq!(finder_ctx["run"]["workflow"], "review-changes");
     let vote_ctx: serde_json::Value = ctxs
         .iter()
@@ -327,10 +347,10 @@ async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
     let conn = agent_mux::tracing::store::open_ro(&f.db).unwrap();
     let run = wstore::get_run(&conn, &run_id).unwrap().unwrap();
     assert_eq!(run.status, "finished");
-    assert_eq!(run.sessions, 8);
+    assert_eq!(run.sessions, 9);
     assert_eq!(run.workflow, "review-changes");
     let steps = wstore::steps_of(&conn, &run_id).unwrap();
-    assert_eq!(steps.len(), 8);
+    assert_eq!(steps.len(), 9);
     assert!(
         steps
             .iter()
@@ -343,13 +363,13 @@ async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(by_run, 8);
+    assert_eq!(by_run, 9);
 
     // the run directory
     let run_dir = f.home.join("runtime/workflows").join(&run_id);
     assert!(run_dir.join("workflow.toml").is_file());
     let journal = agent_mux::workflows::journal::load(&run_dir.join("journal.jsonl"));
-    assert_eq!(journal.len(), 8);
+    assert_eq!(journal.len(), 9);
     let result: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(run_dir.join("result.json")).unwrap())
             .unwrap();

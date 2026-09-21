@@ -36,7 +36,8 @@ pub const USAGE: &str = "agent-mux loop <command>
   decide <run_id> applied|rejected         the inbox decision
 
 Patterns: daily-triage, pr-babysitter, ci-sweeper, post-merge-cleanup,
-dependency-sweeper, changelog-drafter, issue-triage. The registry lives in
+dependency-sweeper, changelog-drafter, issue-triage, continuous-pr,
+harness-audit. The registry lives in
 ~/.agent-mux/loops.json (AGENT_MUX_LOOPS_FILE overrides). Antigravity is not
 supported for loops yet (docs/loops.md).";
 

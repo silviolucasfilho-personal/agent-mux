@@ -1,8 +1,12 @@
 # Review the working tree (or a scope) across dimensions, try to refute
 # every finding with independent votes, report the survivors.
+#
+# The lenses are chosen per change: the three fixed ones, one per language
+# in the diff, and `security` only when a security trigger is touched.
+# Findings below `medium` are dropped before the votes are spent on them.
 [workflow]
 name = "review-changes"
-description = "Find issues per review dimension, refute each one with three independent votes, report the survivors."
+description = "Choose the review lenses for the change, find issues per lens, refute each one with three independent votes, report the survivors."
 when_to_use = "Reviewing a diff, a branch or the working tree for defects with independent verification."
 output = "report"
 
@@ -10,6 +14,9 @@ output = "report"
 description = "What to review: a path, a git ref range (main..HEAD), or empty for the uncommitted working tree."
 default = ""
 
+[schemas.dimensions]
+fields.dimensions = { type = "array", items = "string", required = true, description = "The review lenses, one finder each." }
+fields.reason = { type = "string", description = "Why security was or was not included." }
 [schemas.findings]
 fields.findings = { type = "array", items = "finding", required = true }
 [schemas.finding]
@@ -23,20 +30,31 @@ fields.refuted = { type = "boolean", required = true }
 fields.reason = { type = "string", required = true }
 
 [[steps]]
+id = "dimensions"
+kind = "single"
+phase = "Review"
+skill = "wf-review-dimensions"
+args = { scope = "{args.scope}" }
+result = "dimensions"
+
+[[steps]]
 id = "find"
 kind = "fanout"
 phase = "Review"
-over = ["correctness", "security", "concurrency and resources", "tests and coverage"]
+over = "dimensions.dimensions[*]"
 skill = "wf-review-find"
 args = { dimension = "{item}", scope = "{args.scope}" }
 result = "findings"
 
+# `keep` on a pipeline step is applied to each item before its votes run,
+# so low findings never cost a refutation session.
 [[steps]]
 id = "confirmed"
 kind = "pipeline"
 phase = "Verify"
 over = "find[*].findings[*]"
 dedupe_by = ["file", "line", "title"]
+keep = "severity in [high, medium]"
 verify = { skill = "wf-refute", votes = 3, result = "verdict", keep = "refuted < 2" }
 take = 40
 

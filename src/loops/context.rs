@@ -58,6 +58,10 @@ pub struct Breaker {
     pub iterations: usize,
     #[serde(default)]
     pub consecutive_failures: usize,
+    /// One more attempt of this kind would trip the breaker; the run is
+    /// capped at L1 (`run.level_reason` says so).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_trip: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -230,6 +234,7 @@ pub fn live(
                         "ok".into()
                     }),
                     reason: Some(v.reason),
+                    near_trip: v.near_trip.map(|t| t.as_str().to_string()),
                     iterations: v.iterations,
                     consecutive_failures: l
                         .attempts

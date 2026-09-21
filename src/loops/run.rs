@@ -19,6 +19,9 @@ pub struct PreflightInput {
     pub tokens_today: i64,
     /// The breaker tripped: its reason.
     pub breaker_trip: Option<String>,
+    /// The breaker is one attempt short of tripping: the cap reason
+    /// (`breaker::Verdict::near_trip_reason`). Caps the run at L1.
+    pub breaker_near_trip: Option<String>,
     /// What the readiness audit allows; `Err(why)` for the configured
     /// level means a cap.
     pub audit_allows_configured: Result<(), String>,
@@ -46,6 +49,7 @@ impl Default for PreflightInput {
             runs_today: 0,
             tokens_today: 0,
             breaker_trip: None,
+            breaker_near_trip: None,
             audit_allows_configured: Ok(()),
             audit_allows_l2: Ok(()),
             audit_score: None,
@@ -157,6 +161,9 @@ pub fn preflight(entry: &LoopEntry, input: &PreflightInput) -> Preflight {
             &mut reason,
         );
     }
+    if let Some(why) = &input.breaker_near_trip {
+        cap(Level::L1, why.clone(), &mut level, &mut reason);
+    }
     if input.state_stale {
         cap(
             Level::L1,
@@ -236,13 +243,46 @@ pub struct Observed {
     pub worktree_changed: bool,
     pub state_changed: bool,
     pub high_priority_grew: bool,
-    pub verifier_verdict: Option<String>,
+    /// One verdict per checker sub-agent that answered (`loop-verifier`,
+    /// `loop-reviewer`, …), in the order they ran.
+    pub verifier_verdicts: Vec<String>,
     pub permission_refused: bool,
     /// The harness reported the skill as an unknown command.
     pub skill_missing: bool,
 }
 
-/// Spec section 8.6 step 2.
+/// The one word several checkers add up to: any `ESCALATE_HUMAN` wins,
+/// then any `REJECT`, and only unanimous `APPROVE`s approve. `None` when
+/// nobody answered.
+pub fn combined_verdict(verdicts: &[String]) -> Option<String> {
+    if verdicts.is_empty() {
+        return None;
+    }
+    if verdicts.iter().any(|v| v == "ESCALATE_HUMAN") {
+        return Some("ESCALATE_HUMAN".into());
+    }
+    if verdicts.iter().any(|v| v != "APPROVE") {
+        return Some("REJECT".into());
+    }
+    Some("APPROVE".into())
+}
+
+/// `APPROVE (2/2)`: the combined word and how many checkers said it, for
+/// a run with more than one checker; the bare word otherwise.
+pub fn verdict_label(verdicts: &[String]) -> Option<String> {
+    let word = combined_verdict(verdicts)?;
+    if verdicts.len() < 2 {
+        return Some(word);
+    }
+    let agreeing = verdicts.iter().filter(|v| **v == word).count();
+    Some(format!("{word} ({agreeing}/{})", verdicts.len()))
+}
+
+/// Spec section 8.6 step 2, plus the checkers' rule: a fix is proposed
+/// only when every checker that answered said APPROVE. A REJECT or an
+/// ESCALATE_HUMAN against a changed worktree (or a block claiming a fix)
+/// makes the run `escalated`: the branch stays for a human, nothing is
+/// proposed.
 pub fn derive_outcome(result: Option<&LoopResult>, obs: &Observed) -> Outcome {
     if obs.timed_out
         || obs.exit_code.is_some_and(|c| c != 0)
@@ -250,6 +290,17 @@ pub fn derive_outcome(result: Option<&LoopResult>, obs: &Observed) -> Outcome {
         || obs.skill_missing
     {
         return Outcome::Failed;
+    }
+    let verdict = combined_verdict(&obs.verifier_verdicts);
+    let claims_fix = result
+        .and_then(|r| Outcome::parse(&r.outcome))
+        .is_some_and(|o| o == Outcome::FixProposed);
+    if (obs.worktree_changed || claims_fix)
+        && verdict
+            .as_deref()
+            .is_some_and(|v| v == "REJECT" || v == "ESCALATE_HUMAN")
+    {
+        return Outcome::Escalated;
     }
     if let Some(r) = result
         && let Some(o) = Outcome::parse(&r.outcome)
@@ -264,7 +315,7 @@ pub fn derive_outcome(result: Option<&LoopResult>, obs: &Observed) -> Outcome {
     if obs.worktree_changed {
         return Outcome::FixProposed;
     }
-    if obs.verifier_verdict.as_deref() == Some("ESCALATE_HUMAN") || obs.high_priority_grew {
+    if verdict.as_deref() == Some("ESCALATE_HUMAN") || obs.high_priority_grew {
         return Outcome::Escalated;
     }
     if obs.state_changed {
@@ -435,6 +486,22 @@ mod tests {
             Preflight::Blocked { pause: true, .. }
         ));
         i.breaker_trip = None;
+        i.breaker_near_trip = Some("breaker one attempt from tripping (stagnation)".into());
+        match preflight(&e, &i) {
+            Preflight::Go {
+                effective_level,
+                level_reason,
+                ..
+            } => {
+                assert_eq!(effective_level, Level::L1);
+                assert_eq!(
+                    level_reason.as_deref(),
+                    Some("breaker one attempt from tripping (stagnation)")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        i.breaker_near_trip = None;
         i.state_stale = true;
         assert!(matches!(
             preflight(&e, &i),
@@ -563,6 +630,63 @@ mod tests {
                 }
             ),
             Outcome::Failed
+        );
+        // the checkers' rule
+        let v = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(combined_verdict(&[]), None);
+        assert_eq!(
+            combined_verdict(&v(&["APPROVE", "APPROVE"])).as_deref(),
+            Some("APPROVE")
+        );
+        assert_eq!(
+            combined_verdict(&v(&["APPROVE", "REJECT"])).as_deref(),
+            Some("REJECT")
+        );
+        assert_eq!(
+            combined_verdict(&v(&["REJECT", "ESCALATE_HUMAN"])).as_deref(),
+            Some("ESCALATE_HUMAN")
+        );
+        assert_eq!(verdict_label(&v(&["APPROVE"])).as_deref(), Some("APPROVE"));
+        assert_eq!(
+            verdict_label(&v(&["APPROVE", "APPROVE"])).as_deref(),
+            Some("APPROVE (2/2)")
+        );
+        assert_eq!(
+            verdict_label(&v(&["APPROVE", "REJECT"])).as_deref(),
+            Some("REJECT (1/2)")
+        );
+        let approved = Observed {
+            worktree_changed: true,
+            verifier_verdicts: v(&["APPROVE", "APPROVE"]),
+            ..Default::default()
+        };
+        assert_eq!(derive_outcome(Some(&fix), &approved), Outcome::FixProposed);
+        let split = Observed {
+            worktree_changed: true,
+            verifier_verdicts: v(&["APPROVE", "REJECT"]),
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_outcome(Some(&fix), &split),
+            Outcome::Escalated,
+            "one REJECT keeps the fix from being proposed even when the block claims it"
+        );
+        assert_eq!(derive_outcome(None, &split), Outcome::Escalated);
+        let escalate = Observed {
+            worktree_changed: true,
+            verifier_verdicts: v(&["ESCALATE_HUMAN"]),
+            ..Default::default()
+        };
+        assert_eq!(derive_outcome(None, &escalate), Outcome::Escalated);
+        let rejected_nothing = Observed {
+            state_changed: true,
+            verifier_verdicts: v(&["REJECT"]),
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_outcome(None, &rejected_nothing),
+            Outcome::ReportOnly,
+            "a REJECT with no change to propose is just a report"
         );
         assert!(kill_switch_active("Last run: x\nloop-pause-all\n"));
         assert!(!kill_switch_active(
