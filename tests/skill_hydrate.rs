@@ -388,3 +388,78 @@ fn table_driven_harness_launch_construction() {
         }
     }
 }
+
+/// The MCP server is not a skill's privilege: an ordinary session, with no
+/// skill and no declared capability, reaches the store the same way.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_ordinary_session_gets_the_mcp_server_too() {
+    let f = fixture();
+    let mut app = app_with_runtime(&f);
+    let dir = f.workdir.clone();
+    app.launch(profile(&f), dir).unwrap();
+    wait_for(&f.bin.join("env.txt"));
+
+    let env = env_map(&f.bin.join("env.txt"));
+    assert_eq!(env["AGENT_MUX_MCP"], "registered");
+    assert_eq!(env["AGENT_MUX_WORKSPACE"], f.workdir.to_string_lossy());
+    let args = std::fs::read_to_string(f.bin.join("args.txt")).unwrap();
+    assert!(args.contains("--mcp-config"), "{args}");
+    assert!(args.contains("agent-mux"), "{args}");
+    // no skill, so no hydration
+    assert!(!env.contains_key("AGENT_MUX_BRIEFING"));
+    app.kill_all();
+}
+
+/// Each harness gets the server the way it takes one: Claude Code and
+/// Codex on the command line, Antigravity through its installed entry.
+#[test]
+fn every_harness_has_a_way_to_reach_the_server() {
+    use agent_mux::harness::Harness;
+    use agent_mux::mcp::register::{Registration, plan};
+
+    let temp = tempfile::tempdir().unwrap();
+    let exe = temp.path().join("agent-mux");
+    std::fs::write(&exe, "x").unwrap();
+    let db = temp.path().join("traces.db");
+    let home = temp.path().join("home");
+    let ws = temp.path();
+
+    let claude = plan(Some(Harness::Claude), Some(&exe), Some(&db), ws, &home);
+    match claude {
+        Registration::PerLaunch { args } => {
+            assert_eq!(args[0], "--mcp-config");
+            assert!(args[1].contains("agent-mux"), "{args:?}");
+        }
+        other => panic!("claude takes the server per launch: {other:?}"),
+    }
+    let codex = plan(Some(Harness::Codex), Some(&exe), Some(&db), ws, &home);
+    match codex {
+        Registration::PerLaunch { args } => {
+            assert!(args.iter().any(|a| a.contains("mcp_servers")), "{args:?}");
+        }
+        other => panic!("codex takes the server per launch: {other:?}"),
+    }
+    // agy has no flag: without the installed entry it says so, with it the
+    // launch is covered
+    let agy = plan(Some(Harness::Antigravity), Some(&exe), Some(&db), ws, &home);
+    assert!(
+        matches!(&agy, Registration::Unavailable(why) if why.contains("mcp install agy")),
+        "{agy:?}"
+    );
+    std::fs::create_dir_all(home.join(".gemini").join("config")).unwrap();
+    std::fs::write(
+        home.join(".gemini").join("config").join("mcp_config.json"),
+        serde_json::json!({"mcpServers": {"agent-mux": {
+            "command": exe.to_string_lossy(),
+            "args": ["mcp", "serve", "--stdio", "--workspace-from-env"],
+            "disabled": false
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        plan(Some(Harness::Antigravity), Some(&exe), Some(&db), ws, &home),
+        Registration::Installed
+    );
+}

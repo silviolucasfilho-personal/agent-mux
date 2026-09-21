@@ -224,6 +224,9 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut app = App::new(cfg.profiles, trace_rt, tx);
     app.agents = config::resolve_agents(cfg.agents.as_ref());
+    app.bypass_approvals_default = cfg
+        .bypass_approvals
+        .unwrap_or(agent_mux::app::DEFAULT_BYPASS_APPROVALS);
     app.config_path = cfg.loaded_from.clone();
     app.editor = cfg.editor.clone();
     if hide_sidebar {

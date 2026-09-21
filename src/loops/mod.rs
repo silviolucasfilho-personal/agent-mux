@@ -170,6 +170,15 @@ pub struct Pattern {
     /// same placeholders (`crate::prompts::LOOP_PLACEHOLDERS`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// The model this pattern suggests for a run (`--model`). A loop copies
+    /// it when it is registered and can change it afterwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The model this pattern suggests for the `loop-verifier` sub-agent:
+    /// the checker of the maker/checker pair can be a different, usually
+    /// stronger or cheaper, model than the run that calls it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_model: Option<String>,
 }
 
 impl Pattern {

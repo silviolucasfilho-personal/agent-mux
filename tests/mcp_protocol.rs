@@ -233,3 +233,48 @@ fn a_missing_store_keeps_health_and_types_every_other_error() {
     drop(srv.stdin);
     assert!(srv.child.wait().unwrap().success());
 }
+
+/// A sandboxed App never writes a user's global harness configuration:
+/// `agy mcp add` goes through `agy`, which reads its own home whatever the
+/// App was told, so the guard is a real home and a binary named agent-mux.
+#[test]
+fn a_test_app_never_installs_the_global_antigravity_entry() {
+    use agent_mux::app::App;
+    use agent_mux::config::Profile;
+    use tokio::sync::mpsc;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(
+        vec![Profile {
+            name: "Antigravity".into(),
+            command: "agy".into(),
+            args: vec![],
+            default_dir: None,
+            tracing: None,
+            model: None,
+            bypass_approvals: None,
+        }],
+        None,
+        tx,
+    );
+    app.trace_db_path = Some(temp.path().join("traces.db"));
+    // what every UI test sets, and what marks this App as sandboxed
+    app.skill_install_home = Some(temp.path().join("home"));
+    let before = std::fs::read_to_string(agent_mux::mcp::install::agy_config_path(
+        &agent_mux::skill::install::home_dir(),
+    ))
+    .ok();
+
+    let reg = app.ensure_mcp("agy", temp.path());
+    // agy has no per-launch flag and nothing was installed for this App
+    assert!(
+        matches!(reg, agent_mux::mcp::register::Registration::Unavailable(_)),
+        "{reg:?}"
+    );
+    let after = std::fs::read_to_string(agent_mux::mcp::install::agy_config_path(
+        &agent_mux::skill::install::home_dir(),
+    ))
+    .ok();
+    assert_eq!(before, after, "the real agy configuration was not touched");
+}

@@ -370,6 +370,8 @@ mod tests {
             pattern: "ci-sweeper".into(),
             profile: String::new(),
             harness: "claude".into(),
+            model: String::new(),
+            verifier_model: String::new(),
             interval_s: 900,
             level,
             enabled: true,

@@ -32,7 +32,34 @@ Keep L1 (report-only) for a week. Promote to L2 with `e` when the readiness audi
 
 The literal `loop-pause-all` on a line of its own in the state file or `LOOP.md` pauses every loop of that workspace.
 
-## 3. Patterns
+## 3. Which model runs a loop
+
+A loop is one session: the triage skill runs, it may call `loop-fix`, and it
+hands a change to the `loop-verifier` sub-agent. So a loop has two models to
+choose, not one per step:
+
+| Field | What it sets | Where |
+| --- | --- | --- |
+| `Model` | the run's own session (`--model`) | the add/edit dialog, `loop add --model`, `model` on the entry in `loops.json` |
+| `Verifier` | the `loop-verifier` sub-agent, written into the agent file the scaffolder installs (`model:` in its frontmatter) | the dialog, `loop add --verifier-model`, `verifier_model` on the entry |
+
+Blank leaves the profile's model for the run, and `inherit` for the
+verifier, which is what the shipped agent file says. A pattern may suggest
+both in `loops/registry.toml` (`model`, `verifier_model`); a loop copies
+them when it is registered and can change them afterwards.
+
+The verifier model reaches Claude Code only: a Codex agent file carries a
+name, a description and a system prompt, and no model key is verified for
+it (codex 0.154.0). The scaffolder never overwrites an existing agent file,
+so a loop whose verifier model changed after scaffolding shows the
+difference in the Loops view's **Files** tab, where the line reads what the
+file declares against what the loop asks for. Edit the file with the
+Configuration view (`C`) or delete it and re-scaffold.
+
+`loop-fix` and the other skills run inside the same session on the same
+model: a skill is a prompt, not a process, so it has no model of its own.
+
+## 4. Patterns
 
 | id | default cadence | week-one level | state file | skills | runs/day | tokens/day | breaker |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -46,7 +73,7 @@ The literal `loop-pause-all` on a line of its own in the state file or `LOOP.md`
 
 Registry: `loops/registry.toml` (embedded), merged by id with `~/.agent-mux/loops/registry.toml` when you add or replace patterns; the skills, the verifier and the templates are overridden the same way under `~/.agent-mux/loops/` (the Configuration view `C`, `agent-mux config`, `docs/configuration.md`). A pattern may carry its own `prompt`, replacing `[loop] run` of `prompts.toml` for its runs. Every skill reads `$AGENT_MUX_LOOP_CONTEXT` first, makes its one listing call and compares a fingerprint of it with the `Fingerprint:` line in the state file: unchanged means the run rewrites `Last run:` and ends as `no-op` under 5k tokens (the early exit the cost model assumes); otherwise it follows a bounded procedure, only edits the state file at L1, may call `loop-fix` for one item at L2, hands changes to `loop-verifier`, rewrites the state file, and ends with a fenced `loop-result` block (`outcome`, `items_found`, `actions_taken`, `escalations`, `summary`).
 
-## 4. Levels and what enforces them
+## 5. Levels and what enforces them
 
 | Level | Meaning | Where | Enforced by |
 | --- | --- | --- | --- |
@@ -60,17 +87,17 @@ Per-harness ceiling: Claude Code L3 (per-launch guard with `--loop`, fail-closed
 
 The effective level of a run can be lower than the configured one: tokens today at 80 % or more of the cap, a stale state file (`Last run` older than 14 days), a readiness gate that no longer holds, or a missing guard cap the run at L1; the reason travels in the context and the preview.
 
-## 5. Pre-flight, in order
+## 6. Pre-flight, in order
 
 Kill switch (`K`, or the literal in the files) → workspace exists (git repository for L2+) → runs today below the cap → tokens today below 100 % of the cap (80 % forces report-only) → circuit breaker (3× same error, 3 similar errors, 5 consecutive failures, 10 iterations) → readiness → harness resolves → the pattern's triage skill is installed in the workspace for the harness → concurrency (`max_concurrent`, one run per workspace). A blocked run is stored in `loop_runs` with its reason and never written to `loop-run-log.md`; a breaker trip pauses the loop.
 
-## 6. After a run
+## 7. After a run
 
 agent-mux reads tokens and cost from the trace store, whether a sub-agent whose name contains `verifier` ran and what it answered (`## Verdict: APPROVE | REJECT | ESCALATE_HUMAN`), the files the run's write tools touched, and the worktree's changes. The outcome is the `loop-result` block when present and consistent, else derived: worktree changed → `fix-proposed`; verifier said `ESCALATE_HUMAN` or the High Priority section grew → `escalated`; state file changed → `report-only`; nothing → `no-op`; non-zero exit or timeout → `failed`. A fix without a verifier observation is flagged `verifier_missing`. A touched path on the denylist forces `escalated` and pauses the loop.
 
 Then: the `loop_runs` row, the run-log line, the ledger attempt (fix patterns), a copy of the state file under `<runtime>/loops/state/<loop id>/<run id>.md` with the difference against the previous run (`detail.delta`, or `detail.quiet` when nothing moved), the registry (`next_run_at`, `last_run_id`, auto-pause on failure), and the worktree: removed when nothing changed, kept and listed in the **Inbox** otherwise.
 
-## 7. Reading a run
+## 8. Reading a run
 
 `E` opens the Loops view on the **Report** tab: what the selected run found
 and who has to act. It is the state file the run wrote, parsed into the
@@ -124,15 +151,15 @@ code and readiness. Outcome words are for the reader (`needs you`,
 A run whose harness has no prices in `pricing.toml` shows `unpriced
 (<harness>)`, never `$0.00`.
 
-## 8. The inbox
+## 9. The inbox
 
 The **Inbox** tab lists runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. `a` marks the run **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed.
 
-## 9. Antigravity
+## 10. Antigravity
 
 Not supported for loops in this version. agy 1.2.3 requires a `decision` in every `PreToolUse` reply and each value changes permission behaviour, so no selective path guard can be registered; its hooks and MCP entry are global installs, its skills and agents are user-level only, and sub-agent spawning is unverified. The spec's section 16 lists the probes and the two deliveries that bring it in.
 
-## 10. When something trips
+## 11. When something trips
 
 | Symptom | What to do |
 | --- | --- |
@@ -147,9 +174,9 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 | Run finished but did nothing | look at the session's scrollback (attach to it in Active); a loop run always bypasses the harness's own approval prompts because print mode has nobody to answer them, and the guard is the control |
 | Nothing runs | `[loops] enabled = false`, the kill switch, or the loop is paused; `agent-mux trace doctor` has a `loops` section |
 
-## 11. Command line
+## 12. Command line
 
-`agent-mux loop ls|add|rm|run|pause|resume|init|audit|status|report|runs|show|cost|inbox|decide` mirror the sidebar; `report <id>` prints what a run found and who has to act (`--run <run_id>` for an older one), `runs <id>` the folded timeline (`--all` unfolds it) and `show <run_id>` one run in full; `loop run <id> --now` performs one scheduler pass headlessly (for cron) and exits 0 for report-only or no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. The MCP tool `agent_mux_get_loop_context` gives a running loop its context recomputed now.
+`agent-mux loop ls|add|rm|run|pause|resume|init|audit|status|report|runs|show|cost|inbox|decide` mirror the sidebar; `add` takes `--model` and `--verifier-model`; `report <id>` prints what a run found and who has to act (`--run <run_id>` for an older one), `runs <id>` the folded timeline (`--all` unfolds it) and `show <run_id>` one run in full; `loop run <id> --now` performs one scheduler pass headlessly (for cron) and exits 0 for report-only or no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. The MCP tool `agent_mux_get_loop_context` gives a running loop its context recomputed now.
 
 Configuration (`profiles.toml`):
 

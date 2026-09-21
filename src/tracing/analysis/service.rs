@@ -595,7 +595,9 @@ impl TraceService {
     pub fn execute(&self, request: Request) -> Result<Envelope<serde_json::Value>, ServiceError> {
         let start = std::time::Instant::now();
         let deadline_duration = match request {
-            Request::AnalyzeSkills(_) | Request::CompareRuns(_) => {
+            // A briefing builds a card per session; five seconds is what
+            // the dossier and the skill analysis already allow.
+            Request::AnalyzeSkills(_) | Request::CompareRuns(_) | Request::Briefing(_) => {
                 std::time::Duration::from_secs(5)
             }
             _ => std::time::Duration::from_secs(2),
@@ -810,24 +812,26 @@ impl TraceService {
         let ws = self.config.scope.workspace_path().unwrap_or(Path::new(""));
         let (live, live_available) = self.load_live_sessions(now_ns);
 
-        let mut b = query::briefing(conn, ws, since_ns, until_ns, &live)?;
-
-        // Filter by provider if specified
-        if let Some(ref prov) = args.provider {
-            b.cards
-                .retain(|c| c.provider.as_deref() == Some(prov.as_str()));
-        }
-
         let filters_detail = format!("prov:{:?}", args.provider);
         let filters_hash = compute_filters_hash("briefing", &self.config.scope, &filters_detail);
 
+        // The cursor is decoded before the scan: the provider filter and the
+        // page both belong in SQL, so only the cards this page can show are
+        // built. One extra card tells the pager there is a next page.
         let mut offset = 0;
         if let Some(ref c) = args.cursor {
             let payload = self.codec.decode(c, &filters_hash, now_ns)?;
             offset = payload.offset;
         }
+        let scan = query::BriefingScan {
+            provider: args.provider.clone(),
+            session_key: None,
+            max_cards: offset + limit + 1 + live.len(),
+        };
 
-        let total_sessions = b.cards.len();
+        let b = query::briefing(conn, ws, since_ns, until_ns, &live, &scan)?;
+
+        let total_sessions = b.total_sessions;
         let mut paged_cards = if offset < b.cards.len() {
             b.cards.into_iter().skip(offset).collect::<Vec<_>>()
         } else {
@@ -1142,7 +1146,14 @@ impl TraceService {
         }
 
         // Build session card using query builder logic
-        let card = query::briefing(conn, cwd_path, 0, i64::MAX, &[])?
+        // One session, one card: the key is pushed into the scan rather
+        // than found by building a card for every session ever recorded.
+        let scan = query::BriefingScan {
+            session_key: Some(args.session_key.clone()),
+            max_cards: 1,
+            ..query::BriefingScan::default()
+        };
+        let card = query::briefing(conn, cwd_path, 0, i64::MAX, &[], &scan)?
             .cards
             .into_iter()
             .find(|c| c.session_key.as_deref() == Some(&args.session_key))

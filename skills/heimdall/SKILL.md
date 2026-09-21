@@ -1,6 +1,6 @@
 ---
 name: heimdall
-description: Use when the user asks for a briefing of active or recent coding sessions, or to evaluate, analyse, audit or optimise skills and subagents from the agent-mux trace store. Triggers include "morning briefing", "what happened overnight", "summarize my sessions", "analyse skills", "evaluate agents", "which skills are wasted", "why is this skill slow".
+description: Use when the user asks for a briefing of active or recent coding sessions, or to evaluate, analyse, audit or optimise skills and subagents from the agent-mux trace store. Triggers include "/heimdall", "$heimdall", "session briefing", "morning briefing", "what happened overnight", "summarize my sessions", "analyse skills", "evaluate agents", "which skills are wasted", "why is this skill slow".
 ---
 
 # Heimdall — session briefings and deep skill/agent analysis

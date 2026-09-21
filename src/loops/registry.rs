@@ -20,6 +20,15 @@ pub struct LoopEntry {
     pub profile: String,
     /// `claude` | `codex`.
     pub harness: String,
+    /// Model for the run's session (`--model`). Empty leaves the profile's
+    /// own model, and then the CLI's default. The pattern may suggest one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Model for the `loop-verifier` sub-agent, written into the agent file
+    /// the scaffolder installs. Empty means `inherit`: the verifier runs on
+    /// the same model as the run that calls it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub verifier_model: String,
     pub interval_s: u64,
     pub level: Level,
     pub enabled: bool,
@@ -194,6 +203,8 @@ pub fn new_entry(
         pattern: pattern.id.clone(),
         profile: profile.to_string(),
         harness: harness.to_string(),
+        model: pattern.model.clone().unwrap_or_default(),
+        verifier_model: pattern.verifier_model.clone().unwrap_or_default(),
         interval_s,
         level,
         enabled: true,
@@ -238,6 +249,8 @@ mod tests {
                 stable_fraction: 0.35,
                 early_exit_required: false,
             },
+            model: None,
+            verifier_model: None,
             prompt: None,
         }
     }

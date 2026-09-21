@@ -17,6 +17,7 @@ pub const USAGE: &str = "agent-mux workflow <command>
   skills                           the step skills and the harnesses they are installed for
   run <name> --workspace DIR [--harness claude|codex|agy] [--profile P]
       [--arg name=value …] [--budget N] [--max-cost USD] [--isolation none|worktree]
+      [--step <id>.<harness|profile|model|effort>=<value> …]  per-step, this run only
       [--resume RUN_ID] [--json]   run to completion and print the result;
                                    exit 0 finished, 1 failed, 2 cancelled, 3 budget exhausted
   plan \"<task>\" --workspace DIR [--harness H] [--profile P] [--budget N] [--run] [--save NAME] [--json]
@@ -47,6 +48,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--resume",
     "--save",
     "--arg",
+    "--step",
 ];
 
 impl Args {
@@ -62,7 +64,7 @@ impl Args {
             let t = &raw[i];
             if VALUE_FLAGS.contains(&t.as_str()) {
                 if let Some(v) = raw.get(i + 1) {
-                    if t == "--arg" {
+                    if t == "--arg" || t == "--step" {
                         a.multi.push((t.clone(), v.clone()));
                     } else {
                         a.values.insert(t.clone(), v.clone());
@@ -73,7 +75,7 @@ impl Args {
             } else if let Some((k, v)) = t.split_once('=')
                 && VALUE_FLAGS.contains(&k)
             {
-                if k == "--arg" {
+                if k == "--arg" || k == "--step" {
                     a.multi.push((k.to_string(), v.to_string()));
                 } else {
                     a.values.insert(k.to_string(), v.to_string());
@@ -359,7 +361,7 @@ async fn shutdown(mut h: Headless) {
 
 fn parse_args_flags(args: &Args) -> anyhow::Result<serde_json::Value> {
     let mut m = serde_json::Map::new();
-    for (_, kv) in &args.multi {
+    for (_, kv) in args.multi.iter().filter(|(f, _)| f == "--arg") {
         let (k, v) = kv
             .split_once('=')
             .ok_or_else(|| anyhow::anyhow!("--arg needs name=value, got {kv:?}"))?;
@@ -372,6 +374,30 @@ fn parse_args_flags(args: &Args) -> anyhow::Result<serde_json::Value> {
     } else {
         serde_json::Value::Object(m)
     })
+}
+
+/// `--step find.model=gpt-5-mini` (repeatable): a per-step override for
+/// this run only. `--step find.harness=codex` and `.profile`/`.effort` too.
+fn parse_step_flags(args: &Args) -> anyhow::Result<Vec<(String, String, String)>> {
+    let mut out = Vec::new();
+    for (_, raw) in args.multi.iter().filter(|(f, _)| f == "--step") {
+        let (target, value) = raw.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "--step takes <step>.<harness|profile|model|effort>=<value>, got {raw:?}"
+            )
+        })?;
+        let (step, key) = target.rsplit_once('.').ok_or_else(|| {
+            anyhow::anyhow!(
+                "--step takes <step>.<harness|profile|model|effort>=<value>, got {raw:?}"
+            )
+        })?;
+        out.push((
+            step.trim().to_string(),
+            key.trim().to_string(),
+            value.trim().to_string(),
+        ));
+    }
+    Ok(out)
 }
 
 async fn run_workflow(args: &Args) -> anyhow::Result<()> {
@@ -406,6 +432,7 @@ async fn run_workflow(args: &Args) -> anyhow::Result<()> {
             None => None,
         },
         resume_from: args.value("--resume").map(str::to_string),
+        step_overrides: parse_step_flags(args)?,
     };
     let mut h = headless()?;
     let run_id = h

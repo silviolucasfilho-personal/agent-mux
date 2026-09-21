@@ -179,7 +179,7 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
                 None => all.to_vec(),
             };
             let per_launch = match &exe {
-                Some(e) => format!("per launch from the Agents sidebar ({})", e.display()),
+                Some(e) => format!("per launch, every session ({})", e.display()),
                 None => "unavailable: the agent-mux binary path is not absolute".to_string(),
             };
             for p in providers {
