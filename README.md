@@ -311,11 +311,14 @@ pub enum Mode {
 
 ```text
 Main screen (sidebar visible)                          30 cols │ rest
-┌─ Active [1/2] ──────────┬─ Claude Code — ~/proj [working] [● 3t $0.12 ▸ Bash] ─┐
+┌─ Active [1/4] ──────────┬─ Claude Code — ~/proj [working] [● 3t $0.12 ▸ Bash] ─┐
 │ > 1 Claude Code [working]│                                                     │
-│   2 Codex [idle]        │      VT100 screen of the selected session            │
-├─ Agents [1/1] ──────────┤      (or the agent's briefing / history preview      │
-│ ⚡ Heimdall [agy]       │       depending on the focused sidebar section)      │
+│   ▾ ⚙ map-codebase 2/2▶ │      VT100 screen of the selected session            │
+│   ├ 2 read:src [working]│      (or the agent's briefing / history preview      │
+│   └ 3 read:tests [idle] │       depending on the focused sidebar section)      │
+│   ▸ ⟳ nightly-ci 1      │                                                      │
+├─ Agents [1/1] ──────────┤                                                      │
+│ ⚡ Heimdall [agy]       │                                                      │
 ├─ History [3/12] ────────┤                                                      │
 │ [C] Fix flaky test…     │                                                      │
 └─────────────────────────┴──────────────────────────────────────────────────────┘
@@ -328,8 +331,10 @@ There are three separate notions of "history": terminal scrollback (memory owned
 
 #### Active sidebar (`draw_active_sidebar`)
 
-Title `Active [<selected>/<count>]`. Each row shows a `>` marker, index `1`-`9`, profile name, a coloured status label, and a trace badge when the session is traced.
+Title `Active [<drawn position>/<count>]`. Each session row shows a `>` marker, index `1`-`9`, profile name, a coloured status label, and a trace badge when the session is traced.
 
+- **The tree** (`src/tree.rs`): a loop and a workflow run do not launch one session but a series of them — a run per interval, a session per step — so the list is a two-level tree rather than a flat one. Every session records the parent that launched it (`Session.group`, set from the `LoopLaunch` / `WorkflowLaunch` in `spawn_traced_full`); a loop groups by its registry id, so its successive runs stack under one header, and a workflow groups by run, so two runs of one document stay apart. `tree::build` takes one `Option<GroupRef>` per session and answers with rows; the family gathers at its first member and sessions with no parent keep their place. A header shows `▾`/`▸`, the kind's glyph (`⟳` loop, `⚙` workflow), the name, `running/total▶` (or just the count when nothing runs) and the pattern or short run id; a child hangs off it with `├`/`└` and is named by its step (workflow) or run (loop) rather than by its profile.
+- **Folding:** `space` folds the run the selected session belongs to. A folded header is one cursor stop standing for the whole family, so `j`/`k` skip it whole; the fold is keyed by parent (`App.collapsed_groups`), not by index, and survives sessions coming and going. `1`-`9` count the rows the tree draws, so the digit beside a row is the digit that selects it.
 - **Population:** `App.sessions`. Status from `Session::status(now)` in `src/status.rs`: `Exited(code)` beats `NeedsAttention` (a terminal bell arrived while the session was not focused, cleared on attach) beats `Working` (output within the last 2 seconds) beats `Idle`. Labels: `working` green, `idle` grey, `attention` yellow bold, `exit N` / `exited` red.
 - **Trace badge** (`trace_badge`): glyph `●` local, `◆` Langfuse, `◈` both; `[● TRACE]` before the first rollup; afterwards `[● <turns>t <cost>]`, or `<tokens> tok` when no cost is known. The main pane title uses the verbose form and appends `▸ <running tool>`.
 - **Refresh:** PTY output redraws immediately; the 250 ms tick keeps working/idle current; `TraceStats` events update the badge. The rollup is produced by the writer's commit hook running `query::launch_stats` (section 8) at most once per launch per second.
@@ -491,13 +496,18 @@ Opened by `T`. Backed by a **read-only** SQLite connection (`store::open_ro`) to
 ```text
 ┌─ Sessions (12) [a: this project] ─┬─ Turns (8)  41k tok  $0.34 · ~/proj ─┬─ Turn #7 · list · 9 obs · 12.3s · 6.1k tok · $0.05 ─┐
 │ > [C] 09-14 22:10 8t $0.34 ● Fix…  │ > #8  open     3.2s  $0.01  2🔧   fix  │ > 22:10:03 💬 assistant        1.1s  2.0k  $0.02 │
-│   [X] 09-14 21:02 3t $0.09   Add…  │   #7  closed  12.3s  $0.05  6🔧 1↻ ⚠ ✓ │   22:10:04 🔧 Bash              0.4s            │
-│   [A] 09-13 18:44 1t          Scan │   #6  closed   4.0s  $0.02  1🔧        │   22:10:05 ⏳ Edit                  …           │
+│   ▾⚙ 09-14 21:40 6t $0.21 map-co…  │   #7  closed  12.3s  $0.05  6🔧 1↻ ⚠ ✓ │   22:10:04 🔧 Bash              0.4s            │
+│    ├ [C] 3t $0.11 read:src         │   #6  closed   4.0s  $0.02  1🔧        │   22:10:05 ⏳ Edit                  …           │
+│    └ [C] 3t $0.10 read:tests       │                                       │                                                  │
+│   ▸⟳ 09-14 03:00 9t $0.44 nightly… │                                       │                                                  │
+│   [X] 09-14 21:02 3t $0.09   Add…  │                                       │                                                  │
 └────────────────────────────────────┴───────────────────────────────────────┴──────────────────────────────────────────────────┘
- [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [s] score  [a] all  [r] resume  [Esc] close
+ [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold run/subtree  [/] search  [s] score  [a] all  [r] resume  [Esc] close
 ```
 
 **Sessions pane.** `query::list_sessions` over the `session_stats` view with `SessionFilter { project_slug: current slug unless all_projects, since_ns: None, limit: 500 }`; newest `last_seen_ns` first. Row: `[C]`/`[X]`/`[A]` provider badge, `MM-DD HH:MM`, `<turns>t <cost>`, a green `●` when `open_turns > 0`, and title → cwd → session id, truncated to 40. Empty state suggests `[a]` or `agent-mux trace import --discover`.
+
+The pane is the same two-level tree as the Active sidebar (`src/tree.rs`), over traced sessions rather than live ones. `query::session_groups` reads the parent out of the launch rows' metadata — `loop_id` / `loop_run_id` / `loop_pattern` / `loop_level`, or `workflow_run_id` / `workflow` / `workflow_step`, written by `tracing::start_session` — for the newest 5,000 launches that carry one, newest launch winning per session key; sessions with no parent are simply absent and stay flat rows. A header carries the family's own numbers (latest `last_seen_ns`, summed turns and cost, `●` when any member has open turns) and a child drops the date, which is the header's, in favour of its step or run label. `space` on the Sessions pane folds the run the cursor sits in — the same key folds an observation subtree when the Detail pane has focus — and `focus_session` unfolds whatever hides its target.
 
 **Turns pane.** `query::list_traces(session_key)` over `trace_stats`, reversed so the newest ordinal is first. Title summarizes the session's tokens, cost and cwd. Row: `#ordinal`, status (`open` green, `aborted` red), `latency cost tools🔧`, `n↻` retries, `⚠` when `loops::warning_kinds(metadata)` is non-empty, `✓`/`✗` verdict from `scores::latest_trace_scores`, `n!` errors, and the turn name after the `profile: ` prefix. While a search or skill filter is active the title becomes `Search: <query> (<n>)`.
 
