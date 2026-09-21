@@ -6,7 +6,7 @@
 
 use crate::tracing::analysis::agents::{AgentDossier, analyze_agents};
 use crate::tracing::analysis::model::{AnalysisError, LiveSession, RuntimeState, SessionCard};
-use crate::tracing::analysis::query::briefing;
+use crate::tracing::analysis::query::{BriefingScan, briefing};
 use crate::tracing::analysis::skills::{SkillDossier, analyze_skills_for_dossier};
 use crate::tracing::inventory;
 use rusqlite::Connection;
@@ -520,9 +520,12 @@ pub fn build_dossier(
             session_since_ns,
             as_of_ns,
             inputs.live_sessions,
+            &BriefingScan::with_max(config.max_session_cards),
         )?;
-        let total_matching = b.cards.len();
-        let truncated = b.cards.len() > config.max_session_cards;
+        // The cap is in SQL now, so the count of matching sessions comes
+        // from the rollup rather than from the cards that survived it.
+        let total_matching = b.total_sessions;
+        let truncated = total_matching > b.cards.len();
         let mut cards = b.cards;
         cards.sort_by(|a, b| {
             let a_live = a.runtime_state != RuntimeState::Exited;

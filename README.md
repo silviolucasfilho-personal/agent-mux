@@ -164,7 +164,7 @@ Terminal rendering and telemetry are separate paths. The PTY's escape sequences 
 | Langfuse exporter | OS thread (optional) | `langfuse/mod.rs` | Batches OTLP spans and posts them. |
 | Briefing refresh | `spawn_blocking` | `app.rs` | Runs the Heimdall briefing query off the UI thread. |
 | Hook process | Separate process per hook event | harness | `agent-mux trace hook …` invoked by the CLI; writes one `hook_events` row and exits. |
-| MCP server | Separate process per agent session | harness | `agent-mux mcp serve --stdio` started by the harness for an agent launch; answers the ten `agent_mux_*` tools from `TraceService` and exits on EOF. |
+| MCP server | Separate process per session | harness | `agent-mux mcp serve --stdio` started by the harness for any session; answers the ten `agent_mux_*` tools from `TraceService` and exits on EOF. |
 
 ### Event loop
 
@@ -191,6 +191,7 @@ In this exact order (`src/main.rs`): the loop exits on `should_quit`, channel cl
 
 ```toml
 hide_sidebar = false
+# bypass_approvals = true   # the default: launches skip the harness's approval prompts
 
 [[profiles]]
 name = "Claude Code"
@@ -198,7 +199,7 @@ command = "claude"
 args = []
 # default_dir = "/absolute/path/to/project"
 # model = "your-installed-harness-model-id"
-bypass_approvals = false
+# bypass_approvals = false  # this profile keeps its prompts
 
 [profiles.tracing]
 enabled = true
@@ -244,7 +245,7 @@ mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 | Setting | Resolution (`config::resolve_tracing`) |
 | --- | --- |
 | Profile `name`, `command` | Required. The command is launched as an argument vector, never through a shell. Provider detection uses the file stem of `command` (`claude`, `codex`, `agy`; `.exe` stripped). |
-| Profile `args`, `default_dir`, `model`, `bypass_approvals` | Empty args; optional initial directory; unset model/bypass pass no flag. The launch dialog can override per launch. |
+| Profile `args`, `default_dir`, `model`, `bypass_approvals` | Empty args; optional initial directory; an unset model passes no flag. Approvals are bypassed unless the profile or the top-level `bypass_approvals` says otherwise (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex). The launch dialog can override per launch. |
 | `tracing.enabled` | Absent or `true` traces; only `false` turns the TUI runtime off. `trace` CLI commands re-resolve with `enabled = true` so the store stays readable. |
 | `db_path` | Config value (trimmed, `~` expanded) → `AGENT_MUX_TRACE_DB` → `~/.agent-mux/traces.db` → `traces.db`. Only `db_path` gets tilde expansion. |
 | `content_mode` | `"metadata"` selects metadata-only; any other value, including typos, is `full`. |
@@ -262,7 +263,7 @@ mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 | `tracing.loops` | Warning thresholds (25 / 6 / 3); `0` disables one. |
 | `tracing.models` | Price rows: `id`, optional `provider`, `match` patterns, `input`, `output`, optional `cache_read`, `cache_write`, `cache_write_1h`, `reasoning` (USD per million tokens). Rows with an empty id or negative input/output are dropped silently. |
 | Per-profile `[profiles.tracing]` | `enabled`, `provider`, `content_mode`, `inject_session_id`, `hooks`, `backend`, `max_cost_usd`, `max_turns` override the global defaults for that profile. |
-| `[agents] hydrate`, `mcp` | `true` and `"auto"` by default (`config::resolve_agents`). `hydrate = false` writes no briefing snapshots; `mcp = "off"` never registers the MCP server, whatever a package declares. |
+| `[agents] hydrate`, `mcp` | `true` and `"auto"` by default (`config::resolve_agents`). `hydrate = false` writes no briefing snapshots; `mcp = "off"` never registers the MCP server for any session or harness. |
 | `[loops] enabled`, `max_concurrent`, `catch_up`, `run_timeout_s`, `worktrees_dir` | `true`, `1`, `"once"`, `900`, `".loop-worktrees"` (`config::resolve_loops`). `enabled = false` leaves manual runs only; `catch_up = "skip"` moves a slot missed while agent-mux was closed to the next one; the timeout floors at 30 s. |
 
 Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secret_key`, `flush_interval_ms` default 3,000) or from `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` then `LANGFUSE_BASE_URL` for the host (default `https://cloud.langfuse.com`). If the `[tracing.langfuse]` sub-table exists at all, the legacy `[tracing] host/public_key/secret_key` fields are ignored entirely; they are used only when the sub-table is absent, and trip a migration notice. Both keys must resolve or the remote backend is unavailable and launches fall back to local. A trailing `/` or `/api/public` is stripped from the host.
@@ -284,7 +285,7 @@ Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secr
 | `AGENT_MUX`, `AGENT_MUX_SESSION_ID`, `AGENT_MUX_EXE` | Set on every traced child: marker, the **launch id**, and the binary path (the last only when hooks are registered). |
 | `AGENT_MUX_BIN`, `AGENT_MUX_SKILL_ID` | Passed to skill launches. |
 | `AGENT_MUX_BRIEFING`, `AGENT_MUX_BRIEFING_AS_OF` | Path and RFC 3339 time of the briefing snapshot written for an agent launch (section 11). |
-| `AGENT_MUX_MCP`, `AGENT_MUX_WORKSPACE` | `registered`, `installed` or `unavailable`: how the agent session reaches the MCP server; the workspace the server is scoped to. |
+| `AGENT_MUX_MCP`, `AGENT_MUX_WORKSPACE` | `registered`, `installed` or `unavailable`: how the session reaches the MCP server; the workspace the server is scoped to. Set on every session, not only agent launches. |
 | `~/.agent-mux/snapshots/briefings/<key>.json` | Briefing snapshots, owner-only, removed when the session exits and swept after 24 hours. |
 | `AGENT_MUX_AGY_BIN`, `AGENT_MUX_MCP_DEBUG` | Tests point the agy installer at a fake `agy`; the debug variable logs MCP method names on the server's stderr. |
 | `AGENT_MUX_HOOK_DEBUG` | When present (any value), `trace hook` prints `inserted=<bool> <error>` on stderr. |
@@ -785,7 +786,11 @@ Because ids are content-derived, replaying a transcript, re-importing a file, or
 
 ### 5.9 Import (`trace import`)
 
-`import_transcript` reuses the identical `parse_line` → `TurnAssembler::feed` path. Provider is `--provider` or `detect_provider`; the session id and cwd come from `session_meta` (Codex), the first UUID-shaped parent directory (Antigravity), or the file stem plus a scan of the first 50 lines (Claude). A session flagged `legacy_capture` has its capture rows replaced transactionally first. `started_ns` is the transcript's first timestamp, then file mtime, then now, so re-imports do not look freshly active. Each line's own timestamp is used as the receive time. Antigravity imports then read the whole conversation database. Ops are applied in chunks of 512, followed by `recompute_session_bounds`. `--discover` enumerates every transcript the history viewer finds plus `rollout-*.jsonl` under `<codex_dir>/sessions` to depth 6.
+`import_transcript` reuses the identical `parse_line` → `TurnAssembler::feed` path. Provider is `--provider` or `detect_provider`; the session id and cwd come from `session_meta` (Codex), the first UUID-shaped parent directory (Antigravity), or the file stem plus a scan of the first 50 lines (Claude). `started_ns` is the transcript's first timestamp, then file mtime, then now, so re-imports do not look freshly active. Each line's own timestamp is used as the receive time. Antigravity imports then read the whole conversation database.
+
+A transcript that yields no trace and no observation is **skipped whole**: no session row, no launch row, nothing. Such files are common — a CLI opened and closed without a prompt writes only its `agent-setting`, `mode`, `permission-mode` and `cost-state` lines, and a slash command the CLI rejects (`Unknown command: /x`) ends the session before the first turn opens. Seeding a session for one leaves a permanently empty row in every listing and in the dossier. `ImportSummary::empty` reports the skip and the CLI prints `skipped <path>: no turns in transcript`; the run's closing line counts them separately.
+
+Once a transcript does carry a turn, a session flagged `legacy_capture` has its capture rows replaced transactionally, ops are applied in chunks of 512, and `recompute_session_bounds` follows. `--discover` enumerates every transcript the history viewer finds plus `rollout-*.jsonl` under `<codex_dir>/sessions` to depth 6.
 
 ### 5.10 Antigravity usage database (`agy_usage.rs`)
 
@@ -921,13 +926,13 @@ Rows bind by launch id (inherited environment) or, once the session is known, by
 
 ### 6.7 MCP registration (agent tools)
 
-The same per-launch pattern serves the read-only MCP server that agents use (`src/mcp/`). For an agent launch whose package has `[agent] mcp = "auto"` (the default with `trace.read`) and `[agents] mcp = "auto"`, `mcp::register::plan` produces:
+The same per-launch pattern serves the read-only MCP server (`src/mcp/`). Every session gets it, agent launch or not: the store is local, read-only and scoped to the launch's workspace, so a session can ask what happened in the last one without a skill. `[agents] mcp = "off"` is the one switch that turns it off, for every session and every harness. `App::ensure_mcp` decides per launch and installs what a harness needs first; `mcp::register::plan` produces:
 
 | Harness | Mechanism | Verified flag / file |
 | --- | --- | --- |
 | Claude Code | Per launch: `--mcp-config '{"mcpServers":{"agent-mux":{"type":"stdio","command":"<binary>","args":["mcp","serve","--stdio","--db","<store>","--workspace","<cwd>"]}}}'`. The user's own servers stay active (`--strict-mcp-config` is not passed). | `claude --help` 2.1.273 |
 | Codex | Per launch: `-c 'mcp_servers.agent-mux.command="<binary>"' -c 'mcp_servers.agent-mux.args=[…]'`. | `codex --help` 0.154.0 |
-| Antigravity | Installed once: `agent-mux mcp install agy` runs `agy mcp add agent-mux <binary> -- mcp serve --stdio --workspace-from-env`, which writes `~/.gemini/config/mcp_config.json`; the launch exports `AGENT_MUX_WORKSPACE` for scoping. `agent-mux mcp uninstall agy` runs `agy mcp remove`. | `agy mcp add` 1.2.3 (no per-launch flag) |
+| Antigravity | Installed once: `agy mcp add agent-mux <binary> -- mcp serve --stdio --workspace-from-env` writes `~/.gemini/config/mcp_config.json`; the launch exports `AGENT_MUX_WORKSPACE` for scoping. agent-mux runs it itself before the first agy session of a run when the entry is missing, stale or disabled, which is what `agent-mux mcp install agy` does by hand; `agent-mux mcp uninstall agy` runs `agy mcp remove`. A sandboxed run (a test, an embedded App) never writes that file. | `agy mcp add` 1.2.6 (no per-launch flag) |
 
 The child environment gets `AGENT_MUX_MCP=registered|installed|unavailable` and `AGENT_MUX_WORKSPACE`. Registration needs a trace store (tracing on) and an absolute binary path; otherwise the launch proceeds without tools, one notice says why, and the CLI remains the fallback. `agent-mux mcp status` and the `mcp` section of `trace doctor` (which spawns the server and runs `initialize`, `tools/list` and `agent_mux_get_health`) report the state.
 

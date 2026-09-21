@@ -31,7 +31,7 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 | `capabilities` | none | `trace.read` switches the preview pane to the telemetry dashboard. |
 | `startup_prompt` | none | Appended to the invocation as the session's first message. |
 | `[agent] hydrate` | none | Snapshots Rust writes before launch; `["dossier"]` (schema 2 startup dossier) or `["briefing"]` (schema 1 legacy briefing). Needs `trace.read`. |
-| `[agent] mcp` | `auto` with `trace.read`, else `off` | Whether the launch registers the agent-mux MCP server (Claude and Codex per launch; Antigravity through `agent-mux mcp install agy`). |
+| `[agent] mcp` | `auto` with `trace.read`, else `off` | Recorded on the package, but the server is attached to every session whatever a package says: the store is local, read-only and scoped to the launch's workspace. Claude Code and Codex take it on the command line; Antigravity reads a global entry, which agent-mux writes before the first agy session of a run (what `agent-mux mcp install agy` does). `[agents] mcp = "off"` in profiles.toml is the one switch that turns it off, for every session and every harness. |
 | `hidden` | `false` | Not listed in the Agents sidebar or the Skills view; still installed and launched by workflows (the `wf-*` step skills, `workflow-author`). |
 | `writes` | `false` | The skill edits files; a workflow step running it must be isolated in a worktree (`docs/workflows.md`). |
 | `auto_approve` | `false` | The session launches with every tool permission pre-granted, whichever harness runs it (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex). The package's own demand: it wins over a profile that leaves approvals on, never the other way round. |
@@ -63,7 +63,7 @@ Every package is listed in the Agents section of the sidebar; a `trace.read` pac
 1. installs or refreshes the skill in that harness's directory (manifest hash check; unchanged packages are left alone),
 2. builds the harness command line: the model from your profile for that harness and the permission flags from your profile or the package's `auto_approve`, then the opening prompt `<invocation> <startup_prompt>` as the positional prompt (Claude Code, Codex) or via `--prompt-interactive` (Antigravity),
 3. for a package with `[agent] hydrate`, computes the briefing in Rust and writes it to a snapshot file; the prompt ends with a sentence pointing at `$AGENT_MUX_BRIEFING`,
-4. registers the read-only MCP server for the harness when the package's `[agent] mcp` allows it (`$AGENT_MUX_MCP` says `registered`, `installed` or `unavailable`),
+4. registers the read-only MCP server for the harness, as it does for every session (`$AGENT_MUX_MCP` says `registered`, `installed` or `unavailable`),
 5. spawns the session with `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` (this executable), `AGENT_MUX_TRACE_DB` (the store the TUI writes) and `AGENT_MUX_WORKSPACE` in its environment, and records `skill_id` / `skill_harness` on the launch row so the Executions tab can find it later.
 
 The same preparation runs for sessions restored at startup and for respawns.

@@ -112,6 +112,56 @@ pub struct ArgSpec {
     pub required: bool,
 }
 
+/// Which harness and model run a session. A step sets it; a `verify` block
+/// and a `judge` may set their own, so the refuters of a finding or the
+/// judges of a tournament can be cheaper or stronger than the work they
+/// check. An unset field falls back to the step's, then to the run's.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Runner {
+    pub harness: Option<String>,
+    pub profile: Option<String>,
+    pub model: Option<String>,
+    /// Reasoning effort, where the harness takes one (Codex).
+    pub effort: Option<String>,
+}
+
+impl Runner {
+    pub fn is_empty(&self) -> bool {
+        self.harness.is_none()
+            && self.profile.is_none()
+            && self.model.is_none()
+            && self.effort.is_none()
+    }
+
+    /// `self` where it is set, `base` otherwise.
+    pub fn over(&self, base: &Runner) -> Runner {
+        Runner {
+            harness: self.harness.clone().or_else(|| base.harness.clone()),
+            profile: self.profile.clone().or_else(|| base.profile.clone()),
+            model: self.model.clone().or_else(|| base.model.clone()),
+            effort: self.effort.clone().or_else(|| base.effort.clone()),
+        }
+    }
+
+    /// How it reads in a listing: `codex · gpt-5-mini`.
+    pub fn label(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if let Some(h) = &self.harness {
+            parts.push(h);
+        }
+        if let Some(p) = &self.profile {
+            parts.push(p);
+        }
+        if let Some(m) = &self.model {
+            parts.push(m);
+        }
+        if let Some(e) = &self.effort {
+            parts.push(e);
+        }
+        parts.join(" · ")
+    }
+}
+
 /// A `verify = { … }` table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verify {
@@ -120,6 +170,8 @@ pub struct Verify {
     pub result: Option<String>,
     pub keep: Option<Predicate>,
     pub keep_text: Option<String>,
+    /// The refuters' own harness and model; empty inherits the step's.
+    pub runner: Runner,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +195,8 @@ pub struct Step {
     pub take: Option<usize>,
     pub branches: BTreeMap<String, Vec<String>>,
     pub judge: Option<Actor>,
+    /// The judge's own harness and model; empty inherits the step's.
+    pub judge_runner: Runner,
     pub n: Option<usize>,
     pub rounds_without_new: usize,
     pub max_rounds: usize,
@@ -179,6 +233,37 @@ impl Workflow {
 
     pub fn step_index(&self, id: &str) -> Option<usize> {
         self.steps.iter().position(|s| s.id == id)
+    }
+
+    /// The step runner of `s`: what a session of that step runs on.
+    pub fn runner_of(step: &Step) -> Runner {
+        Runner {
+            harness: step.harness.clone(),
+            profile: step.profile.clone(),
+            model: step.model.clone(),
+            effort: step.effort.clone(),
+        }
+    }
+
+    /// Every harness named anywhere in the document: a step, a verify
+    /// block or a judge. The run's own harness is not included.
+    pub fn harnesses_used(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |h: &Option<String>| {
+            if let Some(h) = h
+                && !out.contains(h)
+            {
+                out.push(h.clone());
+            }
+        };
+        for s in &self.steps {
+            push(&s.harness);
+            push(&s.judge_runner.harness);
+            if let Some(v) = &s.verify {
+                push(&v.runner.harness);
+            }
+        }
+        out
     }
 
     /// Every skill the document references (steps, verify, judge).
@@ -262,6 +347,29 @@ struct RawVerify {
     votes: usize,
     result: Option<String>,
     keep: Option<String>,
+    harness: Option<String>,
+    profile: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+/// `judge = "wf-judge"` or `judge = { skill = …, harness = …, model = … }`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawJudge {
+    Name(String),
+    Table(RawJudgeTable),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawJudgeTable {
+    skill: Option<String>,
+    prompt: Option<String>,
+    harness: Option<String>,
+    profile: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 fn one() -> usize {
@@ -288,7 +396,7 @@ struct RawStep {
     take: Option<usize>,
     #[serde(default)]
     branches: BTreeMap<String, Vec<String>>,
-    judge: Option<String>,
+    judge: Option<RawJudge>,
     judge_prompt: Option<String>,
     n: Option<usize>,
     rounds_without_new: Option<usize>,
@@ -427,22 +535,54 @@ pub fn parse(text: &str) -> Result<Workflow, Vec<String>> {
                 if v.votes == 0 {
                     problems.push(format!("{ctx}: verify.votes must be at least 1"));
                 }
+                let runner = Runner {
+                    harness: v.harness,
+                    profile: v.profile,
+                    model: v.model,
+                    effort: v.effort,
+                };
                 actor.map(|actor| Verify {
                     actor,
                     votes: v.votes.max(1),
                     result: v.result,
                     keep,
                     keep_text: v.keep,
+                    runner,
                 })
             }
         };
-        let judge = match (r.judge, r.judge_prompt) {
-            (Some(s), None) => Some(Actor::Skill(s)),
+        let mut judge_runner = Runner::default();
+        let judge_from_table = match r.judge {
+            Some(RawJudge::Name(name)) => Some(Actor::Skill(name)),
+            Some(RawJudge::Table(t)) => {
+                judge_runner = Runner {
+                    harness: t.harness,
+                    profile: t.profile,
+                    model: t.model,
+                    effort: t.effort,
+                };
+                match (t.skill, t.prompt) {
+                    (Some(s), None) => Some(Actor::Skill(s)),
+                    (None, Some(p)) => Some(Actor::Prompt(p)),
+                    (None, None) => {
+                        problems.push(format!("{ctx}: judge needs a skill or a prompt"));
+                        None
+                    }
+                    (Some(_), Some(_)) => {
+                        problems.push(format!("{ctx}: judge takes a skill or a prompt, not both"));
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let judge = match (judge_from_table, r.judge_prompt) {
+            (Some(a), None) => Some(a),
             (None, Some(p)) => Some(Actor::Prompt(p)),
             (None, None) => None,
-            (Some(_), Some(_)) => {
+            (Some(a), Some(_)) => {
                 problems.push(format!("{ctx}: give either judge or judge_prompt"));
-                None
+                Some(a)
             }
         };
         let args: BTreeMap<String, Value> = r
@@ -480,6 +620,7 @@ pub fn parse(text: &str) -> Result<Workflow, Vec<String>> {
             take: r.take,
             branches: r.branches,
             judge,
+            judge_runner,
             n: r.n,
             rounds_without_new: r.rounds_without_new.unwrap_or(2),
             max_rounds: r.max_rounds.unwrap_or(10),

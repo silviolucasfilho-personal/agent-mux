@@ -343,6 +343,14 @@ pub struct Config {
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
+    /// Whether a new session starts with the harness's approval prompts
+    /// bypassed (`--dangerously-skip-permissions` on Claude Code and
+    /// Antigravity, `--yolo` on Codex). Default true: agent-mux runs the
+    /// harness in its own pane and the prompts interrupt the work. A
+    /// profile's own `bypass_approvals` wins over this, and the New
+    /// session dialog shows what a launch will do before it starts it.
+    #[serde(default)]
+    pub bypass_approvals: Option<bool>,
     /// The editor the Configuration view and `agent-mux config edit` open
     /// (`"code --wait"`); `$VISUAL`, then `$EDITOR`, then `vi` otherwise.
     #[serde(default)]
@@ -724,6 +732,7 @@ pub fn load() -> anyhow::Result<Config> {
         loops: None,
         workflows: None,
         hide_sidebar: false,
+        bypass_approvals: None,
         editor: None,
         loaded_from: None,
         legacy_langfuse_section: false,
@@ -751,6 +760,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
         loops: None,
         workflows: None,
         hide_sidebar: false,
+        bypass_approvals: None,
         editor: None,
         loaded_from: None,
         legacy_langfuse_section: false,

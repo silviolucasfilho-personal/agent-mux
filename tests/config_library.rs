@@ -269,6 +269,7 @@ fn the_scaffolder_writes_library_skills_agents_and_templates() {
     let caps = Caps {
         max_runs_per_day: 2,
         max_tokens_per_day: 100_000,
+        verifier_model: String::new(),
     };
     let report =
         scaffold_with_library(&f.library, &ws, &daily, Harness::Claude, Level::L1, &caps).unwrap();
@@ -346,6 +347,7 @@ fn push_rewrites_loop_skills_in_registered_workspaces() {
     let caps = Caps {
         max_runs_per_day: 2,
         max_tokens_per_day: 100_000,
+        verifier_model: String::new(),
     };
     scaffold_with_library(&f.library, &ws, &daily, Harness::Claude, Level::L1, &caps).unwrap();
     let entry = registry::new_entry(

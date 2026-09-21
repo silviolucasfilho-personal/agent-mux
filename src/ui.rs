@@ -3810,6 +3810,28 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
         dim,
     ));
     lines.push(field(
+        "Model",
+        format!("{} ", dialog.model),
+        dialog.field == LoopField::Model,
+    ));
+    lines.push(Line::styled(
+        "            the run's model; blank keeps the profile's",
+        dim,
+    ));
+    lines.push(field(
+        "Verifier",
+        format!("{} ", dialog.verifier_model),
+        dialog.field == LoopField::VerifierModel,
+    ));
+    lines.push(Line::styled(
+        if dialog.pattern().is_some_and(|p| p.verifier) {
+            "            the loop-verifier sub-agent's model; blank inherits the run's"
+        } else {
+            "            this pattern runs no verifier"
+        },
+        dim,
+    ));
+    lines.push(field(
         "Every",
         format!("{} ", dialog.every),
         dialog.field == LoopField::Every,
@@ -4191,6 +4213,27 @@ fn draw_workflow_preview(f: &mut Frame, area: Rect, app: &App) {
                         s.kind.label()
                     )),
                 ]));
+                // Who runs this step, when the document says something
+                // other than "the run's harness and model".
+                let step_runner = crate::workflows::document::Workflow::runner_of(s);
+                let mut on: Vec<String> = Vec::new();
+                if !step_runner.is_empty() {
+                    on.push(format!("on {}", step_runner.label()));
+                }
+                if let Some(v) = &s.verify
+                    && !v.runner.is_empty()
+                {
+                    on.push(format!("refuters on {}", v.runner.label()));
+                }
+                if !s.judge_runner.is_empty() {
+                    on.push(format!("judge on {}", s.judge_runner.label()));
+                }
+                if !on.is_empty() {
+                    lines.push(Line::styled(
+                        format!("                {}", on.join(" · ")),
+                        dim,
+                    ));
+                }
             }
             if !doc.args.is_empty() {
                 lines.push(Line::raw(""));

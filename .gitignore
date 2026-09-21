@@ -1,3 +1,6 @@
 /target
 profiles.toml
 .worktrees/
+
+# Cargo artifacts from running tests inside the vendored crate.
+vendor/*/target/

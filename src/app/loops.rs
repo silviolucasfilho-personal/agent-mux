@@ -165,6 +165,11 @@ pub enum LoopField {
     Workspace,
     Pattern,
     Profile,
+    /// The model the run's session uses. Blank leaves the profile's own.
+    Model,
+    /// The model the `loop-verifier` sub-agent uses. Blank means it
+    /// inherits the run's, which is what the shipped agent file says.
+    VerifierModel,
     Every,
     Level,
     MaxRuns,
@@ -174,10 +179,12 @@ pub enum LoopField {
 }
 
 impl LoopField {
-    pub const ALL: [LoopField; 9] = [
+    pub const ALL: [LoopField; 11] = [
         LoopField::Workspace,
         LoopField::Pattern,
         LoopField::Profile,
+        LoopField::Model,
+        LoopField::VerifierModel,
         LoopField::Every,
         LoopField::Level,
         LoopField::MaxRuns,
@@ -201,6 +208,8 @@ pub struct LoopDialogState {
     /// `(profile name, harness)` of the eligible profiles.
     pub profiles: Vec<(String, Harness)>,
     pub profile_idx: usize,
+    pub model: String,
+    pub verifier_model: String,
     pub every: String,
     pub level: Level,
     pub max_runs: String,
@@ -239,6 +248,8 @@ impl LoopDialogState {
                 .unwrap_or(0),
             profiles: eligible,
             profile_idx: 0,
+            model: String::new(),
+            verifier_model: String::new(),
             every: String::new(),
             level: Level::L1,
             max_runs: String::new(),
@@ -271,6 +282,8 @@ impl LoopDialogState {
         {
             d.profile_idx = i;
         }
+        d.model = entry.model.clone();
+        d.verifier_model = entry.verifier_model.clone();
         d.every = crate::loops::format_interval(entry.interval_s);
         d.level = entry.level;
         d.max_runs = entry.max_runs_per_day.to_string();
@@ -291,6 +304,12 @@ impl LoopDialogState {
         self.every = crate::loops::format_interval(p.default_interval_s);
         self.max_runs = p.max_runs_per_day.to_string();
         self.max_tokens = p.max_tokens_per_day.to_string();
+        // A pattern may suggest the models its work deserves; an edited
+        // loop keeps what it already had.
+        if self.editing.is_none() {
+            self.model = p.model.clone().unwrap_or_default();
+            self.verifier_model = p.verifier_model.clone().unwrap_or_default();
+        }
     }
 
     pub fn harness(&self) -> Option<Harness> {
@@ -344,6 +363,8 @@ impl LoopDialogState {
 
     fn text_mut(&mut self) -> Option<&mut String> {
         match self.field {
+            LoopField::Model => Some(&mut self.model),
+            LoopField::VerifierModel => Some(&mut self.verifier_model),
             LoopField::Every => Some(&mut self.every),
             LoopField::MaxRuns => Some(&mut self.max_runs),
             LoopField::MaxTokens => Some(&mut self.max_tokens),
@@ -400,6 +421,8 @@ impl LoopDialogState {
             pattern,
             profile,
             harness,
+            model: self.model.trim().to_string(),
+            verifier_model: self.verifier_model.trim().to_string(),
             interval_s,
             level: self.level,
             max_runs,
@@ -432,6 +455,10 @@ pub struct ValidatedLoop {
     pub pattern: &'static crate::loops::Pattern,
     pub profile: String,
     pub harness: Harness,
+    /// Blank: the profile's own model, then the CLI's default.
+    pub model: String,
+    /// Blank: the verifier inherits the run's model.
+    pub verifier_model: String,
     pub interval_s: u64,
     pub level: Level,
     pub max_runs: u32,
@@ -1259,7 +1286,11 @@ impl App {
         // harness's own prompts are bypassed; the PreToolUse guard (gate,
         // report-only, no push) and the worktree are the controls.
         let options = crate::harness::LaunchOptions {
-            model: profile.model.clone(),
+            // the loop's own model wins over the profile's: a loop is a
+            // standing job, and what it costs per run is part of it
+            model: Some(entry.model.clone())
+                .filter(|m| !m.trim().is_empty())
+                .or_else(|| profile.model.clone()),
             bypass_approvals: true,
             resume: crate::harness::Resume::Off,
             one_shot: Some(prompt),
@@ -1283,14 +1314,7 @@ impl App {
 
         // MCP registration and environment
         let mut extra_args: Vec<String> = Vec::new();
-        let exe = crate::tracing::hooks::register::current_exe();
-        let registration = crate::mcp::register::plan(
-            Some(harness),
-            exe.as_deref(),
-            self.trace_db_path.as_deref(),
-            &entry.workspace,
-            &self.skill_home(),
-        );
+        let registration = self.ensure_mcp(harness.as_str(), &entry.workspace);
         if let crate::mcp::register::Registration::PerLaunch { args } = &registration {
             extra_args.extend(args.iter().cloned());
         }
@@ -2021,6 +2045,7 @@ impl App {
             let caps = crate::loops::scaffold::Caps {
                 max_runs_per_day: v.max_runs,
                 max_tokens_per_day: v.max_tokens,
+                verifier_model: v.verifier_model.clone(),
             };
             match crate::loops::scaffold::scaffold(
                 &v.workspace,
@@ -2073,6 +2098,8 @@ impl App {
             ),
         };
         entry.level = v.level;
+        entry.model = v.model.clone();
+        entry.verifier_model = v.verifier_model.clone();
         entry.max_runs_per_day = v.max_runs;
         entry.max_tokens_per_day = v.max_tokens;
         entry.max_cost_usd_per_run = v.max_cost;

@@ -676,18 +676,25 @@ impl Grid {
     }
 
     pub fn col_wrap(&mut self, width: u16, wrap: bool) {
-        if self.pos.col > self.size.cols - width {
+        // Local patch (agent-mux): a degenerate grid used to panic here.
+        // `cols - width` underflowed whenever a glyph was wider than the
+        // grid, and on a one-row grid the row being left scrolls off the
+        // top, so `prev_pos.row -= scrolled` underflowed and the row lookup
+        // that follows found nothing to unwrap. agent-mux reaches this with
+        // a 1x1 pane, which is what it computes when it starts without a
+        // terminal size (CI, `script(1)`, a resize to zero).
+        if self.pos.col > self.size.cols.saturating_sub(width) {
             let mut prev_pos = self.pos;
             self.pos.col = 0;
             let scrolled = self.row_inc_scroll(1);
-            prev_pos.row -= scrolled;
+            prev_pos.row = prev_pos.row.saturating_sub(scrolled);
             let new_pos = self.pos;
-            self.drawing_row_mut(prev_pos.row)
-                // we assume self.pos.row is always valid, and so prev_pos.row
-                // must be valid because it is always less than or equal to
-                // self.pos.row
-                .unwrap()
-                .wrap(wrap && prev_pos.row + 1 == new_pos.row);
+            // The row may have scrolled away entirely, in which case there
+            // is nothing left to mark as wrapped -- and the equality below
+            // is false anyway, so the mark would have been cleared.
+            if let Some(row) = self.drawing_row_mut(prev_pos.row) {
+                row.wrap(wrap && prev_pos.row + 1 == new_pos.row);
+            }
         }
     }
 
@@ -716,15 +723,20 @@ impl Grid {
         }
     }
 
+    // Local patch (agent-mux): saturating, so a zero-row or zero-column
+    // grid clamps to 0 instead of underflowing. agent-mux can compute such
+    // a size from a terminal narrower than its sidebar.
     fn row_clamp(&mut self) {
-        if self.pos.row > self.size.rows - 1 {
-            self.pos.row = self.size.rows - 1;
+        let last = self.size.rows.saturating_sub(1);
+        if self.pos.row > last {
+            self.pos.row = last;
         }
     }
 
     fn col_clamp(&mut self) {
-        if self.pos.col > self.size.cols - 1 {
-            self.pos.col = self.size.cols - 1;
+        let last = self.size.cols.saturating_sub(1);
+        if self.pos.col > last {
+            self.pos.col = last;
         }
     }
 }

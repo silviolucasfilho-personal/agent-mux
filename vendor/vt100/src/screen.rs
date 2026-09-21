@@ -707,6 +707,15 @@ impl Screen {
         let size = self.grid().size();
         let attrs = self.attrs;
 
+        // Local patch (agent-mux): a grid with no columns has nowhere to
+        // put a character, and every cell lookup below would find nothing
+        // to unwrap. agent-mux reaches this when its terminal is narrower
+        // than the sidebar. Dropping the character is the only thing a
+        // zero-width screen can mean.
+        if size.cols == 0 {
+            return;
+        }
+
         let width = c.width();
         if width.is_none() && (u32::from(c)) < 256 {
             // don't even try to draw control characters
@@ -726,20 +735,22 @@ impl Screen {
         // reconsidering this behavior, but only with a really good reason
         // (xterm handles this by introducing the concept of triple width
         // cells, which i really don't want to do).
+        // Local patch (agent-mux): `size.cols - width` underflowed for a
+        // glyph wider than the grid, and `size.cols - 1` underflowed on a
+        // zero-column one; the cell lookup then had nothing to unwrap. A
+        // grid too small to hold the glyph simply has no previous cell to
+        // inspect, so it does not wrap.
         let mut wrap = false;
-        if pos.col > size.cols - width {
-            let last_cell = self
-                .grid()
-                .drawing_cell(crate::grid::Pos {
-                    row: pos.row,
-                    col: size.cols - 1,
-                })
-                // pos.row is valid, since it comes directly from
-                // self.grid().pos() which we assume to always have a valid
-                // row value. size.cols - 1 is also always a valid column.
-                .unwrap();
-            if last_cell.has_contents() || last_cell.is_wide_continuation() {
-                wrap = true;
+        if pos.col > size.cols.saturating_sub(width) {
+            let last_cell = self.grid().drawing_cell(crate::grid::Pos {
+                row: pos.row,
+                col: size.cols.saturating_sub(1),
+            });
+            if let Some(last_cell) = last_cell {
+                if last_cell.has_contents() || last_cell.is_wide_continuation()
+                {
+                    wrap = true;
+                }
             }
         }
         self.grid_mut().col_wrap(width, wrap);
@@ -881,7 +892,12 @@ impl Screen {
                 .unwrap();
             cell.set(c, attrs);
             self.grid_mut().col_inc(1);
-            if width > 1 {
+            // Local patch (agent-mux): the invariant below -- that col_wrap
+            // has made room for a wide glyph -- does not hold when the grid
+            // is narrower than the glyph, because there is no room to make.
+            // A grid that cannot hold the second half simply does not get
+            // one, instead of unwrapping a cell that is not there.
+            if width > 1 && self.grid().drawing_cell(self.grid().pos()).is_some() {
                 let pos = self.grid().pos();
                 if self
                     .grid()
@@ -900,42 +916,24 @@ impl Screen {
                         row: pos.row,
                         col: pos.col + 1,
                     };
-                    let next_next_cell = self
-                        .grid_mut()
-                        .drawing_cell_mut(next_next_pos)
-                        // pos.row is valid because we assume
-                        // self.grid().pos() to always have a valid row value.
-                        // pos.col is valid because we called col_wrap()
-                        // earlier, which ensures that self.grid().pos().col
-                        // has a valid value. this is true even though we just
-                        // called col_inc, because this branch only happens if
-                        // width > 1, and col_wrap takes width into account.
-                        // pos.col + 1 is valid because the cell at pos.col is
-                        // wide, and so it must have the second half of the
-                        // wide character after it.
-                        .unwrap();
-                    next_next_cell.clear(attrs);
-                    if next_next_pos.col == size.cols - 1 {
-                        self.grid_mut()
-                            .drawing_row_mut(pos.row)
-                            // we assume self.grid().pos().row is always valid
-                            .unwrap()
-                            .wrap(false);
+                    // Local patch (agent-mux): see above -- on a grid too
+                    // narrow for the glyph there is no second half to clear.
+                    if let Some(next_next_cell) =
+                        self.grid_mut().drawing_cell_mut(next_next_pos)
+                    {
+                        next_next_cell.clear(attrs);
+                    }
+                    if next_next_pos.col == size.cols.saturating_sub(1) {
+                        if let Some(row) = self.grid_mut().drawing_row_mut(pos.row) {
+                            row.wrap(false);
+                        }
                     }
                 }
-                let next_cell = self
-                    .grid_mut()
-                    .drawing_cell_mut(pos)
-                    // pos.row is valid because we assume self.grid().pos() to
-                    // always have a valid row value. pos.col is valid because
-                    // we called col_wrap() earlier, which ensures that
-                    // self.grid().pos().col has a valid value. this is true
-                    // even though we just called col_inc, because this branch
-                    // only happens if width > 1, and col_wrap takes width
-                    // into account.
-                    .unwrap();
-                next_cell.clear(crate::attrs::Attrs::default());
-                next_cell.set_wide_continuation(true);
+                // Local patch (agent-mux): likewise conditional.
+                if let Some(next_cell) = self.grid_mut().drawing_cell_mut(pos) {
+                    next_cell.clear(crate::attrs::Attrs::default());
+                    next_cell.set_wide_continuation(true);
+                }
                 self.grid_mut().col_inc(1);
             }
         }

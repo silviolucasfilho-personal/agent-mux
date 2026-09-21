@@ -38,6 +38,11 @@ pub struct WorkflowRunRequest {
     pub usd_cap: Option<f64>,
     pub isolation: Option<Isolation>,
     pub resume_from: Option<String>,
+    /// One-off per-step overrides for this run, `(step id, key, value)` with
+    /// `key` one of `harness`, `profile`, `model`, `effort`. What a document
+    /// states permanently, these state for one run.
+    #[allow(clippy::type_complexity)]
+    pub step_overrides: Vec<(String, String, String)>,
 }
 
 /// A session of a live run.
@@ -173,14 +178,28 @@ impl App {
 
     /// Installs every step skill the document names into `harness`'s
     /// user-level skill directory.
+    /// Installs every step skill for every harness the run can use: the
+    /// run's own, plus each harness a step, a verify block or a judge names.
+    /// A step that switches harness would otherwise invoke a skill that was
+    /// never installed for it.
     fn install_workflow_skills(&self, doc: &Workflow, harness: Harness) -> Result<(), String> {
         let home = self.skill_home();
+        let mut harnesses = vec![harness];
+        for h in doc.harnesses_used() {
+            if let Some(h) = Harness::detect(&h)
+                && !harnesses.contains(&h)
+            {
+                harnesses.push(h);
+            }
+        }
         for id in doc.skills() {
             let def = self
                 .find_skill(&id)
                 .ok_or_else(|| format!("step skill {id:?} is not a known package"))?;
-            crate::skill::install::install(def, harness, &home, false)
-                .map_err(|e| format!("installing {id} for {}: {e}", harness.as_str()))?;
+            for h in &harnesses {
+                crate::skill::install::install(def, *h, &home, false)
+                    .map_err(|e| format!("installing {id} for {}: {e}", h.as_str()))?;
+            }
         }
         Ok(())
     }
@@ -265,6 +284,33 @@ impl App {
         }
         if let Some(iso) = req.isolation {
             doc.default_isolation = Some(doc.default_isolation.unwrap_or(iso));
+        }
+        // One-off overrides: `--step find.model=…` for this run only.
+        for (id, key, value) in &req.step_overrides {
+            let step = doc
+                .steps
+                .iter_mut()
+                .find(|s| s.id == *id)
+                .ok_or_else(|| format!("--step {id}: no step with that id"))?;
+            let v = Some(value.clone()).filter(|v| !v.trim().is_empty());
+            match key.as_str() {
+                "harness" => {
+                    if let Some(h) = &v
+                        && Harness::detect(h).is_none()
+                    {
+                        return Err(format!("--step {id}.harness: unknown harness {h:?}"));
+                    }
+                    step.harness = v;
+                }
+                "profile" => step.profile = v,
+                "model" => step.model = v,
+                "effort" => step.effort = v,
+                other => {
+                    return Err(format!(
+                        "--step {id}.{other}: expected harness, profile, model or effort"
+                    ));
+                }
+            }
         }
         let args = Self::resolve_args(&doc, &req.args)?;
         self.install_workflow_skills(&doc, req.harness)?;
@@ -651,11 +697,25 @@ impl App {
             .overrides
             .timeout_s
             .unwrap_or(self.workflows.session_timeout_s);
-        wfh::insert_before_prompt(
-            &mut args,
-            harness,
-            wfh::extra_args(harness, run.usd_cap, timeout_s, &out_file),
-        );
+        let mut extra = wfh::extra_args(harness, run.usd_cap, timeout_s, &out_file);
+        // Reasoning effort, where the harness has one to set.
+        if let Some(effort) = spec
+            .overrides
+            .effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+        {
+            match wfh::effort_args(harness, effort) {
+                Some(mut a) => extra.append(&mut a),
+                None => run.state.notes.push(format!(
+                    "{}: {} takes no reasoning effort; {effort:?} ignored",
+                    spec.label(),
+                    harness.as_str()
+                )),
+            }
+        }
+        wfh::insert_before_prompt(&mut args, harness, extra);
         if Harness::detect(&profile.command) != Some(harness) {
             profile.command = harness.as_str().to_string();
         }
@@ -672,14 +732,7 @@ impl App {
 
         // MCP registration and environment
         let mut extra_args: Vec<String> = Vec::new();
-        let exe = crate::tracing::hooks::register::current_exe();
-        let registration = crate::mcp::register::plan(
-            Some(harness),
-            exe.as_deref(),
-            self.trace_db_path.as_deref(),
-            &workspace,
-            &self.skill_home(),
-        );
+        let registration = self.ensure_mcp(harness.as_str(), &workspace);
         if let crate::mcp::register::Registration::PerLaunch { args } = &registration {
             extra_args.extend(args.iter().cloned());
         }
@@ -1429,6 +1482,7 @@ impl App {
             usd_cap: None,
             isolation: None,
             resume_from: None,
+            step_overrides: Vec::new(),
         };
         let run_id = self.start_workflow_run(req)?;
         if let Some(p) = self.planned_workflows.iter_mut().find(|p| p.id == plan_id) {
@@ -1996,6 +2050,7 @@ impl App {
                     usd_cap,
                     isolation: Some(d.isolation),
                     resume_from: None,
+                    step_overrides: Vec::new(),
                 };
                 match self.start_workflow_run(req) {
                     Ok(id) => {
@@ -2250,6 +2305,7 @@ impl App {
                             usd_cap: None,
                             isolation: None,
                             resume_from: Some(r.id.clone()),
+                            step_overrides: Vec::new(),
                         };
                         self.notice = Some(match self.start_workflow_run(req) {
                             Ok(rid) => Notice::info(format!("resumed as {}", &rid[..8])),

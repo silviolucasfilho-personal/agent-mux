@@ -146,6 +146,7 @@ fn briefing_preserves_distinct_relative_paths() {
         0,
         1000,
         &[],
+        &agent_mux::tracing::analysis::BriefingScan::all(),
     )
     .unwrap();
 
@@ -187,6 +188,7 @@ fn briefing_with_live_session_merges_activity() {
         0,
         1000,
         &live,
+        &agent_mux::tracing::analysis::BriefingScan::all(),
     )
     .unwrap();
 
@@ -241,4 +243,122 @@ fn analyze_skills_computes_attribution_and_percentiles() {
     assert_eq!(row.sample_size, 2);
     assert_eq!(row.p50_ms, Some(100));
     assert_eq!(row.max_ms, Some(200));
+}
+
+/// The briefing caps the cards it builds and filters by provider in SQL,
+/// and the rollup it reports stays exact whatever the cap.
+#[test]
+fn briefing_caps_the_cards_but_not_the_totals() {
+    use agent_mux::tracing::analysis::BriefingScan;
+
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        r#"
+        CREATE TABLE sessions (key TEXT PRIMARY KEY, provider TEXT, cwd TEXT, first_seen_ns INTEGER, last_seen_ns INTEGER);
+        CREATE TABLE traces (id TEXT PRIMARY KEY, session_key TEXT, launch_id TEXT, start_ns INTEGER, end_ns INTEGER, input TEXT, output TEXT);
+        CREATE TABLE observations (id TEXT PRIMARY KEY, trace_id TEXT, type TEXT, name TEXT, input TEXT, output TEXT, start_ns INTEGER, end_ns INTEGER);
+        CREATE VIEW session_stats AS
+          SELECT s.*,
+                 COUNT(t.id) AS turn_count,
+                 0 AS open_turns,
+                 COUNT(o.id) AS tool_count,
+                 100 AS total_tokens,
+                 0.5 AS total_cost_usd
+          FROM sessions s
+          LEFT JOIN traces t ON t.session_key = s.key
+          LEFT JOIN observations o ON o.trace_id = t.id
+          GROUP BY s.key;
+
+        INSERT INTO sessions VALUES('s1', 'claude', '/w', 100, 500);
+        INSERT INTO sessions VALUES('s2', 'claude', '/w', 100, 400);
+        INSERT INTO sessions VALUES('s3', 'codex',  '/w', 100, 300);
+        INSERT INTO sessions VALUES('s4', 'codex',  '/w', 100, 200);
+        INSERT INTO sessions VALUES('s5', 'agy',    '/w', 100, 150);
+        INSERT INTO traces VALUES('t1', 's1', 'l1', 100, 200, 'one', 'done');
+        INSERT INTO traces VALUES('t2', 's2', 'l2', 100, 200, 'two', 'done');
+        INSERT INTO traces VALUES('t3', 's3', 'l3', 100, 200, 'three', 'done');
+        INSERT INTO traces VALUES('t4', 's4', 'l4', 100, 200, 'four', 'done');
+        INSERT INTO traces VALUES('t5', 's5', 'l5', 100, 200, 'five', 'done');
+        "#,
+    )
+    .unwrap();
+    let ws = std::path::Path::new("/w");
+
+    // uncapped: every session gets a card
+    let all =
+        agent_mux::tracing::analysis::query::briefing(&db, ws, 0, 1000, &[], &BriefingScan::all())
+            .unwrap();
+    assert_eq!(all.cards.len(), 5);
+    assert_eq!(all.total_sessions, 5);
+    assert!(all.warnings.is_empty(), "{:?}", all.warnings);
+
+    // capped: two cards, the two most recent, and the totals still cover five
+    let capped = agent_mux::tracing::analysis::query::briefing(
+        &db,
+        ws,
+        0,
+        1000,
+        &[],
+        &BriefingScan::with_max(2),
+    )
+    .unwrap();
+    assert_eq!(capped.cards.len(), 2);
+    let keys: Vec<&str> = capped
+        .cards
+        .iter()
+        .filter_map(|c| c.session_key.as_deref())
+        .collect();
+    assert_eq!(keys, vec!["s1", "s2"], "the most recent sessions");
+    assert_eq!(capped.total_sessions, 5, "the rollup is not capped");
+    assert_eq!(capped.total_turns, all.total_turns);
+    assert_eq!(capped.total_tools, all.total_tools);
+    assert_eq!(capped.total_tokens, all.total_tokens);
+    assert!(
+        capped
+            .warnings
+            .iter()
+            .any(|w| w.contains("5 sessions in scope")),
+        "the cap is reported: {:?}",
+        capped.warnings
+    );
+
+    // the provider filter reaches the SQL, so it also bounds the rollup
+    let codex = agent_mux::tracing::analysis::query::briefing(
+        &db,
+        ws,
+        0,
+        1000,
+        &[],
+        &BriefingScan {
+            provider: Some("codex".into()),
+            ..BriefingScan::all()
+        },
+    )
+    .unwrap();
+    assert_eq!(codex.cards.len(), 2);
+    assert_eq!(codex.total_sessions, 2);
+    assert!(
+        codex
+            .cards
+            .iter()
+            .all(|c| c.provider.as_deref() == Some("codex"))
+    );
+
+    // one key, one card: what a session-detail request asks for
+    let one = agent_mux::tracing::analysis::query::briefing(
+        &db,
+        ws,
+        0,
+        1000,
+        &[],
+        &BriefingScan {
+            session_key: Some("s4".into()),
+            max_cards: 1,
+            ..BriefingScan::all()
+        },
+    )
+    .unwrap();
+    assert_eq!(one.cards.len(), 1);
+    assert_eq!(one.cards[0].session_key.as_deref(), Some("s4"));
+    assert_eq!(one.total_sessions, 1);
 }

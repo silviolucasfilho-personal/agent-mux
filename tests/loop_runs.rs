@@ -115,6 +115,7 @@ fn workspace(root: &Path, pattern: &str, level: Level) -> PathBuf {
         &Caps {
             max_runs_per_day: p.max_runs_per_day,
             max_tokens_per_day: p.max_tokens_per_day,
+            verifier_model: String::new(),
         },
     )
     .unwrap();
@@ -700,4 +701,65 @@ async fn a_loop_whose_skill_is_not_installed_is_blocked_before_launch() {
         "{:?}",
         rows[0].detail
     );
+}
+
+/// A loop carries its own model, and the verifier the scaffolder installs
+/// carries the one the loop asked for.
+#[tokio::test]
+async fn a_loop_runs_on_its_own_model_and_scaffolds_the_verifier_with_its_own() {
+    let spec = FakeSpec {
+        state_file: "ci-sweeper-state.md",
+        extra_file: None,
+        exit_code: 0,
+        sleep_s: 0,
+    };
+    let mut f = fixture("ci-sweeper", Level::L1, &spec);
+    // the loop asks for a model for the run and another for the checker
+    {
+        let entry = f.app.loop_registry.find_mut(&f.loop_id).unwrap();
+        entry.model = "run-model".into();
+        entry.verifier_model = "checker-model".into();
+    }
+    run_to_completion(&mut f).await;
+
+    let args: Vec<String> = std::fs::read_to_string(f.bin.join("args.txt"))
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let at = args
+        .iter()
+        .position(|a| a == "--model")
+        .expect("the run carries a model");
+    assert_eq!(args[at + 1], "run-model");
+
+    // scaffolding the same workspace again writes the verifier with the
+    // model the loop asked for (the file was made without one)
+    let ws = f.ws.clone();
+    let p = patterns::find("ci-sweeper").unwrap();
+    let verifier = agent_mux::loops::scaffold::verifier_path(Harness::Claude, &ws).unwrap();
+    std::fs::remove_file(&verifier).unwrap();
+    scaffold(
+        &ws,
+        p,
+        Harness::Claude,
+        Level::L1,
+        &Caps {
+            max_runs_per_day: p.max_runs_per_day,
+            max_tokens_per_day: p.max_tokens_per_day,
+            verifier_model: "checker-model".into(),
+        },
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&verifier).unwrap();
+    assert!(
+        text.contains("model: checker-model"),
+        "the verifier declares the loop's model\n{text}"
+    );
+    assert!(
+        !text.contains("model: inherit"),
+        "and not the shipped default\n{text}"
+    );
+    assert!(text.starts_with("---\n"), "the frontmatter is still valid");
+    assert!(text.contains("name: loop-verifier"), "{text}");
 }

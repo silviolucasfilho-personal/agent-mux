@@ -150,15 +150,66 @@ args = { subject = "confirmed review findings", shape = "a report grouped by sev
 | `over` | Items for `fanout`, `pipeline`, `tournament`, `until`: an array, `args.name`, or a path into an earlier step's result |
 | `input` | A path handed to the session as `inputs` |
 | `result` | The schema the fenced answer must match |
-| `verify` | `{ skill \| prompt, votes = N, result, keep }`: `N` independent refuter sessions per item; boolean fields are counted and `keep` decides on the counts |
+| `verify` | `{ skill \| prompt, votes = N, result, keep }`: `N` independent refuter sessions per item; boolean fields are counted and `keep` decides on the counts. It may carry its own `harness`, `profile`, `model` and `effort`, so the refuters run on a different model than the step they check |
 | `keep` | A predicate on each item's result: `== != < <= > >=`, `in [a, b]`, `not in [a, b]`, `and`, `or`, `not`, `has(field)`. Inside a set a bare word is a string: `severity in [high, medium]`. On a `pipeline` step it runs before the item's votes, so a dropped item costs no refuter session |
 | `dedupe_by`, `take` | Keep the first item per key; keep at most N |
 | `branches` | `route`: `{ label = ["step", …] }`; the classifier's result carries `label`; other branches are skipped |
-| `judge` / `judge_prompt`, `n` | `tournament`: the pairwise judge and how many candidates to generate |
+| `judge` / `judge_prompt`, `n` | `tournament`: the pairwise judge and how many candidates to generate. `judge` is a skill name or a table (`{ skill \| prompt, harness, profile, model, effort }`) when the judge should run on its own model |
 | `rounds_without_new`, `max_rounds` | `until`: stop after this many quiet rounds (2) or rounds (10); needs `dedupe_by` |
-| `harness`, `profile`, `model`, `isolation`, `cwd`, `timeout_s`, `concurrency`, `phase` | Per-step overrides |
+| `harness`, `profile`, `model`, `effort`, `isolation`, `cwd`, `timeout_s`, `concurrency`, `phase` | Per-step overrides. `harness` and `profile` pick the CLI and its configuration, `model` becomes `--model`, and `effort` becomes Codex's `model_reasoning_effort` (Claude Code and Antigravity take none, and the run notes that it was ignored). The step skills are installed for every harness the document names, so a step may switch CLI safely. |
 
 Paths: `find` is a step's result; `[*]` flattens one level; `.field` descends; `args.name`, `item`, `index` are the other roots. They are checked when the document loads.
+
+### Which agent and model runs each step
+
+Every session of a run can be placed on its own CLI and model. A step says
+it for itself, a `verify` block for its refuters, and a `judge` for its
+judges; anything unset falls back to the step's, then to the run's.
+
+```toml
+[[steps]]
+id = "find"
+kind = "fanout"
+over = ["correctness", "security"]
+harness = "codex"            # this step runs on Codex
+model = "gpt-5-mini"         # on a cheap model: it only has to notice things
+effort = "low"               # Codex reads this as model_reasoning_effort
+
+[[steps]]
+id = "confirmed"
+kind = "pipeline"
+over = "find[*].findings[*]"
+# three refuters, each on a careful model, whatever the step above used
+verify = { skill = "wf-refute", votes = 3, result = "verdict", keep = "refuted < 2", model = "claude-opus-5" }
+
+[[steps]]
+id = "best"
+kind = "tournament"
+n = 4
+skill = "wf-attempt"
+judge = { skill = "wf-judge", harness = "claude", model = "claude-opus-5" }
+
+[[steps]]
+id = "report"
+skill = "wf-synthesize"
+input = "confirmed"
+model = "claude-opus-5"      # the writing is worth the strong model
+```
+
+The Workflows section lists what each step will run on under its row, and
+the Steps tab of a finished run names the harness every session actually
+used. For a single run, without editing the document:
+
+```sh
+agent-mux workflow run review-changes --workspace . \
+  --step find.model=gpt-5-mini --step find.harness=codex \
+  --step report.model=claude-opus-5
+```
+
+A step naming a harness the document's `workflow.harness` forbids is a
+load-time problem. A profile that does not exist falls back to the first
+profile for that harness, and an unknown model is the harness's own error:
+agent-mux passes `--model` through and does not keep a list of model names.
 
 ### Kinds and the six shapes
 

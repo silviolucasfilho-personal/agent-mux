@@ -123,10 +123,14 @@ pub fn template(name: &str) -> Option<&'static str> {
 }
 
 /// The caps written into `loop-budget.md`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Caps {
     pub max_runs_per_day: u32,
     pub max_tokens_per_day: u64,
+    /// The model the scaffolded `loop-verifier` agent declares. Empty
+    /// leaves the file as the library wrote it (`model: inherit`: the
+    /// verifier runs on the model of the run that calls it).
+    pub verifier_model: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -161,6 +165,25 @@ pub fn codex_verifier_toml(body: &str) -> String {
 /// Claude model aliases that are not Codex model ids; never copied into
 /// the Codex TOML.
 const CLAUDE_MODEL_ALIASES: [&str; 4] = ["sonnet", "opus", "haiku", "inherit"];
+
+/// Rewrites the `model:` line of a Claude-shaped agent file, adding one
+/// when the frontmatter has none. A file without frontmatter is returned
+/// unchanged: agent-mux does not invent a header for someone else's file.
+pub fn set_agent_model(body: &str, model: &str) -> String {
+    let Some(rest) = body.strip_prefix("---\n") else {
+        return body.to_string();
+    };
+    let Some(end) = rest.find("\n---") else {
+        return body.to_string();
+    };
+    let (front, tail) = rest.split_at(end);
+    let mut lines: Vec<String> = front.lines().map(str::to_string).collect();
+    match lines.iter_mut().find(|l| l.starts_with("model:")) {
+        Some(l) => *l = format!("model: {model}"),
+        None => lines.push(format!("model: {model}")),
+    }
+    format!("---\n{}{}", lines.join("\n"), tail)
+}
 
 /// Wraps a Claude-shaped agent file (frontmatter + body) into Codex's
 /// agent TOML under `name`: `name`, `description`, `model` when the
@@ -395,7 +418,12 @@ pub fn scaffold_with_library(
         let Some(path) = agent_path(harness, workspace, &name) else {
             continue;
         };
-        report.put(path, &agent_file(harness, &name, body, &preamble))?;
+        let body = if name == "loop-verifier" && !caps.verifier_model.is_empty() {
+            set_agent_model(body, &caps.verifier_model)
+        } else {
+            body.to_string()
+        };
+        report.put(path, &agent_file(harness, &name, &body, &preamble))?;
     }
     // 3. state file
     let state = template("STATE.md").replace("{{PROJECT}}", &project);
@@ -606,6 +634,7 @@ mod tests {
         let caps = Caps {
             max_runs_per_day: 1,
             max_tokens_per_day: 1000,
+            verifier_model: String::new(),
         };
         scaffold_with_library(temp.path(), &ws, pattern, Harness::Claude, Level::L1, &caps)
             .unwrap();
@@ -626,6 +655,7 @@ mod tests {
         let caps = Caps {
             max_runs_per_day: 96,
             max_tokens_per_day: 1_000_000,
+            verifier_model: String::new(),
         };
         let report = scaffold(&ws, pattern, Harness::Claude, Level::L2, &caps).unwrap();
         assert!(report.skipped.is_empty());
@@ -704,6 +734,7 @@ mod tests {
         let caps = Caps {
             max_runs_per_day: 1,
             max_tokens_per_day: 1000,
+            verifier_model: String::new(),
         };
         assert_eq!(
             embedded_agents()
