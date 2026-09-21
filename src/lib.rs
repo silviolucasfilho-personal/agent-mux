@@ -19,5 +19,6 @@ pub mod skill;
 pub mod status;
 pub mod tracing;
 pub mod transcript;
+pub mod tree;
 pub mod ui;
 pub mod workflows;

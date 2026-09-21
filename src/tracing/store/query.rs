@@ -85,6 +85,78 @@ pub fn list_sessions(
     rows.collect()
 }
 
+/// The loop or workflow run each traced session belongs to, read from the
+/// launch rows' metadata (`loop_id`, `workflow_run_id`, written by
+/// `tracing::start_session`). The browser groups its Sessions pane by it,
+/// so a workflow's steps and a loop's runs stop arriving as unrelated
+/// rows. Sessions with no parent are simply absent from the map.
+///
+/// Newest launch wins: a session resumed under a different parent is
+/// listed under the one it last ran for.
+pub fn session_groups(
+    conn: &Connection,
+    limit: usize,
+) -> rusqlite::Result<std::collections::HashMap<String, crate::tree::GroupRef>> {
+    use crate::tree::{GroupKind, GroupRef};
+    let mut stmt = conn.prepare(
+        "SELECT session_key,
+                json_extract(metadata, '$.loop_id')         AS loop_id,
+                json_extract(metadata, '$.loop_run_id')     AS loop_run_id,
+                json_extract(metadata, '$.loop_pattern')    AS loop_pattern,
+                json_extract(metadata, '$.loop_level')      AS loop_level,
+                json_extract(metadata, '$.workflow_run_id') AS wf_run,
+                json_extract(metadata, '$.workflow')        AS wf_name,
+                json_extract(metadata, '$.workflow_step')   AS wf_step
+         FROM launches
+         WHERE session_key IS NOT NULL
+           AND (json_extract(metadata, '$.loop_id') IS NOT NULL
+                OR json_extract(metadata, '$.workflow_run_id') IS NOT NULL)
+         ORDER BY started_ns DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit.max(1) as i64], |r| {
+        let key: String = r.get("session_key")?;
+        let loop_id: Option<String> = r.get("loop_id")?;
+        let group = match loop_id {
+            Some(loop_id) => {
+                let run: Option<String> = r.get("loop_run_id")?;
+                let level: Option<String> = r.get("loop_level")?;
+                GroupRef {
+                    kind: GroupKind::Loop,
+                    id: loop_id.clone(),
+                    title: loop_id,
+                    detail: r
+                        .get::<_, Option<String>>("loop_pattern")?
+                        .unwrap_or_default(),
+                    label: match (run, level) {
+                        (Some(run), Some(level)) => {
+                            format!("{} {level}", run.chars().take(8).collect::<String>())
+                        }
+                        (Some(run), None) => run.chars().take(8).collect(),
+                        _ => "run".to_string(),
+                    },
+                }
+            }
+            None => {
+                let run: String = r.get::<_, Option<String>>("wf_run")?.unwrap_or_default();
+                GroupRef {
+                    kind: GroupKind::Workflow,
+                    detail: format!("#{}", run.chars().take(8).collect::<String>()),
+                    id: run,
+                    title: r.get::<_, Option<String>>("wf_name")?.unwrap_or_default(),
+                    label: r.get::<_, Option<String>>("wf_step")?.unwrap_or_default(),
+                }
+            }
+        };
+        Ok((key, group))
+    })?;
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        let (key, group) = row?;
+        out.entry(key).or_insert(group);
+    }
+    Ok(out)
+}
+
 /// Exact key / session id, or a session-id prefix.
 pub fn find_session(conn: &Connection, needle: &str) -> rusqlite::Result<Option<SessionStat>> {
     conn.query_row(

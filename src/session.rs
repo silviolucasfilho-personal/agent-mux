@@ -127,6 +127,10 @@ pub struct Session {
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     /// Skill this session was launched around from the sidebar, if any.
     pub skill_id: Option<String>,
+    /// The loop or workflow run that launched this session, if any: what
+    /// the Active sidebar hangs the row under. Recorded at spawn so the
+    /// tree survives the run's own bookkeeping being pruned.
+    pub group: Option<crate::tree::GroupRef>,
     /// Briefing snapshot written for this session's agent, removed on exit.
     pub briefing_path: Option<PathBuf>,
 }
@@ -275,6 +279,7 @@ impl Session {
             master: pair.master,
             child,
             skill_id: None,
+            group: None,
             briefing_path: None,
         })
     }

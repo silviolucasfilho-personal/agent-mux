@@ -87,6 +87,41 @@ pub enum SidebarSection {
     History,
 }
 
+/// The first eight characters of a run id: enough to tell two runs apart
+/// in a thirty-column sidebar.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// The parent a launch belongs under in the Active sidebar's tree: the
+/// loop that scheduled the run, or the workflow run that spawned the step.
+/// A loop groups by its registry id, so its successive runs stack under
+/// one header; a workflow groups by run, so two runs of one document stay
+/// apart.
+fn session_group(
+    loop_launch: Option<&crate::loops::LoopLaunch>,
+    workflow_launch: Option<&crate::workflows::WorkflowLaunch>,
+) -> Option<crate::tree::GroupRef> {
+    use crate::tree::{GroupKind, GroupRef};
+    if let Some(l) = loop_launch {
+        return Some(GroupRef {
+            kind: GroupKind::Loop,
+            id: l.loop_id.clone(),
+            title: l.loop_id.clone(),
+            detail: l.pattern.clone(),
+            label: format!("{} {}", short_id(&l.run_id), l.level.as_str()),
+        });
+    }
+    let w = workflow_launch?;
+    Some(GroupRef {
+        kind: GroupKind::Workflow,
+        id: w.run_id.clone(),
+        title: w.workflow.clone(),
+        detail: format!("#{}", short_id(&w.run_id)),
+        label: w.step.clone(),
+    })
+}
+
 #[derive(Debug)]
 pub enum Action {
     None,
@@ -112,6 +147,9 @@ pub enum Action {
     ToggleTracing,
     ToggleSidebar,
     ToggleSidebarSection,
+    /// Space in the Active section: fold or unfold the loop or workflow
+    /// the selected session belongs to.
+    ToggleSessionGroup,
     RestartHistorySession,
     ToggleHistoryAllProjects,
     CancelToControl,
@@ -455,6 +493,11 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
                 {
                     Action::EnterConfirmRemoveLoop
+                }
+                KeyCode::Char(' ')
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Active =>
+                {
+                    Action::ToggleSessionGroup
                 }
                 KeyCode::Char('W') => Action::OpenWorkflowsView,
                 KeyCode::Char('v') | KeyCode::Char('V') => Action::OpenAbout,
@@ -1223,6 +1266,18 @@ impl DetailView {
     }
 }
 
+/// How many launch rows the browser reads to work out the parents of the
+/// sessions it lists. The list itself is capped at 500 sessions; a launch
+/// scan a few times that covers them even when a workspace is all loops
+/// and workflows.
+const GROUP_SCAN_LIMIT: usize = 5_000;
+
+/// How often the live refresh re-reads the parents anyway, with no new
+/// session to prompt it. A launch's `session_key` is filled in once
+/// correlation resolves, which can be after the session first appears, so
+/// the map has to heal itself without waiting for a full reload.
+const GROUPS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The `T` trace browser: sessions → turns → observations, read from the
 /// local store through a read-only connection. Queries are indexed and
 /// `LIMIT`ed, so they run synchronously on the main thread like the
@@ -1232,6 +1287,17 @@ pub struct TraceBrowserState {
     pub error: Option<String>,
     pub sessions: Vec<crate::tracing::store::query::SessionStat>,
     pub selected_session: usize,
+    /// The loop or workflow run behind each listed session, by session
+    /// key: what the Sessions pane groups by. Refreshed with the list.
+    pub groups: std::collections::HashMap<String, crate::tree::GroupRef>,
+    /// Headers folded away in the Sessions pane, by `GroupRef::key`.
+    pub collapsed_groups: std::collections::HashSet<String>,
+    /// Session keys the last group query covered, so the live refresh can
+    /// tell a session it has already resolved (parent or none) from one
+    /// that has just appeared.
+    groups_seen: std::collections::HashSet<String>,
+    /// When the group query last ran, for the slow self-healing sweep.
+    last_groups_refresh: Instant,
     pub turns: Vec<crate::tracing::store::query::TraceStat>,
     pub selected_turn: usize,
     pub observations: Vec<crate::tracing::store::query::ObservationView>,
@@ -1295,6 +1361,10 @@ impl TraceBrowserState {
             error,
             sessions: Vec::new(),
             selected_session: 0,
+            groups: std::collections::HashMap::new(),
+            collapsed_groups: std::collections::HashSet::new(),
+            groups_seen: std::collections::HashSet::new(),
+            last_groups_refresh: Instant::now() - GROUPS_REFRESH_INTERVAL,
             turns: Vec::new(),
             selected_turn: 0,
             observations: Vec::new(),
@@ -1370,6 +1440,66 @@ impl TraceBrowserState {
         Ok(message)
     }
 
+    /// Re-reads which loop or workflow run each listed session belongs
+    /// to. Grouping is a second read, not a join: `session_stats` is a
+    /// shipped view and the parent lives in the launch metadata beside it.
+    /// It is also the browser's heaviest query, so the live refresh pays
+    /// for it only when a session it has not resolved yet shows up, or
+    /// once every `GROUPS_REFRESH_INTERVAL` for launches whose session key
+    /// was filled in late.
+    fn refresh_groups(&mut self, force: bool) {
+        let Some(conn) = &self.conn else {
+            return;
+        };
+        let now = Instant::now();
+        let stale = now.duration_since(self.last_groups_refresh) >= GROUPS_REFRESH_INTERVAL;
+        let fresh_session = self
+            .sessions
+            .iter()
+            .any(|s| !self.groups_seen.contains(&s.key));
+        if !force && !fresh_session && !stale {
+            return;
+        }
+        self.groups = crate::tracing::store::query::session_groups(conn, GROUP_SCAN_LIMIT)
+            .unwrap_or_default();
+        self.groups_seen = self.sessions.iter().map(|s| s.key.clone()).collect();
+        self.last_groups_refresh = now;
+    }
+
+    /// The Sessions pane's tree: the loop and workflow runs as parents
+    /// over the sessions they launched.
+    pub fn session_rows(&self) -> Vec<crate::tree::Row> {
+        let groups: Vec<Option<crate::tree::GroupRef>> = self
+            .sessions
+            .iter()
+            .map(|s| self.groups.get(&s.key).cloned())
+            .collect();
+        crate::tree::build(&groups, &self.collapsed_groups)
+    }
+
+    /// Moves the cursor through the tree and loads the turns of whatever
+    /// session it lands on.
+    fn step_session(&mut self, delta: isize) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let next = crate::tree::step(&self.session_rows(), self.selected_session, delta);
+        if next != self.selected_session {
+            self.selected_session = next;
+            self.search_query = None;
+            self.load_turns();
+        }
+    }
+
+    /// Space on the Sessions pane: fold or unfold the run the selected
+    /// session belongs to.
+    pub fn toggle_session_group(&mut self) {
+        let rows = self.session_rows();
+        if let Some(key) = crate::tree::group_key_of(&rows, self.selected_session) {
+            crate::tree::toggle(&mut self.collapsed_groups, &key);
+        }
+    }
+
     fn filter(&self) -> crate::tracing::store::query::SessionFilter {
         crate::tracing::store::query::SessionFilter {
             project_slug: if self.all_projects {
@@ -1393,6 +1523,10 @@ impl TraceBrowserState {
             return;
         };
         self.selected_session = idx;
+        // Never leave the cursor on a session the tree is hiding.
+        if let Some(g) = self.groups.get(&self.sessions[idx].key) {
+            self.collapsed_groups.remove(&g.key());
+        }
         self.search_query = None;
         self.load_turns();
         if let Some(tid) = trace_id
@@ -1418,6 +1552,7 @@ impl TraceBrowserState {
                 self.error = Some(e.to_string());
             }
         }
+        self.refresh_groups(true);
         self.selected_session = self
             .selected_session
             .min(self.sessions.len().saturating_sub(1));
@@ -1751,6 +1886,9 @@ impl TraceBrowserState {
                 self.rebuild_detail();
             }
         }
+        // Last: it re-borrows the connection this function holds, and a
+        // group that lands one tick late costs nothing.
+        self.refresh_groups(false);
     }
 }
 
@@ -1807,6 +1945,10 @@ pub struct App {
     pub sessions_file: Option<std::path::PathBuf>,
     /// Whether the sidebar is currently hidden (full-screen harness).
     pub sidebar_hidden: bool,
+    /// Loop and workflow headers folded away in the Active sidebar, by
+    /// `tree::GroupRef::key`. Keyed by the parent rather than by a session
+    /// index, so a fold survives sessions coming and going.
+    pub collapsed_groups: std::collections::HashSet<String>,
     /// Overall terminal dimensions (rows, cols).
     pub terminal_size: (u16, u16),
     /// Skill packages, loaded at startup and rescanned when the Skills
@@ -1941,6 +2083,7 @@ impl App {
             trace_db_path,
             sessions_file: None,
             sidebar_hidden: false,
+            collapsed_groups: std::collections::HashSet::new(),
             terminal_size: (27, 112),
             skills,
             hidden_skills,
@@ -2067,6 +2210,38 @@ impl App {
             self.sidebar_hidden,
         );
         self.set_pane_size(pane_rows, pane_cols);
+    }
+
+    /// The Active sidebar's tree: every session as a row, with the loop
+    /// and workflow runs as parents over the calls they made. Rebuilt on
+    /// demand rather than cached -- the list is short and it is the one
+    /// place where a stale tree would point the cursor at the wrong
+    /// session.
+    pub fn active_rows(&self) -> Vec<crate::tree::Row> {
+        let groups: Vec<Option<crate::tree::GroupRef>> =
+            self.sessions.iter().map(|s| s.group.clone()).collect();
+        crate::tree::build(&groups, &self.collapsed_groups)
+    }
+
+    /// Folds or unfolds the loop or workflow the selected session belongs
+    /// to. A session with no parent has nothing to fold.
+    pub fn toggle_selected_group(&mut self) {
+        let rows = self.active_rows();
+        let Some(key) = crate::tree::group_key_of(&rows, self.selected) else {
+            return;
+        };
+        let folded = crate::tree::toggle(&mut self.collapsed_groups, &key);
+        let title = rows
+            .iter()
+            .find_map(|r| match r {
+                crate::tree::Row::Group { key: k, title, .. } if *k == key => Some(title.clone()),
+                _ => None,
+            })
+            .unwrap_or(key);
+        self.notice = Some(Notice::info(format!(
+            "{title} {}",
+            if folded { "folded" } else { "unfolded" }
+        )));
     }
 
     /// Sets a custom path for persistent sessions file.
@@ -2401,6 +2576,10 @@ impl App {
             p.skill = Some((skill.to_string(), harness.to_string()));
         }
         let is_loop = loop_launch.is_some() || workflow_launch.is_some();
+        // The tree the Active sidebar draws: the parent is recorded on the
+        // session itself, not looked up in `live_loop_runs` later, so a
+        // session that outlives its run's bookkeeping keeps its place.
+        let group = session_group(loop_launch.as_ref(), workflow_launch.as_ref());
         if let (Some(p), Some(w)) = (plan.as_mut(), workflow_launch) {
             p.workflow = Some(w);
         }
@@ -2471,6 +2650,7 @@ impl App {
             &extra_env,
         )?;
         session.briefing_path = briefing_path;
+        session.group = group;
         if let (Some(rt), Some(plan)) = (self.tracing.as_mut(), plan) {
             session.trace = Some(rt.start_session(id, plan));
         }
@@ -2901,18 +3081,7 @@ impl App {
             // selected row), so moving detail_lines' scroll_offset had no
             // visible effect. Scroll the focused list instead.
             match browser.focused {
-                BrowserPane::Sessions => {
-                    if !browser.sessions.is_empty() {
-                        let max = browser.sessions.len() as isize - 1;
-                        let next =
-                            (browser.selected_session as isize + delta).clamp(0, max) as usize;
-                        if next != browser.selected_session {
-                            browser.selected_session = next;
-                            browser.search_query = None;
-                            browser.load_turns();
-                        }
-                    }
-                }
+                BrowserPane::Sessions => browser.step_session(delta),
                 BrowserPane::Turns => {
                     if !browser.turns.is_empty() {
                         let max = browser.turns.len() as isize - 1;
@@ -3012,20 +3181,33 @@ impl App {
                 if ev.row > active_rect.y
                     && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
                 {
+                    // The pane draws a tree, so a click lands on a row:
+                    // a header folds, a session is selected.
+                    let rows = self.active_rows();
                     let visible = usize::from(active_rect.height.saturating_sub(2));
-                    let row = usize::from(ev.row - active_rect.y - 1);
-                    let idx = ui::sidebar_window(self.selected, self.sessions.len(), visible) + row;
-                    if idx < self.sessions.len() {
-                        self.sidebar_section = SidebarSection::Active;
-                        if idx != self.selected {
-                            self.selection = None;
-                            self.selected = idx;
-                            if matches!(self.mode, Mode::Attached)
-                                && let Some(s) = self.sessions.get_mut(idx)
-                            {
-                                s.tracker.on_attach();
+                    let cursor = crate::tree::row_of(&rows, self.selected).unwrap_or(0);
+                    let offset = usize::from(ev.row - active_rect.y - 1);
+                    let at = ui::sidebar_window(cursor, rows.len(), visible) + offset;
+                    match rows.get(at) {
+                        Some(crate::tree::Row::Group { key, .. }) => {
+                            let key = key.clone();
+                            self.sidebar_section = SidebarSection::Active;
+                            crate::tree::toggle(&mut self.collapsed_groups, &key);
+                        }
+                        Some(row) => {
+                            let idx = crate::tree::item_of(row).unwrap_or(self.selected);
+                            self.sidebar_section = SidebarSection::Active;
+                            if idx != self.selected {
+                                self.selection = None;
+                                self.selected = idx;
+                                if matches!(self.mode, Mode::Attached)
+                                    && let Some(s) = self.sessions.get_mut(idx)
+                                {
+                                    s.tracker.on_attach();
+                                }
                             }
                         }
+                        None => {}
                     }
                 }
                 return;
@@ -3362,9 +3544,13 @@ impl App {
                 } else {
                     match self.sidebar_section {
                         SidebarSection::Active => {
-                            if !self.sessions.is_empty() && self.selected + 1 < self.sessions.len()
-                            {
-                                self.selected += 1;
+                            // Down walks the tree, not the session list: a
+                            // folded loop or workflow is one stop for the
+                            // whole family it hides.
+                            let rows = self.active_rows();
+                            let next = crate::tree::step(&rows, self.selected, 1);
+                            if !self.sessions.is_empty() && next != self.selected {
+                                self.selected = next;
                             } else {
                                 self.sidebar_section = SidebarSection::Agents;
                                 self.selected_agent = 0;
@@ -3417,14 +3603,20 @@ impl App {
                 } else {
                     match self.sidebar_section {
                         SidebarSection::Active => {
-                            self.selected = self.selected.saturating_sub(1);
+                            self.selected =
+                                crate::tree::step(&self.active_rows(), self.selected, -1);
                         }
                         SidebarSection::Agents => {
                             if self.selected_agent > 0 {
                                 self.selected_agent -= 1;
                             } else if !self.sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::Active;
-                                self.selected = self.sessions.len() - 1;
+                                self.selected = self
+                                    .active_rows()
+                                    .iter()
+                                    .rev()
+                                    .find_map(crate::tree::item_of)
+                                    .unwrap_or(self.sessions.len() - 1);
                             }
                         }
                         SidebarSection::Loops => {
@@ -3456,6 +3648,7 @@ impl App {
                     }
                 }
             }
+            Action::ToggleSessionGroup => self.toggle_selected_group(),
             Action::ToggleSidebarSection => {
                 if self.sidebar_hidden {
                     if !self.sessions.is_empty() {
@@ -3548,9 +3741,19 @@ impl App {
                 self.reload_history_sessions();
             }
             Action::SelectSession(idx) => {
-                if idx < self.sessions.len() {
+                // The digits count the rows the tree draws, so the number
+                // beside a session is the number that selects it. With the
+                // sidebar hidden nothing is drawn and the flat list stands.
+                let target = if self.sidebar_hidden {
+                    (idx < self.sessions.len()).then_some(idx)
+                } else {
+                    crate::tree::visible_items(&self.active_rows())
+                        .get(idx)
+                        .copied()
+                };
+                if let Some(target) = target {
                     self.selection = None;
-                    self.selected = idx;
+                    self.selected = target;
                     self.sidebar_section = SidebarSection::Active;
                 }
             }
@@ -3834,7 +4037,12 @@ impl App {
             }
             KeyCode::Char('/') => browser.search_input = Some(String::new()),
             KeyCode::Char('v') | KeyCode::Char('V') => browser.cycle_detail_view(),
-            KeyCode::Char(' ') => browser.toggle_collapsed(),
+            // Folding is what the focused pane holds: a run in the
+            // Sessions tree, an observation's subtree in the Detail tree.
+            KeyCode::Char(' ') => match browser.focused {
+                BrowserPane::Sessions => browser.toggle_session_group(),
+                _ => browser.toggle_collapsed(),
+            },
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 browser.all_projects = !browser.all_projects;
                 browser.reload_sessions();
@@ -3850,16 +4058,7 @@ impl App {
                 BrowserPane::Detail => browser.toggle_expanded(),
             },
             KeyCode::Down | KeyCode::Char('j') => match browser.focused {
-                BrowserPane::Sessions => {
-                    if !browser.sessions.is_empty() {
-                        let next = (browser.selected_session + 1).min(browser.sessions.len() - 1);
-                        if next != browser.selected_session {
-                            browser.selected_session = next;
-                            browser.search_query = None;
-                            browser.load_turns();
-                        }
-                    }
-                }
+                BrowserPane::Sessions => browser.step_session(1),
                 BrowserPane::Turns => {
                     if !browser.turns.is_empty() {
                         let next = (browser.selected_turn + 1).min(browser.turns.len() - 1);
@@ -3881,13 +4080,7 @@ impl App {
                 }
             },
             KeyCode::Up | KeyCode::Char('k') => match browser.focused {
-                BrowserPane::Sessions => {
-                    if browser.selected_session > 0 {
-                        browser.selected_session -= 1;
-                        browser.search_query = None;
-                        browser.load_turns();
-                    }
-                }
+                BrowserPane::Sessions => browser.step_session(-1),
                 BrowserPane::Turns => {
                     if browser.selected_turn > 0 {
                         browser.selected_turn -= 1;

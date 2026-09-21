@@ -10,7 +10,7 @@ Design: `docs/superpowers/specs/2026-09-17-workflows-design.md`. The idea follow
 
 1. `Tab` to the **Workflows** section (between Loops and History). The eight built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`, `santa-review`. The main pane describes the selected one: its steps by phase, its args, the last run.
 2. `Enter` opens the run dialog: the workspace (the shared directory picker), the profile (one per harness the document allows), one field per declared arg, a token budget, a USD cap, and the isolation default. `Enter` again starts the run.
-3. Each session appears in **Active** as `<workflow> ▸ <step>`; attach to watch it. The section row shows `▶ done/started`.
+3. The run's sessions appear in **Active** under one header — `▾ ⚙ <workflow> <running>/<total>▶ #<run>` — with each step hanging off it by its own name; attach to any of them to watch it. `space` folds the run away into that single row, and the trace browser (`T`) groups the same run the same way. The section row shows `▶ done/started`.
 4. `W` opens the Workflows view: the run's report, the step ledger behind it, the document and the result.
 5. When the run finishes, the notice leads with what the run answered; the preview card shows the last run; the report is in the view and in `agent-mux workflow status <run>`, and the raw result in the **Result** tab and in `result.json` under the run directory.
 

@@ -522,10 +522,19 @@ fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
 fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     let is_focused =
         app.sidebar_section == SidebarSection::Active && matches!(app.mode, Mode::Control);
+    // The tree, and the cursor's place in it: with a run folded away the
+    // session index and the drawn position are no longer the same number.
+    let rows = app.active_rows();
+    let drawn = crate::tree::visible_items(&rows);
     let title = if app.sessions.is_empty() {
         "Active [0]".to_string()
     } else {
-        format!("Active [{}/{}]", app.selected + 1, app.sessions.len())
+        let at = drawn
+            .iter()
+            .position(|i| *i == app.selected)
+            .map(|n| n + 1)
+            .unwrap_or(app.selected + 1);
+        format!("Active [{at}/{}]", app.sessions.len())
     };
     let border_style = if is_focused {
         Style::default()
@@ -554,28 +563,122 @@ fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         return;
     }
 
+    // The cursor sits on a row, not on a session index, so the scroll
+    // window has to follow the row.
+    let cursor = crate::tree::row_of(&rows, app.selected).unwrap_or(0);
     let visible = usize::from(area.height.saturating_sub(2));
-    let start = sidebar_window(app.selected, app.sessions.len(), visible);
-    let end = (start + visible.max(1)).min(app.sessions.len());
-    let items: Vec<ListItem> = app.sessions[start..end]
+    let start = sidebar_window(cursor, rows.len(), visible);
+    let end = (start + visible.max(1)).min(rows.len());
+    // Numbering counts drawn sessions, so the digit beside a row is the
+    // digit that selects it.
+    let numbers: std::collections::HashMap<usize, usize> = drawn
+        .into_iter()
+        .enumerate()
+        .map(|(n, index)| (index, n))
+        .collect();
+    let items: Vec<ListItem> = rows[start..end]
         .iter()
         .enumerate()
-        .map(|(offset, s)| {
-            let i = start + offset;
-            let (label, style) = status_label_style(s.status(now));
-            let is_selected = i == app.selected;
-            let marker = if is_selected { "> " } else { "  " };
-            let num = if i < 9 {
-                format!("{} ", i + 1)
-            } else {
-                "  ".into()
-            };
+        .map(|(offset, row)| {
+            session_row(
+                app,
+                row,
+                start + offset == cursor,
+                is_focused,
+                &numbers,
+                now,
+            )
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
+/// One row of the Active tree: a loop or workflow header, or a session
+/// under it.
+fn session_row<'a>(
+    app: &'a App,
+    row: &crate::tree::Row,
+    is_cursor: bool,
+    is_focused: bool,
+    numbers: &std::collections::HashMap<usize, usize>,
+    now: Instant,
+) -> ListItem<'a> {
+    let marker = if is_cursor { "> " } else { "  " };
+    let spans = match row {
+        crate::tree::Row::Group {
+            kind,
+            title,
+            detail,
+            members,
+            collapsed,
+            ..
+        } => {
+            // A folded header answers for the family it hides: how many
+            // calls, and how many of them are still running.
+            let running = members
+                .iter()
+                .filter_map(|i| app.sessions.get(*i))
+                .filter(|s| !matches!(s.status(now), Status::Exited(_)))
+                .count();
             let mut spans = vec![
                 Span::raw(marker.to_string()),
-                Span::styled(num, Style::default().fg(Color::DarkGray)),
-                Span::raw(format!("{} ", s.profile.name)),
-                Span::styled(format!("[{label}]"), style),
+                Span::styled(
+                    if *collapsed { "▸ " } else { "▾ " }.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{} ", kind.glyph()),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::styled(
+                    truncate_chars(title, 14),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                if running > 0 {
+                    Span::styled(
+                        format!(" {running}/{}▶", members.len()),
+                        Style::default().fg(Color::Green),
+                    )
+                } else {
+                    Span::styled(
+                        format!(" {}", members.len()),
+                        Style::default().fg(Color::DarkGray),
+                    )
+                },
             ];
+            spans.push(Span::styled(
+                format!(" {}", truncate_chars(detail, 10)),
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans
+        }
+        crate::tree::Row::Item { index, depth, last } => {
+            let Some(s) = app.sessions.get(*index) else {
+                return ListItem::new(Line::raw(String::new()));
+            };
+            let (label, style) = status_label_style(s.status(now));
+            let num = match numbers.get(index) {
+                Some(n) if *n < 9 => format!("{} ", n + 1),
+                _ => "  ".into(),
+            };
+            // A session the tree owns says what it is in the run (a
+            // workflow step, a loop run); a loose one keeps its profile.
+            let name = match (&s.group, depth) {
+                (Some(g), 1) if !g.label.is_empty() => g.label.clone(),
+                _ => s.profile.name.clone(),
+            };
+            let mut spans = vec![Span::raw(marker.to_string())];
+            if *depth > 0 {
+                spans.push(Span::styled(
+                    if *last { "└ " } else { "├ " }.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            spans.push(Span::styled(num, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::raw(format!("{} ", truncate_chars(&name, 12))));
+            spans.push(Span::styled(format!("[{label}]"), style));
             if s.trace.is_some() {
                 spans.push(Span::styled(
                     format!(
@@ -585,18 +688,17 @@ fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
                     Style::default().fg(Color::Cyan),
                 ));
             }
-            let line = Line::from(spans);
-            let item = ListItem::new(line);
-            if is_selected && is_focused {
-                item.style(Style::default().add_modifier(Modifier::REVERSED))
-            } else if is_selected {
-                item.style(Style::default().fg(Color::Cyan))
-            } else {
-                item
-            }
-        })
-        .collect();
-    f.render_widget(List::new(items).block(block), area);
+            spans
+        }
+    };
+    let item = ListItem::new(Line::from(spans));
+    if is_cursor && is_focused {
+        item.style(Style::default().add_modifier(Modifier::REVERSED))
+    } else if is_cursor {
+        item.style(Style::default().fg(Color::Cyan))
+    } else {
+        item
+    }
 }
 
 fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
@@ -1690,7 +1792,10 @@ fn draw_help(f: &mut Frame) {
         Line::styled("Control mode", head),
         row("b", "toggle sidebar (hide / full harness)"),
         row("j/k, ↑/↓", "select session"),
-        row("1-9", "jump to session N"),
+        row(
+            "1-9, space",
+            "jump to session N · fold the session's loop or workflow",
+        ),
         row("Tab", "cycle active / agents / loops / history sections"),
         row(
             "Enter",
@@ -1767,7 +1872,10 @@ fn draw_help(f: &mut Frame) {
         row("Tab, ←/→", "sessions → turns → detail"),
         row("Enter", "drill in / expand an observation"),
         row("v", "detail view: list → tree → timeline → loop"),
-        row("Space", "fold / unfold the selected subtree (tree view)"),
+        row(
+            "Space",
+            "fold a loop or workflow run (sessions) / a subtree (tree view)",
+        ),
         row("/", "full-text search (full mode content)"),
         row("a", "toggle this project / all projects"),
         row("s", "verdict: good → bad → cleared (also sent to Langfuse)"),
@@ -2345,44 +2453,17 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             .block(left_block);
         f.render_widget(p, left);
     } else {
+        // The same tree the Active sidebar draws, over traced sessions:
+        // each loop and each workflow run is a parent over its calls.
+        let rows = browser.session_rows();
+        let cursor = crate::tree::row_of(&rows, browser.selected_session).unwrap_or(0);
         let visible = usize::from(left.height.saturating_sub(2));
-        let start = sidebar_window(browser.selected_session, browser.sessions.len(), visible);
-        let end = (start + visible.max(1)).min(browser.sessions.len());
-        let items: Vec<ListItem> = browser.sessions[start..end]
+        let start = sidebar_window(cursor, rows.len(), visible);
+        let end = (start + visible.max(1)).min(rows.len());
+        let items: Vec<ListItem> = rows[start..end]
             .iter()
             .enumerate()
-            .map(|(offset, s)| {
-                let i = start + offset;
-                let is_sel = i == browser.selected_session;
-                let title = s
-                    .title
-                    .clone()
-                    .or_else(|| s.cwd.clone())
-                    .unwrap_or_else(|| s.session_id.clone());
-                let live = if s.open_turns > 0 { "● " } else { "" };
-                let line = Line::from(vec![
-                    Span::raw(if is_sel { "> " } else { "  " }),
-                    provider_badge(&s.provider),
-                    Span::styled(
-                        format!("{} ", &fmt_time(s.last_seen_ns)[5..16]),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!("{}t {} ", s.turn_count, fmt_cost(s.total_cost_usd)),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::styled(live.to_string(), Style::default().fg(Color::Green)),
-                    Span::raw(truncate_chars(&title, 40)),
-                ]);
-                let item = ListItem::new(line);
-                if is_sel && browser.focused == BrowserPane::Sessions {
-                    item.style(Style::default().add_modifier(Modifier::REVERSED))
-                } else if is_sel {
-                    item.style(Style::default().fg(Color::Yellow))
-                } else {
-                    item
-                }
-            })
+            .map(|(offset, row)| traced_session_row(browser, row, start + offset == cursor))
             .collect();
         f.render_widget(List::new(items).block(left_block), left);
     }
@@ -2628,11 +2709,126 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             Style::default().fg(Color::Black).bg(Color::Yellow),
         ),
         None => Line::styled(
-            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold  [/] search  [s] score  [a] all  [r] resume  [Esc] close",
+            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold run/subtree  [/] search  [s] score  [a] all  [r] resume  [Esc] close",
             Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
     };
     f.render_widget(Paragraph::new(footer_text), footer);
+}
+
+/// One row of the trace browser's Sessions tree: a loop or workflow
+/// header, or a traced session under it.
+fn traced_session_row<'a>(
+    browser: &'a TraceBrowserState,
+    row: &crate::tree::Row,
+    is_sel: bool,
+) -> ListItem<'a> {
+    let marker = if is_sel { "> " } else { "  " };
+    let spans = match row {
+        crate::tree::Row::Group {
+            kind,
+            title,
+            detail,
+            members,
+            collapsed,
+            ..
+        } => {
+            // A header carries the family's totals, so a folded run still
+            // says what it cost.
+            let (mut cost, mut turns, mut live, mut seen) = (0.0f64, 0i64, 0i64, 0i64);
+            for s in members.iter().filter_map(|i| browser.sessions.get(*i)) {
+                cost += s.total_cost_usd.unwrap_or(0.0);
+                turns += s.turn_count;
+                live += s.open_turns;
+                seen = seen.max(s.last_seen_ns);
+            }
+            vec![
+                Span::raw(marker.to_string()),
+                Span::styled(
+                    if *collapsed { "▸" } else { "▾" }.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{} ", kind.glyph()),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::styled(
+                    format!("{} ", &fmt_time(seen)[5..16]),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("{turns}t {} ", fmt_cost(Some(cost))),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    if live > 0 { "● " } else { "" }.to_string(),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    truncate_chars(title, 22),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {}·{}", members.len(), truncate_chars(detail, 12)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]
+        }
+        crate::tree::Row::Item { index, depth, last } => {
+            let Some(s) = browser.sessions.get(*index) else {
+                return ListItem::new(Line::raw(String::new()));
+            };
+            // Under a header the step or run label says more than the
+            // transcript title, which is the same prompt for every step.
+            let title = match browser.groups.get(&s.key) {
+                Some(g) if *depth > 0 && !g.label.is_empty() => g.label.clone(),
+                _ => s
+                    .title
+                    .clone()
+                    .or_else(|| s.cwd.clone())
+                    .unwrap_or_else(|| s.session_id.clone()),
+            };
+            let mut spans = vec![Span::raw(marker.to_string())];
+            // Under a header the date is the header's, repeated on every
+            // child; the columns go to the step's own name instead.
+            if *depth > 0 {
+                spans.push(Span::styled(
+                    if *last { " └ " } else { " ├ " }.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            spans.push(provider_badge(&s.provider));
+            if *depth == 0 {
+                spans.push(Span::styled(
+                    format!("{} ", &fmt_time(s.last_seen_ns)[5..16]),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            spans.push(Span::styled(
+                format!("{}t {} ", s.turn_count, fmt_cost(s.total_cost_usd)),
+                Style::default().fg(Color::Yellow),
+            ));
+            spans.push(Span::styled(
+                if s.open_turns > 0 { "● " } else { "" }.to_string(),
+                Style::default().fg(Color::Green),
+            ));
+            spans.push(Span::raw(truncate_chars(
+                &title,
+                if *depth > 0 { 34 } else { 40 },
+            )));
+            spans
+        }
+    };
+    let item = ListItem::new(Line::from(spans));
+    if is_sel && browser.focused == BrowserPane::Sessions {
+        item.style(Style::default().add_modifier(Modifier::REVERSED))
+    } else if is_sel {
+        item.style(Style::default().fg(Color::Yellow))
+    } else {
+        item
+    }
 }
 
 /// The loop's numbers for the selected turn, on one screen.
@@ -4856,7 +5052,8 @@ mod tests {
             "skills view",
             "open the selected execution's traces",
             "list → tree → timeline → loop",
-            "fold / unfold the selected subtree",
+            "fold a loop or workflow run",
+            "fold the session's loop or workflow",
             "also sent to Langfuse",
             "resume the selected session",
             "clear all exited sessions",
