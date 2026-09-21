@@ -113,6 +113,15 @@ pub struct ProfileTracing {
     pub inject_session_id: Option<bool>,
     /// "off" disables per-launch hook registration for this profile.
     pub hooks: Option<String>,
+    /// Which lifecycle hooks a Claude Code launch registers: "off",
+    /// "minimal" (session start, stop, end), "standard" (every event, the
+    /// default) or "strict" (standard plus the write guard with the default
+    /// denylist). `hooks = "off"` still means "off".
+    pub hooks_profile: Option<String>,
+    /// Globs (relative to the launch directory) no write tool may touch
+    /// in this profile's sessions; refused through the `PreToolUse` guard.
+    #[serde(default)]
+    pub write_denylist: Vec<String>,
     /// "local" | "langfuse" | "both": this profile's default destination.
     pub backend: Option<String>,
     /// Budget guard for this profile's launches: past either limit the

@@ -276,6 +276,63 @@ pub fn loop_verdict(
     Verdict::Permit
 }
 
+/// The write policy a profile asks for outside loops: its `write_denylist`,
+/// or the default denylist under the `strict` hooks profile. Stored as
+/// `launches.metadata.write_policy`; `cwd` is the launch directory paths
+/// are made relative to. `None` when the profile asks for nothing.
+pub fn write_policy(
+    t: Option<&ProfileTracing>,
+    profile: crate::tracing::hooks::register::HooksProfile,
+    cwd: &Path,
+) -> Option<LoopPolicy> {
+    let listed: Vec<String> = t
+        .map(|t| {
+            t.write_denylist
+                .iter()
+                .map(|g| g.trim().to_string())
+                .filter(|g| !g.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let denylist = if !listed.is_empty() {
+        listed
+    } else if profile.strict() {
+        crate::loops::gate::DEFAULT_DENYLIST
+            .iter()
+            .map(|g| g.to_string())
+            .collect()
+    } else {
+        return None;
+    };
+    Some(LoopPolicy {
+        report_only: false,
+        reason: None,
+        state_file: String::new(),
+        run_log: String::new(),
+        denylist,
+        max_files: None,
+        worktree: Some(cwd.to_string_lossy().into_owned()),
+    })
+}
+
+/// The write guard for one tool call: only the denylist part of the loop
+/// rules. Shell commands, reads and paths off the list are permitted.
+pub fn write_verdict(policy: &LoopPolicy, tool_name: &str, tool_input: Option<&Value>) -> Verdict {
+    if is_shell_tool(tool_name) || !crate::loops::store::is_write_tool(tool_name) {
+        return Verdict::Permit;
+    }
+    let paths = tool_input
+        .map(crate::loops::store::paths_in_tool_input)
+        .unwrap_or_default();
+    for path in paths {
+        let rel = relative_path(&path, policy);
+        if let Some(pat) = glob_matches(&policy.denylist, &rel) {
+            return Verdict::Block(format!("agent-mux guard: {rel} is protected ({pat})"));
+        }
+    }
+    Verdict::Permit
+}
+
 /// The guard for one tool call. `tool_name`/`tool_input` come from the
 /// raw `PreToolUse` payload; `loop_flag` is `--loop` on the hook, which
 /// makes a missing answer a refusal for write tools.
@@ -326,6 +383,14 @@ pub fn check_tool(
         }
     } else if loop_flag {
         return closed("no loop policy on the launch");
+    } else if let Some(policy) = meta
+        .get("write_policy")
+        .cloned()
+        .and_then(|p| serde_json::from_value::<LoopPolicy>(p).ok())
+        && let Some(tool) = tool_name
+        && let Verdict::Block(reason) = write_verdict(&policy, tool, tool_input)
+    {
+        return Verdict::Block(reason);
     }
     let Some(guard) = meta.get("guard").and_then(Guard::from_json) else {
         return Verdict::Permit;
@@ -441,5 +506,129 @@ mod tests {
             Verdict::Block(_)
         ));
         assert_eq!(check_tool(db, "l1", b, None, None, true), Verdict::Permit);
+    }
+
+    #[test]
+    fn write_policy_follows_the_profile_and_guards_only_listed_paths() {
+        use crate::tracing::hooks::register::HooksProfile;
+        let cwd = Path::new("/ws");
+        let t = |list: &[&str]| ProfileTracing {
+            write_denylist: list.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        assert_eq!(write_policy(None, HooksProfile::Standard, cwd), None);
+        assert_eq!(
+            write_policy(Some(&t(&[])), HooksProfile::Standard, cwd),
+            None
+        );
+        let strict = write_policy(Some(&t(&[])), HooksProfile::Strict, cwd).unwrap();
+        assert_eq!(
+            strict.denylist,
+            crate::loops::gate::DEFAULT_DENYLIST
+                .iter()
+                .map(|g| g.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert!(!strict.report_only);
+        assert_eq!(strict.worktree.as_deref(), Some("/ws"));
+        let policy = write_policy(
+            Some(&t(&["secrets/**", " .claude/settings.json "])),
+            HooksProfile::Minimal,
+            cwd,
+        )
+        .unwrap();
+        assert_eq!(policy.denylist, vec!["secrets/**", ".claude/settings.json"]);
+
+        let input = |p: &str| json!({ "file_path": p });
+        assert!(matches!(
+            write_verdict(&policy, "Write", Some(&input("/ws/secrets/prod.env"))),
+            Verdict::Block(r) if r == "agent-mux guard: secrets/prod.env is protected (secrets/**)"
+        ));
+        assert!(matches!(
+            write_verdict(&policy, "Edit", Some(&input(".claude/settings.json"))),
+            Verdict::Block(_)
+        ));
+        assert_eq!(
+            write_verdict(&policy, "Read", Some(&input("/ws/secrets/prod.env"))),
+            Verdict::Permit
+        );
+        assert_eq!(
+            write_verdict(&policy, "Write", Some(&input("/ws/src/main.rs"))),
+            Verdict::Permit
+        );
+        // pushing is a loop rule, not a write-guard rule
+        assert_eq!(
+            write_verdict(
+                &policy,
+                "Bash",
+                Some(&json!({ "command": "git push origin main" }))
+            ),
+            Verdict::Permit
+        );
+    }
+
+    #[test]
+    fn a_launch_row_with_a_write_policy_is_guarded_through_the_store() {
+        use crate::tracing::hooks::register::HooksProfile;
+        use crate::tracing::pricing::PriceTable;
+        use crate::tracing::store::{OpenOptions, open_aux, open_rw};
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("traces.db");
+        let _ = open_rw(
+            &db,
+            OpenOptions {
+                prices: PriceTable::builtin(),
+                run_id: "run-g".into(),
+                retention_days: 0,
+                agent_mux_version: "test".into(),
+            },
+        )
+        .unwrap();
+        let policy = write_policy(
+            Some(&ProfileTracing {
+                write_denylist: vec!["**/.env".into()],
+                ..Default::default()
+            }),
+            HooksProfile::Standard,
+            Path::new("/ws"),
+        )
+        .unwrap();
+        let meta = json!({ "write_policy": serde_json::to_value(&policy).unwrap() });
+        let conn = open_aux(&db).unwrap();
+        conn.execute(
+            "INSERT INTO launches (id, run_id, agent_mux_session, profile, provider, cwd, project_slug,
+                content_mode, correlation_plan, started_ns, agent_mux_version, metadata)
+             VALUES ('lw', 'run-g', 1, 'Claude Code', 'claude', '/ws', '-ws', 'full', 'deterministic',
+                1000, 'test', ?1)",
+            [meta.to_string()],
+        )
+        .unwrap();
+        let b = Duration::from_millis(200);
+        assert!(matches!(
+            check_tool(&db, "lw", b, Some("Write"), Some(&json!({"file_path": "/ws/.env"})), false),
+            Verdict::Block(r) if r.starts_with("agent-mux guard: .env is protected")
+        ));
+        assert_eq!(
+            check_tool(
+                &db,
+                "lw",
+                b,
+                Some("Write"),
+                Some(&json!({"file_path": "/ws/a.rs"})),
+                false
+            ),
+            Verdict::Permit
+        );
+        assert_eq!(
+            check_tool(
+                &db,
+                "lw",
+                b,
+                Some("Read"),
+                Some(&json!({"file_path": "/ws/.env"})),
+                false
+            ),
+            Verdict::Permit
+        );
     }
 }
