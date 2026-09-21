@@ -1036,8 +1036,10 @@ fn why_line(r: &LoopRun) -> String {
         }
         Outcome::FixProposed => parts.push("the worktree carries a change".into()),
         Outcome::Escalated => {
-            if verifier_verdict(r) == Some("ESCALATE_HUMAN") {
-                parts.push("the verifier asked for a human".into());
+            match verifier_verdict(r) {
+                Some("ESCALATE_HUMAN") => parts.push("a checker asked for a human".into()),
+                Some("REJECT") => parts.push("a checker rejected the change".into()),
+                _ => {}
             }
             if r.detail_str("gate_violation").is_some() {
                 parts.push("a touched path is on the denylist".into());
@@ -1068,8 +1070,13 @@ fn verifier_text(r: &LoopRun) -> String {
         .and_then(|v| v.get("ran"))
         .and_then(|b| b.as_bool())
         .unwrap_or(false);
+    let label = r
+        .detail
+        .get("verifier")
+        .and_then(|v| v.get("label"))
+        .and_then(|l| l.as_str());
     match (ran, verifier_verdict(r), r.effective_level) {
-        (true, Some(v), _) => v.to_string(),
+        (true, Some(v), _) => label.unwrap_or(v).to_string(),
         (true, None, _) => "ran, no verdict line".into(),
         (false, _, Level::L1) => "not required at L1".into(),
         (false, _, _) => "did not run".into(),

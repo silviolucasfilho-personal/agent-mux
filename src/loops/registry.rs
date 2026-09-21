@@ -252,6 +252,7 @@ mod tests {
             model: None,
             verifier_model: None,
             prompt: None,
+            agents: Vec::new(),
         }
     }
 

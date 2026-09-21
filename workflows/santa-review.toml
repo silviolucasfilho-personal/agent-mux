@@ -1,0 +1,53 @@
+# Make a list, check it twice: one reviewer lists the findings, then two
+# independent checkers each try to refute every one of them, and a finding
+# only ships when both checkers fail to refute it.
+#
+# `wf-refute` answers `refuted` per vote; `aggregate_votes` counts the
+# votes where it is true, so `refuted == 0` means both checkers agreed the
+# finding stands. A single refutation drops it.
+[workflow]
+name = "santa-review"
+description = "One reviewer lists the findings, two independent checkers must both fail to refute each one; report what survives both."
+when_to_use = "A change that must not ship with a wrong finding either way: the survivors have passed two independent checkers."
+output = "report"
+
+[args.scope]
+description = "What to review: a path, a git ref range (main..HEAD), or empty for the uncommitted working tree."
+default = ""
+
+[schemas.findings]
+fields.findings = { type = "array", items = "finding", required = true }
+[schemas.finding]
+fields.file = { type = "string", required = true }
+fields.line = { type = "integer" }
+fields.title = { type = "string", required = true }
+fields.why = { type = "string", required = true, description = "The concrete failure: inputs, state, wrong output." }
+fields.severity = { type = "string", enum = ["high", "medium", "low"], required = true }
+[schemas.verdict]
+fields.refuted = { type = "boolean", required = true }
+fields.reason = { type = "string", required = true }
+
+[[steps]]
+id = "list"
+kind = "single"
+phase = "List"
+skill = "wf-review-find"
+args = { dimension = "correctness, security, concurrency, resources, tests: everything that can fail", scope = "{args.scope}" }
+result = "findings"
+
+[[steps]]
+id = "checked"
+kind = "pipeline"
+phase = "Check twice"
+over = "list.findings[*]"
+dedupe_by = ["file", "line", "title"]
+verify = { skill = "wf-refute", votes = 2, result = "verdict", keep = "refuted == 0" }
+take = 40
+
+[[steps]]
+id = "report"
+kind = "single"
+phase = "Report"
+skill = "wf-synthesize"
+input = "checked"
+args = { subject = "review findings for {args.scope} that two independent checkers could not refute", shape = "a review report grouped by severity, one paragraph per finding with file and line, and a closing line saying how many findings the checkers dropped" }

@@ -709,6 +709,12 @@ impl App {
                     );
                     if v.tripped() {
                         format!("TRIPPED: {}", v.reason)
+                    } else if let Some(t) = v.near_trip {
+                        format!(
+                            "ok · {} attempts · one attempt from tripping ({})",
+                            v.iterations,
+                            t.as_str()
+                        )
                     } else {
                         format!("ok · {} attempts", v.iterations)
                     }
@@ -916,7 +922,7 @@ impl App {
                 .ok()
             })
             .unwrap_or_default();
-        let breaker_trip = if pattern.breaker {
+        let breaker_verdict = if pattern.breaker {
             crate::loops::breaker::load(&entry.workspace.join(crate::loops::LEDGER_JSON))
                 .ok()
                 .map(|l| {
@@ -925,11 +931,14 @@ impl App {
                         &crate::loops::breaker::BreakerConfig::default(),
                     )
                 })
-                .filter(|v| v.tripped())
-                .map(|v| v.reason)
         } else {
             None
         };
+        let breaker_trip = breaker_verdict
+            .as_ref()
+            .filter(|v| v.tripped())
+            .map(|v| v.reason.clone());
+        let breaker_near_trip = breaker_verdict.as_ref().and_then(|v| v.near_trip_reason());
         let audit = if entry.workspace.is_dir() {
             Some(self.audit_for(&entry.workspace, now))
         } else {
@@ -943,6 +952,7 @@ impl App {
             runs_today: spend.runs,
             tokens_today: spend.tokens,
             breaker_trip,
+            breaker_near_trip,
             audit_allows_configured: audit
                 .as_ref()
                 .map(|a| a.allows(entry.level))
@@ -1140,6 +1150,7 @@ impl App {
                             "ok".into()
                         }),
                         reason: Some(v.reason),
+                        near_trip: v.near_trip.map(|t| t.as_str().to_string()),
                         iterations: v.iterations,
                         consecutive_failures: l
                             .attempts
@@ -1514,7 +1525,10 @@ impl App {
             worktree_changed,
             state_changed,
             high_priority_grew: high_grew,
-            verifier_verdict: facts.as_ref().and_then(|f| f.verifier_verdict.clone()),
+            verifier_verdicts: facts
+                .as_ref()
+                .map(|f| f.verifier_verdicts.clone())
+                .unwrap_or_default(),
             permission_refused,
             skill_missing: missing_skill.is_some(),
         };
@@ -1572,7 +1586,12 @@ impl App {
         if let Some(f) = &facts {
             row.set_detail(
                 "verifier",
-                serde_json::json!({ "ran": f.verifier_ran, "verdict": f.verifier_verdict }),
+                serde_json::json!({
+                    "ran": f.verifier_ran,
+                    "verdict": f.verifier_verdict,
+                    "verdicts": f.verifier_verdicts,
+                    "label": run::verdict_label(&f.verifier_verdicts),
+                }),
             );
         }
         row.set_detail("files", serde_json::json!(relative));

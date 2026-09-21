@@ -134,7 +134,7 @@ fn c_opens_the_view_grouped_by_kind_and_esc_unwinds() {
     let mut f = fixture();
     press(&mut f.app, KeyCode::Char('C'));
     let v = view(&f.app);
-    assert_eq!(v.item_count(), 69);
+    assert_eq!(v.item_count(), 75);
     assert!(matches!(v.rows[0], ConfigRow::Header(Kind::Prompts)));
     assert_eq!(v.selected, 1, "the first item, never a header");
     assert_eq!(v.selected_asset().unwrap().id, "prompts.toml");
@@ -149,7 +149,7 @@ fn c_opens_the_view_grouped_by_kind_and_esc_unwinds() {
     assert_eq!(headers, Kind::ALL.to_vec());
 
     let text = screen(&f.app);
-    assert!(text.contains("Configuration (69)"), "{text}");
+    assert!(text.contains("Configuration (75)"), "{text}");
     for h in ["Prompts", "Settings", "Skills"] {
         assert!(text.contains(h), "{h}\n{text}");
     }
@@ -347,7 +347,7 @@ fn n_creates_a_new_loop_skill_and_opens_it() {
     );
     assert_eq!(a.source, Source::User);
     assert!(a.valid(), "{:?}", a.problems);
-    assert_eq!(v.item_count(), 70);
+    assert_eq!(v.item_count(), 76);
     f.app.editor_finished(req, Ok(()));
 
     // a bad name is refused and the footer question closes

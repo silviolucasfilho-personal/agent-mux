@@ -290,10 +290,16 @@ pub fn activity_count(
 pub struct RunFacts {
     pub tokens: Option<i64>,
     pub cost_usd: Option<f64>,
-    /// A sub-agent whose name contains `verifier` ran on this launch.
+    /// A checker sub-agent (`loop-verifier`, `loop-reviewer`: a name that
+    /// contains `verifier` or `reviewer`) ran on this launch.
     pub verifier_ran: bool,
-    /// `APPROVE`, `REJECT` or `ESCALATE_HUMAN` from the verifier's output.
+    /// The checkers' combined word (`run::combined_verdict`): `APPROVE`
+    /// only when every checker that answered approved, `REJECT` when any
+    /// rejected, `ESCALATE_HUMAN` when any asked for a human.
     pub verifier_verdict: Option<String>,
+    /// One verdict per checker sub-agent that answered, in the order they
+    /// ran.
+    pub verifier_verdicts: Vec<String>,
     /// Distinct paths the launch's write tools targeted, in first-seen order.
     pub files_touched: Vec<String>,
     /// The last thing the model said.
@@ -433,20 +439,19 @@ pub fn run_facts(conn: &Connection, launch_id: &str) -> rusqlite::Result<RunFact
     })?;
     for row in rows {
         let (name, tool_name, output) = row?;
-        let is_verifier = name.to_ascii_lowercase().contains("verifier")
-            || tool_name
-                .as_deref()
-                .is_some_and(|t| t.to_ascii_lowercase().contains("verifier"));
-        if !is_verifier {
+        let is_checker = |s: &str| {
+            let l = s.to_ascii_lowercase();
+            l.contains("verifier") || l.contains("reviewer")
+        };
+        if !(is_checker(&name) || tool_name.as_deref().is_some_and(is_checker)) {
             continue;
         }
         facts.verifier_ran = true;
-        if facts.verifier_verdict.is_none()
-            && let Some(v) = output.as_deref().and_then(parse_verdict)
-        {
-            facts.verifier_verdict = Some(v);
+        if let Some(v) = output.as_deref().and_then(parse_verdict) {
+            facts.verifier_verdicts.push(v);
         }
     }
+    facts.verifier_verdict = crate::loops::run::combined_verdict(&facts.verifier_verdicts);
     facts.files_touched = files_touched(conn, launch_id)?;
     facts.final_message = crate::tracing::experiments::final_message(conn, launch_id)?;
     Ok(facts)
@@ -748,11 +753,26 @@ mod tests {
             Some("Checked the diff.\n## Verdict: REJECT — tests fail\n- cargo test red"),
             None,
         );
+        obs(
+            "o7",
+            "t2",
+            "agent",
+            "loop-reviewer",
+            Some("Task"),
+            None,
+            Some("Read the diff.\n## Verdict: APPROVE\n- minimal"),
+            None,
+        );
         let facts = run_facts(&conn, "lx").unwrap();
-        assert_eq!(facts.tokens, Some(600));
+        assert_eq!(facts.tokens, Some(700), "the reviewer row adds its tokens");
         assert!(facts.cost_usd.unwrap() > 0.05);
         assert!(facts.verifier_ran);
-        assert_eq!(facts.verifier_verdict.as_deref(), Some("REJECT"));
+        assert_eq!(facts.verifier_verdicts, vec!["REJECT", "APPROVE"]);
+        assert_eq!(
+            facts.verifier_verdict.as_deref(),
+            Some("REJECT"),
+            "one REJECT among the checkers is a REJECT"
+        );
         assert_eq!(
             facts.files_touched,
             vec!["src/a.rs", "docs/b.md", "docs/c.md", "nb.ipynb"]

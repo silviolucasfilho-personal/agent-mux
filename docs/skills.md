@@ -86,7 +86,12 @@ agent-mux skill show heimdall --harness codex # SKILL.md as written for that har
 agent-mux skill install heimdall [--harness claude|codex|agy|all] [--force]
 agent-mux skill uninstall heimdall [--harness …]
 agent-mux skill status [heimdall]             # installed / stale / not managed, per harness
+agent-mux skill import <dir> [--force]        # bring a package written for one harness into ~/.agent-mux/skills
 ```
+
+### Importing
+
+`agent-mux skill import <dir>` copies a skill package written for one harness (a `SKILL.md` with frontmatter, plus `reference/*.md` or `references/*.md`) into `~/.agent-mux/skills/<name>/`, from where the sidebar and `skill install` write it into every harness. The name comes from the frontmatter (the directory name when there is none) and must satisfy the id rule of section 1. The description is rewritten into the one plain YAML scalar all three CLIs parse the same way: block scalars and continuation lines are flattened, `: ` becomes ` - ` and ` #` is dropped. Every other frontmatter key (`allowed-tools`, `tools`, `metadata`, `license`, …) stays in the package as written; the installed copy carries `name` and `description` only. A `skill.toml` with the display name and the default icon is written when the package has none and is kept on a `--force` re-import. The import prints a content lint (secret-looking strings, prompt-injection phrasing, a shell tool next to a write tool with no sentence saying what may be touched); findings are warnings, never a refusal. The package stays under your library, so nothing from another project is compiled in.
 
 ## 7. Heimdall
 

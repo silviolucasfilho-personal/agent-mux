@@ -25,7 +25,7 @@ const HEADINGS: [&str; 7] = [
 #[test]
 fn every_embedded_skill_is_a_valid_package_with_the_spec_shape() {
     let skills = embedded_skills();
-    assert_eq!(skills.len(), 9);
+    assert_eq!(skills.len(), 11);
     for (name, text) in &skills {
         let def = parse_skill(text, None, Vec::new(), None)
             .unwrap_or_else(|e| panic!("{name}: {}", e.message));
@@ -109,7 +109,7 @@ fn every_embedded_skill_lints_clean_for_claude() {
     };
     let defs = inventory(Harness::Claude, &ws, &home);
     let skills: Vec<_> = defs.iter().filter(|d| d.kind == Kind::Skill).collect();
-    assert_eq!(skills.len(), 9, "{defs:?}");
+    assert_eq!(skills.len(), 11, "{defs:?}");
     for def in skills {
         assert!(!def.triggers.is_empty(), "{}: quoted triggers", def.name);
         assert!(!def.tools.is_empty(), "{}: allowed-tools read", def.name);

@@ -93,7 +93,7 @@ fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
     assert_eq!(app.sidebar_section, SidebarSection::Workflows);
     assert_eq!(
         app.workflow_list.len(),
-        7,
+        8,
         "the built-ins are listed on entry"
     );
     press(&mut app, KeyCode::Tab);
@@ -103,14 +103,17 @@ fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
 
     to_workflows(&mut app);
     let text = render(&app, 120, 40);
-    assert!(text.contains("Workflows [1/7]"), "{text}");
+    assert!(text.contains("Workflows [1/8]"), "{text}");
     assert!(text.contains("review-changes"), "{text}");
     assert!(
         text.contains("[c] compose"),
         "the hint line names the keys\n{text}"
     );
     // the preview card describes the selected document
-    assert!(text.contains("Find issues per review dimension"), "{text}");
+    assert!(
+        text.contains("Choose the review lenses for the change"),
+        "{text}"
+    );
     assert!(text.contains("fanout"), "{text}");
 
     // j/k move within the section and continue into History and back
@@ -120,10 +123,10 @@ fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
     for _ in 0..10 {
         press(&mut app, KeyCode::Char('j'));
     }
-    assert_eq!(app.selected_workflow, 6, "no history sessions, so it stays");
+    assert_eq!(app.selected_workflow, 7, "no history sessions, so it stays");
     press(&mut app, KeyCode::Char('k'));
-    assert_eq!(app.selected_workflow, 5);
-    for _ in 0..6 {
+    assert_eq!(app.selected_workflow, 6);
+    for _ in 0..7 {
         press(&mut app, KeyCode::Char('k'));
     }
     assert_eq!(

@@ -31,6 +31,10 @@ pub const BUILTIN: &[(&str, &str)] = &[
         "triage-route",
         include_str!("../../workflows/triage-route.toml"),
     ),
+    (
+        "santa-review",
+        include_str!("../../workflows/santa-review.toml"),
+    ),
 ];
 
 pub fn builtin(name: &str) -> Option<&'static str> {
@@ -237,7 +241,7 @@ mod tests {
                 .unwrap()
                 .steps
                 .len(),
-            3
+            4
         );
     }
 

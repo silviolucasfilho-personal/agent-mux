@@ -107,6 +107,49 @@ profile, agent-mux disables session-id and hook argument injection for that
 profile for the rest of the run and reports the condition in the status bar.
 Set `inject_session_id = false` or `hooks = "off"` in the profile when needed.
 
+### Hook profiles
+
+`hooks_profile` in a profile's `[profiles.tracing]` section chooses how much
+of the lifecycle a Claude Code launch registers:
+
+| Profile | Events registered | Use |
+| --- | --- | --- |
+| `off` | none | the same as `hooks = "off"` |
+| `minimal` | `SessionStart`, `Stop`, `StopFailure`, `SessionEnd` | session rows and timings without per-tool announcements |
+| `standard` | every event (the default) | full tracing |
+| `strict` | every event, plus the write guard below with the default denylist | sessions that must not touch protected files |
+
+The profile filters only the inline `--settings` document of a Claude Code
+launch. Codex and Antigravity read the hook set installed once by
+`agent-mux trace hooks install`, so they keep that set whatever the profile
+says. A loop run needs the tool events for its guard, so `minimal` is
+raised to `standard` for loop launches. An unknown word reads as
+`standard`.
+
+### Write guard
+
+`write_denylist` lists globs, relative to the launch directory, that no
+write tool may touch in that profile's sessions:
+
+```toml
+[profiles.tracing]
+write_denylist = [".claude/**", "secrets/**", "**/.env"]
+```
+
+The list is recorded on the launch row as `metadata.write_policy` and
+enforced by the same synchronous `PreToolUse` hook as the budget guard:
+a `Write`, `Edit` or other write tool aimed at a listed path is refused
+with `agent-mux guard: <path> is protected (<glob>)`, and the model sees
+the reason. Reads, shell commands and paths off the list pass. Under
+`hooks_profile = "strict"` an empty list means the default denylist the
+loop gate uses (`gate.yaml` defaults: `.env` files, secrets, auth,
+payments, migrations, keys, credentials, CI workflows, infra). The guard is enforced where the CLI's
+`PreToolUse` can wait for an answer: Claude Code per launch, Codex after
+`agent-mux trace hooks install codex`, not Antigravity; when it cannot be
+enforced the status bar says so at launch. Unlike the loop guard it fails
+open when the store is unreachable. Report-only, the file cap and the
+no-push rule remain loop rules.
+
 ## Codex
 
 Codex does not receive an injected native session id. agent-mux watches recent

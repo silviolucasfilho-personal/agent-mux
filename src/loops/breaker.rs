@@ -131,11 +131,36 @@ pub struct Verdict {
     pub reason: String,
     pub iterations: usize,
     pub tokens_used: u64,
+    /// Not tripped, but one more attempt of the same kind would trip this
+    /// trigger: pre-flight caps the run at L1 so it reports instead of
+    /// trying again.
+    pub near_trip: Option<Trigger>,
 }
 
 impl Verdict {
     pub fn tripped(&self) -> bool {
         self.trip.is_some()
+    }
+
+    /// "breaker one attempt from tripping (stagnation)" for the level cap.
+    pub fn near_trip_reason(&self) -> Option<String> {
+        self.near_trip
+            .map(|t| format!("breaker one attempt from tripping ({})", t.as_str()))
+    }
+}
+
+impl BreakerConfig {
+    /// The same thresholds one attempt lower; a threshold of 1 (or 0)
+    /// becomes 0, which disables that trigger, since "one attempt short"
+    /// of it means no attempt at all.
+    pub fn one_short(&self) -> BreakerConfig {
+        BreakerConfig {
+            max_iterations: self.max_iterations.saturating_sub(1),
+            stagnation_threshold: self.stagnation_threshold.saturating_sub(1),
+            frustration_threshold: self.frustration_threshold.saturating_sub(1),
+            no_progress_threshold: self.no_progress_threshold.saturating_sub(1),
+            similarity_threshold: self.similarity_threshold,
+        }
     }
 }
 
@@ -234,6 +259,15 @@ fn trailing_failures(ledger: &Ledger) -> Vec<&Attempt> {
 
 /// Whether the loop must stop.
 pub fn check(ledger: &Ledger, cfg: &BreakerConfig) -> Verdict {
+    let mut v = check_at(ledger, cfg);
+    if v.trip.is_none() {
+        v.near_trip = check_at(ledger, &cfg.one_short()).trip;
+    }
+    v
+}
+
+/// `check` without the near-trip look-ahead.
+fn check_at(ledger: &Ledger, cfg: &BreakerConfig) -> Verdict {
     let iterations = ledger.attempts.len();
     let tokens_used: u64 = ledger.attempts.iter().filter_map(|a| a.tokens_used).sum();
     let failures = trailing_failures(ledger);
@@ -260,6 +294,7 @@ pub fn check(ledger: &Ledger, cfg: &BreakerConfig) -> Verdict {
                 reason: format!("the same error {n} times in a row: {sig}"),
                 iterations,
                 tokens_used,
+                near_trip: None,
             };
         }
     }
@@ -281,6 +316,7 @@ pub fn check(ledger: &Ledger, cfg: &BreakerConfig) -> Verdict {
                 reason: format!("{best} consecutive failures with similar errors"),
                 iterations,
                 tokens_used,
+                near_trip: None,
             };
         }
     }
@@ -290,6 +326,7 @@ pub fn check(ledger: &Ledger, cfg: &BreakerConfig) -> Verdict {
             reason: format!("{failure_count} consecutive failures without progress"),
             iterations,
             tokens_used,
+            near_trip: None,
         };
     }
     if cfg.max_iterations > 0 && iterations >= cfg.max_iterations {
@@ -301,6 +338,7 @@ pub fn check(ledger: &Ledger, cfg: &BreakerConfig) -> Verdict {
             ),
             iterations,
             tokens_used,
+            near_trip: None,
         };
     }
     Verdict {
@@ -308,6 +346,7 @@ pub fn check(ledger: &Ledger, cfg: &BreakerConfig) -> Verdict {
         reason: format!("{failure_count} trailing failure(s), {iterations} attempt(s)"),
         iterations,
         tokens_used,
+        near_trip: None,
     }
 }
 
@@ -507,6 +546,48 @@ mod tests {
         );
         let short = ledger(vec![failure("a")]);
         assert_eq!(check(&short, &BreakerConfig::default()).trip, None);
+    }
+
+    #[test]
+    fn near_trip_is_one_attempt_short_of_a_trigger() {
+        // two identical errors: the third would trip stagnation
+        let l = ledger(vec![
+            failure("cargo test failed"),
+            failure("cargo test failed"),
+        ]);
+        let v = check(&l, &BreakerConfig::default());
+        assert_eq!(v.trip, None, "{}", v.reason);
+        assert_eq!(v.near_trip, Some(Trigger::Stagnation));
+        assert_eq!(
+            v.near_trip_reason().as_deref(),
+            Some("breaker one attempt from tripping (stagnation)")
+        );
+        // one failure is not near anything
+        let one = check(&ledger(vec![failure("x")]), &BreakerConfig::default());
+        assert_eq!(one.near_trip, None);
+        assert_eq!(one.near_trip_reason(), None);
+        // nine attempts: the tenth would hit the iteration cap
+        let nine: Vec<Attempt> = (0..9)
+            .map(|i| Attempt {
+                outcome: AttemptOutcome::Noop,
+                error: None,
+                ..failure(&format!("{i}"))
+            })
+            .collect();
+        let v = check(&ledger(nine), &BreakerConfig::default());
+        assert_eq!(v.trip, None);
+        assert_eq!(v.near_trip, Some(Trigger::MaxIterations));
+        // a tripped verdict carries no near-trip
+        let three = ledger(vec![failure("e"), failure("e"), failure("e")]);
+        let v = check(&three, &BreakerConfig::default());
+        assert!(v.tripped());
+        assert_eq!(v.near_trip, None);
+        // a threshold of one has no "one short": disabled, never near
+        let cfg = BreakerConfig {
+            stagnation_threshold: 1,
+            ..Default::default()
+        };
+        assert_eq!(cfg.one_short().stagnation_threshold, 0);
     }
 
     #[test]

@@ -1,5 +1,6 @@
-//! The prompts agent-mux composes itself: the opening prompt of a loop run
-//! and the hydration hint of a skill launch. The built-in text is
+//! The prompts agent-mux composes itself: the opening prompt of a loop run,
+//! the hydration hint of a skill launch, the workflow session prompts and
+//! the baseline section of every installed loop agent. The built-in text is
 //! `src/prompts.toml`; a `prompts.toml` in the configuration library
 //! (`assets::root()`) replaces the keys it sets. Read at launch time, so an
 //! edit takes effect on the next run without a restart.
@@ -35,6 +36,9 @@ pub struct Prompts {
     pub workflow_inline: String,
     /// `[workflow] plan`: the planner's opening prompt.
     pub workflow_plan: String,
+    /// `[agent] preamble`: the baseline section the scaffolder inserts
+    /// into every installed loop agent.
+    pub agent_preamble: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -45,6 +49,8 @@ struct Doc {
     skill: SkillDoc,
     #[serde(default)]
     workflow: WorkflowDoc,
+    #[serde(default)]
+    agent: AgentDoc,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -62,6 +68,11 @@ struct WorkflowDoc {
     run: Option<String>,
     inline: Option<String>,
     plan: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AgentDoc {
+    preamble: Option<String>,
 }
 
 /// The values filled into `loop.run`.
@@ -85,6 +96,7 @@ impl Prompts {
             workflow_run: doc.workflow.run.unwrap_or_default(),
             workflow_inline: doc.workflow.inline.unwrap_or_default(),
             workflow_plan: doc.workflow.plan.unwrap_or_default(),
+            agent_preamble: doc.agent.preamble.unwrap_or_default(),
         }
     }
 
@@ -106,6 +118,9 @@ impl Prompts {
         }
         if let Some(pl) = doc.workflow.plan {
             p.workflow_plan = pl;
+        }
+        if let Some(a) = doc.agent.preamble {
+            p.agent_preamble = a;
         }
         Ok(p)
     }

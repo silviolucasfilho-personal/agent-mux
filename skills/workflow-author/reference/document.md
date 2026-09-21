@@ -34,7 +34,7 @@ args = { dimension = "{item}" }  # values the skill reads from its context
 input = "earlier-step"           # a path handed to the skill as inputs
 result = "findings"              # the schema the answer must match
 verify = { skill = "wf-refute", votes = 3, result = "verdict", keep = "refuted < 2" }
-keep = "severity != 'low'"       # predicate on each item's result: == != < <= > >= and or not has(field)
+keep = "severity in [high, medium]" # predicate on each item's result: == != < <= > >= in [a, b] not in [a, b] and or not has(field); runs before the votes
 dedupe_by = ["file", "line"]     # keep the first item per key
 take = 40                        # keep at most N items
 harness = "codex"                # per-step overrides: harness profile model isolation cwd timeout_s concurrency

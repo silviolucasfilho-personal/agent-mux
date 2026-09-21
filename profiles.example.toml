@@ -133,6 +133,13 @@ args = []
 # provider = "claude"          # force CLI-kind detection for wrapper commands; "none" = never trace
 # content_mode = "metadata"    # dial one profile down
 # hooks = "off"               # no per-launch hook registration for this profile only
+# hooks_profile = "standard"  # which lifecycle hooks a Claude Code launch registers: "off", "minimal"
+#                              # (session start, stop, end), "standard" (every event) or "strict" (every
+#                              # event plus the write guard with the default denylist). Codex and
+#                              # Antigravity keep the set installed by `agent-mux trace hooks install`.
+# write_denylist = [".claude/**", "secrets/**", "**/.env"]
+#                              # write guard: globs (relative to the launch directory) no write tool may
+#                              # touch; refused through the PreToolUse hook with the reason shown
 # max_cost_usd = 2.0           # budget guard: past this spend the next tool call is refused through the
 #                              # CLI's PreToolUse hook (Claude per launch; Codex after `trace hooks install codex`)
 # max_turns = 40               # …or past this many turns. The launch dialog overrides both per launch.

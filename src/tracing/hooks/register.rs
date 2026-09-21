@@ -2,9 +2,114 @@
 //! `--settings` inline JSON and the Codex `-c notify=[…]` override. Both
 //! point the CLI at this very binary (`agent-mux trace hook …`).
 
-use crate::config::ContentMode;
+use crate::config::{ContentMode, ProfileTracing};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
+
+/// Which lifecycle events a Claude Code launch registers
+/// (`[profiles.tracing] hooks_profile`). Codex and Antigravity read the
+/// hook set installed once by `agent-mux trace hooks install`, so the
+/// profile only filters the per-launch `--settings` document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HooksProfile {
+    /// No per-launch hooks at all.
+    Off,
+    /// Session start, stop and end: the session rows without tool detail.
+    Minimal,
+    /// Every event in `CLAUDE_EVENTS`.
+    #[default]
+    Standard,
+    /// `Standard` plus the write guard with the default denylist.
+    Strict,
+}
+
+/// The events `Minimal` keeps.
+const MINIMAL_EVENTS: [&str; 4] = ["SessionStart", "Stop", "StopFailure", "SessionEnd"];
+
+impl HooksProfile {
+    pub fn parse(s: &str) -> Option<HooksProfile> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(HooksProfile::Off),
+            "minimal" => Some(HooksProfile::Minimal),
+            "standard" => Some(HooksProfile::Standard),
+            "strict" => Some(HooksProfile::Strict),
+            _ => None,
+        }
+    }
+
+    /// The profile a tracing section asks for: `hooks_profile` first, the
+    /// older `hooks = "off"` as an alias of `Off`, else `Standard`. An
+    /// unknown word reads as `Standard` so a typo never silences tracing.
+    pub fn from_tracing(t: Option<&ProfileTracing>) -> HooksProfile {
+        let Some(t) = t else {
+            return HooksProfile::Standard;
+        };
+        if t.hooks.as_deref().map(str::trim) == Some("off") {
+            return HooksProfile::Off;
+        }
+        t.hooks_profile
+            .as_deref()
+            .and_then(HooksProfile::parse)
+            .unwrap_or_default()
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HooksProfile::Off => "off",
+            HooksProfile::Minimal => "minimal",
+            HooksProfile::Standard => "standard",
+            HooksProfile::Strict => "strict",
+        }
+    }
+
+    /// "standard hooks", "minimal hooks (session start, stop, end)", … for
+    /// notices.
+    pub fn describe(self) -> String {
+        match self {
+            HooksProfile::Off => "no hooks".into(),
+            HooksProfile::Minimal => "minimal hooks (session start, stop, end)".into(),
+            HooksProfile::Standard => "standard hooks".into(),
+            HooksProfile::Strict => "strict hooks (every event, write guard)".into(),
+        }
+    }
+
+    /// Anything but `Off` registers per launch.
+    pub fn registers(self) -> bool {
+        self != HooksProfile::Off
+    }
+
+    /// `Strict` turns the write guard on even without a denylist.
+    pub fn strict(self) -> bool {
+        self == HooksProfile::Strict
+    }
+
+    /// Whether `event` is registered under this profile.
+    pub fn includes(self, event: &str) -> bool {
+        match self {
+            HooksProfile::Off => false,
+            HooksProfile::Minimal => MINIMAL_EVENTS.contains(&event),
+            HooksProfile::Standard | HooksProfile::Strict => true,
+        }
+    }
+
+    /// The events registered under this profile, in `CLAUDE_EVENTS` order.
+    pub fn events(self) -> Vec<&'static str> {
+        CLAUDE_EVENTS
+            .iter()
+            .filter(|(e, _, _)| self.includes(e))
+            .map(|(e, _, _)| *e)
+            .collect()
+    }
+
+    /// A loop run needs the tool events for its guard: `Minimal` is
+    /// raised to `Standard`, the others stay.
+    pub fn for_loop(self) -> HooksProfile {
+        match self {
+            HooksProfile::Minimal => HooksProfile::Standard,
+            other => other,
+        }
+    }
+}
 
 /// What every registration needs to know.
 #[derive(Debug, Clone)]
@@ -12,8 +117,10 @@ pub struct Registration {
     pub exe: PathBuf,
     pub home: PathBuf,
     pub content_mode: ContentMode,
-    /// A budget guard is set: `PreToolUse` waits for the hook's answer
-    /// (`--guard`) instead of running async.
+    /// Which events the Claude `--settings` document registers.
+    pub profile: HooksProfile,
+    /// A budget or write guard is set: `PreToolUse` waits for the hook's
+    /// answer (`--guard`) instead of running async.
     pub guard: bool,
     /// A loop launch: `PreToolUse` also carries `--loop`, which enforces
     /// the launch row's `loop_policy` and fails closed for write tools.
@@ -78,6 +185,9 @@ fn handler(reg: &Registration, event: &str, is_async: bool) -> Value {
 pub fn claude_hooks(reg: &Registration) -> Map<String, Value> {
     let mut hooks = Map::new();
     for (event, matcher, is_async) in CLAUDE_EVENTS {
+        if !reg.profile.includes(event) {
+            continue;
+        }
         let mut group = Map::new();
         if *matcher {
             group.insert("matcher".into(), Value::from(""));
@@ -200,9 +310,54 @@ mod tests {
             exe: PathBuf::from("/opt/agent-mux"),
             home: PathBuf::from("/home/me"),
             content_mode: ContentMode::Full,
+            profile: HooksProfile::Standard,
             guard: false,
             loop_guard: false,
         }
+    }
+
+    #[test]
+    fn hook_profiles_pick_their_events() {
+        assert_eq!(HooksProfile::parse("STRICT"), Some(HooksProfile::Strict));
+        assert_eq!(HooksProfile::parse("loud"), None);
+        let t = |hooks: Option<&str>, profile: Option<&str>| ProfileTracing {
+            hooks: hooks.map(str::to_string),
+            hooks_profile: profile.map(str::to_string),
+            ..Default::default()
+        };
+        assert_eq!(HooksProfile::from_tracing(None), HooksProfile::Standard);
+        assert_eq!(
+            HooksProfile::from_tracing(Some(&t(Some("off"), Some("strict")))),
+            HooksProfile::Off
+        );
+        assert_eq!(
+            HooksProfile::from_tracing(Some(&t(None, Some("minimal")))),
+            HooksProfile::Minimal
+        );
+        assert_eq!(
+            HooksProfile::from_tracing(Some(&t(None, Some("typo")))),
+            HooksProfile::Standard
+        );
+        assert!(HooksProfile::Off.events().is_empty());
+        assert_eq!(
+            HooksProfile::Minimal.events(),
+            vec!["SessionStart", "Stop", "StopFailure", "SessionEnd"]
+        );
+        assert_eq!(HooksProfile::Standard.events().len(), CLAUDE_EVENTS.len());
+        assert_eq!(HooksProfile::Strict.events().len(), CLAUDE_EVENTS.len());
+        assert!(HooksProfile::Strict.strict() && !HooksProfile::Standard.strict());
+        assert_eq!(HooksProfile::Minimal.for_loop(), HooksProfile::Standard);
+        assert_eq!(HooksProfile::Strict.for_loop(), HooksProfile::Strict);
+        // the settings document follows the profile
+        let minimal = Registration {
+            profile: HooksProfile::Minimal,
+            ..reg()
+        };
+        let v: Value = serde_json::from_str(&claude_settings_json(&minimal, &[])).unwrap();
+        let hooks = v["hooks"].as_object().unwrap();
+        assert_eq!(hooks.len(), 4);
+        assert!(hooks.contains_key("SessionEnd"));
+        assert!(!hooks.contains_key("PreToolUse"));
     }
 
     #[test]
@@ -292,6 +447,7 @@ mod tests {
             exe: PathBuf::from(r"C:\Program Files\agent-mux.exe"),
             home: PathBuf::from(r"C:\Users\me"),
             content_mode: ContentMode::Metadata,
+            profile: HooksProfile::Standard,
             guard: false,
             loop_guard: false,
         };

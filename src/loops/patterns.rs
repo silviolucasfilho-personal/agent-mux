@@ -55,9 +55,13 @@ pub fn load(library: &Path) -> (Vec<Pattern>, Option<String>) {
 }
 
 /// Problems with a registry text: parse errors, duplicate ids, skills
-/// that do not resolve, a pattern without `loop-rules`, an unknown state
-/// file, an interval under five minutes, an invalid prompt.
-pub fn validate_registry(text: &str, available_skills: &[String]) -> Vec<String> {
+/// or agents that do not resolve, a pattern without `loop-rules`, an
+/// unknown state file, an interval under five minutes, an invalid prompt.
+pub fn validate_registry(
+    text: &str,
+    available_skills: &[String],
+    available_agents: &[String],
+) -> Vec<String> {
     let pats = match parse_registry(text) {
         Ok(p) => p,
         Err(e) => return vec![format!("registry.toml does not parse: {e}")],
@@ -80,6 +84,20 @@ pub fn validate_registry(text: &str, available_skills: &[String]) -> Vec<String>
         }
         if !p.skills.iter().any(|s| s == "loop-rules") {
             problems.push(format!("{}: does not list loop-rules", p.id));
+        }
+        for a in &p.agents {
+            if !available_agents.iter().any(|k| k == a) {
+                problems.push(format!(
+                    "{}: agent {a} is not a built-in or library loop agent",
+                    p.id
+                ));
+            }
+        }
+        if p.verifier && !p.agents.is_empty() && !p.agents.iter().any(|a| a == "loop-verifier") {
+            problems.push(format!(
+                "{}: verifier = true but agents does not list loop-verifier",
+                p.id
+            ));
         }
         if !super::STATE_FILES.contains(&p.state_file.as_str()) {
             problems.push(format!(
@@ -152,11 +170,11 @@ mod tests {
     #[test]
     fn the_registry_is_complete_and_consistent() {
         let all = builtin();
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 9);
         let priorities: HashSet<u8> = all.iter().map(|p| p.priority).collect();
-        assert_eq!(priorities.len(), 7, "priorities are unique");
+        assert_eq!(priorities.len(), 9, "priorities are unique");
         let ids: HashSet<&str> = all.iter().map(|p| p.id.as_str()).collect();
-        assert_eq!(ids.len(), 7, "ids are unique");
+        assert_eq!(ids.len(), 9, "ids are unique");
         let embedded: HashSet<&str> = scaffold::embedded_skills()
             .into_iter()
             .map(|(name, _)| name)
@@ -182,7 +200,21 @@ mod tests {
             assert!(p.prompt.is_none());
         }
         let skills: Vec<String> = embedded.iter().map(|s| s.to_string()).collect();
-        assert!(validate_registry(BUILTIN_REGISTRY, &skills).is_empty());
+        let agents = vec!["loop-verifier".to_string()];
+        assert!(validate_registry(BUILTIN_REGISTRY, &skills, &agents).is_empty());
+        for p in &all {
+            assert!(
+                p.agents.is_empty(),
+                "{}: built-ins rely on the default",
+                p.id
+            );
+            let expected: Vec<String> = if p.verifier {
+                vec!["loop-verifier".into()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(p.effective_agents(), expected, "{}", p.id);
+        }
         assert_eq!(find("daily-triage").unwrap().week_one_level, Level::L1);
         assert_eq!(find("ci-sweeper").unwrap().week_one_level, Level::L2);
         assert_eq!(by_priority()[0].id, "ci-sweeper");
@@ -194,7 +226,7 @@ mod tests {
     #[test]
     fn a_library_registry_replaces_by_id_and_adds_new_ids() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load(dir.path()).0.len(), 7);
+        assert_eq!(load(dir.path()).0.len(), 9);
         std::fs::create_dir_all(dir.path().join("loops")).unwrap();
         let text = r#"
 [[patterns]]
@@ -238,6 +270,7 @@ max_runs_per_day = 1
 max_tokens_per_day = 1000
 priority = 9
 prompt = "no invocation {bad}"
+agents = ["loop-verifier", "auditor"]
 [patterns.cost]
 tokens_noop = 1
 tokens_report = 1000
@@ -248,7 +281,7 @@ early_exit_required = false
         std::fs::write(dir.path().join("loops/registry.toml"), text).unwrap();
         let (pats, err) = load(dir.path());
         assert!(err.is_none());
-        assert_eq!(pats.len(), 8);
+        assert_eq!(pats.len(), 10);
         let daily = pats.iter().find(|p| p.id == "daily-triage").unwrap();
         assert_eq!(daily.name, "Daily Triage (mine)");
         assert_eq!(daily.default_interval_s, 3600);
@@ -261,16 +294,28 @@ early_exit_required = false
             Some(5),
             "keeps its place"
         );
-        assert_eq!(pats[7].id, "docs-sweeper");
+        assert_eq!(pats[9].id, "docs-sweeper");
 
         let skills: Vec<String> = scaffold::embedded_skills()
             .iter()
             .map(|(n, _)| n.to_string())
             .collect();
-        let problems = validate_registry(text, &skills);
+        let problems = validate_registry(text, &skills, &["loop-verifier".to_string()]);
         assert!(
             problems.iter().any(|p| p.contains("loop-docs")),
             "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("agent auditor")),
+            "{problems:?}"
+        );
+        assert!(
+            !problems.iter().any(|p| p.contains("agent loop-verifier")),
+            "{problems:?}"
+        );
+        assert_eq!(
+            pats[9].effective_agents(),
+            vec!["loop-verifier".to_string(), "auditor".to_string()]
         );
         assert!(problems.iter().any(|p| p.contains("loop-rules")));
         assert!(problems.iter().any(|p| p.contains("state file")));
@@ -284,7 +329,7 @@ early_exit_required = false
 
         std::fs::write(dir.path().join("loops/registry.toml"), "[[patterns]\n").unwrap();
         let (pats, err) = load(dir.path());
-        assert_eq!(pats.len(), 7, "built-ins on a broken file");
+        assert_eq!(pats.len(), 9, "built-ins on a broken file");
         assert!(err.unwrap().contains("registry.toml"));
     }
 }

@@ -1278,6 +1278,10 @@ pub enum Op {
     Le,
     Gt,
     Ge,
+    /// `field in [a, b]`: the value equals one of the listed values.
+    In,
+    /// `field not in [a, b]`.
+    NotIn,
 }
 
 impl Predicate {
@@ -1323,6 +1327,13 @@ fn get_path<'a>(value: &'a Value, field: &[String]) -> &'a Value {
 
 fn compare(lhs: &Value, op: Op, rhs: &Value) -> bool {
     use std::cmp::Ordering;
+    if matches!(op, Op::In | Op::NotIn) {
+        let member = match rhs {
+            Value::Array(set) => set.iter().any(|v| compare(lhs, Op::Eq, v)),
+            other => compare(lhs, Op::Eq, other),
+        };
+        return if op == Op::In { member } else { !member };
+    }
     let ord = match (lhs, rhs) {
         (Value::Number(a), Value::Number(b)) => a
             .as_f64()
@@ -1356,10 +1367,14 @@ enum Tok {
     Null,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
+    Comma,
     And,
     Or,
     Not,
     Has,
+    In,
 }
 
 fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
@@ -1376,6 +1391,18 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
             }
             ')' => {
                 out.push(Tok::RParen);
+                i += 1;
+            }
+            '[' => {
+                out.push(Tok::LBracket);
+                i += 1;
+            }
+            ']' => {
+                out.push(Tok::RBracket);
+                i += 1;
+            }
+            ',' => {
+                out.push(Tok::Comma);
                 i += 1;
             }
             '"' | '\'' => {
@@ -1432,6 +1459,7 @@ fn tokenize(text: &str) -> Result<Vec<Tok>, String> {
                     "or" => Tok::Or,
                     "not" => Tok::Not,
                     "has" => Tok::Has,
+                    "in" => Tok::In,
                     "true" => Tok::Bool(true),
                     "false" => Tok::Bool(false),
                     "null" => Tok::Null,
@@ -1497,28 +1525,87 @@ fn parse_term(t: &[Tok], pos: &mut usize) -> Result<Predicate, String> {
         }
         Some(Tok::Ident(f)) => {
             *pos += 1;
-            let Some(Tok::Op(op)) = t.get(*pos) else {
-                return Err(format!("{f}: expected a comparison operator"));
+            let op = match (t.get(*pos), t.get(*pos + 1)) {
+                (Some(Tok::Op(op)), _) => {
+                    *pos += 1;
+                    *op
+                }
+                (Some(Tok::In), _) => {
+                    *pos += 1;
+                    Op::In
+                }
+                (Some(Tok::Not), Some(Tok::In)) => {
+                    *pos += 2;
+                    Op::NotIn
+                }
+                _ => return Err(format!("{f}: expected a comparison operator")),
             };
-            *pos += 1;
-            let value = match t.get(*pos) {
-                Some(Tok::Str(s)) => Value::String(s.clone()),
-                Some(Tok::Num(n)) => serde_json::Number::from_f64(*n)
-                    .map(Value::Number)
-                    .unwrap_or(Value::Null),
-                Some(Tok::Bool(b)) => Value::Bool(*b),
-                Some(Tok::Null) => Value::Null,
-                _ => return Err(format!("{f}: expected a value")),
+            let value = if matches!(op, Op::In | Op::NotIn) {
+                parse_set(t, pos).map_err(|e| format!("{f}: {e}"))?
+            } else {
+                let v = scalar(t.get(*pos)).ok_or_else(|| format!("{f}: expected a value"))?;
+                *pos += 1;
+                v
             };
-            *pos += 1;
             Ok(Predicate::Cmp {
                 field: f.split('.').map(str::to_string).collect(),
-                op: *op,
+                op,
                 value,
             })
         }
         other => Err(format!("unexpected {other:?}")),
     }
+}
+
+/// A scalar token as a JSON value. Inside a set a bare word is a string,
+/// so `severity in [high, medium]` needs no quotes; elsewhere a bare word
+/// is not a value.
+fn scalar(tok: Option<&Tok>) -> Option<Value> {
+    match tok {
+        Some(Tok::Str(s)) => Some(Value::String(s.clone())),
+        Some(Tok::Num(n)) => Some(
+            serde_json::Number::from_f64(*n)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+        ),
+        Some(Tok::Bool(b)) => Some(Value::Bool(*b)),
+        Some(Tok::Null) => Some(Value::Null),
+        _ => None,
+    }
+}
+
+/// `[a, b, "c d", 3]` after `in` or `not in`: a non-empty list of scalars
+/// or bare words.
+fn parse_set(t: &[Tok], pos: &mut usize) -> Result<Value, String> {
+    if t.get(*pos) != Some(&Tok::LBracket) {
+        return Err("in needs [a, b, ...]".into());
+    }
+    *pos += 1;
+    let mut set = Vec::new();
+    loop {
+        match t.get(*pos) {
+            Some(Tok::RBracket) => {
+                *pos += 1;
+                break;
+            }
+            Some(Tok::Comma) if !set.is_empty() => {
+                *pos += 1;
+            }
+            Some(Tok::Ident(w)) => {
+                set.push(Value::String(w.clone()));
+                *pos += 1;
+            }
+            tok => {
+                let v = scalar(tok).ok_or_else(|| "in needs [a, b, ...]".to_string())?;
+                *pos += 1;
+                set.push(v);
+            }
+        }
+    }
+    if set.is_empty() {
+        return Err("in needs at least one value".into());
+    }
+    Ok(Value::Array(set))
 }
 
 #[cfg(test)]
@@ -1776,6 +1863,28 @@ skill = "wf-transform"
         assert!(Predicate::parse("refuted <").is_err());
         assert!(Predicate::parse("refuted < 2 junk").is_err());
         assert!(Predicate::parse("has refuted").is_err());
+    }
+
+    #[test]
+    fn predicates_test_set_membership() {
+        let v = serde_json::json!({ "severity": "high", "refuted": 1, "label": "bug feature" });
+        let t = |s: &str| Predicate::parse(s).unwrap().eval(&v);
+        assert!(t("severity in [high, medium]"), "bare words are strings");
+        assert!(!t("severity in [medium, low]"));
+        assert!(t("severity in ['high']"), "quoted values work too");
+        assert!(t("label in [\"bug feature\", other]"), "quotes keep spaces");
+        assert!(t("refuted in [0, 1]"), "numbers compare as numbers");
+        assert!(!t("refuted in [2, 3]"));
+        assert!(t("severity not in [low]"));
+        assert!(!t("severity not in [high, low]"));
+        assert!(t("missing not in [high]"), "null is in no set");
+        assert!(!t("missing in [high]"));
+        assert!(t("severity in [high] and refuted < 2"));
+        assert!(Predicate::parse("severity in []").is_err());
+        assert!(Predicate::parse("severity in high").is_err());
+        assert!(Predicate::parse("severity in [high").is_err());
+        assert!(Predicate::parse("severity not [high]").is_err());
+        assert!(Predicate::parse("severity == [high]").is_err());
     }
 
     #[test]

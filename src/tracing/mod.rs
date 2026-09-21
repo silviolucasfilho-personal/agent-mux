@@ -109,6 +109,13 @@ pub struct LaunchPlan {
     /// The budget guard asked for, recorded on the launch row and enforced
     /// through a synchronous `PreToolUse` hook where the CLI has one.
     pub guard: Option<hooks::guard::Guard>,
+    /// The write policy the profile asks for outside loops (its
+    /// `write_denylist`, or the default denylist under the `strict` hooks
+    /// profile), recorded on the launch row as `metadata.write_policy` and
+    /// enforced by the same `PreToolUse` hook.
+    pub write_policy: Option<crate::loops::LoopPolicy>,
+    /// Which lifecycle events the Claude `--settings` document registers.
+    pub hooks_profile: hooks::register::HooksProfile,
     /// The skill package this launch runs, as `(id, harness label)`, set by
     /// the app for sidebar/skills-view launches. Recorded on the launch row
     /// as `metadata.skill_id` / `metadata.skill_harness` so a skill's
@@ -137,7 +144,8 @@ impl LaunchPlan {
                 exe,
                 home: home.to_path_buf(),
                 content_mode: self.content_mode,
-                guard: self.guard.is_some(),
+                profile: self.hooks_profile.for_loop(),
+                guard: self.guard.is_some() || self.write_policy.is_some(),
                 loop_guard: true,
             };
             let user_files = [
@@ -526,6 +534,8 @@ impl TraceRuntime {
             backend,
             backend_requested,
             guard: None,
+            write_policy: None,
+            hooks_profile: hooks::register::HooksProfile::Off,
             profile_name: profile.name.clone(),
             skill: None,
             loop_launch: None,
@@ -663,17 +673,29 @@ impl TraceRuntime {
         // Per-launch hook registrations: nothing is written anywhere, and a
         // profile that already failed fast twice gets none (an old binary
         // rejecting unknown flags looks exactly like that).
+        let hooks_profile = hooks::register::HooksProfile::from_tracing(over);
         let hooks_wanted = self.settings.hooks.registers()
-            && over.and_then(|o| o.hooks.as_deref()) != Some("off")
+            && hooks_profile.registers()
             && !self
                 .injection_disabled
                 .lock()
                 .map(|s| s.contains(&profile.name))
                 .unwrap_or(false);
-        // a budget guard rides on the launch row; the hook that enforces it
-        // exists only where the CLI's PreToolUse can wait for an answer
+        // a budget guard and a write policy ride on the launch row; the hook
+        // that enforces them exists only where the CLI's PreToolUse can wait
+        // for an answer
         let guard = hooks::guard::Guard::from_tracing(profile.tracing.as_ref());
-        if let Some(g) = &guard {
+        let write_policy = hooks::guard::write_policy(over, hooks_profile, dir);
+        let wanted: Vec<String> = guard
+            .iter()
+            .map(|g| format!("budget guard ({})", g.describe()))
+            .chain(
+                write_policy
+                    .iter()
+                    .map(|p| format!("write guard ({} protected path(s))", p.denylist.len())),
+            )
+            .collect();
+        if !wanted.is_empty() {
             let why = match provider {
                 Provider::Claude if hooks_wanted => None,
                 Provider::Claude => Some("hooks are off for this launch"),
@@ -687,8 +709,8 @@ impl TraceRuntime {
             };
             if let Some(why) = why {
                 let _ = self.status_tx.try_send(AppEvent::TraceStatus(format!(
-                    "budget guard ({}) not enforced for '{}': {why}",
-                    g.describe(),
+                    "{} not enforced for '{}': {why}",
+                    wanted.join(" and "),
                     profile.name
                 )));
             }
@@ -704,7 +726,8 @@ impl TraceRuntime {
                 exe,
                 home: self.settings.home.clone(),
                 content_mode,
-                guard: guard.is_some(),
+                profile: hooks_profile,
+                guard: guard.is_some() || write_policy.is_some(),
                 loop_guard: false,
             };
             match provider {
@@ -750,6 +773,8 @@ impl TraceRuntime {
             backend,
             backend_requested,
             guard,
+            write_policy,
+            hooks_profile,
             profile_name: profile.name.clone(),
             skill: None,
             loop_launch: None,
@@ -849,6 +874,11 @@ impl TraceRuntime {
         }
         if let Some(g) = &plan.guard {
             meta.insert("guard".into(), g.to_json());
+        }
+        if let Some(p) = &plan.write_policy
+            && let Ok(policy) = serde_json::to_value(p)
+        {
+            meta.insert("write_policy".into(), policy);
         }
         if let Some((skill_id, harness)) = &plan.skill {
             meta.insert(
@@ -1848,6 +1878,88 @@ mod plan_tests {
             model: None,
             bypass_approvals: None,
         }
+    }
+
+    #[test]
+    fn hooks_profile_and_write_denylist_shape_the_claude_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = runtime_hooks(dir.path(), dir.path());
+        let with = |t: ProfileTracing| Profile {
+            tracing: Some(t),
+            ..profile("Claude Code", "claude", &[])
+        };
+        // minimal: four session-level events, PreToolUse absent, no policy
+        let plan = rt
+            .plan_launch(
+                &with(ProfileTracing {
+                    hooks_profile: Some("minimal".into()),
+                    ..Default::default()
+                }),
+                Path::new("/ws"),
+            )
+            .unwrap();
+        let hooks = settings_arg(&plan).unwrap();
+        let hooks = hooks["hooks"].as_object().unwrap();
+        assert_eq!(hooks.len(), 4, "{hooks:?}");
+        assert!(!hooks.contains_key("PreToolUse"));
+        assert_eq!(plan.hooks_profile, hooks::register::HooksProfile::Minimal);
+        assert!(plan.write_policy.is_none());
+        // strict: every event, PreToolUse waits for --guard, default denylist
+        let plan = rt
+            .plan_launch(
+                &with(ProfileTracing {
+                    hooks_profile: Some("strict".into()),
+                    ..Default::default()
+                }),
+                Path::new("/ws"),
+            )
+            .unwrap();
+        let hooks = settings_arg(&plan).unwrap();
+        let pre = &hooks["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert_eq!(pre.get("async"), None);
+        let args: Vec<&str> = pre["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str())
+            .collect();
+        assert!(
+            args.contains(&"--guard") && !args.contains(&"--loop"),
+            "{args:?}"
+        );
+        let policy = plan.write_policy.as_ref().unwrap();
+        assert_eq!(
+            policy.denylist.len(),
+            crate::loops::gate::DEFAULT_DENYLIST.len()
+        );
+        assert_eq!(policy.worktree.as_deref(), Some("/ws"));
+        // a denylist alone turns the guard on under the standard profile;
+        // `hooks = "off"` still wins over everything
+        let plan = rt
+            .plan_launch(
+                &with(ProfileTracing {
+                    write_denylist: vec!["secrets/**".into()],
+                    ..Default::default()
+                }),
+                Path::new("/ws"),
+            )
+            .unwrap();
+        assert_eq!(
+            plan.write_policy.as_ref().map(|p| p.denylist.clone()),
+            Some(vec!["secrets/**".to_string()])
+        );
+        assert!(plan.hooks_registered);
+        let plan = rt
+            .plan_launch(
+                &with(ProfileTracing {
+                    hooks: Some("off".into()),
+                    hooks_profile: Some("strict".into()),
+                    ..Default::default()
+                }),
+                Path::new("/ws"),
+            )
+            .unwrap();
+        assert!(!plan.hooks_registered && settings_arg(&plan).is_none());
     }
 
     #[test]

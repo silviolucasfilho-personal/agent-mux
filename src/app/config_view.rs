@@ -276,9 +276,10 @@ impl ConfigViewState {
                 lines.push(row(
                     "Used by",
                     if asset.name == "loop-verifier" {
-                        "every pattern with verifier = true".to_string()
+                        "every pattern with verifier = true, and every pattern whose agents list it"
+                            .to_string()
                     } else {
-                        "installed into every registered loop workspace".to_string()
+                        "every pattern whose agents list it".to_string()
                     },
                     Style::default(),
                 ));

@@ -459,12 +459,17 @@ impl Catalog {
     }
 
     fn scan_loop_agents(&mut self) {
-        self.push_builtin(
-            Kind::LoopAgent,
-            "loops/agents/loop-verifier.md",
-            scaffold::verifier_body(),
-            "loops/agents/loop-verifier.md",
-        );
+        for (name, text) in scaffold::embedded_agents() {
+            self.push_builtin(
+                Kind::LoopAgent,
+                &format!("loops/agents/{name}.md"),
+                text,
+                match name {
+                    "loop-verifier" => "loops/agents/loop-verifier.md",
+                    _ => "loops/agents/loop-reviewer.md",
+                },
+            );
+        }
         for f in sorted_files(&self.root.join("loops").join("agents"), "md") {
             let Some(stem) = f.file_stem().and_then(|n| n.to_str()).map(str::to_string) else {
                 continue;
@@ -484,6 +489,12 @@ impl Catalog {
             .filter(|a| a.kind == Kind::LoopSkill)
             .map(|a| a.name.clone())
             .collect();
+        let loop_agent_names: Vec<String> = self
+            .assets
+            .iter()
+            .filter(|a| a.kind == Kind::LoopAgent)
+            .map(|a| a.name.clone())
+            .collect();
         let mut registry_error = None;
         for i in 0..self.assets.len() {
             let a = &self.assets[i];
@@ -498,7 +509,11 @@ impl Catalog {
                 },
                 Kind::Skill => validate_skill_file(a),
                 Kind::LoopPattern => {
-                    let p = patterns::validate_registry(&a.effective(), &loop_skill_names);
+                    let p = patterns::validate_registry(
+                        &a.effective(),
+                        &loop_skill_names,
+                        &loop_agent_names,
+                    );
                     if a.source != Source::Builtin
                         && let Some(first) = p.first()
                         && first.contains("does not parse")
@@ -673,6 +688,7 @@ impl Catalog {
         let mut out = Vec::new();
         let effective = asset.effective();
         let (pats, _) = patterns::load(&self.root);
+        let preamble = crate::prompts::Prompts::load(&self.root).agent_preamble;
         for entry in &registry.loops {
             let Some(harness) = Harness::detect(&entry.harness) else {
                 continue;
@@ -689,7 +705,7 @@ impl Catalog {
                         .map(|d| d.join(&asset.name).join("SKILL.md"))
                 }
                 Kind::LoopAgent => {
-                    if asset.name == "loop-verifier" && !pattern.verifier {
+                    if !pattern.effective_agents().contains(&asset.name) {
                         continue;
                     }
                     scaffold::agent_path(harness, &entry.workspace, &asset.name)
@@ -702,9 +718,9 @@ impl Catalog {
             if out.iter().any(|c: &WorkspaceCopy| c.path == path) {
                 continue;
             }
-            let expected = match (asset.kind, harness) {
-                (Kind::LoopAgent, Harness::Codex) => {
-                    scaffold::codex_agent_toml(&asset.name, &effective)
+            let expected = match asset.kind {
+                Kind::LoopAgent => {
+                    scaffold::agent_file(harness, &asset.name, &effective, &preamble)
                 }
                 _ => effective.clone(),
             };
@@ -725,6 +741,7 @@ impl Catalog {
     pub fn push(&self, registry: &Registry, dry_run: bool) -> PushReport {
         let mut report = PushReport::default();
         let (pats, _) = patterns::load(&self.root);
+        let preamble = crate::prompts::Prompts::load(&self.root).agent_preamble;
         for entry in &registry.loops {
             let label = format!("{}@{}", entry.pattern, entry.workspace_name());
             let Some(harness) = Harness::detect(&entry.harness) else {
@@ -749,16 +766,13 @@ impl Catalog {
                     files.push((skills_dir.join(name).join("SKILL.md"), text));
                 }
             }
-            for (name, body) in loop_agents(&self.root) {
-                if name == "loop-verifier" && !pattern.verifier {
+            let available = loop_agents(&self.root);
+            for name in pattern.effective_agents() {
+                let Some((_, body)) = available.iter().find(|(n, _)| *n == name) else {
                     continue;
-                }
+                };
                 if let Some(path) = scaffold::agent_path(harness, &entry.workspace, &name) {
-                    let content = match harness {
-                        Harness::Codex => scaffold::codex_agent_toml(&name, &body),
-                        _ => body,
-                    };
-                    files.push((path, content));
+                    files.push((path, scaffold::agent_file(harness, &name, body, &preamble)));
                 }
             }
             for (path, content) in files {
@@ -821,19 +835,20 @@ pub fn loop_agent(root: &Path, name: &str) -> Option<String> {
     if let Ok(t) = std::fs::read_to_string(&lib) {
         return Some(t);
     }
-    (name == "loop-verifier").then(|| scaffold::verifier_body().to_string())
+    scaffold::embedded_agent(name).map(str::to_string)
 }
 
-/// Every loop agent as (name, markdown): the verifier first, then the
-/// library's additions.
+/// Every loop agent as (name, markdown): the built-in checkers first
+/// (verifier, reviewer), then the library's additions.
 pub fn loop_agents(root: &Path) -> Vec<(String, String)> {
-    let mut out = vec![(
-        "loop-verifier".to_string(),
-        loop_agent(root, "loop-verifier").unwrap_or_default(),
-    )];
+    let builtin = scaffold::embedded_agents();
+    let mut out: Vec<(String, String)> = builtin
+        .iter()
+        .map(|(name, _)| (name.to_string(), loop_agent(root, name).unwrap_or_default()))
+        .collect();
     for f in sorted_files(&root.join("loops").join("agents"), "md") {
         if let Some(stem) = f.file_stem().and_then(|n| n.to_str())
-            && stem != "loop-verifier"
+            && !builtin.iter().any(|(n, _)| *n == stem)
             && let Ok(t) = std::fs::read_to_string(&f)
         {
             out.push((stem.to_string(), t));
@@ -1074,12 +1089,12 @@ mod tests {
         assert_eq!(count(Kind::Settings), 1);
         assert_eq!(
             count(Kind::Skill),
-            41,
-            "Heimdall, the planner and sixteen step skills"
+            43,
+            "Heimdall, the planner and seventeen step skills"
         );
         assert_eq!(count(Kind::LoopPattern), 1);
-        assert_eq!(count(Kind::LoopSkill), 9);
-        assert_eq!(count(Kind::LoopAgent), 1);
+        assert_eq!(count(Kind::LoopSkill), 11);
+        assert_eq!(count(Kind::LoopAgent), 2);
         assert_eq!(count(Kind::LoopTemplate), 8);
         for a in &cat.assets {
             assert_eq!(a.source, Source::Builtin, "{}", a.id);
@@ -1166,7 +1181,7 @@ mod tests {
         assert_eq!(docs.source, Source::User);
         assert!(docs.valid(), "{:?}", docs.problems);
         assert!(cat.find("auditor").unwrap().valid());
-        assert_eq!(cat.by_kind(Kind::Skill).count(), 43);
+        assert_eq!(cat.by_kind(Kind::Skill).count(), 45);
         let notes = cat.find("skills/my-notes/SKILL.md").unwrap();
         assert!(notes.valid(), "{:?}", notes.problems);
         assert_eq!(
@@ -1174,7 +1189,7 @@ mod tests {
                 .iter()
                 .map(|(n, _)| n.as_str())
                 .collect::<Vec<_>>(),
-            vec!["loop-verifier", "auditor"]
+            vec!["loop-verifier", "loop-reviewer", "auditor"]
         );
         assert!(loop_skill_names(dir.path()).contains(&"loop-docs".to_string()));
         assert_eq!(
