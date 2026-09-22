@@ -1354,6 +1354,11 @@ pub struct TraceBrowserState {
     /// Detail-pane interior height, written back by the renderer.
     pub viewport_rows: std::cell::Cell<usize>,
     last_refresh: Instant,
+    /// Highest `trace_changes` sequence the browser has already read, so
+    /// the live refresh can skip its queries outright while the store is
+    /// quiet. `None` until the first tick, and on stores written before
+    /// the change feed existed, where every tick re-reads as it used to.
+    last_change_seq: Option<i64>,
     /// The store, for the browser's own writes (scores).
     db_path: Option<std::path::PathBuf>,
     /// Latest verdict per turn id, for the marks in the Turns pane.
@@ -1413,6 +1418,7 @@ impl TraceBrowserState {
             search_query: None,
             viewport_rows: std::cell::Cell::new(30),
             last_refresh: Instant::now(),
+            last_change_seq: None,
             db_path: db_path.map(std::path::Path::to_path_buf),
             scores: std::collections::HashMap::new(),
             langfuse: None,
@@ -1844,6 +1850,12 @@ impl TraceBrowserState {
 
     /// Live sessions change under the browser: re-query at most twice a
     /// second to keep newly arriving chats and ongoing turns up to date.
+    ///
+    /// A store nobody is writing to has nothing to re-read, and the
+    /// `trace_changes` feed says so in one indexed `MAX(seq)`: while the
+    /// browser is only being navigated, the tick costs that single read
+    /// instead of re-listing the sessions and the selected session's
+    /// turns.
     pub fn refresh_if_live(&mut self, now: Instant) {
         if now.duration_since(self.last_refresh) < std::time::Duration::from_millis(500) {
             return;
@@ -1853,6 +1865,31 @@ impl TraceBrowserState {
         }
         self.last_refresh = now;
         let filter = self.filter();
+        let quiet = {
+            let Some(conn) = &self.conn else {
+                return;
+            };
+            match crate::tracing::store::latest_change_seq(conn) {
+                // Zero means the feed is empty or predates this store's
+                // migration: re-read every tick, as before.
+                Ok(seq) if seq > 0 => {
+                    let seen = self.last_change_seq == Some(seq);
+                    self.last_change_seq = Some(seq);
+                    seen
+                }
+                _ => {
+                    self.last_change_seq = None;
+                    false
+                }
+            }
+        };
+        if quiet {
+            // A launch's `session_key` is filled in by an update the feed
+            // does not record, so the group sweep still runs on its own
+            // interval over a store that is otherwise unchanged.
+            self.refresh_groups(false);
+            return;
+        }
         let Some(conn) = &self.conn else {
             return;
         };
@@ -6577,5 +6614,27 @@ mod history_tests {
         // Since user was on s1 (row 1 previously), selection tracks key "claude:s1", now at index 2
         assert_eq!(browser.selected_session, 2);
         assert_eq!(browser.sessions[browser.selected_session].key, "claude:s1");
+
+        // Nothing has been written since: the tick reads the change feed
+        // and stops there, instead of re-listing sessions and turns twice
+        // a second for as long as the browser is open. The cleared vec is
+        // the tell — a tick that re-queried would fill it back in.
+        browser.sessions.clear();
+        browser.refresh_if_live(t2 + Duration::from_millis(600));
+        assert!(
+            browser.sessions.is_empty(),
+            "a quiet store costs one MAX(seq), not a reload"
+        );
+
+        // A write moves the feed on and the next tick reloads as before.
+        store
+            .apply(&[
+                StoreOp::Launch(make_launch("l4", "claude:s4", 4_000_000)),
+                StoreOp::Trace(make_trace("t4", "claude:s4", 4_000_000)),
+            ])
+            .unwrap();
+        browser.refresh_if_live(t2 + Duration::from_millis(1200));
+        assert_eq!(browser.sessions.len(), 4);
+        assert_eq!(browser.sessions[0].key, "claude:s4");
     }
 }
