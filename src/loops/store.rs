@@ -560,6 +560,46 @@ mod tests {
         assert_eq!(all_recent_runs(&conn, 5).unwrap()[0].id, r.id);
     }
 
+    /// The digest of the pattern text a run executed survives the round
+    /// trip, and a row written before the column existed reads as `None`
+    /// rather than failing.
+    #[test]
+    fn a_run_records_the_pattern_text_it_ran() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = fresh_store(temp.path());
+        let conn = open_aux(&db).unwrap();
+
+        let mut first = run("r1", "L1", Outcome::ReportOnly, Some(1_000));
+        first.pattern_hash = Some("a".repeat(64));
+        upsert_run(&conn, &first).unwrap();
+        assert_eq!(get_run(&conn, "r1").unwrap().unwrap(), first);
+
+        // The same pattern id, a different effective text: the rows differ.
+        let mut second = run("r2", "L1", Outcome::ReportOnly, Some(2_000));
+        second.pattern_hash = Some("b".repeat(64));
+        upsert_run(&conn, &second).unwrap();
+        let back = get_run(&conn, "r2").unwrap().unwrap();
+        assert_eq!(back.pattern, first.pattern, "same pattern id");
+        assert_ne!(
+            back.pattern_hash, first.pattern_hash,
+            "an edited pattern must be visible in the run row"
+        );
+
+        // An upsert of an existing row updates the digest in place.
+        second.pattern_hash = Some("c".repeat(64));
+        upsert_run(&conn, &second).unwrap();
+        assert_eq!(
+            get_run(&conn, "r2").unwrap().unwrap().pattern_hash,
+            Some("c".repeat(64))
+        );
+
+        // A row from before the migration carries no digest.
+        let plain = run("r3", "L1", Outcome::NoOp, None);
+        assert_eq!(plain.pattern_hash, None);
+        upsert_run(&conn, &plain).unwrap();
+        assert_eq!(get_run(&conn, "r3").unwrap().unwrap().pattern_hash, None);
+    }
+
     #[test]
     fn spend_inbox_decisions_and_activity() {
         let temp = tempfile::tempdir().unwrap();

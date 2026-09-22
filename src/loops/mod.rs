@@ -395,4 +395,46 @@ mod tests {
         assert_eq!(Outcome::parse("fix-proposed"), Some(Outcome::FixProposed));
         assert!(Level::L1 < Level::L3);
     }
+
+    /// A run must be attributable to the exact pattern text it ran: the
+    /// library can shadow `loops/registry.toml` between two runs of the
+    /// same id, and only the digest tells those runs apart.
+    #[test]
+    fn a_pattern_digest_is_stable_and_follows_every_field() {
+        let base = patterns::builtin()
+            .into_iter()
+            .find(|p| p.id == "daily-triage")
+            .expect("the built-in daily-triage pattern");
+
+        assert_eq!(base.digest(), base.digest(), "same pattern, same digest");
+        assert_eq!(base.digest().len(), 64, "sha-256, hex");
+        assert!(base.digest().chars().all(|c| c.is_ascii_hexdigit()));
+
+        let other = patterns::builtin()
+            .into_iter()
+            .find(|p| p.id == "ci-sweeper")
+            .expect("the built-in ci-sweeper pattern");
+        assert_ne!(base.digest(), other.digest(), "different patterns differ");
+
+        // Each field a run's behaviour depends on moves the digest.
+        for mutate in [
+            (|p: &mut Pattern| p.goal.push_str(" and more")) as fn(&mut Pattern),
+            |p: &mut Pattern| p.prompt = Some("do the thing".into()),
+            |p: &mut Pattern| p.skills.push("loop-fix".into()),
+            |p: &mut Pattern| p.verifier = !p.verifier,
+            |p: &mut Pattern| p.human_gates.push("security".into()),
+            |p: &mut Pattern| p.model = Some("claude-opus-5".into()),
+            |p: &mut Pattern| p.verifier_model = Some("claude-haiku-4-5".into()),
+            |p: &mut Pattern| p.max_tokens_per_day += 1,
+            |p: &mut Pattern| p.cost.early_exit_required = !p.cost.early_exit_required,
+        ] {
+            let mut edited = base.clone();
+            mutate(&mut edited);
+            assert_ne!(
+                base.digest(),
+                edited.digest(),
+                "an edited pattern must not keep the original digest"
+            );
+        }
+    }
 }
