@@ -988,9 +988,6 @@ fn run_detail_lines(r: &LoopRun) -> Vec<Line<'static>> {
     if r.detail.get("timed_out").is_some() {
         run_facts.push("timed out".into());
     }
-    if let Some(s) = r.readiness_score {
-        run_facts.push(format!("readiness {s}"));
-    }
     if let Some(d) = r.decision.as_deref() {
         run_facts.push(format!("decided {d}"));
     }
@@ -1125,7 +1122,15 @@ fn run_headline(r: &LoopRun) -> Vec<Line<'static>> {
                     .fg(outcome_color(r.outcome))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("   {}", r.effective_level.as_str()), dim),
+            Span::styled(
+                match r.readiness_score {
+                    // The score the pre-flight audit computed for this run,
+                    // not the workspace's score today (the Readiness tab).
+                    Some(s) => format!("   {} · readiness {s}", r.effective_level.as_str()),
+                    None => format!("   {}", r.effective_level.as_str()),
+                },
+                dim,
+            ),
         ]),
         Line::styled(format!("  {facts}"), dim),
     ]

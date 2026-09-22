@@ -411,6 +411,14 @@ fn report_runs_and_show_read_a_stored_run() {
     assert!(ok, "{err}");
     assert!(out.contains("quiet ×3"), "quiet runs fold\n{out}");
     assert!(out.contains("NEEDS YOU"), "{out}");
+    assert!(
+        out.contains("L1 · readiness 100"),
+        "the run's readiness rides beside its level\n{out}"
+    );
+    let (ok, out, err) = run(&f, &["runs", &loop_id[..8], "--json"]);
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["readiness_score"], 100, "{out}");
     let (ok, out, err) = run(&f, &["runs", &loop_id[..8], "--all"]);
     assert!(ok, "{err}");
     assert!(!out.contains("quiet ×3"), "--all unfolds them\n{out}");
@@ -421,4 +429,11 @@ fn report_runs_and_show_read_a_stored_run() {
     assert!(out.contains("pr-babysitter"), "{out}");
     assert!(out.contains("touched   no files"), "{out}");
     assert!(out.contains("Two items need a human."), "{out}");
+    assert!(out.contains("L1 · readiness 100"), "{out}");
+
+    let (ok, out, err) = run(&f, &["show", "2026-09-17T17:36", "--json"]);
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["readiness_score"], 100, "{out}");
+    assert_eq!(v["exit_code"], 0, "the detail bag is still whole\n{out}");
 }
