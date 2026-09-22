@@ -256,20 +256,48 @@ pub struct SkillLauncherState {
     pub skill_id: String,
     pub skill_name: String,
     pub harnesses: Vec<crate::harness::Harness>,
+    pub workspace: String,
+    pub dir_picker: dir_picker::DirPicker,
+    pub field: SkillLauncherField,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillLauncherField {
+    Workspace,
+    Harness,
+}
+
 impl Default for SkillLauncherState {
     fn default() -> Self {
+        let workspace = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .to_string_lossy()
+            .into_owned();
         Self {
             selected: 0,
             error: None,
             skill_id: String::new(),
             skill_name: String::new(),
             harnesses: crate::harness::Harness::ALL.to_vec(),
+            dir_picker: dir_picker::DirPicker::for_path(&workspace),
+            workspace,
+            field: SkillLauncherField::Workspace,
         }
     }
 }
 impl SkillLauncherState {
     pub fn for_skill(skill: &crate::skill::SkillDefinition) -> Self {
+        let workspace = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .to_string_lossy()
+            .into_owned();
+        Self::for_skill_in_workspace(skill, workspace)
+    }
+
+    pub fn for_skill_in_workspace(
+        skill: &crate::skill::SkillDefinition,
+        workspace: String,
+    ) -> Self {
         let harnesses = if skill.harnesses.is_empty() {
             crate::harness::Harness::ALL.to_vec()
         } else {
@@ -286,6 +314,9 @@ impl SkillLauncherState {
             skill_id: skill.id.clone(),
             skill_name: skill.name.clone(),
             harnesses,
+            dir_picker: dir_picker::DirPicker::for_path(&workspace),
+            workspace,
+            field: SkillLauncherField::Workspace,
         }
     }
 
@@ -305,6 +336,7 @@ impl SkillLauncherState {
             skill_id: id.into(),
             skill_name: name.into(),
             harnesses: h,
+            ..Self::default()
         }
     }
 
@@ -2147,6 +2179,18 @@ impl App {
         self.skills.get(self.selected_agent)
     }
 
+    fn skill_launcher_workspace(&self) -> String {
+        if let Some(s) = self.sessions.get(self.selected) {
+            return s.dir.to_string_lossy().into_owned();
+        }
+        if let Some(dir) = self.profiles.iter().find_map(|p| p.default_dir.clone()) {
+            return dir;
+        }
+        std::env::current_dir()
+            .map(|cwd| cwd.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| ".".into())
+    }
+
     /// The home whose harness skill directories receive installs.
     fn skill_home(&self) -> std::path::PathBuf {
         self.skill_install_home
@@ -3726,7 +3770,10 @@ impl App {
                 if let Some(idx) = self.running_skill_session(&skill.id) {
                     self.attach_to_session(idx);
                 } else {
-                    let state = SkillLauncherState::for_skill(skill);
+                    let state = SkillLauncherState::for_skill_in_workspace(
+                        skill,
+                        self.skill_launcher_workspace(),
+                    );
                     self.mode = Mode::SkillLauncher(state);
                 }
             }
@@ -4210,9 +4257,44 @@ impl App {
         let Mode::SkillLauncher(ref mut state) = self.mode else {
             return;
         };
+        let harness_shortcut = !state.dir_picker.in_list()
+            && matches!(
+                key.code,
+                KeyCode::Char('1')
+                    | KeyCode::Char('2')
+                    | KeyCode::Char('3')
+                    | KeyCode::Char('c')
+                    | KeyCode::Char('C')
+                    | KeyCode::Char('x')
+                    | KeyCode::Char('X')
+                    | KeyCode::Char('a')
+                    | KeyCode::Char('A')
+            );
+        if state.field == SkillLauncherField::Workspace && !harness_shortcut {
+            match state.dir_picker.handle_key(key, &mut state.workspace) {
+                dir_picker::PickerEvent::Submit => {
+                    state.field = SkillLauncherField::Harness;
+                    state.dir_picker.leave();
+                    state.error = None;
+                    return;
+                }
+                dir_picker::PickerEvent::Consumed { .. } => {
+                    state.error = None;
+                    return;
+                }
+                dir_picker::PickerEvent::Ignored => {}
+            }
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.mode = Mode::Control;
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                state.field = match state.field {
+                    SkillLauncherField::Workspace => SkillLauncherField::Harness,
+                    SkillLauncherField::Harness => SkillLauncherField::Workspace,
+                };
+                state.dir_picker.leave();
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 state.move_up();
@@ -4222,23 +4304,34 @@ impl App {
             }
             KeyCode::Char('1') | KeyCode::Char('c') | KeyCode::Char('C') => {
                 if !state.harnesses.is_empty() {
+                    state.field = SkillLauncherField::Harness;
                     state.selected = 0;
                 }
             }
             KeyCode::Char('2') | KeyCode::Char('x') | KeyCode::Char('X') => {
                 if state.harnesses.len() > 1 {
+                    state.field = SkillLauncherField::Harness;
                     state.selected = 1;
                 }
             }
             KeyCode::Char('3') | KeyCode::Char('a') | KeyCode::Char('A') => {
                 if state.harnesses.len() > 2 {
+                    state.field = SkillLauncherField::Harness;
                     state.selected = 2;
                 }
             }
             KeyCode::Enter => {
                 let skill_id = state.skill_id.clone();
                 let harness = state.selected_harness();
-                let launch_res = self.launch_skill(&skill_id, harness);
+                let workspace = std::path::PathBuf::from(state.workspace.trim());
+                if !workspace.is_dir() {
+                    state.error = Some(format!(
+                        "workspace {} does not exist",
+                        state.workspace.trim()
+                    ));
+                    return;
+                }
+                let launch_res = self.launch_skill_in_dir(&skill_id, harness, workspace);
                 match launch_res {
                     Ok(_) => {
                         self.sidebar_section = SidebarSection::Active;
@@ -4931,6 +5024,16 @@ impl App {
         skill_id: &str,
         harness: crate::harness::Harness,
     ) -> anyhow::Result<usize> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        self.launch_skill_in_dir(skill_id, harness, cwd)
+    }
+
+    fn launch_skill_in_dir(
+        &mut self,
+        skill_id: &str,
+        harness: crate::harness::Harness,
+        cwd: std::path::PathBuf,
+    ) -> anyhow::Result<usize> {
         let skill = self
             .skills
             .iter()
@@ -4958,7 +5061,6 @@ impl App {
             .map_err(|e| anyhow::anyhow!("cannot install skill for {}: {e}", harness.as_str()))?;
 
         // 3. Base profile for the harness, or a bare one.
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let base = self
             .profiles
             .iter()

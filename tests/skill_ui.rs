@@ -246,6 +246,45 @@ async fn the_picker_installs_and_launches_on_the_chosen_harness() {
     app.kill_all();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn the_skill_launcher_selects_a_workspace_before_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let selected = workspace.join("selected");
+    std::fs::create_dir_all(&selected).unwrap();
+    let script = fake_claude(&temp.path().join("bin"));
+    let profile = Profile {
+        name: "Claude Code".into(),
+        command: script.to_string_lossy().into_owned(),
+        args: vec![],
+        default_dir: Some(workspace.to_string_lossy().into_owned()),
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    let mut app = app_in(temp.path(), vec![profile]);
+    app.sidebar_section = SidebarSection::Agents;
+    app.selected_agent = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+
+    assert!(matches!(app.mode, Mode::SkillLauncher(_)));
+    let text = screen(&app);
+    assert!(text.contains("Workspace"), "{text}");
+    assert!(text.contains("Select subfolder"), "{text}");
+
+    app.handle_key(&key(KeyCode::Down), Instant::now());
+    for c in "selected".chars() {
+        app.handle_key(&key(KeyCode::Char(c)), Instant::now());
+    }
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+
+    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
+    assert_eq!(app.sessions[app.selected].dir, selected);
+    app.kill_all();
+}
+
 #[tokio::test]
 async fn skill_sessions_survive_a_restart() {
     let dir = tempfile::tempdir().unwrap();
