@@ -125,6 +125,7 @@ fn launch_heimdall(app: &mut App) {
     app.sidebar_section = SidebarSection::Agents;
     app.selected_agent = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
     app.handle_key(&key(KeyCode::Enter), Instant::now());
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
@@ -306,6 +307,7 @@ async fn custom_package_with_briefing_hydration_gets_schema_1_snapshot() {
     app.sidebar_section = SidebarSection::Agents;
     app.selected_agent = app.skills.iter().position(|s| s.id == "reader").unwrap();
     app.handle_key(&key(KeyCode::Enter), Instant::now());
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
