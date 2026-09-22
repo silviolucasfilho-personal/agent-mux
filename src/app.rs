@@ -1276,6 +1276,8 @@ pub enum DetailView {
     Timeline,
     /// The loop's numbers: calls, retries, where the time went, context.
     Loop,
+    /// What the turn spent: tokens by kind, cost, and calls per tool.
+    Summary,
 }
 
 impl DetailView {
@@ -1284,7 +1286,8 @@ impl DetailView {
             DetailView::List => DetailView::Tree,
             DetailView::Tree => DetailView::Timeline,
             DetailView::Timeline => DetailView::Loop,
-            DetailView::Loop => DetailView::List,
+            DetailView::Loop => DetailView::Summary,
+            DetailView::Summary => DetailView::List,
         }
     }
 
@@ -1294,6 +1297,7 @@ impl DetailView {
             DetailView::Tree => "tree (hierarchy)",
             DetailView::Timeline => "timeline (time)",
             DetailView::Loop => "loop",
+            DetailView::Summary => "summary",
         }
     }
 }
@@ -6322,6 +6326,9 @@ mod history_tests {
         b.cycle_detail_view();
         assert_eq!(b.detail_view, DetailView::Loop);
         assert_eq!(b.visible_rows().len(), 5, "nor does the loop view");
+        b.cycle_detail_view();
+        assert_eq!(b.detail_view, DetailView::Summary);
+        assert_eq!(b.visible_rows().len(), 5, "nor does the summary");
         b.cycle_detail_view();
         assert_eq!(b.detail_view, DetailView::List);
     }

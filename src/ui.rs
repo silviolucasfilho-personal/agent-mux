@@ -2657,6 +2657,8 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
         draw_observation_timeline(f, browser, inner_right);
     } else if browser.detail_view == crate::app::DetailView::Loop {
         draw_loop_view(f, browser, inner_right);
+    } else if browser.detail_view == crate::app::DetailView::Summary {
+        draw_turn_summary(f, browser, inner_right);
     } else {
         let visible = usize::from(inner_right.height);
         let start = sidebar_window(
@@ -2962,6 +2964,97 @@ fn draw_loop_view(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
             fmt_cost(Some(m.subagent_cost).filter(|c| *c > 0.0))
         ),
     ));
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// The turn's bill on one screen: tokens by kind and cost two to a row,
+/// then every tool with its calls and errors. Tools past the pane's last
+/// row fold into one row that carries what it hides.
+fn draw_turn_summary(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
+    let Some(turn) = browser.turns.get(browser.selected_turn) else {
+        return;
+    };
+    let s = trace_view::turn_summary(turn, &browser.observations);
+    let dim = Style::default().fg(Color::DarkGray);
+    let red = Style::default().fg(Color::Red);
+    let head = |s: String| Line::styled(format!("── {s} ──"), Style::default().fg(Color::Yellow));
+    let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    let errors = |n: usize| {
+        if n > 0 {
+            format!(" · {}", plural(n, "error"))
+        } else {
+            String::new()
+        }
+    };
+    let cell = |k: &str, v: String| {
+        vec![
+            Span::styled(format!("  {k:<12}"), dim),
+            Span::raw(format!("{v:>8}")),
+        ]
+    };
+
+    let mut tokens_head = format!("tokens · {}", plural(s.generations, "generation"));
+    if s.unpriced_generations > 0 {
+        tokens_head.push_str(&format!(" · {} unpriced", s.unpriced_generations));
+    }
+    let mut lines = vec![head(tokens_head)];
+    let cells = [
+        ("input", fmt_tokens(s.input_tokens)),
+        ("output", fmt_tokens(s.output_tokens)),
+        ("cache read", fmt_tokens(s.cache_read_tokens)),
+        ("cache write", fmt_tokens(s.cache_write_tokens)),
+        ("total", fmt_tokens(s.total_tokens)),
+        ("cost", fmt_cost(s.cost_usd)),
+    ];
+    // two cells to a row when both fit, so the tools keep the rows
+    let per_row = if area.width >= 44 { 2 } else { 1 };
+    for row in cells.chunks(per_row) {
+        lines.push(Line::from(
+            row.iter()
+                .flat_map(|(k, v)| cell(k, v.clone()))
+                .collect::<Vec<_>>(),
+        ));
+    }
+    lines.push(head(format!(
+        "tools · {} · {} distinct{}",
+        plural(s.tool_calls, "call"),
+        s.tools.len(),
+        errors(s.tool_errors)
+    )));
+
+    let rows = usize::from(area.height).saturating_sub(lines.len());
+    let (shown, folded) = trace_view::fit_tools(&s.tools, rows);
+    let width = s
+        .tools
+        .iter()
+        .map(|t| t.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(12, 40);
+    for t in shown {
+        let mut spans = vec![
+            Span::raw(format!("  {:<width$} ", truncate_chars(&t.name, width))),
+            Span::styled(
+                format!("×{:<4}", t.calls),
+                Style::default().fg(Color::Yellow),
+            ),
+        ];
+        if t.errors > 0 {
+            spans.push(Span::styled(format!("✗{}", t.errors), red));
+        }
+        lines.push(Line::from(spans));
+    }
+    if let Some(rest) = folded {
+        lines.push(Line::styled(
+            format!(
+                "  … +{} more · {}{}",
+                rest.tools,
+                plural(rest.calls, "call"),
+                errors(rest.errors)
+            ),
+            dim,
+        ));
+    }
     f.render_widget(Paragraph::new(lines), area);
 }
 
@@ -5646,8 +5739,132 @@ mod tests {
         );
         assert!(text.contains("cache ratio"), "{text}");
 
-        // a cramped terminal must not panic in either view
+        // summary: the turn's tokens by kind, its cost, and every tool
+        // with how many times it ran
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.detail_view = DetailView::Summary;
+            b.observations[1].level = "ERROR".into();
+            let t = &mut b.turns[0];
+            t.input_tokens = Some(1_200);
+            t.output_tokens = Some(340);
+            t.cache_read_tokens = Some(52_000);
+            t.cache_write_tokens = Some(2_500);
+            t.total_tokens = Some(56_040);
+            t.total_cost_usd = Some(0.42);
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("summary"), "the title names the view: {text}");
+        assert!(text.contains("── tokens"), "{text}");
+        // each value sits right after its own label, two to a row
+        for (label, value) in [
+            ("input", "1.2k"),
+            ("output", "340"),
+            ("cache read", "52k"),
+            ("cache write", "2.5k"),
+            ("total", "56k"),
+            ("cost", "$0.42"),
+        ] {
+            let row = text
+                .lines()
+                .find(|l| l.contains(&format!("  {label} ")))
+                .unwrap_or_else(|| panic!("no {label} row: {text}"));
+            let after = &row[row.find(&format!("  {label} ")).unwrap()..];
+            let first = after[label.len() + 2..].split_whitespace().next();
+            assert_eq!(first, Some(value), "{label} shows {value}: {row}");
+        }
+        assert!(text.contains("── tools"), "{text}");
+        assert!(
+            text.contains("5 calls · 4 distinct · 1 error"),
+            "the call and error totals: {text}"
+        );
+        let grep = text
+            .lines()
+            .find(|l| l.contains("  Grep "))
+            .unwrap_or_else(|| panic!("Grep is listed: {text}"));
+        assert!(grep.contains("×2"), "Grep ran twice: {grep}");
+        assert!(grep.contains("✗1"), "one Grep failed: {grep}");
+        let read = text
+            .lines()
+            .find(|l| l.contains("  Read "))
+            .unwrap_or_else(|| panic!("Read is listed: {text}"));
+        assert!(!read.contains('✗'), "a clean tool shows no errors: {read}");
+        assert!(
+            text.contains("agent: Explore"),
+            "the launch is a call: {text}"
+        );
+        let grep_at = text.find("  Grep ").unwrap();
+        let bash_at = text.find("  Bash ").unwrap();
+        assert!(grep_at < bash_at, "most called first: {text}");
+
+        // one screen: a turn with more tools than rows keeps its totals
+        // on screen and folds the tail into a last row, losing nothing
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            for i in 0..20 {
+                let mut o = view(
+                    &format!("z{i}"),
+                    &format!("Zz{i:02}"),
+                    0,
+                    base,
+                    Some(base + 1),
+                );
+                if i == 19 {
+                    o.level = "ERROR".into();
+                }
+                b.observations.push(o);
+            }
+        }
+        let mut short = Terminal::new(TestBackend::new(180, 18)).unwrap();
+        short.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&short);
+        assert!(
+            text.contains("25 calls · 24 distinct · 2 errors"),
+            "the totals stay on screen: {text}"
+        );
+        for label in ["input", "cache read", "total", "cost"] {
+            assert!(text.contains(&format!("  {label} ")), "{label}: {text}");
+        }
+        let names: Vec<String> = ["Grep", "Bash", "Read", "agent: Explore"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain((0..20).map(|i| format!("Zz{i:02}")))
+            .collect();
+        let visible: Vec<&String> = names
+            .iter()
+            .filter(|n| text.contains(&format!("  {n} ")))
+            .collect();
+        assert!(
+            !text.contains("  agent: Explore "),
+            "the least called tool is folded: {text}"
+        );
+        let fold = text
+            .lines()
+            .find(|l| l.contains("more"))
+            .unwrap_or_else(|| panic!("a fold row: {text}"));
+        let hidden = 24 - visible.len();
+        let hidden_calls = 25
+            - visible
+                .iter()
+                .map(|n| if *n == "Grep" { 2 } else { 1 })
+                .sum::<usize>();
+        assert!(
+            fold.contains(&format!("+{hidden} more · {hidden_calls} calls · 1 error")),
+            "the fold carries what it hides: {fold}"
+        );
+        let rows: Vec<&str> = text.lines().collect();
+        let last = rows.iter().rposition(|l| l.contains("more")).unwrap();
+        assert!(
+            rows.get(last + 1)
+                .is_some_and(|l| l.contains('└') || l.contains('─')),
+            "the fold is the pane's last row, right above its border: {text}"
+        );
+
+        // a cramped terminal must not panic in any view
         let mut tiny = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        tiny.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.detail_view = DetailView::Loop;
+        }
         tiny.draw(|f| draw(f, &app, Instant::now())).unwrap();
         if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
             b.detail_view = DetailView::Tree;

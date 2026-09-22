@@ -1,5 +1,5 @@
-//! Two derived views over a turn's observations: a hierarchical tree and
-//! a time-proportional timeline.
+//! Three derived views over a turn's observations: a hierarchical tree, a
+//! time-proportional timeline and a summary of what the turn spent.
 //!
 //! Both are pure functions over the rows `query::list_observations`
 //! returns — already in tree order, each carrying its depth — so the TUI
@@ -7,8 +7,8 @@
 //! (connectors, collapsing, rollups, bar geometry) is tested without a
 //! terminal.
 
-use crate::tracing::store::query::ObservationView;
-use std::collections::HashSet;
+use crate::tracing::store::query::{ObservationView, TraceStat};
+use std::collections::{HashMap, HashSet};
 
 /// What a collapsed row is hiding.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -229,6 +229,95 @@ pub fn axis(w: &Window, cols: usize) -> String {
     String::from_utf8(line).unwrap_or_default()
 }
 
+/// How often one tool ran in a turn, and how many of those runs failed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCount {
+    pub name: String,
+    pub calls: usize,
+    pub errors: usize,
+}
+
+/// What a turn spent: tokens by kind and cost (the turn's own totals, so
+/// they match the Turns pane), and each tool with how many times it ran.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnSummary {
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+    /// Generations with usage but no price: the cost is a lower bound.
+    pub unpriced_generations: i64,
+    pub generations: usize,
+    pub tool_calls: usize,
+    /// Calls whose row ended in `ERROR`.
+    pub tool_errors: usize,
+    /// Most called first; ties by name, so the order holds across redraws.
+    pub tools: Vec<ToolCount>,
+}
+
+/// A call the model made: a tool, or a subagent launch (`agent: …`). A
+/// subagent's transcript row is its work, not another call.
+fn is_tool_call(o: &ObservationView) -> bool {
+    o.obs_type == "tool" || (o.obs_type == "agent" && o.name.starts_with("agent: "))
+}
+
+pub fn turn_summary(turn: &TraceStat, obs: &[ObservationView]) -> TurnSummary {
+    let mut calls: HashMap<&str, (usize, usize)> = HashMap::new();
+    for o in obs.iter().filter(|o| is_tool_call(o)) {
+        let (n, errors) = calls.entry(o.name.as_str()).or_default();
+        *n += 1;
+        *errors += usize::from(o.level == "ERROR");
+    }
+    let mut tools: Vec<ToolCount> = calls
+        .into_iter()
+        .map(|(name, (calls, errors))| ToolCount {
+            name: name.to_string(),
+            calls,
+            errors,
+        })
+        .collect();
+    tools.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.name.cmp(&b.name)));
+    TurnSummary {
+        input_tokens: turn.input_tokens,
+        output_tokens: turn.output_tokens,
+        cache_read_tokens: turn.cache_read_tokens,
+        cache_write_tokens: turn.cache_write_tokens,
+        total_tokens: turn.total_tokens,
+        cost_usd: turn.total_cost_usd,
+        unpriced_generations: turn.unpriced_generations,
+        generations: obs.iter().filter(|o| o.obs_type == "generation").count(),
+        tool_calls: tools.iter().map(|t| t.calls).sum(),
+        tool_errors: tools.iter().map(|t| t.errors).sum(),
+        tools,
+    }
+}
+
+/// The tools a list too long for its rows stops showing: how many, and
+/// the calls and errors they carry, so the fold loses nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Folded {
+    pub tools: usize,
+    pub calls: usize,
+    pub errors: usize,
+}
+
+/// Splits `tools` (already most called first) to fit `rows`: every tool
+/// when they fit, otherwise the first `rows - 1` and one fold for the rest.
+pub fn fit_tools(tools: &[ToolCount], rows: usize) -> (&[ToolCount], Option<Folded>) {
+    if tools.len() <= rows {
+        return (tools, None);
+    }
+    let (shown, rest) = tools.split_at(rows.saturating_sub(1));
+    let folded = Folded {
+        tools: rest.len(),
+        calls: rest.iter().map(|t| t.calls).sum(),
+        errors: rest.iter().map(|t| t.errors).sum(),
+    };
+    (shown, Some(folded))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +509,220 @@ mod tests {
             end_ns: 7,
         };
         assert_eq!(bar(7, Some(7), &flat, 10).width, 1);
+    }
+
+    fn turn() -> TraceStat {
+        TraceStat {
+            id: "t".into(),
+            session_key: "claude:s".into(),
+            launch_id: None,
+            ordinal: 1,
+            name: "turn".into(),
+            status: "closed".into(),
+            start_ns: 0,
+            end_ns: Some(100),
+            latency_ms: 0,
+            input: None,
+            output: None,
+            thinking: None,
+            skills: "[]".into(),
+            reported_duration_ms: None,
+            session_cost_usd: None,
+            closed_by: None,
+            observation_count: 0,
+            generation_count: 0,
+            tool_count: 0,
+            error_count: 0,
+            open_count: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            total_cost_usd: None,
+            unpriced_generations: 0,
+            models: None,
+            metadata: "{}".into(),
+            retries: 0,
+            declined: 0,
+        }
+    }
+
+    fn named(obs_type: &str, name: &str) -> ObservationView {
+        let mut o = obs(name, 0, 0, Some(1));
+        o.obs_type = obs_type.into();
+        o.name = name.into();
+        o
+    }
+
+    #[test]
+    fn the_summary_counts_each_tool_by_name_most_called_first() {
+        let all = vec![
+            named("generation", "claude-opus"),
+            named("tool", "Read"),
+            named("tool", "Grep"),
+            named("tool", "Read"),
+            named("tool", "Edit"),
+            named("tool", "Grep"),
+            named("tool", "Bash"),
+            named("tool", "Read"),
+        ];
+        let s = turn_summary(&turn(), &all);
+        let counts: Vec<(&str, usize)> =
+            s.tools.iter().map(|t| (t.name.as_str(), t.calls)).collect();
+        // ties are broken by name so the order is stable across redraws
+        assert_eq!(
+            counts,
+            vec![("Read", 3), ("Grep", 2), ("Bash", 1), ("Edit", 1)]
+        );
+        assert_eq!(s.tool_calls, 7, "the generation is not a tool call");
+        assert_eq!(s.generations, 1);
+    }
+
+    #[test]
+    fn subagent_launches_are_tool_calls_but_their_transcripts_are_not() {
+        let mut child = named("agent", "agent Explore: find it");
+        child.depth = 1;
+        let mut inner = named("tool", "Grep");
+        inner.depth = 2;
+        let all = vec![
+            named("agent", "agent: Explore"),
+            child,
+            inner,
+            named("tool", "Bash"),
+        ];
+        let s = turn_summary(&turn(), &all);
+        let names: Vec<&str> = s.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["Bash", "Grep", "agent: Explore"]);
+        assert_eq!(s.tool_calls, 3, "tools nested in a subagent count too");
+    }
+
+    #[test]
+    fn the_summary_takes_tokens_and_cost_from_the_turn_totals() {
+        let mut t = turn();
+        t.input_tokens = Some(1_200);
+        t.output_tokens = Some(300);
+        t.cache_read_tokens = Some(50_000);
+        t.cache_write_tokens = Some(2_000);
+        t.total_tokens = Some(53_500);
+        t.total_cost_usd = Some(0.42);
+        t.unpriced_generations = 1;
+        let s = turn_summary(&t, &[]);
+        assert_eq!(s.input_tokens, Some(1_200));
+        assert_eq!(s.output_tokens, Some(300));
+        assert_eq!(s.cache_read_tokens, Some(50_000));
+        assert_eq!(s.cache_write_tokens, Some(2_000));
+        assert_eq!(s.total_tokens, Some(53_500));
+        assert_eq!(s.cost_usd, Some(0.42));
+        assert_eq!(s.unpriced_generations, 1);
+    }
+
+    #[test]
+    fn an_empty_turn_summarises_to_nothing_without_inventing_zeros() {
+        let s = turn_summary(&turn(), &[]);
+        assert!(s.tools.is_empty());
+        assert_eq!(s.tool_calls, 0);
+        assert_eq!(s.generations, 0);
+        assert_eq!(s.total_tokens, None, "no usage reported stays unknown");
+        assert_eq!(s.cost_usd, None);
+        assert_eq!(s.tool_errors, 0);
+    }
+
+    #[test]
+    fn the_summary_counts_each_tools_errors_and_their_total() {
+        let failed = |obs_type: &str, name: &str| {
+            let mut o = named(obs_type, name);
+            o.level = "ERROR".into();
+            o
+        };
+        let all = vec![
+            named("tool", "Bash"),
+            failed("tool", "Bash"),
+            failed("tool", "Bash"),
+            failed("tool", "Edit"),
+            named("tool", "Read"),
+            failed("agent", "agent: Explore"),
+            // a failed generation is not a failed call
+            failed("generation", "claude-opus"),
+        ];
+        let s = turn_summary(&turn(), &all);
+        let counts: Vec<(&str, usize, usize)> = s
+            .tools
+            .iter()
+            .map(|t| (t.name.as_str(), t.calls, t.errors))
+            .collect();
+        assert_eq!(
+            counts,
+            vec![
+                ("Bash", 3, 2),
+                ("Edit", 1, 1),
+                ("Read", 1, 0),
+                ("agent: Explore", 1, 1),
+            ]
+        );
+        assert_eq!(s.tool_errors, 4);
+    }
+
+    fn counted(name: &str, calls: usize, errors: usize) -> ToolCount {
+        ToolCount {
+            name: name.into(),
+            calls,
+            errors,
+        }
+    }
+
+    #[test]
+    fn every_tool_is_shown_when_the_rows_are_enough() {
+        let tools = vec![counted("Read", 3, 0), counted("Grep", 1, 1)];
+        let (shown, rest) = fit_tools(&tools, 2);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(rest, None);
+        let (shown, rest) = fit_tools(&tools, 10);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(rest, None);
+    }
+
+    #[test]
+    fn the_tools_that_do_not_fit_fold_into_one_last_row() {
+        let tools = vec![
+            counted("Read", 5, 0),
+            counted("Grep", 3, 1),
+            counted("Bash", 2, 2),
+            counted("Edit", 1, 0),
+        ];
+        let (shown, rest) = fit_tools(&tools, 3);
+        let names: Vec<&str> = shown.iter().map(|t| t.name.as_str()).collect();
+        // the fold takes the last row, so two tools keep their own
+        assert_eq!(names, vec!["Read", "Grep"]);
+        assert_eq!(
+            rest,
+            Some(Folded {
+                tools: 2,
+                calls: 3,
+                errors: 2
+            }),
+            "nothing is lost: the fold carries the hidden calls and errors"
+        );
+    }
+
+    #[test]
+    fn with_one_row_or_none_every_tool_folds() {
+        let tools = vec![counted("Read", 5, 0), counted("Grep", 3, 1)];
+        for rows in [0, 1] {
+            let (shown, rest) = fit_tools(&tools, rows);
+            assert!(shown.is_empty(), "{rows} rows");
+            assert_eq!(
+                rest,
+                Some(Folded {
+                    tools: 2,
+                    calls: 8,
+                    errors: 1
+                })
+            );
+        }
+        let (shown, rest) = fit_tools(&[], 0);
+        assert!(shown.is_empty());
+        assert_eq!(rest, None, "no tools, nothing to fold");
     }
 
     #[test]
