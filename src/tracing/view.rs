@@ -232,6 +232,7 @@ pub fn axis(w: &Window, cols: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tracing::store::query::TraceStat;
 
     fn obs(id: &str, depth: usize, start_ns: i64, end_ns: Option<i64>) -> ObservationView {
         ObservationView {
@@ -420,6 +421,125 @@ mod tests {
             end_ns: 7,
         };
         assert_eq!(bar(7, Some(7), &flat, 10).width, 1);
+    }
+
+    fn turn() -> TraceStat {
+        TraceStat {
+            id: "t".into(),
+            session_key: "claude:s".into(),
+            launch_id: None,
+            ordinal: 1,
+            name: "turn".into(),
+            status: "closed".into(),
+            start_ns: 0,
+            end_ns: Some(100),
+            latency_ms: 0,
+            input: None,
+            output: None,
+            thinking: None,
+            skills: "[]".into(),
+            reported_duration_ms: None,
+            session_cost_usd: None,
+            closed_by: None,
+            observation_count: 0,
+            generation_count: 0,
+            tool_count: 0,
+            error_count: 0,
+            open_count: 0,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            total_cost_usd: None,
+            unpriced_generations: 0,
+            models: None,
+            metadata: "{}".into(),
+            retries: 0,
+            declined: 0,
+        }
+    }
+
+    fn named(obs_type: &str, name: &str) -> ObservationView {
+        let mut o = obs(name, 0, 0, Some(1));
+        o.obs_type = obs_type.into();
+        o.name = name.into();
+        o
+    }
+
+    #[test]
+    fn the_summary_counts_each_tool_by_name_most_called_first() {
+        let all = vec![
+            named("generation", "claude-opus"),
+            named("tool", "Read"),
+            named("tool", "Grep"),
+            named("tool", "Read"),
+            named("tool", "Edit"),
+            named("tool", "Grep"),
+            named("tool", "Bash"),
+            named("tool", "Read"),
+        ];
+        let s = turn_summary(&turn(), &all);
+        let counts: Vec<(&str, usize)> = s
+            .tools
+            .iter()
+            .map(|t| (t.name.as_str(), t.calls))
+            .collect();
+        // ties are broken by name so the order is stable across redraws
+        assert_eq!(
+            counts,
+            vec![("Read", 3), ("Grep", 2), ("Bash", 1), ("Edit", 1)]
+        );
+        assert_eq!(s.tool_calls, 7, "the generation is not a tool call");
+        assert_eq!(s.generations, 1);
+    }
+
+    #[test]
+    fn subagent_launches_are_tool_calls_but_their_transcripts_are_not() {
+        let mut child = named("agent", "agent Explore: find it");
+        child.depth = 1;
+        let mut inner = named("tool", "Grep");
+        inner.depth = 2;
+        let all = vec![
+            named("agent", "agent: Explore"),
+            child,
+            inner,
+            named("tool", "Bash"),
+        ];
+        let s = turn_summary(&turn(), &all);
+        let names: Vec<&str> = s.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["Bash", "Grep", "agent: Explore"]);
+        assert_eq!(s.tool_calls, 3, "tools nested in a subagent count too");
+    }
+
+    #[test]
+    fn the_summary_takes_tokens_and_cost_from_the_turn_totals() {
+        let mut t = turn();
+        t.input_tokens = Some(1_200);
+        t.output_tokens = Some(300);
+        t.cache_read_tokens = Some(50_000);
+        t.cache_write_tokens = Some(2_000);
+        t.total_tokens = Some(53_500);
+        t.total_cost_usd = Some(0.42);
+        t.unpriced_generations = 1;
+        let s = turn_summary(&t, &[]);
+        assert_eq!(s.input_tokens, Some(1_200));
+        assert_eq!(s.output_tokens, Some(300));
+        assert_eq!(s.cache_read_tokens, Some(50_000));
+        assert_eq!(s.cache_write_tokens, Some(2_000));
+        assert_eq!(s.total_tokens, Some(53_500));
+        assert_eq!(s.cost_usd, Some(0.42));
+        assert_eq!(s.unpriced_generations, 1);
+    }
+
+    #[test]
+    fn an_empty_turn_summarises_to_nothing_without_inventing_zeros() {
+        let s = turn_summary(&turn(), &[]);
+        assert!(s.tools.is_empty());
+        assert_eq!(s.tool_calls, 0);
+        assert_eq!(s.generations, 0);
+        assert_eq!(s.total_tokens, None, "no usage reported stays unknown");
+        assert_eq!(s.cost_usd, None);
     }
 
     #[test]

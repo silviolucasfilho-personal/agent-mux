@@ -6323,6 +6323,9 @@ mod history_tests {
         assert_eq!(b.detail_view, DetailView::Loop);
         assert_eq!(b.visible_rows().len(), 5, "nor does the loop view");
         b.cycle_detail_view();
+        assert_eq!(b.detail_view, DetailView::Summary);
+        assert_eq!(b.visible_rows().len(), 5, "nor does the summary");
+        b.cycle_detail_view();
         assert_eq!(b.detail_view, DetailView::List);
     }
 

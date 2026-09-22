@@ -5646,8 +5646,60 @@ mod tests {
         );
         assert!(text.contains("cache ratio"), "{text}");
 
-        // a cramped terminal must not panic in either view
+        // summary: the turn's tokens by kind, its cost, and every tool
+        // with how many times it ran
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.detail_view = DetailView::Summary;
+            let t = &mut b.turns[0];
+            t.input_tokens = Some(1_200);
+            t.output_tokens = Some(340);
+            t.cache_read_tokens = Some(52_000);
+            t.cache_write_tokens = Some(2_500);
+            t.total_tokens = Some(56_040);
+            t.total_cost_usd = Some(0.42);
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("summary"),
+            "the title names the view: {text}"
+        );
+        assert!(text.contains("── tokens ──"), "{text}");
+        for (label, value) in [
+            ("input", "1.2k"),
+            ("output", "340"),
+            ("cache read", "52k"),
+            ("cache write", "2.5k"),
+            ("total", "56k"),
+        ] {
+            let row = text
+                .lines()
+                .find(|l| l.contains(&format!("  {label} ")))
+                .unwrap_or_else(|| panic!("no {label} row: {text}"));
+            assert!(row.contains(value), "{label} shows {value}: {row}");
+        }
+        assert!(text.contains("── cost ──") && text.contains("$0.42"), "{text}");
+        assert!(text.contains("── tools ──"), "{text}");
+        assert!(
+            text.contains("5 calls · 4 distinct"),
+            "the call total: {text}"
+        );
+        let grep = text
+            .lines()
+            .find(|l| l.contains("  Grep "))
+            .unwrap_or_else(|| panic!("Grep is listed: {text}"));
+        assert!(grep.contains("×2"), "Grep ran twice: {grep}");
+        assert!(text.contains("agent: Explore"), "the launch is a call: {text}");
+        let grep_at = text.find("  Grep ").unwrap();
+        let bash_at = text.find("  Bash ").unwrap();
+        assert!(grep_at < bash_at, "most called first: {text}");
+
+        // a cramped terminal must not panic in any view
         let mut tiny = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        tiny.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.detail_view = DetailView::Loop;
+        }
         tiny.draw(|f| draw(f, &app, Instant::now())).unwrap();
         if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
             b.detail_view = DetailView::Tree;
