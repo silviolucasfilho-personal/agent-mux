@@ -1215,7 +1215,8 @@ fn runs_cmd(args: &Args) -> anyhow::Result<()> {
             .map(|r| {
                 serde_json::json!({
                     "id": r.id, "outcome": r.outcome.as_str(), "word": r.outcome.word(),
-                    "level": r.effective_level.as_str(), "items_found": r.items_found,
+                    "level": r.effective_level.as_str(), "readiness_score": r.readiness_score,
+                    "items_found": r.items_found,
                     "actions_taken": r.actions_taken, "escalations": r.escalations,
                     "tokens": r.tokens, "cost_usd": r.cost_usd, "duration_s": r.duration_s(),
                     "detail": r.detail,
@@ -1278,7 +1279,13 @@ fn show(args: &Args) -> anyhow::Result<()> {
         .find(|r| r.id.starts_with(id))
         .ok_or_else(|| anyhow::anyhow!("no run {id:?}"))?;
     if args.has("json") {
-        println!("{}", serde_json::to_string_pretty(&run.detail)?);
+        // The detail bag, plus the row columns a reader of one run asks for
+        // by name. Additive: every key `detail` carried is still here.
+        let mut v = run.detail.clone();
+        if let (Some(obj), Some(score)) = (v.as_object_mut(), run.readiness_score) {
+            obj.insert("readiness_score".into(), score.into());
+        }
+        println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
     for l in run_lines(run) {
@@ -1342,6 +1349,16 @@ fn when_of(r: &lstore::LoopRun) -> String {
     crate::workflows::report::format_when(r.started_ns.unwrap_or(r.scheduled_ns))
 }
 
+/// The level a run ran at, with the readiness score that allowed it. The
+/// score is the one the pre-flight audit computed for this run, not the
+/// workspace's score today.
+fn level_of(r: &lstore::LoopRun) -> String {
+    match r.readiness_score {
+        Some(s) => format!("{} · readiness {s}", r.effective_level.as_str()),
+        None => r.effective_level.as_str().to_string(),
+    }
+}
+
 /// The two lines every surface leads a run with.
 fn run_lines(r: &lstore::LoopRun) -> Vec<String> {
     let facts = match r.outcome {
@@ -1379,7 +1396,7 @@ fn run_lines(r: &lstore::LoopRun) -> Vec<String> {
         "{}   {}   {}   {facts}",
         when_of(r),
         r.outcome.word().to_uppercase(),
-        r.effective_level.as_str()
+        level_of(r)
     )];
     if let Some(s) = r.detail_str("summary") {
         out.push(format!("  {s}"));

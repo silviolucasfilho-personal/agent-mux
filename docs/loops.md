@@ -22,7 +22,7 @@ Keep L1 (report-only) for a week. Promote to L2 with `e` when the readiness audi
 | --- | --- | --- |
 | `STATE.md` or `<pattern>-state.md` | the skill, every run | `Last run: <RFC3339>`, `## High Priority (loop is acting or waiting on human)`, `## Watch List`, `## Recent Noise (ignored this run)`, footer `Run log:` |
 | `LOOP.md` | scaffolder once, then you | Active Loops table, Human Gates, Budget, Worktrees, Safety |
-| `loop-run-log.md` | agent-mux after every completed run | one JSON line per run after the marker; pruned after 30 days; tokens come from the store |
+| `loop-run-log.md` | agent-mux after every completed run | one JSON line per run after the marker (`run_id`, `pattern`, `duration_s`, counts, `tokens_estimate`, `outcome`, then `readiness_score`, `level`, `harness`, `launch_id`, `source`); pruned after 30 days; tokens come from the store |
 | `loop-budget.md` | scaffolder once, then you | the daily caps table and the kill switch (`loop-pause-all`) |
 | `loop-constraints.md` | scaffolder once, then you | the binding rules the `loop-rules` skill loads |
 | `gate.yaml` | scaffolder once, then you | `denylist` globs, `maxFiles`, `autoMergeAllowlist` (recorded, never acted on) |
@@ -114,7 +114,7 @@ and who has to act. It is the state file the run wrote, parsed into the
 shape every loop skill already keeps.
 
 ```text
-Sep 17 17:36   NEEDS YOU   L1
+Sep 17 17:36   NEEDS YOU   L1 · readiness 71
 8 found · 2 for you · 417k tokens · $1.18 · 1m 43s
 #2238 conflicts and #1919 is blocked on a missing check
 Since last run  #2238 CLEAN → CONFLICTING after a push
@@ -146,15 +146,18 @@ changed nothing folds away, so a fifteen-minute loop still reads as a
 changelog:
 
 ```text
-Sep 17 17:36   NEEDS YOU   L1   8 found · 2 for you · 417k tokens · $1.18 · 1m 43s
+Sep 17 17:36   NEEDS YOU   L1 · readiness 71   8 found · 2 for you · 417k tokens · $1.18 · 1m 43s
   #2238 conflicts and #1919 is blocked on a missing check
 Sep 17 14:06 … 17:21   quiet ×13   1.1M tokens · $2.60
 Sep 16 16:03 … 17:33   skipped · tokens today 2.2M at the cap of 2.0M ×7
 ```
 
+Every run leads with the level it ran at and the readiness score its
+pre-flight audit computed — the score at the time of that run, not the
+workspace's score today, which is what the **Readiness** tab (`4`) shows.
 The selected run opens with why it ended that way, the verifier's verdict,
-the files it touched, the first lines of what it said, its launch id, exit
-code and readiness. Outcome words are for the reader (`needs you`,
+the files it touched, the first lines of what it said, its launch id and
+exit code. Outcome words are for the reader (`needs you`,
 `fix ready`, `reported`, `quiet`, `skipped`, `failed`); the values stored in
 `loop_runs.outcome` do not change.
 

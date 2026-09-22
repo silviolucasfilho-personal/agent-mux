@@ -457,4 +457,8 @@ fn the_runs_timeline_folds_quiet_runs_and_opens_the_selected_one() {
     assert!(out.contains("Verifier"), "{out}");
     assert!(out.contains("not required at L1"), "{out}");
     assert!(out.contains("exit 0"), "the run facts are on screen\n{out}");
+    assert!(
+        out.contains("L1 · readiness 100"),
+        "every run in the timeline carries the score it ran under\n{out}"
+    );
 }
