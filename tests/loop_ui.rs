@@ -307,6 +307,7 @@ fn store_run(
         decision: None,
         decided_ns: None,
         detail,
+        pattern_hash: None,
     };
     if outcome == agent_mux::loops::Outcome::NoOp {
         run.items_found = Some(0);

@@ -38,6 +38,10 @@ pub struct LoopRun {
     /// `reason`, `level_reason`, `verifier`, `files`, `gate_violation`,
     /// `final_message`, `exit_code`, `timed_out`, …
     pub detail: Value,
+    /// `Pattern::digest()` of the effective pattern this run executed, so
+    /// a reader can tell two runs of the same id apart after the library
+    /// shadowed its text. `None` for rows written before the column.
+    pub pattern_hash: Option<String>,
 }
 
 impl LoopRun {
@@ -75,6 +79,7 @@ impl LoopRun {
             decision: None,
             decided_ns: None,
             detail: Value::Object(serde_json::Map::new()),
+            pattern_hash: None,
         }
     }
 
@@ -105,7 +110,8 @@ impl LoopRun {
 
 const COLUMNS: &str = "id, loop_id, workspace, pattern, harness, level, effective_level, launch_id, \
     scheduled_ns, started_ns, ended_ns, outcome, items_found, actions_taken, escalations, tokens, \
-    cost_usd, readiness_score, worktree, branch, decision, decided_ns, detail";
+    cost_usd, readiness_score, worktree, branch, decision, decided_ns, detail, \
+    (SELECT pattern_hash FROM loop_run_patterns p WHERE p.run_id = loop_runs.id)";
 
 fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<LoopRun> {
     let level: String = r.get(5)?;
@@ -136,6 +142,7 @@ fn row_to_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<LoopRun> {
         decision: r.get(20)?,
         decided_ns: r.get(21)?,
         detail: serde_json::from_str(&detail).unwrap_or(Value::Null),
+        pattern_hash: r.get(23)?,
     })
 }
 
@@ -182,6 +189,16 @@ pub fn upsert_run(conn: &Connection, run: &LoopRun) -> rusqlite::Result<()> {
             run.detail.to_string(),
         ],
     )?;
+    // The digest lives beside the row (see schema v14). `None` leaves any
+    // earlier value alone: a reconstructed row must not erase what the
+    // launch recorded.
+    if let Some(hash) = &run.pattern_hash {
+        conn.execute(
+            "INSERT INTO loop_run_patterns (run_id, pattern_hash) VALUES (?1, ?2)
+             ON CONFLICT(run_id) DO UPDATE SET pattern_hash = excluded.pattern_hash",
+            params![run.id, hash],
+        )?;
+    }
     Ok(())
 }
 

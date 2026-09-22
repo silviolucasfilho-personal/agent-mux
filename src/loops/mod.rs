@@ -188,6 +188,22 @@ pub struct Pattern {
 }
 
 impl Pattern {
+    /// A fingerprint of this pattern's effective text, the way
+    /// `workflow_runs.document_hash` fingerprints a workflow document.
+    /// `loops/registry.toml` is shadowable from the configuration
+    /// library, so the id alone does not say what a run executed; a run
+    /// row keeps this so two runs of the same id can be told apart.
+    /// Serialization is the struct's declaration order, so the digest is
+    /// stable across processes for an unchanged pattern.
+    pub fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical =
+            serde_json::to_string(self).expect("a Pattern serializes; every field is plain data");
+        let mut h = Sha256::new();
+        h.update(canonical.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+
     /// The agents a workspace of this pattern receives: the listed ones,
     /// or `loop-verifier` alone when the list is empty and the pattern
     /// uses a verifier, else none.
