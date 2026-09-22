@@ -229,11 +229,12 @@ pub fn axis(w: &Window, cols: usize) -> String {
     String::from_utf8(line).unwrap_or_default()
 }
 
-/// How often one tool ran in a turn.
+/// How often one tool ran in a turn, and how many of those runs failed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCount {
     pub name: String,
     pub calls: usize,
+    pub errors: usize,
 }
 
 /// What a turn spent: tokens by kind and cost (the turn's own totals, so
@@ -250,6 +251,8 @@ pub struct TurnSummary {
     pub unpriced_generations: i64,
     pub generations: usize,
     pub tool_calls: usize,
+    /// Calls whose row ended in `ERROR`.
+    pub tool_errors: usize,
     /// Most called first; ties by name, so the order holds across redraws.
     pub tools: Vec<ToolCount>,
 }
@@ -261,15 +264,18 @@ fn is_tool_call(o: &ObservationView) -> bool {
 }
 
 pub fn turn_summary(turn: &TraceStat, obs: &[ObservationView]) -> TurnSummary {
-    let mut calls: HashMap<&str, usize> = HashMap::new();
+    let mut calls: HashMap<&str, (usize, usize)> = HashMap::new();
     for o in obs.iter().filter(|o| is_tool_call(o)) {
-        *calls.entry(o.name.as_str()).or_default() += 1;
+        let (n, errors) = calls.entry(o.name.as_str()).or_default();
+        *n += 1;
+        *errors += usize::from(o.level == "ERROR");
     }
     let mut tools: Vec<ToolCount> = calls
         .into_iter()
-        .map(|(name, calls)| ToolCount {
+        .map(|(name, (calls, errors))| ToolCount {
             name: name.to_string(),
             calls,
+            errors,
         })
         .collect();
     tools.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.name.cmp(&b.name)));
@@ -283,8 +289,33 @@ pub fn turn_summary(turn: &TraceStat, obs: &[ObservationView]) -> TurnSummary {
         unpriced_generations: turn.unpriced_generations,
         generations: obs.iter().filter(|o| o.obs_type == "generation").count(),
         tool_calls: tools.iter().map(|t| t.calls).sum(),
+        tool_errors: tools.iter().map(|t| t.errors).sum(),
         tools,
     }
+}
+
+/// The tools a list too long for its rows stops showing: how many, and
+/// the calls and errors they carry, so the fold loses nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Folded {
+    pub tools: usize,
+    pub calls: usize,
+    pub errors: usize,
+}
+
+/// Splits `tools` (already most called first) to fit `rows`: every tool
+/// when they fit, otherwise the first `rows - 1` and one fold for the rest.
+pub fn fit_tools(tools: &[ToolCount], rows: usize) -> (&[ToolCount], Option<Folded>) {
+    if tools.len() <= rows {
+        return (tools, None);
+    }
+    let (shown, rest) = tools.split_at(rows.saturating_sub(1));
+    let folded = Folded {
+        tools: rest.len(),
+        calls: rest.iter().map(|t| t.calls).sum(),
+        errors: rest.iter().map(|t| t.errors).sum(),
+    };
+    (shown, Some(folded))
 }
 
 #[cfg(test)]

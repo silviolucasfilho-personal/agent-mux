@@ -2967,49 +2967,63 @@ fn draw_loop_view(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// The turn's bill: tokens by kind, cost, and every tool with its count.
+/// The turn's bill on one screen: tokens by kind and cost two to a row,
+/// then every tool with its calls and errors. Tools past the pane's last
+/// row fold into one row that carries what it hides.
 fn draw_turn_summary(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
     let Some(turn) = browser.turns.get(browser.selected_turn) else {
         return;
     };
     let s = trace_view::turn_summary(turn, &browser.observations);
     let dim = Style::default().fg(Color::DarkGray);
-    let head = |s: &str| Line::styled(format!("── {s} ──"), Style::default().fg(Color::Yellow));
-    let kv = |k: &str, v: String| {
-        Line::from(vec![Span::styled(format!("  {k:<14}"), dim), Span::raw(v)])
-    };
-    let tok = |n: Option<i64>| format!("{:>8}", fmt_tokens(n));
-
-    let mut lines = vec![head("tokens")];
-    lines.push(kv("input", tok(s.input_tokens)));
-    lines.push(kv("output", tok(s.output_tokens)));
-    lines.push(kv("cache read", tok(s.cache_read_tokens)));
-    lines.push(kv("cache write", tok(s.cache_write_tokens)));
-    lines.push(kv("total", tok(s.total_tokens)));
-
-    lines.push(Line::raw(""));
-    lines.push(head("cost"));
-    lines.push(kv(
-        "cost",
-        if s.unpriced_generations > 0 {
-            format!(
-                "{:>8}  (+{} unpriced generation{})",
-                fmt_cost(s.cost_usd),
-                s.unpriced_generations,
-                if s.unpriced_generations == 1 { "" } else { "s" }
-            )
+    let red = Style::default().fg(Color::Red);
+    let head = |s: String| Line::styled(format!("── {s} ──"), Style::default().fg(Color::Yellow));
+    let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    let errors = |n: usize| {
+        if n > 0 {
+            format!(" · {}", plural(n, "error"))
         } else {
-            format!("{:>8}", fmt_cost(s.cost_usd))
-        },
-    ));
-    lines.push(kv("generations", format!("{:>8}", s.generations)));
+            String::new()
+        }
+    };
+    let cell = |k: &str, v: String| {
+        vec![
+            Span::styled(format!("  {k:<12}"), dim),
+            Span::raw(format!("{v:>8}")),
+        ]
+    };
 
-    lines.push(Line::raw(""));
-    lines.push(head("tools"));
-    lines.push(kv(
-        "calls",
-        format!("{} calls · {} distinct", s.tool_calls, s.tools.len()),
-    ));
+    let mut tokens_head = format!("tokens · {}", plural(s.generations, "generation"));
+    if s.unpriced_generations > 0 {
+        tokens_head.push_str(&format!(" · {} unpriced", s.unpriced_generations));
+    }
+    let mut lines = vec![head(tokens_head)];
+    let cells = [
+        ("input", fmt_tokens(s.input_tokens)),
+        ("output", fmt_tokens(s.output_tokens)),
+        ("cache read", fmt_tokens(s.cache_read_tokens)),
+        ("cache write", fmt_tokens(s.cache_write_tokens)),
+        ("total", fmt_tokens(s.total_tokens)),
+        ("cost", fmt_cost(s.cost_usd)),
+    ];
+    // two cells to a row when both fit, so the tools keep the rows
+    let per_row = if area.width >= 44 { 2 } else { 1 };
+    for row in cells.chunks(per_row) {
+        lines.push(Line::from(
+            row.iter()
+                .flat_map(|(k, v)| cell(k, v.clone()))
+                .collect::<Vec<_>>(),
+        ));
+    }
+    lines.push(head(format!(
+        "tools · {} · {} distinct{}",
+        plural(s.tool_calls, "call"),
+        s.tools.len(),
+        errors(s.tool_errors)
+    )));
+
+    let rows = usize::from(area.height).saturating_sub(lines.len());
+    let (shown, folded) = trace_view::fit_tools(&s.tools, rows);
     let width = s
         .tools
         .iter()
@@ -3017,11 +3031,29 @@ fn draw_turn_summary(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
         .max()
         .unwrap_or(0)
         .clamp(12, 40);
-    for t in &s.tools {
-        lines.push(Line::from(vec![
+    for t in shown {
+        let mut spans = vec![
             Span::raw(format!("  {:<width$} ", truncate_chars(&t.name, width))),
-            Span::styled(format!("×{}", t.calls), Style::default().fg(Color::Yellow)),
-        ]));
+            Span::styled(
+                format!("×{:<4}", t.calls),
+                Style::default().fg(Color::Yellow),
+            ),
+        ];
+        if t.errors > 0 {
+            spans.push(Span::styled(format!("✗{}", t.errors), red));
+        }
+        lines.push(Line::from(spans));
+    }
+    if let Some(rest) = folded {
+        lines.push(Line::styled(
+            format!(
+                "  … +{} more · {}{}",
+                rest.tools,
+                plural(rest.calls, "call"),
+                errors(rest.errors)
+            ),
+            dim,
+        ));
     }
     f.render_widget(Paragraph::new(lines), area);
 }
