@@ -496,6 +496,24 @@ pub fn unpriced_models(conn: &Connection) -> rusqlite::Result<Vec<(String, i64)>
     rows.collect()
 }
 
+/// The harness's conversation id for a launch: its `session_key` without
+/// the `<provider>:` prefix. `None` until the launch is correlated, and
+/// for an id this store never saw.
+pub fn launch_conversation(conn: &Connection, launch_id: &str) -> rusqlite::Result<Option<String>> {
+    let key: Option<String> = conn
+        .query_row(
+            "SELECT session_key FROM launches WHERE id = ?1",
+            params![launch_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(key.map(|k| match k.split_once(':') {
+        Some((_, id)) => id.to_string(),
+        None => k,
+    }))
+}
+
 /// Live per-launch rollup for the TUI badges.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LaunchStats {

@@ -10,6 +10,12 @@ pub struct SavedSession {
     /// `agent_id`; both are read.
     #[serde(default, alias = "agent_id", skip_serializing_if = "Option::is_none")]
     pub skill_id: Option<String>,
+    /// The harness's own id for the conversation the session held (agy's
+    /// `--conversation`, Claude's `--resume`, `codex resume`), so a
+    /// restart resumes it instead of opening a blank one. Absent when it
+    /// was never known: tracing off, or the launch not yet correlated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
 }
 
 pub fn sessions_file_path() -> Option<PathBuf> {

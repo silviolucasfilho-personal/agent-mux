@@ -232,6 +232,57 @@ pub fn resume_args(harness: Harness, session_id: &str) -> Vec<String> {
     compose(&[], &options.render(harness))
 }
 
+/// The arguments that bring a saved session back as the conversation it
+/// held: the profile's own arguments with whatever resume they already
+/// carried taken out (a session started with `--continue`, or resumed
+/// from History, has since become one named conversation), plus a resume
+/// of `conversation`. Unlike `resume_args`, the rest of the command line
+/// stays: a restored session keeps its model and approval flags.
+pub fn restore_args(harness: Harness, saved: &[String], conversation: &str) -> Vec<String> {
+    let options = LaunchOptions {
+        resume: Resume::Id(conversation.to_string()),
+        ..Default::default()
+    };
+    compose(&without_resume(harness, saved), &options.render(harness))
+}
+
+/// `args` minus every spelling of resume `harness` accepts: Claude's
+/// `--continue`/`-c`, `--resume`/`-r` with its value, Antigravity's
+/// `--continue`/`-c` and `--conversation` with its value, and Codex's
+/// leading `resume` subcommand with `--last` or the id after it.
+fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
+    if harness == Harness::Codex {
+        return match args {
+            [sub, _target, rest @ ..] if sub == "resume" => rest.to_vec(),
+            _ => args.to_vec(),
+        };
+    }
+    let valued: &[&str] = match harness {
+        Harness::Claude => &["--resume", "-r"],
+        _ => &["--conversation"],
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut it = args.iter().peekable();
+    while let Some(arg) = it.next() {
+        if arg == "--continue" || arg == "-c" {
+            continue;
+        }
+        if valued.contains(&arg.as_str()) {
+            // the value, unless the flag was given bare (Claude's picker)
+            it.next_if(|v| !v.starts_with('-'));
+            continue;
+        }
+        if valued
+            .iter()
+            .any(|flag| arg.starts_with(&format!("{flag}=")))
+        {
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
 /// The full argument list for a launch: the harness's subcommand, then
 /// the profile's own arguments, then the options' flags.
 pub fn compose(profile_args: &[String], rendered: &Rendered) -> Vec<String> {
