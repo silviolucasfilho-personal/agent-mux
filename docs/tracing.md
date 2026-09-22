@@ -298,7 +298,7 @@ that shrinks is marked incomplete and its capture is stopped for that launch;
 reimport reconstructs it from the source. Missing child files contribute
 unknown usage, not zero. Full conversation replay, media inspection, timeline
 zoom and richer evaluation controls are later work; this version improves
-the data used by the existing list/tree/timeline/loop views.
+the data used by the existing list/tree/timeline/loop/summary views.
 
 ## Code map
 

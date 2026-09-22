@@ -2657,6 +2657,8 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
         draw_observation_timeline(f, browser, inner_right);
     } else if browser.detail_view == crate::app::DetailView::Loop {
         draw_loop_view(f, browser, inner_right);
+    } else if browser.detail_view == crate::app::DetailView::Summary {
+        draw_turn_summary(f, browser, inner_right);
     } else {
         let visible = usize::from(inner_right.height);
         let start = sidebar_window(
@@ -2962,6 +2964,65 @@ fn draw_loop_view(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
             fmt_cost(Some(m.subagent_cost).filter(|c| *c > 0.0))
         ),
     ));
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// The turn's bill: tokens by kind, cost, and every tool with its count.
+fn draw_turn_summary(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
+    let Some(turn) = browser.turns.get(browser.selected_turn) else {
+        return;
+    };
+    let s = trace_view::turn_summary(turn, &browser.observations);
+    let dim = Style::default().fg(Color::DarkGray);
+    let head = |s: &str| Line::styled(format!("── {s} ──"), Style::default().fg(Color::Yellow));
+    let kv = |k: &str, v: String| {
+        Line::from(vec![Span::styled(format!("  {k:<14}"), dim), Span::raw(v)])
+    };
+    let tok = |n: Option<i64>| format!("{:>8}", fmt_tokens(n));
+
+    let mut lines = vec![head("tokens")];
+    lines.push(kv("input", tok(s.input_tokens)));
+    lines.push(kv("output", tok(s.output_tokens)));
+    lines.push(kv("cache read", tok(s.cache_read_tokens)));
+    lines.push(kv("cache write", tok(s.cache_write_tokens)));
+    lines.push(kv("total", tok(s.total_tokens)));
+
+    lines.push(Line::raw(""));
+    lines.push(head("cost"));
+    lines.push(kv(
+        "cost",
+        if s.unpriced_generations > 0 {
+            format!(
+                "{:>8}  (+{} unpriced generation{})",
+                fmt_cost(s.cost_usd),
+                s.unpriced_generations,
+                if s.unpriced_generations == 1 { "" } else { "s" }
+            )
+        } else {
+            format!("{:>8}", fmt_cost(s.cost_usd))
+        },
+    ));
+    lines.push(kv("generations", format!("{:>8}", s.generations)));
+
+    lines.push(Line::raw(""));
+    lines.push(head("tools"));
+    lines.push(kv(
+        "calls",
+        format!("{} calls · {} distinct", s.tool_calls, s.tools.len()),
+    ));
+    let width = s
+        .tools
+        .iter()
+        .map(|t| t.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(12, 40);
+    for t in &s.tools {
+        lines.push(Line::from(vec![
+            Span::raw(format!("  {:<width$} ", truncate_chars(&t.name, width))),
+            Span::styled(format!("×{}", t.calls), Style::default().fg(Color::Yellow)),
+        ]));
+    }
     f.render_widget(Paragraph::new(lines), area);
 }
 
@@ -5660,10 +5721,7 @@ mod tests {
         }
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
-        assert!(
-            text.contains("summary"),
-            "the title names the view: {text}"
-        );
+        assert!(text.contains("summary"), "the title names the view: {text}");
         assert!(text.contains("── tokens ──"), "{text}");
         for (label, value) in [
             ("input", "1.2k"),
@@ -5678,7 +5736,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("no {label} row: {text}"));
             assert!(row.contains(value), "{label} shows {value}: {row}");
         }
-        assert!(text.contains("── cost ──") && text.contains("$0.42"), "{text}");
+        assert!(
+            text.contains("── cost ──") && text.contains("$0.42"),
+            "{text}"
+        );
         assert!(text.contains("── tools ──"), "{text}");
         assert!(
             text.contains("5 calls · 4 distinct"),
@@ -5689,7 +5750,10 @@ mod tests {
             .find(|l| l.contains("  Grep "))
             .unwrap_or_else(|| panic!("Grep is listed: {text}"));
         assert!(grep.contains("×2"), "Grep ran twice: {grep}");
-        assert!(text.contains("agent: Explore"), "the launch is a call: {text}");
+        assert!(
+            text.contains("agent: Explore"),
+            "the launch is a call: {text}"
+        );
         let grep_at = text.find("  Grep ").unwrap();
         let bash_at = text.find("  Bash ").unwrap();
         assert!(grep_at < bash_at, "most called first: {text}");

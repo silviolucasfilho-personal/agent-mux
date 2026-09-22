@@ -1,5 +1,5 @@
-//! Two derived views over a turn's observations: a hierarchical tree and
-//! a time-proportional timeline.
+//! Three derived views over a turn's observations: a hierarchical tree, a
+//! time-proportional timeline and a summary of what the turn spent.
 //!
 //! Both are pure functions over the rows `query::list_observations`
 //! returns — already in tree order, each carrying its depth — so the TUI
@@ -7,8 +7,8 @@
 //! (connectors, collapsing, rollups, bar geometry) is tested without a
 //! terminal.
 
-use crate::tracing::store::query::ObservationView;
-use std::collections::HashSet;
+use crate::tracing::store::query::{ObservationView, TraceStat};
+use std::collections::{HashMap, HashSet};
 
 /// What a collapsed row is hiding.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -229,10 +229,67 @@ pub fn axis(w: &Window, cols: usize) -> String {
     String::from_utf8(line).unwrap_or_default()
 }
 
+/// How often one tool ran in a turn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCount {
+    pub name: String,
+    pub calls: usize,
+}
+
+/// What a turn spent: tokens by kind and cost (the turn's own totals, so
+/// they match the Turns pane), and each tool with how many times it ran.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnSummary {
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+    /// Generations with usage but no price: the cost is a lower bound.
+    pub unpriced_generations: i64,
+    pub generations: usize,
+    pub tool_calls: usize,
+    /// Most called first; ties by name, so the order holds across redraws.
+    pub tools: Vec<ToolCount>,
+}
+
+/// A call the model made: a tool, or a subagent launch (`agent: …`). A
+/// subagent's transcript row is its work, not another call.
+fn is_tool_call(o: &ObservationView) -> bool {
+    o.obs_type == "tool" || (o.obs_type == "agent" && o.name.starts_with("agent: "))
+}
+
+pub fn turn_summary(turn: &TraceStat, obs: &[ObservationView]) -> TurnSummary {
+    let mut calls: HashMap<&str, usize> = HashMap::new();
+    for o in obs.iter().filter(|o| is_tool_call(o)) {
+        *calls.entry(o.name.as_str()).or_default() += 1;
+    }
+    let mut tools: Vec<ToolCount> = calls
+        .into_iter()
+        .map(|(name, calls)| ToolCount {
+            name: name.to_string(),
+            calls,
+        })
+        .collect();
+    tools.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.name.cmp(&b.name)));
+    TurnSummary {
+        input_tokens: turn.input_tokens,
+        output_tokens: turn.output_tokens,
+        cache_read_tokens: turn.cache_read_tokens,
+        cache_write_tokens: turn.cache_write_tokens,
+        total_tokens: turn.total_tokens,
+        cost_usd: turn.total_cost_usd,
+        unpriced_generations: turn.unpriced_generations,
+        generations: obs.iter().filter(|o| o.obs_type == "generation").count(),
+        tool_calls: tools.iter().map(|t| t.calls).sum(),
+        tools,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracing::store::query::TraceStat;
 
     fn obs(id: &str, depth: usize, start_ns: i64, end_ns: Option<i64>) -> ObservationView {
         ObservationView {
@@ -480,11 +537,8 @@ mod tests {
             named("tool", "Read"),
         ];
         let s = turn_summary(&turn(), &all);
-        let counts: Vec<(&str, usize)> = s
-            .tools
-            .iter()
-            .map(|t| (t.name.as_str(), t.calls))
-            .collect();
+        let counts: Vec<(&str, usize)> =
+            s.tools.iter().map(|t| (t.name.as_str(), t.calls)).collect();
         // ties are broken by name so the order is stable across redraws
         assert_eq!(
             counts,
