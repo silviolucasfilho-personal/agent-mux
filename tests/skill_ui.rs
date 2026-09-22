@@ -2,7 +2,9 @@
 //! picker, the one-session rule) and the Skills workbench (`S`): grouping by
 //! harness, editing, validation, launching, navigation, and install state.
 
-use agent_mux::app::{App, Mode, SidebarSection, SkillRow, SkillsPane, SkillsTab};
+use agent_mux::app::{
+    App, Mode, SidebarSection, SkillLauncherField, SkillRow, SkillsPane, SkillsTab,
+};
 use agent_mux::config::Profile;
 use agent_mux::harness::Harness;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -135,6 +137,8 @@ async fn heimdall_is_listed_in_the_agents_section_and_the_picker_defaults_to_its
     assert_eq!(state.selected_harness(), Harness::Antigravity);
     assert_eq!(state.harnesses, Harness::ALL.to_vec());
 
+    // Tab leaves the Workspace text field; the shortcut then selects.
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     if let Mode::SkillLauncher(ref state) = app.mode {
         assert_eq!(state.selected_harness(), Harness::Claude);
@@ -206,6 +210,7 @@ async fn the_picker_installs_and_launches_on_the_chosen_harness() {
     app.sidebar_section = SidebarSection::Agents;
     app.selected_agent = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
     app.handle_key(&key(KeyCode::Enter), Instant::now());
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
@@ -243,6 +248,45 @@ async fn the_picker_installs_and_launches_on_the_chosen_harness() {
         2,
         "codex and agy: {text}"
     );
+    app.kill_all();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_skill_launcher_selects_a_workspace_before_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let selected = workspace.join("selected");
+    std::fs::create_dir_all(&selected).unwrap();
+    let script = fake_claude(&temp.path().join("bin"));
+    let profile = Profile {
+        name: "Claude Code".into(),
+        command: script.to_string_lossy().into_owned(),
+        args: vec![],
+        default_dir: Some(workspace.to_string_lossy().into_owned()),
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    let mut app = app_in(temp.path(), vec![profile]);
+    app.sidebar_section = SidebarSection::Agents;
+    app.selected_agent = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+
+    assert!(matches!(app.mode, Mode::SkillLauncher(_)));
+    let text = screen(&app);
+    assert!(text.contains("Workspace"), "{text}");
+    assert!(text.contains("Select subfolder"), "{text}");
+
+    app.handle_key(&key(KeyCode::Down), Instant::now());
+    for c in "selected".chars() {
+        app.handle_key(&key(KeyCode::Char(c)), Instant::now());
+    }
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+
+    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
+    assert_eq!(app.sessions[app.selected].dir, selected);
     app.kill_all();
 }
 
@@ -556,5 +600,65 @@ async fn the_view_has_details_and_executions_tabs_and_reflects_install_state() {
     std::fs::write(dir.join("SKILL.md"), "someone else's").unwrap();
     app.handle_key(&key(KeyCode::Char('r')), Instant::now());
     assert!(screen(&app).contains("not managed"));
+    app.kill_all();
+}
+
+/// The Workspace field is a text field: every character belongs to the
+/// path. The harness shortcuts (`1-3`, `c`, `x`, `a`) may not swallow the
+/// letters of an ordinary directory name — they apply once the Harness
+/// field has focus.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_workspace_field_accepts_the_harness_shortcut_letters() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = fake_claude(&temp.path().join("bin"));
+    let profile = Profile {
+        name: "Claude Code".into(),
+        command: script.to_string_lossy().into_owned(),
+        args: vec![],
+        default_dir: Some(temp.path().to_string_lossy().into_owned()),
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    let mut app = app_in(temp.path(), vec![profile]);
+    app.sidebar_section = SidebarSection::Agents;
+    app.selected_agent = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+
+    let before = match &app.mode {
+        Mode::SkillLauncher(s) => s.workspace.clone(),
+        _ => panic!("the launcher did not open"),
+    };
+    // Every character a real path segment can contain, shortcuts included.
+    for c in "/ax1c2x3".chars() {
+        app.handle_key(&key(KeyCode::Char(c)), Instant::now());
+    }
+    match &app.mode {
+        Mode::SkillLauncher(s) => {
+            assert_eq!(
+                s.workspace,
+                format!("{before}/ax1c2x3"),
+                "the path field must receive the shortcut letters"
+            );
+            assert_eq!(
+                s.field,
+                SkillLauncherField::Workspace,
+                "typing must not move focus to the harness list"
+            );
+        }
+        _ => panic!("left the launcher"),
+    }
+
+    // The shortcuts still select a harness once that field has focus.
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    app.handle_key(&key(KeyCode::Char('x')), Instant::now());
+    match &app.mode {
+        Mode::SkillLauncher(s) => {
+            assert_eq!(s.field, SkillLauncherField::Harness);
+            assert_eq!(s.selected, 1, "x is the second harness");
+        }
+        _ => panic!("left the launcher"),
+    }
     app.kill_all();
 }

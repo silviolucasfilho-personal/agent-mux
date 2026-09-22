@@ -7,8 +7,8 @@ use crate::app::workflows_view::{
 };
 use crate::app::{
     App, BrowserPane, DialogContentMode, DialogField, DialogState, HistoryPane, HistoryState,
-    InstallLabel, Mode, NoticeLevel, SidebarSection, SkillRow, SkillsPane, SkillsTab,
-    SkillsViewState, TraceBrowserState,
+    InstallLabel, Mode, NoticeLevel, SidebarSection, SkillLauncherField, SkillRow, SkillsPane,
+    SkillsTab, SkillsViewState, TraceBrowserState,
 };
 use crate::app::{ConfigPane, ConfigRow, ConfigViewState, Pending};
 use crate::status::Status;
@@ -1566,7 +1566,7 @@ fn draw_trace_briefing_preview(
 
 fn draw_skill_launcher(f: &mut Frame, state: &crate::app::SkillLauncherState, app: &App) {
     let width = 68.min(f.area().width.saturating_sub(4)).max(48);
-    let height = 18.min(f.area().height.saturating_sub(2)).max(14);
+    let height = 24.min(f.area().height.saturating_sub(2)).max(16);
     let area = centered(f.area(), width, height);
     f.render_widget(Clear, area);
 
@@ -1586,8 +1586,9 @@ fn draw_skill_launcher(f: &mut Frame, state: &crate::app::SkillLauncherState, ap
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let [header_area, list_area, info_area, hint_area] = Layout::vertical([
+    let [header_area, workspace_area, list_area, info_area, hint_area] = Layout::vertical([
         Constraint::Length(2),
+        Constraint::Length(5),
         Constraint::Length(4),
         Constraint::Min(4),
         Constraint::Length(2),
@@ -1602,6 +1603,15 @@ fn draw_skill_launcher(f: &mut Frame, state: &crate::app::SkillLauncherState, ap
         Line::raw(""),
     ]);
     f.render_widget(header_text, header_area);
+
+    let workspace_lines = dir_picker_lines(
+        "Workspace: ",
+        &state.workspace,
+        &state.dir_picker,
+        state.field == SkillLauncherField::Workspace,
+        2,
+    );
+    f.render_widget(Paragraph::new(workspace_lines), workspace_area);
 
     let harnesses = if state.harnesses.is_empty() {
         crate::harness::Harness::ALL.as_slice()
@@ -1637,7 +1647,7 @@ fn draw_skill_launcher(f: &mut Frame, state: &crate::app::SkillLauncherState, ap
                 Span::styled(running_tag, Style::default().fg(Color::Green)),
             ]);
             let item = ListItem::new(line);
-            if is_selected {
+            if is_selected && state.field == SkillLauncherField::Harness {
                 item.style(Style::default().add_modifier(Modifier::REVERSED))
             } else {
                 item
@@ -1691,6 +1701,8 @@ fn draw_skill_launcher(f: &mut Frame, state: &crate::app::SkillLauncherState, ap
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("Launch/Attach   "),
+        Span::styled("[Tab] ", Style::default().fg(Color::Cyan)),
+        Span::raw("Workspace/Harness   "),
         Span::styled("[1-3 / c,x,a] ", Style::default().fg(Color::Cyan)),
         Span::raw("Select   "),
         Span::styled("[Esc] ", Style::default().fg(Color::DarkGray)),
