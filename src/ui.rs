@@ -5711,6 +5711,7 @@ mod tests {
         // with how many times it ran
         if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
             b.detail_view = DetailView::Summary;
+            b.observations[1].level = "ERROR".into();
             let t = &mut b.turns[0];
             t.input_tokens = Some(1_200);
             t.output_tokens = Some(340);
@@ -5722,34 +5723,40 @@ mod tests {
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("summary"), "the title names the view: {text}");
-        assert!(text.contains("── tokens ──"), "{text}");
+        assert!(text.contains("── tokens"), "{text}");
+        // each value sits right after its own label, two to a row
         for (label, value) in [
             ("input", "1.2k"),
             ("output", "340"),
             ("cache read", "52k"),
             ("cache write", "2.5k"),
             ("total", "56k"),
+            ("cost", "$0.42"),
         ] {
             let row = text
                 .lines()
                 .find(|l| l.contains(&format!("  {label} ")))
                 .unwrap_or_else(|| panic!("no {label} row: {text}"));
-            assert!(row.contains(value), "{label} shows {value}: {row}");
+            let after = &row[row.find(&format!("  {label} ")).unwrap()..];
+            let first = after[label.len() + 2..].split_whitespace().next();
+            assert_eq!(first, Some(value), "{label} shows {value}: {row}");
         }
+        assert!(text.contains("── tools"), "{text}");
         assert!(
-            text.contains("── cost ──") && text.contains("$0.42"),
-            "{text}"
-        );
-        assert!(text.contains("── tools ──"), "{text}");
-        assert!(
-            text.contains("5 calls · 4 distinct"),
-            "the call total: {text}"
+            text.contains("5 calls · 4 distinct · 1 error"),
+            "the call and error totals: {text}"
         );
         let grep = text
             .lines()
             .find(|l| l.contains("  Grep "))
             .unwrap_or_else(|| panic!("Grep is listed: {text}"));
         assert!(grep.contains("×2"), "Grep ran twice: {grep}");
+        assert!(grep.contains("✗1"), "one Grep failed: {grep}");
+        let read = text
+            .lines()
+            .find(|l| l.contains("  Read "))
+            .unwrap_or_else(|| panic!("Read is listed: {text}"));
+        assert!(!read.contains('✗'), "a clean tool shows no errors: {read}");
         assert!(
             text.contains("agent: Explore"),
             "the launch is a call: {text}"
@@ -5757,6 +5764,68 @@ mod tests {
         let grep_at = text.find("  Grep ").unwrap();
         let bash_at = text.find("  Bash ").unwrap();
         assert!(grep_at < bash_at, "most called first: {text}");
+
+        // one screen: a turn with more tools than rows keeps its totals
+        // on screen and folds the tail into a last row, losing nothing
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            for i in 0..20 {
+                let mut o = view(
+                    &format!("z{i}"),
+                    &format!("Zz{i:02}"),
+                    0,
+                    base,
+                    Some(base + 1),
+                );
+                if i == 19 {
+                    o.level = "ERROR".into();
+                }
+                b.observations.push(o);
+            }
+        }
+        let mut short = Terminal::new(TestBackend::new(180, 18)).unwrap();
+        short.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&short);
+        assert!(
+            text.contains("25 calls · 24 distinct · 2 errors"),
+            "the totals stay on screen: {text}"
+        );
+        for label in ["input", "cache read", "total", "cost"] {
+            assert!(text.contains(&format!("  {label} ")), "{label}: {text}");
+        }
+        let names: Vec<String> = ["Grep", "Bash", "Read", "agent: Explore"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain((0..20).map(|i| format!("Zz{i:02}")))
+            .collect();
+        let visible: Vec<&String> = names
+            .iter()
+            .filter(|n| text.contains(&format!("  {n} ")))
+            .collect();
+        assert!(
+            !text.contains("  agent: Explore "),
+            "the least called tool is folded: {text}"
+        );
+        let fold = text
+            .lines()
+            .find(|l| l.contains("more"))
+            .unwrap_or_else(|| panic!("a fold row: {text}"));
+        let hidden = 24 - visible.len();
+        let hidden_calls = 25
+            - visible
+                .iter()
+                .map(|n| if *n == "Grep" { 2 } else { 1 })
+                .sum::<usize>();
+        assert!(
+            fold.contains(&format!("+{hidden} more · {hidden_calls} calls · 1 error")),
+            "the fold carries what it hides: {fold}"
+        );
+        let rows: Vec<&str> = text.lines().collect();
+        let last = rows.iter().rposition(|l| l.contains("more")).unwrap();
+        assert!(
+            rows.get(last + 1)
+                .is_some_and(|l| l.contains('└') || l.contains('─')),
+            "the fold is the pane's last row, right above its border: {text}"
+        );
 
         // a cramped terminal must not panic in any view
         let mut tiny = Terminal::new(TestBackend::new(40, 10)).unwrap();

@@ -594,6 +594,104 @@ mod tests {
         assert_eq!(s.generations, 0);
         assert_eq!(s.total_tokens, None, "no usage reported stays unknown");
         assert_eq!(s.cost_usd, None);
+        assert_eq!(s.tool_errors, 0);
+    }
+
+    #[test]
+    fn the_summary_counts_each_tools_errors_and_their_total() {
+        let failed = |obs_type: &str, name: &str| {
+            let mut o = named(obs_type, name);
+            o.level = "ERROR".into();
+            o
+        };
+        let all = vec![
+            named("tool", "Bash"),
+            failed("tool", "Bash"),
+            failed("tool", "Bash"),
+            failed("tool", "Edit"),
+            named("tool", "Read"),
+            failed("agent", "agent: Explore"),
+            // a failed generation is not a failed call
+            failed("generation", "claude-opus"),
+        ];
+        let s = turn_summary(&turn(), &all);
+        let counts: Vec<(&str, usize, usize)> = s
+            .tools
+            .iter()
+            .map(|t| (t.name.as_str(), t.calls, t.errors))
+            .collect();
+        assert_eq!(
+            counts,
+            vec![
+                ("Bash", 3, 2),
+                ("Edit", 1, 1),
+                ("Read", 1, 0),
+                ("agent: Explore", 1, 1),
+            ]
+        );
+        assert_eq!(s.tool_errors, 4);
+    }
+
+    fn counted(name: &str, calls: usize, errors: usize) -> ToolCount {
+        ToolCount {
+            name: name.into(),
+            calls,
+            errors,
+        }
+    }
+
+    #[test]
+    fn every_tool_is_shown_when_the_rows_are_enough() {
+        let tools = vec![counted("Read", 3, 0), counted("Grep", 1, 1)];
+        let (shown, rest) = fit_tools(&tools, 2);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(rest, None);
+        let (shown, rest) = fit_tools(&tools, 10);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(rest, None);
+    }
+
+    #[test]
+    fn the_tools_that_do_not_fit_fold_into_one_last_row() {
+        let tools = vec![
+            counted("Read", 5, 0),
+            counted("Grep", 3, 1),
+            counted("Bash", 2, 2),
+            counted("Edit", 1, 0),
+        ];
+        let (shown, rest) = fit_tools(&tools, 3);
+        let names: Vec<&str> = shown.iter().map(|t| t.name.as_str()).collect();
+        // the fold takes the last row, so two tools keep their own
+        assert_eq!(names, vec!["Read", "Grep"]);
+        assert_eq!(
+            rest,
+            Some(Folded {
+                tools: 2,
+                calls: 3,
+                errors: 2
+            }),
+            "nothing is lost: the fold carries the hidden calls and errors"
+        );
+    }
+
+    #[test]
+    fn with_one_row_or_none_every_tool_folds() {
+        let tools = vec![counted("Read", 5, 0), counted("Grep", 3, 1)];
+        for rows in [0, 1] {
+            let (shown, rest) = fit_tools(&tools, rows);
+            assert!(shown.is_empty(), "{rows} rows");
+            assert_eq!(
+                rest,
+                Some(Folded {
+                    tools: 2,
+                    calls: 8,
+                    errors: 1
+                })
+            );
+        }
+        let (shown, rest) = fit_tools(&[], 0);
+        assert!(shown.is_empty());
+        assert_eq!(rest, None, "no tools, nothing to fold");
     }
 
     #[test]
