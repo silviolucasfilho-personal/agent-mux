@@ -137,6 +137,8 @@ async fn heimdall_is_listed_in_the_agents_section_and_the_picker_defaults_to_its
     assert_eq!(state.selected_harness(), Harness::Antigravity);
     assert_eq!(state.harnesses, Harness::ALL.to_vec());
 
+    // Tab leaves the Workspace text field; the shortcut then selects.
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     if let Mode::SkillLauncher(ref state) = app.mode {
         assert_eq!(state.selected_harness(), Harness::Claude);
@@ -208,6 +210,7 @@ async fn the_picker_installs_and_launches_on_the_chosen_harness() {
     app.sidebar_section = SidebarSection::Agents;
     app.selected_agent = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
     app.handle_key(&key(KeyCode::Enter), Instant::now());
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);

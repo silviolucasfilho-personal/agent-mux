@@ -4257,20 +4257,10 @@ impl App {
         let Mode::SkillLauncher(ref mut state) = self.mode else {
             return;
         };
-        let harness_shortcut = !state.dir_picker.in_list()
-            && matches!(
-                key.code,
-                KeyCode::Char('1')
-                    | KeyCode::Char('2')
-                    | KeyCode::Char('3')
-                    | KeyCode::Char('c')
-                    | KeyCode::Char('C')
-                    | KeyCode::Char('x')
-                    | KeyCode::Char('X')
-                    | KeyCode::Char('a')
-                    | KeyCode::Char('A')
-            );
-        if state.field == SkillLauncherField::Workspace && !harness_shortcut {
+        // The Workspace field is a text field: every key belongs to the
+        // path, including the letters the harness shortcuts below use.
+        // `Tab` and `Enter` are how focus reaches the harness list.
+        if state.field == SkillLauncherField::Workspace {
             match state.dir_picker.handle_key(key, &mut state.workspace) {
                 dir_picker::PickerEvent::Submit => {
                     state.field = SkillLauncherField::Harness;
