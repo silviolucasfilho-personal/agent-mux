@@ -61,6 +61,113 @@ async fn test_persistence_roundtrip_across_restarts() {
     app2.kill_all();
 }
 
+/// A stand-in `agy` on disk: `Harness::detect` goes by the program name,
+/// so an absolute path ending in `agy` is launched with agy's flags.
+#[cfg(unix)]
+fn fake_agy(dir: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("agy");
+    std::fs::write(&path, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.display().to_string()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn restoring_a_saved_antigravity_session_resumes_its_conversation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sessions_path = temp_dir.path().join("saved_sessions.json");
+    let agy = Profile {
+        name: "Antigravity".into(),
+        command: fake_agy(temp_dir.path()),
+        args: vec!["--dangerously-skip-permissions".into()],
+        default_dir: None,
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    agent_mux::persistence::save_sessions(
+        &sessions_path,
+        &[agent_mux::persistence::SavedSession {
+            profile: agy.clone(),
+            dir: temp_dir.path().to_path_buf(),
+            skill_id: None,
+            conversation: Some("8fcec510-6f3b-44c9-aca5-830f7a9eeeb5".into()),
+        }],
+    )
+    .unwrap();
+
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![agy], None, tx);
+    app.set_pane_size(24, 80);
+    app.set_sessions_file(&sessions_path);
+    app.restore_saved_sessions();
+
+    assert_eq!(app.sessions.len(), 1);
+    assert_eq!(
+        app.sessions[0].profile.args,
+        vec![
+            "--dangerously-skip-permissions",
+            "--conversation",
+            "8fcec510-6f3b-44c9-aca5-830f7a9eeeb5"
+        ],
+        "the profile's own flags stay, the conversation is resumed"
+    );
+    // restore rewrites the file right away, before the trace store can
+    // have correlated the new launch: the id must survive that save
+    let saved = agent_mux::persistence::load_saved_sessions(&sessions_path);
+    assert_eq!(
+        saved[0].conversation.as_deref(),
+        Some("8fcec510-6f3b-44c9-aca5-830f7a9eeeb5")
+    );
+    // and a second restart resumes it once, not twice
+    app.kill_all();
+    let (tx, _rx) = mpsc::channel(32);
+    let mut again = App::new(vec![], None, tx);
+    again.set_pane_size(24, 80);
+    again.set_sessions_file(&sessions_path);
+    again.restore_saved_sessions();
+    assert_eq!(
+        again.sessions[0].profile.args,
+        vec![
+            "--dangerously-skip-permissions",
+            "--conversation",
+            "8fcec510-6f3b-44c9-aca5-830f7a9eeeb5"
+        ]
+    );
+    again.kill_all();
+}
+
+#[tokio::test]
+async fn a_session_resumed_from_history_is_saved_with_its_conversation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sessions_path = temp_dir.path().join("saved_sessions.json");
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![make_echo_profile("claude")], None, tx);
+    app.set_pane_size(24, 80);
+    app.set_sessions_file(&sessions_path);
+    app.history_sessions = vec![SessionSummary {
+        session_id: "uuid-abc".into(),
+        title: "Fix compiler bug".into(),
+        modified: std::time::SystemTime::UNIX_EPOCH,
+        file_path: PathBuf::from("/tmp/conv.jsonl"),
+        turn_count: 10,
+        project_slug: "-test".into(),
+        timestamp_str: "2026-09-01".into(),
+        provider: agent_mux::history::AgentProvider::Claude,
+        cwd: Some(std::env::current_dir().unwrap()),
+    }];
+    app.sidebar_section = SidebarSection::History;
+    app.selected_history = 0;
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert_eq!(app.sessions.len(), 1);
+
+    app.save_active_sessions().unwrap();
+    let saved = agent_mux::persistence::load_saved_sessions(&sessions_path);
+    assert_eq!(saved[0].conversation.as_deref(), Some("uuid-abc"));
+    app.kill_all();
+}
+
 #[tokio::test]
 async fn uppercase_x_removes_every_exited_session_and_keeps_running_sessions() {
     let temp_dir = tempfile::tempdir().unwrap();

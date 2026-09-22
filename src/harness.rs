@@ -406,6 +406,91 @@ mod tests {
         );
     }
 
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn restoring_keeps_the_profiles_arguments_and_resumes_the_conversation() {
+        assert_eq!(
+            restore_args(
+                Harness::Antigravity,
+                &args(&["--dangerously-skip-permissions"]),
+                "8fcec510"
+            ),
+            args(&[
+                "--dangerously-skip-permissions",
+                "--conversation",
+                "8fcec510"
+            ])
+        );
+        assert_eq!(
+            restore_args(
+                Harness::Claude,
+                &args(&["--model", "opus", "--dangerously-skip-permissions"]),
+                "abc-123"
+            ),
+            args(&[
+                "--model",
+                "opus",
+                "--dangerously-skip-permissions",
+                "--resume",
+                "abc-123"
+            ])
+        );
+        assert_eq!(
+            restore_args(
+                Harness::Codex,
+                &args(&["--yolo", "--no-alt-screen"]),
+                "019a"
+            ),
+            args(&["resume", "019a", "--yolo", "--no-alt-screen"])
+        );
+    }
+
+    #[test]
+    fn restoring_replaces_whatever_resume_the_saved_arguments_carried() {
+        // a session that was itself started with --continue, or resumed
+        // from History, must come back as the conversation it became
+        for (harness, saved) in [
+            (Harness::Antigravity, args(&["--continue", "--model", "m"])),
+            (Harness::Antigravity, args(&["-c", "--model", "m"])),
+            (
+                Harness::Antigravity,
+                args(&["--conversation", "old", "--model", "m"]),
+            ),
+            (
+                Harness::Antigravity,
+                args(&["--conversation=old", "--model", "m"]),
+            ),
+            (Harness::Claude, args(&["--resume", "old", "--model", "m"])),
+            (Harness::Claude, args(&["--resume=old", "--model", "m"])),
+            (Harness::Claude, args(&["-r", "old", "--model", "m"])),
+            (Harness::Claude, args(&["--continue", "--model", "m"])),
+        ] {
+            let flag = if harness == Harness::Claude {
+                "--resume"
+            } else {
+                "--conversation"
+            };
+            assert_eq!(
+                restore_args(harness, &saved, "new"),
+                args(&["--model", "m", flag, "new"]),
+                "{harness} {saved:?}"
+            );
+        }
+        for saved in [
+            args(&["resume", "--last", "--yolo"]),
+            args(&["resume", "old", "--yolo"]),
+        ] {
+            assert_eq!(
+                restore_args(Harness::Codex, &saved, "new"),
+                args(&["resume", "new", "--yolo"]),
+                "{saved:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_profiles_own_arguments_sit_between_subcommand_and_flags() {
         let o = LaunchOptions {

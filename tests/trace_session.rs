@@ -464,3 +464,99 @@ exit 0
         .unwrap();
     assert_eq!(tool_output, "hi");
 }
+
+/// The quit path: a traced session still running when agent-mux exits is
+/// saved with the conversation its launch was correlated to, so the next
+/// start resumes it instead of opening a blank one.
+#[tokio::test]
+async fn a_running_traced_session_is_saved_with_its_conversation() {
+    let temp = tempfile::tempdir().unwrap();
+    let claude_dir = temp.path().join("claude-home");
+    let workdir = temp.path().join("proj");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let db_path = temp.path().join("store").join("traces.db");
+    let projects_dir = claude_dir
+        .join("projects")
+        .join(agent_mux::history::project_slug(&workdir));
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script_path = bin_dir.join("claude");
+    let script = format!(
+        r#"#!/bin/sh
+sid=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--session-id" ]; then sid="$a"; fi
+  prev="$a"
+done
+[ -n "$sid" ] || exit 3
+printf '%s\n' '{{"type":"user","timestamp":"2026-08-31T10:00:00Z","cwd":"{cwd}","message":{{"role":"user","content":[{{"type":"text","text":"hello"}}]}}}}' >> "{proj}/$sid.jsonl"
+sleep 30
+"#,
+        proj = projects_dir.display(),
+        cwd = workdir.display(),
+    );
+    std::fs::write(&script_path, script).unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let toml = format!(
+        r#"
+        [tracing]
+        db_path = "{db}"
+        content_mode = "full"
+        poll_interval_ms = 60
+        flush_interval_ms = 40
+        claude_dir = "{claude}"
+
+        [[profiles]]
+        name = "Claude Code"
+        command = "{cmd}"
+        args = []
+        default_dir = "{dir}"
+        "#,
+        db = db_path.display(),
+        claude = claude_dir.display(),
+        cmd = script_path.display(),
+        dir = workdir.display(),
+    );
+    let cfg = config::parse(&toml).unwrap();
+    let resolved = config::resolve_tracing(cfg.tracing.as_ref(), &|_| None).unwrap();
+    let (tx, _rx) = mpsc::channel(1024);
+    let runtime = TraceRuntime::new(resolved, tx.clone()).unwrap();
+    let mut app = App::new(cfg.profiles, Some(runtime), tx);
+    app.clipboard_enabled = false;
+    let sessions_path = temp.path().join("sessions.json");
+    app.set_sessions_file(&sessions_path);
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert_eq!(app.sessions.len(), 1, "spawn failed: {:?}", app.notice);
+
+    // wait for the pipeline to record which conversation the launch is
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut key_in_store: Option<String> = None;
+    while Instant::now() < deadline && key_in_store.is_none() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        key_in_store = open_ro(&db_path).ok().and_then(|c| {
+            c.query_row(
+                "SELECT session_key FROM launches WHERE session_key IS NOT NULL",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        });
+    }
+    let key_in_store = key_in_store.expect("the launch was never correlated");
+    let id = key_in_store.strip_prefix("claude:").unwrap().to_string();
+
+    app.save_active_sessions().unwrap();
+    let saved = agent_mux::persistence::load_saved_sessions(&sessions_path);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].conversation.as_deref(), Some(id.as_str()));
+
+    app.kill_all();
+    if let Some(rt) = app.take_tracing() {
+        rt.shutdown(Duration::from_secs(5)).await;
+    }
+}
