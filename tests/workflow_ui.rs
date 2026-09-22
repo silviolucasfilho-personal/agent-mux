@@ -753,3 +753,147 @@ input = "confirmed"
     assert!(steps.contains("confirmed[0]/vote1"), "{steps}");
     assert!(steps.contains("Verify · confirmed"), "{steps}");
 }
+
+/// The run dialog ends with one row per step: the harness that step runs
+/// on for this run. A row starts on the default (the document's own
+/// choice for the step, else the run's profile) and cycles only through
+/// harnesses that have a profile, so a choice can always launch.
+#[test]
+fn each_step_of_a_run_can_be_given_its_own_harness() {
+    // no Antigravity profile: agy is never offered
+    let (mut app, temp) = app_with(vec![
+        profile("Claude Code", "claude"),
+        profile("Codex", "codex"),
+    ]);
+    let lib = temp.path().join("library").join("workflows");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        lib.join("zz-mixed.toml"),
+        r#"
+[workflow]
+name = "zz-mixed"
+description = "steps on different harnesses"
+[[steps]]
+id = "look"
+prompt = "look"
+[[steps]]
+id = "check"
+harness = "codex"
+prompt = "check"
+"#,
+    )
+    .unwrap();
+    to_workflows(&mut app);
+    app.reload_workflow_list();
+    while app.selected_workflow_entry().unwrap().name != "zz-mixed" {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    press(&mut app, KeyCode::Enter);
+    let Mode::WorkflowDialog(d) = &mut app.mode else {
+        panic!("not the dialog: {:?} notice {:?}", app.mode, app.notice);
+    };
+    assert_eq!(d.step_ids, vec!["look", "check"]);
+    assert_eq!(
+        d.step_harness,
+        vec![None, None],
+        "every step starts on its default"
+    );
+    let text = render(&app, 120, 40);
+    assert!(text.contains("Steps"), "{text}");
+    assert!(text.contains("look"), "{text}");
+    assert!(
+        text.contains("run profile"),
+        "the default names where it comes from\n{text}"
+    );
+    assert!(text.contains("document: codex"), "{text}");
+
+    // the step rows follow Isolation, so the form above keeps its order
+    let Mode::WorkflowDialog(d) = &mut app.mode else {
+        panic!()
+    };
+    d.field = DialogField::Isolation;
+    press(&mut app, KeyCode::Tab);
+    let Mode::WorkflowDialog(d) = &app.mode else {
+        panic!()
+    };
+    assert_eq!(d.field, DialogField::StepHarness(0));
+
+    use agent_mux::harness::Harness;
+    let harness_of = |app: &App, i: usize| {
+        let Mode::WorkflowDialog(d) = &app.mode else {
+            panic!()
+        };
+        d.step_harness[i]
+    };
+    press(&mut app, KeyCode::Right);
+    assert_eq!(harness_of(&app, 0), Some(Harness::Claude));
+    press(&mut app, KeyCode::Char(' '));
+    assert_eq!(harness_of(&app, 0), Some(Harness::Codex));
+    press(&mut app, KeyCode::Right);
+    assert_eq!(
+        harness_of(&app, 0),
+        None,
+        "agy has no profile: back to the default"
+    );
+    press(&mut app, KeyCode::Left);
+    assert_eq!(harness_of(&app, 0), Some(Harness::Codex));
+
+    // the second step: its document says codex, the run says claude
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(harness_of(&app, 1), Some(Harness::Claude));
+    let text = render(&app, 120, 40);
+    assert!(text.contains("claude"), "{text}");
+
+    // only explicit choices become this run's overrides
+    let Mode::WorkflowDialog(d) = &mut app.mode else {
+        panic!()
+    };
+    assert_eq!(
+        d.step_overrides(),
+        vec![
+            (
+                "look".to_string(),
+                "harness".to_string(),
+                "codex".to_string()
+            ),
+            (
+                "check".to_string(),
+                "harness".to_string(),
+                "claude".to_string()
+            ),
+        ]
+    );
+    d.step_harness[0] = None;
+    assert_eq!(
+        d.step_overrides(),
+        vec![(
+            "check".to_string(),
+            "harness".to_string(),
+            "claude".to_string()
+        )]
+    );
+    // Tab past the last step wraps to the top of the form
+    d.field = DialogField::StepHarness(1);
+    press(&mut app, KeyCode::Tab);
+    let Mode::WorkflowDialog(d) = &app.mode else {
+        panic!()
+    };
+    assert_eq!(d.field, DialogField::Workspace);
+}
+
+#[test]
+fn the_compose_dialog_has_no_step_rows() {
+    let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
+    to_workflows(&mut app);
+    press(&mut app, KeyCode::Char('c'));
+    let Mode::WorkflowDialog(d) = &app.mode else {
+        panic!("not the dialog: {:?}", app.mode)
+    };
+    assert!(d.step_ids.is_empty());
+    assert!(
+        !d.fields()
+            .iter()
+            .any(|f| matches!(f, DialogField::StepHarness(_)))
+    );
+}
