@@ -763,3 +763,37 @@ async fn a_loop_runs_on_its_own_model_and_scaffolds_the_verifier_with_its_own() 
     assert!(text.starts_with("---\n"), "the frontmatter is still valid");
     assert!(text.contains("name: loop-verifier"), "{text}");
 }
+
+/// The journey: a run must be attributable to the pattern text it ran.
+/// `loop_runs.pattern` is only the id, and the configuration library can
+/// replace that id's text between two runs, so the row carries a digest
+/// of the effective pattern the way `workflow_runs.document_hash` does.
+#[tokio::test]
+async fn a_run_records_the_digest_of_the_pattern_it_ran() {
+    let spec = FakeSpec {
+        state_file: "STATE.md",
+        extra_file: None,
+        exit_code: 0,
+        sleep_s: 0,
+    };
+    let mut f = fixture("daily-triage", Level::L1, &spec);
+    let run_id = run_to_completion(&mut f).await;
+
+    let row = get_run(&f.db, &run_id);
+    let pattern = patterns::find("daily-triage").expect("the pattern");
+    assert_eq!(
+        row.pattern_hash.as_deref(),
+        Some(pattern.digest().as_str()),
+        "the row pins the effective pattern text"
+    );
+
+    // The same id with different text is a different run to any reader.
+    let mut edited = pattern.clone();
+    edited.goal.push_str(" and also sweep the logs");
+    assert_ne!(
+        row.pattern_hash.as_deref(),
+        Some(edited.digest().as_str()),
+        "an edited pattern must not be mistaken for the one that ran"
+    );
+    f.app.kill_all();
+}

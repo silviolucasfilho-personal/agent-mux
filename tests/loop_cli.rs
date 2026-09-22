@@ -355,6 +355,7 @@ fn report_runs_and_show_read_a_stored_run() {
                 decision: None,
                 decided_ns: None,
                 detail,
+                pattern_hash: None,
             },
         )
         .unwrap();

@@ -51,6 +51,9 @@ pub struct LiveLoopRun {
     pub context_path: PathBuf,
     pub timeout: Duration,
     pub readiness_score: Option<u32>,
+    /// `Pattern::digest()` as the pattern stood when this run started;
+    /// the library can edit it while the run is in flight.
+    pub pattern_hash: Option<String>,
     pub exited_at: Option<Instant>,
     pub timed_out: bool,
 }
@@ -984,6 +987,9 @@ impl App {
             crate::loops::to_ns(wall),
         );
         row.readiness_score = audit.as_ref().map(|a| i64::from(a.score));
+        // Pin the pattern text this run executes: the library can replace
+        // it before the next run of the same id.
+        row.pattern_hash = Some(pattern.digest());
         drop(conn);
 
         match run::preflight(&entry, &input) {
@@ -1438,6 +1444,7 @@ impl App {
             context_path,
             timeout: Duration::from_secs(self.loops.run_timeout_s),
             readiness_score: audit.map(|a| a.score),
+            pattern_hash: Some(pattern.digest()),
             exited_at: None,
             timed_out: false,
         });
@@ -1575,6 +1582,7 @@ impl App {
         row.tokens = facts.as_ref().and_then(|f| f.tokens);
         row.cost_usd = facts.as_ref().and_then(|f| f.cost_usd);
         row.readiness_score = live.readiness_score.map(i64::from);
+        row.pattern_hash = live.pattern_hash.clone();
         if let Some(r) = &result {
             row.items_found = Some(r.items_found as i64);
             row.actions_taken = Some(r.actions_taken as i64);

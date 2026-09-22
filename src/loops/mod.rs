@@ -188,6 +188,22 @@ pub struct Pattern {
 }
 
 impl Pattern {
+    /// A fingerprint of this pattern's effective text, the way
+    /// `workflow_runs.document_hash` fingerprints a workflow document.
+    /// `loops/registry.toml` is shadowable from the configuration
+    /// library, so the id alone does not say what a run executed; a run
+    /// row keeps this so two runs of the same id can be told apart.
+    /// Serialization is the struct's declaration order, so the digest is
+    /// stable across processes for an unchanged pattern.
+    pub fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let canonical =
+            serde_json::to_string(self).expect("a Pattern serializes; every field is plain data");
+        let mut h = Sha256::new();
+        h.update(canonical.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+
     /// The agents a workspace of this pattern receives: the listed ones,
     /// or `loop-verifier` alone when the list is empty and the pattern
     /// uses a verifier, else none.
@@ -394,5 +410,47 @@ mod tests {
         assert_eq!(Level::parse("l2"), Some(Level::L2));
         assert_eq!(Outcome::parse("fix-proposed"), Some(Outcome::FixProposed));
         assert!(Level::L1 < Level::L3);
+    }
+
+    /// A run must be attributable to the exact pattern text it ran: the
+    /// library can shadow `loops/registry.toml` between two runs of the
+    /// same id, and only the digest tells those runs apart.
+    #[test]
+    fn a_pattern_digest_is_stable_and_follows_every_field() {
+        let base = patterns::builtin()
+            .into_iter()
+            .find(|p| p.id == "daily-triage")
+            .expect("the built-in daily-triage pattern");
+
+        assert_eq!(base.digest(), base.digest(), "same pattern, same digest");
+        assert_eq!(base.digest().len(), 64, "sha-256, hex");
+        assert!(base.digest().chars().all(|c| c.is_ascii_hexdigit()));
+
+        let other = patterns::builtin()
+            .into_iter()
+            .find(|p| p.id == "ci-sweeper")
+            .expect("the built-in ci-sweeper pattern");
+        assert_ne!(base.digest(), other.digest(), "different patterns differ");
+
+        // Each field a run's behaviour depends on moves the digest.
+        for mutate in [
+            (|p: &mut Pattern| p.goal.push_str(" and more")) as fn(&mut Pattern),
+            |p: &mut Pattern| p.prompt = Some("do the thing".into()),
+            |p: &mut Pattern| p.skills.push("loop-fix".into()),
+            |p: &mut Pattern| p.verifier = !p.verifier,
+            |p: &mut Pattern| p.human_gates.push("security".into()),
+            |p: &mut Pattern| p.model = Some("claude-opus-5".into()),
+            |p: &mut Pattern| p.verifier_model = Some("claude-haiku-4-5".into()),
+            |p: &mut Pattern| p.max_tokens_per_day += 1,
+            |p: &mut Pattern| p.cost.early_exit_required = !p.cost.early_exit_required,
+        ] {
+            let mut edited = base.clone();
+            mutate(&mut edited);
+            assert_ne!(
+                base.digest(),
+                edited.digest(),
+                "an edited pattern must not keep the original digest"
+            );
+        }
     }
 }

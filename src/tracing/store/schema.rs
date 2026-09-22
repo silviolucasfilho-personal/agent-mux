@@ -1,9 +1,9 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13];
+pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
 // uses a separate database rather than silently replacing its history.
@@ -741,5 +741,23 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
   changed_files  TEXT NOT NULL DEFAULT 'null',
   result         TEXT NOT NULL DEFAULT 'null',
   PRIMARY KEY (run_id, session)
+);
+"#;
+
+// v14: which pattern text a loop run executed. `loop_runs.pattern` is the
+// pattern id, and `~/.agent-mux/loops/registry.toml` can replace that id's
+// text between two runs, so the id alone cannot tell two runs apart;
+// `workflow_runs.document_hash` already pins a workflow document this way.
+//
+// A side table rather than `ALTER TABLE loop_runs ADD COLUMN`: SQLite has
+// no `ADD COLUMN IF NOT EXISTS`, and every migration from v11 on is
+// replay-safe (`open` re-runs `version..SCHEMA_VERSION` against whatever
+// schema the file actually has). Rows written before this migration simply
+// have no entry: their pattern text was never recorded, and backfilling
+// from today's registry would assert something untrue.
+const V14: &str = r#"
+CREATE TABLE IF NOT EXISTS loop_run_patterns (
+  run_id        TEXT PRIMARY KEY REFERENCES loop_runs (id) ON DELETE CASCADE,
+  pattern_hash  TEXT NOT NULL
 );
 "#;
