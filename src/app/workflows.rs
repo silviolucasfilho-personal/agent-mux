@@ -295,10 +295,27 @@ impl App {
             let v = Some(value.clone()).filter(|v| !v.trim().is_empty());
             match key.as_str() {
                 "harness" => {
-                    if let Some(h) = &v
-                        && Harness::detect(h).is_none()
-                    {
-                        return Err(format!("--step {id}.harness: unknown harness {h:?}"));
+                    if let Some(h) = &v {
+                        let Some(to) = Harness::detect(h) else {
+                            return Err(format!("--step {id}.harness: unknown harness {h:?}"));
+                        };
+                        if !doc.harness.allows(to.as_str()) {
+                            return Err(format!(
+                                "step {id}: harness {h:?} is not allowed by workflow.harness"
+                            ));
+                        }
+                        // a profile the document named for another CLI
+                        // would launch that CLI; the new harness picks its own
+                        if let Some(p) = &step.profile
+                            && self
+                                .profiles
+                                .iter()
+                                .find(|q| q.name == *p)
+                                .and_then(|q| Harness::detect(&q.command))
+                                .is_some_and(|ph| ph != to)
+                        {
+                            step.profile = None;
+                        }
                     }
                     step.harness = v;
                 }
@@ -1863,7 +1880,10 @@ impl App {
                 }
             }
             KeyCode::Char(' ')
-                if matches!(dialog.field, DialogField::Profile | DialogField::Isolation) =>
+                if matches!(
+                    dialog.field,
+                    DialogField::Profile | DialogField::Isolation | DialogField::StepHarness(_)
+                ) =>
             {
                 dialog.cycle(1)
             }
@@ -2050,7 +2070,7 @@ impl App {
                     usd_cap,
                     isolation: Some(d.isolation),
                     resume_from: None,
-                    step_overrides: Vec::new(),
+                    step_overrides: d.step_overrides(),
                 };
                 match self.start_workflow_run(req) {
                     Ok(id) => {

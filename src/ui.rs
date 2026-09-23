@@ -4701,6 +4701,25 @@ fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
             },
             dialog.field == WfField::Isolation,
         ));
+        // one row per step: the harness it runs on for this run
+        let id_width = dialog.step_ids.iter().map(|s| s.len()).max().unwrap_or(0);
+        for (i, id) in dialog.step_ids.iter().enumerate() {
+            let choice = match dialog.step_harness.get(i).copied().flatten() {
+                Some(h) => h.as_str().to_string(),
+                None => dialog.step_default_label(i),
+            };
+            lines.push(field(
+                if i == 0 { "Steps" } else { "" },
+                format!("{id:<id_width$}  {choice}"),
+                dialog.field == WfField::StepHarness(i),
+            ));
+        }
+        if matches!(dialog.field, WfField::StepHarness(_)) {
+            lines.push(Line::styled(
+                "            ←/→ or Space: the harness this step runs on, for this run only",
+                dim,
+            ));
+        }
         if !dialog.estimate.is_empty() {
             lines.push(Line::styled(
                 format!("  sessions: {}", dialog.estimate),

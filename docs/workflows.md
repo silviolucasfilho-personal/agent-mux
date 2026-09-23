@@ -9,7 +9,7 @@ Design: `docs/superpowers/specs/2026-09-17-workflows-design.md`. The idea follow
 ## 1. First run
 
 1. `Tab` to the **Workflows** section (between Loops and History). The eight built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`, `santa-review`. The main pane describes the selected one: its steps by phase, its args, the last run.
-2. `Enter` opens the run dialog: the workspace (the shared directory picker), the profile (one per harness the document allows), one field per declared arg, a token budget, a USD cap, and the isolation default. `Enter` again starts the run.
+2. `Enter` opens the run dialog: the workspace (the shared directory picker), the profile (one per harness the document allows), one field per declared arg, a token budget, a USD cap, the isolation default, and one **Steps** row per step: the harness that step runs on for this run (`←`/`→` or `Space`; it starts on the step's default, the document's `harness` when it names one, else the run's profile, and offers only harnesses you have a profile for). `Enter` again starts the run.
 3. The run's sessions appear in **Active** under one header — `▾ ⚙ <workflow> <running>/<total>▶ #<run>` — with each step hanging off it by its own name; attach to any of them to watch it. `space` folds the run away into that single row, and the trace browser (`T`) groups the same run the same way. The section row shows `▶ done/started`.
 4. `W` opens the Workflows view: the run's report, the step ledger behind it, the document and the result.
 5. When the run finishes, the notice leads with what the run answered; the preview card shows the last run; the report is in the view and in `agent-mux workflow status <run>`, and the raw result in the **Result** tab and in `result.json` under the run directory.
@@ -251,7 +251,7 @@ agent-mux validates it against the schema and retries the session once with the 
 
 Step skills are agent-mux packages (`wf-review-dimensions`, `wf-review-find`, `wf-refute`, `wf-synthesize`, `wf-read-map`, `wf-search`, `wf-deep-read`, `wf-critic`, `wf-find`, `wf-attempt`, `wf-judge`, `wf-discover-sites`, `wf-transform`, `wf-verify-site`, `wf-classify`, `wf-triage-bug`, `wf-triage-feature`) with `hidden = true` in their `skill.toml`, so they stay out of the Agents sidebar. They are installed user-level for the run's harness before the first session. `writes = true` marks a skill that edits files; a step running it must have `isolation = "worktree"`, which the validator enforces.
 
-Mixed harnesses: a step's `harness = "codex"` runs it on Codex whatever the run's harness; `profile` picks a named profile.
+Mixed harnesses: a step's `harness = "codex"` runs it on Codex whatever the run's harness; `profile` picks a named profile. For one run, the run dialog's Steps rows and `--step <id>.harness=<h>` do the same without editing the document. Such a choice must be one `workflow.harness` allows, or the run is refused before it launches, and a `profile` the document named for another CLI is dropped, so the step launches with the chosen harness's own profile. Refuters and judges keep their own `harness` and are not changed by the step's row.
 
 ## 4. Isolation, budgets, resume
 
