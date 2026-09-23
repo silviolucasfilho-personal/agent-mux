@@ -35,6 +35,8 @@ pub enum DialogField {
     Budget,
     MaxCost,
     Isolation,
+    /// Index into the document's steps: the harness that step runs on.
+    StepHarness(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +60,13 @@ pub struct WorkflowDialogState {
     pub budget: TextArea,
     pub max_cost: TextArea,
     pub isolation: Isolation,
+    /// The document's step ids, in order: one harness row each.
+    pub step_ids: Vec<String>,
+    /// The harness picked for each step for this run; `None` keeps the
+    /// step's default (`step_defaults`, else the run's profile).
+    pub step_harness: Vec<Option<Harness>>,
+    /// The harness each step's document names, if any.
+    pub step_defaults: Vec<Option<Harness>>,
     pub error: Option<String>,
     pub estimate: String,
 }
@@ -94,6 +103,17 @@ impl WorkflowDialogState {
             })
             .unwrap_or_default();
         let estimate = doc.map(estimate_sessions).unwrap_or_default();
+        let step_ids: Vec<String> = doc
+            .map(|d| d.steps.iter().map(|s| s.id.clone()).collect())
+            .unwrap_or_default();
+        let step_defaults: Vec<Option<Harness>> = doc
+            .map(|d| {
+                d.steps
+                    .iter()
+                    .map(|s| s.harness.as_deref().and_then(Harness::detect))
+                    .collect()
+            })
+            .unwrap_or_default();
         WorkflowDialogState {
             purpose: DialogPurpose::Run {
                 name: entry.name.clone(),
@@ -116,6 +136,9 @@ impl WorkflowDialogState {
             ),
             max_cost: TextArea::default(),
             isolation: doc.and_then(|d| d.default_isolation).unwrap_or_default(),
+            step_harness: vec![None; step_ids.len()],
+            step_ids,
+            step_defaults,
             error: None,
             estimate,
         }
@@ -144,6 +167,9 @@ impl WorkflowDialogState {
             budget: TextArea::default(),
             max_cost: TextArea::default(),
             isolation: Isolation::None,
+            step_ids: Vec::new(),
+            step_harness: Vec::new(),
+            step_defaults: Vec::new(),
             error: None,
             estimate: String::new(),
         }
@@ -163,6 +189,9 @@ impl WorkflowDialogState {
         if self.purpose != DialogPurpose::Plan {
             v.push(DialogField::MaxCost);
             v.push(DialogField::Isolation);
+            for i in 0..self.step_ids.len() {
+                v.push(DialogField::StepHarness(i));
+            }
         }
         v
     }
@@ -189,8 +218,47 @@ impl WorkflowDialogState {
                     Isolation::Worktree => Isolation::None,
                 };
             }
+            DialogField::StepHarness(i) => {
+                // the default, then each harness a profile can launch
+                let mut choices: Vec<Option<Harness>> = vec![None];
+                choices.extend(
+                    Harness::ALL
+                        .into_iter()
+                        .filter(|h| self.profiles.iter().any(|(_, p)| p == h))
+                        .map(Some),
+                );
+                if let Some(cur) = self.step_harness.get_mut(i) {
+                    let at = choices.iter().position(|c| c == cur).unwrap_or(0) as isize;
+                    let len = choices.len() as isize;
+                    *cur = choices[((at + delta).rem_euclid(len)) as usize];
+                }
+            }
             _ => {}
         }
+    }
+
+    /// What step `i` runs on when its row is left on the default: the
+    /// document's harness for it, else the run's profile.
+    pub fn step_default_label(&self, i: usize) -> String {
+        match self.step_defaults.get(i).copied().flatten() {
+            Some(h) => format!("document: {}", h.as_str()),
+            None => match self.harness() {
+                Some(h) => format!("run profile ({})", h.as_str()),
+                None => "run profile".into(),
+            },
+        }
+    }
+
+    /// The harness rows the user changed, as this run's step overrides
+    /// `(step id, "harness", harness)`; rows on their default add none.
+    pub fn step_overrides(&self) -> Vec<(String, String, String)> {
+        self.step_ids
+            .iter()
+            .zip(&self.step_harness)
+            .filter_map(|(id, h)| {
+                h.map(|h| (id.clone(), "harness".to_string(), h.as_str().to_string()))
+            })
+            .collect()
     }
 
     /// The multi-line field under the cursor, when the cursor is on one.

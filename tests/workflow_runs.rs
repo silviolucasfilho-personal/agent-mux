@@ -878,3 +878,143 @@ prompt = "write"
         "{err}"
     );
 }
+
+/// Three steps, one of which the document puts on Codex with a Codex
+/// profile. The dialog moves `look` to Antigravity and `check` to Claude
+/// for this run; `wrap` keeps the run's profile.
+const PICKED: &str = r#"
+[workflow]
+name = "picked"
+description = "each step on the harness the user picked"
+output = "wrap"
+[[steps]]
+id = "look"
+prompt = "look"
+[[steps]]
+id = "check"
+harness = "codex"
+profile = "Codex CLI (codex)"
+prompt = "check"
+[[steps]]
+id = "wrap"
+prompt = "combine"
+"#;
+
+#[tokio::test]
+async fn the_run_dialog_runs_each_step_on_the_harness_picked_for_it() {
+    use agent_mux::app::Mode;
+    use agent_mux::app::workflows_view::DialogField;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fake_harness(&bin, Harness::Antigravity, &[("look", "seen")], None, None);
+    fake_harness(
+        &bin,
+        Harness::Claude,
+        &[("check", "checked"), ("wrap", "done")],
+        None,
+        None,
+    );
+    fake_harness(&bin, Harness::Codex, &[], None, None);
+    let mut f = fixture(&bin, temp);
+    let lib = library::dir(&f.home.join(".agent-mux"));
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(lib.join("picked.toml"), PICKED).unwrap();
+    f.app.reload_workflow_list();
+    f.app.selected_workflow = f
+        .app
+        .workflow_list
+        .iter()
+        .position(|e| e.name == "picked")
+        .expect("the library document is listed");
+    f.app.open_workflow_run();
+    let press = |app: &mut App, code| {
+        app.handle_key(&KeyEvent::new(code, KeyModifiers::NONE), Instant::now())
+    };
+    {
+        let Mode::WorkflowDialog(d) = &mut f.app.mode else {
+            panic!("not the dialog: {:?}", f.app.notice)
+        };
+        d.workspace = f.ws.to_string_lossy().into_owned();
+        assert_eq!(d.harness(), Some(Harness::Claude), "the run's profile");
+        d.field = DialogField::StepHarness(0);
+    }
+    // look: default -> claude -> codex -> agy
+    for _ in 0..3 {
+        press(&mut f.app, KeyCode::Right);
+    }
+    // check: default (codex, from the document) -> claude
+    press(&mut f.app, KeyCode::Tab);
+    press(&mut f.app, KeyCode::Right);
+    press(&mut f.app, KeyCode::Enter);
+    assert!(
+        !matches!(f.app.mode, Mode::WorkflowDialog(_)),
+        "the run did not start: {:?}",
+        match &f.app.mode {
+            Mode::WorkflowDialog(d) => d.error.clone(),
+            _ => None,
+        }
+    );
+    let done = pump_until(&mut f, Duration::from_secs(90), |a| {
+        a.live_workflow_runs.is_empty()
+    })
+    .await;
+    assert!(done, "the run never finished");
+    let recent = &f.app.recent_workflow_runs[0];
+    assert_eq!(
+        recent.status, "finished",
+        "{:?} {:?}",
+        recent.error, recent.notes
+    );
+    assert_eq!(recent.result, "done");
+
+    let step_of = |call: &str| -> String {
+        call.lines()
+            .find_map(|l| l.strip_prefix("AGENT_MUX_WORKFLOW_STEP="))
+            .unwrap_or_default()
+            .split(['[', '/'])
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let agy: Vec<String> = calls(&f.bin, Harness::Antigravity, "env")
+        .iter()
+        .map(|c| step_of(c))
+        .collect();
+    let claude: Vec<String> = calls(&f.bin, Harness::Claude, "env")
+        .iter()
+        .map(|c| step_of(c))
+        .collect();
+    assert_eq!(agy, vec!["look"], "look ran on the harness picked for it");
+    let mut claude_sorted = claude.clone();
+    claude_sorted.sort();
+    assert_eq!(
+        claude_sorted,
+        vec!["check", "wrap"],
+        "check left Codex, and its Codex profile with it; wrap kept the run's"
+    );
+    assert!(
+        calls(&f.bin, Harness::Codex, "args").is_empty(),
+        "nothing ran on Codex"
+    );
+}
+
+#[tokio::test]
+async fn an_override_to_a_harness_the_document_forbids_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fake_harness(&bin, Harness::Claude, &[], None, None);
+    let mut f = fixture(&bin, temp);
+    let doc = "[workflow]\nname = \"two\"\ndescription = \"d\"\nharness = [\"claude\", \"codex\"]\n[[steps]]\nid = \"s\"\nprompt = \"hi\"\n";
+    let mut req = request(
+        "two",
+        doc,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    req.step_overrides = vec![("s".into(), "harness".into(), "agy".into())];
+    let err = f.app.start_workflow_run(req).unwrap_err();
+    assert!(err.contains("not allowed by workflow.harness"), "{err}");
+    assert!(f.app.live_workflow_runs.is_empty());
+}
