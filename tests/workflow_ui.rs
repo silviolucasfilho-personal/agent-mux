@@ -580,7 +580,7 @@ fn a_long_result_wraps_and_scrolls_in_the_result_tab() {
     );
     assert!(
         top.lines()
-            .any(|l| l.contains("Result") && l.contains("1–") && l.contains("/89")),
+            .any(|l| l.contains("Result") && l.contains("1–") && l.contains("/88")),
         "the pane title carries the scroll position\n{top}"
     );
     assert!(!top.lines().any(|l| l.contains("very long very long very long very long very long very long very long very long very long")), "no row runs past the pane");
@@ -738,8 +738,23 @@ input = "confirmed"
     );
     assert!(out.contains("HIGH"), "{out}");
     assert!(
-        out.contains("1/3"),
-        "the votes against are on the row\n{out}"
+        out.contains("refuted 1/3"),
+        "the votes against are on the row, named\n{out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| l.contains("src/app/loops.rs:1572") && l.contains("refuted 1/3")),
+        "the votes share the location's line, so the row does not wrap\n{out}"
+    );
+    assert!(!out.contains(" B)"), "no byte size in the report\n{out}");
+    assert_eq!(
+        out.matches("Review of the branch").count(),
+        1,
+        "the verdict is not repeated under the report's title\n{out}"
+    );
+    assert!(
+        out.lines().next().unwrap().starts_with("┌ Workflow runs"),
+        "the view is the whole screen\n{out}"
     );
     assert!(out.contains("Refuted (1)"), "{out}");
     assert!(

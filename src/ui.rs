@@ -467,8 +467,10 @@ fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
     let visible = usize::from(area.height.saturating_sub(2));
     let start = sidebar_window(app.selected_loop, n, visible);
     let end = (start + visible.max(1)).min(n);
+    // Marker, glyph, then the pattern and the workspace sharing the rest
+    // with the right label: two loops of one pattern differ by workspace.
     let name_width = usize::from(area.width.saturating_sub(2))
-        .saturating_sub(12)
+        .saturating_sub(9)
         .max(6);
     let items: Vec<ListItem> = app.loop_registry.loops[start..end]
         .iter()
@@ -484,6 +486,13 @@ fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
                 "  "
             };
             let (status, right) = app.loop_row(entry);
+            let pattern = truncate_chars(&entry.pattern, name_width);
+            let room = name_width.saturating_sub(pattern.chars().count() + 1);
+            let workspace = if room >= 5 {
+                format!(" {}", truncate_chars(&entry.workspace_name(), room))
+            } else {
+                String::new()
+            };
             let line = Line::from(vec![
                 Span::raw(marker),
                 Span::styled(
@@ -491,11 +500,7 @@ fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(status.color()),
                 ),
                 Span::styled(
-                    format!(
-                        "{:<w$}",
-                        truncate_chars(&entry.pattern, name_width),
-                        w = name_width
-                    ),
+                    pattern.clone(),
                     if is_selected {
                         Style::default().fg(Color::Cyan)
                     } else {
@@ -503,10 +508,14 @@ fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
                     },
                 ),
                 Span::styled(
-                    format!(" {} ", entry.level.as_str()),
+                    format!(
+                        "{:<w$}",
+                        workspace,
+                        w = name_width - pattern.chars().count()
+                    ),
                     Style::default().fg(Color::DarkGray),
                 ),
-                Span::styled(format!("{right:>4}"), Style::default().fg(status.color())),
+                Span::styled(format!(" {right:>4}"), Style::default().fg(status.color())),
             ]);
             let item = ListItem::new(line);
             if is_selected && is_focused {
@@ -1711,7 +1720,33 @@ fn draw_skill_launcher(f: &mut Frame, state: &crate::app::SkillLauncherState, ap
     f.render_widget(Paragraph::new(hints), hint_area);
 }
 
+/// A hint line cut to `width` columns by dropping whole hints rather than
+/// letters: the first piece (the section's lead) and the last (`[?] help`,
+/// `[Esc] close`) stay, and the hints before the last go first.
+pub(crate) fn fit_hints(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut starts: Vec<usize> = vec![0];
+    for (i, _) in text.match_indices('[') {
+        if i > 0 && text[..i].ends_with(' ') && !text[..i].trim().is_empty() {
+            starts.push(i);
+        }
+    }
+    let mut pieces: Vec<&str> = starts
+        .iter()
+        .enumerate()
+        .map(|(n, &a)| &text[a..starts.get(n + 1).copied().unwrap_or(text.len())])
+        .collect();
+    let len = |p: &[&str]| p.iter().map(|s| s.chars().count()).sum::<usize>();
+    while len(&pieces) > width && pieces.len() > 2 {
+        pieces.remove(pieces.len() - 2);
+    }
+    pieces.concat()
+}
+
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
+    let fit = |hints: &str| fit_hints(hints, usize::from(area.width));
     let text = if let Some(st) = &app.search {
         let count = if st.matches.is_empty() {
             if st.query.is_empty() {
@@ -1740,41 +1775,43 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
             ),
             Mode::Control => {
                 if app.sidebar_hidden {
-                    Line::raw(
+                    Line::raw(fit(
                         "[b] sidebar  [Tab] select  [Enter] attach  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
-                    )
+                    ))
                 } else {
                     match app.sidebar_section {
-                        SidebarSection::Active => Line::raw(
+                        SidebarSection::Active => Line::raw(fit(
                             "[b] side [Enter] attach [n] new [S] skills [C] config [X] clear exited [t/T] trace [?] help [q] quit",
-                        ),
-                        SidebarSection::Agents => Line::raw(
+                        )),
+                        SidebarSection::Agents => Line::raw(fit(
                             "[b] sidebar  [Enter/h] launch agent  [Tab] loops  [n] new  [S] skills  [C] config  [?] help  [q] quit",
-                        ),
+                        )),
                         SidebarSection::Loops => {
                             if app.loop_registry.pause_all {
                                 Line::styled(
-                                    "‖ LOOPS PAUSED  [K] resume all  [Enter] details  [r] run now  [p] pause  [a] add  [e] edit  [x] remove",
+                                    fit(
+                                        "‖ LOOPS PAUSED  [K] resume all  [Enter] details  [r] run now  [p] pause  [a] add  [e] edit  [x] remove",
+                                    ),
                                     Style::default().fg(Color::Yellow),
                                 )
                             } else {
-                                Line::raw(
+                                Line::raw(fit(
                                     "[b] sidebar  [Enter] details  [r] run now  [p] pause  [a] add  [e] edit  [x] remove  [K] kill  [?] help",
-                                )
+                                ))
                             }
                         }
-                        SidebarSection::Workflows => Line::raw(
+                        SidebarSection::Workflows => Line::raw(fit(
                             "[b] sidebar  [Enter] run / view  [c] compose  [e] edit  [x] cancel  [W] view  [K] kill  [?] help",
-                        ),
-                        SidebarSection::History => Line::raw(
+                        )),
+                        SidebarSection::History => Line::raw(fit(
                             "[b] sidebar  [Enter/r] restart  [a] all  [n] new  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
-                        ),
+                        )),
                     }
                 }
             }
-            _ => Line::raw(
+            _ => Line::raw(fit(
                 "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
-            ),
+            )),
         }
     };
     f.render_widget(Paragraph::new(text), area);
@@ -3523,7 +3560,10 @@ fn draw_config_view(f: &mut Frame, view: &ConfigViewState) {
         Style::default().fg(Color::Black).bg(Color::Yellow)
     };
     f.render_widget(
-        Paragraph::new(Line::styled(view.footer(), footer_style)),
+        Paragraph::new(Line::styled(
+            fit_hints(&view.footer(), usize::from(footer.width)),
+            footer_style,
+        )),
         footer,
     );
 }
@@ -3699,7 +3739,7 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
     let title = format!(
         " {} · {} · {} ",
         entry.pattern,
-        truncate_path_chars(&entry.workspace.to_string_lossy(), 40),
+        entry.workspace_name(),
         profile
     );
     let block = Block::default()
@@ -3753,13 +3793,24 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
             format!("{} {status_text}", status.glyph()),
             Style::default().fg(status.color()),
         ),
-        Span::raw(format!(
-            " · {next} · every {} · level {} ({})",
+        Span::raw(format!(" · {next}")),
+    ]));
+    lines.push(row(
+        "Workspace",
+        truncate_path_chars(
+            &entry.workspace.to_string_lossy(),
+            usize::from(inner.width.saturating_sub(13)),
+        ),
+    ));
+    lines.push(row(
+        "Schedule",
+        format!(
+            "every {} · level {} ({})",
             crate::loops::format_interval(entry.interval_s),
             entry.level.as_str(),
             entry.level.label()
-        )),
-    ]));
+        ),
+    ));
     let _ = right;
     match card {
         None => {
@@ -3932,7 +3983,10 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        " [Enter] details  [r] run now  [p] pause  [e] edit  [x] remove  [K] kill switch  [E] loops view",
+        fit_hints(
+            " [Enter] details  [r] run now  [p] pause  [e] edit  [x] remove  [K] kill switch  [E] loops view",
+            usize::from(inner.width),
+        ),
         dim,
     ));
     f.render_widget(
@@ -4228,9 +4282,9 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
 }
 
 fn draw_loops_view(f: &mut Frame, view: &LoopsViewState, app: &App) {
-    let width = (f.area().width * 96 / 100).clamp(60, 220);
-    let height = (f.area().height * 92 / 100).clamp(18, 70);
-    let area = centered(f.area(), width, height);
+    // The whole screen, footer over the status bar: a box inset over the
+    // sidebar left fragments of it showing down both edges.
+    let area = f.area();
     f.render_widget(Clear, area);
     let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let [left, right] =
@@ -4345,21 +4399,22 @@ fn draw_loops_view(f: &mut Frame, view: &LoopsViewState, app: &App) {
         .collect();
     f.render_widget(Paragraph::new(lines), inner);
 
+    let footer_hints = match view.tab {
+        LoopsTab::Inbox => {
+            " [Tab/1-6] tab  [←/→] pane  [↑/↓] select  [a] applied  [x] rejected  [T] traces  [Esc] close"
+        }
+        LoopsTab::Report => {
+            " [Tab/1-6] tab  [↑/↓] earlier run  [2] the timeline  [r] run now  [T] traces  [Esc] close"
+        }
+        LoopsTab::Runs => {
+            " [Tab/1-6] tab  [←/→] pane  [↑/↓] select  [1] its report  [Enter] attach/traces  [r] run now  [Esc] close"
+        }
+        _ => {
+            " [Tab/1-6] tab  [←/→] pane  [↑/↓] scroll  [r] run now  [p] pause  [R] reload  [Esc] close"
+        }
+    };
     let footer_text = Line::styled(
-        match view.tab {
-            LoopsTab::Inbox => {
-                " [Tab/1-6] tab  [←/→] pane  [↑/↓] select  [a] applied  [x] rejected  [T] traces  [Esc] close"
-            }
-            LoopsTab::Report => {
-                " [Tab/1-6] tab  [↑/↓] earlier run  [2] the timeline  [r] run now  [T] traces  [Esc] close"
-            }
-            LoopsTab::Runs => {
-                " [Tab/1-6] tab  [←/→] pane  [↑/↓] select  [1] its report  [Enter] attach/traces  [r] run now  [Esc] close"
-            }
-            _ => {
-                " [Tab/1-6] tab  [←/→] pane  [↑/↓] scroll  [r] run now  [p] pause  [R] reload  [Esc] close"
-            }
-        },
+        fit_hints(footer_hints, usize::from(footer.width)),
         Style::default().fg(Color::Black).bg(Color::Cyan),
     );
     f.render_widget(Paragraph::new(footer_text), footer);
@@ -4835,9 +4890,9 @@ fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
 }
 
 fn draw_workflows_view(f: &mut Frame, view: &WorkflowsViewState, app: &App) {
-    let width = (f.area().width * 96 / 100).clamp(60, 220);
-    let height = (f.area().height * 92 / 100).clamp(18, 70);
-    let area = centered(f.area(), width, height);
+    // The whole screen, footer over the status bar: a box inset over the
+    // sidebar left fragments of it showing down both edges.
+    let area = f.area();
     f.render_widget(Clear, area);
     let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let [left, right] =
@@ -4992,7 +5047,10 @@ fn draw_workflows_view(f: &mut Frame, view: &WorkflowsViewState, app: &App) {
         Style::default().fg(Color::Black).bg(Color::Yellow)
     };
     f.render_widget(
-        Paragraph::new(Line::styled(view.footer(), footer_style)),
+        Paragraph::new(Line::styled(
+            fit_hints(&view.footer(), usize::from(footer.width)),
+            footer_style,
+        )),
         footer,
     );
 }
@@ -5142,6 +5200,26 @@ mod tests {
         assert_eq!(sidebar_window(9, 10, 4), 6);
         // degenerate viewport
         assert_eq!(sidebar_window(5, 10, 0), 0);
+    }
+
+    #[test]
+    fn a_hint_line_drops_whole_hints_and_keeps_its_first_and_last() {
+        let hints = "[b] sidebar  [Enter] details  [r] run now  [p] pause  [?] help";
+        assert_eq!(
+            fit_hints(hints, 80),
+            hints,
+            "a line that fits is left alone"
+        );
+        let cut = fit_hints(hints, 44);
+        assert_eq!(cut, "[b] sidebar  [Enter] details  [?] help");
+        assert!(cut.chars().count() <= 44);
+        // a leading space is not a hint of its own
+        assert_eq!(
+            fit_hints(" [Tab] tab  [r] run now  [Esc] close", 24),
+            " [Tab] tab  [Esc] close"
+        );
+        // two pieces are the floor, even when they are too wide
+        assert_eq!(fit_hints("[a] one  [b] two", 4), "[a] one  [b] two");
     }
 
     #[test]

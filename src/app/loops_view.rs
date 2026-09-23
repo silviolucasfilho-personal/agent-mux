@@ -513,12 +513,20 @@ impl LoopsViewState {
             if from_snapshot {
                 format!(
                     "  the report this run wrote · last run {}",
-                    report.last_run.clone().unwrap_or_default()
+                    report
+                        .last_run
+                        .as_deref()
+                        .map(crate::workflows::report::format_stamp)
+                        .unwrap_or_default()
                 )
             } else {
                 format!(
                     "  the workspace's state file · last run {}",
-                    report.last_run.clone().unwrap_or_default()
+                    report
+                        .last_run
+                        .as_deref()
+                        .map(crate::workflows::report::format_stamp)
+                        .unwrap_or_default()
                 )
             },
             dim,

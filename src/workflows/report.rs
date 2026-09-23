@@ -116,6 +116,16 @@ pub fn format_when(ns: i64) -> String {
     )
 }
 
+/// An RFC 3339 stamp (as a state file writes it) in the same words as
+/// [`format_when`]; text that does not parse is shown as it is.
+pub fn format_stamp(stamp: &str) -> String {
+    use time::format_description::well_known::Rfc3339;
+    match time::OffsetDateTime::parse(stamp.trim(), &Rfc3339) {
+        Ok(t) => format_when(crate::loops::to_ns(t)),
+        Err(_) => stamp.to_string(),
+    }
+}
+
 /// `Sep 17 21:45 → 22:06`, dropping the repeated day.
 pub fn format_range(start_ns: i64, end_ns: Option<i64>) -> String {
     let start = format_when(start_ns);
@@ -1034,7 +1044,7 @@ fn text_row(r: &Row) -> String {
     }
     s.push_str(&short(&r.title, 60));
     if let Some((against, cast)) = r.votes {
-        s.push_str(&format!("  {against}/{cast}"));
+        s.push_str(&format!("  refuted {against}/{cast}"));
     }
     s
 }
@@ -1042,6 +1052,12 @@ fn text_row(r: &Row) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_state_file_stamp_reads_like_every_other_time() {
+        assert_eq!(format_stamp("2026-09-17T17:36:53Z"), "Sep 17 17:36");
+        assert_eq!(format_stamp("yesterday"), "yesterday");
+    }
     use crate::workflows::store::WorkflowStep;
 
     fn step(
