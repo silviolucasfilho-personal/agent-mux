@@ -1875,8 +1875,7 @@ impl App {
             Some(WorkflowRow::Doc(_)) => None,
         };
         if let Some(row) = target {
-            self.open_workflows_view();
-            self.with_view(|view, facts| view.select(&row, facts));
+            self.open_workflows_view_on(row);
             return;
         }
         let Some(entry) = self.selected_workflow_entry().cloned() else {
@@ -2297,7 +2296,7 @@ impl App {
     }
 
     /// Runs `f` on the view with the facts borrowed out of `self`.
-    fn with_view<R>(
+    pub(crate) fn with_view<R>(
         &mut self,
         f: impl FnOnce(&mut WorkflowsViewState, &ViewFacts<'_>) -> R,
     ) -> Option<R> {
@@ -2422,6 +2421,10 @@ impl App {
             }
             KeyCode::BackTab => {
                 self.with_view(|v, f| v.prev_tab(f));
+            }
+            KeyCode::Char(c @ '1'..='4') => {
+                let tab = super::workflows_view::ViewTab::ALL[c as usize - '1' as usize];
+                self.with_view(|v, f| v.set_tab(tab, f));
             }
             KeyCode::Right => view.focus = ViewPane::Detail,
             KeyCode::Left => view.focus = ViewPane::Runs,

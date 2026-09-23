@@ -78,7 +78,7 @@ fn render(app: &App, width: u16, height: u16) -> String {
 #[test]
 fn the_sidebar_has_four_sections_and_tab_visits_loops() {
     let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
-    let (active, agents, loops, workflows, history) = agent_mux::ui::sidebar_areas(33, 1, 0, 0);
+    let (active, agents, loops, workflows, history) = agent_mux::ui::sidebar_areas(33, 1, 1, 1);
     assert_eq!(
         [
             active.height,
@@ -95,16 +95,22 @@ fn the_sidebar_has_four_sections_and_tab_visits_loops() {
     assert_eq!(history.y, workflows.y + workflows.height);
     // A short terminal still fits every block: history gives way first and
     // the active quarter never moves; sixteen rows give history its cap.
-    let (a, b, c, w, d) = agent_mux::ui::sidebar_areas(13, 1, 0, 0);
+    let (a, b, c, w, d) = agent_mux::ui::sidebar_areas(13, 1, 1, 1);
     assert_eq!(
         [a.height, b.height, c.height, w.height, d.height],
         [3, 2, 2, 2, 3]
     );
-    let (a, b, c, w, d) = agent_mux::ui::sidebar_areas(16, 1, 0, 0);
+    let (a, b, c, w, d) = agent_mux::ui::sidebar_areas(16, 1, 1, 1);
     assert_eq!(
         [a.height, b.height, c.height, w.height, d.height],
         [3, 3, 3, 2, 4]
     );
+    // an empty section shrinks to a border and one line; the others share
+    // what it frees
+    let (_, agents, loops, workflows, _) = agent_mux::ui::sidebar_areas(33, 1, 0, 1);
+    assert_eq!([agents.height, loops.height, workflows.height], [9, 3, 8]);
+    let (_, agents, loops, workflows, _) = agent_mux::ui::sidebar_areas(33, 1, 0, 0);
+    assert_eq!([agents.height, loops.height, workflows.height], [14, 3, 3]);
 
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Agents);
@@ -559,7 +565,7 @@ fn the_card_says_what_the_loop_may_do_and_setup_says_what_it_needs() {
     }
 
     app.handle_key(&key(KeyCode::Char('E')), Instant::now());
-    app.handle_key(&key(KeyCode::Char('4')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('3')), Instant::now());
     let setup = render(&app, 120, 100);
     assert!(setup.contains("What this loop may do"), "{setup}");
     assert!(setup.contains("✗ report only  ← set"), "{setup}");
@@ -575,4 +581,110 @@ fn the_card_says_what_the_loop_may_do_and_setup_says_what_it_needs() {
         !setup.contains("needs L"),
         "no level codes in the needs lines\n{setup}"
     );
+}
+
+/// `I` gathers what waits on a human across loops and workflows: a loop
+/// run to decide, a plan to review, a workflow run that did not finish.
+/// The status bar counts them; each is decided, opened or dismissed in
+/// place, and the Loops view has no inbox tab of its own any more.
+#[test]
+fn the_inbox_gathers_loop_runs_plans_and_failed_runs() {
+    use agent_mux::app::inbox::InboxItem;
+    use agent_mux::app::workflows::{PlannedWorkflow, RecentWorkflowRun};
+    let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
+    let db = temp.path().join("traces.db");
+    let _store =
+        agent_mux::tracing::store::open_rw(&db, agent_mux::tracing::store::OpenOptions::default())
+            .unwrap();
+    app.trace_db_path = Some(db.clone());
+    let e = entry(&temp, "pr-babysitter");
+    let loop_id = e.id.clone();
+    app.loop_registry.loops.push(e);
+    store_run(
+        &db,
+        &loop_id,
+        "2026-09-17T17:36:53Z",
+        agent_mux::loops::Outcome::Escalated,
+        serde_json::json!({"summary": "two PRs need a human"}),
+    );
+    app.planned_workflows.push(PlannedWorkflow {
+        id: "plan-1".into(),
+        task: "audit the parser".into(),
+        workspace: temp.path().to_path_buf(),
+        harness: agent_mux::harness::Harness::Claude,
+        profile: None,
+        budget_tokens: None,
+        name: "parser-audit".into(),
+        document: "[workflow]\nname = \"parser-audit\"\n".into(),
+        problems: Vec::new(),
+        raw: None,
+        run_id: None,
+    });
+    app.recent_workflow_runs.push(RecentWorkflowRun {
+        run_id: "run-00000007".into(),
+        name: "migrate".into(),
+        harness: "claude".into(),
+        status: "failed".into(),
+        sessions: 3,
+        tokens: 0,
+        cost_usd: 0.0,
+        ended_at: time::OffsetDateTime::now_utc(),
+        result: serde_json::Value::Null,
+        error: Some("budget exceeded".into()),
+        notes: Vec::new(),
+    });
+    app.refresh_loop_cards(Instant::now());
+    assert_eq!(app.inbox_count(), 3);
+    let screen = render(&app, 120, 34);
+    let last = screen.lines().last().unwrap();
+    assert!(last.starts_with("● 3 need you [I]"), "{last}");
+
+    app.handle_key(&key(KeyCode::Char('I')), Instant::now());
+    let Mode::Inbox(state) = &app.mode else {
+        panic!("not the inbox: {:?}", app.mode)
+    };
+    assert!(matches!(state.items[0], InboxItem::Loop(_)), "loops first");
+    let screen = render(&app, 120, 34);
+    assert!(screen.contains("Needs you (3)"), "{screen}");
+    assert!(screen.contains(" Loops"), "{screen}");
+    assert!(screen.contains(" Workflows"), "{screen}");
+    assert!(screen.contains("pr-babysitter @ w"), "{screen}");
+    assert!(
+        screen.contains("[a] done"),
+        "a run with no branch is done or dismissed, not applied\n{screen}"
+    );
+
+    // the failed run is dismissed, not deleted
+    app.handle_key(&key(KeyCode::End), Instant::now());
+    let screen = render(&app, 120, 34);
+    assert!(screen.contains("FAILED · migrate"), "{screen}");
+    app.handle_key(&key(KeyCode::Char('x')), Instant::now());
+    assert_eq!(app.inbox_count(), 2);
+
+    // a loop run is decided in place
+    app.handle_key(&key(KeyCode::Home), Instant::now());
+    app.handle_key(&key(KeyCode::Char('a')), Instant::now());
+    let Mode::Inbox(state) = &app.mode else {
+        panic!()
+    };
+    assert_eq!(state.items.len(), 1, "{:?}", app.notice);
+
+    // Enter on the plan opens the Workflows view on it
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    let Mode::WorkflowsView(v) = &app.mode else {
+        panic!("not the view: {:?}", app.mode)
+    };
+    assert_eq!(
+        v.selected_row(),
+        Some(&agent_mux::app::workflows_view::RunRow::Planned(
+            "plan-1".into()
+        ))
+    );
+
+    // the Loops view keeps three tabs
+    app.mode = Mode::Control;
+    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    let screen = render(&app, 120, 34);
+    assert!(screen.contains("Report | History | Setup"), "{screen}");
+    assert!(!screen.contains("Inbox |"), "{screen}");
 }

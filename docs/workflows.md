@@ -61,7 +61,7 @@ in flight.
 
 | Key | In the view |
 | --- | --- |
-| `Tab`, `Shift+Tab` | Report → Steps → Result → Document. The tab change goes back to the top. |
+| `Tab`, `Shift+Tab`, `1`-`4` | Report → Steps → Result → Document, the same keys as the Loops view. The tab change goes back to the top. |
 | `↑` `↓` / `j` `k` | The runs list when the left pane has focus (`←`), the result when the right one does (`→`). |
 | `PgUp`, `PgDn`, `Space` | Scroll by a screen, whichever pane has focus. |
 | `Home` / `g`, `End` / `G` | Top and bottom. |

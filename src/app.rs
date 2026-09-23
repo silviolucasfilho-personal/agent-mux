@@ -21,6 +21,7 @@ use tokio::sync::mpsc::Sender;
 pub mod about;
 mod config_view;
 pub mod dir_picker;
+pub mod inbox;
 pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
@@ -56,6 +57,8 @@ pub enum Mode {
     WorkflowDialog(Box<workflows_view::WorkflowDialogState>),
     /// The Workflows view (`W`): runs, planned documents, results.
     WorkflowsView(Box<workflows_view::WorkflowsViewState>),
+    /// The inbox (`I`): what waits on a human, across loops and workflows.
+    Inbox(Box<inbox::InboxState>),
 }
 
 /// An external editor the main loop must run for the App: it leaves the
@@ -191,6 +194,8 @@ pub enum Action {
     CancelWorkflow,
     /// `W`: the Workflows view.
     OpenWorkflowsView,
+    OpenInbox,
+    InboxKey,
     WorkflowsKey,
     WorkflowDialogKey,
 }
@@ -532,6 +537,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     Action::ToggleSessionGroup
                 }
                 KeyCode::Char('W') => Action::OpenWorkflowsView,
+                KeyCode::Char('I') => Action::OpenInbox,
                 KeyCode::Char('v') | KeyCode::Char('V') => Action::OpenAbout,
                 KeyCode::Char('K') => Action::ToggleKillSwitch,
                 KeyCode::Char('E') => Action::OpenLoopsView,
@@ -609,6 +615,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::ConfigView(_) => Action::ConfigKey,
         Mode::WorkflowDialog(_) => Action::WorkflowDialogKey,
         Mode::WorkflowsView(_) => Action::WorkflowsKey,
+        Mode::Inbox(_) => Action::InboxKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 Action::EnterConfirmRemoveLoop
@@ -2110,6 +2117,8 @@ pub struct App {
     pub selected_workflow: usize,
     /// The row the selection is on, so it survives the lists changing.
     pub workflow_anchor: Option<workflows::WorkflowRow>,
+    /// Inbox items the user dismissed this session (`run:<id>`).
+    pub inbox_dismissed: std::collections::HashSet<String>,
 }
 
 impl App {
@@ -2203,6 +2212,7 @@ impl App {
             workflow_list: Vec::new(),
             selected_workflow: 0,
             workflow_anchor: None,
+            inbox_dismissed: Default::default(),
         }
     }
 
@@ -3833,6 +3843,8 @@ impl App {
             Action::CancelWorkflow => self.cancel_selected_workflow(),
             Action::OpenWorkflowsView => self.open_workflows_view(),
             Action::WorkflowsKey => self.handle_workflows_view_key(key),
+            Action::OpenInbox => self.open_inbox(),
+            Action::InboxKey => self.handle_inbox_key(key),
             Action::WorkflowDialogKey => self.handle_workflow_dialog_key(key),
             Action::OpenSkillLauncher => {
                 let Some(skill) = self.selected_agent() else {

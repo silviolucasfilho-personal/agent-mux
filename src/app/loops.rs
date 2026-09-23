@@ -2273,10 +2273,6 @@ impl App {
                 view.rebuild_detail();
             }
             KeyCode::Char('3') => {
-                view.tab = LoopsTab::Inbox;
-                view.rebuild_detail();
-            }
-            KeyCode::Char('4') => {
                 view.tab = LoopsTab::Setup;
                 view.rebuild_detail();
             }
@@ -2310,21 +2306,6 @@ impl App {
                     if let Mode::LoopsView(view) = &mut self.mode {
                         view.reload(&reg);
                     }
-                }
-            }
-            KeyCode::Char('a') | KeyCode::Char('x') if view.tab == LoopsTab::Inbox => {
-                let applied = key.code == KeyCode::Char('a');
-                let id = view.selected_run().map(|r| r.id.clone());
-                if let Some(id) = id {
-                    if let Err(e) = self.decide_loop_run(&id, applied) {
-                        self.notice = Some(Notice::error(format!("inbox: {e}")));
-                    }
-                    let reg = self.loop_registry.clone();
-                    if let Mode::LoopsView(view) = &mut self.mode {
-                        view.reload(&reg);
-                    }
-                } else {
-                    self.notice = Some(Notice::info("nothing selected in the inbox"));
                 }
             }
             KeyCode::Char('T') => {
@@ -2371,7 +2352,7 @@ impl App {
     }
 
     /// Opens the Trace Browser on the session of a launch.
-    fn open_trace_browser_for_launch(&mut self, launch_id: &str) {
+    pub(crate) fn open_trace_browser_for_launch(&mut self, launch_id: &str) {
         let session_key: Option<String> = self.trace_db_path.as_deref().and_then(|db| {
             let conn = crate::tracing::store::open_ro(db).ok()?;
             conn.query_row(

@@ -77,7 +77,7 @@ model: a skill is a prompt, not a process, so it has no model of its own.
 | continuous-pr | 1h | L2 | `continuous-pr-state.md` | loop-issue-pick, loop-fix, loop-rules, verifier | 12 | 1.5M | yes |
 | harness-audit | 1d | L1 | `harness-audit-state.md` | loop-harness-audit, loop-rules | 2 | 100k | no |
 
-`continuous-pr` is the one pattern that starts at L2: it picks one issue a human labelled `ready`, hands it to `loop-fix` on the run's branch, asks every checker the pattern names, and leaves the branch in the Inbox for a human to open the pull request from; it never pushes, comments or opens the PR itself. `harness-audit` is always report-only whatever its level: it reads the loops' own runs (`agent-mux loop ls|runs|show`, or the MCP `agent_mux_get_loop_context` and trace tools) and writes at most three tuning proposals (an interval, a token cap, a level promotion or demotion, a denylist glob, a second checker) as High Priority items with the facts behind them; applying one is a human gate.
+`continuous-pr` is the one pattern that starts at L2: it picks one issue a human labelled `ready`, hands it to `loop-fix` on the run's branch, asks every checker the pattern names, and leaves the branch in the inbox (`I`) for a human to open the pull request from; it never pushes, comments or opens the PR itself. `harness-audit` is always report-only whatever its level: it reads the loops' own runs (`agent-mux loop ls|runs|show`, or the MCP `agent_mux_get_loop_context` and trace tools) and writes at most three tuning proposals (an interval, a token cap, a level promotion or demotion, a denylist glob, a second checker) as High Priority items with the facts behind them; applying one is a human gate.
 
 Registry: `loops/registry.toml` (embedded), merged by id with `~/.agent-mux/loops/registry.toml` when you add or replace patterns; the skills, the agents and the templates are overridden the same way under `~/.agent-mux/loops/` (the Configuration view `C`, `agent-mux config`, `docs/configuration.md`). A pattern may carry its own `prompt`, replacing `[loop] run` of `prompts.toml` for its runs, and an `agents` list naming the loop agents the scaffolder installs for it (`loops/agents/<name>.md`, built-in or library, including agents brought in with `agent-mux agent import`); an empty list means `loop-verifier` alone when `verifier = true` and no agent otherwise, and a pattern with `verifier = true` must keep `loop-verifier` in the list. Two checkers ship built in: `loop-verifier` runs the tests and reads the diff; `loop-reviewer` reads the diff only, for scope creep, risk areas and missing tests, and answers the same `## Verdict:` line. A pattern that lists `agents = ["loop-verifier", "loop-reviewer"]` requires both: agent-mux collects one verdict per checker sub-agent that answered (a name containing `verifier` or `reviewer`), and only unanimous APPROVEs propose the fix (section 6). Every skill reads `$AGENT_MUX_LOOP_CONTEXT` first, makes its one listing call and compares a fingerprint of it with the `Fingerprint:` line in the state file: unchanged means the run rewrites `Last run:` and ends as `no-op` under 5k tokens (the early exit the cost model assumes); otherwise it follows a bounded procedure, only edits the state file at L1, may call `loop-fix` for one item at L2, hands changes to `loop-verifier`, rewrites the state file, and ends with a fenced `loop-result` block (`outcome`, `items_found`, `actions_taken`, `escalations`, `summary`).
 
@@ -107,7 +107,7 @@ agent-mux reads tokens and cost from the trace store, which checker sub-agents r
 
 Every run also pins the pattern text it executed: `Pattern::digest()`, a SHA-256 over the effective pattern, captured at launch and stored in `loop_run_patterns` beside the row (schema v14), the way `workflow_runs.document_hash` pins a workflow document. `loop_runs.pattern` is only the id, and `~/.agent-mux/loops/registry.toml` can replace that id's text between two runs, so without the digest two runs of one pattern cannot be told apart. Runs recorded before v14 carry none: their text was never captured, and backfilling it from today's registry would assert something untrue.
 
-Then: the `loop_runs` row, the run-log line, the ledger attempt (fix patterns), a copy of the state file under `<runtime>/loops/state/<loop id>/<run id>.md` with the difference against the previous run (`detail.delta`, or `detail.quiet` when nothing moved), the registry (`next_run_at`, `last_run_id`, auto-pause on failure), and the worktree: removed when nothing changed, kept and listed in the **Inbox** otherwise.
+Then: the `loop_runs` row, the run-log line, the ledger attempt (fix patterns), a copy of the state file under `<runtime>/loops/state/<loop id>/<run id>.md` with the difference against the previous run (`detail.delta`, or `detail.quiet` when nothing moved), the registry (`next_run_at`, `last_run_id`, auto-pause on failure), and the worktree: removed when nothing changed, kept and listed in the inbox (`I`) otherwise.
 
 ## 8. Reading a run
 
@@ -156,7 +156,7 @@ Sep 16 16:03 … 17:33   skipped · tokens today 2.2M at the cap of 2.0M ×7
 
 Every run leads with the level it ran at and the readiness score its
 pre-flight audit computed — the score at the time of that run, not the
-workspace's score today, which is what the **Setup** tab (`4`) shows.
+workspace's score today, which is what the **Setup** tab (`3`) shows.
 The selected run opens with why it ended that way, the verifier's verdict,
 the files it touched, the first lines of what it said, its launch id and
 exit code. Outcome words are for the reader (`needs you`,
@@ -166,11 +166,14 @@ exit code. Outcome words are for the reader (`needs you`,
 A run whose harness has no prices in `pricing.toml` shows `unpriced
 (<harness>)`, never `$0.00`.
 
+The **Setup** tab (`3`) is everything about the loop that is not a run: what it may do and, for each level, what it still needs (`✓ report only ← set`, `✗ propose a fix for you to review` with one `needs …` line per gap); the budget (today against the caps, the pattern's cost estimate, the last seven days); the contract files, skills, verifier and worktrees; and last the full readiness audit, its findings and recommendations.
+
 ## 9. The inbox
 
-The **Setup** tab (`4`) is everything about the loop that is not a run: what it may do and, for each level, what it still needs (`✓ report only ← set`, `✗ propose a fix for you to review` with one `needs …` line per gap); the budget (today against the caps, the pattern's cost estimate, the last seven days); the contract files, skills, verifier and worktrees; and last the full readiness audit, its findings and recommendations.
+`I`, from anywhere, opens the inbox: everything waiting on a human, loops and workflows together. The status bar leads with the count (`● 3 need you [I]`) whenever it is not zero.
 
-The **Inbox** tab (`3`) lists runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. `a` marks the run **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed.
+- **Loops**: runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. For a run with a branch, `a` marks it **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed. A run that asked for a decision without a branch reads `a` done and `x` dismiss; both record the decision. `Enter` opens its loop's History, `T` its traces.
+- **Workflows**: plans the planner wrote that wait for you (`Enter` reviews one in the Workflows view, `x` discards it) and runs since startup that did not finish cleanly (`Enter` opens the run, `x` dismisses it from the inbox for this session).
 
 ## 10. Antigravity
 
@@ -181,9 +184,9 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 | Symptom | What to do |
 | --- | --- |
 | Loop shows `‖` with a reason | `p` resumes; a breaker reason also resets the trailing failures in the ledger |
-| `!` with an inbox count | `E` → Inbox, decide with `a` or `x` |
+| `!` with a count, or `● N need you` in the status bar | `I`, decide with `a` or `x` |
 | Run blocked: tokens at the cap | raise the cap with `e`, or wait for UTC midnight |
-| Card says "held back: needs …" | `E` → Setup tab (`4`) lists what each level needs and the readiness findings |
+| Card says "held back: needs …" | `E` → Setup tab (`3`) lists what each level needs and the readiness findings |
 | Held back: no path guard | Codex: `agent-mux trace hooks install codex`; Claude: the binary must run from an absolute path |
 | `verifier_missing` on a fix | the skill did not hand the change to `loop-verifier`; treat the fix as unverified |
 | Run failed: "the harness did not find /loop-…" | the skill file is missing from the run's directory; edit the loop with Scaffold on or run `agent-mux loop init`, and commit `.claude/skills` if you want it in every checkout |

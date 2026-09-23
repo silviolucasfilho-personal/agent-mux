@@ -1,8 +1,8 @@
 //! The Loops view (`E`): every registered loop grouped by workspace on
-//! the left; Runs, Inbox, Readiness, Budget and Files on the right. Reads
-//! the registry snapshot it was opened with, the store through a read-only
-//! connection, and the workspace files. Decisions (`a`/`x` in the inbox,
-//! `r`/`p`) are performed by `App`, never here.
+//! the left; Report, History and Setup on the right. Reads the registry
+//! snapshot it was opened with, the store through a read-only connection,
+//! and the workspace files. Actions (`r`/`p`) are performed by `App`,
+//! never here; decisions on a run are the inbox's (`I`, `app::inbox`).
 
 use crate::loops::registry::{LoopEntry, Registry};
 use crate::loops::store::{self as lstore, LoopRun};
@@ -26,25 +26,17 @@ pub enum LoopsTab {
     Report,
     /// The runs, quiet ones folded.
     History,
-    /// Runs waiting on a decision, across every loop.
-    Inbox,
     /// What the loop may do and what it needs: readiness, budget, files.
     Setup,
 }
 
 impl LoopsTab {
-    pub const ALL: [LoopsTab; 4] = [
-        LoopsTab::Report,
-        LoopsTab::History,
-        LoopsTab::Inbox,
-        LoopsTab::Setup,
-    ];
+    pub const ALL: [LoopsTab; 3] = [LoopsTab::Report, LoopsTab::History, LoopsTab::Setup];
 
     pub fn label(self) -> &'static str {
         match self {
             LoopsTab::Report => "Report",
             LoopsTab::History => "History",
-            LoopsTab::Inbox => "Inbox",
             LoopsTab::Setup => "Setup",
         }
     }
@@ -70,8 +62,6 @@ pub struct LoopsViewState {
     pub tab: LoopsTab,
     pub runs: Vec<LoopRun>,
     pub selected_run: usize,
-    pub inbox: Vec<LoopRun>,
-    pub selected_inbox: usize,
     pub detail_lines: Vec<Line<'static>>,
     /// The line index of the selected run / inbox item, for auto-follow.
     pub anchor_line: usize,
@@ -95,7 +85,6 @@ impl std::fmt::Debug for LoopsViewState {
             .field("selected", &self.selected)
             .field("tab", &self.tab)
             .field("runs", &self.runs.len())
-            .field("inbox", &self.inbox.len())
             .finish()
     }
 }
@@ -126,8 +115,6 @@ impl LoopsViewState {
             tab: LoopsTab::Report,
             runs: Vec::new(),
             selected_run: 0,
-            inbox: Vec::new(),
-            selected_inbox: 0,
             detail_lines: Vec::new(),
             anchor_line: 0,
             scroll_offset: 0,
@@ -183,7 +170,6 @@ impl LoopsViewState {
             .unwrap_or(0);
         self.ensure_selectable();
         self.load_runs();
-        self.load_inbox();
         self.rebuild_detail();
     }
 
@@ -218,7 +204,6 @@ impl LoopsViewState {
     pub fn selected_run(&self) -> Option<&LoopRun> {
         match self.tab {
             LoopsTab::History => self.runs.get(self.selected_run),
-            LoopsTab::Inbox => self.inbox.get(self.selected_inbox),
             _ => None,
         }
     }
@@ -269,15 +254,6 @@ impl LoopsViewState {
                 if !self.runs.is_empty() {
                     let max = self.runs.len() as isize - 1;
                     self.selected_run = (self.selected_run as isize + delta).clamp(0, max) as usize;
-                    self.rebuild_detail();
-                    self.follow_anchor();
-                }
-            }
-            LoopsTab::Inbox => {
-                if !self.inbox.is_empty() {
-                    let max = self.inbox.len() as isize - 1;
-                    self.selected_inbox =
-                        (self.selected_inbox as isize + delta).clamp(0, max) as usize;
                     self.rebuild_detail();
                     self.follow_anchor();
                 }
@@ -333,16 +309,10 @@ impl LoopsViewState {
             return;
         }
         self.last_refresh = now;
-        if self.conn.is_none()
-            || !matches!(
-                self.tab,
-                LoopsTab::Report | LoopsTab::History | LoopsTab::Inbox
-            )
-        {
+        if self.conn.is_none() || !matches!(self.tab, LoopsTab::Report | LoopsTab::History) {
             return;
         }
         self.load_runs();
-        self.load_inbox();
         self.rebuild_detail();
     }
 
@@ -356,15 +326,6 @@ impl LoopsViewState {
             .and_then(|l| lstore::recent_runs(conn, &l.id, RUN_LIMIT).ok())
             .unwrap_or_default();
         self.selected_run = self.selected_run.min(self.runs.len().saturating_sub(1));
-    }
-
-    fn load_inbox(&mut self) {
-        let Some(conn) = &self.conn else {
-            self.inbox.clear();
-            return;
-        };
-        self.inbox = lstore::inbox(conn).unwrap_or_default();
-        self.selected_inbox = self.selected_inbox.min(self.inbox.len().saturating_sub(1));
     }
 
     fn spend_today(&self, loop_id: &str) -> lstore::Spend {
@@ -552,10 +513,7 @@ impl LoopsViewState {
             return;
         };
         if let Some(e) = &self.error
-            && matches!(
-                self.tab,
-                LoopsTab::History | LoopsTab::Inbox | LoopsTab::Setup
-            )
+            && matches!(self.tab, LoopsTab::History | LoopsTab::Setup)
         {
             lines.push(Line::styled(
                 format!("  {e}"),
@@ -632,65 +590,6 @@ impl LoopsViewState {
                         }
                     }
                     i += 1;
-                }
-            }
-            LoopsTab::Inbox => {
-                lines.push(Line::styled(
-                    "  runs waiting on a decision (all loops) — [a] applied  [x] rejected",
-                    head,
-                ));
-                if self.inbox.is_empty() {
-                    lines.push(Line::styled("  (nothing waiting)", dim));
-                }
-                for (i, r) in self.inbox.iter().enumerate() {
-                    let sel = i == self.selected_inbox;
-                    if sel {
-                        self.anchor_line = lines.len();
-                    }
-                    let ws = Path::new(&r.workspace)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let marker = if sel { "> " } else { "  " };
-                    let style = if sel {
-                        Style::default().add_modifier(Modifier::REVERSED)
-                    } else {
-                        Style::default()
-                    };
-                    lines.push(Line::styled(
-                        format!(
-                            "{marker}{} · {} · {} · {}",
-                            r.id,
-                            r.pattern,
-                            ws,
-                            r.outcome.as_str()
-                        ),
-                        style,
-                    ));
-                    if sel {
-                        if let Some(b) = &r.branch {
-                            lines.push(Line::from(vec![
-                                Span::styled("    branch   ", dim),
-                                Span::raw(b.clone()),
-                                Span::styled("   (merge it yourself; agent-mux never merges)", dim),
-                            ]));
-                        }
-                        if let Some(w) = &r.worktree {
-                            lines.push(Line::from(vec![
-                                Span::styled("    worktree ", dim),
-                                Span::raw(w.clone()),
-                            ]));
-                        }
-                        for l in run_detail_lines(r) {
-                            lines.push(l);
-                        }
-                        if let Some(stat) = r.detail_str("diff_stat") {
-                            lines.push(Line::styled("    diff --stat", dim));
-                            for s in stat.lines().take(20) {
-                                lines.push(Line::raw(format!("      {s}")));
-                            }
-                        }
-                    }
                 }
             }
             LoopsTab::Setup => {
@@ -937,7 +836,7 @@ fn run_card(r: &LoopRun, selected: bool) -> Vec<Line<'static>> {
 
 /// The expanded detail of the selected run: why the outcome is what it is,
 /// what the run touched, what it said, and where to look next.
-fn run_detail_lines(r: &LoopRun) -> Vec<Line<'static>> {
+pub(crate) fn run_detail_lines(r: &LoopRun) -> Vec<Line<'static>> {
     let dim = Style::default().fg(Color::DarkGray);
     let key = Style::default().fg(Color::Yellow);
     let mut out: Vec<Line<'static>> = Vec::new();

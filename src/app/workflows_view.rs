@@ -754,6 +754,13 @@ impl WorkflowsViewState {
         self.rebuild_detail(facts);
     }
 
+    /// `1`-`4`: straight to a tab, as in the Loops view.
+    pub fn set_tab(&mut self, tab: ViewTab, facts: &ViewFacts<'_>) {
+        self.tab = tab;
+        self.scroll_offset = 0;
+        self.rebuild_detail(facts);
+    }
+
     pub fn prev_tab(&mut self, facts: &ViewFacts<'_>) {
         let at = ViewTab::ALL
             .iter()
@@ -1243,7 +1250,7 @@ impl WorkflowsViewState {
             ViewPending::SaveName(n) => {
                 format!(" Save to the library as: {n}_   [Enter] save  [Esc] cancel")
             }
-            ViewPending::None => " [Tab] Report/Steps/Result/Document  [→] detail  [PgDn/End] scroll  [Enter] run/attach  [r] resume  [s] save  [x] cancel  [Esc] close".into(),
+            ViewPending::None => " [Tab/1-4] tab  [←/→] pane  [↑/↓] select  [PgDn/End] scroll  [Enter] run/attach  [r] resume  [s] save  [x] cancel  [I] inbox  [Esc] close".into(),
         }
     }
 }
