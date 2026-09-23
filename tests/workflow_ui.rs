@@ -103,7 +103,7 @@ fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
 
     to_workflows(&mut app);
     let text = render(&app, 120, 40);
-    assert!(text.contains("Workflows [1/8]"), "{text}");
+    assert!(text.contains("Workflows [8]"), "{text}");
     assert!(text.contains("review-changes"), "{text}");
     assert!(
         text.contains("[c] compose"),
@@ -114,7 +114,10 @@ fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
         text.contains("Choose the review lenses for the change"),
         "{text}"
     );
-    assert!(text.contains("fanout"), "{text}");
+    // steps in words, not document kinds
+    assert!(text.contains("one session for each item"), "{text}");
+    assert!(!text.contains("fanout"), "{text}");
+    assert!(text.contains("Typical"), "{text}");
 
     // j/k move within the section and continue into History and back
     press(&mut app, KeyCode::Char('j'));
@@ -160,22 +163,34 @@ fn enter_opens_the_run_dialog_with_the_documents_args() {
     );
     assert_eq!(d.arg_names, vec!["question"]);
     assert_eq!(d.profiles.len(), 3, "every harness is allowed");
-    assert_eq!(d.field, DialogField::Workspace);
+    assert_eq!(
+        d.field,
+        DialogField::Arg(0),
+        "what the run is for comes first"
+    );
     let text = render(&app, 120, 40);
     assert!(text.contains("Run research"), "{text}");
     assert!(text.contains("question"), "{text}");
     assert!(text.contains("(required)"), "{text}");
+    assert!(text.contains("More"), "{text}");
+    assert!(
+        !text.contains("Max cost") && !text.contains("Select subfolder"),
+        "limits fold under More; the folder list waits for its field\n{text}"
+    );
 
-    // Tab walks Workspace -> Profile -> arg -> Budget -> Max cost -> Isolation
+    // Tab walks arg -> Workspace -> Profile -> More; Space opens More,
+    // then Budget -> Max cost -> Isolation
+    for c in "why?".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+    press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Tab);
     let Mode::WorkflowDialog(d) = &app.mode else {
         panic!()
     };
-    assert_eq!(d.field, DialogField::Arg(0));
-    for c in "why?".chars() {
-        press(&mut app, KeyCode::Char(c));
-    }
+    assert_eq!(d.field, DialogField::More);
+    press(&mut app, KeyCode::Char(' '));
     press(&mut app, KeyCode::Tab);
     for c in "400k".chars() {
         press(&mut app, KeyCode::Char(c));
@@ -474,9 +489,7 @@ fn an_argument_keeps_a_multi_line_prompt_verbatim() {
         press(&mut app, KeyCode::Char('j'));
     }
     press(&mut app, KeyCode::Enter);
-    // Workspace -> Profile -> arg pattern
-    press(&mut app, KeyCode::Tab);
-    press(&mut app, KeyCode::Tab);
+    // the dialog opens on the first argument, pattern
     let Mode::WorkflowDialog(d) = &app.mode else {
         panic!("{:?}", app.mode)
     };
@@ -814,13 +827,22 @@ prompt = "check"
         "every step starts on its default"
     );
     let text = render(&app, 120, 40);
+    assert!(
+        !text.contains("Steps"),
+        "the step rows fold under More\n{text}"
+    );
+    let Mode::WorkflowDialog(d) = &mut app.mode else {
+        panic!()
+    };
+    d.more = true;
+    let text = render(&app, 120, 40);
     assert!(text.contains("Steps"), "{text}");
     assert!(text.contains("look"), "{text}");
     assert!(
-        text.contains("run profile"),
+        text.contains("claude · the run's profile"),
         "the default names where it comes from\n{text}"
     );
-    assert!(text.contains("document: codex"), "{text}");
+    assert!(text.contains("codex · set by the document"), "{text}");
 
     // the step rows follow Isolation, so the form above keeps its order
     let Mode::WorkflowDialog(d) = &mut app.mode else {
@@ -910,5 +932,105 @@ fn the_compose_dialog_has_no_step_rows() {
         !d.fields()
             .iter()
             .any(|f| matches!(f, DialogField::StepHarness(_)))
+    );
+}
+
+/// The section lists what is going on above the library: a run finished
+/// since startup sits under Recent, `Enter` on it opens the view on that
+/// run, and the selection stays on its row when the lists change.
+#[test]
+fn a_recent_run_is_listed_above_the_library_and_opens_in_the_view() {
+    use agent_mux::app::workflows::{RecentWorkflowRun, WorkflowRow};
+    use agent_mux::workflows::store as wstore;
+
+    let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
+    let db = temp.path().join("traces.db");
+    let _store =
+        agent_mux::tracing::store::open_rw(&db, agent_mux::tracing::store::OpenOptions::default())
+            .unwrap();
+    let conn = agent_mux::tracing::store::open_aux(&db).unwrap();
+    wstore::upsert_run(
+        &conn,
+        &wstore::WorkflowRun {
+            id: "run-00000009".into(),
+            workflow: "understand".into(),
+            source: "built-in".into(),
+            document_hash: "h".into(),
+            document: "[workflow]\nname = \"understand\"\ndescription = \"d\"\n[[steps]]\nid = \"s\"\nprompt = \"p\"\n".into(),
+            workspace: temp.path().display().to_string(),
+            harness: "claude".into(),
+            profile: "Claude Code".into(),
+            args: serde_json::Value::Null,
+            budget_tokens: None,
+            started_ns: 1_000_000_000,
+            ended_ns: Some(61_000_000_000),
+            status: "finished".into(),
+            sessions: 1,
+            tokens: Some(12_000),
+            cost_usd: Some(0.04),
+            result: serde_json::Value::String("the map".into()),
+            error: None,
+            resumed_from: None,
+        },
+    )
+    .unwrap();
+    drop(conn);
+    app.trace_db_path = Some(db);
+    to_workflows(&mut app);
+
+    // on the third library document, then a run finishes
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    let before = app.selected_workflow_entry().unwrap().name.clone();
+    app.recent_workflow_runs.insert(
+        0,
+        RecentWorkflowRun {
+            run_id: "run-00000009".into(),
+            name: "understand".into(),
+            harness: "claude".into(),
+            status: "finished".into(),
+            sessions: 1,
+            tokens: 12_000,
+            cost_usd: 0.04,
+            ended_at: time::OffsetDateTime::now_utc(),
+            result: serde_json::Value::String("the map".into()),
+            error: None,
+            notes: Vec::new(),
+        },
+    );
+    app.on_tick(Instant::now());
+    assert_eq!(
+        app.selected_workflow_entry().unwrap().name,
+        before,
+        "the selection stays on its document"
+    );
+    assert_eq!(
+        app.workflow_rows()[0],
+        WorkflowRow::Recent("run-00000009".into())
+    );
+
+    let text = render(&app, 120, 40);
+    assert!(text.contains("Recent"), "{text}");
+    assert!(text.contains("Library"), "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.contains("✓ understand") && l.contains("done")),
+        "{text}"
+    );
+
+    // Enter on the run opens the view on that run, not the run dialog
+    app.select_workflow_row(0);
+    let text = render(&app, 120, 40);
+    assert!(
+        text.contains("FINISHED"),
+        "the preview is the run's\n{text}"
+    );
+    press(&mut app, KeyCode::Enter);
+    let Mode::WorkflowsView(v) = &app.mode else {
+        panic!("not the view: {:?}", app.mode)
+    };
+    assert_eq!(
+        v.selected_row(),
+        Some(&RunRow::Stored("run-00000009".into()))
     );
 }

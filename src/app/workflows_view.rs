@@ -37,6 +37,9 @@ pub enum DialogField {
     Isolation,
     /// Index into the document's steps: the harness that step runs on.
     StepHarness(usize),
+    /// The row that shows or hides budget, cost cap, isolation and the
+    /// per-step harness rows.
+    More,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +72,8 @@ pub struct WorkflowDialogState {
     pub step_defaults: Vec<Option<Harness>>,
     pub error: Option<String>,
     pub estimate: String,
+    /// The `More` rows are shown.
+    pub more: bool,
 }
 
 impl WorkflowDialogState {
@@ -102,7 +107,12 @@ impl WorkflowDialogState {
                 (n, h, v)
             })
             .unwrap_or_default();
-        let estimate = doc.map(estimate_sessions).unwrap_or_default();
+        let estimate = doc.map(estimate_text).unwrap_or_default();
+        let first_field = if arg_names.is_empty() {
+            DialogField::Workspace
+        } else {
+            DialogField::Arg(0)
+        };
         let step_ids: Vec<String> = doc
             .map(|d| d.steps.iter().map(|s| s.id.clone()).collect())
             .unwrap_or_default();
@@ -124,7 +134,8 @@ impl WorkflowDialogState {
             arg_help,
             args,
             task: TextArea::default(),
-            field: DialogField::Workspace,
+            // what the run is for comes first: the arguments, if any
+            field: first_field,
             dir_picker: DirPicker::for_path(&workspace),
             workspace,
             profiles: eligible,
@@ -141,6 +152,7 @@ impl WorkflowDialogState {
             step_defaults,
             error: None,
             estimate,
+            more: false,
         }
     }
 
@@ -172,21 +184,30 @@ impl WorkflowDialogState {
             step_defaults: Vec::new(),
             error: None,
             estimate: String::new(),
+            more: false,
         }
     }
 
+    /// The fields in the order the dialog draws them: for a run, the
+    /// arguments, where and on what, then `More` and, when it is open,
+    /// the limits and the per-step harness rows.
     pub fn fields(&self) -> Vec<DialogField> {
         let mut v = Vec::new();
         if self.purpose == DialogPurpose::Plan {
             v.push(DialogField::Task);
+            v.push(DialogField::Workspace);
+            v.push(DialogField::Profile);
+            v.push(DialogField::Budget);
+            return v;
         }
-        v.push(DialogField::Workspace);
-        v.push(DialogField::Profile);
         for i in 0..self.arg_names.len() {
             v.push(DialogField::Arg(i));
         }
-        v.push(DialogField::Budget);
-        if self.purpose != DialogPurpose::Plan {
+        v.push(DialogField::Workspace);
+        v.push(DialogField::Profile);
+        v.push(DialogField::More);
+        if self.more {
+            v.push(DialogField::Budget);
             v.push(DialogField::MaxCost);
             v.push(DialogField::Isolation);
             for i in 0..self.step_ids.len() {
@@ -194,6 +215,29 @@ impl WorkflowDialogState {
             }
         }
         v
+    }
+
+    /// The `More` row's summary of what it hides.
+    pub fn more_summary(&self) -> String {
+        let mut parts = vec![
+            match self.budget.text.trim() {
+                "" => "no token budget".to_string(),
+                t => format!("{t} tokens"),
+            },
+            match self.max_cost.text.trim() {
+                "" => "no cost cap".to_string(),
+                t => format!("${t} cap"),
+            },
+            match self.isolation {
+                Isolation::None => "in place".to_string(),
+                Isolation::Worktree => "in worktrees".to_string(),
+            },
+        ];
+        let changed = self.step_harness.iter().filter(|h| h.is_some()).count();
+        if changed > 0 {
+            parts.push(format!("{changed} step(s) on another CLI"));
+        }
+        parts.join(" · ")
     }
 
     pub fn step_field(&mut self, delta: isize) {
@@ -212,6 +256,7 @@ impl WorkflowDialogState {
                         ((self.profile_idx as isize + delta).rem_euclid(len)) as usize;
                 }
             }
+            DialogField::More => self.more = !self.more,
             DialogField::Isolation => {
                 self.isolation = match self.isolation {
                     Isolation::None => Isolation::Worktree,
@@ -241,10 +286,10 @@ impl WorkflowDialogState {
     /// document's harness for it, else the run's profile.
     pub fn step_default_label(&self, i: usize) -> String {
         match self.step_defaults.get(i).copied().flatten() {
-            Some(h) => format!("document: {}", h.as_str()),
+            Some(h) => format!("{} · set by the document", h.as_str()),
             None => match self.harness() {
-                Some(h) => format!("run profile ({})", h.as_str()),
-                None => "run profile".into(),
+                Some(h) => format!("{} · the run's profile", h.as_str()),
+                None => "the run's profile".into(),
             },
         }
     }
@@ -355,34 +400,100 @@ fn parse_num(text: &str, what: &str) -> Result<Option<u64>, String> {
         .map_err(|_| format!("{what} {text:?} is not a number (try 400k)"))
 }
 
-/// A static session estimate: known item counts, `?` for the rest.
-pub fn estimate_sessions(doc: &crate::workflows::document::Workflow) -> String {
+/// What a step does, in words for the preview: how many sessions it
+/// starts and over what, then what it filters or checks.
+pub fn describe_step(s: &crate::workflows::document::Step) -> String {
+    use crate::workflows::document::{Over, Root, StepKind};
+    let over = match &s.over {
+        Some(Over::Inline(v)) => {
+            let words: Vec<&str> = v.iter().filter_map(|x| x.as_str()).collect();
+            if words.len() == v.len() && (1..=4).contains(&v.len()) {
+                format!("each of: {}", words.join(", "))
+            } else {
+                format!("each of {} items", v.len())
+            }
+        }
+        Some(Over::Path(p)) => match &p.root {
+            Root::Args(n) => format!("each value of the {n} argument"),
+            Root::Step(id) => format!("each item from {id}"),
+            _ => "each item".into(),
+        },
+        None => String::new(),
+    };
+    let mut text = match s.kind {
+        StepKind::Single if s.actor.is_none() => "no session: reshapes earlier results".into(),
+        StepKind::Single => "one session".into(),
+        StepKind::Route => {
+            let branches: Vec<&str> = s.branches.keys().map(String::as_str).collect();
+            format!(
+                "one session sorts the task, then one branch runs ({})",
+                branches.join(" | ")
+            )
+        }
+        StepKind::Fanout => format!("one session for {over}"),
+        StepKind::Pipeline if s.actor.is_none() => over.clone(),
+        StepKind::Pipeline => format!("one session for {over}, each on its own"),
+        StepKind::Tournament => format!(
+            "{} attempts, judged in pairs; the best one wins",
+            s.n.unwrap_or(0)
+        ),
+        StepKind::Until => format!(
+            "repeats until {} rounds find nothing new (at most {})",
+            s.rounds_without_new, s.max_rounds
+        ),
+    };
+    if !s.dedupe_by.is_empty() {
+        text.push_str("; drops duplicates");
+    }
+    if s.keep.is_some() {
+        text.push_str("; keeps only the items that pass a filter");
+    }
+    if let Some(t) = s.take {
+        text.push_str(&format!("; keeps at most {t}"));
+    }
+    if let Some(v) = &s.verify {
+        text.push_str(&format!(
+            "; each checked {}× by independent sessions",
+            v.votes
+        ));
+        if let Some(k) = &v.keep_text {
+            text.push_str(&format!(", kept when {k}"));
+        }
+    }
+    text
+}
+
+/// About how many sessions a run starts, in words: known counts added up,
+/// and the part that depends on what earlier steps find.
+pub fn estimate_text(doc: &crate::workflows::document::Workflow) -> String {
     use crate::workflows::document::{Over, StepKind};
-    let mut parts: Vec<String> = Vec::new();
+    let mut fixed = 0usize;
+    let mut per_item = 0usize;
+    let mut rounds = false;
     for s in &doc.steps {
         let votes = s.verify.as_ref().map(|v| v.votes).unwrap_or(0);
-        let part = match s.kind {
-            StepKind::Single | StepKind::Route => {
-                if votes > 0 {
-                    format!("{}: 1+{votes}", s.id)
-                } else {
-                    format!("{}: 1", s.id)
-                }
+        let one = usize::from(s.actor.is_some());
+        match s.kind {
+            StepKind::Single | StepKind::Route => fixed += one + votes,
+            StepKind::Fanout | StepKind::Pipeline => match &s.over {
+                Some(Over::Inline(v)) => fixed += v.len() * (one + votes),
+                _ => per_item += one + votes,
+            },
+            StepKind::Tournament => {
+                let n = s.n.unwrap_or(0);
+                fixed += n + n.saturating_sub(1);
             }
-            StepKind::Fanout | StepKind::Pipeline => {
-                let n = match &s.over {
-                    Some(Over::Inline(v)) => v.len().to_string(),
-                    _ => "k".into(),
-                };
-                let per = if s.actor.is_some() { 1 } else { 0 } + votes;
-                format!("{}: {n}×{per}", s.id)
-            }
-            StepKind::Tournament => format!("{}: {}+judges", s.id, s.n.unwrap_or(0)),
-            StepKind::Until => format!("{}: ≤{} rounds", s.id, s.max_rounds),
-        };
-        parts.push(part);
+            StepKind::Until => rounds = true,
+        }
     }
-    parts.join("  ")
+    let mut text = format!("about {fixed} session(s)");
+    if per_item > 0 {
+        text.push_str(&format!(" + {per_item} for each item found while it runs"));
+    }
+    if rounds {
+        text.push_str(" + one per search round");
+    }
+    text
 }
 
 // ---- the view ----------------------------------------------------------------
@@ -568,6 +679,17 @@ impl WorkflowsViewState {
             self.cache = None;
         }
         self.rebuild_detail(facts);
+    }
+
+    /// Puts the selection on `row` (a run or a plan the section chose),
+    /// when the list has it.
+    pub fn select(&mut self, row: &RunRow, facts: &ViewFacts<'_>) {
+        if let Some(i) = self.rows.iter().position(|r| r == row) {
+            self.selected = i;
+            self.cache = None;
+            self.scroll_offset = 0;
+            self.rebuild_detail(facts);
+        }
     }
 
     fn ensure_selectable(&mut self) {

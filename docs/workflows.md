@@ -8,9 +8,11 @@ Design: `docs/superpowers/specs/2026-09-17-workflows-design.md`. The idea follow
 
 ## 1. First run
 
-1. `Tab` to the **Workflows** section (between Loops and History). The eight built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`, `santa-review`. The main pane describes the selected one: its steps by phase, its args, the last run.
-2. `Enter` opens the run dialog: the workspace (the shared directory picker), the profile (one per harness the document allows), one field per declared arg, a token budget, a USD cap, the isolation default, and one **Steps** row per step: the harness that step runs on for this run (`←`/`→` or `Space`; it starts on the step's default, the document's `harness` when it names one, else the run's profile, and offers only harnesses you have a profile for). `Enter` again starts the run.
-3. The run's sessions appear in **Active** under one header — `▾ ⚙ <workflow> <running>/<total>▶ #<run>` — with each step hanging off it by its own name; attach to any of them to watch it. `space` folds the run away into that single row, and the trace browser (`T`) groups the same run the same way. The section row shows `▶ done/started`.
+1. `Tab` to the **Workflows** section (between Loops and History). The eight built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`, `santa-review`. The main pane describes the selected one in words: each step, what it starts sessions for and what it filters or checks (the skill and any CLI it names in grey under it), the arguments it needs or takes, about how many sessions a run starts, and the last run.
+
+   Above the library the section lists what is going on, each group under its heading: **Running** (`▶ name 3/7`), **Plans to review** (`⏸`, the planner's documents waiting for you), and **Recent** (`✓ name done`, the last three runs finished since agent-mux started). `Enter` on a run or a plan opens the Workflows view on it; `Enter` on a library document opens the run dialog. The selection stays on its row when a run starts or ends.
+2. `Enter` opens the run dialog on what the run is for: one field per declared arg first, then the workspace (one line; the shared directory picker opens while the field has focus), the profile (one per harness the document allows) and **More ▸**, whose summary says what it hides (`no token budget · no cost cap · in place`). `Space` or `→` on **More** shows a token budget, a USD cap, the isolation default and one **Steps** row per step: the CLI that step runs on for this run (`←`/`→` or `Space`; it starts on the step's default, shown as `codex · set by the document` or `claude · the run's profile`, and offers only harnesses you have a profile for). Under the form, about how many sessions the run starts. `Enter` starts the run from any field.
+3. The run's sessions appear in **Active** under one header — `▾ ⚙ <workflow> <running>/<total>▶ #<run>` — with each step hanging off it by its own name; attach to any of them to watch it. `space` folds the run away into that single row, and the trace browser (`T`) groups the same run the same way. The run's row under **Running** shows `▶ done/started`.
 4. `W` opens the Workflows view: the run's report, the step ledger behind it, the document and the result.
 5. When the run finishes, the notice leads with what the run answered; the preview card shows the last run; the report is in the view and in `agent-mux workflow status <run>`, and the raw result in the **Result** tab and in `result.json` under the run directory.
 
@@ -197,7 +199,7 @@ input = "confirmed"
 model = "claude-opus-5"      # the writing is worth the strong model
 ```
 
-The Workflows section lists what each step will run on under its row, and
+The Workflows section's preview lists what each step will run on under it, and
 the Steps tab of a finished run names the harness every session actually
 used. For a single run, without editing the document:
 

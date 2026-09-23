@@ -316,7 +316,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         area.height,
         app.skills.len(),
         app.loop_registry.loops.len(),
-        app.workflow_list.len(),
+        app.workflow_section_lines().len(),
     );
 
     draw_active_sidebar(f, active_area, app, now);
@@ -327,20 +327,15 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
 }
 
 fn draw_workflows_sidebar(f: &mut Frame, area: Rect, app: &App) {
+    use crate::app::workflows::{SectionLine, WorkflowRow};
     let is_focused =
         app.sidebar_section == SidebarSection::Workflows && matches!(app.mode, Mode::Control);
     let n = app.workflow_list.len();
     let live = app.live_workflow_runs.len();
     let title = if live > 0 {
-        format!(
-            "Workflows [{}/{}] {live} running",
-            (app.selected_workflow + 1).min(n),
-            n
-        )
-    } else if n == 0 {
-        "Workflows [0]".to_string()
+        format!("Workflows · {live} running")
     } else {
-        format!("Workflows [{}/{}]", (app.selected_workflow + 1).min(n), n)
+        format!("Workflows [{n}]")
     };
     let border_style = if is_focused {
         Style::default()
@@ -360,7 +355,8 @@ fn draw_workflows_sidebar(f: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Span::styled(format!(" {title} "), title_style));
-    if n == 0 {
+    let rows = app.workflow_rows();
+    if rows.is_empty() {
         let hint = Paragraph::new(
             "no workflows
 
@@ -370,17 +366,23 @@ fn draw_workflows_sidebar(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(hint, area);
         return;
     }
+    let lines = app.workflow_section_lines();
     let visible = usize::from(area.height.saturating_sub(2));
-    let start = sidebar_window(app.selected_workflow, n, visible);
-    let end = (start + visible.max(1)).min(n);
-    let name_width = usize::from(area.width.saturating_sub(2))
-        .saturating_sub(9)
-        .max(6);
-    let items: Vec<ListItem> = app.workflow_list[start..end]
+    let start = app.workflow_section_start(&lines, visible);
+    let end = (start + visible.max(1)).min(lines.len());
+    let inner_width = usize::from(area.width.saturating_sub(2));
+    let items: Vec<ListItem> = lines[start..end]
         .iter()
-        .enumerate()
-        .map(|(offset, entry)| {
-            let i = start + offset;
+        .map(|line| {
+            let i = match line {
+                SectionLine::Header(h) => {
+                    return ListItem::new(Line::styled(
+                        h.to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                SectionLine::Row(i) => *i,
+            };
             let is_selected = i == app.selected_workflow;
             let marker = if is_selected && is_focused {
                 "> "
@@ -389,26 +391,71 @@ fn draw_workflows_sidebar(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 "  "
             };
-            let (glyph, right) = app.workflow_row(entry);
+            let (glyph, color, name, right) = match &rows[i] {
+                WorkflowRow::Live(id) => {
+                    let r = app.live_workflow_runs.iter().find(|r| &r.run_id == id);
+                    (
+                        "▶",
+                        Color::Cyan,
+                        r.map(|r| r.name.clone()).unwrap_or_default(),
+                        r.map(|r| {
+                            format!("{}/{}", r.state.records.len(), r.state.sessions_started)
+                        })
+                        .unwrap_or_default(),
+                    )
+                }
+                WorkflowRow::Planned(id) => {
+                    let p = app.planned_workflows.iter().find(|p| &p.id == id);
+                    let ok = p.is_some_and(|p| p.valid());
+                    (
+                        if ok { "⏸" } else { "!" },
+                        if ok { Color::Cyan } else { Color::Yellow },
+                        p.map(|p| p.name.clone()).unwrap_or_default(),
+                        "plan".to_string(),
+                    )
+                }
+                WorkflowRow::Recent(id) => {
+                    let r = app.recent_workflow_runs.iter().find(|r| &r.run_id == id);
+                    let ok = r.is_some_and(|r| r.status == "finished" && r.error.is_none());
+                    (
+                        if ok { "✓" } else { "!" },
+                        if ok { Color::Green } else { Color::Yellow },
+                        r.map(|r| r.name.clone()).unwrap_or_default(),
+                        r.map(|r| {
+                            if ok {
+                                "done".to_string()
+                            } else {
+                                r.status.clone()
+                            }
+                        })
+                        .unwrap_or_default(),
+                    )
+                }
+                WorkflowRow::Doc(d) => {
+                    let e = &app.workflow_list[*d];
+                    if e.valid() {
+                        (" ", Color::DarkGray, e.name.clone(), String::new())
+                    } else {
+                        ("!", Color::Yellow, e.name.clone(), "invalid".to_string())
+                    }
+                }
+            };
+            let right = truncate_chars(&right, 8);
+            let name_width = inner_width
+                .saturating_sub(4 + right.chars().count() + 1)
+                .max(6);
             let line = Line::from(vec![
                 Span::raw(marker),
+                Span::styled(format!("{glyph} "), Style::default().fg(color)),
                 Span::styled(
-                    format!("{} ", glyph.glyph()),
-                    Style::default().fg(glyph.color()),
-                ),
-                Span::styled(
-                    format!(
-                        "{:<w$}",
-                        truncate_chars(&entry.name, name_width),
-                        w = name_width
-                    ),
+                    format!("{:<w$}", truncate_chars(&name, name_width), w = name_width),
                     if is_selected {
                         Style::default().fg(Color::Cyan)
                     } else {
                         Style::default().fg(Color::White)
                     },
                 ),
-                Span::styled(format!(" {right:>4}"), Style::default().fg(glyph.color())),
+                Span::styled(format!(" {right}"), Style::default().fg(color)),
             ]);
             let item = ListItem::new(line);
             if is_selected && is_focused {
@@ -3719,15 +3766,15 @@ fn draw_skill_executions(f: &mut Frame, area: Rect, view: &SkillsViewState) {
 }
 
 /// The Loops section preview: one card for the selected loop.
-/// Wraps the preview's rows at `width`: a `key  value` row (its first span
-/// is the padded key) hangs under the value, any other line under its own
-/// leading spaces.
+/// Wraps a preview's rows at `width`: a `key  value` row (a first span
+/// that is the indented, padded key, then the value) hangs under the
+/// value, any other line under its own leading spaces.
 fn hang(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
     lines
         .iter()
         .flat_map(|l| {
             let first = l.spans.first().map(|s| s.content.as_ref()).unwrap_or("");
-            let indent = if l.spans.len() > 1 && first.starts_with(' ') && first.ends_with("  ") {
+            let indent = if l.spans.len() > 1 && first.starts_with(' ') && first.ends_with(' ') {
                 first.chars().count()
             } else {
                 l.spans
@@ -4548,9 +4595,10 @@ fn draw_confirm(f: &mut Frame, message: &str) {
 
 /// The Workflows section preview: one card for the selected document.
 fn draw_workflow_preview(f: &mut Frame, area: Rect, app: &App) {
+    use crate::app::workflows::WorkflowRow;
     let dim = Style::default().fg(Color::DarkGray);
     let key = Style::default().fg(Color::DarkGray);
-    let Some(entry) = app.selected_workflow_entry() else {
+    let Some(selected) = app.selected_workflow_row() else {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
@@ -4559,169 +4607,239 @@ fn draw_workflow_preview(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
-    let (glyph, _) = app.workflow_row(entry);
-    let title = format!(" {} · {} ", entry.name, entry.source.label());
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .title(Span::styled(title, Style::default().fg(glyph.color())));
-    let mut lines: Vec<Line> = Vec::new();
     let row = |k: &str, v: String| {
-        Line::from(vec![Span::styled(format!("  {k:<10}"), key), Span::raw(v)])
+        Line::from(vec![Span::styled(format!("  {k:<11}"), key), Span::raw(v)])
     };
-    match &entry.doc {
-        Some(doc) => {
-            lines.push(Line::raw(format!("  {}", doc.description)));
-            if let Some(w) = &doc.when_to_use {
-                lines.push(Line::styled(format!("  {w}"), dim));
-            }
-            lines.push(Line::raw(""));
-            for s in &doc.steps {
-                let phase = s.phase.clone().unwrap_or_else(|| s.id.clone());
-                let detail = match s.kind {
-                    crate::workflows::document::StepKind::Fanout
-                    | crate::workflows::document::StepKind::Pipeline => match &s.over {
-                        Some(crate::workflows::document::Over::Inline(v)) => {
-                            format!("×{}", v.len())
-                        }
-                        _ => "×k".into(),
-                    },
-                    crate::workflows::document::StepKind::Tournament => {
-                        format!("n={}", s.n.unwrap_or(0))
-                    }
-                    crate::workflows::document::StepKind::Until => {
-                        format!("≤{} rounds", s.max_rounds)
-                    }
-                    _ => String::new(),
-                };
-                let verify = s
-                    .verify
-                    .as_ref()
-                    .map(|v| format!(" · verify ×{}", v.votes))
-                    .unwrap_or_default();
-                let actor = match &s.actor {
-                    Some(crate::workflows::document::Actor::Skill(n)) => n.clone(),
-                    Some(crate::workflows::document::Actor::Prompt(_)) => "prompt".into(),
-                    None => "transform".into(),
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {phase:<14}"), key),
-                    Span::raw(format!(
-                        "{} ({} {detail}{verify}) · {actor}",
-                        s.id,
-                        s.kind.label()
-                    )),
-                ]));
-                // Who runs this step, when the document says something
-                // other than "the run's harness and model".
-                let step_runner = crate::workflows::document::Workflow::runner_of(s);
-                let mut on: Vec<String> = Vec::new();
-                if !step_runner.is_empty() {
-                    on.push(format!("on {}", step_runner.label()));
-                }
-                if let Some(v) = &s.verify
-                    && !v.runner.is_empty()
-                {
-                    on.push(format!("refuters on {}", v.runner.label()));
-                }
-                if !s.judge_runner.is_empty() {
-                    on.push(format!("judge on {}", s.judge_runner.label()));
-                }
-                if !on.is_empty() {
-                    lines.push(Line::styled(
-                        format!("                {}", on.join(" · ")),
-                        dim,
-                    ));
-                }
-            }
-            if !doc.args.is_empty() {
-                lines.push(Line::raw(""));
-                for (k, a) in &doc.args {
-                    lines.push(row(
-                        &format!("arg {k}"),
-                        format!(
-                            "{}{}",
-                            a.description.clone().unwrap_or_default(),
-                            if a.required { " (required)" } else { "" }
-                        ),
-                    ));
-                }
-            }
+    let block_with = |title: String, color: Color| {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .title(Span::styled(title, Style::default().fg(color)))
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    let block = match &selected {
+        WorkflowRow::Live(id) => {
+            let Some(r) = app.live_workflow_runs.iter().find(|r| &r.run_id == id) else {
+                return;
+            };
+            lines.push(Line::styled(
+                format!("  ▶ RUNNING   {}", r.progress()),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
             lines.push(Line::styled(
                 format!(
-                    "  harness {}",
-                    match &doc.harness {
-                        crate::workflows::document::HarnessFilter::Any => "any".to_string(),
-                        crate::workflows::document::HarnessFilter::Only(l) => l.join(", "),
-                    }
+                    "  on {} · {} · started {}",
+                    r.harness.as_str(),
+                    r.workspace.display(),
+                    crate::workflows::report::format_when(r.started_ns)
                 ),
                 dim,
             ));
+            lines.push(Line::raw(""));
+            for (step, state) in r.state.step_states() {
+                lines.push(row(&step, state.to_string()));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled("  [Enter] open the run   [x] cancel", dim));
+            block_with(format!(" {} · running ", r.name), Color::Cyan)
         }
-        None => {
-            for p in &entry.problems {
+        WorkflowRow::Recent(id) => {
+            let Some(r) = app.recent_workflow_runs.iter().find(|r| &r.run_id == id) else {
+                return;
+            };
+            let ok = r.status == "finished" && r.error.is_none();
+            lines.push(Line::styled(
+                format!(
+                    "  {} {}",
+                    if ok { "✓" } else { "!" },
+                    r.status.to_uppercase()
+                ),
+                Style::default()
+                    .fg(if ok { Color::Green } else { Color::Yellow })
+                    .add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::styled(
+                format!(
+                    "  {} sessions · {} tokens · ${:.2} · on {} · {}",
+                    r.sessions,
+                    crate::loops::format_tokens(r.tokens),
+                    r.cost_usd,
+                    r.harness,
+                    crate::workflows::report::format_when(crate::loops::to_ns(r.ended_at))
+                ),
+                dim,
+            ));
+            if let Some(e) = &r.error {
                 lines.push(Line::styled(
-                    format!("  ! {p}"),
+                    format!("  {e}"),
                     Style::default().fg(Color::Red),
                 ));
             }
-        }
-    }
-    lines.push(Line::raw(""));
-    if let Some(r) = app.live_run_of(&entry.name) {
-        lines.push(row(
-            "Running",
-            format!(
-                "{} on {} · {}",
-                &r.run_id[..8],
-                r.harness.as_str(),
-                r.progress()
-            ),
-        ));
-        for (step, state) in r.state.step_states() {
+            for n in r.notes.iter().take(4) {
+                lines.push(Line::styled(format!("  · {n}"), dim));
+            }
+            lines.push(Line::raw(""));
             lines.push(Line::styled(
-                format!("             {step:<24} {state}"),
+                "  [Enter] open the report   [W] every run",
                 dim,
             ));
+            block_with(
+                format!(" {} · {} ", r.name, r.status),
+                if ok { Color::Green } else { Color::Yellow },
+            )
         }
-        lines.push(Line::styled(
-            "  [Enter] the Workflows view   [x] cancel",
-            dim,
-        ));
-    } else if let Some(r) = app
-        .recent_workflow_runs
-        .iter()
-        .find(|r| r.name == entry.name)
-    {
-        lines.push(row(
-            "Last run",
-            format!(
-                "{} on {} · {} sessions · {}k tokens · ${:.2}",
-                r.status,
-                r.harness,
-                r.sessions,
-                r.tokens / 1000,
-                r.cost_usd
-            ),
-        ));
-        if let Some(e) = &r.error {
+        WorkflowRow::Planned(id) => {
+            let Some(p) = app.planned_workflows.iter().find(|p| &p.id == id) else {
+                return;
+            };
             lines.push(Line::styled(
-                format!("             {e}"),
-                Style::default().fg(Color::Red),
+                if p.valid() {
+                    "  ⏸ PLAN READY   the planner wrote a workflow; nothing has run yet"
+                } else {
+                    "  ! PLAN HAS PROBLEMS   fix it with [e] in the view, or discard it"
+                },
+                Style::default()
+                    .fg(if p.valid() {
+                        Color::Cyan
+                    } else {
+                        Color::Yellow
+                    })
+                    .add_modifier(Modifier::BOLD),
             ));
+            lines.push(Line::raw(""));
+            lines.push(row("Task", p.task.clone()));
+            lines.push(row("Workflow", p.name.clone()));
+            lines.push(row("Workspace", p.workspace.to_string_lossy().into_owned()));
+            for problem in p.problems.iter().take(4) {
+                lines.push(Line::styled(
+                    format!("  ! {problem}"),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "  [Enter] review it: run, edit, save or discard",
+                dim,
+            ));
+            block_with(format!(" {} · plan ", p.name), Color::Cyan)
         }
-        lines.push(Line::styled("  [Enter] run again   [W] results", dim));
-    } else {
-        lines.push(Line::styled(
-            "  [Enter] run   [c] compose for a task   [e] edit   [W] view",
-            dim,
-        ));
-    }
-    f.render_widget(Paragraph::new(lines).block(block), area);
+        WorkflowRow::Doc(_) => {
+            let Some(entry) = app.selected_workflow_entry() else {
+                return;
+            };
+            let (glyph, _) = app.workflow_row(entry);
+            match &entry.doc {
+                Some(doc) => {
+                    lines.push(Line::raw(format!("  {}", doc.description)));
+                    if let Some(w) = &doc.when_to_use {
+                        lines.push(Line::styled(format!("  {w}"), dim));
+                    }
+                    lines.push(Line::raw(""));
+                    for (n, s) in doc.steps.iter().enumerate() {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("  {:>2} {:<14} ", n + 1, s.id),
+                                Style::default().fg(Color::White),
+                            ),
+                            Span::raw(crate::app::workflows_view::describe_step(s)),
+                        ]));
+                        // which skill does the work and where it runs,
+                        // when the document says more than "the run's"
+                        let mut how: Vec<String> = Vec::new();
+                        match &s.actor {
+                            Some(crate::workflows::document::Actor::Skill(name)) => {
+                                how.push(name.clone())
+                            }
+                            Some(crate::workflows::document::Actor::Prompt(_)) => {
+                                how.push("inline prompt".into())
+                            }
+                            None => {}
+                        }
+                        let step_runner = crate::workflows::document::Workflow::runner_of(s);
+                        if !step_runner.is_empty() {
+                            how.push(format!("on {}", step_runner.label()));
+                        }
+                        if let Some(v) = &s.verify
+                            && !v.runner.is_empty()
+                        {
+                            how.push(format!("checkers on {}", v.runner.label()));
+                        }
+                        if !s.judge_runner.is_empty() {
+                            how.push(format!("judge on {}", s.judge_runner.label()));
+                        }
+                        if !how.is_empty() {
+                            lines.push(Line::styled(
+                                format!("{}{}", " ".repeat(20), how.join(" · ")),
+                                dim,
+                            ));
+                        }
+                    }
+                    lines.push(Line::raw(""));
+                    for (k, a) in &doc.args {
+                        lines.push(row(
+                            if a.required { "Needs" } else { "Takes" },
+                            format!("{k} — {}", a.description.clone().unwrap_or_default()),
+                        ));
+                    }
+                    lines.push(row(
+                        "Typical",
+                        crate::app::workflows_view::estimate_text(doc),
+                    ));
+                    lines.push(row(
+                        "Runs on",
+                        match &doc.harness {
+                            crate::workflows::document::HarnessFilter::Any => {
+                                "any CLI you have a profile for".to_string()
+                            }
+                            crate::workflows::document::HarnessFilter::Only(l) => l.join(", "),
+                        },
+                    ));
+                }
+                None => {
+                    for p in &entry.problems {
+                        lines.push(Line::styled(
+                            format!("  ! {p}"),
+                            Style::default().fg(Color::Red),
+                        ));
+                    }
+                }
+            }
+            if let Some(r) = app
+                .recent_workflow_runs
+                .iter()
+                .find(|r| r.name == entry.name)
+            {
+                lines.push(row(
+                    "Last run",
+                    format!(
+                        "{} · {} sessions · {} tokens · ${:.2}",
+                        r.status,
+                        r.sessions,
+                        crate::loops::format_tokens(r.tokens),
+                        r.cost_usd
+                    ),
+                ));
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "  [Enter] run   [c] compose your own   [e] edit   [W] view",
+                dim,
+            ));
+            block_with(
+                format!(" {} · {} ", entry.name, entry.source.label()),
+                glyph.color(),
+            )
+        }
+    };
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_widget(Paragraph::new(hang(lines, usize::from(inner.width))), inner);
 }
 
 /// A dialog text field over several rows: the label, then the wrapped
@@ -4838,14 +4956,40 @@ fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
             ));
         }
     }
-    let max_visible = usize::from(height).saturating_sub(18).clamp(1, 4);
-    lines.extend(dir_picker_lines(
-        &format!("{:<12}", "Workspace"),
-        &dialog.workspace,
-        &dialog.dir_picker,
-        dialog.field == WfField::Workspace,
-        max_visible,
-    ));
+    // A run's dialog asks what the run is for first; a plan's, the task.
+    let args_lines = |lines: &mut Vec<Line<'static>>| {
+        for (i, name) in dialog.arg_names.iter().enumerate() {
+            if let Some(ta) = dialog.args.get(i) {
+                // the name alone: the help line under it says what it is
+                lines.extend(text_area_lines(
+                    name,
+                    ta,
+                    dialog.field == WfField::Arg(i),
+                    dialog.rows_for(WfField::Arg(i)),
+                    inner_width,
+                ));
+            }
+            if let Some(h) = dialog.arg_help.get(i)
+                && !h.is_empty()
+            {
+                lines.push(Line::styled(format!("            {h}"), dim));
+            }
+        }
+    };
+    args_lines(&mut lines);
+    // the folder list only while the field is focused: otherwise one line
+    if dialog.field == WfField::Workspace {
+        let max_visible = usize::from(height).saturating_sub(18).clamp(1, 4);
+        lines.extend(dir_picker_lines(
+            &format!("{:<12}", "Workspace"),
+            &dialog.workspace,
+            &dialog.dir_picker,
+            true,
+            max_visible,
+        ));
+    } else {
+        lines.push(field("Workspace", dialog.workspace.clone(), false));
+    }
     let profile_text = if dialog.profiles.is_empty() {
         "no profile for this workflow's harnesses in profiles.toml".to_string()
     } else {
@@ -4860,66 +5004,67 @@ fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
         profile_text,
         dialog.field == WfField::Profile,
     ));
-    for (i, name) in dialog.arg_names.iter().enumerate() {
-        if let Some(ta) = dialog.args.get(i) {
-            // the name alone: the help line under it says it is an argument
-            lines.extend(text_area_lines(
-                name,
-                ta,
-                dialog.field == WfField::Arg(i),
-                dialog.rows_for(WfField::Arg(i)),
-                inner_width,
-            ));
-        }
-        if let Some(h) = dialog.arg_help.get(i)
-            && !h.is_empty()
-        {
-            lines.push(Line::styled(format!("            {h}"), dim));
-        }
-    }
-    lines.push(field(
-        "Budget",
-        format!("{} tokens ", dialog.budget.text),
-        dialog.field == WfField::Budget,
-    ));
-    if dialog.purpose != DialogPurpose::Plan {
+    if dialog.purpose == DialogPurpose::Plan {
         lines.push(field(
-            "Max cost",
-            format!("{} USD ", dialog.max_cost.text),
-            dialog.field == WfField::MaxCost,
+            "Budget",
+            format!("{} tokens ", dialog.budget.text),
+            dialog.field == WfField::Budget,
         ));
-        lines.push(field(
-            "Isolation",
-            match dialog.isolation {
-                crate::workflows::document::Isolation::None => "none".into(),
-                crate::workflows::document::Isolation::Worktree => "worktree".into(),
-            },
-            dialog.field == WfField::Isolation,
-        ));
-        // one row per step: the harness it runs on for this run
-        let id_width = dialog.step_ids.iter().map(|s| s.len()).max().unwrap_or(0);
-        for (i, id) in dialog.step_ids.iter().enumerate() {
-            let choice = match dialog.step_harness.get(i).copied().flatten() {
-                Some(h) => h.as_str().to_string(),
-                None => dialog.step_default_label(i),
-            };
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<12}", "More"), dim),
+            Span::styled(
+                if dialog.more { "▾ " } else { "▸ " }.to_string(),
+                sel(dialog.field == WfField::More),
+            ),
+            Span::styled(dialog.more_summary(), dim),
+        ]));
+        if dialog.more {
             lines.push(field(
-                if i == 0 { "Steps" } else { "" },
-                format!("{id:<id_width$}  {choice}"),
-                dialog.field == WfField::StepHarness(i),
+                "  Budget",
+                format!("{} tokens ", dialog.budget.text),
+                dialog.field == WfField::Budget,
             ));
-        }
-        if matches!(dialog.field, WfField::StepHarness(_)) {
+            lines.push(field(
+                "  Max cost",
+                format!("{} USD ", dialog.max_cost.text),
+                dialog.field == WfField::MaxCost,
+            ));
+            lines.push(field(
+                "  Isolation",
+                match dialog.isolation {
+                    crate::workflows::document::Isolation::None => "none".into(),
+                    crate::workflows::document::Isolation::Worktree => "worktree".into(),
+                },
+                dialog.field == WfField::Isolation,
+            ));
+            // one row per step: the harness it runs on for this run
+            let id_width = dialog.step_ids.iter().map(|s| s.len()).max().unwrap_or(0);
+            for (i, id) in dialog.step_ids.iter().enumerate() {
+                let choice = match dialog.step_harness.get(i).copied().flatten() {
+                    Some(h) => format!("{} · chosen for this run", h.as_str()),
+                    None => dialog.step_default_label(i),
+                };
+                lines.push(field(
+                    if i == 0 { "  Steps" } else { "" },
+                    format!("{id:<id_width$}  {choice}"),
+                    dialog.field == WfField::StepHarness(i),
+                ));
+            }
+            if matches!(dialog.field, WfField::StepHarness(_)) {
+                lines.push(Line::styled(
+                    "            ←/→ or Space: the CLI this step runs on, for this run only",
+                    dim,
+                ));
+            }
+        } else if dialog.field == WfField::More {
             lines.push(Line::styled(
-                "            ←/→ or Space: the harness this step runs on, for this run only",
+                "            Space or →: budget, cost cap, isolation and each step's CLI",
                 dim,
             ));
         }
         if !dialog.estimate.is_empty() {
-            lines.push(Line::styled(
-                format!("  sessions: {}", dialog.estimate),
-                dim,
-            ));
+            lines.push(Line::styled(format!("  {}", dialog.estimate), dim));
         }
     }
     lines.push(Line::raw(""));

@@ -2106,7 +2106,10 @@ pub struct App {
     pub planned_workflows: Vec<workflows::PlannedWorkflow>,
     /// The Workflows section's list and selection.
     pub workflow_list: Vec<crate::workflows::library::Entry>,
+    /// Index into `workflow_rows()`.
     pub selected_workflow: usize,
+    /// The row the selection is on, so it survives the lists changing.
+    pub workflow_anchor: Option<workflows::WorkflowRow>,
 }
 
 impl App {
@@ -2199,6 +2202,7 @@ impl App {
             planned_workflows: Vec::new(),
             workflow_list: Vec::new(),
             selected_workflow: 0,
+            workflow_anchor: None,
         }
     }
 
@@ -2346,6 +2350,7 @@ impl App {
         if let Mode::LoopsView(view) = &mut self.mode {
             view.refresh_if_live(now);
         }
+        self.resync_workflow_selection();
         self.publish_live_snapshot_if_needed(now);
         self.refresh_briefing_if_needed(now);
         self.refresh_loop_cards_if_needed(now);
@@ -3290,7 +3295,7 @@ impl App {
                     self.pane_size.0 + 3,
                     self.skills.len(),
                     self.loop_registry.loops.len(),
-                    self.workflow_list.len(),
+                    self.workflow_section_lines().len(),
                 );
             if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
                 if ev.row > active_rect.y
@@ -3348,14 +3353,11 @@ impl App {
                 {
                     let visible = usize::from(workflows_rect.height.saturating_sub(2));
                     let row = usize::from(ev.row - workflows_rect.y - 1);
-                    let idx = ui::sidebar_window(
-                        self.selected_workflow,
-                        self.workflow_list.len(),
-                        visible,
-                    ) + row;
-                    if idx < self.workflow_list.len() {
+                    let lines = self.workflow_section_lines();
+                    let start = self.workflow_section_start(&lines, visible);
+                    if let Some(workflows::SectionLine::Row(idx)) = lines.get(start + row) {
                         self.sidebar_section = SidebarSection::Workflows;
-                        self.selected_workflow = idx;
+                        self.select_workflow_row(*idx);
                     }
                 }
                 return;
@@ -3435,7 +3437,7 @@ impl App {
                             self.pane_size.0 + 3,
                             self.skills.len(),
                             self.loop_registry.loops.len(),
-                            self.workflow_list.len(),
+                            self.workflow_section_lines().len(),
                         );
                     if ev.row >= loops_rect.y
                         && ev.row < loops_rect.y + loops_rect.height
@@ -3689,14 +3691,12 @@ impl App {
                             } else {
                                 self.sidebar_section = SidebarSection::Workflows;
                                 self.reload_workflow_list();
-                                self.selected_workflow = 0;
+                                self.select_workflow_row(0);
                             }
                         }
                         SidebarSection::Workflows => {
-                            if !self.workflow_list.is_empty()
-                                && self.selected_workflow + 1 < self.workflow_list.len()
-                            {
-                                self.selected_workflow += 1;
+                            if self.selected_workflow + 1 < self.workflow_rows().len() {
+                                self.select_workflow_row(self.selected_workflow + 1);
                             } else if !self.history_sessions.is_empty() {
                                 self.sidebar_section = SidebarSection::History;
                                 self.selected_history = 0;
@@ -3744,7 +3744,7 @@ impl App {
                         }
                         SidebarSection::Workflows => {
                             if self.selected_workflow > 0 {
-                                self.selected_workflow -= 1;
+                                self.select_workflow_row(self.selected_workflow - 1);
                             } else {
                                 self.sidebar_section = SidebarSection::Loops;
                                 self.selected_loop =
@@ -3757,7 +3757,9 @@ impl App {
                             } else {
                                 self.sidebar_section = SidebarSection::Workflows;
                                 self.reload_workflow_list();
-                                self.selected_workflow = self.workflow_list.len().saturating_sub(1);
+                                self.select_workflow_row(
+                                    self.workflow_rows().len().saturating_sub(1),
+                                );
                             }
                         }
                     }

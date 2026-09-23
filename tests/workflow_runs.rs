@@ -937,6 +937,8 @@ async fn the_run_dialog_runs_each_step_on_the_harness_picked_for_it() {
         };
         d.workspace = f.ws.to_string_lossy().into_owned();
         assert_eq!(d.harness(), Some(Harness::Claude), "the run's profile");
+        // the step rows live under More
+        d.more = true;
         d.field = DialogField::StepHarness(0);
     }
     // look: default -> claude -> codex -> agy

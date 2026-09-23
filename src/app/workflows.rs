@@ -108,6 +108,42 @@ impl LiveWorkflowRun {
 
 /// A finished run, kept in memory for the sidebar until restart (the
 /// store has the durable row).
+/// Finished runs the Workflows section lists above the library.
+pub const RECENT_IN_SECTION: usize = 3;
+
+/// One selectable row of the Workflows section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowRow {
+    /// A live run (run id).
+    Live(String),
+    /// A planner's document awaiting a decision (plan id).
+    Planned(String),
+    /// A run finished since startup (run id).
+    Recent(String),
+    /// A library document (index into `workflow_list`).
+    Doc(usize),
+}
+
+impl WorkflowRow {
+    /// The heading the row sits under.
+    pub fn group(&self) -> &'static str {
+        match self {
+            WorkflowRow::Live(_) => "Running",
+            WorkflowRow::Planned(_) => "Plans to review",
+            WorkflowRow::Recent(_) => "Recent",
+            WorkflowRow::Doc(_) => "Library",
+        }
+    }
+}
+
+/// A drawn line of the Workflows section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionLine {
+    Header(&'static str),
+    /// Index into `App::workflow_rows`.
+    Row(usize),
+}
+
 #[derive(Debug, Clone)]
 pub struct RecentWorkflowRun {
     pub run_id: String,
@@ -1637,21 +1673,142 @@ impl WorkflowGlyph {
 }
 
 impl App {
-    /// Rescans the documents; keeps the selection on the same name.
+    /// Rescans the documents; keeps the selection on the same row.
     pub fn reload_workflow_list(&mut self) {
         let keep = self
-            .workflow_list
-            .get(self.selected_workflow)
-            .map(|e| e.name.clone());
+            .workflow_anchor
+            .clone()
+            .or_else(|| self.workflow_rows().get(self.selected_workflow).cloned());
+        let doc = match &keep {
+            Some(WorkflowRow::Doc(i)) => self.workflow_list.get(*i).map(|e| e.name.clone()),
+            _ => None,
+        };
         self.workflow_list = self.workflow_entries();
-        self.selected_workflow = keep
-            .and_then(|n| self.workflow_list.iter().position(|e| e.name == n))
-            .unwrap_or(0)
-            .min(self.workflow_list.len().saturating_sub(1));
+        let keep = match doc {
+            Some(name) => self
+                .workflow_list
+                .iter()
+                .position(|e| e.name == name)
+                .map(WorkflowRow::Doc),
+            None => keep,
+        };
+        self.workflow_anchor = keep;
+        self.resync_workflow_selection();
     }
 
+    /// The section's selectable rows, in the order they are drawn: live
+    /// runs, plans awaiting a decision, runs finished since startup (the
+    /// last few), then the library.
+    pub fn workflow_rows(&self) -> Vec<WorkflowRow> {
+        let mut rows: Vec<WorkflowRow> = self
+            .live_workflow_runs
+            .iter()
+            .map(|r| WorkflowRow::Live(r.run_id.clone()))
+            .collect();
+        rows.extend(
+            self.planned_workflows
+                .iter()
+                .filter(|p| p.run_id.is_none())
+                .map(|p| WorkflowRow::Planned(p.id.clone())),
+        );
+        rows.extend(
+            self.recent_workflow_runs
+                .iter()
+                .filter(|r| !self.live_workflow_runs.iter().any(|l| l.run_id == r.run_id))
+                .take(RECENT_IN_SECTION)
+                .map(|r| WorkflowRow::Recent(r.run_id.clone())),
+        );
+        rows.extend((0..self.workflow_list.len()).map(WorkflowRow::Doc));
+        rows
+    }
+
+    /// The section as drawn: a heading before each group once anything
+    /// but the library is listed, and the selectable rows.
+    pub fn workflow_section_lines(&self) -> Vec<SectionLine> {
+        let rows = self.workflow_rows();
+        let grouped = rows.iter().any(|r| !matches!(r, WorkflowRow::Doc(_)));
+        let mut out = Vec::new();
+        let mut last: Option<&'static str> = None;
+        for (i, r) in rows.iter().enumerate() {
+            let group = r.group();
+            if grouped && last != Some(group) {
+                out.push(SectionLine::Header(group));
+                last = Some(group);
+            }
+            out.push(SectionLine::Row(i));
+        }
+        out
+    }
+
+    /// The first drawn line of the section at `visible` rows, keeping the
+    /// selection in view; the renderer and the mouse share it.
+    pub fn workflow_section_start(&self, lines: &[SectionLine], visible: usize) -> usize {
+        let pos = lines
+            .iter()
+            .position(|l| *l == SectionLine::Row(self.selected_workflow))
+            .unwrap_or(0);
+        crate::ui::sidebar_window(pos, lines.len(), visible)
+    }
+
+    /// Selects row `i` and remembers which row it is, so a run starting or
+    /// ending does not move the selection onto another one.
+    pub fn select_workflow_row(&mut self, i: usize) {
+        let rows = self.workflow_rows();
+        self.selected_workflow = i.min(rows.len().saturating_sub(1));
+        self.workflow_anchor = rows.get(self.selected_workflow).cloned();
+    }
+
+    /// Puts the selection back on its row after the lists changed; a run
+    /// that finished is followed to its Recent row.
+    pub fn resync_workflow_selection(&mut self) {
+        let rows = self.workflow_rows();
+        let Some(anchor) = self.workflow_anchor.clone() else {
+            self.selected_workflow = self.selected_workflow.min(rows.len().saturating_sub(1));
+            return;
+        };
+        let found = rows
+            .iter()
+            .position(|r| *r == anchor)
+            .or_else(|| match &anchor {
+                WorkflowRow::Live(id) => rows
+                    .iter()
+                    .position(|r| matches!(r, WorkflowRow::Recent(x) if x == id)),
+                _ => None,
+            });
+        match found {
+            Some(i) => {
+                self.selected_workflow = i;
+                self.workflow_anchor = rows.get(i).cloned();
+            }
+            None => {
+                self.selected_workflow = self.selected_workflow.min(rows.len().saturating_sub(1));
+                self.workflow_anchor = rows.get(self.selected_workflow).cloned();
+            }
+        }
+    }
+
+    pub fn selected_workflow_row(&self) -> Option<WorkflowRow> {
+        self.workflow_rows().get(self.selected_workflow).cloned()
+    }
+
+    /// The document behind the selected row: the library entry, or the one
+    /// a live or recent run was started from. A plan has none yet.
     pub fn selected_workflow_entry(&self) -> Option<&library::Entry> {
-        self.workflow_list.get(self.selected_workflow)
+        let by_name = |name: &str| self.workflow_list.iter().find(|e| e.name == name);
+        match self.selected_workflow_row()? {
+            WorkflowRow::Doc(i) => self.workflow_list.get(i),
+            WorkflowRow::Live(id) => self
+                .live_workflow_runs
+                .iter()
+                .find(|r| r.run_id == id)
+                .and_then(|r| by_name(&r.name)),
+            WorkflowRow::Recent(id) => self
+                .recent_workflow_runs
+                .iter()
+                .find(|r| r.run_id == id)
+                .and_then(|r| by_name(&r.name)),
+            WorkflowRow::Planned(_) => None,
+        }
     }
 
     /// The live run of a workflow name, if any.
@@ -1704,16 +1861,27 @@ impl App {
         v
     }
 
-    /// `Enter` in the section: the view when a run is live, else the run dialog.
+    /// `Enter` in the section: a run or a plan opens in the view on that
+    /// row; a library document opens the run dialog.
     pub fn open_workflow_run(&mut self) {
-        let Some(entry) = self.selected_workflow_entry().cloned() else {
-            self.notice = Some(Notice::info("no workflows; c composes one for a task"));
-            return;
+        let target = match self.selected_workflow_row() {
+            None => {
+                self.notice = Some(Notice::info("no workflows; c composes one for a task"));
+                return;
+            }
+            Some(WorkflowRow::Live(id)) => Some(RunRow::Live(id)),
+            Some(WorkflowRow::Recent(id)) => Some(RunRow::Stored(id)),
+            Some(WorkflowRow::Planned(id)) => Some(RunRow::Planned(id)),
+            Some(WorkflowRow::Doc(_)) => None,
         };
-        if self.live_run_of(&entry.name).is_some() {
+        if let Some(row) = target {
             self.open_workflows_view();
+            self.with_view(|view, facts| view.select(&row, facts));
             return;
         }
+        let Some(entry) = self.selected_workflow_entry().cloned() else {
+            return;
+        };
         if !entry.valid() {
             self.notice = Some(Notice::warn(format!(
                 "{}: {}",
@@ -1882,7 +2050,10 @@ impl App {
             KeyCode::Char(' ')
                 if matches!(
                     dialog.field,
-                    DialogField::Profile | DialogField::Isolation | DialogField::StepHarness(_)
+                    DialogField::Profile
+                        | DialogField::Isolation
+                        | DialogField::StepHarness(_)
+                        | DialogField::More
                 ) =>
             {
                 dialog.cycle(1)
