@@ -9,7 +9,7 @@ use crate::harness::Harness;
 use crate::workflows::document::Isolation;
 use crate::workflows::interp::RunStatus;
 use crate::workflows::library::Entry;
-use crate::workflows::report::{self, Block, ColumnKind, Report, RunView, Status};
+use crate::workflows::report::{self, Block, Report, RunView, Status};
 use crate::workflows::store::{self as wstore, WorkflowRun, WorkflowStep};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -1274,41 +1274,34 @@ fn report_lines(rep: &Report) -> Vec<Line<'static>> {
         match block {
             Block::Outline {
                 title,
-                bytes,
+                bytes: _,
                 headings,
                 lead,
             } => {
-                out.push(Line::from(vec![
-                    Span::styled(format!("  {} ", cap_first(title)), key),
-                    Span::styled(format!("({})", report::human_bytes(*bytes)), dim),
-                ]));
+                out.push(Line::styled(format!("  {}", cap_first(title)), key));
                 if headings.is_empty() && !lead.is_empty() {
                     out.push(Line::raw(format!("    {lead}")));
                 }
-                for h in headings.iter().take(24) {
+                // The first heading is the verdict the headline already
+                // shows; repeating it under the title says nothing new.
+                let skip = usize::from(
+                    headings
+                        .first()
+                        .is_some_and(|h| h.text.trim() == rep.headline.verdict.trim()),
+                );
+                for h in headings.iter().skip(skip).take(24) {
                     let indent = "  ".repeat(h.level.saturating_sub(1));
                     out.push(Line::raw(format!("    {indent}{}", h.text)));
                 }
             }
             Block::Table {
                 title,
-                columns,
+                columns: _,
                 rows,
             } => {
-                let votes = columns.iter().any(|c| c.kind == ColumnKind::Number);
-                out.push(Line::from(vec![
-                    Span::styled(format!("  {title} ({})", rows.len()), key),
-                    Span::styled(
-                        if votes {
-                            "                                            votes".into()
-                        } else {
-                            String::new()
-                        },
-                        dim,
-                    ),
-                ]));
+                out.push(Line::styled(format!("  {title} ({})", rows.len()), key));
                 for r in rows.iter().take(60) {
-                    out.push(row_line(r, false));
+                    out.extend(row_lines(r, false));
                     if let Some(d) = &r.detail {
                         out.push(Line::styled(
                             format!("      {}", report::short(d, 100)),
@@ -1320,7 +1313,7 @@ fn report_lines(rep: &Report) -> Vec<Line<'static>> {
             Block::Dropped { title, rows } => {
                 out.push(Line::styled(format!("  {title}"), key));
                 for r in rows.iter().take(40) {
-                    out.push(row_line(r, true));
+                    out.extend(row_lines(r, true));
                     for reason in r.reasons.iter().take(3) {
                         out.push(Line::styled(
                             format!("      refuted: {}", report::short(reason, 96)),
@@ -1380,7 +1373,11 @@ fn report_lines(rep: &Report) -> Vec<Line<'static>> {
     out
 }
 
-fn row_line(r: &report::Row, dropped: bool) -> Line<'static> {
+/// One finding: the badge, the location and the votes on a short first
+/// line, the title under it, so the row fits a narrow pane instead of
+/// wrapping mid-column. A row with no location keeps the title on the
+/// first line.
+fn row_lines(r: &report::Row, dropped: bool) -> Vec<Line<'static>> {
     let dim = Style::default().fg(Color::DarkGray);
     let mut spans = vec![Span::raw("    ")];
     if let Some(b) = &r.badge {
@@ -1389,24 +1386,35 @@ fn row_line(r: &report::Row, dropped: bool) -> Line<'static> {
             if dropped { dim } else { badge_style(b) },
         ));
     }
-    if let Some(l) = &r.location {
-        spans.push(Span::styled(
-            format!("{:<30} ", report::short(l, 30)),
-            if dropped {
-                dim
-            } else {
-                Style::default().fg(Color::Cyan)
-            },
-        ));
+    let title_style = if dropped { dim } else { Style::default() };
+    let title = report::short(&r.title, 96);
+    let mut under = None;
+    match &r.location {
+        Some(l) => {
+            spans.push(Span::styled(
+                format!("{:<30}", report::short(l, 30)),
+                if dropped {
+                    dim
+                } else {
+                    Style::default().fg(Color::Cyan)
+                },
+            ));
+            under = Some(Line::styled(format!("      {title}"), title_style));
+        }
+        None => spans.push(Span::styled(format!("{title:<30}"), title_style)),
     }
-    spans.push(Span::styled(
-        format!("{:<44}", report::short(&r.title, 44)),
-        if dropped { dim } else { Style::default() },
-    ));
-    if let Some((against, cast)) = r.votes {
-        spans.push(Span::styled(format!("  {against}/{cast}"), dim));
+    if let Some(votes) = votes_text(r.votes) {
+        spans.push(Span::styled(format!("  {votes}"), dim));
     }
-    Line::from(spans)
+    let mut out = vec![Line::from(spans)];
+    out.extend(under);
+    out
+}
+
+/// `refuted 1/3`: the votes against out of the votes cast, named, so the
+/// fraction cannot be read as the votes in favour.
+fn votes_text(votes: Option<(u64, u64)>) -> Option<String> {
+    votes.map(|(against, cast)| format!("refuted {against}/{cast}"))
 }
 
 /// The ledger: one group per step, one row per session, with the reason a

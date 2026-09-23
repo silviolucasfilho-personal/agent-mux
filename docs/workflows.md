@@ -21,7 +21,7 @@ evidence behind it, and what it dropped on the way. The report is built
 from the document's schemas, so a new document gets one without saying
 anything: a `file` (and `line`) field becomes an openable location, a
 schema enum such as `severity` becomes a badge the rows group by, a
-`verify` step's boolean becomes a votes column plus a **Refuted** block
+`verify` step's boolean becomes a `refuted N/M` count on each row plus a **Refuted** block
 carrying each refuter's reason, and an object step that is not the output
 (a critique, a classification) appears as its own block instead of being
 lost.
@@ -31,14 +31,15 @@ lost.
 1 finding · 1 high · 1 refuted · 7/7 answered · 1.9M tokens · $3.10 · 6m 12s
 Sep 18 10:02 → 10:08 · claude · /Users/me/code/agent-mux
 ────────────────────────────────────────
-Report (3 KB)
-  Review of the branch
+Report
     High
-Findings (1)                                            votes
-  HIGH     src/app/loops.rs:1572   final_message is cut at 2000 bytes   1/3
+Findings (1)
+  HIGH     src/app/loops.rs:1572           refuted 1/3
+      final_message is cut at 2000 bytes
       a long narrative loses its loop-result block
 Refuted (1)
-  LOW      src/ui.rs:40            not a bug                           2/3
+  LOW      src/ui.rs:40                    refuted 2/3
+      not a bug
       refuted: the caller checks it
 Notes
   · find: dropped 1 duplicate item(s)

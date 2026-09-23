@@ -404,6 +404,15 @@ fn the_report_tab_shows_what_the_run_found_and_who_has_to_act() {
         out.contains("Ignored (0)") || !out.contains("no drafts open"),
         "{out}"
     );
+    // one date format: the state file's RFC 3339 stamp reads like the rest
+    assert!(out.contains("last run Sep 17 17:36"), "{out}");
+    assert!(!out.contains("17:36:53Z"), "{out}");
+    // the view is the whole screen: no sidebar shows down its left edge,
+    // and its own hints take the status bar's row
+    let first = out.lines().next().unwrap();
+    assert!(first.starts_with("┌ Loops (1)"), "{first}");
+    let last = out.lines().last().unwrap();
+    assert!(last.contains("[Esc] close"), "{last}");
 }
 
 #[test]
@@ -461,4 +470,45 @@ fn the_runs_timeline_folds_quiet_runs_and_opens_the_selected_one() {
         out.contains("L1 · readiness 100"),
         "every run in the timeline carries the score it ran under\n{out}"
     );
+}
+
+/// The sidebar row and the preview name the workspace, not a cut-off path,
+/// and no hint line wraps or loses its last hint.
+#[test]
+fn a_loop_is_named_by_its_workspace_and_its_hints_fit() {
+    let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
+    app.loop_registry.add(entry(&temp, "daily-triage"));
+    app.sidebar_section = SidebarSection::Loops;
+    let screen = render(&app, 100, 34);
+    let row = screen
+        .lines()
+        .find(|l| l.contains("daily-triage") && l.starts_with('│'))
+        .unwrap();
+    assert!(
+        row.contains("daily-triage proj"),
+        "the row names the workspace: {row}"
+    );
+    let title = screen.lines().next().unwrap();
+    assert!(
+        title.contains("daily-triage · proj · Claude Code"),
+        "{title}"
+    );
+    assert!(
+        !title.contains('…'),
+        "no cut-off path in the title: {title}"
+    );
+    assert!(
+        screen.contains("Workspace"),
+        "the full path has its own row\n{screen}"
+    );
+    assert!(screen.contains("Schedule   every 1d"), "{screen}");
+    // the preview's hint line keeps whole hints on one row
+    assert!(
+        !screen
+            .lines()
+            .any(|l| l.contains("│kill switch") || l.contains("│loops view")),
+        "a hint wrapped:\n{screen}"
+    );
+    let last = screen.lines().last().unwrap().trim_end();
+    assert!(last.ends_with("[?] help"), "{last}");
 }
