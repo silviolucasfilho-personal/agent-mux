@@ -15,6 +15,7 @@ allowed-tools: Read, Grep, Glob, Bash
 1. Open the file at the line. Read the surrounding function and the callers `grep` finds.
 2. Try to construct the failure the finding claims. If the claimed inputs cannot occur, the path is guarded, the behaviour is intended, or the finding misreads the code, it is refuted.
 3. If you can name the inputs that trigger it and the wrong result, it stands: `refuted = false`.
+   A finding that claims a cost rather than a failure (its `category` is `simplification`, `performance` or `architecture`: a duplicate, a needless abstraction, a slow path) stands when the evidence it cites is in the code (the duplicate exists, grep finds no importer, the path is hot) and its fix keeps behaviour; it is refuted when the evidence is wrong or the fix would change behaviour.
 4. When you cannot decide within a few minutes of reading, answer `refuted = true` and say why: an unverifiable finding must not survive a review.
 
 Your `reason` is one or two sentences a reader can check.

@@ -127,6 +127,9 @@ pub fn builtin_packages() -> Vec<BuiltinPackage> {
         wf_skill!("wf-triage-bug"),
         wf_skill!("wf-triage-feature"),
         wf_skill!("wf-review-dimensions"),
+        wf_skill!("wf-grimoire-brief"),
+        wf_skill!("wf-grimoire-lens"),
+        wf_skill!("wf-grimoire-verdict"),
     ]
 }
 

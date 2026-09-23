@@ -29,8 +29,8 @@ pub const USAGE: &str = "agent-mux workflow <command>
 
 Documents live in ~/.agent-mux/workflows (AGENT_MUX_LIBRARY_DIR overrides); the
 built-in ones are review-changes, understand, research, audit-until-dry,
-judge-panel, migrate, triage-route and santa-review. docs/workflows.md explains
-the format.";
+judge-panel, migrate, triage-route, santa-review and grimoire-review.
+docs/workflows.md explains the format.";
 
 struct Args {
     values: HashMap<String, String>,

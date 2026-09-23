@@ -1,0 +1,71 @@
+# Grimoire's Oracle review as a workflow: the Sage writes a brief of the
+# change, the Paladin, the Cleric and the Ranger each review it through
+# their own lens, every finding meets three independent refuters, and the
+# Oracle's verdict (APPROVED, NEEDS_CHANGES or NEEDS_HUMAN) closes the run.
+#
+# Nothing is published: the report is the run's result. Posting review
+# comments on a pull request stays with a human, who reads the verdict
+# from the inbox or the Workflows view.
+[workflow]
+name = "grimoire-review"
+description = "Grimoire's Oracle review: a Sage brief, then the Paladin (security), Cleric (bugs and edge cases) and Ranger (simplification) lenses, three refuters per finding, and an APPROVED / NEEDS_CHANGES / NEEDS_HUMAN verdict."
+when_to_use = "Reviewing a branch, a ref range or a pull request before merge, when you want a gate verdict rather than a list of findings."
+output = "verdict"
+
+[args.scope]
+description = "What to review: a path, a git ref range (develop..HEAD), a pull request as #123, or empty for the uncommitted working tree."
+default = ""
+
+[args.language]
+description = "The language the verdict is written in."
+default = "English"
+
+[schemas.findings]
+fields.findings = { type = "array", items = "finding", required = true }
+[schemas.finding]
+fields.file = { type = "string", required = true }
+fields.line = { type = "integer" }
+fields.title = { type = "string", required = true }
+fields.why = { type = "string", required = true, description = "The concrete failure (inputs, state, wrong output) or, for the Ranger, the cost and the evidence for it." }
+fields.severity = { type = "string", enum = ["critical", "high", "medium", "low"], required = true }
+fields.category = { type = "string", enum = ["security", "bug", "edge-case", "simplification", "performance", "architecture"], required = true }
+fields.lens = { type = "string", enum = ["paladin", "cleric", "ranger"], required = true }
+fields.fix = { type = "string", required = true, description = "The exact change that resolves it." }
+[schemas.verdict]
+fields.refuted = { type = "boolean", required = true }
+fields.reason = { type = "string", required = true }
+
+[[steps]]
+id = "brief"
+kind = "single"
+phase = "Brief"
+skill = "wf-grimoire-brief"
+args = { scope = "{args.scope}" }
+
+[[steps]]
+id = "find"
+kind = "fanout"
+phase = "Review"
+over = ["paladin", "cleric", "ranger"]
+skill = "wf-grimoire-lens"
+input = "brief"
+args = { lens = "{item}", scope = "{args.scope}" }
+result = "findings"
+
+# Low findings are dropped before the votes, so no refuter is spent on them.
+[[steps]]
+id = "confirmed"
+kind = "pipeline"
+phase = "Verify"
+over = "find[*].findings[*]"
+dedupe_by = ["file", "line", "category"]
+keep = "severity in [critical, high, medium]"
+verify = { skill = "wf-refute", votes = 3, result = "verdict", keep = "refuted < 2" }
+
+[[steps]]
+id = "verdict"
+kind = "single"
+phase = "Verdict"
+skill = "wf-grimoire-verdict"
+input = "confirmed"
+args = { scope = "{args.scope}", language = "{args.language}" }

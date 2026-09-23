@@ -377,6 +377,83 @@ async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
     assert_eq!(result["status"], "finished");
 }
 
+const GRIMOIRE_FINDINGS: &str = r#"```workflow-result
+{"findings":[{"file":"api/routes/goals.ts","line":12,"title":"missing ownership check","why":"any user reads any goal by id","severity":"critical","category":"security","lens":"paladin","fix":"scope the query to the requester"},{"file":"api/lib/x.ts","line":3,"title":"single-use wrapper","why":"forwards to y() only","severity":"low","category":"simplification","lens":"ranger","fix":"call y() directly"}]}
+```"#;
+
+#[tokio::test]
+async fn the_grimoire_review_briefs_the_lenses_and_refutes_only_what_can_block() {
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fake_harness(
+        &bin,
+        Harness::Claude,
+        &[
+            ("brief", "## Intent\nAdds goals."),
+            ("find", GRIMOIRE_FINDINGS),
+            ("confirmed", STANDS),
+            ("verdict", "ORACLE_VERDICT: NEEDS_CHANGES"),
+        ],
+        None,
+        None,
+    );
+    let mut f = fixture(&bin, temp);
+    let doc = library::builtin("grimoire-review").unwrap();
+    let req = request(
+        "grimoire-review",
+        doc,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::json!({}),
+    );
+    run_to_completion(&mut f, req).await;
+
+    let recent = &f.app.recent_workflow_runs[0];
+    assert_eq!(recent.status, "finished", "{:?}", recent.error);
+    assert_eq!(
+        recent.result,
+        serde_json::json!("ORACLE_VERDICT: NEEDS_CHANGES")
+    );
+    // 1 brief + 3 lenses + 3 votes on the one critical finding + 1 verdict:
+    // the lenses' duplicates are deduped and the low finding costs no vote
+    assert_eq!(recent.sessions, 8, "{:?}", recent.notes);
+
+    let ctxs: Vec<serde_json::Value> = calls(&f.bin, Harness::Claude, "ctx")
+        .iter()
+        .map(|c| serde_json::from_str(c).unwrap())
+        .collect();
+    let mut lenses: Vec<&str> = ctxs
+        .iter()
+        .filter(|c| c["step"]["id"] == "find")
+        .map(|c| {
+            assert_eq!(
+                c["inputs"], "## Intent\nAdds goals.",
+                "the brief reaches every lens"
+            );
+            c["args"]["lens"].as_str().unwrap()
+        })
+        .collect();
+    lenses.sort();
+    assert_eq!(lenses, ["cleric", "paladin", "ranger"]);
+    let verdict = ctxs.iter().find(|c| c["step"]["id"] == "verdict").unwrap();
+    let survivors = verdict["inputs"].as_array().unwrap();
+    assert_eq!(survivors.len(), 1);
+    assert_eq!(survivors[0]["severity"], "critical");
+    assert_eq!(verdict["args"]["language"], "English");
+    for skill in [
+        "wf-grimoire-brief",
+        "wf-grimoire-lens",
+        "wf-grimoire-verdict",
+    ] {
+        assert!(
+            f.home
+                .join(format!(".claude/skills/{skill}/SKILL.md"))
+                .is_file(),
+            "{skill} installed"
+        );
+    }
+}
+
 const MIXED: &str = r#"
 [workflow]
 name = "mixed"
