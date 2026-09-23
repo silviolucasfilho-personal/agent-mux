@@ -133,6 +133,10 @@ pub struct Session {
     pub group: Option<crate::tree::GroupRef>,
     /// Briefing snapshot written for this session's agent, removed on exit.
     pub briefing_path: Option<PathBuf>,
+    /// The conversation this session resumed, when it was launched as a
+    /// resume (History, trace browser, restart). What a save records
+    /// while the trace store has not yet correlated the new launch.
+    pub conversation: Option<String>,
 }
 
 /// How often the exit-watcher thread polls `Child::try_wait()`.
@@ -281,6 +285,7 @@ impl Session {
             skill_id: None,
             group: None,
             briefing_path: None,
+            conversation: None,
         })
     }
 

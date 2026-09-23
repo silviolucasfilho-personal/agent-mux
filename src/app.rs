@@ -2550,6 +2550,16 @@ impl App {
             return Ok(());
         };
         let now = Instant::now();
+        // the conversation each launch was correlated to; only opened when
+        // some session is traced, and a store that cannot be read leaves
+        // what the sessions remember
+        let conn = self
+            .sessions
+            .iter()
+            .any(|s| s.trace.is_some())
+            .then_some(self.trace_db_path.as_deref())
+            .flatten()
+            .and_then(|p| crate::tracing::store::open_ro(p).ok());
         let saved: Vec<persistence::SavedSession> = self
             .sessions
             .iter()
@@ -2558,6 +2568,15 @@ impl App {
                 profile: s.profile.clone(),
                 dir: s.dir.clone(),
                 skill_id: s.skill_id.clone(),
+                conversation: conn
+                    .as_ref()
+                    .zip(s.trace.as_ref())
+                    .and_then(|(c, t)| {
+                        crate::tracing::store::query::launch_conversation(c, &t.launch_id)
+                            .ok()
+                            .flatten()
+                    })
+                    .or_else(|| s.conversation.clone()),
             })
             .collect();
         persistence::save_sessions(&path, &saved)?;
@@ -2585,10 +2604,21 @@ impl App {
             } else {
                 continue;
             };
+            // a session that held a conversation comes back as it; one
+            // that never had one known starts as it was first launched
+            let mut profile = s.profile;
+            let conversation = s.conversation.filter(|c| !c.trim().is_empty());
+            if let (Some(conv), Some(harness)) = (
+                conversation.as_deref(),
+                crate::harness::Harness::detect(&profile.command),
+            ) {
+                profile.args = crate::harness::restore_args(harness, &profile.args, conv);
+            }
             let id = self.next_id;
-            match self.spawn_traced_with_env(id, s.profile, dir, &[], s.skill_id.as_deref()) {
+            match self.spawn_traced_with_env(id, profile, dir, &[], s.skill_id.as_deref()) {
                 Ok(mut session) => {
                     session.skill_id = s.skill_id;
+                    session.conversation = conversation;
                     self.next_id += 1;
                     self.sessions.push(session);
                 }
@@ -5195,7 +5225,8 @@ impl App {
 
         let id = self.next_id;
         match self.spawn_traced(id, profile, dir) {
-            Ok(session) => {
+            Ok(mut session) => {
+                session.conversation = Some(session_id.to_string());
                 self.next_id += 1;
                 self.sessions.push(session);
                 self.selected = self.sessions.len() - 1;

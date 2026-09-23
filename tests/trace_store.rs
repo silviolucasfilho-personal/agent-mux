@@ -432,3 +432,34 @@ fn skill_and_agent_views_roll_up_attribution() {
         .unwrap();
     assert_eq!((calls, distinct), (5, 1));
 }
+
+#[test]
+fn a_launch_reads_back_as_its_harness_conversation_id() {
+    use agent_mux::tracing::store::query::launch_conversation;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = store(dir.path(), "run-1");
+    let mut agy = launch("agy-1");
+    agy.provider = "antigravity".into();
+    agy.session_key = Some("antigravity:8fcec510-6f3b-44c9-aca5-830f7a9eeeb5".into());
+    let mut pending = launch("pending");
+    pending.session_key = None;
+    s.apply(&[
+        StoreOp::Launch(launch("l1")),
+        StoreOp::Launch(agy),
+        StoreOp::Launch(pending),
+    ])
+    .unwrap();
+    let conn = open_ro(&dir.path().join("traces.db")).unwrap();
+    // the key is `<provider>:<id>`; the harness wants the id alone
+    assert_eq!(
+        launch_conversation(&conn, "agy-1").unwrap().as_deref(),
+        Some("8fcec510-6f3b-44c9-aca5-830f7a9eeeb5")
+    );
+    assert_eq!(
+        launch_conversation(&conn, "l1").unwrap().as_deref(),
+        Some("s1")
+    );
+    // not correlated yet, or not a launch of this store: nothing to resume
+    assert_eq!(launch_conversation(&conn, "pending").unwrap(), None);
+    assert_eq!(launch_conversation(&conn, "nope").unwrap(), None);
+}

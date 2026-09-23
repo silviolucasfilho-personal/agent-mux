@@ -232,6 +232,57 @@ pub fn resume_args(harness: Harness, session_id: &str) -> Vec<String> {
     compose(&[], &options.render(harness))
 }
 
+/// The arguments that bring a saved session back as the conversation it
+/// held: the profile's own arguments with whatever resume they already
+/// carried taken out (a session started with `--continue`, or resumed
+/// from History, has since become one named conversation), plus a resume
+/// of `conversation`. Unlike `resume_args`, the rest of the command line
+/// stays: a restored session keeps its model and approval flags.
+pub fn restore_args(harness: Harness, saved: &[String], conversation: &str) -> Vec<String> {
+    let options = LaunchOptions {
+        resume: Resume::Id(conversation.to_string()),
+        ..Default::default()
+    };
+    compose(&without_resume(harness, saved), &options.render(harness))
+}
+
+/// `args` minus every spelling of resume `harness` accepts: Claude's
+/// `--continue`/`-c`, `--resume`/`-r` with its value, Antigravity's
+/// `--continue`/`-c` and `--conversation` with its value, and Codex's
+/// leading `resume` subcommand with `--last` or the id after it.
+fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
+    if harness == Harness::Codex {
+        return match args {
+            [sub, _target, rest @ ..] if sub == "resume" => rest.to_vec(),
+            _ => args.to_vec(),
+        };
+    }
+    let valued: &[&str] = match harness {
+        Harness::Claude => &["--resume", "-r"],
+        _ => &["--conversation"],
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut it = args.iter().peekable();
+    while let Some(arg) = it.next() {
+        if arg == "--continue" || arg == "-c" {
+            continue;
+        }
+        if valued.contains(&arg.as_str()) {
+            // the value, unless the flag was given bare (Claude's picker)
+            it.next_if(|v| !v.starts_with('-'));
+            continue;
+        }
+        if valued
+            .iter()
+            .any(|flag| arg.starts_with(&format!("{flag}=")))
+        {
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
 /// The full argument list for a launch: the harness's subcommand, then
 /// the profile's own arguments, then the options' flags.
 pub fn compose(profile_args: &[String], rendered: &Rendered) -> Vec<String> {
@@ -404,6 +455,91 @@ mod tests {
             resume_args(Harness::Codex, "abc-123"),
             vec!["resume", "abc-123"]
         );
+    }
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn restoring_keeps_the_profiles_arguments_and_resumes_the_conversation() {
+        assert_eq!(
+            restore_args(
+                Harness::Antigravity,
+                &args(&["--dangerously-skip-permissions"]),
+                "8fcec510"
+            ),
+            args(&[
+                "--dangerously-skip-permissions",
+                "--conversation",
+                "8fcec510"
+            ])
+        );
+        assert_eq!(
+            restore_args(
+                Harness::Claude,
+                &args(&["--model", "opus", "--dangerously-skip-permissions"]),
+                "abc-123"
+            ),
+            args(&[
+                "--model",
+                "opus",
+                "--dangerously-skip-permissions",
+                "--resume",
+                "abc-123"
+            ])
+        );
+        assert_eq!(
+            restore_args(
+                Harness::Codex,
+                &args(&["--yolo", "--no-alt-screen"]),
+                "019a"
+            ),
+            args(&["resume", "019a", "--yolo", "--no-alt-screen"])
+        );
+    }
+
+    #[test]
+    fn restoring_replaces_whatever_resume_the_saved_arguments_carried() {
+        // a session that was itself started with --continue, or resumed
+        // from History, must come back as the conversation it became
+        for (harness, saved) in [
+            (Harness::Antigravity, args(&["--continue", "--model", "m"])),
+            (Harness::Antigravity, args(&["-c", "--model", "m"])),
+            (
+                Harness::Antigravity,
+                args(&["--conversation", "old", "--model", "m"]),
+            ),
+            (
+                Harness::Antigravity,
+                args(&["--conversation=old", "--model", "m"]),
+            ),
+            (Harness::Claude, args(&["--resume", "old", "--model", "m"])),
+            (Harness::Claude, args(&["--resume=old", "--model", "m"])),
+            (Harness::Claude, args(&["-r", "old", "--model", "m"])),
+            (Harness::Claude, args(&["--continue", "--model", "m"])),
+        ] {
+            let flag = if harness == Harness::Claude {
+                "--resume"
+            } else {
+                "--conversation"
+            };
+            assert_eq!(
+                restore_args(harness, &saved, "new"),
+                args(&["--model", "m", flag, "new"]),
+                "{harness} {saved:?}"
+            );
+        }
+        for saved in [
+            args(&["resume", "--last", "--yolo"]),
+            args(&["resume", "old", "--yolo"]),
+        ] {
+            assert_eq!(
+                restore_args(Harness::Codex, &saved, "new"),
+                args(&["resume", "new", "--yolo"]),
+                "{saved:?}"
+            );
+        }
     }
 
     #[test]

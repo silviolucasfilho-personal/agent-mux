@@ -10,6 +10,12 @@ pub struct SavedSession {
     /// `agent_id`; both are read.
     #[serde(default, alias = "agent_id", skip_serializing_if = "Option::is_none")]
     pub skill_id: Option<String>,
+    /// The harness's own id for the conversation the session held (agy's
+    /// `--conversation`, Claude's `--resume`, `codex resume`), so a
+    /// restart resumes it instead of opening a blank one. Absent when it
+    /// was never known: tracing off, or the launch not yet correlated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
 }
 
 pub fn sessions_file_path() -> Option<PathBuf> {
@@ -66,6 +72,7 @@ mod tests {
                 },
                 dir: PathBuf::from("/tmp/project1"),
                 skill_id: Some("heimdall".into()),
+                conversation: Some("uuid-123".into()),
             },
             SavedSession {
                 profile: Profile {
@@ -79,12 +86,34 @@ mod tests {
                 },
                 dir: PathBuf::from("/tmp/project2"),
                 skill_id: None,
+                conversation: None,
             },
         ];
 
         save_sessions(&path, &sessions).unwrap();
         let loaded = load_saved_sessions(&path);
         assert_eq!(loaded, sessions);
+    }
+
+    #[test]
+    fn a_file_written_before_conversations_were_saved_still_loads() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        std::fs::write(
+            &path,
+            r#"[{"profile":{"name":"Antigravity","command":"agy","args":["--dangerously-skip-permissions"],"default_dir":null},"dir":"/tmp/p"}]"#,
+        )
+        .unwrap();
+        let loaded = load_saved_sessions(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].conversation, None);
+        // and a session without one writes no key at all
+        save_sessions(&path, &loaded).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("conversation")
+        );
     }
 
     #[test]
