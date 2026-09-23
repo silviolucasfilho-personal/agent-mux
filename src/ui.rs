@@ -4006,6 +4006,9 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
     // 2. What the loop may do, and what stands between it and more.
     let (allowed, capped) = c.allowed(entry.level);
     let mut allowed_line = allowed.can().to_string();
+    if entry.bypass_score && allowed < crate::loops::Level::L3 {
+        allowed_line.push_str(" · score bypassed");
+    }
     if let Some(why) = &capped {
         allowed_line.push_str(&format!(
             " — set to {}; held back: {why}",
@@ -4398,6 +4401,15 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
             }
         ),
         dialog.field == LoopField::MaxCost,
+    ));
+    lines.push(field(
+        "Score",
+        if dialog.bypass_score {
+            "[x] may run below the readiness score (report only, propose fixes)".into()
+        } else {
+            "[ ] needs the readiness score".into()
+        },
+        dialog.field == LoopField::BypassScore,
     ));
     lines.push(field(
         "Scaffold",

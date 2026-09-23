@@ -437,3 +437,38 @@ fn report_runs_and_show_read_a_stored_run() {
     assert_eq!(v["readiness_score"], 100, "{out}");
     assert_eq!(v["exit_code"], 0, "the detail bag is still whole\n{out}");
 }
+
+/// `--bypass-score` lets propose fixes (L2) register below the readiness
+/// score when its other gates hold, and is saved on the entry.
+#[test]
+fn add_bypass_score_registers_l2_below_the_score() {
+    let f = fixture();
+    let ws = f.workspace.to_string_lossy().into_owned();
+    let skill = f.workspace.join(".claude/skills/loop-triage");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "---\nname: loop-triage\n---\n").unwrap();
+    let add = |extra: &[&str]| {
+        let mut args = vec![
+            "add",
+            "--workspace",
+            &ws,
+            "--pattern",
+            "daily-triage",
+            "--level",
+            "L2",
+            "--no-scaffold",
+        ];
+        args.extend_from_slice(extra);
+        run(&f, &args)
+    };
+    let (ok, _, err) = add(&[]);
+    assert!(!ok, "L2 below the score is refused without the flag");
+    assert!(err.contains("L2 needs score"), "{err}");
+    let (ok, out, err) = add(&["--bypass-score"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("at L2"), "{out}");
+    let (ok, out, _) = run(&f, &["ls", "--json"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["loops"][0]["bypass_score"], true);
+}

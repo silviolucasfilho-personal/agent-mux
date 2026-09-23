@@ -367,6 +367,13 @@ impl Audit {
     /// What `level` still needs in this workspace, in plain words for the
     /// screen; empty exactly when [`Audit::allows`] is `Ok`.
     pub fn missing_for(&self, level: Level) -> Vec<String> {
+        self.missing_for_with(level, false)
+    }
+
+    /// [`Audit::missing_for`] for a loop that may bypass the score: at L1
+    /// and L2 `bypass_score` drops the score threshold and keeps the rest
+    /// (a state file, a triage skill). L3 always needs its score.
+    pub fn missing_for_with(&self, level: Level, bypass_score: bool) -> Vec<String> {
         let (state, triage, verifier, cost_ready, activity) = self.gates();
         let score = self.score;
         let mut out = Vec::new();
@@ -375,7 +382,8 @@ impl Audit {
             Level::L2 => THRESHOLD_L2,
             Level::L3 => THRESHOLD_L3,
         };
-        if score < threshold {
+        let score_counts = !(bypass_score && level < Level::L3);
+        if score_counts && score < threshold {
             out.push(format!("a readiness score of {threshold} (now {score})"));
         }
         match level {
@@ -409,11 +417,18 @@ impl Audit {
 
     /// Whether the workspace may run at `level`, else why not.
     pub fn allows(&self, level: Level) -> Result<(), String> {
+        self.allows_with(level, false)
+    }
+
+    /// [`Audit::allows`] for a loop that may bypass the score at L1 and L2
+    /// (`LoopEntry::bypass_score`): the other gates still hold.
+    pub fn allows_with(&self, level: Level, bypass_score: bool) -> Result<(), String> {
         let (state, triage, verifier, cost_ready, activity) = self.gates();
         let score = self.score;
+        let over = |t: u32| score >= t || bypass_score;
         match level {
             Level::L1 => {
-                if score >= THRESHOLD_L1 && state {
+                if over(THRESHOLD_L1) && state {
                     Ok(())
                 } else {
                     Err(format!(
@@ -423,7 +438,7 @@ impl Audit {
                 }
             }
             Level::L2 => {
-                if score >= THRESHOLD_L2 && triage {
+                if over(THRESHOLD_L2) && triage {
                     Ok(())
                 } else {
                     Err(format!(
@@ -1196,12 +1211,14 @@ mod tests {
             let temp = copy_fixture(fixture);
             let a = audit(temp.path(), 0);
             for level in [Level::L1, Level::L2, Level::L3] {
-                assert_eq!(
-                    a.allows(level).is_ok(),
-                    a.missing_for(level).is_empty(),
-                    "{fixture} {level:?}: {:?}",
-                    a.missing_for(level)
-                );
+                for bypass in [false, true] {
+                    assert_eq!(
+                        a.allows_with(level, bypass).is_ok(),
+                        a.missing_for_with(level, bypass).is_empty(),
+                        "{fixture} {level:?} bypass {bypass}: {:?}",
+                        a.missing_for_with(level, bypass)
+                    );
+                }
             }
         }
         let temp = copy_fixture("empty");
@@ -1210,6 +1227,47 @@ mod tests {
             a.missing_for(Level::L1),
             vec!["a readiness score of 38 (now 7)", "a state file"]
         );
+    }
+
+    #[test]
+    fn bypassing_the_score_keeps_the_other_gates_and_never_reaches_l3() {
+        let temp = copy_fixture("empty");
+        let a = audit(temp.path(), 0);
+        assert_eq!(a.missing_for_with(Level::L1, true), vec!["a state file"]);
+        assert_eq!(a.missing_for_with(Level::L2, true), vec!["a triage skill"]);
+        assert!(
+            a.missing_for_with(Level::L3, true)
+                .contains(&"a readiness score of 78 (now 7)".to_string()),
+            "L3 keeps its score"
+        );
+        assert!(
+            a.allows_with(Level::L1, true).is_err(),
+            "still no state file"
+        );
+        // a triage skill alone: L2 needs no state file, only the score
+        let skill = temp.path().join(".claude/skills/loop-triage");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: loop-triage\n---\n").unwrap();
+        let a = audit(temp.path(), 0);
+        assert!(a.score < THRESHOLD_L2, "score {}", a.score);
+        assert!(a.allows(Level::L2).is_err());
+        assert!(
+            a.allows_with(Level::L2, true).is_ok(),
+            "{:?}",
+            a.missing_for_with(Level::L2, true)
+        );
+        // a stale state file alone: present, but under the L1 score
+        let temp = copy_fixture("empty");
+        std::fs::write(
+            temp.path().join("STATE.md"),
+            "Last run: 2020-01-01T00:00:00Z\n",
+        )
+        .unwrap();
+        let a = audit(temp.path(), 0);
+        assert!(a.score < THRESHOLD_L1, "score {}", a.score);
+        assert!(a.allows(Level::L1).is_err());
+        assert!(a.allows_with(Level::L1, true).is_ok());
+        assert!(a.allows_with(Level::L3, true).is_err());
     }
 
     #[test]

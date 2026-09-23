@@ -17,7 +17,10 @@ pub const USAGE: &str = "agent-mux loop <command>
   add --workspace <dir> --pattern <id> [--profile <name>] [--harness claude|codex]
       [--every 1d] [--level L1] [--max-runs-per-day n] [--max-tokens-per-day n]
       [--max-cost <usd>] [--model <id>] [--verifier-model <id>] [--no-scaffold]
-                                           register a loop (and scaffold its files)
+      [--bypass-score]
+                                           register a loop (and scaffold its files);
+                                           --bypass-score lets L1 and L2 run below the
+                                           readiness score (their other gates still hold)
   rm <id|prefix|pattern@workspace>         remove the registry entry (files stay)
   run <id|prefix|pattern@workspace> [--now]
                                            one scheduler pass for that loop, headless;
@@ -213,6 +216,7 @@ fn entry_json(
         "harness": l.harness,
         "model": l.model,
         "verifier_model": l.verifier_model,
+        "bypass_score": l.bypass_score,
         "every": format_interval(l.interval_s),
         "interval_s": l.interval_s,
         "level": l.level.as_str(),
@@ -427,7 +431,8 @@ fn add(args: &Args) -> anyhow::Result<()> {
     }
     let audit =
         crate::loops::readiness::audit(&workspace, store_activity(conn.as_ref(), &workspace));
-    if let Err(why) = audit.allows(level)
+    let bypass_score = args.has("bypass-score");
+    if let Err(why) = audit.allows_with(level, bypass_score)
         && level > Level::L1
     {
         anyhow::bail!("level {}: {why}", level.as_str());
@@ -448,6 +453,7 @@ fn add(args: &Args) -> anyhow::Result<()> {
     entry.max_cost_usd_per_run = max_cost;
     entry.model = model.clone();
     entry.verifier_model = verifier_model.clone();
+    entry.bypass_score = bypass_score;
     let id = entry.id.clone();
     let next = entry.next_run_at.clone().unwrap_or_default();
     reg.add(entry);

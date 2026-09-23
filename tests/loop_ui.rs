@@ -688,3 +688,67 @@ fn the_inbox_gathers_loop_runs_plans_and_failed_runs() {
     assert!(screen.contains("Report | History | Setup"), "{screen}");
     assert!(!screen.contains("Inbox |"), "{screen}");
 }
+
+/// A loop may bypass the readiness score for report only and propose
+/// fixes: the card and the dialog stop asking for the score and keep the
+/// other gates; the choice is saved on the entry.
+#[test]
+fn a_loop_can_bypass_the_readiness_score_for_l1_and_l2() {
+    let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
+    app.loop_registry.add(entry(&temp, "daily-triage"));
+    app.sidebar_section = SidebarSection::Loops;
+    app.refresh_loop_cards(Instant::now());
+    let screen = render(&app, 120, 34);
+    assert!(screen.contains("score of 58 (now 7)"), "{screen}");
+
+    app.loop_registry.loops[0].bypass_score = true;
+    app.refresh_loop_cards(Instant::now());
+    let screen = render(&app, 120, 34);
+    assert!(
+        screen.contains("Allowed to  report only · score bypassed"),
+        "{screen}"
+    );
+    assert!(
+        !screen.contains("score of 58"),
+        "the score is no longer asked for\n{screen}"
+    );
+    assert!(
+        screen.contains("triage skill"),
+        "the other gates still hold\n{screen}"
+    );
+
+    // the dialog edits it, and its level notes follow
+    app.handle_key(&key(KeyCode::Char('e')), Instant::now());
+    let Mode::NewLoop(d) = &mut app.mode else {
+        panic!("{:?}", app.notice)
+    };
+    assert!(d.bypass_score, "the edit dialog loads the choice");
+    d.level = Level::L2;
+    d.field = LoopField::BypassScore;
+    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+    let Mode::NewLoop(d) = &app.mode else {
+        panic!()
+    };
+    assert!(!d.bypass_score);
+    assert!(
+        d.level_notes[1]
+            .as_deref()
+            .unwrap_or("")
+            .contains("a readiness score of 58"),
+        "{:?}",
+        d.level_notes
+    );
+    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+    let Mode::NewLoop(d) = &app.mode else {
+        panic!()
+    };
+    assert!(d.bypass_score);
+    let note = d.level_notes[1].clone().unwrap_or_default();
+    assert!(!note.contains("readiness score"), "{note}");
+    assert!(note.contains("a triage skill"), "{note}");
+    let screen = render(&app, 120, 40);
+    assert!(
+        screen.contains("Score       [x] may run below the readiness score"),
+        "{screen}"
+    );
+}

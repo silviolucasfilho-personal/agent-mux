@@ -36,6 +36,11 @@ pub struct LoopEntry {
     pub max_tokens_per_day: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_cost_usd_per_run: Option<f64>,
+    /// Report only and propose fixes may run below the readiness score;
+    /// their other gates (a state file, a triage skill, a path guard, a
+    /// git repository) still hold, and L3 always needs its score.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bypass_score: bool,
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at: Option<String>,
@@ -211,6 +216,7 @@ pub fn new_entry(
         max_runs_per_day: pattern.max_runs_per_day,
         max_tokens_per_day: pattern.max_tokens_per_day,
         max_cost_usd_per_run: None,
+        bypass_score: false,
         created_at: format_timestamp(now),
         next_run_at: None,
         last_run_id: None,

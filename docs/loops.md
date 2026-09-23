@@ -89,6 +89,8 @@ Registry: `loops/registry.toml` (embedded), merged by id with `~/.agent-mux/loop
 | L2 | assisted: one fix, verifier, human decides | a worktree `.loop-worktrees/<run>` on branch `loop/<run>`; the state file, run log and ledger stay in the workspace (`$AGENT_MUX_LOOP_STATE`, absolute paths in the context) | guard: denylist, `maxFiles`, no push or merge; post-run gate re-check; inbox |
 | L3 | unattended | worktree | same guard; readiness ≥ 78 with verifier, cost observability and fresh activity |
 
+The readiness score gates L1 at 38 and L2 at 58. A loop can bypass the score for those two levels: **Score** in the add/edit dialog (`Space` toggles it), `loop add --bypass-score`, or `"bypass_score": true` on the entry in `loops.json`. The other gates still hold: a state file for L1; a triage skill, a git repository and a path guard for L2. L3 always needs its score (78), a verifier, cost observability and fresh activity. The card reads `Allowed to  report only · score bypassed`, and the Setup tab says so under **Allowed to**.
+
 A loop run passes `--dangerously-skip-permissions` (Claude Code) or `--yolo` (Codex) whatever the profile says: print mode cannot answer an approval prompt, and the guard, the gate and the worktree are the controls instead.
 
 Per-harness ceiling: Claude Code L3 (per-launch guard with `--loop`, fail-closed for write tools); Codex L3 with `agent-mux trace hooks install codex`, else L1; Antigravity not supported (section 8).
@@ -196,7 +198,7 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 
 ## 12. Command line
 
-`agent-mux loop ls|add|rm|run|pause|resume|init|audit|status|report|runs|show|cost|inbox|decide` mirror the sidebar; `add` takes `--model` and `--verifier-model`; `report <id>` prints what a run found and who has to act (`--run <run_id>` for an older one), `runs <id>` the folded timeline (`--all` unfolds it) and `show <run_id>` one run in full; `loop run <id> --now` performs one scheduler pass headlessly (for cron) and exits 0 for report-only or no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. The MCP tool `agent_mux_get_loop_context` gives a running loop its context recomputed now.
+`agent-mux loop ls|add|rm|run|pause|resume|init|audit|status|report|runs|show|cost|inbox|decide` mirror the sidebar; `add` takes `--model`, `--verifier-model` and `--bypass-score`; `report <id>` prints what a run found and who has to act (`--run <run_id>` for an older one), `runs <id>` the folded timeline (`--all` unfolds it) and `show <run_id>` one run in full; `loop run <id> --now` performs one scheduler pass headlessly (for cron) and exits 0 for report-only or no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. The MCP tool `agent_mux_get_loop_context` gives a running loop its context recomputed now.
 
 Configuration (`profiles.toml`):
 

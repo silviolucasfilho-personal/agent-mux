@@ -429,6 +429,7 @@ mod tests {
             max_runs_per_day: 2,
             max_tokens_per_day: 100_000,
             max_cost_usd_per_run: None,
+            bypass_score: false,
             created_at: String::new(),
             next_run_at: None,
             last_run_id: None,

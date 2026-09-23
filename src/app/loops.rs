@@ -200,6 +200,8 @@ pub enum LoopField {
     VerifierModel,
     Every,
     Level,
+    /// Whether report only and propose fixes may run below the score.
+    BypassScore,
     MaxRuns,
     MaxTokens,
     MaxCost,
@@ -207,7 +209,7 @@ pub enum LoopField {
 }
 
 impl LoopField {
-    pub const ALL: [LoopField; 11] = [
+    pub const ALL: [LoopField; 12] = [
         LoopField::Workspace,
         LoopField::Pattern,
         LoopField::Profile,
@@ -215,6 +217,7 @@ impl LoopField {
         LoopField::VerifierModel,
         LoopField::Every,
         LoopField::Level,
+        LoopField::BypassScore,
         LoopField::MaxRuns,
         LoopField::MaxTokens,
         LoopField::MaxCost,
@@ -244,6 +247,7 @@ pub struct LoopDialogState {
     pub max_tokens: String,
     pub max_cost: String,
     pub scaffold: bool,
+    pub bypass_score: bool,
     pub error: Option<String>,
     /// What the readiness audit says about the workspace and the levels.
     pub audit_note: String,
@@ -284,6 +288,7 @@ impl LoopDialogState {
             max_tokens: String::new(),
             max_cost: String::new(),
             scaffold: true,
+            bypass_score: false,
             error: None,
             audit_note: String::new(),
             level_notes: [None, None, None],
@@ -321,6 +326,7 @@ impl LoopDialogState {
             .map(|c| format!("{c}"))
             .unwrap_or_default();
         d.scaffold = false;
+        d.bypass_score = entry.bypass_score;
         d
     }
 
@@ -385,6 +391,7 @@ impl LoopDialogState {
                 self.level = levels[((at + delta).rem_euclid(3)) as usize];
             }
             LoopField::Scaffold => self.scaffold = !self.scaffold,
+            LoopField::BypassScore => self.bypass_score = !self.bypass_score,
             _ => {}
         }
     }
@@ -457,6 +464,7 @@ impl LoopDialogState {
             max_tokens,
             max_cost,
             scaffold: self.scaffold,
+            bypass_score: self.bypass_score,
         })
     }
 }
@@ -493,6 +501,7 @@ pub struct ValidatedLoop {
     pub max_tokens: u64,
     pub max_cost: Option<f64>,
     pub scaffold: bool,
+    pub bypass_score: bool,
 }
 
 /// The per-harness invocation of a skill in the opening prompt.
@@ -794,7 +803,7 @@ impl App {
                 && why.starts_with("readiness:")
                 && let Some(a) = &audit
             {
-                let missing = a.missing_for(entry.level);
+                let missing = a.missing_for_with(entry.level, entry.bypass_score);
                 if !missing.is_empty() {
                     *why = format!("needs {}", missing.join("; "));
                 }
@@ -816,7 +825,7 @@ impl App {
                 missing.push("a git repository for the worktree".into());
             }
             match &audit {
-                Some(a) => missing.extend(a.missing_for(up)),
+                Some(a) => missing.extend(a.missing_for_with(up, entry.bypass_score)),
                 None => missing.push("the workspace".into()),
             }
             (up, missing)
@@ -981,10 +990,10 @@ impl App {
             breaker_trip: breaker.filter(|v| v.tripped()).map(|v| v.reason.clone()),
             breaker_near_trip: breaker.and_then(|v| v.near_trip_reason()),
             audit_allows_configured: audit
-                .map(|a| a.allows(entry.level))
+                .map(|a| a.allows_with(entry.level, entry.bypass_score))
                 .unwrap_or(Err("no readiness audit".into())),
             audit_allows_l2: audit
-                .map(|a| a.allows(Level::L2))
+                .map(|a| a.allows_with(Level::L2, entry.bypass_score))
                 .unwrap_or(Err("no readiness audit".into())),
             audit_score: audit.map(|a| a.score),
             state_stale: audit.is_some_and(|a| a.state_stale),
@@ -1994,7 +2003,11 @@ impl App {
             })
             .unwrap_or(Level::L1);
         let is_repo = worktree::is_git_repo(&ws);
+        let bypass = dialog.bypass_score;
         let mut note = format!("readiness {}/100", audit.score);
+        if bypass {
+            note.push_str(" · the score is bypassed for report only and propose fixes");
+        }
         if ceiling == Level::L1 {
             note.push_str(" · this harness has no path guard, so runs only report");
         } else if !is_repo {
@@ -2009,7 +2022,7 @@ impl App {
             if level > Level::L1 && !is_repo {
                 missing.push("a git repository".into());
             }
-            missing.extend(audit.missing_for(level));
+            missing.extend(audit.missing_for_with(level, bypass));
             (!missing.is_empty()).then(|| format!("needs {}", missing.join("; ")))
         };
         dialog.level_notes = [None, note(Level::L2), note(Level::L3)];
@@ -2064,7 +2077,10 @@ impl App {
             }
             KeyCode::Left => {
                 dialog.cycle(-1);
-                refresh = matches!(dialog.field, LoopField::Profile | LoopField::Pattern);
+                refresh = matches!(
+                    dialog.field,
+                    LoopField::Profile | LoopField::Pattern | LoopField::BypassScore
+                );
             }
             KeyCode::Right | KeyCode::Char(' ')
                 if !matches!(
@@ -2076,7 +2092,10 @@ impl App {
                 ) || key.code == KeyCode::Right =>
             {
                 dialog.cycle(1);
-                refresh = matches!(dialog.field, LoopField::Profile | LoopField::Pattern);
+                refresh = matches!(
+                    dialog.field,
+                    LoopField::Profile | LoopField::Pattern | LoopField::BypassScore
+                );
             }
             KeyCode::Backspace => {
                 if let Some(t) = dialog.text_mut() {
@@ -2183,6 +2202,7 @@ impl App {
         entry.max_runs_per_day = v.max_runs;
         entry.max_tokens_per_day = v.max_tokens;
         entry.max_cost_usd_per_run = v.max_cost;
+        entry.bypass_score = v.bypass_score;
         let id = entry.id.clone();
         self.loop_registry.add(entry);
         if let Err(e) = self.save_loop_registry() {
