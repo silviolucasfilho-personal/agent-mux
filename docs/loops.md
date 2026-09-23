@@ -12,7 +12,9 @@ Design: `docs/superpowers/specs/2026-09-15-loop-engineering-design.md`. Not to b
 2. Pick the workspace with the same directory picker as the New session dialog (it starts on the directory of an open session, the current directory or a profile's `default_dir`; `↓` into the subfolder list, `→`/`←` to enter or go up, type in the list to search subfolders three levels deep), a pattern, a Claude Code or Codex profile, the cadence, `L1`, and leave **Scaffold** on. `Enter`.
 3. agent-mux writes the missing contract files and skills into the workspace (never overwriting), registers the loop in `~/.agent-mux/loops.json`, and shows the readiness score.
 4. Press `r` to run once now, or wait for the slot. The run appears in **Active** as an ordinary session (name `<pattern> ↻ <workspace>`); attach to watch it.
-5. The preview card shows what the last run found, in the words the report uses (`needs you`, `reported`, `quiet`), with its summary line; `loop-run-log.md` in the workspace gains one line per completed run.
+5. The preview card leads with what the last run found, in the words the report uses (`NEEDS YOU`, `REPORTED`, `QUIET`), with its summary line and when it ran; then **Allowed to** (what a run may do now, and what the next step needs), **Today** (runs and tokens against the caps) and, when something is missing, one **Setup** line pointing at the Setup tab. `loop-run-log.md` in the workspace gains one line per completed run.
+
+On screen a level is named by what it lets a run do: `report only` (L1), `propose a fix for you to review` (L2), `fix unattended` (L3). The command line and `loops.json` keep the codes.
 
 Keep L1 (report-only) for a week. Promote to L2 with `e` when the readiness audit allows it (score ≥ 58 and a triage skill) and you have read a week of state files.
 
@@ -54,7 +56,7 @@ alias (`sonnet`, `opus`, `haiku`, `inherit`), since Codex reads a config
 overlay with `model` and `developer_instructions` (codex-cli 0.155.1; see
 `src/loops/scaffold.rs`). The scaffolder never overwrites an existing agent file,
 so a loop whose verifier model changed after scaffolding shows the
-difference in the Loops view's **Files** tab, where the line reads what the
+difference in the Loops view's **Setup** tab, where the line reads what the
 file declares against what the loop asks for. Edit the file with the
 Configuration view (`C`) or delete it and re-scaffold.
 
@@ -114,7 +116,7 @@ and who has to act. It is the state file the run wrote, parsed into the
 shape every loop skill already keeps.
 
 ```text
-Sep 17 17:36   NEEDS YOU   L1 · readiness 71
+Sep 17 17:36   NEEDS YOU   report only · readiness 71
 8 found · 2 for you · 417k tokens · $1.18 · 1m 43s
 #2238 conflicts and #1919 is blocked on a missing check
 Since last run  #2238 CLEAN → CONFLICTING after a push
@@ -141,12 +143,12 @@ older run shows the report *it* wrote. agent-mux keeps one copy of the state
 file per run under `<runtime>/loops/state/<loop id>/`, pruned after 30 days,
 because the workspace's file is rewritten in place every run.
 
-The **Runs** tab (`2`) is the timeline those reports sit in. A run that
+The **History** tab (`2`) is the timeline those reports sit in. A run that
 changed nothing folds away, so a fifteen-minute loop still reads as a
 changelog:
 
 ```text
-Sep 17 17:36   NEEDS YOU   L1 · readiness 71   8 found · 2 for you · 417k tokens · $1.18 · 1m 43s
+Sep 17 17:36   NEEDS YOU   report only · readiness 71   8 found · 2 for you · 417k tokens · $1.18 · 1m 43s
   #2238 conflicts and #1919 is blocked on a missing check
 Sep 17 14:06 … 17:21   quiet ×13   1.1M tokens · $2.60
 Sep 16 16:03 … 17:33   skipped · tokens today 2.2M at the cap of 2.0M ×7
@@ -154,7 +156,7 @@ Sep 16 16:03 … 17:33   skipped · tokens today 2.2M at the cap of 2.0M ×7
 
 Every run leads with the level it ran at and the readiness score its
 pre-flight audit computed — the score at the time of that run, not the
-workspace's score today, which is what the **Readiness** tab (`4`) shows.
+workspace's score today, which is what the **Setup** tab (`4`) shows.
 The selected run opens with why it ended that way, the verifier's verdict,
 the files it touched, the first lines of what it said, its launch id and
 exit code. Outcome words are for the reader (`needs you`,
@@ -166,7 +168,9 @@ A run whose harness has no prices in `pricing.toml` shows `unpriced
 
 ## 9. The inbox
 
-The **Inbox** tab lists runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. `a` marks the run **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed.
+The **Setup** tab (`4`) is everything about the loop that is not a run: what it may do and, for each level, what it still needs (`✓ report only ← set`, `✗ propose a fix for you to review` with one `needs …` line per gap); the budget (today against the caps, the pattern's cost estimate, the last seven days); the contract files, skills, verifier and worktrees; and last the full readiness audit, its findings and recommendations.
+
+The **Inbox** tab (`3`) lists runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. `a` marks the run **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed.
 
 ## 10. Antigravity
 
@@ -179,8 +183,8 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 | Loop shows `‖` with a reason | `p` resumes; a breaker reason also resets the trailing failures in the ledger |
 | `!` with an inbox count | `E` → Inbox, decide with `a` or `x` |
 | Run blocked: tokens at the cap | raise the cap with `e`, or wait for UTC midnight |
-| Run capped at L1: readiness | `E` → Readiness tab lists the missing signals |
-| Run capped at L1: no path guard | Codex: `agent-mux trace hooks install codex`; Claude: the binary must run from an absolute path |
+| Card says "held back: needs …" | `E` → Setup tab (`4`) lists what each level needs and the readiness findings |
+| Held back: no path guard | Codex: `agent-mux trace hooks install codex`; Claude: the binary must run from an absolute path |
 | `verifier_missing` on a fix | the skill did not hand the change to `loop-verifier`; treat the fix as unverified |
 | Run failed: "the harness did not find /loop-…" | the skill file is missing from the run's directory; edit the loop with Scaffold on or run `agent-mux loop init`, and commit `.claude/skills` if you want it in every checkout |
 | An edited loop skill or agent does not reach a workspace | the scaffolder never overwrites; press `u` in the Configuration view or run `agent-mux config push` |

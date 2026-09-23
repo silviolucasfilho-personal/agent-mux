@@ -105,15 +105,40 @@ pub struct LoopCard {
     /// `None`: the pattern has no breaker.
     pub breaker: Option<String>,
     pub kill_switch_in_files: bool,
-    /// score, level, first warnings
-    pub readiness: Option<(u32, String, Vec<String>)>,
     pub inbox: usize,
     pub files: Vec<ContractFile>,
     pub store_error: Option<String>,
     pub ceiling: Level,
+    /// What pre-flight would decide for a run now: blocked and why, or the
+    /// level it would run at and why that is below the configured one.
+    pub preflight: Option<Preflight>,
+    /// The level above the configured one and what stands in its way;
+    /// `None` at L3.
+    pub step_up: Option<(Level, Vec<String>)>,
 }
 
 impl LoopCard {
+    /// `(allowed, capped because)` for the "Allowed to" line: the level a
+    /// run would get now, and why it is below `configured`.
+    pub fn allowed(&self, configured: Level) -> (Level, Option<String>) {
+        match &self.preflight {
+            Some(Preflight::Go {
+                effective_level,
+                level_reason,
+                ..
+            }) => (*effective_level, level_reason.clone()),
+            _ => (configured, None),
+        }
+    }
+
+    /// Why the next run would not start, when it would not.
+    pub fn blocked(&self) -> Option<&str> {
+        match &self.preflight {
+            Some(Preflight::Blocked { reason, .. }) => Some(reason.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn budget_mode(&self) -> &'static str {
         if self.percent >= 100 {
             "blocked"
@@ -129,7 +154,7 @@ impl LoopCard {
         match self.status {
             LoopStatus::Running => "now".into(),
             LoopStatus::Paused => "—".into(),
-            LoopStatus::NeedsHuman => format!("in{}", self.inbox),
+            LoopStatus::NeedsHuman => self.inbox.to_string(),
             _ => match self.next_in_s {
                 Some(s) if s <= 0 => "due".into(),
                 Some(s) => short_duration(s as u64),
@@ -417,7 +442,7 @@ impl LoopDialogState {
         if let Some(note) = &self.level_notes[level_index(self.level)]
             && self.level > Level::L1
         {
-            return Err(format!("level {}: {note}", self.level.as_str()));
+            return Err(format!("{}: {note}", self.level.short()));
         }
         Ok(ValidatedLoop {
             workspace,
@@ -702,46 +727,40 @@ impl App {
         } else {
             ((spend.tokens.max(0) as u128 * 100) / entry.max_tokens_per_day as u128) as u32
         };
-        let breaker = pattern.filter(|p| p.breaker).map(|_| {
-            let path = entry.workspace.join(crate::loops::LEDGER_JSON);
-            match crate::loops::breaker::load(&path) {
-                Ok(ledger) => {
-                    let v = crate::loops::breaker::check(
-                        &ledger,
+        let verdict = pattern.filter(|p| p.breaker).and_then(|_| {
+            crate::loops::breaker::load(&entry.workspace.join(crate::loops::LEDGER_JSON))
+                .ok()
+                .map(|l| {
+                    crate::loops::breaker::check(
+                        &l,
                         &crate::loops::breaker::BreakerConfig::default(),
-                    );
-                    if v.tripped() {
-                        format!("TRIPPED: {}", v.reason)
-                    } else if let Some(t) = v.near_trip {
-                        format!(
-                            "ok · {} attempts · one attempt from tripping ({})",
-                            v.iterations,
-                            t.as_str()
-                        )
-                    } else {
-                        format!("ok · {} attempts", v.iterations)
-                    }
+                    )
+                })
+        });
+        let breaker = pattern.filter(|p| p.breaker).map(|_| match &verdict {
+            Some(v) => {
+                if v.tripped() {
+                    format!("TRIPPED: {}", v.reason)
+                } else if let Some(t) = v.near_trip {
+                    format!(
+                        "ok · {} attempts · one attempt from tripping ({})",
+                        v.iterations,
+                        t.as_str()
+                    )
+                } else {
+                    format!("ok · {} attempts", v.iterations)
                 }
-                Err(_) => "no ledger yet".to_string(),
             }
+            None => "no ledger yet".to_string(),
         });
         let kill_switch_in_files = self.kill_switch_in_files(entry);
         let files = pattern
             .map(|p| crate::loops::scaffold::contract_files(&entry.workspace, p))
             .unwrap_or_default();
-        let readiness = if entry.workspace.is_dir() {
-            let audit = self.audit_for(&entry.workspace, Instant::now());
-            let warnings: Vec<String> = audit
-                .findings
-                .iter()
-                .filter(|f| f.level != crate::loops::readiness::FindingLevel::Ok)
-                .take(3)
-                .map(|f| format!("{} {}", f.level.glyph(), f.message))
-                .collect();
-            Some((audit.score, audit.level_str().to_string(), warnings))
-        } else {
-            None
-        };
+        let audit = entry
+            .workspace
+            .is_dir()
+            .then(|| self.audit_for(&entry.workspace, Instant::now()));
         let inbox_count = inbox.iter().filter(|r| r.loop_id == entry.id).count();
         let last_run = recent.first().cloned();
         let running = self.live_run_for(&entry.id).is_some();
@@ -760,6 +779,48 @@ impl App {
             LoopStatus::Scheduled
         };
         let next_in_s = entry.next_run().map(|t| (t - wall).whole_seconds());
+        let profile = self.loop_profile(entry);
+        let preflight = pattern.map(|p| {
+            let mut plan = run::preflight(
+                entry,
+                &self.preflight_input(entry, p, &profile, &spend, audit.as_ref(), verdict.as_ref()),
+            );
+            // The run log keeps pre-flight's words; the card says what is
+            // missing in the ones the Setup tab uses.
+            if let Preflight::Go {
+                level_reason: Some(why),
+                ..
+            } = &mut plan
+                && why.starts_with("readiness:")
+                && let Some(a) = &audit
+            {
+                let missing = a.missing_for(entry.level);
+                if !missing.is_empty() {
+                    *why = format!("needs {}", missing.join("; "));
+                }
+            }
+            plan
+        });
+        let ceiling = self.harness_ceiling(entry);
+        let step_up = entry.level.next().map(|up| {
+            let mut missing = Vec::new();
+            if up > ceiling {
+                missing.push(match Harness::detect(&entry.harness) {
+                    Some(Harness::Codex) => {
+                        "a path guard: run `agent-mux trace hooks install codex`".to_string()
+                    }
+                    _ => "a path guard for this harness".to_string(),
+                });
+            }
+            if !worktree::is_git_repo(&entry.workspace) {
+                missing.push("a git repository for the worktree".into());
+            }
+            match &audit {
+                Some(a) => missing.extend(a.missing_for(up)),
+                None => missing.push("the workspace".into()),
+            }
+            (up, missing)
+        });
         LoopCard {
             loop_id: entry.id.clone(),
             status,
@@ -772,11 +833,12 @@ impl App {
             percent,
             breaker,
             kill_switch_in_files,
-            readiness,
             inbox: inbox_count,
             files,
             store_error,
-            ceiling: self.harness_ceiling(entry),
+            ceiling,
+            preflight,
+            step_up,
         }
     }
 
@@ -897,6 +959,47 @@ impl App {
 
     // ----- one run ------------------------------------------------------
 
+    /// The facts pre-flight decides on, shared by a launch and the card
+    /// (which shows what the next run would be allowed to do).
+    fn preflight_input(
+        &self,
+        entry: &LoopEntry,
+        pattern: &crate::loops::Pattern,
+        profile: &Profile,
+        spend: &lstore::Spend,
+        audit: Option<&crate::loops::readiness::Audit>,
+        breaker: Option<&crate::loops::breaker::Verdict>,
+    ) -> PreflightInput {
+        let harness = Harness::detect(&entry.harness);
+        PreflightInput {
+            pause_all: self.loop_registry.pause_all,
+            kill_switch_in_files: self.kill_switch_in_files(entry),
+            workspace_exists: entry.workspace.is_dir(),
+            workspace_is_repo: worktree::is_git_repo(&entry.workspace),
+            runs_today: spend.runs,
+            tokens_today: spend.tokens,
+            breaker_trip: breaker.filter(|v| v.tripped()).map(|v| v.reason.clone()),
+            breaker_near_trip: breaker.and_then(|v| v.near_trip_reason()),
+            audit_allows_configured: audit
+                .map(|a| a.allows(entry.level))
+                .unwrap_or(Err("no readiness audit".into())),
+            audit_allows_l2: audit
+                .map(|a| a.allows(Level::L2))
+                .unwrap_or(Err("no readiness audit".into())),
+            audit_score: audit.map(|a| a.score),
+            state_stale: audit.is_some_and(|a| a.state_stale),
+            guard_available: harness.is_some_and(|h| self.guard_available(h)),
+            harness_resolves: harness.is_some()
+                && crate::session::resolve_command(&profile.command).is_some(),
+            skill_installed: harness.is_some_and(|h| {
+                crate::loops::scaffold::project_skills_dir(h, &entry.workspace)
+                    .map(|d| d.join(pattern.triage_skill()).join("SKILL.md").is_file())
+                    .unwrap_or(false)
+            }),
+            concurrency_blocked: None,
+        }
+    }
+
     /// The whole of section 8: pre-flight, isolation, context, launch.
     pub fn start_loop_run(&mut self, loop_id: &str) -> Option<String> {
         let entry = self.loop_registry.find(loop_id).cloned()?;
@@ -937,45 +1040,19 @@ impl App {
         } else {
             None
         };
-        let breaker_trip = breaker_verdict
-            .as_ref()
-            .filter(|v| v.tripped())
-            .map(|v| v.reason.clone());
-        let breaker_near_trip = breaker_verdict.as_ref().and_then(|v| v.near_trip_reason());
         let audit = if entry.workspace.is_dir() {
             Some(self.audit_for(&entry.workspace, now))
         } else {
             None
         };
-        let input = PreflightInput {
-            pause_all: self.loop_registry.pause_all,
-            kill_switch_in_files: self.kill_switch_in_files(&entry),
-            workspace_exists: entry.workspace.is_dir(),
-            workspace_is_repo: worktree::is_git_repo(&entry.workspace),
-            runs_today: spend.runs,
-            tokens_today: spend.tokens,
-            breaker_trip,
-            breaker_near_trip,
-            audit_allows_configured: audit
-                .as_ref()
-                .map(|a| a.allows(entry.level))
-                .unwrap_or(Err("no readiness audit".into())),
-            audit_allows_l2: audit
-                .as_ref()
-                .map(|a| a.allows(Level::L2))
-                .unwrap_or(Err("no readiness audit".into())),
-            audit_score: audit.as_ref().map(|a| a.score),
-            state_stale: audit.as_ref().is_some_and(|a| a.state_stale),
-            guard_available: harness.is_some_and(|h| self.guard_available(h)),
-            harness_resolves: harness.is_some()
-                && crate::session::resolve_command(&profile.command).is_some(),
-            skill_installed: harness.is_some_and(|h| {
-                crate::loops::scaffold::project_skills_dir(h, &entry.workspace)
-                    .map(|d| d.join(pattern.triage_skill()).join("SKILL.md").is_file())
-                    .unwrap_or(false)
-            }),
-            concurrency_blocked: None,
-        };
+        let input = self.preflight_input(
+            &entry,
+            pattern,
+            &profile,
+            &spend,
+            audit.as_ref(),
+            breaker_verdict.as_ref(),
+        );
         let run_id = self.fresh_run_id(conn.as_ref(), wall);
         let mut row = LoopRun::new(
             &run_id,
@@ -1916,29 +1993,24 @@ impl App {
                 }
             })
             .unwrap_or(Level::L1);
-        let git = if worktree::is_git_repo(&ws) {
-            ""
-        } else {
-            " · not a git repository (L1 only)"
-        };
-        dialog.audit_note = format!(
-            "readiness {}/100 {} · guard ceiling {}{}",
-            audit.score,
-            audit.level_str(),
-            ceiling.as_str(),
-            git
-        );
+        let is_repo = worktree::is_git_repo(&ws);
+        let mut note = format!("readiness {}/100", audit.score);
+        if ceiling == Level::L1 {
+            note.push_str(" · this harness has no path guard, so runs only report");
+        } else if !is_repo {
+            note.push_str(" · not a git repository, so runs only report");
+        }
+        dialog.audit_note = note;
         let note = |level: Level| -> Option<String> {
+            let mut missing = Vec::new();
             if level > ceiling {
-                return Some(format!(
-                    "no path guard for this harness (ceiling {})",
-                    ceiling.as_str()
-                ));
+                missing.push("a path guard for this harness".to_string());
             }
-            if level > Level::L1 && !worktree::is_git_repo(&ws) {
-                return Some("needs a git repository".into());
+            if level > Level::L1 && !is_repo {
+                missing.push("a git repository".into());
             }
-            audit.allows(level).err()
+            missing.extend(audit.missing_for(level));
+            (!missing.is_empty()).then(|| format!("needs {}", missing.join("; ")))
         };
         dialog.level_notes = [None, note(Level::L2), note(Level::L3)];
     }
@@ -2143,13 +2215,16 @@ impl App {
     pub fn open_loops_view(&mut self) {
         let selected = self.selected_loop().map(|l| l.id.clone());
         let runtime = self.loops_runtime_dir();
-        let view = super::loops_view::LoopsViewState::new(
+        self.refresh_loop_cards(Instant::now());
+        let mut view = super::loops_view::LoopsViewState::new(
             self.trace_db_path.as_deref(),
             Some(runtime.as_path()),
             &self.loop_registry,
             selected.as_deref(),
             &self.loops.worktrees_dir,
         );
+        view.cards = self.loop_cards.clone();
+        view.rebuild_detail();
         self.mode = Mode::LoopsView(Box::new(view));
     }
 
@@ -2165,6 +2240,7 @@ impl App {
             .map(|r| (r.loop_id.clone(), r.session_id))
             .collect();
         view.live = live;
+        view.cards = self.loop_cards.clone();
         let page = view.viewport_rows.get().max(1) as isize;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -2193,7 +2269,7 @@ impl App {
                 view.rebuild_detail();
             }
             KeyCode::Char('2') => {
-                view.tab = LoopsTab::Runs;
+                view.tab = LoopsTab::History;
                 view.rebuild_detail();
             }
             KeyCode::Char('3') => {
@@ -2201,15 +2277,7 @@ impl App {
                 view.rebuild_detail();
             }
             KeyCode::Char('4') => {
-                view.tab = LoopsTab::Readiness;
-                view.rebuild_detail();
-            }
-            KeyCode::Char('5') => {
-                view.tab = LoopsTab::Budget;
-                view.rebuild_detail();
-            }
-            KeyCode::Char('6') => {
-                view.tab = LoopsTab::Files;
+                view.tab = LoopsTab::Setup;
                 view.rebuild_detail();
             }
             KeyCode::Char('R') => {
@@ -2272,7 +2340,7 @@ impl App {
             KeyCode::Enter => match view.focus {
                 LoopsPane::Loops => view.focus = LoopsPane::Detail,
                 LoopsPane::Detail => {
-                    if view.tab == LoopsTab::Runs {
+                    if view.tab == LoopsTab::History {
                         let live = view
                             .selected_loop()
                             .and_then(|l| view.live_session(&l.id))

@@ -200,7 +200,12 @@ fn keys_of_the_loops_section_pause_run_and_toggle_the_kill_switch() {
     app.handle_key(&key(KeyCode::Char('E')), Instant::now());
     assert!(matches!(app.mode, Mode::LoopsView(_)));
     let screen = render(&app, 120, 40);
-    assert!(screen.contains("Runs"), "{screen}");
+    assert!(screen.contains("History"), "{screen}");
+    assert!(screen.contains("Setup"), "{screen}");
+    assert!(
+        !screen.contains("Readiness |"),
+        "three tabs merged into Setup\n{screen}"
+    );
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(matches!(app.mode, Mode::Control));
 }
@@ -464,10 +469,10 @@ fn the_runs_timeline_folds_quiet_runs_and_opens_the_selected_one() {
     // the selected run opens with why it ended that way
     assert!(out.contains("Why"), "{out}");
     assert!(out.contains("Verifier"), "{out}");
-    assert!(out.contains("not required at L1"), "{out}");
+    assert!(out.contains("the run only reports"), "{out}");
     assert!(out.contains("exit 0"), "the run facts are on screen\n{out}");
     assert!(
-        out.contains("L1 · readiness 100"),
+        out.contains("report only · readiness 100"),
         "every run in the timeline carries the score it ran under\n{out}"
     );
 }
@@ -497,11 +502,14 @@ fn a_loop_is_named_by_its_workspace_and_its_hints_fit() {
         !title.contains('…'),
         "no cut-off path in the title: {title}"
     );
+    app.refresh_loop_cards(Instant::now());
+    let screen = render(&app, 100, 34);
     assert!(
-        screen.contains("Workspace"),
-        "the full path has its own row\n{screen}"
+        screen
+            .lines()
+            .any(|l| l.contains(" Every ") && l.contains("1d · ") && l.contains("proj")),
+        "the cadence and the full path share a row\n{screen}"
     );
-    assert!(screen.contains("Schedule   every 1d"), "{screen}");
     // the preview's hint line keeps whole hints on one row
     assert!(
         !screen
@@ -511,4 +519,60 @@ fn a_loop_is_named_by_its_workspace_and_its_hints_fit() {
     );
     let last = screen.lines().last().unwrap().trim_end();
     assert!(last.ends_with("[?] help"), "{last}");
+}
+
+/// The preview leads with what the loop found, then what it may do and
+/// what stands in the way, in words rather than level codes; the Setup
+/// tab lists what each step needs.
+#[test]
+fn the_card_says_what_the_loop_may_do_and_setup_says_what_it_needs() {
+    let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
+    app.loop_registry.add(entry(&temp, "daily-triage"));
+    app.sidebar_section = SidebarSection::Loops;
+    app.refresh_loop_cards(Instant::now());
+    let screen = render(&app, 120, 34);
+    assert!(screen.contains("NO RUNS YET"), "the answer leads\n{screen}");
+    assert!(
+        screen.contains("Allowed to  report only"),
+        "the level in words\n{screen}"
+    );
+    assert!(
+        screen.contains("to propose a fix for you to review: "),
+        "what the next step needs\n{screen}"
+    );
+    assert!(
+        screen.contains("(now 7)") && screen.contains("a triage skill"),
+        "the gap in plain words\n{screen}"
+    );
+    assert!(
+        screen
+            .lines()
+            .any(|l| l.contains(" Today ") && l.contains("0 of 2 runs")),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("6 of 6 files missing") && screen.contains("[E] Setup tab"),
+        "setup folds to one line\n{screen}"
+    );
+    for code in ["Breaker", "ceiling", " L0", "L1 (", "Readiness  "] {
+        assert!(!screen.contains(code), "{code:?} left the card\n{screen}");
+    }
+
+    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('4')), Instant::now());
+    let setup = render(&app, 120, 100);
+    assert!(setup.contains("What this loop may do"), "{setup}");
+    assert!(setup.contains("✗ report only  ← set"), "{setup}");
+    assert!(setup.contains("needs a state file"), "{setup}");
+    assert!(
+        setup.contains("✗ propose a fix for you to review"),
+        "{setup}"
+    );
+    assert!(setup.contains("Readiness █"), "{setup}");
+    assert!(setup.contains("Budget"), "{setup}");
+    assert!(setup.contains("Files · "), "{setup}");
+    assert!(
+        !setup.contains("needs L"),
+        "no level codes in the needs lines\n{setup}"
+    );
 }

@@ -1143,6 +1143,23 @@ fn value_lines(text: &str) -> Vec<Line<'static>> {
 /// often a single long JSON line). Each piece keeps its span's style, and
 /// continuations sit under the line's own indent.
 fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let indent = line
+        .spans
+        .iter()
+        .flat_map(|s| s.content.chars())
+        .take_while(|c| *c == ' ')
+        .count()
+        .min(width / 4);
+    wrap_line_hanging(line, width, indent)
+}
+
+/// [`wrap_line`] with the continuation indent given: a `key  value` row
+/// hangs its continuations under the value, not under the key.
+pub(crate) fn wrap_line_hanging(
+    line: &Line<'static>,
+    width: usize,
+    indent: usize,
+) -> Vec<Line<'static>> {
     let chars: Vec<(char, Style)> = line
         .spans
         .iter()
@@ -1151,11 +1168,7 @@ fn wrap_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
     if width < 8 || chars.len() <= width {
         return vec![line.clone()];
     }
-    let indent = chars
-        .iter()
-        .take_while(|(c, _)| *c == ' ')
-        .count()
-        .min(width / 4);
+    let indent = indent.min(width / 2);
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut start = 0;
     while start < chars.len() {

@@ -22,32 +22,30 @@ pub enum LoopsPane {
 /// the timeline it sits in. The other three are the loop's configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopsTab {
+    /// What the selected run found and who has to act.
     Report,
-    Runs,
+    /// The runs, quiet ones folded.
+    History,
+    /// Runs waiting on a decision, across every loop.
     Inbox,
-    Readiness,
-    Budget,
-    Files,
+    /// What the loop may do and what it needs: readiness, budget, files.
+    Setup,
 }
 
 impl LoopsTab {
-    pub const ALL: [LoopsTab; 6] = [
+    pub const ALL: [LoopsTab; 4] = [
         LoopsTab::Report,
-        LoopsTab::Runs,
+        LoopsTab::History,
         LoopsTab::Inbox,
-        LoopsTab::Readiness,
-        LoopsTab::Budget,
-        LoopsTab::Files,
+        LoopsTab::Setup,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             LoopsTab::Report => "Report",
-            LoopsTab::Runs => "Runs",
+            LoopsTab::History => "History",
             LoopsTab::Inbox => "Inbox",
-            LoopsTab::Readiness => "Readiness",
-            LoopsTab::Budget => "Budget",
-            LoopsTab::Files => "Files",
+            LoopsTab::Setup => "Setup",
         }
     }
 }
@@ -81,6 +79,8 @@ pub struct LoopsViewState {
     pub viewport_rows: std::cell::Cell<usize>,
     /// Session ids of live runs, by loop id (from the App).
     pub live: Vec<(String, usize)>,
+    /// The App's cards, by loop id: what a run would be allowed to do.
+    pub cards: std::collections::HashMap<String, crate::app::loops::LoopCard>,
     worktrees_dir: String,
     /// Where the per-run copies of the state file are kept.
     runtime: Option<std::path::PathBuf>,
@@ -133,6 +133,7 @@ impl LoopsViewState {
             scroll_offset: 0,
             viewport_rows: std::cell::Cell::new(30),
             live: Vec::new(),
+            cards: Default::default(),
             worktrees_dir: worktrees_dir.to_string(),
             runtime: runtime.map(Path::to_path_buf),
             last_refresh: Instant::now(),
@@ -216,7 +217,7 @@ impl LoopsViewState {
 
     pub fn selected_run(&self) -> Option<&LoopRun> {
         match self.tab {
-            LoopsTab::Runs => self.runs.get(self.selected_run),
+            LoopsTab::History => self.runs.get(self.selected_run),
             LoopsTab::Inbox => self.inbox.get(self.selected_inbox),
             _ => None,
         }
@@ -264,7 +265,7 @@ impl LoopsViewState {
         match self.tab {
             // The Report follows the run selected in the Runs tab; here the
             // arrows move between runs so the reader can step back in time.
-            LoopsTab::Report | LoopsTab::Runs => {
+            LoopsTab::Report | LoopsTab::History => {
                 if !self.runs.is_empty() {
                     let max = self.runs.len() as isize - 1;
                     self.selected_run = (self.selected_run as isize + delta).clamp(0, max) as usize;
@@ -335,7 +336,7 @@ impl LoopsViewState {
         if self.conn.is_none()
             || !matches!(
                 self.tab,
-                LoopsTab::Report | LoopsTab::Runs | LoopsTab::Inbox
+                LoopsTab::Report | LoopsTab::History | LoopsTab::Inbox
             )
         {
             return;
@@ -553,7 +554,7 @@ impl LoopsViewState {
         if let Some(e) = &self.error
             && matches!(
                 self.tab,
-                LoopsTab::Runs | LoopsTab::Inbox | LoopsTab::Budget
+                LoopsTab::History | LoopsTab::Inbox | LoopsTab::Setup
             )
         {
             lines.push(Line::styled(
@@ -566,7 +567,7 @@ impl LoopsViewState {
             LoopsTab::Report => {
                 lines.extend(self.report_lines(&entry));
             }
-            LoopsTab::Runs => {
+            LoopsTab::History => {
                 if self.runs.is_empty() {
                     lines.push(Line::styled("  (no runs yet — [r] runs now)", dim));
                 }
@@ -692,75 +693,73 @@ impl LoopsViewState {
                     }
                 }
             }
-            LoopsTab::Readiness => {
+            LoopsTab::Setup => {
                 let audit = crate::loops::readiness::audit(
                     &entry.workspace,
                     self.store_activity(&entry.workspace),
                 );
-                for l in audit.human_lines() {
-                    lines.push(Line::raw(l));
-                }
-                lines.push(Line::raw(""));
-                lines.push(Line::styled("Level gates", head));
-                for level in [Level::L1, Level::L2, Level::L3] {
-                    let (glyph, text) = match audit.allows(level) {
-                        Ok(()) => ("✓", format!("{}: ok", level.as_str())),
-                        Err(why) => ("✗", why),
-                    };
-                    lines.push(Line::raw(format!("  {glyph} {text}")));
-                }
-                if !audit.activity_evidence.is_empty() {
-                    lines.push(Line::raw(""));
-                    lines.push(Line::styled("Activity evidence", head));
-                    for e in &audit.activity_evidence {
-                        lines.push(Line::raw(format!("  · {e}")));
-                    }
-                }
-            }
-            LoopsTab::Budget => {
-                lines.push(Line::styled(
-                    format!(
-                        "  {:<22} {:<16} {:>9} {:>12} {:>5}  {}",
-                        "loop", "workspace", "runs", "tokens", "%", "mode"
-                    ),
-                    head,
-                ));
-                for l in &self.loops {
-                    let s = self.spend_today(&l.id);
-                    let pct = if l.max_tokens_per_day == 0 {
-                        0
-                    } else {
-                        (s.tokens.max(0) as u128 * 100 / l.max_tokens_per_day as u128) as u32
-                    };
-                    let mode = if pct >= 100 {
-                        "blocked"
-                    } else if pct >= 80 {
-                        "report-only"
-                    } else {
-                        "normal"
-                    };
-                    let sel = l.id == entry.id;
+                let card = self.cards.get(&entry.id);
+                let ceiling = card.map(|c| c.ceiling).unwrap_or(Level::L3);
+                let is_repo = crate::loops::worktree::is_git_repo(&entry.workspace);
+                // What the loop may do, and what each level still needs.
+                lines.push(Line::styled("What this loop may do", head));
+                let (allowed, capped) = card
+                    .map(|c| c.allowed(entry.level))
+                    .unwrap_or((entry.level, None));
+                lines.push(Line::raw(format!("  Allowed to  {}", allowed.can())));
+                if let Some(why) = capped {
                     lines.push(Line::styled(
                         format!(
-                            "  {:<22} {:<16} {:>9} {:>12} {:>4}%  {}",
-                            truncate(&l.pattern, 22),
-                            truncate(&l.workspace_name(), 16),
-                            format!("{}/{}", s.runs, l.max_runs_per_day),
-                            format!(
-                                "{}/{}",
-                                format_tokens(s.tokens.max(0) as u64),
-                                format_tokens(l.max_tokens_per_day)
-                            ),
-                            pct,
-                            mode
+                            "              set to {}; held back: {why}",
+                            entry.level.can()
                         ),
-                        if sel {
-                            Style::default().fg(Color::Cyan)
-                        } else {
-                            Style::default()
-                        },
+                        dim,
                     ));
                 }
+                if let Some(why) = card.and_then(|c| c.blocked()) {
+                    lines.push(Line::styled(
+                        "  Next run    will not start:",
+                        Style::default().fg(Color::Yellow),
+                    ));
+                    lines.push(Line::styled(
+                        format!("              {why}"),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
+                lines.push(Line::raw(""));
+                for level in [Level::L1, Level::L2, Level::L3] {
+                    let mut missing: Vec<String> = Vec::new();
+                    if level > ceiling {
+                        missing.push("a path guard for this harness".into());
+                    }
+                    if level > Level::L1 && !is_repo {
+                        missing.push("a git repository".into());
+                    }
+                    missing.extend(audit.missing_for(level));
+                    let set = if level == entry.level {
+                        "  ← set"
+                    } else {
+                        ""
+                    };
+                    if missing.is_empty() {
+                        lines.push(Line::raw(format!("  ✓ {}{set}", level.can())));
+                    } else {
+                        lines.push(Line::raw(format!("  ✗ {}{set}", level.can())));
+                        for m in missing {
+                            lines.push(Line::styled(format!("      needs {m}"), dim));
+                        }
+                    }
+                }
+                lines.push(Line::raw(""));
+                lines.push(Line::styled("Budget", head));
+                let spend = self.spend_today(&entry.id);
+                lines.push(Line::raw(format!(
+                    "  today      {} of {} runs · {} of {} tokens",
+                    spend.runs,
+                    entry.max_runs_per_day,
+                    format_tokens(spend.tokens.max(0) as u64),
+                    format_tokens(entry.max_tokens_per_day)
+                )));
                 if let Some(p) = patterns::find(&entry.pattern) {
                     lines.push(Line::raw(""));
                     let est = crate::loops::cost::estimate(p, entry.interval_s, entry.level, true);
@@ -789,10 +788,9 @@ impl LoopsViewState {
                         )));
                     }
                 }
-            }
-            LoopsTab::Files => {
+                lines.push(Line::raw(""));
                 lines.push(Line::styled(
-                    format!("  {}", entry.workspace.display()),
+                    format!("Files · {}", entry.workspace.display()),
                     head,
                 ));
                 if let Some(p) = patterns::find(&entry.pattern) {
@@ -857,6 +855,24 @@ impl LoopsViewState {
                         "  {:<10} {} · {} · {}",
                         w.status, w.id, w.branch, w.path
                     )));
+                }
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    format!("Readiness {}", audit.score_bar()),
+                    head,
+                ));
+                lines.push(Line::raw(format!("  {}", audit.assessment)));
+                for f in &audit.findings {
+                    lines.push(Line::raw(format!("  {} {}", f.level.glyph(), f.message)));
+                }
+                for r in &audit.recommendations {
+                    lines.push(Line::styled(format!("  → {r}"), dim));
+                }
+                if !audit.activity_evidence.is_empty() {
+                    lines.push(Line::styled(
+                        format!("  activity: {}", audit.activity_evidence.join(" · ")),
+                        dim,
+                    ));
                 }
             }
         }
@@ -1083,7 +1099,7 @@ fn verifier_text(r: &LoopRun) -> String {
     match (ran, verifier_verdict(r), r.effective_level) {
         (true, Some(v), _) => label.unwrap_or(v).to_string(),
         (true, None, _) => "ran, no verdict line".into(),
-        (false, _, Level::L1) => "not required at L1".into(),
+        (false, _, Level::L1) => "not needed: the run only reports".into(),
         (false, _, _) => "did not run".into(),
     }
 }
@@ -1133,9 +1149,9 @@ fn run_headline(r: &LoopRun) -> Vec<Line<'static>> {
             Span::styled(
                 match r.readiness_score {
                     // The score the pre-flight audit computed for this run,
-                    // not the workspace's score today (the Readiness tab).
-                    Some(s) => format!("   {} · readiness {s}", r.effective_level.as_str()),
-                    None => format!("   {}", r.effective_level.as_str()),
+                    // not the workspace's score today (the Setup tab).
+                    Some(s) => format!("   {} · readiness {s}", r.effective_level.short()),
+                    None => format!("   {}", r.effective_level.short()),
                 },
                 dim,
             ),

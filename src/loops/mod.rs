@@ -57,6 +57,33 @@ impl Level {
         }
     }
 
+    /// What a run at this level may do, as the "Allowed to" line says it.
+    pub fn can(self) -> &'static str {
+        match self {
+            Level::L1 => "report only",
+            Level::L2 => "propose a fix for you to review",
+            Level::L3 => "fix unattended",
+        }
+    }
+
+    /// The option's name in the add/edit dialog.
+    pub fn short(self) -> &'static str {
+        match self {
+            Level::L1 => "report only",
+            Level::L2 => "propose fixes",
+            Level::L3 => "fix unattended",
+        }
+    }
+
+    /// The level above this one, if any.
+    pub fn next(self) -> Option<Level> {
+        match self {
+            Level::L1 => Some(Level::L2),
+            Level::L2 => Some(Level::L3),
+            Level::L3 => None,
+        }
+    }
+
     /// What the level means, for the dialog and the preview.
     pub fn label(self) -> &'static str {
         match self {

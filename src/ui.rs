@@ -1908,7 +1908,7 @@ fn draw_help(f: &mut Frame) {
         row("a / e / x", "add a loop · edit it · remove it (files stay)"),
         row(
             "Loops view",
-            "Tab or 1-6 tabs · Report what a run found · a/x decide an inbox item · T traces",
+            "Tab or 1-4: Report · History · Inbox (a/x decide) · Setup · T traces",
         ),
         Line::raw(""),
         Line::styled("Skills view", head),
@@ -3719,6 +3719,28 @@ fn draw_skill_executions(f: &mut Frame, area: Rect, view: &SkillsViewState) {
 }
 
 /// The Loops section preview: one card for the selected loop.
+/// Wraps the preview's rows at `width`: a `key  value` row (its first span
+/// is the padded key) hangs under the value, any other line under its own
+/// leading spaces.
+fn hang(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    lines
+        .iter()
+        .flat_map(|l| {
+            let first = l.spans.first().map(|s| s.content.as_ref()).unwrap_or("");
+            let indent = if l.spans.len() > 1 && first.starts_with(' ') && first.ends_with("  ") {
+                first.chars().count()
+            } else {
+                l.spans
+                    .iter()
+                    .flat_map(|s| s.content.chars())
+                    .take_while(|c| *c == ' ')
+                    .count()
+            };
+            crate::app::workflows_view::wrap_line_hanging(l, width, indent)
+        })
+        .collect()
+}
+
 fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
     let dim = Style::default().fg(Color::DarkGray);
     let key = Style::default().fg(Color::DarkGray);
@@ -3727,7 +3749,7 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Loops ");
-        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [a] add a loop (pattern, harness, cadence, level)   [E] Loops view   [?] help\n\n  Week one: report-only (L1). Promote to L2 when the readiness audit allows it.";
+        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [a] add a loop (pattern, harness, cadence, what it may do)   [E] Loops view   [?] help\n\n  Start with report only for a week. Let it propose fixes when the Setup tab says it is ready.";
         f.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
@@ -3757,242 +3779,269 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let row =
-        |k: &str, v: String| Line::from(vec![Span::styled(format!(" {k:<11}"), key), Span::raw(v)]);
+    // ` key         value`: the value starts at column KEY, and a row that
+    // wraps hangs under it.
+    const KEY: usize = 13;
+    let row = |k: &str, v: String| {
+        Line::from(vec![
+            Span::styled(format!(" {k:<w$}", w = KEY - 1), key),
+            Span::raw(v),
+        ])
+    };
+    let width = usize::from(inner.width);
     let mut lines: Vec<Line> = Vec::new();
     let card = app.loop_cards.get(&entry.id);
-    let (status, right) = app.loop_row(entry);
-    let next = match card.and_then(|c| c.next_in_s) {
-        Some(s) if s <= 0 => "due now".to_string(),
-        Some(s) => format!("next run in {}", crate::app::loops::long_duration(s as u64)),
-        None => "no next run".to_string(),
-    };
-    let status_text = match status {
-        LoopStatus::Running => "running".to_string(),
+    let (status, _) = app.loop_row(entry);
+    let wall = crate::loops::now();
+
+    // 1. The answer: what the loop is doing or found, and when.
+    let last = card.and_then(|c| c.last_run.as_ref());
+    let (word, why) = match status {
+        LoopStatus::Running => ("RUNNING".to_string(), String::new()),
         LoopStatus::Paused => {
-            let why = entry
-                .paused_reason
-                .as_deref()
-                .map(|r| format!(" ({r})"))
-                .unwrap_or_default();
-            if app.loop_registry.pause_all {
-                "paused by the kill switch (K)".to_string()
+            let why = if app.loop_registry.pause_all {
+                "every loop is paused ([K] resumes)".to_string()
             } else if card.is_some_and(|c| c.kill_switch_in_files) {
-                "paused: loop-pause-all in the workspace files".to_string()
+                "loop-pause-all is in the workspace files".to_string()
             } else {
-                format!("paused{why}")
-            }
+                entry
+                    .paused_reason
+                    .clone()
+                    .unwrap_or_else(|| "[p] resumes".into())
+            };
+            ("PAUSED".to_string(), why)
         }
-        LoopStatus::NeedsHuman => "waiting on a decision (inbox)".to_string(),
-        LoopStatus::Failed => "last run failed or blocked".to_string(),
-        LoopStatus::Scheduled => "scheduled".to_string(),
+        LoopStatus::NeedsHuman => (
+            "NEEDS YOU".to_string(),
+            format!(
+                "{} waiting in the inbox",
+                card.map(|c| c.inbox).unwrap_or(0)
+            ),
+        ),
+        LoopStatus::Failed => (
+            last.map(|r| r.outcome.word())
+                .unwrap_or("failed")
+                .to_uppercase(),
+            last.and_then(|r| r.detail_str("reason"))
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        LoopStatus::Scheduled => match last {
+            Some(r) => (r.outcome.word().to_uppercase(), String::new()),
+            None => ("NO RUNS YET".to_string(), "[r] runs it now".to_string()),
+        },
     };
-    lines.push(Line::from(vec![
-        Span::styled(" Status     ", key),
-        Span::styled(
-            format!("{} {status_text}", status.glyph()),
-            Style::default().fg(status.color()),
-        ),
-        Span::raw(format!(" · {next}")),
-    ]));
+    let mut when: Vec<String> = Vec::new();
+    if let Some(r) = last {
+        let ago = (wall - crate::loops::from_ns(r.started_ns.unwrap_or(r.scheduled_ns)))
+            .whole_seconds()
+            .max(0) as u64;
+        when.push(format!(
+            "ran {} ago",
+            crate::app::loops::short_duration(ago)
+        ));
+    }
+    if status != LoopStatus::Paused {
+        match card.and_then(|c| c.next_in_s) {
+            Some(s) if s <= 0 => when.push("due now".into()),
+            Some(s) => when.push(format!(
+                "next in {}",
+                crate::app::loops::short_duration(s as u64)
+            )),
+            None => {}
+        }
+    }
+    let head = format!(" {} {word}", status.glyph());
+    let tail = when.join(" · ");
+    let mut spans = vec![Span::styled(
+        head.clone(),
+        Style::default()
+            .fg(status.color())
+            .add_modifier(Modifier::BOLD),
+    )];
+    let mut used = head.chars().count();
+    if !why.is_empty() {
+        let text = format!("  {why}");
+        used += text.chars().count();
+        spans.push(Span::raw(text));
+    }
+    if !tail.is_empty() {
+        let pad = width.saturating_sub(used + tail.chars().count() + 1).max(2);
+        spans.push(Span::styled(format!("{}{tail}", " ".repeat(pad)), dim));
+    }
+    lines.push(Line::from(spans));
+
+    let Some(c) = card else {
+        lines.push(Line::styled(" loading…", dim));
+        f.render_widget(Paragraph::new(hang(lines, width)), inner);
+        return;
+    };
+    // what the last run found, in its own words, and what moved
+    if let Some(r) = last {
+        let mut facts: Vec<String> = Vec::new();
+        if let Some(n) = r.items_found {
+            facts.push(format!("{n} found"));
+        }
+        if let Some(n) = r.escalations.filter(|n| *n > 0) {
+            facts.push(format!("{n} for you"));
+        }
+        if let Some(t) = r.tokens.filter(|t| *t > 0) {
+            facts.push(format!(
+                "{} tokens",
+                crate::loops::format_tokens(t.max(0) as u64)
+            ));
+            facts.push(crate::workflows::report::Cost::of(r.cost_usd, &r.harness).text());
+        }
+        if let Some(d) = r.duration_s() {
+            facts.push(crate::workflows::report::format_duration(d));
+        }
+        if let Some(s) = r.detail_str("summary") {
+            lines.push(Line::raw(format!("   {s}")));
+        }
+        if let Some(d) = crate::app::loops::run_delta_summary(r) {
+            lines.push(Line::from(vec![
+                Span::styled("   Since last run  ", dim),
+                Span::raw(d),
+            ]));
+        }
+        if !facts.is_empty() {
+            lines.push(Line::styled(format!("   {}", facts.join(" · ")), dim));
+        }
+    }
+    lines.push(Line::raw(""));
+
+    // 2. What the loop may do, and what stands between it and more.
+    let (allowed, capped) = c.allowed(entry.level);
+    let mut allowed_line = allowed.can().to_string();
+    if let Some(why) = &capped {
+        allowed_line.push_str(&format!(
+            " — set to {}; held back: {why}",
+            entry.level.can()
+        ));
+    }
+    lines.push(row("Allowed to", allowed_line));
+    if capped.is_none()
+        && let Some((up, missing)) = &c.step_up
+    {
+        if missing.is_empty() {
+            lines.push(Line::styled(
+                format!("{}ready to {} · [e] edit", " ".repeat(KEY), up.can()),
+                dim,
+            ));
+        } else {
+            lines.push(Line::styled(
+                format!("{}to {}: {}", " ".repeat(KEY), up.can(), missing.join("; ")),
+                dim,
+            ));
+        }
+    }
+    if status != LoopStatus::Paused
+        && let Some(why) = c.blocked()
+    {
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<w$}", "Next run", w = KEY - 1), key),
+            Span::styled(
+                format!("will not start: {why}"),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    }
+
+    // 3. Today's spend against the caps, and the last few runs.
     lines.push(row(
-        "Workspace",
-        truncate_path_chars(
-            &entry.workspace.to_string_lossy(),
-            usize::from(inner.width.saturating_sub(13)),
-        ),
-    ));
-    lines.push(row(
-        "Schedule",
+        "Today",
         format!(
-            "every {} · level {} ({})",
-            crate::loops::format_interval(entry.interval_s),
-            entry.level.as_str(),
-            entry.level.label()
+            "{} of {} runs · {} of {} tokens{} · {}",
+            c.runs_today,
+            entry.max_runs_per_day,
+            crate::loops::format_tokens(c.tokens_today.max(0) as u64),
+            crate::loops::format_tokens(entry.max_tokens_per_day),
+            if c.percent >= 80 {
+                format!(" ({} %)", c.percent)
+            } else {
+                String::new()
+            },
+            crate::workflows::report::Cost::of(
+                (c.cost_today > 0.0).then_some(c.cost_today),
+                &entry.harness
+            )
+            .text()
         ),
     ));
-    let _ = right;
-    match card {
-        None => {
-            lines.push(Line::styled(" loading…", dim));
-        }
-        Some(c) => {
-            match &c.last_run {
-                Some(r) => {
-                    let when = crate::workflows::report::format_when(
-                        r.started_ns.unwrap_or(r.scheduled_ns),
-                    );
-                    let mut facts: Vec<String> = Vec::new();
-                    if let Some(n) = r.items_found {
-                        facts.push(format!("{n} found"));
-                    }
-                    if let Some(n) = r.escalations.filter(|n| *n > 0) {
-                        facts.push(format!("{n} for you"));
-                    }
-                    if let Some(t) = r.tokens.filter(|t| *t > 0) {
-                        facts.push(format!(
-                            "{} tokens",
-                            crate::loops::format_tokens(t.max(0) as u64)
-                        ));
-                        facts.push(
-                            crate::workflows::report::Cost::of(r.cost_usd, &r.harness).text(),
-                        );
-                    }
-                    if let Some(d) = r.duration_s() {
-                        facts.push(crate::workflows::report::format_duration(d));
-                    }
-                    if r.outcome == crate::loops::Outcome::Blocked
-                        && let Some(reason) = r.detail_str("reason")
-                    {
-                        facts = vec![reason.to_string()];
-                    }
-                    lines.push(row(
-                        "Last run",
-                        format!("{when} · {} · {}", r.outcome.word(), facts.join(" · ")),
-                    ));
-                    // What the run found, in its own words.
-                    if let Some(s) = r
-                        .detail_str("summary")
-                        .map(str::to_string)
-                        .or_else(|| crate::app::loops::run_delta_summary(r))
-                    {
-                        lines.push(row("", s));
-                    }
-                }
-                None => lines.push(row("Last run", "none yet".into())),
-            }
-            lines.push(row(
-                "Budget",
-                format!(
-                    "today {}/{} runs · {}/{} tokens ({} %) · {}{}",
-                    c.runs_today,
-                    entry.max_runs_per_day,
-                    crate::loops::format_tokens(c.tokens_today.max(0) as u64),
-                    crate::loops::format_tokens(entry.max_tokens_per_day),
-                    c.percent,
-                    c.budget_mode(),
-                    entry
-                        .max_cost_usd_per_run
-                        .map(|v| format!(" · ${v:.2}/run cap"))
-                        .unwrap_or_default()
-                ),
-            ));
-            lines.push(row(
-                "Breaker",
-                format!(
-                    "{} │ Kill switch {}",
-                    c.breaker
-                        .clone()
-                        .unwrap_or_else(|| "n/a (report-only pattern)".into()),
-                    if app.loop_registry.pause_all || c.kill_switch_in_files {
-                        "ON"
-                    } else {
-                        "off"
-                    }
-                ),
-            ));
-            match &c.readiness {
-                Some((score, level, warnings)) => {
-                    let filled = (*score as usize * 20 / 100).min(20);
-                    lines.push(row(
-                        "Readiness",
-                        format!(
-                            "{}{}  {score}/100  {level} · ceiling {}",
-                            "█".repeat(filled),
-                            "░".repeat(20 - filled),
-                            c.ceiling.as_str()
-                        ),
-                    ));
-                    for w in warnings {
-                        lines.push(row("", w.clone()));
-                    }
-                }
-                None => lines.push(row("Readiness", "workspace not found".into())),
-            }
-            lines.push(row("Inbox", format!("{} waiting", c.inbox)));
-            let files: Vec<String> = c
-                .files
-                .iter()
-                .map(|fl| {
-                    let short = fl
-                        .name
-                        .trim_end_matches(".md")
-                        .trim_end_matches(".yaml")
-                        .trim_end_matches(".json")
-                        .replace("loop-", "");
-                    format!(
-                        "{} {}",
-                        short,
-                        if !fl.present {
-                            "✗"
-                        } else if fl.stale {
-                            "!"
-                        } else {
-                            "✓"
-                        }
-                    )
-                })
-                .collect();
-            lines.push(row("Files", files.join("  ")));
-            if let Some(e) = &c.store_error {
-                lines.push(Line::styled(
-                    format!(" {e}"),
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-            // One glyph per run, newest on the right, with the tally under
-            // it: a week of a fifteen-minute loop in one line.
-            let glyphs: String = c
-                .recent
-                .iter()
-                .rev()
-                .map(|r| match r.outcome {
-                    crate::loops::Outcome::Escalated => '▮',
-                    crate::loops::Outcome::FixProposed => '▰',
-                    crate::loops::Outcome::ReportOnly => '▪',
-                    crate::loops::Outcome::Failed => '✗',
-                    _ => '▯',
-                })
-                .collect();
-            let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
-            for r in &c.recent {
-                *tally.entry(r.outcome.word()).or_default() += 1;
-            }
-            let tokens: i64 = c.recent.iter().filter_map(|r| r.tokens).sum();
-            let cost: f64 = c.recent.iter().filter_map(|r| r.cost_usd).sum();
-            let recent: Vec<String> = tally
-                .iter()
-                .map(|(word, n)| format!("{n} {word}"))
-                .collect();
-            if !recent.is_empty() {
-                let mut text = format!("{glyphs}  {}", recent.join(" · "));
-                if tokens > 0 {
-                    text.push_str(&format!(
-                        " · {} tokens · {}",
-                        crate::loops::format_tokens(tokens.max(0) as u64),
-                        crate::workflows::report::Cost::of(
-                            (cost > 0.0).then_some(cost),
-                            &c.recent[0].harness
-                        )
-                        .text()
-                    ));
-                }
-                lines.push(row("Recent", text));
-            }
-        }
+    // One glyph per run, newest on the right, with the tally beside it.
+    let glyphs: String = c
+        .recent
+        .iter()
+        .rev()
+        .map(|r| match r.outcome {
+            crate::loops::Outcome::Escalated => '▮',
+            crate::loops::Outcome::FixProposed => '▰',
+            crate::loops::Outcome::ReportOnly => '▪',
+            crate::loops::Outcome::Failed => '✗',
+            _ => '▯',
+        })
+        .collect();
+    let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
+    for r in &c.recent {
+        *tally.entry(r.outcome.word()).or_default() += 1;
+    }
+    if !tally.is_empty() {
+        let recent: Vec<String> = tally
+            .iter()
+            .map(|(word, n)| format!("{n} {word}"))
+            .collect();
+        lines.push(row("Recent", format!("{glyphs}  {}", recent.join(" · "))));
+    }
+    lines.push(row(
+        "Every",
+        format!(
+            "{} · {}",
+            crate::loops::format_interval(entry.interval_s),
+            truncate_path_chars(
+                &entry.workspace.to_string_lossy(),
+                width.saturating_sub(24).max(12)
+            )
+        ),
+    ));
+
+    // 4. Setup, folded to one line: the Setup tab has the detail.
+    let mut setup: Vec<String> = Vec::new();
+    let missing = c.files.iter().filter(|f| !f.present).count();
+    let stale = c.files.iter().filter(|f| f.present && f.stale).count();
+    if missing > 0 {
+        setup.push(format!("{missing} of {} files missing", c.files.len()));
+    }
+    if stale > 0 {
+        setup.push(format!("{stale} stale"));
+    }
+    if let Some(b) = c
+        .breaker
+        .as_deref()
+        .filter(|b| !b.starts_with("ok") && *b != "no ledger yet")
+    {
+        setup.push(format!("breaker {b}"));
+    }
+    if let Some(e) = &c.store_error {
+        setup.push(e.clone());
+    }
+    if !setup.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {:<w$}", "Setup", w = KEY - 1), key),
+            Span::styled(
+                format!("{} · [E] Setup tab", setup.join(" · ")),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
     }
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         fit_hints(
             " [Enter] details  [r] run now  [p] pause  [e] edit  [x] remove  [K] kill switch  [E] loops view",
-            usize::from(inner.width),
+            width,
         ),
         dim,
     ));
-    f.render_widget(
-        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
-        inner,
-    );
+    f.render_widget(Paragraph::new(hang(lines, width)), inner);
 }
 
 /// The directory picker shared by the New session dialog (Directory) and
@@ -4137,9 +4186,9 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
     if let Some(p) = pattern {
         lines.push(Line::styled(
             format!(
-                "            {} · week one {} · risk {} · cost {}",
+                "            {} · starts: {} · risk {} · cost {}",
                 truncate_chars(&p.goal, 48),
-                p.week_one_level.as_str(),
+                p.week_one_level.short(),
                 p.risk,
                 p.token_cost
             ),
@@ -4192,7 +4241,7 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
         dialog.field == LoopField::Every,
     ));
     let level_line: Vec<Span> = {
-        let mut spans = vec![Span::styled(format!("{:<12}", "Level"), dim)];
+        let mut spans = vec![Span::styled(format!("{:<12}", "Allowed to"), dim)];
         for (i, l) in [
             crate::loops::Level::L1,
             crate::loops::Level::L2,
@@ -4213,14 +4262,10 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
                 Style::default()
             };
             spans.push(Span::styled(
-                format!("[{}{}] ", l.as_str(), if blocked { " ✗" } else { "" }),
+                format!("[{}{}] ", l.short(), if blocked { " ✗" } else { "" }),
                 style,
             ));
         }
-        spans.push(Span::styled(
-            format!("({}, week one: report only)", dialog.level.label()),
-            dim,
-        ));
         spans
     };
     lines.push(Line::from(level_line));
@@ -4232,6 +4277,11 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
         lines.push(Line::styled(
             format!("            ✗ {note}"),
             Style::default().fg(Color::Yellow),
+        ));
+    } else {
+        lines.push(Line::styled(
+            format!("            a run may {}", dialog.level.can()),
+            dim,
         ));
     }
     lines.push(field(
@@ -4334,10 +4384,7 @@ fn draw_loops_view(f: &mut Frame, view: &LoopsViewState, app: &App) {
                                 Style::default().fg(status.color()),
                             ),
                             Span::raw(format!("{} ", entry.pattern)),
-                            Span::styled(
-                                format!("{} {}", entry.level.as_str(), right),
-                                Style::default().fg(Color::DarkGray),
-                            ),
+                            Span::styled(right.to_string(), Style::default().fg(Color::DarkGray)),
                         ])
                     }
                 };
@@ -4401,16 +4448,16 @@ fn draw_loops_view(f: &mut Frame, view: &LoopsViewState, app: &App) {
 
     let footer_hints = match view.tab {
         LoopsTab::Inbox => {
-            " [Tab/1-6] tab  [←/→] pane  [↑/↓] select  [a] applied  [x] rejected  [T] traces  [Esc] close"
+            " [Tab/1-4] tab  [←/→] pane  [↑/↓] select  [a] applied  [x] rejected  [T] traces  [Esc] close"
         }
         LoopsTab::Report => {
-            " [Tab/1-6] tab  [↑/↓] earlier run  [2] the timeline  [r] run now  [T] traces  [Esc] close"
+            " [Tab/1-4] tab  [↑/↓] earlier run  [2] history  [r] run now  [T] traces  [Esc] close"
         }
-        LoopsTab::Runs => {
-            " [Tab/1-6] tab  [←/→] pane  [↑/↓] select  [1] its report  [Enter] attach/traces  [r] run now  [Esc] close"
+        LoopsTab::History => {
+            " [Tab/1-4] tab  [←/→] pane  [↑/↓] select  [1] its report  [Enter] attach/traces  [r] run now  [Esc] close"
         }
         _ => {
-            " [Tab/1-6] tab  [←/→] pane  [↑/↓] scroll  [r] run now  [p] pause  [R] reload  [Esc] close"
+            " [Tab/1-4] tab  [←/→] pane  [↑/↓] scroll  [r] run now  [p] pause  [R] reload  [Esc] close"
         }
     };
     let footer_text = Line::styled(

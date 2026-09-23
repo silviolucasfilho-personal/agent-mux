@@ -342,8 +342,9 @@ impl Audit {
         }
     }
 
-    /// Whether the workspace may run at `level`, else why not.
-    pub fn allows(&self, level: Level) -> Result<(), String> {
+    /// The signals the level gates read: state file, triage skill,
+    /// verifier, cost observability, fresh activity.
+    fn gates(&self) -> (bool, bool, bool, bool, bool) {
         let sig = &self.signals;
         let flag = |path: &[&str]| -> bool {
             let mut v = sig;
@@ -352,13 +353,63 @@ impl Audit {
             }
             v.as_bool().unwrap_or(false)
         };
-        let state = flag(&["stateFile", "present"]);
-        let triage = flag(&["triage", "present"]);
-        let verifier = flag(&["verifier", "present"]);
-        let cost_ready = flag(&["cost", "budgetDoc"])
-            && flag(&["cost", "runLog"])
-            && flag(&["cost", "loopMdBudget"]);
-        let activity = flag(&["loopActivity", "present"]);
+        (
+            flag(&["stateFile", "present"]),
+            flag(&["triage", "present"]),
+            flag(&["verifier", "present"]),
+            flag(&["cost", "budgetDoc"])
+                && flag(&["cost", "runLog"])
+                && flag(&["cost", "loopMdBudget"]),
+            flag(&["loopActivity", "present"]),
+        )
+    }
+
+    /// What `level` still needs in this workspace, in plain words for the
+    /// screen; empty exactly when [`Audit::allows`] is `Ok`.
+    pub fn missing_for(&self, level: Level) -> Vec<String> {
+        let (state, triage, verifier, cost_ready, activity) = self.gates();
+        let score = self.score;
+        let mut out = Vec::new();
+        let threshold = match level {
+            Level::L1 => THRESHOLD_L1,
+            Level::L2 => THRESHOLD_L2,
+            Level::L3 => THRESHOLD_L3,
+        };
+        if score < threshold {
+            out.push(format!("a readiness score of {threshold} (now {score})"));
+        }
+        match level {
+            Level::L1 => {
+                if !state {
+                    out.push("a state file".into());
+                }
+            }
+            Level::L2 => {
+                if !triage {
+                    out.push("a triage skill".into());
+                }
+            }
+            Level::L3 => {
+                if !verifier {
+                    out.push("a verifier".into());
+                }
+                if !state {
+                    out.push("a state file".into());
+                }
+                if !cost_ready {
+                    out.push("cost observability (budget doc, run log, LOOP.md budget)".into());
+                }
+                if !activity {
+                    out.push("loop activity in the last 14 days".into());
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the workspace may run at `level`, else why not.
+    pub fn allows(&self, level: Level) -> Result<(), String> {
+        let (state, triage, verifier, cost_ready, activity) = self.gates();
         let score = self.score;
         match level {
             Level::L1 => {
@@ -1136,6 +1187,28 @@ mod tests {
         assert!(
             !is_fresh(now + time::Duration::minutes(2), now),
             "forged future"
+        );
+    }
+
+    #[test]
+    fn missing_for_agrees_with_allows() {
+        for fixture in ["empty", "minimal"] {
+            let temp = copy_fixture(fixture);
+            let a = audit(temp.path(), 0);
+            for level in [Level::L1, Level::L2, Level::L3] {
+                assert_eq!(
+                    a.allows(level).is_ok(),
+                    a.missing_for(level).is_empty(),
+                    "{fixture} {level:?}: {:?}",
+                    a.missing_for(level)
+                );
+            }
+        }
+        let temp = copy_fixture("empty");
+        let a = audit(temp.path(), 0);
+        assert_eq!(
+            a.missing_for(Level::L1),
+            vec!["a readiness score of 38 (now 7)", "a state file"]
         );
     }
 
