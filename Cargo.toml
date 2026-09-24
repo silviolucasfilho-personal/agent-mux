@@ -3,6 +3,17 @@ name = "agent-mux"
 version = "0.1.0"
 edition = "2024"
 
+# The unit tests live in the library and the integration tests in one
+# binary (tests/it). The binary has no tests and the library no doctests:
+# skipping them saves two links and, on macOS, two first-launch scans.
+[lib]
+doctest = false
+
+[[bin]]
+name = "agent-mux"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 anyhow = "1.0.104"
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }

@@ -5359,7 +5359,13 @@ impl App {
             if self.attached() == Some(i) {
                 self.mode = Mode::Control;
             }
-            self.reload_history_sessions();
+            // A loop's or a workflow's headless session is not one the
+            // History list waits for, and the rescan runs on this thread:
+            // in a workspace with no history of its own it reads every
+            // project's transcripts, seconds per exit, twice per session.
+            if self.sessions[i].group.is_none() {
+                self.reload_history_sessions();
+            }
             let _ = self.save_active_sessions();
         }
     }
