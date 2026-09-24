@@ -392,7 +392,10 @@ async fn the_grimoire_review_briefs_the_lenses_and_refutes_only_what_can_block()
             ("brief", "## Intent\nAdds goals."),
             ("find", GRIMOIRE_FINDINGS),
             ("confirmed", STANDS),
-            ("verdict", "ORACLE_VERDICT: NEEDS_CHANGES"),
+            (
+                "verdict",
+                "ORACLE_VERDICT: NEEDS_CHANGES\nBLOCKING_COUNT: 1\nHUMAN_REVIEW_REQUIRED: false\n\nAn IDOR blocks the merge.\n\n## Blocking findings\n- api/routes/goals.ts:12",
+            ),
         ],
         None,
         None,
@@ -410,9 +413,24 @@ async fn the_grimoire_review_briefs_the_lenses_and_refutes_only_what_can_block()
 
     let recent = &f.app.recent_workflow_runs[0];
     assert_eq!(recent.status, "finished", "{:?}", recent.error);
-    assert_eq!(
-        recent.result,
-        serde_json::json!("ORACLE_VERDICT: NEEDS_CHANGES")
+    assert!(
+        recent
+            .result
+            .as_str()
+            .unwrap()
+            .starts_with("ORACLE_VERDICT: NEEDS_CHANGES")
+    );
+    // a verdict the document does not accept waits in the inbox
+    assert_eq!(recent.awaiting.as_deref(), Some("NEEDS_CHANGES"));
+    assert_eq!(f.app.inbox_count(), 1);
+    // the low finding was set aside, not refuted
+    assert!(
+        recent
+            .notes
+            .iter()
+            .any(|n| n.contains("item(s) dropped (1 below keep)")),
+        "{:?}",
+        recent.notes
     );
     // 1 brief + 3 lenses + 3 votes on the one critical finding + 1 verdict:
     // the lenses' duplicates are deduped and the low finding costs no vote
@@ -440,6 +458,11 @@ async fn the_grimoire_review_briefs_the_lenses_and_refutes_only_what_can_block()
     assert_eq!(survivors.len(), 1);
     assert_eq!(survivors[0]["severity"], "critical");
     assert_eq!(verdict["args"]["language"], "English");
+    // the verdict sees the brief and every reviewer's answer
+    assert_eq!(verdict["args"]["brief"], "## Intent\nAdds goals.");
+    let reviews: serde_json::Value =
+        serde_json::from_str(verdict["args"]["reviews"].as_str().unwrap()).unwrap();
+    assert_eq!(reviews.as_array().unwrap().len(), 3);
     for skill in [
         "wf-grimoire-brief",
         "wf-grimoire-lens",

@@ -996,6 +996,7 @@ fn a_recent_run_is_listed_above_the_library_and_opens_in_the_view() {
             result: serde_json::Value::String("the map".into()),
             error: None,
             notes: Vec::new(),
+            awaiting: None,
         },
     );
     app.on_tick(Instant::now());

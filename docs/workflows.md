@@ -104,6 +104,7 @@ harness = "any"            # any | claude | codex | agy | ["claude", "codex"]
 output = "report"          # the step whose result is the run's result
 default_isolation = "none" # none | worktree, for steps that omit isolation
 budget_tokens = 400000     # optional ceiling
+accept = ["APPROVED"]      # optional: verdicts that need no human (see Built-in reviews)
 
 [args.scope]
 description = "A path, a ref range, or empty for the working tree."
@@ -229,11 +230,28 @@ agent-mux passes `--model` through and does not keep a list of model names.
 
 Per-item chains (the main session, then its votes) run independently; a step waits only for the steps it references. Concurrency is `[workflows] max_concurrent` across runs, shared with loop runs.
 
+### Built-in reviews
+
+Three documents review a change. They differ in what they hand you:
+
+| Workflow | Reviewers | Check on each finding | You get | Pick it when |
+| --- | --- | --- | --- | --- |
+| `review-changes` | lenses chosen per change (correctness, tests, one per language, security when touched) | three refuters, two must fail | a report of defects by severity | you want the defects in a diff |
+| `santa-review` | one reviewer, everything | two checkers, both must fail | a report of the findings that survived both | a wrong finding would be costly |
+| `grimoire-review` | security, bugs and edge cases, simplification and design | three refuters, two must fail | a verdict: APPROVED, NEEDS_CHANGES or NEEDS_HUMAN | you are deciding whether to merge |
+
 The built-in `review-changes` is the worked example of the last two rows. Its first step runs `wf-review-dimensions`, which reads the diff and answers the lenses the change deserves: `correctness`, `concurrency and resources` and `tests and coverage` always; one `<language> conventions and idioms` lens per language in the changed files (at most four); and `security` only when a changed path or hunk touches input handling, shell or process execution, SQL, file paths, authentication, secrets, network calls or CI files. The finders fan out over that array. Before the three refutation votes, `keep = "severity in [high, medium]"` drops the low findings so no session is spent refuting them; the dropped count appears in the run's notes.
 
 `santa-review` is the same review with the other gate: one finder lists everything, and each finding then meets two independent `wf-refute` checkers. `keep = "refuted == 0"` on the votes means a single refutation is enough to drop it, so what reaches the report has passed both.
 
-`grimoire-review` is Grimoire's Oracle review (the Spellbook multi-agent kit) as a document. `wf-grimoire-brief` writes the Sage's brief of the change (intent, code touched, convention gaps, one hint per reviewer); the brief is the `input` of a `fanout` over three fixed lenses run by `wf-grimoire-lens`: the Paladin (security), the Cleric (bugs and edge cases) and the Ranger (simplification). Findings carry Grimoire's four severities and a category; `medium` and above meet three `wf-refute` votes, which judge a Ranger finding by its evidence rather than by a failure. `wf-grimoire-verdict` applies the Oracle's rule (any `critical` or `high` is NEEDS_CHANGES, else any `architecture` finding is NEEDS_HUMAN, else APPROVED) and writes a report whose first three lines are `ORACLE_VERDICT:`, `BLOCKING_COUNT:` and `HUMAN_REVIEW_REQUIRED:`. `scope` also takes a pull request as `#123` (read with `gh pr diff`); nothing is posted to it. `--arg language=…` sets the report's language.
+`grimoire-review` is a merge gate modelled on Grimoire, a multi-agent review kit whose roles it borrows; nothing from the kit is installed or run. Four roles, four steps:
+
+- **Brief** (the Sage, `wf-grimoire-brief`): resolves the scope and writes the change's intent, the code it touches, the conventions it departs from, and a hint per reviewer. A scope it cannot read (a mistyped ref, no `gh`, a pull request that is not checked out) or that holds nothing becomes a single `SCOPE_ERROR:` or `NOTHING_TO_REVIEW:` line, and the run ends NEEDS_HUMAN instead of APPROVED.
+- **Review** (`wf-grimoire-lens`, the brief as `input`): the Paladin (security), the Cleric (bugs and edge cases) and the Ranger (simplification and design) each report up to five findings with a severity (`critical` to `low`), a category and a fix.
+- **Verify**: findings of `medium` and above, and every `architecture` finding, meet three `wf-refute` votes; a simplification or design finding stands when its evidence is in the code.
+- **Verdict** (the Oracle, `wf-grimoire-verdict`): NEEDS_HUMAN when nothing was reviewed; NEEDS_CHANGES on any `critical` or `high`; NEEDS_HUMAN when a reviewer did not answer or a design question stands; APPROVED otherwise. The report opens with `ORACLE_VERDICT:`, `BLOCKING_COUNT:` and `HUMAN_REVIEW_REQUIRED:`, then the reason, the findings and a `## Next step`.
+
+The run's headline is the verdict line (any text answer whose header has a `<NAME>_VERDICT:` line is read that way), and `accept = ["APPROVED"]` sends every other verdict to the inbox (`I`). The notes say how many findings were set aside below `keep`, refuted, or left without an answer. `scope` takes a ref range, a path, the working tree (untracked files included) or a pull request as `#123`; check the pull request out first (`gh pr checkout 123`), because the reviewers and refuters read the files on disk. Nothing is posted to the pull request. `--arg language=…` sets the report's language.
 
 ## 3. Sessions and harnesses
 
@@ -287,7 +305,7 @@ default_budget_tokens = 0   # 0 = none
 ## 6. Command line
 
 ```sh
-agent-mux workflow ls [--json]                       workflows with their last run
+agent-mux workflow ls [--json]                       workflows, their last run and when to use each
 agent-mux workflow show <name>                       the document
 agent-mux workflow check [<name>]                    validate documents and step skills; exit 1 on problems
 agent-mux workflow skills                            step skills and where they are installed

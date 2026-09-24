@@ -211,6 +211,10 @@ fn ls(args: &Args) -> anyhow::Result<()> {
                 .unwrap_or_default(),
             status
         );
+        // what tells two similar documents apart (three reviews, say)
+        if let Some(w) = e.doc.as_ref().and_then(|d| d.when_to_use.as_deref()) {
+            println!("{:<22} when: {w}", "");
+        }
     }
     Ok(())
 }

@@ -4,16 +4,23 @@
 # Oracle's verdict (APPROVED, NEEDS_CHANGES or NEEDS_HUMAN) closes the run.
 #
 # Nothing is published: the report is the run's result. Posting review
-# comments on a pull request stays with a human, who reads the verdict
-# from the inbox or the Workflows view.
+# comments on a pull request stays with a human. `accept` sends every
+# verdict other than APPROVED to the inbox (`I`); the run's headline in
+# the Workflows view and `workflow status` reads the verdict line.
+#
+# A scope that cannot be read (a mistyped ref, no `gh`, a pull request
+# that is not checked out, an empty diff) never ends in APPROVED: the
+# brief says so on its first line and the verdict turns it into
+# NEEDS_HUMAN.
 [workflow]
 name = "grimoire-review"
-description = "Grimoire's Oracle review: a Sage brief, then the Paladin (security), Cleric (bugs and edge cases) and Ranger (simplification) lenses, three refuters per finding, and an APPROVED / NEEDS_CHANGES / NEEDS_HUMAN verdict."
-when_to_use = "Reviewing a branch, a ref range or a pull request before merge, when you want a gate verdict rather than a list of findings."
+description = "A merge-gate review in the style of Grimoire: a brief of the change, three reviewers (security; bugs and edge cases; simplification and design), three refuters per finding, and a verdict: APPROVED, NEEDS_CHANGES or NEEDS_HUMAN."
+when_to_use = "Before a merge, when you want a verdict to act on. For a list of defects use review-changes; for findings that must survive two checkers, santa-review."
 output = "verdict"
+accept = ["APPROVED"]
 
 [args.scope]
-description = "What to review: a path, a git ref range (develop..HEAD), a pull request as #123, or empty for the uncommitted working tree."
+description = "What to review: a git ref range (develop..HEAD), a pull request as #123 (check it out first: gh pr checkout 123), a path, or empty for the uncommitted working tree including untracked files."
 default = ""
 
 [args.language]
@@ -52,14 +59,15 @@ input = "brief"
 args = { lens = "{item}", scope = "{args.scope}" }
 result = "findings"
 
-# Low findings are dropped before the votes, so no refuter is spent on them.
+# Low findings are dropped before the votes, so no refuter is spent on
+# them; a design question (`architecture`) always goes on to the verdict.
 [[steps]]
 id = "confirmed"
 kind = "pipeline"
 phase = "Verify"
 over = "find[*].findings[*]"
 dedupe_by = ["file", "line", "category"]
-keep = "severity in [critical, high, medium]"
+keep = "severity in [critical, high, medium] or category == 'architecture'"
 verify = { skill = "wf-refute", votes = 3, result = "verdict", keep = "refuted < 2" }
 
 [[steps]]
@@ -68,4 +76,4 @@ kind = "single"
 phase = "Verdict"
 skill = "wf-grimoire-verdict"
 input = "confirmed"
-args = { scope = "{args.scope}", language = "{args.language}" }
+args = { scope = "{args.scope}", language = "{args.language}", brief = "{brief}", reviews = "{find}" }

@@ -157,6 +157,34 @@ pub struct RecentWorkflowRun {
     pub result: Value,
     pub error: Option<String>,
     pub notes: Vec<String>,
+    /// A finished run whose verdict its document does not `accept`: the
+    /// verdict (or "no verdict"), so the run waits in the inbox.
+    pub awaiting: Option<String>,
+}
+
+impl RecentWorkflowRun {
+    /// Waits on a human: it did not finish cleanly, or it finished with a
+    /// verdict its document does not accept.
+    pub fn needs_human(&self) -> bool {
+        self.status != "finished" || self.error.is_some() || self.awaiting.is_some()
+    }
+}
+
+/// The verdict a finished run waits on, when its document names the
+/// verdicts it `accept`s and the answer's is not one of them.
+fn awaiting_verdict(accept: &[String], status: &str, result: &Value) -> Option<String> {
+    if accept.is_empty() || status != "finished" {
+        return None;
+    }
+    let v = match result {
+        Value::String(text) => crate::workflows::report::verdict_line(text).map(|v| v.value),
+        _ => None,
+    };
+    match v {
+        Some(v) if accept.iter().any(|a| a == &v) => None,
+        Some(v) => Some(v),
+        None => Some("no verdict".into()),
+    }
 }
 
 fn hash_text(text: &str) -> String {
@@ -1120,6 +1148,7 @@ impl App {
             .unwrap_or_default(),
         );
         let live = self.live_workflow_runs.remove(ri);
+        let awaiting = awaiting_verdict(&live.state.doc.accept, status_label, &result);
         let recent = RecentWorkflowRun {
             run_id: live.run_id.clone(),
             name: live.name.clone(),
@@ -1132,6 +1161,7 @@ impl App {
             result,
             error: error.clone(),
             notes: live.state.notes.clone(),
+            awaiting,
         };
         // The notice leads with what the run answered, not with how many
         // sessions it took.
