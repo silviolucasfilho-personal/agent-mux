@@ -37,7 +37,7 @@ fields.title = { type = "string", required = true }
 fields.why = { type = "string", required = true, description = "The concrete failure (inputs, state, wrong output) or, for the Ranger, the cost and the evidence for it." }
 fields.severity = { type = "string", enum = ["critical", "high", "medium", "low"], required = true }
 fields.category = { type = "string", enum = ["security", "bug", "edge-case", "simplification", "performance", "architecture"], required = true }
-fields.lens = { type = "string", enum = ["paladin", "cleric", "ranger"], required = true }
+fields.lens = { type = "string", enum = ["paladin", "cleric", "ranger"], description = "The reviewer that raised it; the answer's own lens when left out." }
 fields.fix = { type = "string", required = true, description = "The exact change that resolves it." }
 [schemas.verdict]
 fields.refuted = { type = "boolean", required = true }

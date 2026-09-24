@@ -919,8 +919,10 @@ impl VerdictLine {
     /// `NEEDS_CHANGES · 2 blocking · <reason>`.
     pub fn headline(&self) -> String {
         let mut parts = vec![self.value.clone()];
-        if let Some(n) = self.blocking.filter(|n| *n > 0) {
-            parts.push(format!("{n} blocking"));
+        match self.blocking {
+            Some(u64::MAX) => parts.push("blocking count unreadable".into()),
+            Some(n) if n > 0 => parts.push(format!("{n} blocking")),
+            _ => {}
         }
         if let Some(r) = &self.reason {
             parts.push(r.clone());
@@ -952,7 +954,10 @@ pub fn verdict_line(text: &str) -> Option<VerdictLine> {
         if key.ends_with("VERDICT") && value.is_none() {
             value = Some(v.to_string());
         } else if key == "BLOCKING_COUNT" {
-            blocking = v.parse().ok();
+            // leading digits (`2 (see below)`); a count with none is read
+            // as blocking, never as zero
+            let digits: String = v.chars().take_while(char::is_ascii_digit).collect();
+            blocking = Some(digits.parse().unwrap_or(u64::MAX));
         } else if key == "HUMAN_REVIEW_REQUIRED" {
             human_required = v.eq_ignore_ascii_case("true");
         }
@@ -1143,6 +1148,14 @@ mod tests {
         assert_eq!(approved.headline(), "APPROVED");
         assert!(verdict_line("## Blocking findings\nORACLE_VERDICT: APPROVED").is_none());
         assert!(verdict_line("Note: prose with a colon").is_none());
+        let loose =
+            verdict_line("ORACLE_VERDICT: APPROVED\nBLOCKING_COUNT: 2 (see below)\n").unwrap();
+        assert_eq!(loose.blocking, Some(2));
+        let word = verdict_line("ORACLE_VERDICT: APPROVED\nBLOCKING_COUNT: two\n").unwrap();
+        assert!(
+            word.blocking.unwrap() > 0,
+            "an unreadable count is not zero"
+        );
     }
 
     #[test]
