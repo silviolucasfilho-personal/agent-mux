@@ -10,7 +10,7 @@ allowed-tools: Read, Grep, Glob
 
 - `inputs`: the findings that survived three independent refuters (every `architecture` finding reaches here, whatever its severity). Each has `file`, `line`, `title`, `why`, `severity`, `category`, `lens` and `fix`. It may be empty.
 - `args.brief`: the Sage's brief. Its first line is `SCOPE:` when the scope was read, `SCOPE_ERROR:` or `NOTHING_TO_REVIEW:` when it was not.
-- `args.reviews`: a JSON array of the three reviewers' answers, in this order: the Paladin, the Cleric, the Ranger. `null` is a reviewer that did not answer.
+- `args.reviews`: a JSON array of the reviewers' answers, each `{ "lens": "paladin" | "cleric" | "ranger", "findings": [...] }`. A reviewer that did not answer is simply absent: check all three lenses are there.
 - `args.scope`: what was reviewed. `args.language`: the language to write in.
 
 ## Procedure
@@ -18,13 +18,13 @@ allowed-tools: Read, Grep, Glob
 1. Apply the rule, first match wins, and do not soften it:
    1. **NEEDS_HUMAN** when the brief is empty or starts with `SCOPE_ERROR:` or `NOTHING_TO_REVIEW:`. Nothing was reviewed; say why, quoting the brief's line.
    2. **NEEDS_CHANGES** when any finding in `inputs` is `critical` or `high`.
-   3. **NEEDS_HUMAN** when a reviewer answered `null`: the change was not reviewed for that lens. Name it (security for the Paladin, bugs and edge cases for the Cleric, simplification and design for the Ranger).
+   3. **NEEDS_HUMAN** when a lens is absent from `args.reviews`: the change was not reviewed for it. Name it (security for the Paladin, bugs and edge cases for the Cleric, simplification and design for the Ranger).
    4. **NEEDS_HUMAN** when any finding's category is `architecture`.
    5. Otherwise **APPROVED**.
 2. Count, from the data only:
    - `BLOCKING_COUNT`: every `critical` and `high` finding in `inputs`.
    - `HUMAN_REVIEW_REQUIRED`: `true` exactly when the verdict is NEEDS_HUMAN or any finding in `inputs` is `architecture`; `false` otherwise.
-   - Raised: the findings in each non-null answer of `args.reviews`, per reviewer. Survived: the length of `inputs`.
+   - Raised: the findings in each answer of `args.reviews`, per reviewer (`no answer` for an absent lens). Survived: the length of `inputs`.
 3. Write the report. List every blocking finding; list at most 10 of the others, most severe first. Every claim traces to a finding or the brief; do not open new investigations or add findings of your own.
 
 ## Rules

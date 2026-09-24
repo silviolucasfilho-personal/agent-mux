@@ -378,7 +378,7 @@ async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
 }
 
 const GRIMOIRE_FINDINGS: &str = r#"```workflow-result
-{"findings":[{"file":"api/routes/goals.ts","line":12,"title":"missing ownership check","why":"any user reads any goal by id","severity":"critical","category":"security","lens":"paladin","fix":"scope the query to the requester"},{"file":"api/lib/x.ts","line":3,"title":"single-use wrapper","why":"forwards to y() only","severity":"low","category":"simplification","lens":"ranger","fix":"call y() directly"}]}
+{"lens":"paladin","findings":[{"file":"api/routes/goals.ts","line":12,"title":"missing ownership check","why":"any user reads any goal by id","severity":"critical","category":"security","lens":"paladin","fix":"scope the query to the requester"},{"file":"api/lib/x.ts","line":3,"title":"single-use wrapper","why":"forwards to y() only","severity":"low","category":"simplification","lens":"ranger","fix":"call y() directly"}]}
 ```"#;
 
 #[tokio::test]

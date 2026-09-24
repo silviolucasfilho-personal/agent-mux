@@ -247,11 +247,11 @@ The built-in `review-changes` is the worked example of the last two rows. Its fi
 `grimoire-review` is a merge gate modelled on Grimoire, a multi-agent review kit whose roles it borrows; nothing from the kit is installed or run. Four roles, four steps:
 
 - **Brief** (the Sage, `wf-grimoire-brief`): resolves the scope and writes the change's intent, the code it touches, the conventions it departs from, and a hint per reviewer. A scope it cannot read (a mistyped ref, no `gh`, a pull request that is not checked out) or that holds nothing becomes a single `SCOPE_ERROR:` or `NOTHING_TO_REVIEW:` line, and the run ends NEEDS_HUMAN instead of APPROVED.
-- **Review** (`wf-grimoire-lens`, the brief as `input`): the Paladin (security), the Cleric (bugs and edge cases) and the Ranger (simplification and design) each report up to five findings with a severity (`critical` to `low`), a category and a fix.
+- **Review** (`wf-grimoire-lens`, the brief as `input`): the Paladin (security), the Cleric (bugs and edge cases) and the Ranger (simplification and design) each answer with their `lens`, so the verdict can name one that failed, and report up to five findings with a severity (`critical` to `low`), a category and a fix.
 - **Verify**: findings of `medium` and above, and every `architecture` finding, meet three `wf-refute` votes; a simplification or design finding stands when its evidence is in the code.
 - **Verdict** (the Oracle, `wf-grimoire-verdict`): NEEDS_HUMAN when nothing was reviewed; NEEDS_CHANGES on any `critical` or `high`; NEEDS_HUMAN when a reviewer did not answer or a design question stands; APPROVED otherwise. The report opens with `ORACLE_VERDICT:`, `BLOCKING_COUNT:` and `HUMAN_REVIEW_REQUIRED:`, then the reason, the findings and a `## Next step`.
 
-The run's headline is the verdict line (any text answer whose header has a `<NAME>_VERDICT:` line is read that way), and `accept = ["APPROVED"]` sends every other verdict to the inbox (`I`). The notes say how many findings were set aside below `keep`, refuted, or left without an answer. `scope` takes a ref range, a path, the working tree (untracked files included) or a pull request as `#123`; check the pull request out first (`gh pr checkout 123`), because the reviewers and refuters read the files on disk. Nothing is posted to the pull request. `--arg language=…` sets the report's language.
+The run's headline is the verdict line (any text answer whose header has a `<NAME>_VERDICT:` line is read that way), and `accept = ["APPROVED"]` sends every other verdict to the inbox (`I`), as it does an APPROVED whose own header says `BLOCKING_COUNT` above zero or `HUMAN_REVIEW_REQUIRED: true`; a headless `workflow run` then exits 4, so a CI step does not pass it as success. The notes say how many findings were set aside below `keep`, refuted, or left without an answer. `scope` takes a ref range, a path, the working tree (untracked files included) or a pull request as `#123`; check the pull request out first (`gh pr checkout 123`), because the reviewers and refuters read the files on disk. Nothing is posted to the pull request. `--arg language=…` sets the report's language.
 
 ## 3. Sessions and harnesses
 
@@ -311,7 +311,8 @@ agent-mux workflow check [<name>]                    validate documents and step
 agent-mux workflow skills                            step skills and where they are installed
 agent-mux workflow run <name> --workspace DIR [--harness claude|codex|agy] [--profile P]
     [--arg name=value …] [--budget N] [--max-cost USD] [--isolation none|worktree]
-    [--resume RUN_ID] [--json]                       exit 0 finished, 1 failed, 2 cancelled, 3 budget
+    [--resume RUN_ID] [--json]                       exit 0 finished, 1 failed, 2 cancelled, 3 budget,
+                                                     4 a verdict the document does not accept
 agent-mux workflow plan "<task>" --workspace DIR [--harness H] [--run] [--save NAME] [--json]
 agent-mux workflow runs [--json]
 agent-mux workflow status <run_id> [--json] [--result] [--steps]

@@ -28,6 +28,7 @@ description = "The language the verdict is written in."
 default = "English"
 
 [schemas.findings]
+fields.lens = { type = "string", enum = ["paladin", "cleric", "ranger"], required = true, description = "Which reviewer answered: the verdict names one that did not." }
 fields.findings = { type = "array", items = "finding", required = true }
 [schemas.finding]
 fields.file = { type = "string", required = true }

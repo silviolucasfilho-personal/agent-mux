@@ -16,6 +16,7 @@ allowed-tools: Read, Grep, Glob, Bash
 2. Establish the diff the brief names: `git diff HEAD` plus the untracked files (`git ls-files --others --exclude-standard`, read in full) for an empty scope, `git diff <range>` for a range, `gh pr diff <n>` for `#<n>` (the brief checked that it is checked out, so the files on disk are the pull request's), or the files under a path.
 3. Read every changed hunk with enough surrounding code to judge it, then apply your lens's checklist below and nothing else. Another session runs each of the other lenses.
 4. Report at most 5 findings, most severe first. Each names the file and, when you can, the line; `why` states the failure or the cost concretely; `fix` states the exact change; `lens` is `args.lens`. Style, naming and formatting are never findings.
+5. Keep the answer valid JSON: `why` and `fix` are at most three sentences of prose each, code only as short inline identifiers, no raw newlines, and every `"` inside a string escaped. A long snippet breaks the block and loses the whole lens.
 
 ## Paladin — security
 
@@ -67,7 +68,7 @@ You are one session of an agent-mux workflow. Read the file named by `$AGENT_MUX
 
 ## Answer
 
-End with exactly one fenced block whose JSON matches `result_schema` from the context, and nothing after it:
+End with exactly one fenced block whose JSON matches `result_schema` from the context, and nothing after it. Its top-level `lens` is `args.lens`, also when `findings` is empty:
 
 ```workflow-result
 {{ ... }}

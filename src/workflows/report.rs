@@ -910,6 +910,8 @@ pub fn outline(text: &str) -> Vec<Heading> {
 pub struct VerdictLine {
     pub value: String,
     pub blocking: Option<u64>,
+    /// `HUMAN_REVIEW_REQUIRED: true`.
+    pub human_required: bool,
     pub reason: Option<String>,
 }
 
@@ -931,6 +933,7 @@ pub fn verdict_line(text: &str) -> Option<VerdictLine> {
     let mut lines = text.lines().map(str::trim).skip_while(|l| l.is_empty());
     let mut value = None;
     let mut blocking = None;
+    let mut human_required = false;
     let mut reason = None;
     for line in lines.by_ref() {
         let Some((key, v)) = line.split_once(':') else {
@@ -950,6 +953,8 @@ pub fn verdict_line(text: &str) -> Option<VerdictLine> {
             value = Some(v.to_string());
         } else if key == "BLOCKING_COUNT" {
             blocking = v.parse().ok();
+        } else if key == "HUMAN_REVIEW_REQUIRED" {
+            human_required = v.eq_ignore_ascii_case("true");
         }
     }
     if reason == Some("") {
@@ -959,6 +964,7 @@ pub fn verdict_line(text: &str) -> Option<VerdictLine> {
     Some(VerdictLine {
         value,
         blocking,
+        human_required,
         reason: reason
             .filter(|r| !r.starts_with('#') && !r.starts_with("```"))
             .map(|r| short(r, 120)),

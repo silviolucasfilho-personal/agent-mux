@@ -176,15 +176,18 @@ fn awaiting_verdict(accept: &[String], status: &str, result: &Value) -> Option<S
     if accept.is_empty() || status != "finished" {
         return None;
     }
-    let v = match result {
-        Value::String(text) => crate::workflows::report::verdict_line(text).map(|v| v.value),
+    let Some(v) = (match result {
+        Value::String(text) => crate::workflows::report::verdict_line(text),
         _ => None,
+    }) else {
+        return Some("no verdict".into());
     };
-    match v {
-        Some(v) if accept.iter().any(|a| a == &v) => None,
-        Some(v) => Some(v),
-        None => Some("no verdict".into()),
-    }
+    // an accepted word that its own header contradicts (blocking findings,
+    // a human asked for) is not accepted
+    let accepted = accept.iter().any(|a| a.eq_ignore_ascii_case(&v.value))
+        && v.blocking.unwrap_or(0) == 0
+        && !v.human_required;
+    (!accepted).then_some(v.value)
 }
 
 fn hash_text(text: &str) -> String {
@@ -2631,5 +2634,41 @@ impl App {
             KeyCode::Char('r') => Some(Action::OpenWorkflowRun),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::awaiting_verdict;
+    use serde_json::json;
+
+    #[test]
+    fn a_verdict_waits_unless_accepted_and_uncontradicted() {
+        let accept = vec!["APPROVED".to_string()];
+        let ok =
+            json!("ORACLE_VERDICT: APPROVED\nBLOCKING_COUNT: 0\nHUMAN_REVIEW_REQUIRED: false\n");
+        assert_eq!(awaiting_verdict(&accept, "finished", &ok), None);
+        assert_eq!(
+            awaiting_verdict(&accept, "finished", &json!("ORACLE_VERDICT: approved")),
+            None,
+            "case does not matter"
+        );
+        assert_eq!(
+            awaiting_verdict(&accept, "finished", &json!("ORACLE_VERDICT: NEEDS_CHANGES"))
+                .as_deref(),
+            Some("NEEDS_CHANGES")
+        );
+        // the word says APPROVED but its own header disagrees
+        let contradicted = json!("ORACLE_VERDICT: APPROVED\nBLOCKING_COUNT: 2\n");
+        assert!(awaiting_verdict(&accept, "finished", &contradicted).is_some());
+        let human = json!("ORACLE_VERDICT: APPROVED\nHUMAN_REVIEW_REQUIRED: true\n");
+        assert!(awaiting_verdict(&accept, "finished", &human).is_some());
+        assert_eq!(
+            awaiting_verdict(&accept, "finished", &json!("## Report")).as_deref(),
+            Some("no verdict")
+        );
+        // no accept list, or a run that did not finish: the old rules apply
+        assert_eq!(awaiting_verdict(&[], "finished", &json!("x")), None);
+        assert_eq!(awaiting_verdict(&accept, "failed", &json!(null)), None);
     }
 }
