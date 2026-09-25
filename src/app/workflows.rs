@@ -157,6 +157,37 @@ pub struct RecentWorkflowRun {
     pub result: Value,
     pub error: Option<String>,
     pub notes: Vec<String>,
+    /// A finished run whose verdict its document does not `accept`: the
+    /// verdict (or "no verdict"), so the run waits in the inbox.
+    pub awaiting: Option<String>,
+}
+
+impl RecentWorkflowRun {
+    /// Waits on a human: it did not finish cleanly, or it finished with a
+    /// verdict its document does not accept.
+    pub fn needs_human(&self) -> bool {
+        self.status != "finished" || self.error.is_some() || self.awaiting.is_some()
+    }
+}
+
+/// The verdict a finished run waits on, when its document names the
+/// verdicts it `accept`s and the answer's is not one of them.
+fn awaiting_verdict(accept: &[String], status: &str, result: &Value) -> Option<String> {
+    if accept.is_empty() || status != "finished" {
+        return None;
+    }
+    let Some(v) = (match result {
+        Value::String(text) => crate::workflows::report::verdict_line(text),
+        _ => None,
+    }) else {
+        return Some("no verdict".into());
+    };
+    // an accepted word that its own header contradicts (blocking findings,
+    // a human asked for) is not accepted
+    let accepted = accept.iter().any(|a| a.eq_ignore_ascii_case(&v.value))
+        && v.blocking.unwrap_or(0) == 0
+        && !v.human_required;
+    (!accepted).then_some(v.value)
 }
 
 fn hash_text(text: &str) -> String {
@@ -1120,6 +1151,7 @@ impl App {
             .unwrap_or_default(),
         );
         let live = self.live_workflow_runs.remove(ri);
+        let awaiting = awaiting_verdict(&live.state.doc.accept, status_label, &result);
         let recent = RecentWorkflowRun {
             run_id: live.run_id.clone(),
             name: live.name.clone(),
@@ -1132,6 +1164,7 @@ impl App {
             result,
             error: error.clone(),
             notes: live.state.notes.clone(),
+            awaiting,
         };
         // The notice leads with what the run answered, not with how many
         // sessions it took.
@@ -2601,5 +2634,41 @@ impl App {
             KeyCode::Char('r') => Some(Action::OpenWorkflowRun),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::awaiting_verdict;
+    use serde_json::json;
+
+    #[test]
+    fn a_verdict_waits_unless_accepted_and_uncontradicted() {
+        let accept = vec!["APPROVED".to_string()];
+        let ok =
+            json!("ORACLE_VERDICT: APPROVED\nBLOCKING_COUNT: 0\nHUMAN_REVIEW_REQUIRED: false\n");
+        assert_eq!(awaiting_verdict(&accept, "finished", &ok), None);
+        assert_eq!(
+            awaiting_verdict(&accept, "finished", &json!("ORACLE_VERDICT: approved")),
+            None,
+            "case does not matter"
+        );
+        assert_eq!(
+            awaiting_verdict(&accept, "finished", &json!("ORACLE_VERDICT: NEEDS_CHANGES"))
+                .as_deref(),
+            Some("NEEDS_CHANGES")
+        );
+        // the word says APPROVED but its own header disagrees
+        let contradicted = json!("ORACLE_VERDICT: APPROVED\nBLOCKING_COUNT: 2\n");
+        assert!(awaiting_verdict(&accept, "finished", &contradicted).is_some());
+        let human = json!("ORACLE_VERDICT: APPROVED\nHUMAN_REVIEW_REQUIRED: true\n");
+        assert!(awaiting_verdict(&accept, "finished", &human).is_some());
+        assert_eq!(
+            awaiting_verdict(&accept, "finished", &json!("## Report")).as_deref(),
+            Some("no verdict")
+        );
+        // no accept list, or a run that did not finish: the old rules apply
+        assert_eq!(awaiting_verdict(&[], "finished", &json!("x")), None);
+        assert_eq!(awaiting_verdict(&accept, "failed", &json!(null)), None);
     }
 }

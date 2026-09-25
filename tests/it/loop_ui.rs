@@ -632,6 +632,7 @@ fn the_inbox_gathers_loop_runs_plans_and_failed_runs() {
         result: serde_json::Value::Null,
         error: Some("budget exceeded".into()),
         notes: Vec::new(),
+        awaiting: None,
     });
     app.refresh_loop_cards(Instant::now());
     assert_eq!(app.inbox_count(), 3);

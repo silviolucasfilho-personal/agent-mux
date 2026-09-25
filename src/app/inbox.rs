@@ -22,13 +22,15 @@ pub enum InboxItem {
         task: String,
         problems: Vec<String>,
     },
-    /// A workflow run since startup that did not finish cleanly.
+    /// A workflow run since startup that did not finish cleanly, or that
+    /// finished with a verdict its document does not accept.
     Run {
         run_id: String,
         name: String,
         status: String,
         error: Option<String>,
         notes: Vec<String>,
+        verdict: Option<String>,
     },
 }
 
@@ -47,6 +49,9 @@ impl InboxItem {
             InboxItem::Loop(r) => r.outcome.word(),
             InboxItem::Plan { problems, .. } if problems.is_empty() => "plan ready",
             InboxItem::Plan { .. } => "plan has problems",
+            InboxItem::Run {
+                verdict: Some(_), ..
+            } => "verdict to read",
             InboxItem::Run { .. } => "did not finish",
         }
     }
@@ -122,13 +127,14 @@ impl App {
         items.extend(
             self.recent_workflow_runs
                 .iter()
-                .filter(|r| r.status != "finished" || r.error.is_some())
+                .filter(|r| r.needs_human())
                 .map(|r| InboxItem::Run {
                     run_id: r.run_id.clone(),
                     name: r.name.clone(),
                     status: r.status.clone(),
                     error: r.error.clone(),
                     notes: r.notes.clone(),
+                    verdict: r.awaiting.clone(),
                 }),
         );
         items.retain(|i| !self.inbox_dismissed.contains(&i.key()));
@@ -149,7 +155,7 @@ impl App {
         let runs = self
             .recent_workflow_runs
             .iter()
-            .filter(|r| r.status != "finished" || r.error.is_some())
+            .filter(|r| r.needs_human())
             .filter(|r| !self.inbox_dismissed.contains(&format!("run:{}", r.run_id)))
             .count();
         loops + plans + runs

@@ -1095,17 +1095,37 @@ impl RunState {
                 }
                 if items.iter().all(|it| Self::item_settled(&step, it)) {
                     let mut kept: Vec<Value> = Vec::new();
-                    let mut dropped = 0;
+                    // why each item went: a reader must tell findings the
+                    // keep predicate set aside from findings the votes refuted
+                    let (mut below_keep, mut refuted, mut unanswered) = (0, 0, 0);
                     for it in items.iter() {
-                        if it.dropped.is_some() {
-                            dropped += 1;
-                        } else if let Some(s) = &it.subject {
-                            kept.push(s.clone());
+                        match it.dropped.as_deref() {
+                            Some("keep") => below_keep += 1,
+                            Some("verify") => refuted += 1,
+                            Some(_) => unanswered += 1,
+                            None => {
+                                if let Some(s) = &it.subject {
+                                    kept.push(s.clone());
+                                }
+                            }
                         }
                     }
+                    let dropped = below_keep + refuted + unanswered;
                     if dropped > 0 {
-                        self.notes
-                            .push(format!("{}: {dropped} item(s) dropped", step.id));
+                        let why: Vec<String> = [
+                            (below_keep, "below keep"),
+                            (refuted, "refuted"),
+                            (unanswered, "without an answer"),
+                        ]
+                        .iter()
+                        .filter(|(n, _)| *n > 0)
+                        .map(|(n, w)| format!("{n} {w}"))
+                        .collect();
+                        self.notes.push(format!(
+                            "{}: {dropped} item(s) dropped ({})",
+                            step.id,
+                            why.join(", ")
+                        ));
                     }
                     if let Some(n) = step.take
                         && kept.len() > n
@@ -1593,7 +1613,13 @@ input = "confirmed"
             RunStatus::Finished(Value::String("empty".into()))
         );
         assert_eq!(st.step_result("find"), serde_json::json!([]));
-        assert!(st.notes.iter().any(|n| n.contains("2 item(s) dropped")));
+        assert!(
+            st.notes
+                .iter()
+                .any(|n| n.contains("2 item(s) dropped (2 without an answer)")),
+            "{:?}",
+            st.notes
+        );
     }
 
     #[test]

@@ -516,6 +516,12 @@ fn verdict(run: &RunView<'_>, blocks: &[Block]) -> String {
     if run.status == "cancelled" {
         return format!("cancelled after {} sessions", run.sessions);
     }
+    // an answer that states its verdict first is read by that verdict
+    if let Value::String(text) = run.result
+        && let Some(v) = verdict_line(text)
+    {
+        return short(&v.headline(), 90);
+    }
     for b in blocks {
         match b {
             Block::Outline { headings, lead, .. } => {
@@ -897,6 +903,79 @@ pub fn outline(text: &str) -> Vec<Heading> {
 }
 
 /// The first paragraph of a text answer that is not a heading.
+/// The verdict a text answer states in its header: leading `KEY: value`
+/// lines, one of them `<NAME>_VERDICT: <value>` (Grimoire's
+/// `ORACLE_VERDICT:`), then the reason on the first line after them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerdictLine {
+    pub value: String,
+    pub blocking: Option<u64>,
+    /// `HUMAN_REVIEW_REQUIRED: true`.
+    pub human_required: bool,
+    pub reason: Option<String>,
+}
+
+impl VerdictLine {
+    /// `NEEDS_CHANGES · 2 blocking · <reason>`.
+    pub fn headline(&self) -> String {
+        let mut parts = vec![self.value.clone()];
+        match self.blocking {
+            Some(u64::MAX) => parts.push("blocking count unreadable".into()),
+            Some(n) if n > 0 => parts.push(format!("{n} blocking")),
+            _ => {}
+        }
+        if let Some(r) = &self.reason {
+            parts.push(r.clone());
+        }
+        parts.join(" · ")
+    }
+}
+
+pub fn verdict_line(text: &str) -> Option<VerdictLine> {
+    let mut lines = text.lines().map(str::trim).skip_while(|l| l.is_empty());
+    let mut value = None;
+    let mut blocking = None;
+    let mut human_required = false;
+    let mut reason = None;
+    for line in lines.by_ref() {
+        let Some((key, v)) = line.split_once(':') else {
+            reason = Some(line);
+            break;
+        };
+        let is_key = !key.is_empty()
+            && key
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        if !is_key {
+            reason = Some(line);
+            break;
+        }
+        let v = v.trim();
+        if key.ends_with("VERDICT") && value.is_none() {
+            value = Some(v.to_string());
+        } else if key == "BLOCKING_COUNT" {
+            // leading digits (`2 (see below)`); a count with none is read
+            // as blocking, never as zero
+            let digits: String = v.chars().take_while(char::is_ascii_digit).collect();
+            blocking = Some(digits.parse().unwrap_or(u64::MAX));
+        } else if key == "HUMAN_REVIEW_REQUIRED" {
+            human_required = v.eq_ignore_ascii_case("true");
+        }
+    }
+    if reason == Some("") {
+        reason = lines.find(|l| !l.is_empty());
+    }
+    let value = value.filter(|v| !v.is_empty())?;
+    Some(VerdictLine {
+        value,
+        blocking,
+        human_required,
+        reason: reason
+            .filter(|r| !r.starts_with('#') && !r.starts_with("```"))
+            .map(|r| short(r, 120)),
+    })
+}
+
 fn lead(text: &str) -> String {
     for line in text.lines() {
         let t = line.trim();
@@ -1052,6 +1131,32 @@ fn text_row(r: &Row) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_verdict_header_is_read_before_the_headings() {
+        let text = "ORACLE_VERDICT: NEEDS_CHANGES\nBLOCKING_COUNT: 2\nHUMAN_REVIEW_REQUIRED: false\n\nTwo findings block the merge.\n\n## Blocking findings\n- a\n";
+        let v = verdict_line(text).unwrap();
+        assert_eq!(v.value, "NEEDS_CHANGES");
+        assert_eq!(v.blocking, Some(2));
+        assert_eq!(
+            v.headline(),
+            "NEEDS_CHANGES · 2 blocking · Two findings block the merge."
+        );
+        let approved =
+            verdict_line("ORACLE_VERDICT: APPROVED\nBLOCKING_COUNT: 0\n## Other findings\n")
+                .unwrap();
+        assert_eq!(approved.headline(), "APPROVED");
+        assert!(verdict_line("## Blocking findings\nORACLE_VERDICT: APPROVED").is_none());
+        assert!(verdict_line("Note: prose with a colon").is_none());
+        let loose =
+            verdict_line("ORACLE_VERDICT: APPROVED\nBLOCKING_COUNT: 2 (see below)\n").unwrap();
+        assert_eq!(loose.blocking, Some(2));
+        let word = verdict_line("ORACLE_VERDICT: APPROVED\nBLOCKING_COUNT: two\n").unwrap();
+        assert!(
+            word.blocking.unwrap() > 0,
+            "an unreadable count is not zero"
+        );
+    }
 
     #[test]
     fn a_state_file_stamp_reads_like_every_other_time() {
@@ -1434,6 +1539,32 @@ input = "confirmed"
         });
         assert_eq!(r.headline.status, Status::Failed);
         assert_eq!(r.headline.verdict, "no step can make progress");
+    }
+
+    #[test]
+    fn a_stated_verdict_is_the_headline_not_the_first_heading() {
+        let result = Value::String(
+            "ORACLE_VERDICT: NEEDS_CHANGES\nBLOCKING_COUNT: 1\nHUMAN_REVIEW_REQUIRED: false\n\nAn IDOR blocks the merge.\n\n## Blocking findings\n\n- api.ts:3\n".into(),
+        );
+        let r = build(RunView {
+            workflow: "grimoire-review",
+            status: "finished",
+            harness: "claude",
+            workspace: "/w",
+            sessions: 8,
+            tokens: 500,
+            cost_usd: None,
+            duration_s: Some(30),
+            result: &result,
+            error: None,
+            notes: &[],
+            doc: None,
+            steps: &[],
+        });
+        assert_eq!(
+            r.headline.verdict,
+            "NEEDS_CHANGES · 1 blocking · An IDOR blocks the merge."
+        );
     }
 
     #[test]

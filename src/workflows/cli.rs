@@ -19,7 +19,8 @@ pub const USAGE: &str = "agent-mux workflow <command>
       [--arg name=value …] [--budget N] [--max-cost USD] [--isolation none|worktree]
       [--step <id>.<harness|profile|model|effort>=<value> …]  per-step, this run only
       [--resume RUN_ID] [--json]   run to completion and print the result;
-                                   exit 0 finished, 1 failed, 2 cancelled, 3 budget exhausted
+                                   exit 0 finished, 1 failed, 2 cancelled, 3 budget exhausted,
+                                   4 finished with a verdict the document does not accept
   plan \"<task>\" --workspace DIR [--harness H] [--profile P] [--budget N] [--run] [--save NAME] [--json]
                                    compose a workflow for the task (and run or save it)
   runs [--json]                    recent runs
@@ -211,6 +212,10 @@ fn ls(args: &Args) -> anyhow::Result<()> {
                 .unwrap_or_default(),
             status
         );
+        // what tells two similar documents apart (three reviews, say)
+        if let Some(w) = e.doc.as_ref().and_then(|d| d.when_to_use.as_deref()) {
+            println!("{:<22} when: {w}", "");
+        }
     }
     Ok(())
 }
@@ -469,6 +474,7 @@ async fn run_workflow(args: &Args) -> anyhow::Result<()> {
                 "run_id": r.run_id, "workflow": r.name, "status": r.status, "harness": r.harness,
                 "sessions": r.sessions, "tokens": r.tokens, "cost_usd": r.cost_usd,
                 "result": r.result, "error": r.error, "notes": r.notes,
+                "awaiting": r.awaiting,
             }))?
         );
     } else {
@@ -489,12 +495,20 @@ async fn run_workflow(args: &Args) -> anyhow::Result<()> {
             other => println!("{}", serde_json::to_string_pretty(other)?),
         }
     }
-    std::process::exit(match r.status.as_str() {
+    std::process::exit(exit_code(&r))
+}
+
+/// A headless run's exit status. A finished run whose verdict its document
+/// does not accept exits 4, so a CI step gating on the status does not
+/// pass a NEEDS_CHANGES review as success.
+fn exit_code(r: &crate::app::workflows::RecentWorkflowRun) -> i32 {
+    match r.status.as_str() {
+        "finished" if r.awaiting.is_some() => 4,
         "finished" => 0,
         "cancelled" => 2,
         "budget-exhausted" => 3,
         _ => 1,
-    })
+    }
 }
 
 async fn plan(args: &Args) -> anyhow::Result<()> {
@@ -584,7 +598,7 @@ async fn plan(args: &Args) -> anyhow::Result<()> {
             serde_json::Value::Null => {}
             other => println!("{}", serde_json::to_string_pretty(other)?),
         }
-        std::process::exit(if r.status == "finished" { 0 } else { 1 });
+        std::process::exit(exit_code(&r));
     }
     shutdown(h).await;
     Ok(())

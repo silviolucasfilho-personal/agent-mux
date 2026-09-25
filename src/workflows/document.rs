@@ -216,6 +216,11 @@ pub struct Workflow {
     pub name: String,
     pub description: String,
     pub when_to_use: Option<String>,
+    /// The verdicts a finished run may end with and not wait on a human:
+    /// when set, the output's first line is `<NAME>_VERDICT: <value>`, and
+    /// a run whose value is not listed, or that has no such line, lands in
+    /// the inbox (`grimoire-review` accepts `APPROVED`).
+    pub accept: Vec<String>,
     pub harness: HarnessFilter,
     pub output: String,
     pub default_isolation: Option<Isolation>,
@@ -331,6 +336,8 @@ struct RawWorkflow {
     name: String,
     description: String,
     when_to_use: Option<String>,
+    #[serde(default)]
+    accept: Vec<String>,
     harness: Option<toml::Value>,
     output: Option<String>,
     default_isolation: Option<Isolation>,
@@ -644,6 +651,7 @@ pub fn parse(text: &str) -> Result<Workflow, Vec<String>> {
         name: raw.workflow.name,
         description: raw.workflow.description,
         when_to_use: raw.workflow.when_to_use,
+        accept: raw.workflow.accept,
         harness,
         output,
         default_isolation: raw.workflow.default_isolation,

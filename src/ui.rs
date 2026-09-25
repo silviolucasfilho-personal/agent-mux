@@ -5291,11 +5291,18 @@ fn draw_inbox(f: &mut Frame, state: &crate::app::inbox::InboxState) {
             status,
             error,
             notes,
+            verdict,
         }) => {
             detail.push(Line::styled(
                 format!("  {} · {name} · {run_id}", status.to_uppercase()),
                 head,
             ));
+            if let Some(v) = verdict {
+                detail.push(Line::styled(
+                    format!("  verdict {v}: the document does not accept it, so a human reads it"),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
             if let Some(e) = error {
                 detail.push(Line::styled(
                     format!("  {e}"),
