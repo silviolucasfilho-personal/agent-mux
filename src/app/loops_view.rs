@@ -598,7 +598,7 @@ impl LoopsViewState {
                     self.store_activity(&entry.workspace),
                 );
                 let card = self.cards.get(&entry.id);
-                let ceiling = card.map(|c| c.ceiling).unwrap_or(Level::L3);
+                let ceiling = card.map(|c| c.ceiling).unwrap_or(Level::L2);
                 let is_repo = crate::loops::worktree::is_git_repo(&entry.workspace);
                 // What the loop may do, and what each level still needs.
                 lines.push(Line::styled("What this loop may do", head));
@@ -626,7 +626,7 @@ impl LoopsViewState {
                     ));
                 }
                 lines.push(Line::raw(""));
-                for level in [Level::L1, Level::L2, Level::L3] {
+                for level in [Level::L1, Level::L2] {
                     let mut missing: Vec<String> = Vec::new();
                     if level > ceiling {
                         missing.push("a path guard for this harness".into());

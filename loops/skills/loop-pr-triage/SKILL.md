@@ -33,11 +33,11 @@ You are one run of a scheduled loop over the open pull requests of this reposito
 ## Report-only vs assisted
 
 - At effective `L1` you write only the state file. No comments on PRs, no branches, no pushes.
-- At `L2`/`L3` you may hand one red-CI PR whose failure is a single-file, test-covered fix outside `gate.denylist` to `loop-fix`. Conflicts, security, payments and auth paths are human gates: never touch them.
+- At `L2` you may hand one red-CI PR whose failure is a single-file, test-covered fix outside `gate.denylist` to `loop-fix`. Conflicts, security, payments and auth paths are human gates: never touch them.
 
 ## Verifier
 
-At `L2`/`L3`, a change from `loop-fix` goes to the `loop-verifier` sub-agent. Record its verdict line in the state file. Only APPROVE makes the outcome `fix-proposed`; REJECT keeps the item in High Priority; ESCALATE_HUMAN or no verdict sets `escalated`.
+At `L2`, a change from `loop-fix` goes to the `loop-verifier` sub-agent. Record its verdict line in the state file. Only APPROVE makes the outcome `fix-proposed`; REJECT keeps the item in High Priority; ESCALATE_HUMAN or no verdict sets `escalated`.
 
 ## State file
 

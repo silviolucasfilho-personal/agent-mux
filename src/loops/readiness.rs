@@ -370,7 +370,7 @@ impl Audit {
     /// score stays a description of the workspace. What a level needs to
     /// be safe still holds.
     pub fn missing_for(&self, level: Level) -> Vec<String> {
-        let (state, triage, verifier, cost_ready, activity) = self.gates();
+        let (state, triage, ..) = self.gates();
         let mut out = Vec::new();
         match level {
             Level::L1 => {
@@ -383,20 +383,6 @@ impl Audit {
                     out.push("a triage skill".into());
                 }
             }
-            Level::L3 => {
-                if !verifier {
-                    out.push("a verifier".into());
-                }
-                if !state {
-                    out.push("a state file".into());
-                }
-                if !cost_ready {
-                    out.push("cost observability (budget doc, run log, LOOP.md budget)".into());
-                }
-                if !activity {
-                    out.push("loop activity in the last 14 days".into());
-                }
-            }
         }
         out
     }
@@ -404,7 +390,7 @@ impl Audit {
     /// Whether the workspace may run at `level`, else why not. The score
     /// does not decide it (see [`Audit::missing_for`]).
     pub fn allows(&self, level: Level) -> Result<(), String> {
-        let (state, triage, verifier, cost_ready, activity) = self.gates();
+        let (state, triage, ..) = self.gates();
         match level {
             Level::L1 => {
                 if state {
@@ -418,29 +404,6 @@ impl Audit {
                     Ok(())
                 } else {
                     Err("L2 needs a triage skill".into())
-                }
-            }
-            Level::L3 => {
-                let mut missing: Vec<&str> = Vec::new();
-                if !verifier {
-                    missing.push("no verifier");
-                }
-                if !state {
-                    missing.push("no state file");
-                }
-                if !cost_ready {
-                    missing.push("missing cost observability");
-                }
-                if !activity {
-                    missing.push("no fresh activity");
-                }
-                if missing.is_empty() {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "L3 needs a verifier, a state file, cost observability and fresh activity ({})",
-                        missing.join(", ")
-                    ))
                 }
             }
         }
@@ -507,9 +470,8 @@ fn build(root: PathBuf, sig: Signals) -> Audit {
     let cost_ready = sig.cost_ready();
     let activity = sig.activity_present();
     let l3_ready = cost_ready && activity;
-    let level = if score >= THRESHOLD_L3 && sig.verifier && sig.state_present() && l3_ready {
-        Some(Level::L3)
-    } else if score >= THRESHOLD_L2 && sig.triage {
+    // the workspace's own readiness, described: never a gate
+    let level = if score >= THRESHOLD_L2 && sig.triage {
         Some(Level::L2)
     } else if score >= THRESHOLD_L1 && sig.state_present() {
         Some(Level::L1)
@@ -517,7 +479,7 @@ fn build(root: PathBuf, sig: Signals) -> Audit {
         None
     };
     let assessment = if score >= 82 && l3_ready {
-        "Strong loop readiness: a candidate for L3 with explicit gates."
+        "Strong loop readiness: ready for a loop that edits, with explicit gates."
     } else if score >= 82 && !cost_ready {
         "Strong signals, but cost observability is incomplete (loop-budget.md, loop-run-log.md, a budget section in LOOP.md): add it before L3."
     } else if score >= 82 {
@@ -1180,7 +1142,7 @@ mod tests {
         for fixture in ["empty", "minimal"] {
             let temp = copy_fixture(fixture);
             let a = audit(temp.path(), 0);
-            for level in [Level::L1, Level::L2, Level::L3] {
+            for level in [Level::L1, Level::L2] {
                 assert_eq!(
                     a.allows(level).is_ok(),
                     a.missing_for(level).is_empty(),
@@ -1202,12 +1164,6 @@ mod tests {
         assert!(a.score < THRESHOLD_L1);
         assert_eq!(a.missing_for(Level::L1), vec!["a state file"]);
         assert_eq!(a.missing_for(Level::L2), vec!["a triage skill"]);
-        let l3 = a.missing_for(Level::L3);
-        assert!(!l3.iter().any(|m| m.contains("score")), "{l3:?}");
-        assert!(
-            l3.contains(&"a verifier".to_string()),
-            "L3 keeps its other gates"
-        );
         // a triage skill alone: L2 runs at a score under 58
         let skill = temp.path().join(".claude/skills/loop-triage");
         std::fs::create_dir_all(&skill).unwrap();
@@ -1229,10 +1185,6 @@ mod tests {
         let a = audit(temp.path(), 0);
         assert!(a.score < THRESHOLD_L1, "score {}", a.score);
         assert!(a.allows(Level::L1).is_ok());
-        assert!(
-            a.allows(Level::L3).is_err(),
-            "no verifier, no cost, no activity"
-        );
     }
 
     #[test]
@@ -1283,11 +1235,7 @@ mod tests {
         assert_eq!(a.signals["skills"]["count"], 2);
         assert!(a.allows(Level::L1).is_ok());
         assert!(a.allows(Level::L2).is_ok());
-        let why = a.allows(Level::L3).unwrap_err();
-        assert!(
-            !why.contains("score") && why.contains("no fresh activity"),
-            "{why}"
-        );
+
         // a fresh state file adds activity: 90, still not L3 (no cost observability)
         set_last_run(temp.path(), "STATE.md", OffsetDateTime::now_utc());
         let fresh = audit(temp.path(), 0);
@@ -1305,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn the_full_fixture_reaches_100_and_l3_once_a_run_is_fresh() {
+    fn the_full_fixture_reaches_100_once_a_run_is_fresh() {
         // base 7 + state 18 + triage 14 + LOOP.md 9 + AGENTS.md 9 + skills 14
         // + verifier 14 + safety 4+4 + github 6+4 + mcp 3 + worktree 3
         // + registry 2 + budget 3 + run log 3 + LOOP.md budget 2 + budget skill 2
@@ -1328,13 +1276,10 @@ mod tests {
                 .iter()
                 .any(|f| f.message.contains("no proven loop activity"))
         );
-        assert!(a.allows(Level::L3).is_err());
-
-        // store evidence alone unlocks L3
+        // store evidence alone makes the workspace strong
         let with_store = audit(temp.path(), 2);
-        assert_eq!(with_store.level, Some(Level::L3));
+        assert_eq!(with_store.level, Some(Level::L2));
         assert_eq!(with_store.activity_evidence, vec!["store:2 runs"]);
-        assert!(with_store.allows(Level::L3).is_ok());
         assert!(with_store.assessment.starts_with("Strong loop readiness"));
 
         // so does a fresh run-log line
@@ -1346,14 +1291,14 @@ mod tests {
         ));
         fs::write(&log, text).unwrap();
         let with_log = audit(temp.path(), 0);
-        assert_eq!(with_log.level, Some(Level::L3));
+        assert_eq!(with_log.level, Some(Level::L2));
         assert_eq!(
             with_log.activity_evidence,
             vec!["log:loop-run-log.md:fresh"]
         );
         assert_eq!(with_log.score_bar(), format!("{}  100/100", "█".repeat(20)));
         let lines = with_log.human_lines();
-        assert!(lines[1].contains("Score: 100/100  Level: L3"));
+        assert!(lines[1].contains("Score: 100/100  Level: L2"));
         assert!(
             lines
                 .iter()

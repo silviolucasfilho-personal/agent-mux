@@ -247,7 +247,7 @@ pub struct LoopDialogState {
     pub error: Option<String>,
     /// What the readiness audit says about the workspace and the levels.
     pub audit_note: String,
-    pub level_notes: [Option<String>; 3],
+    pub level_notes: [Option<String>; 2],
     /// True when no profile runs Claude Code or Codex.
     pub no_profiles: bool,
 }
@@ -286,7 +286,7 @@ impl LoopDialogState {
             scaffold: true,
             error: None,
             audit_note: String::new(),
-            level_notes: [None, None, None],
+            level_notes: [None, None],
             no_profiles,
         };
         if let Some(p) = pattern {
@@ -380,9 +380,8 @@ impl LoopDialogState {
                 }
             }
             LoopField::Level => {
-                let levels = [Level::L1, Level::L2, Level::L3];
-                let at = levels.iter().position(|l| *l == self.level).unwrap_or(0) as isize;
-                self.level = levels[((at + delta).rem_euclid(3)) as usize];
+                let _ = delta;
+                self.level = Level::from_edits(!self.level.edits());
             }
             LoopField::Scaffold => self.scaffold = !self.scaffold,
             _ => {}
@@ -465,7 +464,6 @@ fn level_index(level: Level) -> usize {
     match level {
         Level::L1 => 0,
         Level::L2 => 1,
-        Level::L3 => 2,
     }
 }
 
@@ -868,7 +866,7 @@ impl App {
 
     pub fn harness_ceiling(&self, entry: &LoopEntry) -> Level {
         match Harness::detect(&entry.harness) {
-            Some(h) if self.guard_available(h) => Level::L3,
+            Some(h) if self.guard_available(h) => Level::L2,
             _ => Level::L1,
         }
     }
@@ -1975,11 +1973,7 @@ impl App {
         let ws = PathBuf::from(shellexpand_home(dialog.workspace.trim()));
         if !ws.is_dir() {
             dialog.audit_note = "workspace: not a directory".into();
-            dialog.level_notes = [
-                None,
-                Some("no workspace".into()),
-                Some("no workspace".into()),
-            ];
+            dialog.level_notes = [None, Some("no workspace".into())];
             return;
         }
         let audit = self.audit_for(&ws, Instant::now());
@@ -1987,7 +1981,7 @@ impl App {
             .harness()
             .map(|h| {
                 if self.guard_available(h) {
-                    Level::L3
+                    Level::L2
                 } else {
                     Level::L1
                 }
@@ -2013,7 +2007,7 @@ impl App {
             missing.extend(audit.missing_for(level));
             (!missing.is_empty()).then(|| format!("needs {}", missing.join("; ")))
         };
-        dialog.level_notes = [None, note(Level::L2), note(Level::L3)];
+        dialog.level_notes = [None, note(Level::L2)];
     }
 
     pub fn handle_loop_dialog_key(&mut self, key: &KeyEvent) {

@@ -26,7 +26,7 @@ Say which one this run is and why (`run.level_effective`, `run.level_reason`). A
 
 ## Verifier
 
-Remind the run that at `L2`/`L3` every change goes to the `loop-verifier` sub-agent and that its verdict is recorded in the state file.
+Remind the run that at `L2` every change goes to the `loop-verifier` sub-agent and that its verdict is recorded in the state file.
 
 ## State file
 

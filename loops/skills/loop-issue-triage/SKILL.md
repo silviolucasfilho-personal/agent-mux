@@ -32,11 +32,11 @@ You are one run of a scheduled loop over the open issues. Budget, level and stat
 ## Report-only vs assisted
 
 - Effective `L1`: state file only.
-- `L2`/`L3`: still no writes to the tracker; the only assisted action is applying labels a human already approved in the previous state file (`Human decision: apply`), one `gh issue edit <n> --add-label <l>` per run.
+- `L2`: still no writes to the tracker; the only assisted action is applying labels a human already approved in the previous state file (`Human decision: apply`), one `gh issue edit <n> --add-label <l>` per run.
 
 ## Verifier
 
-Not used by this pattern's reply drafting. When a label is applied at `L2`/`L3`, ask the `loop-verifier` sub-agent to confirm the label existed and the human decision was recorded; record its verdict line.
+Not used by this pattern's reply drafting. When a label is applied at `L2`, ask the `loop-verifier` sub-agent to confirm the label existed and the human decision was recorded; record its verdict line.
 
 ## State file
 

@@ -79,7 +79,7 @@ impl LField {
             LField::Name => "Name",
             LField::Goal => "Goal",
             LField::Every => "Every",
-            LField::Level => "Starts at",
+            LField::Level => "Edits files",
             LField::Skills => "Skills",
             LField::Checkers => "Checkers",
             LField::Verifier => "Verifier",
@@ -232,11 +232,7 @@ impl LoopBuilderState {
             LField::Name => p.name.clone(),
             LField::Goal => p.goal.clone(),
             LField::Every => builder::format_interval(p.default_interval_s),
-            LField::Level => match p.week_one_level {
-                Level::L1 => "L1 · reports only".into(),
-                Level::L2 => "L2 · proposes one fix".into(),
-                Level::L3 => "L3 · fixes and verifies".into(),
-            },
+            LField::Level => p.week_one_level.short().into(),
             LField::Skills => p.skills.join(" → "),
             LField::Checkers => {
                 let a = p.effective_agents();
@@ -899,9 +895,8 @@ fn loop_cycle(st: &mut LoopBuilderState, f: LField, delta: isize) {
     let Some(p) = st.current_mut() else { return };
     match f {
         LField::Level => {
-            let all = [Level::L1, Level::L2, Level::L3];
-            let i = all.iter().position(|l| *l == p.week_one_level).unwrap_or(0) as isize;
-            p.week_one_level = all[(i + delta).rem_euclid(3) as usize];
+            let _ = delta;
+            p.week_one_level = Level::from_edits(!p.week_one_level.edits());
         }
         LField::Verifier => p.verifier = !p.verifier,
         LField::Breaker => p.breaker = !p.breaker,

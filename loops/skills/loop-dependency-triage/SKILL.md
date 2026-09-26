@@ -33,7 +33,7 @@ Use only tools already present; never install one.
 ## Report-only vs assisted
 
 - Effective `L1`: state file only.
-- `L2`/`L3`: hand **one** patch-level bump of one direct dependency to `loop-fix` (manifest and lockfile only, tests must pass). Minor bumps only when the project pins minors; major bumps, CVE fixes that need code changes and denylisted packages are human gates.
+- `L2`: hand **one** patch-level bump of one direct dependency to `loop-fix` (manifest and lockfile only, tests must pass). Minor bumps only when the project pins minors; major bumps, CVE fixes that need code changes and denylisted packages are human gates.
 
 ## Verifier
 

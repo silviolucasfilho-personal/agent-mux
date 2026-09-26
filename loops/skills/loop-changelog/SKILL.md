@@ -27,11 +27,11 @@ You are one run of a scheduled loop that drafts release notes. Budget, level and
 ## Report-only vs assisted
 
 - Effective `L1`: the draft goes into the state file only.
-- `L2`/`L3`: you may write the draft as an `## Unreleased` section at the top of `CHANGELOG.md` (one file, no other change, never a tag or a version bump) and hand it to the verifier. That is the only write outside the state file, and only when `CHANGELOG.md` is not in `gate.denylist`.
+- `L2`: you may write the draft as an `## Unreleased` section at the top of `CHANGELOG.md` (one file, no other change, never a tag or a version bump) and hand it to the verifier. That is the only write outside the state file, and only when `CHANGELOG.md` is not in `gate.denylist`.
 
 ## Verifier
 
-At `L2`/`L3` the `loop-verifier` sub-agent checks that every entry maps to a commit in the window and nothing else changed. Record its verdict line. APPROVE → `fix-proposed`; REJECT → draft stays in the state file; ESCALATE_HUMAN or no verdict → `escalated`.
+At `L2` the `loop-verifier` sub-agent checks that every entry maps to a commit in the window and nothing else changed. Record its verdict line. APPROVE → `fix-proposed`; REJECT → draft stays in the state file; ESCALATE_HUMAN or no verdict → `escalated`.
 
 ## State file
 

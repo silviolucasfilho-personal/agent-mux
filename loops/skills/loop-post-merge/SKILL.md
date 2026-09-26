@@ -29,7 +29,7 @@ You are one run of a scheduled loop that reads recent merges and lists their lef
 ## Report-only vs assisted
 
 - Effective `L1`: state file only.
-- `L2`/`L3`: hand one leftover to `loop-fix` when it is a single-file removal or doc line outside `gate.denylist` (a dead flag with one call site, one stale TODO, one wrong doc line). Feature flags that change behaviour, large diffs and anything architectural are human gates.
+- `L2`: hand one leftover to `loop-fix` when it is a single-file removal or doc line outside `gate.denylist` (a dead flag with one call site, one stale TODO, one wrong doc line). Feature flags that change behaviour, large diffs and anything architectural are human gates.
 
 ## Verifier
 

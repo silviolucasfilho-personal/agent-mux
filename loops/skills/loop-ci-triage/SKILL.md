@@ -31,7 +31,7 @@ You are one run of a scheduled loop that looks at CI on the default branch. Budg
 ## Report-only vs assisted
 
 - Effective `L1`: state file only.
-- `L2`/`L3`: hand one **code** failure to `loop-fix` when the fix is one file, test-covered, outside `gate.denylist` and not in a security test. Infrastructure and flaky items are never fixed by the loop.
+- `L2`: hand one **code** failure to `loop-fix` when the fix is one file, test-covered, outside `gate.denylist` and not in a security test. Infrastructure and flaky items are never fixed by the loop.
 
 ## Verifier
 

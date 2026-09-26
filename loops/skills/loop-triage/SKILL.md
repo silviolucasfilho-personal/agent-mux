@@ -31,11 +31,11 @@ Stay inside these bounds; do not explore beyond them.
 ## Report-only vs assisted
 
 - At effective `L1` you write nothing but the state file. Do not edit code, do not create branches.
-- At `L2` or `L3` you may hand exactly one High Priority item to `loop-fix` (`/loop-fix` or `$loop-fix`) when it is a single-file, test-covered change outside `gate.denylist`. Pick the one with the smallest blast radius. If none qualifies, stay report-only and say why.
+- At `L2` you may hand exactly one High Priority item to `loop-fix` (`/loop-fix` or `$loop-fix`) when it is a single-file, test-covered change outside `gate.denylist`. Pick the one with the smallest blast radius. If none qualifies, stay report-only and say why.
 
 ## Verifier
 
-At `L2` or `L3`, after `loop-fix` returns a change, hand it to the `loop-verifier` sub-agent and record its verdict line (`## Verdict: APPROVE | REJECT | ESCALATE_HUMAN`) in the state file. Anything other than APPROVE means the change is not proposed; ESCALATE_HUMAN or a missing verdict means the item goes to High Priority with `Human decision:` requested.
+At `L2`, after `loop-fix` returns a change, hand it to the `loop-verifier` sub-agent and record its verdict line (`## Verdict: APPROVE | REJECT | ESCALATE_HUMAN`) in the state file. Anything other than APPROVE means the change is not proposed; ESCALATE_HUMAN or a missing verdict means the item goes to High Priority with `Human decision:` requested.
 
 ## State file
 

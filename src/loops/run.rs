@@ -175,12 +175,12 @@ pub fn preflight(entry: &LoopEntry, input: &PreflightInput) -> Preflight {
     if level > Level::L1
         && let Err(why) = &input.audit_allows_configured
     {
-        let to = if level == Level::L3 && input.audit_allows_l2.is_ok() {
-            Level::L2
-        } else {
-            Level::L1
-        };
-        cap(to, format!("readiness: {why}"), &mut level, &mut reason);
+        cap(
+            Level::L1,
+            format!("readiness: {why}"),
+            &mut level,
+            &mut reason,
+        );
     }
     if level > Level::L1 && !input.guard_available {
         cap(
@@ -522,26 +522,17 @@ mod tests {
                 ..
             }
         ));
-        let e3 = entry(Level::L3);
-        i.audit_allows_l2 = Ok(());
-        assert!(matches!(
-            preflight(&e3, &i),
-            Preflight::Go {
-                effective_level: Level::L2,
-                ..
-            }
-        ));
         i.audit_allows_configured = Ok(());
         i.guard_available = false;
         assert!(matches!(
-            preflight(&e3, &i),
+            preflight(&e, &i),
             Preflight::Go {
                 effective_level: Level::L1,
                 ..
             }
         ));
         i.pause_all = true;
-        assert!(matches!(preflight(&e3, &i), Preflight::Blocked { .. }));
+        assert!(matches!(preflight(&e, &i), Preflight::Blocked { .. }));
         let mut p = entry(Level::L1);
         p.paused_reason = Some("breaker".into());
         assert!(matches!(

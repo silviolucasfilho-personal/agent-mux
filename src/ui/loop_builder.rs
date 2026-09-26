@@ -344,8 +344,8 @@ fn draw_fields(f: &mut Frame, area: Rect, st: &LoopBuilderState) {
     second.push(Span::raw(p.state_file.clone()));
     second.push(Span::styled(
         format!(
-            " · starts at {} · {} run(s), {}k tokens a day",
-            p.week_one_level.as_str(),
+            " · {} · {} run(s), {}k tokens a day",
+            p.week_one_level.label(),
             p.max_runs_per_day,
             p.max_tokens_per_day / 1000
         ),
@@ -421,7 +421,9 @@ fn detail(st: &LoopBuilderState, f: LField) -> Option<String> {
     let p = &st.current()?.pattern;
     Some(match f {
         LField::Every => "e.g. 15m, 2h, 1d; at least 5m".into(),
-        LField::Level => "what a new loop of this pattern may do in its first week".into(),
+        LField::Level => {
+            "yes: works in its own worktree and you apply its change; no: reports only".into()
+        }
         LField::Skills => st
             .skills
             .iter()

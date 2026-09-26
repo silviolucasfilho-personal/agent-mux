@@ -31,13 +31,19 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-/// Readiness ladder level of a loop.
+/// What a loop's runs may change. There are no levels any more (spec
+/// `2026-09-26-agent-first-design.md`, section 3): a run reports only, or
+/// it edits in its own worktree and its change waits for the user. The
+/// names `L1` / `L2` stay in `loops.json` and the registry for
+/// compatibility; an old `L3` loads as `L2`, which ran the same way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum Level {
+    /// Reads and reports: the state file and the run log only.
     #[default]
     L1,
+    /// Edits in a worktree; the change goes to the inbox.
+    #[serde(alias = "L3")]
     L2,
-    L3,
 }
 
 impl Level {
@@ -45,52 +51,56 @@ impl Level {
         match self {
             Level::L1 => "L1",
             Level::L2 => "L2",
-            Level::L3 => "L3",
         }
     }
 
+    /// `L1` / `L2` (and an old `L3`), or `report` / `edit` in words.
     pub fn parse(s: &str) -> Option<Level> {
-        match s.trim().to_ascii_uppercase().as_str() {
-            "L1" => Some(Level::L1),
-            "L2" => Some(Level::L2),
-            "L3" => Some(Level::L3),
+        match s.trim().to_ascii_lowercase().as_str() {
+            "l1" | "report" | "reports" | "no" => Some(Level::L1),
+            "l2" | "l3" | "edit" | "edits" | "yes" => Some(Level::L2),
             _ => None,
         }
     }
 
-    /// What a run at this level may do, as the "Allowed to" line says it.
+    /// Whether runs edit files (in a worktree).
+    pub fn edits(self) -> bool {
+        self == Level::L2
+    }
+
+    pub fn from_edits(edits: bool) -> Level {
+        if edits { Level::L2 } else { Level::L1 }
+    }
+
+    /// What a run may do, as the "Allowed to" line says it.
     pub fn can(self) -> &'static str {
         match self {
             Level::L1 => "report only",
-            Level::L2 => "propose a fix for you to review",
-            Level::L3 => "fix unattended",
+            Level::L2 => "edit in a worktree for you to apply",
         }
     }
 
     /// The option's name in the add/edit dialog.
     pub fn short(self) -> &'static str {
         match self {
-            Level::L1 => "report only",
-            Level::L2 => "propose fixes",
-            Level::L3 => "fix unattended",
+            Level::L1 => "no, report only",
+            Level::L2 => "yes, in a worktree",
         }
     }
 
-    /// The level above this one, if any.
+    /// The other value, if runs could do more.
     pub fn next(self) -> Option<Level> {
         match self {
             Level::L1 => Some(Level::L2),
-            Level::L2 => Some(Level::L3),
-            Level::L3 => None,
+            Level::L2 => None,
         }
     }
 
-    /// What the level means, for the dialog and the preview.
+    /// What it means, for the dialog and the preview.
     pub fn label(self) -> &'static str {
         match self {
-            Level::L1 => "report-only",
-            Level::L2 => "assisted",
-            Level::L3 => "unattended",
+            Level::L1 => "reports only",
+            Level::L2 => "edits in a worktree",
         }
     }
 }
@@ -437,7 +447,12 @@ mod tests {
         assert_eq!(format_tokens(2_000_000), "2.0M");
         assert_eq!(Level::parse("l2"), Some(Level::L2));
         assert_eq!(Outcome::parse("fix-proposed"), Some(Outcome::FixProposed));
-        assert!(Level::L1 < Level::L3);
+        assert!(Level::L1 < Level::L2);
+        // an old L3 reads as L2: it ran the same way
+        assert_eq!(Level::parse("L3"), Some(Level::L2));
+        assert_eq!(serde_json::from_str::<Level>("\"L3\"").unwrap(), Level::L2);
+        assert_eq!(Level::parse("edit"), Some(Level::L2));
+        assert!(Level::L2.edits() && !Level::L1.edits());
     }
 
     /// A run must be attributable to the exact pattern text it ran: the

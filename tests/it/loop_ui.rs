@@ -543,7 +543,7 @@ fn the_card_says_what_the_loop_may_do_and_setup_says_what_it_needs() {
         "the level in words\n{screen}"
     );
     assert!(
-        screen.contains("to propose a fix for you to review: "),
+        screen.contains("to edit in a worktree for you to apply: "),
         "what the next step needs\n{screen}"
     );
     assert!(
@@ -571,7 +571,7 @@ fn the_card_says_what_the_loop_may_do_and_setup_says_what_it_needs() {
     assert!(setup.contains("✗ report only  ← set"), "{setup}");
     assert!(setup.contains("needs a state file"), "{setup}");
     assert!(
-        setup.contains("✗ propose a fix for you to review"),
+        setup.contains("✗ edit in a worktree for you to apply"),
         "{setup}"
     );
     assert!(setup.contains("Readiness █"), "{setup}");

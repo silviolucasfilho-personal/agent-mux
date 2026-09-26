@@ -1779,8 +1779,8 @@ A **loop** is a scheduled, bounded agent run against one workspace, driven from 
 
 | Harness | Guard | Worktree | Ceiling |
 | --- | --- | --- | --- |
-| Claude Code 2.1.273 | per launch, `--loop`, fail-closed for write tools | yes | L3 |
-| Codex 0.154.0 with `trace hooks install codex` | installed `hooks.json`, fail-open | yes | L3 |
+| Claude Code 2.1.273 | per launch, `--loop`, fail-closed for write tools | yes | edits |
+| Codex 0.154.0 with `trace hooks install codex` | installed `hooks.json`, fail-open | yes | edits |
 | Codex without installed hooks | none | yes | L1 (the state-file rule is enforced by the skill and the post-run check) |
 | Antigravity 1.2.3 | not supported for loops | — | see [docs/loops.md](docs/loops.md) §8 and the spec's section 16 |
 

@@ -1,6 +1,6 @@
 ---
 name: loop-fix
-description: Use only from another loop skill at level L2 or L3, when the user or a triage skill asks to "propose a minimal fix", "fix just this one thing" or "make the smallest change that passes". Makes exactly one bounded change in the run's worktree, within the gate, with the tests run, and hands it back for verification.
+description: Use only from another loop skill at level L2 (edits in a worktree), when the user or a triage skill asks to "propose a minimal fix", "fix just this one thing" or "make the smallest change that passes". Makes exactly one bounded change in the run's worktree, within the gate, with the tests run, and hands it back for verification.
 allowed-tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 
@@ -27,7 +27,7 @@ You are called by a triage skill with one item. You change as little as possible
 
 ## Report-only vs assisted
 
-This skill only exists in assisted runs. At `L2` the change is a proposal on a branch a human merges; at `L3` the same, with the verifier's approval recorded. Nothing here merges.
+This skill only exists in assisted runs. At `L2` the change is a proposal on a branch a human merges, with the verifier's approval recorded. Nothing here merges.
 
 ## Verifier
 

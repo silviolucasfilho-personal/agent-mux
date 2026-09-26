@@ -377,7 +377,7 @@ fn add(args: &Args) -> anyhow::Result<()> {
     };
     let home = crate::skill::install::home_dir();
     let ceiling = if guard_available(harness, &home) {
-        Level::L3
+        Level::L2
     } else {
         Level::L1
     };

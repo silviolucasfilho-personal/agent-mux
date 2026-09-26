@@ -4402,14 +4402,10 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
         dialog.field == LoopField::Every,
     ));
     let level_line: Vec<Span> = {
-        let mut spans = vec![Span::styled(format!("{:<12}", "Allowed to"), dim)];
-        for (i, l) in [
-            crate::loops::Level::L1,
-            crate::loops::Level::L2,
-            crate::loops::Level::L3,
-        ]
-        .into_iter()
-        .enumerate()
+        let mut spans = vec![Span::styled(format!("{:<12}", "Edits files"), dim)];
+        for (i, l) in [crate::loops::Level::L1, crate::loops::Level::L2]
+            .into_iter()
+            .enumerate()
         {
             let blocked = dialog.level_notes[i].is_some();
             let on = dialog.level == l;
@@ -4433,7 +4429,6 @@ fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
     if let Some(note) = &dialog.level_notes[match dialog.level {
         crate::loops::Level::L1 => 0,
         crate::loops::Level::L2 => 1,
-        crate::loops::Level::L3 => 2,
     }] {
         lines.push(Line::styled(
             format!("            ✗ {note}"),

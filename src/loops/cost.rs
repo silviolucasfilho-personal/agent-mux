@@ -39,12 +39,6 @@ fn mix(level: Level, early_exit: bool) -> (f64, f64, f64, &'static str) {
             "L2: 85% early exit, 10% triage, 5% fix and verify",
         ),
         (Level::L2, false) => (0.5, 0.3, 0.2, "L2: 50% no-op, 30% triage, 20% action"),
-        (Level::L3, _) => (
-            0.4,
-            0.35,
-            0.25,
-            "L3: 40% no-op, 35% triage, 25% action (unattended: watch it)",
-        ),
     }
 }
 
@@ -245,6 +239,6 @@ mod tests {
         assert!(e.warnings.iter().any(|w| w.starts_with("Worst case")));
         assert!(!e.warnings.iter().any(|w| w.starts_with("Realistic")));
         assert!(!e.warnings.iter().any(|w| w.starts_with("High cadence")));
-        assert_eq!(estimate(&p, 0, Level::L3, true).runs_per_day, 0);
+        assert_eq!(estimate(&p, 0, Level::L2, true).runs_per_day, 0);
     }
 }

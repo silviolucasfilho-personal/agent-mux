@@ -24,16 +24,16 @@ You are one run of a scheduled loop over the issues a human marked ready. Budget
 3. Rank the rest by expected blast radius: the body names one file or one function first, a failing test named in the body next, everything else last. An issue already in the state file with a `Loop action: rejected` line from a previous run is skipped unless the issue changed since; after three rejected attempts on the same issue it moves to **High Priority** with `Human decision:` requested.
 4. Pick exactly one issue. Put it in **High Priority** with `Loop action: picked #<n>`. Every other candidate goes to **Watch List** in rank order; issues you dropped in step 2 go to **Recent Noise** when they were already listed last run.
 5. At effective `L1` stop here: the pick is the report.
-6. At `L2`/`L3` hand the picked issue to `loop-fix` (`/loop-fix` or `$loop-fix`) with the issue number, its title and the one-line acceptance test you derive from the body. `loop-fix` reproduces, changes at most `gate.max_files` files, runs the tests and commits once on the run's `loop/<run_id>` branch inside `worktree`. Its return value (`gave up`, `out of scope`, `cannot reproduce`, or a diff summary) becomes the `Loop action:` line.
+6. At `L2` hand the picked issue to `loop-fix` (`/loop-fix` or `$loop-fix`) with the issue number, its title and the one-line acceptance test you derive from the body. `loop-fix` reproduces, changes at most `gate.max_files` files, runs the tests and commits once on the run's `loop/<run_id>` branch inside `worktree`. Its return value (`gave up`, `out of scope`, `cannot reproduce`, or a diff summary) becomes the `Loop action:` line.
 
 ## Report-only vs assisted
 
 - At effective `L1` you write only the state file. No branch, no edit, no comment on the issue.
-- At `L2`/`L3` the only change is the one commit `loop-fix` makes in the worktree. One issue per run; a `loop-fix` failure ends the run as `escalated` with the reason, it never picks a second issue.
+- At `L2` the only change is the one commit `loop-fix` makes in the worktree. One issue per run; a `loop-fix` failure ends the run as `escalated` with the reason, it never picks a second issue.
 
 ## Verifier
 
-At `L2`/`L3`, after `loop-fix` returns a commit, hand it to every checker sub-agent the workspace installs for this pattern (`loop-verifier`, and `loop-reviewer` when it is present) and record each `## Verdict:` line in the state file under the issue. agent-mux requires every checker to say APPROVE before the outcome is `fix-proposed`; one REJECT means the commit stays on its branch as `escalated` with the rejecting checker's reason as `Human decision:`; ESCALATE_HUMAN or a missing verdict is `escalated` as well.
+At `L2`, after `loop-fix` returns a commit, hand it to every checker sub-agent the workspace installs for this pattern (`loop-verifier`, and `loop-reviewer` when it is present) and record each `## Verdict:` line in the state file under the issue. agent-mux requires every checker to say APPROVE before the outcome is `fix-proposed`; one REJECT means the commit stays on its branch as `escalated` with the rejecting checker's reason as `Human decision:`; ESCALATE_HUMAN or a missing verdict is `escalated` as well.
 
 ## State file
 

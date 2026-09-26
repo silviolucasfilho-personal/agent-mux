@@ -14,9 +14,9 @@ Design: `docs/superpowers/specs/2026-09-15-loop-engineering-design.md`. Not to b
 4. Press `r` to run once now, or wait for the slot. The run appears in **Active** as an ordinary session (name `<pattern> ↻ <workspace>`); attach to watch it.
 5. The preview card leads with what the last run found, in the words the report uses (`NEEDS YOU`, `REPORTED`, `QUIET`), with its summary line and when it ran; then **Allowed to** (what a run may do now, and what the next step needs), **Today** (runs and tokens against the caps) and, when something is missing, one **Setup** line pointing at the Setup tab. `loop-run-log.md` in the workspace gains one line per completed run.
 
-On screen a level is named by what it lets a run do: `report only` (L1), `propose a fix for you to review` (L2), `fix unattended` (L3). The command line and `loops.json` keep the codes.
+A loop either reports or edits: **Edits files: no** (runs report only) or **yes** (runs work in their own worktree and the change waits for you to apply it). There are no levels beyond that; `loops.json` and `--level` keep the codes `L1` (reports) and `L2` (edits), and an old `L3` loads as `L2`.
 
-Keep L1 (report-only) for a week. Promote to L2 with `e` once the workspace has a triage skill and you have read a week of state files. The readiness score is advice, not a gate: any level can be set at any score.
+Start with a loop that only reports for a week, then turn **Edits files** on with `e` once the workspace has a triage skill and you have read its state files. The readiness score is advice, not a gate.
 
 ## 2. The files a loop keeps in the workspace
 
@@ -103,29 +103,27 @@ Keys:
 
 Registered loops read their pattern when they run. Skills and agents that the scaffolder already installed in a workspace are refreshed with `agent-mux config push`.
 
-## 5. Levels and what enforces them
+## 5. What a run may change
 
-| Level | Meaning | Where | Enforced by |
+| Edits files | A run | Where | Enforced by |
 | --- | --- | --- | --- |
-| L1 | report-only | the workspace | the `PreToolUse` guard permits only the state file, the run log and `.loop-context/` |
-| L2 | assisted: one fix, verifier, human decides | a worktree `.loop-worktrees/<run>` on branch `loop/<run>`; the state file, run log and ledger stay in the workspace (`$AGENT_MUX_LOOP_STATE`, absolute paths in the context) | guard: denylist, `maxFiles`, no push or merge; post-run gate re-check; inbox |
-| L3 | unattended | worktree | same guard; a verifier, a state file, cost observability and fresh activity |
+| no (`L1`) | reads and reports | the workspace | the `PreToolUse` guard permits only the state file, the run log and `.loop-context/` |
+| yes (`L2`) | makes one change, a checker reviews it, you decide | a worktree `.loop-worktrees/<run>` on branch `loop/<run>`; the state file, run log and ledger stay in the workspace (`$AGENT_MUX_LOOP_STATE`, absolute paths in the context) | guard: denylist, `maxFiles`, no push or merge; post-run gate re-check; inbox |
 
-Any level may be set whatever the readiness score. The score (0-100) describes how loop-ready the workspace is and its findings say what to improve, but it never holds a level back. What a level needs to be safe still does:
+Nothing changes your working tree unless you apply it; there is no unattended mode. The readiness score (0-100) describes how loop-ready the workspace is and its findings say what to improve; it never holds a loop back. What each needs to be safe:
 
-| Level | Needs |
+| Edits files | Needs |
 | --- | --- |
-| L1 | a state file |
-| L2 | a triage skill, a git repository (for the worktree) and a path guard for the harness |
-| L3 | a verifier, a state file, cost observability (budget doc, run log, `LOOP.md` budget), loop activity in the last 14 days, a git repository and a path guard |
+| no | a state file |
+| yes | a triage skill, a git repository (for the worktree) and a path guard for the harness |
 
-The card and the Setup tab name what a level still needs, in those words. An older `loops.json` with `"bypass_score"` still loads; the key is ignored.
+The card and the Setup tab name what is still missing, in those words. An older `loops.json` with `"bypass_score"` still loads; the key is ignored.
 
 A loop run passes `--dangerously-skip-permissions` (Claude Code) or `--yolo` (Codex) whatever the profile says: print mode cannot answer an approval prompt, and the guard, the gate and the worktree are the controls instead.
 
-Per-harness ceiling: Claude Code L3 (per-launch guard with `--loop`, fail-closed for write tools); Codex L3 with `agent-mux trace hooks install codex`, else L1; Antigravity not supported (section 8).
+Per harness: Claude Code may edit (per-launch guard with `--loop`, fail-closed for write tools); Codex may edit with `agent-mux trace hooks install codex`, else it only reports; Antigravity is not supported (section 8).
 
-The effective level of a run can be lower than the configured one: tokens today at 80 % or more of the cap, a circuit breaker one attempt short of tripping (two identical errors where three trip it, nine attempts where ten are the cap), a stale state file (`Last run` older than 14 days), a readiness gate that no longer holds, or a missing guard cap the run at L1; the reason travels in the context (`run.level_reason`, `breaker.near_trip`) and the preview, so the loop reports instead of spending its last attempt.
+A loop that edits can still run as report-only for one run: tokens today at 80 % or more of the cap, a circuit breaker one attempt short of tripping (two identical errors where three trip it, nine attempts where ten are the cap), a stale state file (`Last run` older than 14 days), a readiness gate that no longer holds, or a missing guard make that run report only; the reason travels in the context (`run.level_reason`, `breaker.near_trip`) and the preview, so the loop reports instead of spending its last attempt.
 
 ## 6. Pre-flight, in order
 
