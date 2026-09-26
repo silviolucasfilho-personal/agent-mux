@@ -757,7 +757,7 @@ impl App {
             .unwrap_or_default();
         let mut st = self.builder_state(Draft::blank(&name), Origin::New, workspace);
         st.focus = Focus::List;
-        self.notice = Some(Notice::info("a new flow: a adds the first step"));
+        self.notice = Some(Notice::info("a new flow: n adds the first step"));
         self.mode = Mode::FlowBuilder(Box::new(st));
     }
 
@@ -772,6 +772,36 @@ impl App {
             .unwrap_or_default();
         let (text, origin, plan_agents, workspace) = match self.selected_workflow_row() {
             Some(WorkflowRow::Planned(id)) => {
+                self.open_flow_builder_plan(&id);
+                return;
+            }
+            Some(WorkflowRow::Doc(_)) => {
+                let Some(e) = self.selected_workflow_entry().cloned() else {
+                    return;
+                };
+                if let library::Source::Skill(id) = &e.source {
+                    self.notice = Some(Notice::info(format!(
+                        "{} is distributed by the {id} skill; n starts a new flow",
+                        e.name
+                    )));
+                    return;
+                }
+                (e.text, Origin::Document(e.name), Vec::new(), workspace)
+            }
+            _ => {
+                self.notice = Some(Notice::info(
+                    "e opens a workflow or a plan in the builder; n starts a new flow",
+                ));
+                return;
+            }
+        };
+        self.open_flow_builder_text(&text, origin, plan_agents, workspace);
+    }
+
+    /// A planner's document in the builder.
+    pub fn open_flow_builder_plan(&mut self, id: &str) {
+        let (text, origin, plan_agents, workspace) = {
+            {
                 let Some(p) = self.planned_workflows.iter().find(|p| p.id == id).cloned() else {
                     return;
                 };
@@ -781,32 +811,23 @@ impl App {
                 }
                 (
                     p.document,
-                    Origin::Plan(id),
+                    Origin::Plan(id.to_string()),
                     p.agents,
                     p.workspace.to_string_lossy().into_owned(),
                 )
             }
-            Some(WorkflowRow::Doc(_)) => {
-                let Some(e) = self.selected_workflow_entry().cloned() else {
-                    return;
-                };
-                if let library::Source::Skill(id) = &e.source {
-                    self.notice = Some(Notice::info(format!(
-                        "{} is distributed by the {id} skill; f starts a new flow",
-                        e.name
-                    )));
-                    return;
-                }
-                (e.text, Origin::Document(e.name), Vec::new(), workspace)
-            }
-            _ => {
-                self.notice = Some(Notice::info(
-                    "o opens a workflow or a plan in the builder; f starts a new flow",
-                ));
-                return;
-            }
         };
-        match Draft::from_text(&text) {
+        self.open_flow_builder_text(&text, origin, plan_agents, workspace);
+    }
+
+    fn open_flow_builder_text(
+        &mut self,
+        text: &str,
+        origin: Origin,
+        plan_agents: Vec<String>,
+        workspace: String,
+    ) {
+        match Draft::from_text(text) {
             Ok(d) => {
                 let mut st = self.builder_state(d, origin, workspace);
                 st.plan_agents = plan_agents;
@@ -838,8 +859,8 @@ impl App {
 
     fn flow_key(&mut self, st: &mut FlowBuilderState, key: &KeyEvent) -> After {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        // Ctrl+E: the text being typed goes to $EDITOR and comes back
-        if ctrl && key.code == KeyCode::Char('e') && self.flow_text_mut(st).is_some() {
+        // Ctrl+O: the text being typed goes to $EDITOR and comes back
+        if ctrl && key.code == KeyCode::Char('o') && self.flow_text_mut(st).is_some() {
             self.flow_open_text_editor(st);
             return After::Stay;
         }
@@ -850,6 +871,69 @@ impl App {
             self.flow_edit_key(st, key);
             return After::Stay;
         }
+        // the shared keymap, the same on every screen (`crate::keymap`)
+        match key.code {
+            KeyCode::Char(c @ '1'..='3') if !ctrl => {
+                let screen =
+                    [Screen::Steps, Screen::Exchange, Screen::Review][c as usize - '1' as usize];
+                if screen == Screen::Exchange && st.step_index().is_none() && !st.draft.is_empty() {
+                    st.selected = 1;
+                }
+                if screen != st.screen {
+                    st.ex_groups.clear();
+                    st.ex_field = 0;
+                    st.review_scroll = 0;
+                }
+                st.screen = screen;
+                return After::Stay;
+            }
+            KeyCode::Char('s') if !ctrl => return self.flow_save(st, false, false),
+            KeyCode::Char('r') if !ctrl => return self.flow_save(st, true, false),
+            KeyCode::Char('R') => {
+                match self.flow_builtin_state(st) {
+                    Some(true) => {
+                        st.overlay = Some(Overlay::Confirm {
+                            question: format!(
+                                "Restore the built-in {}? Your saved copy is removed. [y/n]",
+                                st.draft.name()
+                            ),
+                            action: ConfirmAction::Restore,
+                        })
+                    }
+                    _ => {
+                        self.notice = Some(Notice::info(
+                            "R restores a built-in workflow you saved a copy of",
+                        ))
+                    }
+                }
+                return After::Stay;
+            }
+            KeyCode::Char('o') if ctrl => {
+                let dir = self.workflows_runtime_dir().join("workflows");
+                let path = dir.join(format!("{}.builder.toml", st.draft.name()));
+                if let Err(e) = std::fs::create_dir_all(&dir)
+                    .and_then(|_| std::fs::write(&path, st.draft.to_toml()))
+                {
+                    self.notice = Some(Notice::error(format!("{}: {e}", path.display())));
+                } else {
+                    self.editor_request = Some(super::EditorRequest {
+                        path,
+                        asset_id: "flow:doc".into(),
+                        command: crate::assets::editor_command(self.editor.as_deref()),
+                    });
+                }
+                return After::Stay;
+            }
+            _ => {}
+        }
+        // q is Esc wherever nothing is typed
+        let esc;
+        let key = if key.code == KeyCode::Char('q') {
+            esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+            &esc
+        } else {
+            key
+        };
         match st.screen {
             Screen::Steps => self.flow_steps_key(st, key),
             Screen::Exchange => self.flow_exchange_key(st, key),
@@ -964,35 +1048,13 @@ impl App {
                 }
                 return self.flow_close(st);
             }
-            KeyCode::Char('a') => {
-                let base = st
-                    .step_index()
-                    .map(|_| "step".to_string())
-                    .unwrap_or_else(|| "step".into());
-                let name = st.draft.fresh_id(&base);
+            KeyCode::Char('n') => {
+                let name = st.draft.fresh_id("step");
                 st.overlay = Some(Overlay::AddStep {
                     name: TextArea::new(name),
                     choice: 0,
                     on_name: false,
                 });
-                return After::Stay;
-            }
-            KeyCode::Char('w') => {
-                if st.step_index().is_none() && !st.draft.is_empty() {
-                    st.selected = 1;
-                }
-                st.screen = Screen::Exchange;
-                st.ex_groups.clear();
-                st.ex_field = 0;
-                return After::Stay;
-            }
-            KeyCode::Char('v') => {
-                st.screen = Screen::Review;
-                st.review_scroll = 0;
-                return After::Stay;
-            }
-            KeyCode::Char('g') if st.step_index().is_some() => {
-                self.flow_open_agents(st, Role::Step);
                 return After::Stay;
             }
             _ => {}
@@ -1025,7 +1087,13 @@ impl App {
                         action: ConfirmAction::DeleteStep,
                     });
                 }
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                KeyCode::Home | KeyCode::Char('g') => st.selected = 0,
+                KeyCode::End | KeyCode::Char('G') => st.selected = st.draft.len(),
+                KeyCode::Enter
+                | KeyCode::Right
+                | KeyCode::Char('l')
+                | KeyCode::Tab
+                | KeyCode::Char('e') => {
                     st.focus = Focus::Fields;
                     st.field = 0;
                 }
@@ -1057,7 +1125,9 @@ impl App {
                             self.flow_cycle(st, f, delta);
                         }
                     }
-                    KeyCode::Enter => {
+                    KeyCode::Home | KeyCode::Char('g') => st.field = 0,
+                    KeyCode::End | KeyCode::Char('G') => st.field = n.saturating_sub(1),
+                    KeyCode::Enter | KeyCode::Char('e') => {
                         if let Some(f) = st.current_field() {
                             self.flow_activate(st, f);
                         }
@@ -1620,7 +1690,7 @@ impl App {
                 p.selected = p.new_index();
                 p.form = Some(AgentForm::new(""));
             }
-            KeyCode::Char('e') => {
+            KeyCode::Char('e') | KeyCode::Char('o') => {
                 if let Some(Some(name)) = p.options.get(p.selected).cloned() {
                     self.flow_edit_agent(st, &name);
                 }
@@ -1724,7 +1794,7 @@ impl App {
 
     fn flow_exchange_key(&mut self, st: &mut FlowBuilderState, key: &KeyEvent) -> After {
         let Some(i) = st.step_index() else {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Char('w')) {
+            if key.code == KeyCode::Esc {
                 st.screen = Screen::Steps;
             }
             return After::Stay;
@@ -1735,12 +1805,8 @@ impl App {
                 st.ex_field = 0;
                 return After::Stay;
             }
-            KeyCode::Esc | KeyCode::Char('w') => {
+            KeyCode::Esc => {
                 st.screen = Screen::Steps;
-                return After::Stay;
-            }
-            KeyCode::Char('v') => {
-                st.screen = Screen::Review;
                 return After::Stay;
             }
             KeyCode::Tab => {
@@ -1802,7 +1868,7 @@ impl App {
                     KeyCode::Down | KeyCode::Char('j') => {
                         st.ex_field = (st.ex_field + 1).min(fields.len().saturating_sub(1))
                     }
-                    KeyCode::Char('+') | KeyCode::Char('n') | KeyCode::Char('a') => {
+                    KeyCode::Char('n') => {
                         let schema = match schema {
                             Some(s) => s,
                             None => st.draft.ensure_result_schema(i),
@@ -1812,14 +1878,14 @@ impl App {
                             text: TextArea::default(),
                         });
                     }
-                    KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => {
+                    KeyCode::Left | KeyCode::Right => {
                         if let (Some(s), Some(f)) = (&schema, &cur) {
                             let delta = if key.code == KeyCode::Left { -1 } else { 1 };
                             st.draft.cycle_kind(s, &f.name, delta);
                             st.touch();
                         }
                     }
-                    KeyCode::Char('r') => {
+                    KeyCode::Char(' ') => {
                         if let (Some(s), Some(f)) = (&schema, &cur) {
                             st.draft.toggle_required(s, &f.name);
                             st.touch();
@@ -1870,11 +1936,29 @@ impl App {
                 }
             }
             ExPane::Gets => {
-                let n = st.draft.sources(i).len() + 1;
+                // the sources, then the two filter rows
+                let sources = st.draft.sources(i).len() + 1;
+                let n = sources + 2;
                 match key.code {
                     KeyCode::Up | KeyCode::Char('k') => st.ex_gets = st.ex_gets.saturating_sub(1),
                     KeyCode::Down | KeyCode::Char('j') => {
                         st.ex_gets = (st.ex_gets + 1).min(n.saturating_sub(1))
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('e')
+                        if st.ex_gets == sources =>
+                    {
+                        st.edit = Some(InlineEdit {
+                            target: EditTarget::Filter,
+                            text: TextArea::new(st.draft.step_str(i, "keep")),
+                        });
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('e')
+                        if st.ex_gets == sources + 1 =>
+                    {
+                        st.edit = Some(InlineEdit {
+                            target: EditTarget::Dedupe,
+                            text: TextArea::new(st.draft.list_text(i, "dedupe_by")),
+                        });
                     }
                     KeyCode::Enter | KeyCode::Char(' ') => {
                         if st.ex_gets == 0 {
@@ -1884,18 +1968,6 @@ impl App {
                             st.draft.set_step_str(i, "input", &p);
                         }
                         st.touch();
-                    }
-                    KeyCode::Char('f') => {
-                        st.edit = Some(InlineEdit {
-                            target: EditTarget::Filter,
-                            text: TextArea::new(st.draft.step_str(i, "keep")),
-                        });
-                    }
-                    KeyCode::Char('u') => {
-                        st.edit = Some(InlineEdit {
-                            target: EditTarget::Dedupe,
-                            text: TextArea::new(st.draft.list_text(i, "dedupe_by")),
-                        });
                     }
                     _ => {}
                 }
@@ -1909,47 +1981,22 @@ impl App {
 
     fn flow_review_key(&mut self, st: &mut FlowBuilderState, key: &KeyEvent) -> After {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('v') | KeyCode::Left => st.screen = Screen::Steps,
-            KeyCode::Char('w') => st.screen = Screen::Exchange,
+            KeyCode::Esc | KeyCode::Left => st.screen = Screen::Steps,
             KeyCode::Up | KeyCode::Char('k') => {
                 st.review_scroll = st.review_scroll.saturating_sub(1)
             }
             KeyCode::Down | KeyCode::Char('j') => st.review_scroll += 1,
             KeyCode::PageUp => st.review_scroll = st.review_scroll.saturating_sub(15),
             KeyCode::PageDown => st.review_scroll += 15,
-            KeyCode::Char('s') => return self.flow_save(st, false, false),
-            KeyCode::Char('R') => match self.flow_builtin_state(st) {
-                Some(true) => {
-                    st.overlay = Some(Overlay::Confirm {
-                        question: format!(
-                            "Restore the built-in {}? Your saved copy is removed. [y/n]",
-                            st.draft.name()
-                        ),
-                        action: ConfirmAction::Restore,
-                    })
-                }
-                _ => {
-                    self.notice = Some(Notice::info(
-                        "R restores a built-in workflow you saved a copy of",
-                    ))
-                }
-            },
-            KeyCode::Enter => return self.flow_save(st, true, false),
-            KeyCode::Char('e') => {
-                let dir = self.workflows_runtime_dir().join("workflows");
-                let path = dir.join(format!("{}.builder.toml", st.draft.name()));
-                if let Err(e) = std::fs::create_dir_all(&dir)
-                    .and_then(|_| std::fs::write(&path, st.draft.to_toml()))
-                {
-                    self.notice = Some(Notice::error(format!("{}: {e}", path.display())));
-                } else {
-                    self.editor_request = Some(super::EditorRequest {
-                        path,
-                        asset_id: "flow:doc".into(),
-                        command: crate::assets::editor_command(self.editor.as_deref()),
-                    });
-                }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                st.review_scroll = st.review_scroll.saturating_sub(15)
             }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                st.review_scroll += 15
+            }
+            KeyCode::Home | KeyCode::Char('g') => st.review_scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => st.review_scroll = usize::MAX / 2,
+            KeyCode::Enter => return self.flow_save(st, true, false),
             _ => {}
         }
         After::Stay
@@ -2071,29 +2118,10 @@ impl App {
 }
 
 /// The keys every builder text field shares.
-pub(crate) fn text_key(t: &mut TextArea, key: &KeyEvent, ctrl: bool) {
-    match key.code {
-        KeyCode::Backspace => t.backspace(),
-        KeyCode::Delete => t.delete(),
-        KeyCode::Left => {
-            t.left();
-        }
-        KeyCode::Right => {
-            t.right();
-        }
-        KeyCode::Up => {
-            t.up();
-        }
-        KeyCode::Down => {
-            t.down();
-        }
-        KeyCode::Home => t.home(),
-        KeyCode::End => t.end(),
-        KeyCode::Char('w') if ctrl => t.delete_word(),
-        KeyCode::Char('u') if ctrl => t.set(""),
-        KeyCode::Char('j') if ctrl => t.newline(),
-        KeyCode::Enter => t.newline(),
-        KeyCode::Char(c) if !ctrl => t.insert(c),
-        _ => {}
+pub(crate) fn text_key(t: &mut TextArea, key: &KeyEvent, _ctrl: bool) {
+    // Enter never types a new line here: Ctrl+J (or ⌥↩ / ⇧↩) does
+    if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+        return;
     }
+    crate::keymap::apply_text(t, key);
 }

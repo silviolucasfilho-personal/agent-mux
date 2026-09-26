@@ -135,7 +135,7 @@ fn the_hint_lines_fit_a_hundred_columns_and_the_help_fits() {
     app.sidebar_section = SidebarSection::Loops;
     let screen = render(&app, 100, 34);
     let last = screen.lines().last().unwrap().trim_end();
-    assert!(last.contains("[a] add"), "{last}");
+    assert!(last.contains("[n] new"), "{last}");
     assert!(last.chars().count() <= 100);
     app.loop_registry.pause_all = true;
     let screen = render(&app, 100, 34);
@@ -191,12 +191,12 @@ fn keys_of_the_loops_section_pause_run_and_toggle_the_kill_switch() {
     assert!(!app.loop_registry.pause_all);
 
     // remove asks first, then removes; the workspace files stay
-    app.handle_key(&key(KeyCode::Char('x')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('d')), Instant::now());
     assert!(matches!(app.mode, Mode::ConfirmRemoveLoop));
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
     assert!(matches!(app.mode, Mode::Control));
     assert_eq!(app.loop_registry.loops.len(), 1);
-    app.handle_key(&key(KeyCode::Char('x')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('d')), Instant::now());
     app.handle_key(&key(KeyCode::Char('y')), Instant::now());
     assert!(app.loop_registry.loops.is_empty());
     assert!(temp.path().join("proj").is_dir());
@@ -224,7 +224,7 @@ fn the_dialog_lists_no_antigravity_profile_and_validates() {
         profile("Claude Code", "claude"),
     ]);
     app.sidebar_section = SidebarSection::Loops;
-    app.handle_key(&key(KeyCode::Char('a')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
     let Mode::NewLoop(dialog) = &app.mode else {
         panic!("{:?}", app.notice);
     };
@@ -660,7 +660,7 @@ fn the_inbox_gathers_loop_runs_plans_and_failed_runs() {
     app.handle_key(&key(KeyCode::End), Instant::now());
     let screen = render(&app, 120, 34);
     assert!(screen.contains("FAILED · migrate"), "{screen}");
-    app.handle_key(&key(KeyCode::Char('x')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('d')), Instant::now());
     assert_eq!(app.inbox_count(), 2);
 
     // a loop run is decided in place

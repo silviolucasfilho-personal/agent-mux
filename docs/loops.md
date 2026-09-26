@@ -83,11 +83,11 @@ Registry: `loops/registry.toml` (embedded), merged by id with `~/.agent-mux/loop
 
 ### Editing patterns in the loop builder
 
-Every pattern can be edited, the built-in ones too. `o` in the Loops section opens the **loop builder** on the selected loop's pattern, and `f` starts a new pattern.
+Every pattern can be edited, the built-in ones too. `o` in the Loops section opens the **loop builder** on the selected loop's pattern; `n` inside it starts a new pattern.
 - **Left:** every pattern with its cadence and where it comes from: `built-in`, `edited` (your copy of a built-in) or `yours`. A `*` marks unsaved edits.
 - **Right:** the pattern's cycle, drawn (`every 15m ─▶ loop-ci-triage ─▶ loop-fix ─▶ loop-rules`, `checked by loop-verifier ─▶ writes ci-sweeper-state.md`), then its fields in words:
   - **What it is:** id, name and goal.
-  - **How it runs:** the interval (`15m`, `2h`, `1d`), the week-one level, the skills (ticked in order, the first being the triage), the checker agents, and the run's prompt (`Ctrl+E` opens your editor, `Ctrl+R` goes back to the default).
+  - **How it runs:** the interval (`15m`, `2h`, `1d`), the week-one level, the skills (ticked in order, the first being the triage), the checker agents, and the run's prompt (`Ctrl+O` opens your editor, `Ctrl+R` goes back to the default).
   - **Safety:** verifier, breaker and human gates.
   - **Models:** the run's model and the checker's model.
   - **Budget:** runs and tokens a day, priority, risk, token cost, state file and early exit.
@@ -197,7 +197,7 @@ The **Setup** tab (`3`) is everything about the loop that is not a run: what it 
 `I`, from anywhere, opens the inbox: everything waiting on a human, loops and workflows together. The status bar leads with the count (`● 3 need you [I]`) whenever it is not zero.
 
 - **Loops**: runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. For a run with a branch, `a` marks it **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed. A run that asked for a decision without a branch reads `a` done and `x` dismiss; both record the decision. `Enter` opens its loop's History, `T` its traces.
-- **Workflows**: plans the planner wrote that wait for you (`Enter` reviews one in the Workflows view, `x` discards it) and runs since startup that did not finish cleanly (`Enter` opens the run, `x` dismisses it from the inbox for this session).
+- **Workflows**: plans the planner wrote that wait for you (`Enter` reviews one in the Workflows view, `d` discards it) and runs since startup that did not finish cleanly (`Enter` opens the run, `x` dismisses it from the inbox for this session).
 
 ## 10. Antigravity
 
@@ -208,7 +208,7 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 | Symptom | What to do |
 | --- | --- |
 | Loop shows `‖` with a reason | `p` resumes; a breaker reason also resets the trailing failures in the ledger |
-| `!` with a count, or `● N need you` in the status bar | `I`, decide with `a` or `x` |
+| `!` with a count, or `● N need you` in the status bar | `I`, decide with `a` (apply) or `d` (reject) |
 | Run blocked: tokens at the cap | raise the cap with `e`, or wait for UTC midnight |
 | Card says "held back: needs …" | `E` → Setup tab (`3`) lists what each level needs and the readiness findings |
 | Held back: no path guard | Codex: `agent-mux trace hooks install codex`; Claude: the binary must run from an absolute path |

@@ -198,6 +198,7 @@ pub enum Action {
     OpenWorkflowPlan,
     OpenFlowBuilder,
     OpenFlowBuilderSelected,
+    DeleteWorkflowRow,
     FlowBuilderKey,
     OpenLoopBuilder,
     OpenLoopBuilderNew,
@@ -528,17 +529,12 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::LoopTogglePause
                 }
-                KeyCode::Char('a')
-                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
-                {
-                    Action::OpenNewLoop
-                }
                 KeyCode::Char('e')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
                 {
                     Action::EditLoop
                 }
-                KeyCode::Char('x')
+                KeyCode::Char('d')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
                 {
                     Action::EnterConfirmRemoveLoop
@@ -548,11 +544,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::OpenLoopBuilder
                 }
-                KeyCode::Char('f')
-                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
-                {
-                    Action::OpenLoopBuilderNew
-                }
+
                 KeyCode::Char(' ')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Active =>
                 {
@@ -573,6 +565,11 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::ToggleHistoryAllProjects
                 }
+                KeyCode::Char('n')
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
+                {
+                    Action::OpenNewLoop
+                }
                 KeyCode::Char('n') => Action::OpenNewSession,
                 KeyCode::Char('l') | KeyCode::Char('L') => Action::OpenSessionHistory,
                 KeyCode::Char('t')
@@ -585,6 +582,14 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 KeyCode::Char('C') => Action::OpenConfigView,
                 KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
                 KeyCode::Char('x')
+                    if ctx.sidebar_hidden || ctx.sidebar_section == SidebarSection::Active =>
+                {
+                    match ctx.selected_status {
+                        Some(Status::Exited(_)) | None => Action::None,
+                        Some(_) => Action::EnterConfirmKill,
+                    }
+                }
+                KeyCode::Char('d')
                     if ctx.sidebar_hidden || ctx.sidebar_section == SidebarSection::Active =>
                 {
                     match ctx.selected_status {
@@ -3057,12 +3062,34 @@ impl App {
             sidebar_section: self.sidebar_section,
             sidebar_hidden: self.sidebar_hidden,
         };
+        // g/G and Ctrl+D/Ctrl+U in the list views, where nothing is typed
+        let aliased;
+        let key = if self.list_keys_apply() {
+            aliased = crate::keymap::list_alias(key);
+            &aliased
+        } else {
+            key
+        };
         let action = dispatch(&self.mode, key, &ctx);
         // any Control-mode key other than the literal-send consumes the flag
         if !matches!(action, Action::Detach | Action::SendLiteralDetachKey) {
             self.just_detached = false;
         }
         self.apply(action, key, now);
+    }
+
+    /// The list views, when no text is being typed: they take the
+    /// keymap's list aliases (`g`/`G`, `Ctrl+D`/`Ctrl+U`).
+    fn list_keys_apply(&self) -> bool {
+        match &self.mode {
+            Mode::TraceBrowser(b) => b.search_input.is_none(),
+            Mode::SessionHistory(_) | Mode::SkillsView(_) | Mode::LoopsView(_) | Mode::Inbox(_) => {
+                true
+            }
+            Mode::ConfigView(v) => v.pending == Pending::None,
+            Mode::WorkflowsView(v) => v.pending == crate::app::workflows_view::ViewPending::None,
+            _ => false,
+        }
     }
 
     /// Terminal-emulator chords intercepted before v1 dispatch (Ghostty /
@@ -3865,6 +3892,7 @@ impl App {
             Action::OpenWorkflowPlan => self.open_workflow_plan(),
             Action::OpenFlowBuilder => self.open_flow_builder_new(),
             Action::OpenFlowBuilderSelected => self.open_flow_builder_selected(),
+            Action::DeleteWorkflowRow => self.delete_selected_workflow_row(),
             Action::FlowBuilderKey => self.handle_flow_builder_key(key),
             Action::OpenLoopBuilder => self.open_loop_builder_selected(),
             Action::OpenLoopBuilderNew => self.open_loop_builder_new(),
@@ -4135,8 +4163,8 @@ impl App {
     }
 
     fn handle_browser_key(&mut self, key: &KeyEvent) {
-        // `s` scores the selected turn; the outcome is a status-bar notice
-        if key.code == KeyCode::Char('s')
+        // `+` scores the selected turn; the outcome is a status-bar notice
+        if key.code == KeyCode::Char('+')
             && let Mode::TraceBrowser(browser) = &mut self.mode
             && browser.search_input.is_none()
         {
@@ -4209,7 +4237,7 @@ impl App {
                 browser.all_projects = !browser.all_projects;
                 browser.reload_sessions();
             }
-            KeyCode::Char('r') | KeyCode::Char('R') => {
+            KeyCode::Char('r') => {
                 if let Some(session) = browser.sessions.get(browser.selected_session).cloned() {
                     self.resume_traced_session(&session);
                 }
@@ -4315,7 +4343,7 @@ impl App {
                 history.all_projects = !history.all_projects;
                 history.reload_sessions();
             }
-            KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Enter => {
+            KeyCode::Char('r') | KeyCode::Enter => {
                 if let Some(summary) = history.sessions.get(history.selected_session_idx).cloned() {
                     self.resume_history_session(&summary);
                 }
@@ -4796,7 +4824,7 @@ impl App {
             },
             KeyCode::Home => view.scroll_offset = 0,
             KeyCode::End => view.scroll_offset = view.max_scroll(),
-            KeyCode::Enter | KeyCode::Char('e') => {
+            KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('o') => {
                 let Some(asset) = view.selected_asset().cloned() else {
                     return;
                 };
@@ -4850,7 +4878,7 @@ impl App {
                     view.pending = Pending::Push;
                 }
             }
-            KeyCode::Char('r') => {
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 view.reload(&self.loop_registry);
                 self.notice = Some(Notice::info("configuration rescanned"));
             }
@@ -4902,7 +4930,7 @@ impl App {
                 self.validate_selected_skill();
                 return;
             }
-            KeyCode::Char('l') => {
+            KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.launch_selected_workbench_skill();
                 return;
             }
@@ -4933,7 +4961,7 @@ impl App {
             KeyCode::Char('3') | KeyCode::Char('a') | KeyCode::Char('A') => {
                 view.toggle_filter(crate::harness::Harness::Antigravity)
             }
-            KeyCode::Char('r') | KeyCode::Char('R') => {
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 view.reload();
                 self.reload_skills();
             }
@@ -5628,10 +5656,19 @@ mod dispatch_tests {
             dispatch(&Mode::Control, &key(KeyCode::Char('x')), &running),
             Action::EnterConfirmKill
         ));
+        // x stops; there is nothing to stop in an exited session: d removes it
         let exited = ctx(Some(Status::Exited(Some(0))));
         assert!(matches!(
             dispatch(&Mode::Control, &key(KeyCode::Char('x')), &exited),
+            Action::None
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('d')), &exited),
             Action::RemoveSelected
+        ));
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('d')), &running),
+            Action::EnterConfirmKill
         ));
     }
 

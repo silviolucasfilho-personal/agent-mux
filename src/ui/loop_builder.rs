@@ -96,9 +96,9 @@ pub fn draw(f: &mut Frame, st: &LoopBuilderState) {
             f.render_widget(
                 Paragraph::new(hints(&[
                     ("Enter", "done"),
-                    ("Alt+Enter", "new line"),
-                    ("Ctrl+E", "editor"),
-                    ("Ctrl+R", "back to the default"),
+                    ("⌃J", "new line"),
+                    ("⌃O", "editor"),
+                    ("⌃R", "back to the default"),
                     ("Esc", "cancel"),
                 ])),
                 foot,

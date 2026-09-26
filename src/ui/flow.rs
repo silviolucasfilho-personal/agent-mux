@@ -195,80 +195,69 @@ fn draw_header(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
 }
 
 fn footer(st: &FlowBuilderState) -> Line<'static> {
+    use crate::keymap::{Verb, ctrl_label, label, newline_label};
+    let editor = ctrl_label('o');
     if st.edit.is_some() {
-        return hints(&[("Enter", "done"), ("Esc", "cancel"), ("Ctrl+E", "editor")]);
+        return hints(&[
+            (label(Verb::Open), "done"),
+            ("Esc", "cancel"),
+            (newline_label(), "new line"),
+            (&editor, "editor"),
+        ]);
     }
-    match st.screen {
+    // the same on every screen
+    let common: [(&str, &str); 4] = [
+        ("1 2 3", "steps · passes · review"),
+        (label(Verb::Save), "save"),
+        (label(Verb::Run), "save and run"),
+        ("Esc", "back"),
+    ];
+    let mut own: Vec<(&str, &str)> = match st.screen {
         Screen::Steps => match st.focus {
-            Focus::List => hints(&[
+            Focus::List => vec![
                 ("↑↓", "steps"),
                 ("→", "fields"),
-                ("a", "add"),
+                (label(Verb::New), "new step"),
                 ("J K", "move"),
-                ("d", "delete"),
-                ("w", "what passes"),
-                ("g", "who runs it"),
-                ("v", "review"),
-                ("Esc", "close"),
-            ]),
+                (label(Verb::Delete), "delete"),
+            ],
             Focus::Fields => {
-                let f = st.current_field();
-                let what = match f.map(Field::edits) {
+                let what = match st.current_field().map(Field::edits) {
                     Some(Edits::Cycle) => ("←→", "change"),
-                    Some(Edits::Pick) => ("Enter", "choose"),
-                    Some(Edits::Jump) => ("Enter", "edit the shape"),
-                    _ => ("Enter", "type"),
+                    Some(Edits::Pick) => ("↩", "choose"),
+                    Some(Edits::Jump) => ("↩", "edit the shape"),
+                    _ => ("↩", "type"),
                 };
-                hints(&[
-                    ("↑↓", "fields"),
-                    what,
-                    ("a", "add step"),
-                    ("w", "what passes"),
-                    ("g", "who runs it"),
-                    ("v", "review"),
-                    ("Esc", "steps"),
-                ])
+                vec![("↑↓", "fields"), what, (label(Verb::New), "new step")]
             }
         },
         Screen::Exchange => match st.ex_pane {
-            ExPane::Strip => hints(&[("←→", "steps"), ("Tab", "gives / gets"), ("Esc", "back")]),
-            ExPane::Gives => hints(&[
+            ExPane::Strip => vec![("←→", "steps"), ("Tab", "gives / gets")],
+            ExPane::Gives => vec![
                 ("↑↓", "fields"),
-                ("+", "add"),
+                (label(Verb::New), "new field"),
                 ("←→", "kind"),
-                ("r", "required"),
-                ("Enter", "open / values / rename"),
-                ("d", "delete"),
+                ("Space", "required"),
+                ("↩", "open / values"),
+                (label(Verb::Edit), "rename"),
+                (label(Verb::Delete), "delete"),
                 ("[ ]", "step"),
-                ("Tab", "gets"),
-                ("Esc", "back"),
-            ]),
-            ExPane::Gets => hints(&[
+            ],
+            ExPane::Gets => vec![
                 ("↑↓", "choose"),
-                ("Enter", "read it"),
-                ("f", "keep only"),
-                ("u", "drop repeats"),
+                ("↩", "read it / edit filter"),
                 ("[ ]", "step"),
-                ("Tab", "strip"),
-                ("Esc", "back"),
-            ]),
+            ],
         },
-        Screen::Review if st.builtin == Some(true) => hints(&[
-            ("Enter", "save and run"),
-            ("s", "save"),
-            ("R", "restore the built-in"),
-            ("e", "open in $EDITOR"),
-            ("Esc", "steps"),
-        ]),
-        Screen::Review => hints(&[
-            ("Enter", "save and run"),
-            ("s", "save"),
-            ("e", "open in $EDITOR"),
-            ("↑↓ PgUp PgDn", "scroll"),
-            ("w", "what passes"),
-            ("Esc", "steps"),
-        ]),
-    }
+        Screen::Review => vec![
+            ("↩", "save and run"),
+            (label(Verb::Restore), "restore built-in"),
+            ("↑↓ ⌃D ⌃U", "scroll"),
+        ],
+    };
+    own.push((&editor, "document in $EDITOR"));
+    own.extend(common);
+    hints(&own)
 }
 
 // ---- Steps ----------------------------------------------------------------------
@@ -376,7 +365,7 @@ fn draw_chain(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
         Span::styled(" + add a step ", key_style()),
-        Span::styled(" a", dim()),
+        Span::styled(" n", dim()),
     ]));
     // what the flow takes, at the foot
     let args = st.draft.args_text();
@@ -512,7 +501,7 @@ fn draw_fields(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
         lines.push(Line::from(vec![
             Span::styled(" Next: ", head()),
             Span::raw("press "),
-            Span::styled("a", key_style()),
+            Span::styled("n", key_style()),
             Span::raw(
                 " to add the first step, then say how it runs, what it does and who runs it.",
             ),
@@ -639,7 +628,7 @@ fn detail_of(st: &FlowBuilderState, field: Field) -> Option<String> {
 fn agent_line(st: &FlowBuilderState, name: &str) -> String {
     match st.catalog.get(name) {
         Some(a) => format!("{} · tools {}", a.description, a.tools_label()),
-        None => "not found: g creates it".into(),
+        None => "not found: Enter on Who creates it".into(),
     }
 }
 
@@ -893,23 +882,35 @@ fn draw_gets(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
     lines.push(Line::styled(" Filters", Style::default().fg(Color::Yellow)));
     let keep = st.draft.step_str(i, "keep");
     let dedupe = st.draft.list_text(i, "dedupe_by");
-    lines.push(Line::from(vec![
-        Span::styled(" f ", key_style()),
-        Span::raw("keep only "),
-        Span::styled(
-            if keep.is_empty() { "all".into() } else { keep },
-            Style::default(),
+    // two more rows of the same list: Enter edits them
+    let at = options.len();
+    for (n, (what, value)) in [
+        (
+            "keep only",
+            if keep.is_empty() {
+                "all".to_string()
+            } else {
+                keep
+            },
         ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(" u ", key_style()),
-        Span::raw("drop repeats by "),
-        Span::raw(if dedupe.is_empty() {
-            "—".into()
-        } else {
-            dedupe
-        }),
-    ]));
+        (
+            "drop repeats by",
+            if dedupe.is_empty() {
+                "—".to_string()
+            } else {
+                dedupe
+            },
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let on = focused && st.ex_gets == at + n;
+        lines.push(Line::styled(
+            truncate_chars(&format!("  {what}  {value}  ▸"), width),
+            if on { sel() } else { Style::default() },
+        ));
+    }
     if let Some(e) = &st.edit
         && matches!(e.target, EditTarget::Filter | EditTarget::Dedupe)
     {
@@ -1222,8 +1223,8 @@ fn draw_prompt(f: &mut Frame, st: &FlowBuilderState, text: &crate::app::text_are
     f.render_widget(
         Paragraph::new(hints(&[
             ("Enter", "done"),
-            ("Alt+Enter", "new line"),
-            ("Ctrl+E", "editor"),
+            ("⌃J", "new line"),
+            ("⌃O", "editor"),
             ("Esc", "cancel"),
         ])),
         foot,
@@ -1394,8 +1395,8 @@ fn draw_agents(f: &mut Frame, st: &FlowBuilderState, p: &AgentPicker) {
         hints(&[
             ("Tab ↑↓", "fields"),
             ("Space ←→", "toggle"),
-            ("Alt+Enter", "new line"),
-            ("Ctrl+E", "editor"),
+            ("⌃J", "new line"),
+            ("⌃O", "editor"),
             ("Ctrl+S", "save and use"),
             ("Esc", "back to the list"),
         ])

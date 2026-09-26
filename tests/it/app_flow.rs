@@ -146,7 +146,7 @@ async fn kill_confirm_respawn_and_remove() {
     })
     .await;
     assert!(ok);
-    app.handle_key(&key(KeyCode::Char('x')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('d')), Instant::now());
     assert!(app.sessions.is_empty());
 }
 

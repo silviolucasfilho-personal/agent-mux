@@ -389,7 +389,7 @@ impl App {
         }
     }
 
-    /// After `Ctrl+E` on the prompt: the text returns to it.
+    /// After `Ctrl+O` on the prompt: the text returns to it.
     pub fn loop_builder_editor_finished(&mut self, path: &std::path::Path) {
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
@@ -440,7 +440,7 @@ impl App {
                 self.loop_save(st);
                 return After::Stay;
             }
-            KeyCode::Char('n') | KeyCode::Char('f') => {
+            KeyCode::Char('n') => {
                 st.overlay = Some(Overlay::NewName {
                     text: TextArea::new("my-loop"),
                     from: None,
@@ -517,7 +517,13 @@ impl App {
                 KeyCode::Down | KeyCode::Char('j') => {
                     st.selected = (st.selected + 1).min(st.items.len())
                 }
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                KeyCode::Home | KeyCode::Char('g') => st.selected = 0,
+                KeyCode::End | KeyCode::Char('G') => st.selected = st.items.len(),
+                KeyCode::Enter
+                | KeyCode::Right
+                | KeyCode::Char('l')
+                | KeyCode::Tab
+                | KeyCode::Char('e') => {
                     if st.selected == st.items.len() {
                         st.overlay = Some(Overlay::NewName {
                             text: TextArea::new("my-loop"),
@@ -536,7 +542,8 @@ impl App {
                     KeyCode::Down | KeyCode::Char('j') => st.field = (st.field + 1).min(n - 1),
                     KeyCode::Tab => st.field = (st.field + 1) % n,
                     KeyCode::BackTab => st.field = (st.field + n - 1) % n,
-                    KeyCode::Home => st.field = 0,
+                    KeyCode::Home | KeyCode::Char('g') => st.field = 0,
+                    KeyCode::End | KeyCode::Char('G') => st.field = n - 1,
                     KeyCode::Left | KeyCode::Char('h')
                         if st.current_field().map(LField::edits) != Some(Edits::Cycle) =>
                     {
@@ -548,7 +555,7 @@ impl App {
                             loop_cycle(st, f, delta);
                         }
                     }
-                    KeyCode::Enter => {
+                    KeyCode::Enter | KeyCode::Char('e') => {
                         if let Some(f) = st.current_field() {
                             self.loop_activate(st, f);
                         }
@@ -733,7 +740,7 @@ impl App {
             },
             Overlay::Prompt { text } => match key.code {
                 KeyCode::Esc => st.overlay = None,
-                KeyCode::Char('e') if ctrl => {
+                KeyCode::Char('o') if ctrl => {
                     let dir = self.workflows_runtime_dir().join("loops");
                     let path = dir.join("builder-prompt.md");
                     if std::fs::create_dir_all(&dir)

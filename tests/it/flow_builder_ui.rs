@@ -123,6 +123,19 @@ fn pick(app: &mut App, text: &str) {
     press(app, KeyCode::Enter);
 }
 
+/// Opens the agent picker for the selected step (Enter on Who).
+fn open_agents(app: &mut App) {
+    if st(app).focus == agent_mux::app::flow_builder::Focus::List {
+        press(app, KeyCode::Right);
+    }
+    to_field(app, Field::Who);
+    press(app, KeyCode::Enter);
+    assert!(
+        matches!(st(app).overlay, Some(Overlay::Agent(_))),
+        "the picker is open"
+    );
+}
+
 fn to_workflows(app: &mut App) {
     for _ in 0..6 {
         if app.sidebar_section == SidebarSection::Workflows {
@@ -135,7 +148,7 @@ fn to_workflows(app: &mut App) {
 
 /// Adds a step running as the `n`th shape, named `name`.
 fn add_step(app: &mut App, name: &str, shape: usize) {
-    press(app, KeyCode::Char('a'));
+    press(app, KeyCode::Char('n'));
     for _ in 0..shape {
         press(app, KeyCode::Right);
     }
@@ -151,7 +164,7 @@ fn a_flow_is_built_step_by_step_and_saved() {
     let (mut app, temp) = app();
     let ws = temp.path().join("ws");
     to_workflows(&mut app);
-    press(&mut app, KeyCode::Char('f'));
+    press(&mut app, KeyCode::Char('n'));
     assert!(matches!(app.mode, Mode::FlowBuilder(_)));
     let text = render(&app);
     assert!(text.contains("New flow"), "{text}");
@@ -208,9 +221,9 @@ fn a_flow_is_built_step_by_step_and_saved() {
     assert!(text.contains("├─ security"), "{text}");
 
     // what review gives: findings, a list of items with a file and a severity
-    press(&mut app, KeyCode::Char('w'));
+    press(&mut app, KeyCode::Char('2'));
     assert_eq!(st(&app).screen, Screen::Exchange);
-    press(&mut app, KeyCode::Char('+'));
+    press(&mut app, KeyCode::Char('n'));
     type_text(&mut app, "findings");
     press(&mut app, KeyCode::Enter);
     for _ in 0..6 {
@@ -223,11 +236,11 @@ fn a_flow_is_built_step_by_step_and_saved() {
     ));
     press(&mut app, KeyCode::Enter); // into the item group
     assert_eq!(st(&app).ex_groups, vec!["finding".to_string()]);
-    press(&mut app, KeyCode::Char('+'));
+    press(&mut app, KeyCode::Char('n'));
     type_text(&mut app, "file");
     press(&mut app, KeyCode::Enter);
-    press(&mut app, KeyCode::Char('r'));
-    press(&mut app, KeyCode::Char('+'));
+    press(&mut app, KeyCode::Char(' ')); // required
+    press(&mut app, KeyCode::Char('n'));
     type_text(&mut app, "severity");
     press(&mut app, KeyCode::Enter);
     for _ in 0..4 {
@@ -246,7 +259,7 @@ fn a_flow_is_built_step_by_step_and_saved() {
     assert_eq!(st(&app).screen, Screen::Steps);
 
     // who runs review: a new agent, written here, saved in the workspace
-    press(&mut app, KeyCode::Char('g'));
+    open_agents(&mut app);
     let text = render(&app);
     assert!(
         text.contains("skeptic · built-in"),
@@ -310,7 +323,7 @@ fn a_flow_is_built_step_by_step_and_saved() {
     assert_eq!(st(&app).draft.check_votes(2), Some((2, 2)));
 
     // review: the flow in words, the checks, then save
-    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('3'));
     let text = render(&app);
     assert!(text.contains("In words"), "{text}");
     assert!(text.contains("✓ ready to run"), "{text}");
@@ -364,7 +377,7 @@ fn a_flow_is_built_step_by_step_and_saved() {
 fn leaving_with_changes_asks_first_and_a_document_opens_in_the_builder() {
     let (mut app, _temp) = app();
     to_workflows(&mut app);
-    press(&mut app, KeyCode::Char('f'));
+    press(&mut app, KeyCode::Char('n'));
     add_step(&mut app, "only", 0);
     press(&mut app, KeyCode::Esc); // fields → list
     press(&mut app, KeyCode::Esc); // list → close?
@@ -390,7 +403,7 @@ fn leaving_with_changes_asks_first_and_a_document_opens_in_the_builder() {
         }
         press(&mut app, KeyCode::Down);
     }
-    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('e'));
     let s = st(&app);
     assert_eq!(s.draft.name(), "review-changes");
     assert_eq!(
@@ -410,9 +423,9 @@ fn leaving_with_changes_asks_first_and_a_document_opens_in_the_builder() {
 fn a_built_in_agent_is_edited_as_a_library_copy() {
     let (mut app, temp) = app();
     to_workflows(&mut app);
-    press(&mut app, KeyCode::Char('f'));
+    press(&mut app, KeyCode::Char('n'));
     add_step(&mut app, "look", 0);
-    press(&mut app, KeyCode::Char('g'));
+    open_agents(&mut app);
     let Some(Overlay::Agent(p)) = &st(&app).overlay else {
         panic!("the agent picker is open");
     };
@@ -478,7 +491,7 @@ fn a_built_in_workflow_is_edited_as_a_copy_and_restored() {
         }
         press(&mut app, KeyCode::Down);
     }
-    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('e'));
     assert!(render(&app).contains("Built-in flow"));
     // change what it says it does, then save: the library copy wins
     press(&mut app, KeyCode::Up); // flow settings
@@ -488,7 +501,7 @@ fn a_built_in_workflow_is_edited_as_a_copy_and_restored() {
     ctrl(&mut app, 'u');
     type_text(&mut app, "My stricter review");
     press(&mut app, KeyCode::Enter);
-    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('3'));
     press(&mut app, KeyCode::Char('s'));
     let copy = temp.path().join("library/workflows/santa-review.toml");
     assert!(
@@ -505,7 +518,7 @@ fn a_built_in_workflow_is_edited_as_a_copy_and_restored() {
     );
     let text = render(&app);
     assert!(text.contains("Your copy of a built-in"), "{text}");
-    assert!(text.contains("restore the built-in"), "{text}");
+    assert!(text.contains("restore built-in"), "{text}");
     // R, confirmed: the copy goes and the built-in text is back
     press(&mut app, KeyCode::Char('R'));
     press(&mut app, KeyCode::Char('y'));

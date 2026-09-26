@@ -1,4 +1,4 @@
-//! The loop builder as the user drives it: `f` and `o` in the Loops
+//! The loop builder as the user drives it: `o` in the Loops
 //! section, a pattern of the user's own, an edited built-in saved as the
 //! user's copy, and `R` restoring it.
 
@@ -115,8 +115,9 @@ fn patterns_are_created_edited_as_copies_and_restored() {
     let registry = temp.path().join("library/loops/registry.toml");
     to_loops(&mut app);
 
-    // f: a new pattern of the user's own
-    press(&mut app, KeyCode::Char('f'));
+    // o opens the builder, n: a new pattern of the user's own
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('n'));
     assert!(matches!(st(&app).overlay, Some(Overlay::NewName { .. })));
     ctrl(&mut app, 'u');
     type_text(&mut app, "docs-drift");

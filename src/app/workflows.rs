@@ -2009,6 +2009,27 @@ impl App {
         self.mode = Mode::WorkflowDialog(Box::new(d));
     }
 
+    /// `d` in the section: a plan is discarded after a y/n in the view; a
+    /// library document is removed from the Configuration view.
+    pub fn delete_selected_workflow_row(&mut self) {
+        match self.selected_workflow_row() {
+            Some(WorkflowRow::Planned(id)) => {
+                self.open_workflows_view_on(RunRow::Planned(id.clone()));
+                if let Mode::WorkflowsView(v) = &mut self.mode {
+                    v.pending = crate::app::workflows_view::ViewPending::Discard(id);
+                }
+            }
+            Some(WorkflowRow::Live(_)) => {
+                self.notice = Some(Notice::info("x stops a running workflow"));
+            }
+            _ => {
+                self.notice = Some(Notice::info(
+                    "d discards a plan; a library workflow is removed with R in the Configuration view (C)",
+                ));
+            }
+        }
+    }
+
     /// `c` in the section: the planner dialog.
     pub fn open_workflow_plan(&mut self) {
         let d = WorkflowDialogState::for_plan(&self.profiles, self.dialog_workspaces());
@@ -2209,9 +2230,20 @@ impl App {
                     d.error = None;
                 }
             }
-            // Ctrl+E writes the field to a file and opens the editor; the
+            // Ctrl+O writes the field to a file and opens the editor; the
             // text comes back in `editor_finished`
-            KeyCode::Char('e') if ctrl && on_text => self.open_dialog_editor(),
+            KeyCode::Char('o') if ctrl && on_text => self.open_dialog_editor(),
+            // start and end of the line, as in macOS text fields
+            KeyCode::Char('a') if ctrl => {
+                if let Some(t) = dialog.text_mut() {
+                    t.home();
+                }
+            }
+            KeyCode::Char('e') if ctrl => {
+                if let Some(t) = dialog.text_mut() {
+                    t.end();
+                }
+            }
             KeyCode::Char(c) if !ctrl => {
                 if let Some(t) = dialog.text_mut() {
                     t.insert(c);
@@ -2472,6 +2504,21 @@ impl App {
                 }
                 return;
             }
+            ViewPending::Discard(id) => {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        view.pending = ViewPending::None;
+                        self.planned_workflows.retain(|p| p.id != id);
+                        self.with_view(|v, f| v.reload(f));
+                        self.notice = Some(Notice::info("planned document discarded"));
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        view.pending = ViewPending::None
+                    }
+                    _ => {}
+                }
+                return;
+            }
             ViewPending::SaveName(mut name) => {
                 match key.code {
                     KeyCode::Esc => view.pending = ViewPending::None,
@@ -2594,6 +2641,9 @@ impl App {
                     _ => {}
                 }
             }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.with_view(|v, f| v.reload(f));
+            }
             KeyCode::Char('r') => {
                 let row = view.selected_row().cloned();
                 if let Some(RunRow::Stored(id)) = row {
@@ -2624,7 +2674,9 @@ impl App {
                         self.with_view(|v, f| v.reload(f));
                     }
                 } else {
-                    self.with_view(|v, f| v.reload(f));
+                    self.notice = Some(Notice::info(
+                        "r resumes a stored run; Ctrl+R reloads the list",
+                    ));
                 }
             }
             KeyCode::Char('s') => {
@@ -2650,19 +2702,23 @@ impl App {
                     view.pending = ViewPending::SaveName(d);
                 }
             }
+            // x stops a live run; d discards a plan, asking first
             KeyCode::Char('x') => {
-                let row = view.selected_row().cloned();
-                match row {
-                    Some(RunRow::Live(_)) => view.pending = ViewPending::Cancel,
-                    Some(RunRow::Planned(id)) => {
-                        self.planned_workflows.retain(|p| p.id != id);
-                        self.with_view(|v, f| v.reload(f));
-                        self.notice = Some(Notice::info("planned document discarded"));
-                    }
-                    _ => {}
+                if let Some(RunRow::Live(_)) = view.selected_row() {
+                    view.pending = ViewPending::Cancel;
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(RunRow::Planned(id)) = view.selected_row().cloned() {
+                    view.pending = ViewPending::Discard(id);
                 }
             }
             KeyCode::Char('e') => {
+                if let Some(RunRow::Planned(id)) = view.selected_row().cloned() {
+                    self.open_flow_builder_plan(&id);
+                }
+            }
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let row = view.selected_row().cloned();
                 if let Some(RunRow::Planned(id)) = row {
                     let doc = self.planned_workflows.iter().find(|p| p.id == id).cloned();
@@ -2717,12 +2773,17 @@ impl App {
     /// The action for a key in the Workflows section (Control mode).
     pub fn workflows_section_action(key: &KeyEvent) -> Option<Action> {
         match key.code {
+            // the shared keymap (`crate::keymap`): n new, e edit, x stop,
+            // d delete, r run, Ctrl+O the file in $EDITOR; c composes
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::EditWorkflow)
+            }
             KeyCode::Enter => Some(Action::OpenWorkflowRun),
             KeyCode::Char('c') => Some(Action::OpenWorkflowPlan),
-            KeyCode::Char('f') => Some(Action::OpenFlowBuilder),
-            KeyCode::Char('o') => Some(Action::OpenFlowBuilderSelected),
-            KeyCode::Char('e') => Some(Action::EditWorkflow),
+            KeyCode::Char('n') => Some(Action::OpenFlowBuilder),
+            KeyCode::Char('e') => Some(Action::OpenFlowBuilderSelected),
             KeyCode::Char('x') => Some(Action::CancelWorkflow),
+            KeyCode::Char('d') => Some(Action::DeleteWorkflowRow),
             KeyCode::Char('r') => Some(Action::OpenWorkflowRun),
             _ => None,
         }

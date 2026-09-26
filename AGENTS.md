@@ -28,6 +28,10 @@ A workflow agent is the *who* of a session: a TOML file (`name`, `description`, 
 
 Every compiled-in text (the prompts in `src/prompts.toml`, the Heimdall files, `loops/registry.toml`, the loop skills, the verifier, the templates, the workflows, the built-in agents in `agents/builtin/`) is shadowed file by file from `~/.agent-mux/` (`$AGENT_MUX_LIBRARY_DIR`); `prompts.toml` and `registry.toml` merge by key and by pattern id. The Configuration view (`C`) and `agent-mux config ls|show|path|edit|reset|new|check|push` list, edit (external editor: `editor` in profiles.toml, `$VISUAL`, `$EDITOR`, `vi`), reset, create and push items. Consumers read the effective text: `loops::patterns::all()` (cached, `reload()`), `loops::scaffold` (`scaffold_with_library`), the loop launch prompt (`prompts::render_loop_run`, a pattern's `prompt` first) and the hydration hint. When you add a compiled-in asset, register it in `Catalog::load` so it is editable; nothing pre-defined is read-only (built-in agents, loop patterns and workflows are also editable in the builders). Guide: `docs/configuration.md`; design: `docs/superpowers/specs/2026-09-17-configuration-library-design.md`.
 
+## Keyboard (`src/keymap.rs`)
+
+One keymap for every screen, macOS-friendly: `n` new, `e` edit, `d` delete (asks), `x` stop, `s` save, `r` run, `Ctrl+R` reload, `R` restore built-in, `J`/`K` move, `g`/`G`, `Ctrl+D`/`Ctrl+U`, `1`-`9` tabs, `Ctrl+O` `$EDITOR`; text fields share `keymap::apply_text` (`Ctrl+J` new line, `Ctrl+A`/`Ctrl+E`, `Ctrl+W`, `Ctrl+U`). A new screen uses these keys and never gives one another meaning; the help overlay prints `keymap::VERBS`. Guide: `docs/keyboard.md`.
+
 ## Working in this repository
 
 - `cargo build`, `cargo test`, `cargo clippy --all-targets`, `cargo fmt`.

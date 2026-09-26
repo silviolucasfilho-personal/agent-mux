@@ -14,7 +14,7 @@ use crate::loops::store::{self as lstore, LoopRun};
 use crate::loops::worktree::{self, Worktree};
 use crate::loops::{Level, LoopLaunch, LoopPolicy, Outcome, patterns};
 use crate::status::Status;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -2296,7 +2296,7 @@ impl App {
                 view.tab = LoopsTab::Setup;
                 view.rebuild_detail();
             }
-            KeyCode::Char('R') => {
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let reg = self.loop_registry.clone();
                 if let Mode::LoopsView(view) = &mut self.mode {
                     view.reload(&reg);

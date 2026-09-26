@@ -32,7 +32,7 @@ Five agents ship built in, ready for `agent = "…"`:
 | `judge` | picking the better of two candidates, with the deciding reason | read |
 
 Every built-in can be edited, the same way built-in workflows and loops are:
-- **Where:** `Enter` on it in the Configuration view (`C`), or `e` on it in the flow builder's agent picker.
+- **Where:** `Enter` on it in the Configuration view (`C`), or `e` on it in the flow builder's agent picker (both open it in `$EDITOR`).
 - **What changes:** an edit makes your copy in `~/.agent-mux/agents/<name>.toml`, and that copy replaces the built-in everywhere.
 - **Undo:** `R` in the Configuration view restores the built-in.
 
@@ -52,7 +52,7 @@ agent-mux agent new sec --description "Security reviewer" \
   --tools read,shell
 ```
 
-While you build a flow (`f` in the Workflows section, `docs/workflows.md`), `g` on a step picks its agent or writes a new one in a form: what it is for, instructions, tools as checkboxes, a model per harness, and whether to save it to the workspace or the library. The form shows as you type whether the agent fits the step.
+While you build a flow (`n` in the Workflows section, `docs/workflows.md`), `Enter` on a step's **Who** picks its agent or writes a new one in a form: what it is for, instructions, tools as checkboxes, a model per harness, and whether to save it to the workspace or the library. The form shows as you type whether the agent fits the step.
 
 In the TUI: `C` opens the Configuration view. Its **Agents** group lists library agents; before the first one exists it shows `no agents yet · n creates one`. On that row or on any agent, `n` asks for a name, writes the agent from the blank template and opens it in your editor; `Enter` edits an existing one. `agent-mux config new agent <name>` does the same from the shell.
 

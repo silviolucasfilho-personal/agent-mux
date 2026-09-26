@@ -396,7 +396,7 @@ fn e_edits_a_managed_package_and_keeps_workbench_context() {
             .text
             .contains("frontmatter name")
     );
-    app.handle_key(&key(KeyCode::Char('l')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('r')), Instant::now());
     assert!(app.sessions.is_empty());
     let notice = &app.notice.as_ref().unwrap().text;
     assert!(
@@ -454,7 +454,7 @@ async fn l_launches_the_selected_harness_and_reopening_s_restores_executions() {
     app.handle_key(&key(KeyCode::Char('S')), Instant::now());
     assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
 
-    app.handle_key(&key(KeyCode::Char('l')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('r')), Instant::now());
     assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
     assert_eq!(
         app.sessions[app.selected].skill_id.as_deref(),
@@ -598,7 +598,10 @@ async fn the_view_has_details_and_executions_tabs_and_reflects_install_state() {
     let dir = temp.path().join(".claude/skills/plain");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("SKILL.md"), "someone else's").unwrap();
-    app.handle_key(&key(KeyCode::Char('r')), Instant::now());
+    app.handle_key(
+        &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        Instant::now(),
+    );
     assert!(screen(&app).contains("not managed"));
     app.kill_all();
 }

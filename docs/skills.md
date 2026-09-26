@@ -76,7 +76,7 @@ Press `S` for the workbench view of every skill under each harness it declares: 
 
 For an agent-mux package, `e` opens its `SKILL.md` in the configured external editor. A compiled-in skill is first copied to the configuration library as an override. The workbench validates the saved package when the editor returns and keeps an invalid edit selected so it can be repaired. `v` validates again without launching. Harness-native skills remain read-only because agent-mux does not own their source.
 
-`l` installs the selected package for that row's harness and launches it, or attaches when that singleton skill is already running. Opening `S` again returns to the same skill and the Executions tab. `T` opens the selected execution in the Trace Browser. `1`-`3` filter by harness and `r` rescans.
+`r` (run) installs the selected package for that row's harness and launches it, or attaches when that singleton skill is already running. Opening `S` again returns to the same skill and the Executions tab. `T` opens the selected execution in the Trace Browser. `1`-`3` filter by harness and `r` rescans.
 
 ## 6. CLI
 

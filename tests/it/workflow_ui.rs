@@ -339,8 +339,10 @@ fn a_planned_document_is_listed_run_saved_or_discarded_from_the_view() {
         "the section list reloaded"
     );
 
-    // x discards it
-    press(&mut app, KeyCode::Char('x'));
+    // d discards it, after a y
+    press(&mut app, KeyCode::Char('d'));
+    assert!(!app.planned_workflows.is_empty(), "it asks first");
+    press(&mut app, KeyCode::Char('y'));
     assert!(app.planned_workflows.is_empty());
     let Mode::WorkflowsView(v) = &app.mode else {
         panic!()
@@ -352,7 +354,7 @@ fn a_planned_document_is_listed_run_saved_or_discarded_from_the_view() {
 fn the_help_overlay_and_the_section_hints_mention_workflows() {
     let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
     press(&mut app, KeyCode::Char('?'));
-    let text = render(&app, 120, 45);
+    let text = render(&app, 120, 64);
     assert!(text.contains("workflows view"), "{text}");
     assert!(text.contains("Workflows section"), "{text}");
 }
@@ -394,7 +396,7 @@ fn the_task_field_takes_a_multi_line_prompt() {
     assert!(text.contains("Audit the parser for unchecked"), "{text}");
     assert!(text.contains("Report by file."), "{text}");
     assert!(
-        text.contains("[Alt+Enter] newline"),
+        text.contains("[⌃J] new line"),
         "the keys are on screen\n{text}"
     );
 
@@ -445,7 +447,7 @@ fn the_task_field_takes_a_multi_line_prompt() {
 }
 
 #[test]
-fn ctrl_e_composes_the_field_in_the_editor_and_brings_it_back() {
+fn ctrl_o_composes_the_field_in_the_editor_and_brings_it_back() {
     let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
     app.editor = Some("true".into());
     to_workflows(&mut app);
@@ -453,7 +455,7 @@ fn ctrl_e_composes_the_field_in_the_editor_and_brings_it_back() {
     for c in "short start".chars() {
         press(&mut app, KeyCode::Char(c));
     }
-    press_mod(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    press_mod(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
     let req = app.take_editor_request().expect("an editor request");
     assert_eq!(req.asset_id, "dialog:text");
     assert_eq!(req.command, vec!["true".to_string()]);

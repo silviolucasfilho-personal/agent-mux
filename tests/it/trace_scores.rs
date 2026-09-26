@@ -248,7 +248,7 @@ fn s_in_the_browser_cycles_the_verdict() {
     let mut app = App::new(vec![], None, tx);
     app.mode = Mode::TraceBrowser(Box::new(browser));
     app.handle_key(
-        &KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        &KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
         Instant::now(),
     );
     let notice = app.notice.clone().expect("a notice says what happened");

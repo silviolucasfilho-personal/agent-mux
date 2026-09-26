@@ -550,6 +550,8 @@ pub enum RunRow {
 pub enum ViewPending {
     None,
     Cancel,
+    /// `d` on a planned document: discard it?
+    Discard(String),
     /// `s`: the library name for the selected document.
     SaveName(String),
 }
@@ -1266,10 +1268,11 @@ impl WorkflowsViewState {
     pub fn footer(&self) -> String {
         match &self.pending {
             ViewPending::Cancel => " Cancel this run? [y/n]".into(),
+            ViewPending::Discard(_) => " Discard this planned document? [y/n]".into(),
             ViewPending::SaveName(n) => {
                 format!(" Save to the library as: {n}_   [Enter] save  [Esc] cancel")
             }
-            ViewPending::None => " [Tab/1-4] tab  [←/→] pane  [↑/↓] select  [PgDn/End] scroll  [Enter] run/attach  [r] resume  [s] save  [x] cancel  [I] inbox  [Esc] close".into(),
+            ViewPending::None => " [Tab/1-4] tab  [←/→] pane  [↑/↓] select  [⌃D/G] scroll  [Enter] run/attach  [r] resume  [e] edit plan  [s] save  [x] stop run  [d] discard plan  [⌃R] reload  [I] inbox  [Esc] close".into(),
         }
     }
 }

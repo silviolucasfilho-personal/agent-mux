@@ -387,7 +387,7 @@ fn draw_workflows_sidebar(f: &mut Frame, area: Rect, app: &App) {
         .title(Span::styled(format!(" {title} "), title_style));
     let rows = app.workflow_rows();
     if rows.is_empty() {
-        let hint = Paragraph::new("[c] compose one for a task  [f] build one step by step")
+        let hint = Paragraph::new("[n] build one step by step  [c] compose one for a task")
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(hint, area);
@@ -529,7 +529,7 @@ fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
         .border_style(border_style)
         .title(Span::styled(format!(" {title} "), title_style));
     if n == 0 {
-        let hint = Paragraph::new("[a] add a loop  [o] patterns")
+        let hint = Paragraph::new("[n] new loop  [o] patterns")
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(hint, area);
@@ -1861,18 +1861,18 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                             if app.loop_registry.pause_all {
                                 Line::styled(
                                     fit(
-                                        "‖ LOOPS PAUSED  [K] resume all  [Enter] details  [r] run now  [p] pause  [a] add  [e] edit  [x] remove",
+                                        "‖ LOOPS PAUSED  [K] resume all  [Enter] details  [r] run now  [p] pause  [n] new  [e] edit  [d] remove",
                                     ),
                                     Style::default().fg(Color::Yellow),
                                 )
                             } else {
                                 Line::raw(fit(
-                                    "[b] sidebar  [Enter] details  [r] run now  [p] pause  [a] add  [e] edit  [o] its pattern  [f] new pattern  [x] remove  [K] kill  [?] help",
+                                    "[b] sidebar  [Enter] details  [r] run now  [p] pause  [n] new  [e] edit  [d] remove  [o] its pattern  [K] kill  [?] help",
                                 ))
                             }
                         }
                         SidebarSection::Workflows => Line::raw(fit(
-                            "[b] sidebar  [Enter] run / view  [f] build  [o] open in builder  [c] compose  [e] edit  [x] cancel  [W] view  [K] kill  [?] help",
+                            "[b] sidebar  [Enter] run / view  [n] new flow  [e] edit  [c] compose  [x] stop  [d] discard plan  [⌃O] file  [W] view  [?] help",
                         )),
                         SidebarSection::History => Line::raw(fit(
                             "[b] sidebar  [Enter/r] restart  [a] all  [n] new  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
@@ -1935,7 +1935,58 @@ fn draw_help(f: &mut Frame) {
             Span::raw(desc.to_string()),
         ])
     };
-    let lines: Vec<Line> = vec![
+    // the shared keymap, written from `keymap::VERBS`: one key, one meaning
+    use crate::keymap::{Verb, label};
+    let pairs = |items: &[(Verb, &str)]| -> Line<'static> {
+        let mut spans = vec![Span::raw("  ")];
+        for (v, what) in items {
+            spans.push(Span::styled(label(*v).to_string(), key_style));
+            spans.push(Span::raw(format!(" {what}   ")));
+        }
+        Line::from(spans)
+    };
+    let mut lines: Vec<Line> = vec![
+        Line::styled("Everywhere: one key, one meaning", head),
+        pairs(&[
+            (Verb::Open, "open"),
+            (Verb::Back, "back"),
+            (Verb::New, "new"),
+            (Verb::Edit, "edit"),
+            (Verb::Save, "save"),
+            (Verb::Run, "run"),
+            (Verb::Delete, "delete"),
+            (Verb::Stop, "stop"),
+        ]),
+        pairs(&[
+            (Verb::Restore, "restore built-in"),
+            (Verb::Reload, "reload"),
+            (Verb::Editor, "$EDITOR"),
+            (Verb::Top, "top"),
+            (Verb::Bottom, "bottom"),
+            (Verb::PageDown, "page down"),
+            (Verb::PageUp, "up"),
+        ]),
+        Line::from(vec![
+            Span::styled("  in text  ", dim),
+            Span::styled(crate::keymap::newline_label(), key_style),
+            Span::raw(" new line   "),
+            Span::styled(
+                format!(
+                    "{} {}",
+                    crate::keymap::ctrl_label('a'),
+                    crate::keymap::ctrl_label('e')
+                ),
+                key_style,
+            ),
+            Span::raw(" start end   "),
+            Span::styled(crate::keymap::ctrl_label('w'), key_style),
+            Span::raw(" word   "),
+            Span::styled(crate::keymap::ctrl_label('u'), key_style),
+            Span::raw(" clear   "),
+            Span::styled("J K", key_style),
+            Span::raw(" move an item"),
+        ]),
+        Line::raw(""),
         Line::styled("Control mode", head),
         row("b", "toggle sidebar (hide / full harness)"),
         row("j/k, ↑/↓", "select session"),
@@ -1954,15 +2005,14 @@ fn draw_help(f: &mut Frame) {
             "C",
             "configuration: edit every prompt, skill, loop pattern, loop skill, agent and template",
         ),
-        row("E / K", "loops view / kill switch: pause every loop"),
         row(
-            "W / I",
-            "workflows view · inbox: what waits on you, loops and workflows",
+            "E K W I",
+            "loops view · kill switch (pause every loop) · workflows view · inbox",
         ),
         row("v", "about: version, build time, paths and this session"),
         row(
             "n",
-            "new session (pick the trace backend: SQLite, Langfuse, both)",
+            "new, in the section: a session · a loop (Loops) · a flow (Workflows)",
         ),
         row("l", "browse past session logs"),
         row("t / T", "toggle tracing / browse local traces"),
@@ -1970,9 +2020,11 @@ fn draw_help(f: &mut Frame) {
             "● ◆ ◈",
             "badge glyphs: traced locally, to Langfuse, to both",
         ),
-        row("x / r", "kill session / respawn or restart"),
-        row("X", "clear all exited sessions"),
-        row("q", "quit"),
+        row(
+            "x / d / r",
+            "stop (kill) a session / remove it / respawn or restart",
+        ),
+        row("X · q", "clear all exited sessions · quit"),
         Line::raw(""),
         Line::styled("Attached mode", head),
         row("Ctrl+Shift+B", "toggle sidebar / full-screen harness"),
@@ -1992,23 +2044,18 @@ fn draw_help(f: &mut Frame) {
         ),
         Line::raw(""),
         Line::styled("Session logs", head),
-        row("Tab, ←/→", "switch pane"),
-        row("a", "toggle this project / all projects"),
+        row("Tab, ←/→ · a", "switch pane · this project / all projects"),
         row("r or Enter", "resume the selected session"),
         Line::raw(""),
         Line::styled("Workflows section", head),
         row(
-            "Enter c f o e x",
-            "run/view · compose · build step by step · open in builder · edit · cancel",
+            "n e c x d",
+            "new flow · edit in the builder · compose for a task · stop · discard plan",
         ),
         Line::styled("Loops section", head),
         row(
-            "Enter",
-            "details (Loops view) · r run now · p pause / resume",
-        ),
-        row(
-            "a e x o f",
-            "add · edit · remove a loop · edit its pattern · new pattern",
+            "Enter r p n e d o",
+            "details · run now · pause · new · edit · remove · its pattern",
         ),
         row(
             "Loops view",
@@ -2018,7 +2065,10 @@ fn draw_help(f: &mut Frame) {
         Line::styled("Skills view", head),
         row("Tab, ←/→", "next tab / focus the list or the detail pane"),
         row("1-3, c/x/a", "filter to one harness (again to clear)"),
-        row("r", "rescan packages, install state and the store"),
+        row(
+            "r · Ctrl+R",
+            "launch the skill · rescan packages and install state",
+        ),
         row("T", "open the selected execution's traces"),
         Line::raw(""),
         Line::styled("Trace browser", head),
@@ -2029,10 +2079,11 @@ fn draw_help(f: &mut Frame) {
             "Space",
             "fold a loop or workflow run (sessions) / a subtree (tree view)",
         ),
-        row("/", "full-text search (full mode content)"),
-        row("a", "toggle this project / all projects"),
-        row("s", "verdict: good → bad → cleared (also sent to Langfuse)"),
-        row("r", "resume the selected session"),
+        row("/ · a", "full-text search · this project / all projects"),
+        row(
+            "+ · r",
+            "verdict good → bad → cleared (also sent to Langfuse) · resume",
+        ),
         Line::raw(""),
         Line::styled("  [Esc] or [?] to close", dim),
         Line::styled(
@@ -2040,8 +2091,9 @@ fn draw_help(f: &mut Frame) {
             Style::default().fg(Color::DarkGray),
         ),
     ];
+    lines.shrink_to_fit();
     let height = (lines.len() as u16 + 2).min(f.area().height.saturating_sub(2));
-    let width = 84.min(f.area().width.saturating_sub(4)).max(40);
+    let width = 96.min(f.area().width.saturating_sub(4)).max(40);
     let area = centered(f.area(), width, height);
     f.render_widget(Clear, area);
     let block = Block::default()
@@ -2864,7 +2916,7 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             Style::default().fg(Color::Black).bg(Color::Yellow),
         ),
         None => Line::styled(
-            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold run/subtree  [/] search  [s] score  [a] all  [r] resume  [Esc] close",
+            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold run/subtree  [/] search  [+] score  [a] all  [r] resume  [Esc] close",
             Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
     };
@@ -3556,7 +3608,7 @@ fn draw_skills_view(f: &mut Frame, view: &SkillsViewState, app: &App) {
     }
 
     let footer_text = Line::styled(
-        " [e] edit  [v] check  [l] run  [Tab] details/runs  [↑/↓] select  [1-3] harness  [T] trace  [Esc] close",
+        " [e] edit  [v] check  [r] run  [⌃R] rescan  [Tab] details/runs  [↑/↓] select  [1-3] harness  [T] trace  [Esc] close",
         Style::default().fg(Color::Black).bg(Color::Cyan),
     );
     f.render_widget(Paragraph::new(footer_text), footer);
@@ -3861,7 +3913,7 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Loops ");
-        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [a] add a loop (pattern, harness, cadence, what it may do)   [o] edit the patterns   [E] Loops view   [?] help\n\n  Start with report only for a week. Let it propose fixes when the Setup tab says it is ready.";
+        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [n] new loop (pattern, harness, cadence, what it may do)   [o] edit the patterns   [E] Loops view   [?] help\n\n  Start with report only for a week. Let it propose fixes when the Setup tab says it is ready.";
         f.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
@@ -4148,7 +4200,7 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         fit_hints(
-            " [Enter] details  [r] run now  [p] pause  [e] edit  [x] remove  [K] kill switch  [E] loops view",
+            " [Enter] details  [r] run now  [p] pause  [e] edit  [d] remove  [o] pattern  [K] kill switch  [E] loops view",
             width,
         ),
         dim,
@@ -4571,7 +4623,7 @@ fn draw_loops_view(f: &mut Frame, view: &LoopsViewState, app: &App) {
             " [Tab/1-3] tab  [←/→] pane  [↑/↓] select  [1] its report  [Enter] attach/traces  [r] run now  [Esc] close"
         }
         _ => {
-            " [Tab/1-3] tab  [←/→] pane  [↑/↓] scroll  [r] run now  [p] pause  [R] reload  [I] inbox  [Esc] close"
+            " [Tab/1-3] tab  [←/→] pane  [↑/↓] scroll  [r] run now  [p] pause  [⌃R] reload  [I] inbox  [Esc] close"
         }
     };
     let footer_text = Line::styled(
@@ -4713,7 +4765,7 @@ fn draw_workflow_preview(f: &mut Frame, area: Rect, app: &App) {
                 lines.push(row(&step, state.to_string()));
             }
             lines.push(Line::raw(""));
-            lines.push(Line::styled("  [Enter] open the run   [x] cancel", dim));
+            lines.push(Line::styled("  [Enter] open the run   [x] stop", dim));
             block_with(format!(" {} · running ", r.name), Color::Cyan)
         }
         WorkflowRow::Recent(id) => {
@@ -4904,7 +4956,7 @@ fn draw_workflow_preview(f: &mut Frame, area: Rect, app: &App) {
             }
             lines.push(Line::raw(""));
             lines.push(Line::styled(
-                "  [Enter] run   [o] open in the builder   [f] build your own   [c] compose   [W] view",
+                "  [Enter] run   [e] edit in the builder   [n] build your own   [c] compose   [W] view",
                 dim,
             ));
             block_with(
@@ -5027,7 +5079,7 @@ fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
         ));
         if dialog.field == WfField::Task {
             lines.push(Line::styled(
-                "            what the composed workflow should do; Alt+Enter newline, Ctrl+E editor, Ctrl+V paste",
+                "            what the composed workflow should do; ⌃J new line, ⌃O editor, ⌃V paste",
                 dim,
             ));
         }
@@ -5151,7 +5203,7 @@ fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
         ));
     }
     lines.push(Line::styled(
-        "  [Enter] start  [Tab] field  [Alt+Enter] newline  [Ctrl+E] editor  [Ctrl+V] paste  [Esc] cancel",
+        "  [Enter] start  [Tab] field  [⌃J] new line  [⌃O] editor  [⌃V] paste  [Esc] cancel",
         dim,
     ));
     f.render_widget(Paragraph::new(lines).block(block), area);

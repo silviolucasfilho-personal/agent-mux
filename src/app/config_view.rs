@@ -471,7 +471,7 @@ impl ConfigViewState {
                 format!(" New {} name: {input}_   [Enter] create  [Esc] cancel", kind.label())
             }
             Pending::None => {
-                " [Enter/e] edit  [n] new  [R] reset  [u] push to workspaces  [r] rescan  [←/→] pane  [Esc] close"
+                " [Enter/e] edit  [n] new  [R] restore built-in  [u] push to workspaces  [⌃R] rescan  [←/→] pane  [Esc] close"
                     .into()
             }
         }

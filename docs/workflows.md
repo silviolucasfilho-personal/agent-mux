@@ -63,7 +63,7 @@ in flight.
 | --- | --- |
 | `Tab`, `Shift+Tab`, `1`-`4` | Report → Steps → Result → Document, the same keys as the Loops view. The tab change goes back to the top. |
 | `↑` `↓` / `j` `k` | The runs list when the left pane has focus (`←`), the result when the right one does (`→`). |
-| `PgUp`, `PgDn`, `Space` | Scroll by a screen, whichever pane has focus. |
+| `Ctrl+D`, `Ctrl+U`, `Space` (or `PgDn`, `PgUp`) | Scroll by a screen, whichever pane has focus. |
 | `Home` / `g`, `End` / `G` | Top and bottom. |
 | Wheel | Scrolls the pane that has focus. |
 
@@ -73,15 +73,15 @@ The task and every argument are full text fields, because an argument is often a
 
 | Key | In a text field |
 | --- | --- |
-| `Alt+Enter` | A newline. `Shift+Enter` and `Ctrl+J` work where the terminal sends them. |
+| `Ctrl+J` | A newline, in every terminal. `Option+Enter` (`Alt+Enter`) and `Shift+Enter` also work where the terminal sends them. |
 | `Enter` | Starts the run. It never inserts a newline, in this dialog or any other. |
-| `←` `→` `Home` `End` | Move the cursor; at the edges of the text, `↑` and `↓` move to the next field. |
+| `←` `→`, `Ctrl+A` / `Ctrl+E` | Move the cursor; start and end of the line (`Home`/`End` too). At the edges of the text, `↑` and `↓` move to the next field. |
 | `Tab`, `Shift+Tab` | Always move to the next or previous field, wherever the cursor sits. |
-| `Backspace`, `Delete`, `Ctrl+W`, `Ctrl+U` | Delete a character, a character forward, a word, the whole field. |
+| `Backspace`, `Delete`, `Ctrl+W` or `Option+Backspace`, `Ctrl+U` | Delete a character, a character forward, a word, the whole field. |
 | `Ctrl+V` | Paste the clipboard, newlines included. |
-| `Ctrl+E` | Compose the field in `$EDITOR`. agent-mux leaves the screen, your editor opens on the text, and what you save comes back into the same field. |
+| `Ctrl+O` | Compose the field in `$EDITOR`. agent-mux leaves the screen, your editor opens on the text, and what you save comes back into the same field. |
 
-`Ctrl+E` is the one to reach for when the prompt is long: it is the same editor round-trip the Configuration view uses, so you get your own key bindings, undo and syntax highlighting. On the command line the shell does this job, with a quoted string or a heredoc:
+`Ctrl+O` is the one to reach for when the prompt is long: it is the same editor round-trip the Configuration view uses, so you get your own key bindings, undo and syntax highlighting. On the command line the shell does this job, with a quoted string or a heredoc:
 
 ```sh
 agent-mux workflow plan "$(cat prompt.md)" --workspace .
@@ -95,7 +95,7 @@ To compose a workflow for a task instead: `c`, type the task, pick the workspace
 
 ### Building a flow step by step
 
-`f` in the Workflows section opens the **flow builder** on a new flow. `o` opens the selected workflow or planned document in it instead, so you can start from a built-in, from a document you saved, or from a draft the planner wrote. The builder writes an ordinary document (section 2) and keeps every key it has no field for, so nothing is lost when an existing workflow goes through it. There are three screens:
+`n` in the Workflows section opens the **flow builder** on a new flow. `e` opens the selected workflow or planned document in it instead (`Ctrl+O` opens the file in `$EDITOR`), so you can start from a built-in, from a document you saved, or from a draft the planner wrote. The builder writes an ordinary document (section 2) and keeps every key it has no field for, so nothing is lost when an existing workflow goes through it. There are three screens, `1`, `2` and `3`. On every screen `s` saves, `r` saves and opens the run dialog, `R` restores a built-in, `Ctrl+O` opens the document in `$EDITOR`, and `Esc` (or `q`) goes back:
 
 - **Steps.** On the left, the flow as a chain: each step, how it runs (`once`, `⇉ 3 in parallel`, `↓ each · 3 votes`, `★ best of 3`), the agent that runs it and what it passes on. On the right are the selected step's fields, in words:
   - **Runs:** one of six shapes (`←`/`→` change it).
@@ -107,15 +107,15 @@ To compose a workflow for a task instead: `c`, type the task, pick the workspace
   - **Shape-specific fields:** votes and "keep when" for checked steps, attempts and judge for best-of-N, paths for pick-a-path, "same when" for until-quiet.
   - **Harness, model, effort and isolation.**
 
-  `a` adds a step after the selected one, and `J`/`K` move it. `d` deletes it. The first row, **flow settings**, holds the name, the description, the arguments (`scope=., language*`), the step whose answer the run returns, the budget and the workspace.
-- **What passes** (`w`). The flow is drawn left to right with what each step gets and gives. Below it, you edit the selected step's answer field by field:
-  - `+` adds a field, `←`/`→` change its kind, `r` makes it required, and `Enter` edits the values of a "one of" field.
+  `n` adds a step after the selected one, and `J`/`K` move it. `d` deletes it. The first row, **flow settings**, holds the name, the description, the arguments (`scope=., language*`), the step whose answer the run returns, the budget and the workspace.
+- **What passes** (`2`). The flow is drawn left to right with what each step gets and gives. Below it, you edit the selected step's answer field by field:
+  - `n` adds a field, `←`/`→` change its kind, `Space` makes it required, `e` renames it, and `Enter` edits the values of a "one of" field.
   - For a list of items, `Enter` opens the item's own fields.
-  - On the right, you pick what the step reads, in words ("every finding from every review session"), and its filters: `f` sets keep only, `u` drops repeats.
-- **Review** (`v`). The flow is retold one sentence per step, with the same checks `workflow check` runs, the estimated number of sessions, and the document itself. `s` saves it into the library, `Enter` saves it and opens the run dialog, and `e` opens it in `$EDITOR` and brings the edit back.
+  - On the right, you pick what the step reads, in words ("every finding from every review session"), and its filters, "keep only" and "drop repeats by", as the last two rows (`Enter` edits them).
+- **Review** (`3`). The flow is retold one sentence per step, with the same checks `workflow check` runs, the estimated number of sessions, and the document itself. `Enter` saves it and opens the run dialog.
 
-`g` (or `Enter` on **Who**, **Voters** or **Judge**) opens the agent picker. It lists the workspace's and the library's agents with their descriptions, tools and models. `n` writes a new agent on the spot:
-- **Its text:** a name, what it is for, and its instructions (`Ctrl+E` opens your editor).
+`Enter` on **Who**, **Voters** or **Judge** opens the agent picker. It lists the workspace's and the library's agents with their descriptions, tools and models. `n` writes a new agent on the spot:
+- **Its text:** a name, what it is for, and its instructions (`Ctrl+O` opens your editor).
 - **What it may use:** ticked from read files, edit files, run commands, web and MCP servers.
 - **Where it runs:** a model per harness, and the effort for Codex and Antigravity.
 - **Where it is saved:** the workspace (`.agent-mux/agents/`, committed with the repository) or the library.
@@ -316,7 +316,7 @@ Mixed harnesses: a step's `harness = "codex"` runs it on Codex whatever the run'
 - **Worktrees.** `isolation = "worktree"` on a step (or the run dialog's default) runs the session in `git worktree` under `[loops] worktrees_dir` on branch `wf/<run>-<step>`. A worktree without changes is removed when the session ends; one with changes is kept and noted (`kept worktree … on branch …`), and the step row records the changed files. agent-mux never merges.
 - **Budget.** A token ceiling from the document, the dialog or `--budget`; once spent, no new session starts and the run ends `budget-exhausted` with the partial result. A USD cap becomes `--max-budget-usd` on Claude Code and the hook guard elsewhere.
 - **Timeouts.** `session_timeout_s` (900) per session, `run_timeout_s` (7200) per run; a timed-out session answers `null`.
-- **Cancel.** `x` in the section or the view; running sessions are killed and settle as `null`.
+- **Cancel.** `x` (stop) in the section or the view; running sessions are killed and settle as `null`.
 - **Resume.** Every session is journaled (`journal.jsonl` in the run directory). `r` on a stored run in the view, or `--resume <run>` on the CLI, replays the journaled sessions and launches only what is new: same document, same args, same session keys.
 
 ## 5. Library and configuration

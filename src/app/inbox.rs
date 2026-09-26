@@ -60,14 +60,14 @@ impl InboxItem {
     pub fn hints(&self) -> &'static str {
         match self {
             InboxItem::Loop(r) if r.branch.is_some() => {
-                " [↑/↓] select  [a] applied  [x] rejected  [Enter] its loop  [T] traces  [Esc] close"
+                " [↑/↓] select  [a] applied  [d] rejected  [Enter] its loop  [T] traces  [Esc] close"
             }
             InboxItem::Loop(_) => {
-                " [↑/↓] select  [a] done  [x] dismiss  [Enter] its loop  [T] traces  [Esc] close"
+                " [↑/↓] select  [a] done  [d] dismiss  [Enter] its loop  [T] traces  [Esc] close"
             }
-            InboxItem::Plan { .. } => " [↑/↓] select  [Enter] review it  [x] discard  [Esc] close",
+            InboxItem::Plan { .. } => " [↑/↓] select  [Enter] review it  [d] discard  [Esc] close",
             InboxItem::Run { .. } => {
-                " [↑/↓] select  [Enter] open the run  [x] dismiss  [Esc] close"
+                " [↑/↓] select  [Enter] open the run  [d] dismiss  [Esc] close"
             }
         }
     }
@@ -195,19 +195,19 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => {
                 state.selected = state.items.len().saturating_sub(1);
             }
-            KeyCode::Char(c @ ('a' | 'x')) => match selected {
+            KeyCode::Char(c @ ('a' | 'd')) => match selected {
                 Some(InboxItem::Loop(r)) => {
                     if let Err(e) = self.decide_loop_run(&r.id, c == 'a') {
                         self.notice = Some(Notice::error(format!("inbox: {e}")));
                     }
                     self.reload_inbox();
                 }
-                Some(InboxItem::Plan { id, .. }) if c == 'x' => {
+                Some(InboxItem::Plan { id, .. }) if c == 'd' => {
                     self.planned_workflows.retain(|p| p.id != id);
                     self.notice = Some(Notice::info("planned document discarded"));
                     self.reload_inbox();
                 }
-                Some(item @ InboxItem::Run { .. }) if c == 'x' => {
+                Some(item @ InboxItem::Run { .. }) if c == 'd' => {
                     self.inbox_dismissed.insert(item.key());
                     self.notice = Some(Notice::info(
                         "dismissed; the run stays in the Workflows view",

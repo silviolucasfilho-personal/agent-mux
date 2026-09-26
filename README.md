@@ -351,7 +351,7 @@ Title `Agents [<sel>/<count>]`; rows show the package icon (default `⚡`), disp
 Title `Loops [<sel>/<count>]`, or `Loops [<count>] PAUSED` in yellow while the kill switch is on. Rows show a status glyph (`○` scheduled, `●` running, `‖` paused, `!` waiting on a human, `✗` last run failed or blocked), the pattern id, the configured level, and a right column with the countdown to the next run (`due`, `6h`, `12m`), `now` while running, `—` when paused or `in2` with two inbox items.
 
 - **Population:** `App.loop_registry` (`~/.agent-mux/loops.json`, `AGENT_MUX_LOOPS_FILE` in tests) loaded by `load_loop_registry` at startup, which also applies the catch-up rule and sweeps old context snapshots. Status and the right column come from `App.loop_cards`, rebuilt every second by `refresh_loop_cards` from the registry, the store (`spend_since`, `recent_runs`, `inbox`), the ledger, the workspace files and a readiness audit cached 60 s per workspace.
-- **Keys:** `Enter` details (Loops view), `r` run now, `p` pause / resume, `a` add, `e` edit, `x` remove (confirmation; files stay), `K` kill switch, `E` Loops view.
+- **Keys:** `Enter` details (Loops view), `r` run now, `p` pause / resume, `n` new, `e` edit, `d` remove (confirmation; files stay), `o` the pattern in the loop builder, `K` kill switch, `E` Loops view.
 
 #### History sidebar (`draw_history_sidebar`)
 
@@ -383,6 +383,8 @@ Search (`src/search.rs`) turns the status bar into `Search: <query>  <n/m>`; it 
 
 #### Control mode
 
+Every screen shares one keymap (`src/keymap.rs`, `docs/keyboard.md`): `n` new, `e` edit, `d` delete, `x` stop, `s` save, `r` run, `Ctrl+R` reload, `R` restore a built-in, `g`/`G` top and bottom, `Ctrl+D`/`Ctrl+U` page, `Ctrl+O` `$EDITOR`, and in text fields `Ctrl+J` a new line and `Ctrl+A`/`Ctrl+E` start and end. The help overlay (`?`) prints it from the same table.
+
 | Key | Action (and guard) |
 | --- | --- |
 | `j`/`k`, `↓`/`↑` | Move within the focused section; at the edges continue into the adjacent section (Active ↔ Agents ↔ Loops ↔ History). |
@@ -390,7 +392,7 @@ Search (`src/search.rs`) turns the status bar into `Search: <query>  <n/m>`; it 
 | `1`-`9` | Select active session; only when Active is focused or the sidebar is hidden. |
 | `Enter` | Active: attach. Agents: open the harness picker, or attach to the running agent session. Loops: the Loops view on the selected loop. History: resume. |
 | `r` | Active: respawn, only when the selected session has exited (new PTY, same profile and directory, tracing replanned; an agent session keeps its skill id). Agents: picker/attach. Loops: run now (pre-flight still applies). History: resume. |
-| `p`, `a`, `e`, `x` (Loops focused) | Pause / resume, add, edit, remove (confirmation) the selected loop. |
+| `p`, `n`, `e`, `d`, `o` (Loops focused) | Pause / resume, new loop, edit, remove (confirmation) the selected loop; `o` opens its pattern in the loop builder. |
 | `E` | Loops view (section 4.10), from any section. |
 | `v` | About overlay (section 4.7): version, build date and time, branch and commit, the config, store and runtime paths, this session's counts, and the harnesses on `PATH`. |
 | `K` | Kill switch: pause every loop; again to resume. Shown in the Loops title and the status bar while on. |
@@ -398,14 +400,14 @@ Search (`src/search.rs`) turns the status bar into `Search: <query>  <n/m>`; it 
 | `S` | Skills view (section 4.4), from any section. |
 | `C` | Configuration view (section 16), from any section: edit every prompt, skill, loop pattern, loop skill, agent and template in your editor. |
 | `W` | Workflows view (section 17), from any section: runs, planned documents, results, journal. |
-| `Enter`, `c`, `e`, `x` (Workflows section) | Run the selected workflow (or open the view when a run is live), compose a workflow for a task with the planner, edit the document, cancel the live run. |
-| `n` | New session dialog. |
+| `Enter`, `n`, `e`, `c`, `x`, `d`, `Ctrl+O` (Workflows section) | Run the selected workflow (or open the view when a run is live), build a new flow, edit the selected one in the flow builder, compose one for a task with the planner, stop the live run, discard a plan, open the document in `$EDITOR`. |
+| `n` | New, in the focused section: a session (Active, Agents, History), a loop (Loops), a flow (Workflows). |
 | `l` | Session Logs dialog. |
 | `t` | Toggle tracing on the selected session (Active focused or sidebar hidden). Starting requires a live supported session and an available runtime; `plan_attach` back-dates the correlation window by one hour and injects nothing. |
 | `T` | Trace Browser (any section). |
-| `x` | Active focused or sidebar hidden: remove an exited session immediately, otherwise ask before killing. |
+| `x`, `d` | Active focused or sidebar hidden: `x` stops (asks before killing) a running session; `d` removes an exited one (a running one asks to be killed first). |
 | `X` | Active focused or sidebar hidden: remove all exited sessions, leaving running sessions untouched. |
-| `a` | History focused: toggle current-project / all-projects scope. Loops focused: add a loop. |
+| `a` | History focused: toggle current-project / all-projects scope. |
 | `b`, `Ctrl+Shift+B` | Toggle the sidebar. |
 | `?`, `F1` | Help overlay (closes with `Esc`, `q`, `?`, `Enter`, `F1`). |
 | `q` | Quit immediately, or open the quit confirmation if any session is `working`. |
@@ -594,7 +596,7 @@ Every fact is gathered once by `App::open_about` when the overlay opens — the 
 | Trace Browser Detail | `Vec<ObservationView>` | `list_observations` | `observations` | turn change, live refresh |
 | Trace Browser search | `Vec<TraceStat>` | `search` + `find_trace` | `traces_fts`, `observations_fts` | on `Enter` |
 | About overlay | `AboutState.rows` | `App::open_about` → `about::rows` | `build_info` constants, `config.loaded_from`, store `metadata`, the registry, `PATH` | once, when `v` opens it |
-| Verdict marks | `HashMap<trace_id, f64>` | `scores::latest_trace_scores` | `scores` | observation load, after `s` |
+| Verdict marks | `HashMap<trace_id, f64>` | `scores::latest_trace_scores` | `scores` | observation load, after `+` |
 
 ---
 
@@ -1771,7 +1773,7 @@ A **loop** is a scheduled, bounded agent run against one workspace, driven from 
 5. **Launch**: the loop's profile (by name, else the first for the harness), `LaunchOptions { one_shot: "<invocation> Run the <pattern> loop … Update <state file>. Finish with a loop-result block. <hydration hint>" }` composed through `harness::compose` (`claude -p … --dangerously-skip-permissions`, `codex exec … --yolo`: a print-mode run has nobody to answer approval prompts, so they are always bypassed and the guard is the control), `--max-budget-usd` on Claude when a USD cap is set (also the profile's budget guard), the per-launch MCP registration, the environment `AGENT_MUX_LOOP_ID/RUN_ID/PATTERN/LEVEL/CONTEXT/WORKSPACE`, and `LaunchPlan::attach_loop` writing `launches.metadata.loop_*` and `loop_policy` (on Claude, the `--settings` hook document is recomputed with `--loop`). The session appears in Active as `<pattern> ↻ <workspace>`.
 6. **Timeout**: `[loops] run_timeout_s` kills the session; the run is `failed` and the loop pauses.
 7. **Post-run** (1.2 s after exit, so the writer flushed): `store::run_facts` (tokens and cost from `trace_stats`, the verifier observation and its verdict, files touched, the final message), the worktree's changes, the state file before/after; outcome from the `loop-result` block or derived (`Unknown command: /<skill>` in the session's output is a `failed` run, not a no-op); the gate re-check over every touched path (a hit → `escalated`, pause); `verifier_missing` on an unverified fix; the row, the run-log line (`tokens_estimate` from the store, `source: agent-mux`), the ledger attempt, the registry (`last_run_id`, auto-pause on failure), the worktree (removed when unchanged, kept for the inbox otherwise), a notice.
-8. **Inbox**: `a` applied (worktree removed, branch kept for you to merge), `x` rejected (both removed); `loop_runs.decision` records it.
+8. **Inbox**: `a` applied (worktree removed, branch kept for you to merge), `d` rejected (both removed); `loop_runs.decision` records it.
 
 ### 15.3 Per-harness ceiling
 

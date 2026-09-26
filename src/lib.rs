@@ -7,6 +7,7 @@ pub mod config_cli;
 pub mod events;
 pub mod harness;
 pub mod history;
+pub mod keymap;
 pub mod keys;
 pub mod loops;
 pub mod mcp;
