@@ -37,8 +37,12 @@ verify = { skill = "wf-refute", votes = 3, result = "verdict", keep = "refuted <
 keep = "severity in [high, medium]" # predicate on each item's result: == != < <= > >= in [a, b] not in [a, b] and or not has(field); runs before the votes
 dedupe_by = ["file", "line"]     # keep the first item per key
 take = 40                        # keep at most N items
-harness = "codex"                # per-step overrides: harness profile model isolation cwd timeout_s concurrency
+harness = "codex"                # per-step overrides: harness profile model effort isolation cwd timeout_s concurrency
+agent = "reviewer"               # who runs the step's sessions: an agent from the context's `agents`
+                                 # verify = { …, agent = "skeptic" } and judge = { …, agent = "…" } name their own
 ```
+
+Agents: `agent = "<name>"` runs the session as that agent: its instructions become the system prompt (Claude Code), the developer instructions (Codex) or the agent file (Antigravity); its tools limit the session where the harness can enforce them. The step's `model` and `effort` win over the agent's. An agent must have `read`; on a step whose skill writes or that runs in a worktree it must have `edit`.
 
 Paths: `find` (a step's result), `find[*].findings[*]` (`[*]` flattens one level), `args.scope`, `item`, `item.file`, `index`.
 

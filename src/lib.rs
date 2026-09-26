@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod app;
 pub mod assets;
 pub mod build_info;

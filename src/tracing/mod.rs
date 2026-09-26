@@ -907,6 +907,9 @@ impl TraceRuntime {
                 "workflow_phase".into(),
                 serde_json::Value::from(w.phase.as_str()),
             );
+            if let Some(a) = &w.agent {
+                meta.insert("workflow_agent".into(), serde_json::Value::from(a.as_str()));
+            }
         }
         if let Some(lp) = &plan.loop_launch {
             meta.insert(

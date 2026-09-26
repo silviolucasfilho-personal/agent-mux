@@ -61,14 +61,16 @@ pub enum Kind {
     LoopAgent,
     LoopTemplate,
     Workflow,
+    Agent,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] = [
+    pub const ALL: [Kind; 9] = [
         Kind::Prompts,
         Kind::Settings,
         Kind::Skill,
         Kind::Workflow,
+        Kind::Agent,
         Kind::LoopPattern,
         Kind::LoopSkill,
         Kind::LoopAgent,
@@ -85,6 +87,7 @@ impl Kind {
             Kind::LoopAgent => "loop agent",
             Kind::LoopTemplate => "loop template",
             Kind::Workflow => "workflow",
+            Kind::Agent => "agent",
         }
     }
 
@@ -99,6 +102,7 @@ impl Kind {
             Kind::LoopAgent => "Loop agents",
             Kind::LoopTemplate => "Loop templates",
             Kind::Workflow => "Workflows",
+            Kind::Agent => "Agents",
         }
     }
 
@@ -106,7 +110,7 @@ impl Kind {
     pub fn creatable(self) -> bool {
         matches!(
             self,
-            Kind::Skill | Kind::LoopSkill | Kind::LoopAgent | Kind::Workflow
+            Kind::Skill | Kind::LoopSkill | Kind::LoopAgent | Kind::Workflow | Kind::Agent
         )
     }
 
@@ -117,6 +121,7 @@ impl Kind {
             Kind::LoopSkill => Some("loop-skill"),
             Kind::LoopAgent => Some("loop-agent"),
             Kind::Workflow => Some("workflow"),
+            Kind::Agent => Some("agent"),
             _ => None,
         }
     }
@@ -286,6 +291,7 @@ impl Catalog {
         });
         cat.scan_skills();
         cat.scan_workflows();
+        cat.scan_agents();
         cat.push_builtin(
             Kind::LoopPattern,
             "loops/registry.toml",
@@ -433,6 +439,25 @@ impl Catalog {
         }
     }
 
+    /// Workflow agents (`src/agents`): the built-in ones, which a library
+    /// file of the same name replaces, then the user's own.
+    fn scan_agents(&mut self) {
+        for (name, text) in crate::agents::BUILTIN {
+            self.push_builtin(
+                Kind::Agent,
+                &format!("agents/{name}.toml"),
+                text,
+                "agents/builtin/",
+            );
+        }
+        for f in sorted_files(&crate::agents::library_dir(&self.root), "toml") {
+            let Some(stem) = f.file_stem().and_then(|n| n.to_str()).map(str::to_string) else {
+                continue;
+            };
+            self.push_user(Kind::Agent, format!("agents/{stem}.toml"), f, stem);
+        }
+    }
+
     fn scan_loop_skills(&mut self) {
         for (name, text) in scaffold::embedded_skills() {
             self.push_builtin(
@@ -526,6 +551,7 @@ impl Catalog {
                 Kind::LoopAgent => validate_loop_agent(&a.name, &a.effective()),
                 Kind::LoopTemplate => validate_template(&a.name, &a.effective()),
                 Kind::Workflow => validate_workflow(&a.name, &a.effective(), &skill_infos),
+                Kind::Agent => validate_agent(&a.name, &a.effective()),
             };
             self.assets[i].problems = problems;
         }
@@ -652,6 +678,13 @@ impl Catalog {
             Kind::Workflow => {
                 let path = self.root.join("workflows").join(format!("{name}.toml"));
                 (path, crate::workflows::library::skeleton(name))
+            }
+            Kind::Agent => {
+                let path = crate::agents::library_dir(&self.root).join(format!("{name}.toml"));
+                (
+                    path,
+                    crate::agents::from_template("blank", name).unwrap_or_default(),
+                )
             }
             other => {
                 return Err(format!(
@@ -952,6 +985,23 @@ fn validate_workflow(
                 ));
             }
             p
+        }
+        Err(p) => p,
+    }
+}
+
+fn validate_agent(name: &str, text: &str) -> Vec<String> {
+    match crate::agents::AgentSpec::parse(text) {
+        Ok(a) => {
+            let stem = name.trim_end_matches(".toml");
+            if a.name == stem {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "name {:?} must equal the file name {stem:?}",
+                    a.name
+                )]
+            }
         }
         Err(p) => p,
     }

@@ -300,6 +300,7 @@ fn a_planned_document_is_listed_run_saved_or_discarded_from_the_view() {
         problems: Vec::new(),
         raw: None,
         run_id: None,
+        agents: Vec::new(),
     });
     press(&mut app, KeyCode::Char('W'));
     let Mode::WorkflowsView(v) = &app.mode else {

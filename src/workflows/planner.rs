@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const FENCE: &str = "workflow-toml";
+/// A new agent the planner defines for its document (`src/agents`).
+pub const AGENT_FENCE: &str = "agent-toml";
 
 /// A quick inventory of a workspace, computed in Rust so the planner
 /// spends its context on the task, not on `ls`.
@@ -77,6 +79,16 @@ pub struct SkillSummary {
     pub writes: bool,
 }
 
+/// An agent a step may run as.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentSummary {
+    pub name: String,
+    pub description: String,
+    /// Canonical tools, or `all` for the harness's own.
+    pub tools: String,
+    pub source: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowSummary {
     pub name: String,
@@ -93,6 +105,7 @@ pub struct PlanContext {
     pub harness: String,
     pub workspace: Value,
     pub skills: Vec<SkillSummary>,
+    pub agents: Vec<AgentSummary>,
     pub workflows: Vec<WorkflowSummary>,
     pub budget_tokens: Option<u64>,
     pub rules: Vec<String>,
@@ -104,10 +117,11 @@ pub fn plan_context(
     workspace: &Path,
     skills: &[crate::skill::SkillDefinition],
     workflows: &[super::library::Entry],
+    agents: &crate::agents::Catalog,
     budget_tokens: Option<u64>,
 ) -> PlanContext {
     PlanContext {
-        schema_version: 1,
+        schema_version: 2,
         task: task.to_string(),
         harness: harness.to_string(),
         workspace: inventory(workspace),
@@ -118,6 +132,21 @@ pub fn plan_context(
                 name: s.id.clone(),
                 description: s.description.clone(),
                 writes: s.writes,
+            })
+            .collect(),
+        agents: agents
+            .entries
+            .iter()
+            .filter_map(|e| {
+                e.spec.as_ref().map(|s| AgentSummary {
+                    name: s.name.clone(),
+                    description: s.description.clone(),
+                    tools: match &s.tools {
+                        None => "all".into(),
+                        Some(_) => s.tools_label(),
+                    },
+                    source: e.source.label().into(),
+                })
             })
             .collect(),
         workflows: workflows
@@ -140,6 +169,8 @@ pub fn plan_context(
             "A step whose skill has writes = true needs isolation = \"worktree\".".into(),
             format!("Answer with exactly one fenced {FENCE} block and nothing after it."),
             "Regular coding tasks do not need a panel of 5 reviewers.".into(),
+            "A step, a verify block or a judge may run as an agent listed here: agent = \"<name>\". Refuters and judges do not inherit the step's agent.".into(),
+            format!("When a role needs a persona no listed agent has, define it in a fenced {AGENT_FENCE} block before the {FENCE} block (name, description, instructions, tools from read, edit, shell, web, mcp:<server>); it is saved into the library when the plan runs or is saved. Every agent needs read; one on a step that edits needs edit."),
         ],
     }
 }
@@ -175,12 +206,101 @@ pub fn extract_document(text: &str) -> Result<String, String> {
     Ok(doc + "\n")
 }
 
+/// Every fenced `agent-toml` block of the planner's answer, in order.
+pub fn extract_agents(text: &str) -> Vec<String> {
+    let open = format!("```{AGENT_FENCE}");
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        let body = rest[start + open.len()..].trim_start_matches(['\r', '\n']);
+        let Some(end) = body.find("```") else {
+            break;
+        };
+        let agent = body[..end].trim();
+        if !agent.is_empty() {
+            out.push(format!("{agent}\n"));
+        }
+        rest = &body[end + 3..];
+    }
+    out
+}
+
 /// A planned document with its validation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Planned {
     pub document: String,
     pub name: String,
     pub problems: Vec<String>,
+}
+
+/// Checks the agents a planner defined, and the document's fit with
+/// them and the existing ones: a new agent must load and must not
+/// replace an existing one with other content.
+pub fn check_agents(
+    document: &str,
+    new_agents: &[String],
+    catalog: &crate::agents::Catalog,
+    skills: &[SkillInfo],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut all = catalog.clone();
+    for text in new_agents {
+        match crate::agents::AgentSpec::parse(text) {
+            Err(p) => problems.extend(p.into_iter().map(|x| format!("{AGENT_FENCE}: {x}"))),
+            Ok(spec) => {
+                if let Some(existing) = catalog.get(&spec.name)
+                    && existing.hash != spec.hash
+                {
+                    problems.push(format!(
+                        "{AGENT_FENCE}: agent {:?} already exists with other content; use it, or give the new one another name",
+                        spec.name
+                    ));
+                    continue;
+                }
+                all.entries.retain(|e| e.name != spec.name);
+                all.entries.push(crate::agents::Entry {
+                    name: spec.name.clone(),
+                    source: crate::agents::Source::Library(PathBuf::from(format!(
+                        "(planned) {}.toml",
+                        spec.name
+                    ))),
+                    spec: Some(spec),
+                    problems: Vec::new(),
+                });
+            }
+        }
+    }
+    if let Ok(doc) = parse(document) {
+        problems.extend(crate::agents::fit::errors(&crate::agents::fit::check(
+            &doc, &all, skills,
+        )));
+    }
+    problems
+}
+
+/// Writes the planner's new agents into the library (`<root>/agents`).
+/// One that is already there with the same content is left alone.
+pub fn save_agents(root: &Path, new_agents: &[String]) -> Result<Vec<PathBuf>, String> {
+    let dir = crate::agents::library_dir(root);
+    let mut written = Vec::new();
+    for text in new_agents {
+        let spec = crate::agents::AgentSpec::parse(text).map_err(|p| p.join("; "))?;
+        let path = dir.join(format!("{}.toml", spec.name));
+        match std::fs::read_to_string(&path) {
+            Ok(existing) if existing == *text => continue,
+            Ok(_) => {
+                return Err(format!(
+                    "{} already exists with other content",
+                    path.display()
+                ));
+            }
+            Err(_) => {}
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        written.push(path);
+    }
+    Ok(written)
 }
 
 pub fn check(document: &str, skills: &[SkillInfo]) -> Planned {
@@ -230,5 +350,28 @@ mod tests {
         let bad = check("[workflow\n", &[]);
         assert_eq!(bad.name, "dynamic");
         assert!(!bad.problems.is_empty());
+    }
+
+    #[test]
+    fn planned_agents_are_extracted_checked_and_saved() {
+        let text = "Two agents:\n```agent-toml\nname = \"sec\"\ndescription = \"Security\"\ninstructions = \"Look for injections.\"\ntools = [\"read\", \"shell\"]\n```\n```agent-toml\nname = \"bad\"\n```\n```workflow-toml\n[workflow]\nname = \"w\"\ndescription = \"d\"\n[[steps]]\nid = \"s\"\nprompt = \"p\"\nagent = \"sec\"\n```\n";
+        let agents = extract_agents(text);
+        assert_eq!(agents.len(), 2);
+        let doc = extract_document(text).unwrap();
+        let empty = crate::agents::Catalog::default();
+        let p = check_agents(&doc, &agents, &empty, &[]);
+        assert!(p.iter().all(|x| x.starts_with("agent-toml:")), "{p:?}");
+        assert!(!p.is_empty());
+        // the good one alone fits; an unknown agent does not
+        assert!(check_agents(&doc, &agents[..1], &empty, &[]).is_empty());
+        assert!(check_agents(&doc, &[], &empty, &[])[0].contains("not found"));
+        // saved once, then left alone; other content is refused
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(save_agents(root.path(), &agents[..1]).unwrap().len(), 1);
+        assert!(save_agents(root.path(), &agents[..1]).unwrap().is_empty());
+        let other = agents[0].replace("Security", "Other");
+        assert!(save_agents(root.path(), std::slice::from_ref(&other)).is_err());
+        let lib = crate::agents::Catalog::load(root.path(), None);
+        assert!(check_agents(&doc, &[other], &lib, &[])[0].contains("already exists"));
     }
 }

@@ -82,6 +82,7 @@ Every file of a skill package is one item: `skills/heimdall/SKILL.md`, `skills/h
 
 - **Patterns** (`loops/registry.toml`): every `[[patterns]]` table, same fields as the built-in file (`docs/loops.md` section 3) plus the optional `prompt` and `agents`. Validation checks unique ids, that every listed skill is a built-in or library loop skill, that every listed agent is a built-in or library loop agent (and that a verifier pattern keeps `loop-verifier`), that `loop-rules` is listed, a state file the guard permits, and an interval of at least five minutes. A file that does not parse is reported and the built-in patterns stay in use.
 - **Loop skills** (`loops/skills/<name>/SKILL.md`): frontmatter `name` must equal the directory name. A new skill becomes usable by listing it in a pattern's `skills`.
+- **Agents** (`agents/<name>.toml`): workflow agents, the persona a workflow step runs as (`agent = "<name>"`): `name`, `description`, `instructions`, canonical `tools`, `model`, `effort` and `[backends.<harness>]`. Five ship built in (`reviewer`, `skeptic`, `planner`, `doc-writer`, `judge`, from `agents/builtin/`). Like every built-in here, `Enter` edits your copy in the library and `R` restores the built-in. `agent-mux agent new --template` starts from a built-in or a blank one, and a workspace's `.agent-mux/agents/` wins over the library. Guide: `docs/agents.md`.
 - **Loop agents** (`loops/agents/<name>.md`): Claude's agent file shape (`name`, `description`, `tools`, `model`, then the body). Two ship built in, `loop-verifier` (runs the tests) and `loop-reviewer` (reads the diff only); a pattern receives the agents its `agents` list names, or the verifier alone when the list is empty and `verifier = true`, and listing both checkers makes a fix wait for both to approve. Every installed copy opens with the `## Baseline` section from `[agent] preamble` of `prompts.toml`. Codex receives the same text as `<name>.toml`: `name`, `description`, `developer_instructions` (the body), `model` when the frontmatter names one that is not a Claude alias, and the body again under `[system_prompt] content`; a Claude `tools` list has no Codex counterpart and is left out. `agent-mux agent import <file>` copies an agent file written for Claude Code into this directory after validating its frontmatter and printing a content lint (secret-looking strings, prompt-injection phrasing, over-broad tool lists).
 - **Templates** (`loops/templates/<file>`): the scaffolder fills `{{PROJECT}}`, `{{PATTERN}}`, `{{CADENCE}}`, `{{LEVEL}}`, `{{STATE_FILE}}`, `{{HARNESS}}`, `{{GATES}}`, `{{ROW}}`, `{{GOAL}}`; any other marker is reported. `gate.yaml` and `loop-ledger.json` must parse.
 
@@ -95,11 +96,12 @@ agent-mux config show <id> [--builtin]    the effective (or compiled-in) text
 agent-mux config path [<id>]              the library root, or an item's library path
 agent-mux config edit <id>                copy the built-in text if needed, open the editor, validate
 agent-mux config reset <id>               delete the override (or a user item)
-agent-mux config new skill|loop-skill|loop-agent <name>
+agent-mux config new skill|loop-skill|loop-agent|workflow|agent <name>
 agent-mux config check                    validate everything; exit 1 on problems
 agent-mux config push [--dry-run]         rewrite loop skills and agents in registered workspaces
 agent-mux agent import <file> [--force]   copy a Claude-shaped agent file into loops/agents/
-agent-mux agent ls                        the loop agents the binary and the library provide
+agent-mux agent ls                        workflow agents (docs/agents.md), then the loop agents
+agent-mux agent new|show|check|templates  workflow agents: docs/agents.md
 ```
 
 An `<id>` is the path under the library or any unique suffix or name: `loop-triage`, `registry.toml`, `prompts.toml`, `heimdall/skill.toml`.

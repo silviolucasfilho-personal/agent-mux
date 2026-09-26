@@ -1,4 +1,7 @@
 use crate::app::about::{AboutRow, AboutState};
+mod flow;
+mod loop_builder;
+
 use crate::app::loops::{LoopDialogState, LoopField, LoopStatus};
 use crate::app::loops_view::{LoopRow, LoopsPane, LoopsTab, LoopsViewState};
 use crate::app::workflows_view::{
@@ -328,6 +331,8 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::WorkflowDialog(dialog) => draw_workflow_dialog(f, dialog),
         Mode::WorkflowsView(view) => draw_workflows_view(f, view, app),
         Mode::Inbox(state) => draw_inbox(f, state),
+        Mode::FlowBuilder(state) => flow::draw(f, state),
+        Mode::LoopBuilder(state) => loop_builder::draw(f, state),
         Mode::ConfirmRemoveLoop => draw_confirm(
             f,
             "Remove this loop from the registry? Its files in the workspace stay. [y/n]",
@@ -382,7 +387,7 @@ fn draw_workflows_sidebar(f: &mut Frame, area: Rect, app: &App) {
         .title(Span::styled(format!(" {title} "), title_style));
     let rows = app.workflow_rows();
     if rows.is_empty() {
-        let hint = Paragraph::new("[c] compose one for a task")
+        let hint = Paragraph::new("[c] compose one for a task  [f] build one step by step")
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(hint, area);
@@ -524,7 +529,7 @@ fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
         .border_style(border_style)
         .title(Span::styled(format!(" {title} "), title_style));
     if n == 0 {
-        let hint = Paragraph::new("[a] add a loop")
+        let hint = Paragraph::new("[a] add a loop  [o] patterns")
             .style(Style::default().fg(Color::DarkGray))
             .block(block);
         f.render_widget(hint, area);
@@ -1862,12 +1867,12 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                                 )
                             } else {
                                 Line::raw(fit(
-                                    "[b] sidebar  [Enter] details  [r] run now  [p] pause  [a] add  [e] edit  [x] remove  [K] kill  [?] help",
+                                    "[b] sidebar  [Enter] details  [r] run now  [p] pause  [a] add  [e] edit  [o] its pattern  [f] new pattern  [x] remove  [K] kill  [?] help",
                                 ))
                             }
                         }
                         SidebarSection::Workflows => Line::raw(fit(
-                            "[b] sidebar  [Enter] run / view  [c] compose  [e] edit  [x] cancel  [W] view  [K] kill  [?] help",
+                            "[b] sidebar  [Enter] run / view  [f] build  [o] open in builder  [c] compose  [e] edit  [x] cancel  [W] view  [K] kill  [?] help",
                         )),
                         SidebarSection::History => Line::raw(fit(
                             "[b] sidebar  [Enter/r] restart  [a] all  [n] new  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
@@ -1993,15 +1998,18 @@ fn draw_help(f: &mut Frame) {
         Line::raw(""),
         Line::styled("Workflows section", head),
         row(
-            "Enter / c / e / x",
-            "run (or view when live) · compose for a task · edit · cancel",
+            "Enter c f o e x",
+            "run/view · compose · build step by step · open in builder · edit · cancel",
         ),
         Line::styled("Loops section", head),
         row(
             "Enter",
             "details (Loops view) · r run now · p pause / resume",
         ),
-        row("a / e / x", "add a loop · edit it · remove it (files stay)"),
+        row(
+            "a e x o f",
+            "add · edit · remove a loop · edit its pattern · new pattern",
+        ),
         row(
             "Loops view",
             "Tab or 1-3: Report · History · Setup · T traces",
@@ -3592,6 +3600,14 @@ fn draw_config_view(f: &mut Frame, view: &ConfigViewState) {
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
+                ConfigRow::Empty(kind) => Line::styled(
+                    format!(
+                        "{}no {}s yet · n creates one",
+                        if is_sel { "> " } else { "  " },
+                        kind.label()
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 ConfigRow::Item(idx) => {
                     let Some(asset) = view.catalog.assets.get(*idx) else {
                         return ListItem::new(Line::raw(""));
@@ -3845,7 +3861,7 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Loops ");
-        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [a] add a loop (pattern, harness, cadence, what it may do)   [E] Loops view   [?] help\n\n  Start with report only for a week. Let it propose fixes when the Setup tab says it is ready.";
+        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [a] add a loop (pattern, harness, cadence, what it may do)   [o] edit the patterns   [E] Loops view   [?] help\n\n  Start with report only for a week. Let it propose fixes when the Setup tab says it is ready.";
         f.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
@@ -4812,17 +4828,26 @@ fn draw_workflow_preview(f: &mut Frame, area: Rect, app: &App) {
                             }
                             None => {}
                         }
+                        // `as reviewer on codex · gpt-5`: who, then where
+                        let runs = |r: &crate::workflows::document::Runner| {
+                            let on = r.label();
+                            match (&r.agent, on.is_empty()) {
+                                (Some(a), true) => format!("as {a}"),
+                                (Some(a), false) => format!("as {a} on {on}"),
+                                (None, _) => format!("on {on}"),
+                            }
+                        };
                         let step_runner = crate::workflows::document::Workflow::runner_of(s);
                         if !step_runner.is_empty() {
-                            how.push(format!("on {}", step_runner.label()));
+                            how.push(runs(&step_runner));
                         }
                         if let Some(v) = &s.verify
                             && !v.runner.is_empty()
                         {
-                            how.push(format!("checkers on {}", v.runner.label()));
+                            how.push(format!("checkers {}", runs(&v.runner)));
                         }
                         if !s.judge_runner.is_empty() {
-                            how.push(format!("judge on {}", s.judge_runner.label()));
+                            how.push(format!("judge {}", runs(&s.judge_runner)));
                         }
                         if !how.is_empty() {
                             lines.push(Line::styled(
@@ -4879,7 +4904,7 @@ fn draw_workflow_preview(f: &mut Frame, area: Rect, app: &App) {
             }
             lines.push(Line::raw(""));
             lines.push(Line::styled(
-                "  [Enter] run   [c] compose your own   [e] edit   [W] view",
+                "  [Enter] run   [o] open in the builder   [f] build your own   [c] compose   [W] view",
                 dim,
             ));
             block_with(

@@ -39,7 +39,7 @@ pub struct WorkflowRunRequest {
     pub isolation: Option<Isolation>,
     pub resume_from: Option<String>,
     /// One-off per-step overrides for this run, `(step id, key, value)` with
-    /// `key` one of `harness`, `profile`, `model`, `effort`. What a document
+    /// `key` one of `harness`, `profile`, `model`, `effort`, `agent`. What a document
     /// states permanently, these state for one run.
     #[allow(clippy::type_complexity)]
     pub step_overrides: Vec<(String, String, String)>,
@@ -85,6 +85,8 @@ pub struct LiveWorkflowRun {
     pub session_count: usize,
     pub run_timeout: Duration,
     pub resumed_from: Option<String>,
+    /// The agents the document names, as loaded when the run started.
+    pub agents: std::collections::BTreeMap<String, crate::agents::AgentSpec>,
 }
 
 impl LiveWorkflowRun {
@@ -389,14 +391,28 @@ impl App {
                 "profile" => step.profile = v,
                 "model" => step.model = v,
                 "effort" => step.effort = v,
+                "agent" => step.agent = v,
                 other => {
                     return Err(format!(
-                        "--step {id}.{other}: expected harness, profile, model or effort"
+                        "--step {id}.{other}: expected harness, profile, model, effort or agent"
                     ));
                 }
             }
         }
         let args = Self::resolve_args(&doc, &req.args)?;
+        // Agents: each one the document names must load and fit its steps;
+        // warnings (what a harness cannot enforce) become run notes.
+        let catalog = crate::agents::Catalog::load(&self.library_root(), Some(&req.workspace));
+        let diagnostics = crate::agents::fit::check(&doc, &catalog, &self.all_skill_infos());
+        let errors = crate::agents::fit::errors(&diagnostics);
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        let agents: std::collections::BTreeMap<String, crate::agents::AgentSpec> = doc
+            .agents()
+            .into_iter()
+            .filter_map(|a| catalog.get(&a).cloned().map(|s| (a, s)))
+            .collect();
         self.install_workflow_skills(&doc, req.harness)?;
 
         let run_id = uuid::Uuid::new_v4().to_string();
@@ -417,16 +433,29 @@ impl App {
             .then_some(self.workflows.default_budget_tokens)),
         };
         let mut state = RunState::new(doc, args.clone(), caps);
+        let mut resume_note: Option<String> = None;
         if let Some(prev) = &req.resume_from {
             let prev_journal = context::run_dir(&runtime, prev).join("journal.jsonl");
             let entries = journal::load(&prev_journal);
             if entries.is_empty() {
                 return Err(format!("run {prev} has no journal to resume from"));
             }
+            let (entries, stale) = journal::replayable(entries, &state.doc, |a| {
+                agents.get(a).map(|s| s.hash.clone())
+            });
+            if let Some(step) = stale {
+                resume_note = Some(format!(
+                    "an agent changed since run {prev}: step {step} and the steps after it run again"
+                ));
+            }
             for e in &entries {
                 let _ = journal::append(&run_dir.join("journal.jsonl"), e);
             }
             state = state.with_replay(journal::to_replay(&entries));
+        }
+        state.notes.extend(resume_note);
+        for d in &diagnostics {
+            state.notes.push(d.message.clone());
         }
         let profile = self.workflow_profile(req.profile.as_deref(), req.harness);
         let started_at = crate::loops::now();
@@ -449,6 +478,7 @@ impl App {
             session_count: 0,
             run_timeout: Duration::from_secs(self.workflows.run_timeout_s),
             resumed_from: req.resume_from.clone(),
+            agents,
         };
         self.write_workflow_run_row(&live, "running", None);
         self.live_workflow_runs.push(live);
@@ -766,34 +796,57 @@ impl App {
             prompt.push_str("\n\n");
             prompt.push_str(&hint);
         }
+        // The agent the session runs as: its launch plan on this harness.
+        // A step's own model and effort win over the agent's.
+        let agent = spec
+            .overrides
+            .agent
+            .as_ref()
+            .and_then(|a| run.agents.get(a))
+            .cloned();
+        let agent_plan = agent
+            .as_ref()
+            .map(|a| crate::agents::launch::plan(a, harness))
+            .unwrap_or_default();
+        if harness == Harness::Antigravity
+            && let Some(a) = &agent
+        {
+            crate::agents::launch::install_agy(a, &self.skill_home())
+                .map_err(|e| format!("agent {}: {e}", a.name))?;
+        }
+        let run = &mut self.live_workflow_runs[ri];
         let options = LaunchOptions {
             model: spec
                 .overrides
                 .model
                 .clone()
+                .or_else(|| agent_plan.model.clone())
                 .or_else(|| profile.model.clone()),
             bypass_approvals: true,
             resume: Resume::Off,
             one_shot: Some(prompt),
         };
         let mut args = compose(&profile.args, &options.render(harness));
+        args.retain(|a| !agent_plan.remove.contains(a));
         let timeout_s = spec
             .overrides
             .timeout_s
             .unwrap_or(self.workflows.session_timeout_s);
         let mut extra = wfh::extra_args(harness, run.usd_cap, timeout_s, &out_file);
+        extra.extend(agent_plan.args.iter().cloned());
         // Reasoning effort, where the harness has one to set.
         if let Some(effort) = spec
             .overrides
             .effort
             .as_deref()
+            .or(agent_plan.effort.as_deref())
             .map(str::trim)
             .filter(|e| !e.is_empty())
         {
             match wfh::effort_args(harness, effort) {
                 Some(mut a) => extra.append(&mut a),
                 None => run.state.notes.push(format!(
-                    "{}: {} takes no reasoning effort; {effort:?} ignored",
+                    "{}: {} takes no reasoning effort {effort:?}; ignored",
                     spec.label(),
                     harness.as_str()
                 )),
@@ -842,6 +895,7 @@ impl App {
             workflow: self.live_workflow_runs[ri].name.clone(),
             step: label.clone(),
             phase: phase.clone(),
+            agent: agent.as_ref().map(|a| a.name.clone()),
         };
         let id = self.next_id;
         let session = self
@@ -1093,6 +1147,12 @@ impl App {
         };
         // journal, store, interpreter
         let run = &self.live_workflow_runs[ri];
+        let agent = spec
+            .overrides
+            .agent
+            .as_ref()
+            .and_then(|a| run.agents.get(a))
+            .map(|a| (a.name.clone(), a.hash.clone()));
         let entry = journal::Entry::from_outcome(
             &key.label(),
             &key.step,
@@ -1101,7 +1161,8 @@ impl App {
             launch_id.clone(),
             tokens,
             cost,
-        );
+        )
+        .with_agent(agent);
         let _ = journal::append(&run.run_dir.join("journal.jsonl"), &entry);
         self.write_workflow_step_row(ri, si, Some((&outcome, tokens, cost)));
         let run = &mut self.live_workflow_runs[ri];
@@ -1284,6 +1345,9 @@ pub struct PlannedWorkflow {
     /// The planner's answer when no document could be extracted.
     pub raw: Option<String>,
     pub run_id: Option<String>,
+    /// Agents the planner defined for the document (`agent-toml` blocks),
+    /// written into the library when the plan runs or is saved.
+    pub agents: Vec<String>,
 }
 
 impl PlannedWorkflow {
@@ -1339,6 +1403,7 @@ impl App {
             &req.workspace,
             &all,
             &entries,
+            &crate::agents::Catalog::load(&self.library_root(), Some(&req.workspace)),
             req.budget_tokens,
         );
         let runtime = self.workflows_runtime_dir();
@@ -1392,6 +1457,7 @@ impl App {
             workflow: "plan".into(),
             step: "plan".into(),
             phase: "Plan".into(),
+            agent: None,
         };
         let sid = self.next_id;
         let session = self
@@ -1481,9 +1547,20 @@ impl App {
             .or(stored)
             .unwrap_or_else(|| screen.trim().to_string());
         let infos = self.all_skill_infos();
+        let new_agents = crate::workflows::planner::extract_agents(&text);
         let planned = match crate::workflows::planner::extract_document(&text) {
             Ok(doc) => {
-                let c = crate::workflows::planner::check(&doc, &infos);
+                let mut c = crate::workflows::planner::check(&doc, &infos);
+                if c.problems.is_empty() {
+                    let catalog =
+                        crate::agents::Catalog::load(&self.library_root(), Some(&plan.workspace));
+                    c.problems = crate::workflows::planner::check_agents(
+                        &doc,
+                        &new_agents,
+                        &catalog,
+                        &infos,
+                    );
+                }
                 PlannedWorkflow {
                     id: plan.id.clone(),
                     task: plan.task.clone(),
@@ -1496,6 +1573,7 @@ impl App {
                     problems: c.problems,
                     raw: None,
                     run_id: None,
+                    agents: new_agents,
                 }
             }
             Err(e) => PlannedWorkflow {
@@ -1510,6 +1588,7 @@ impl App {
                 problems: vec![e],
                 raw: Some(text),
                 run_id: None,
+                agents: new_agents,
             },
         };
         let runtime = self.workflows_runtime_dir();
@@ -1556,6 +1635,7 @@ impl App {
         if !p.valid() {
             return Err(p.problems.join("; "));
         }
+        crate::workflows::planner::save_agents(&self.library_root(), &p.agents)?;
         let req = WorkflowRunRequest {
             name: p.name.clone(),
             source: "dynamic".into(),
@@ -1584,6 +1664,7 @@ impl App {
             .iter()
             .find(|p| p.id == plan_id)
             .ok_or_else(|| format!("no planned workflow {plan_id}"))?;
+        crate::workflows::planner::save_agents(&self.library_root(), &p.agents)?;
         save_document(&self.library_root(), name, &p.document)
     }
 
@@ -1878,7 +1959,7 @@ impl App {
 
     /// Where the dialog's workspace starts: the selected session's
     /// directory, the current directory, or a profile's default.
-    fn dialog_workspaces(&self) -> Vec<String> {
+    pub(crate) fn dialog_workspaces(&self) -> Vec<String> {
         let mut v: Vec<String> = Vec::new();
         if let Some(s) = self.sessions.get(self.selected) {
             v.push(s.dir.to_string_lossy().into_owned());
@@ -1899,7 +1980,9 @@ impl App {
     pub fn open_workflow_run(&mut self) {
         let target = match self.selected_workflow_row() {
             None => {
-                self.notice = Some(Notice::info("no workflows; c composes one for a task"));
+                self.notice = Some(Notice::info(
+                    "no workflows; f builds one step by step, c composes one for a task",
+                ));
                 return;
             }
             Some(WorkflowRow::Live(id)) => Some(RunRow::Live(id)),
@@ -2614,7 +2697,14 @@ impl App {
             return;
         };
         let infos = self.all_skill_infos();
-        let checked = crate::workflows::planner::check(&text, &infos);
+        let mut checked = crate::workflows::planner::check(&text, &infos);
+        if let Some(p) = self.planned_workflows.iter().find(|p| p.id == plan_id)
+            && checked.problems.is_empty()
+        {
+            let catalog = crate::agents::Catalog::load(&self.library_root(), Some(&p.workspace));
+            checked.problems =
+                crate::workflows::planner::check_agents(&text, &p.agents, &catalog, &infos);
+        }
         if let Some(p) = self.planned_workflows.iter_mut().find(|p| p.id == plan_id) {
             p.document = checked.document;
             p.name = checked.name;
@@ -2629,6 +2719,8 @@ impl App {
         match key.code {
             KeyCode::Enter => Some(Action::OpenWorkflowRun),
             KeyCode::Char('c') => Some(Action::OpenWorkflowPlan),
+            KeyCode::Char('f') => Some(Action::OpenFlowBuilder),
+            KeyCode::Char('o') => Some(Action::OpenFlowBuilderSelected),
             KeyCode::Char('e') => Some(Action::EditWorkflow),
             KeyCode::Char('x') => Some(Action::CancelWorkflow),
             KeyCode::Char('r') => Some(Action::OpenWorkflowRun),

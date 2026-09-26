@@ -1,0 +1,9 @@
+# An agent for agent-mux workflows. docs/agents.md explains every field.
+name = "blank"
+description = "One line: what this agent is for"
+instructions = """
+Who the agent is and how it works. This becomes its system prompt.
+"""
+# tools = ["read", "edit", "shell", "web", "mcp:<server>"]
+# model = ""
+# effort = ""

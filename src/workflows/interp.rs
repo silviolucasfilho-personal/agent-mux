@@ -80,6 +80,8 @@ pub struct Overrides {
     pub profile: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The agent the session runs as.
+    pub agent: Option<String>,
     pub isolation: Option<Isolation>,
     pub cwd: Option<String>,
     pub timeout_s: Option<u64>,
@@ -648,7 +650,12 @@ impl RunState {
         let step = &self.doc.steps[i];
         // The role's runner wins over the step's: a refuter or a judge may
         // be a different, cheaper or stronger, model than the work it reads.
-        let runner = role.over(&crate::workflows::document::Workflow::runner_of(step));
+        let mut runner = role.over(&crate::workflows::document::Workflow::runner_of(step));
+        // The step's agent does the step's work; a refuter or a judge is
+        // another role and runs as its own agent, or as none.
+        if matches!(key.role, Role::Vote(_) | Role::Judge { .. }) {
+            runner.agent = role.agent.clone();
+        }
         let results = self.step_results();
         let env = self.env_for(&results, Some(item), Some(index));
         let args: serde_json::Map<String, Value> = step
@@ -680,6 +687,7 @@ impl RunState {
                 profile: runner.profile,
                 model: runner.model,
                 effort: runner.effort,
+                agent: runner.agent,
                 isolation: step.isolation.or(self.doc.default_isolation),
                 cwd: step.cwd.clone(),
                 timeout_s: step.timeout_s,

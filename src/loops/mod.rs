@@ -11,6 +11,7 @@
 
 pub mod agents;
 pub mod breaker;
+pub mod builder;
 pub mod cli;
 pub mod context;
 pub mod cost;

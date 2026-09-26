@@ -5,6 +5,7 @@
 //! `result`; the App side (spawning, accounting) lives in
 //! `crate::app::workflows`. Design: docs/superpowers/specs/2026-09-17-workflows-design.md.
 
+pub mod builder;
 pub mod cli;
 pub mod context;
 pub mod document;
@@ -27,4 +28,6 @@ pub struct WorkflowLaunch {
     pub workflow: String,
     pub step: String,
     pub phase: String,
+    /// The agent the session runs as (`launches.metadata.workflow_agent`).
+    pub agent: Option<String>,
 }

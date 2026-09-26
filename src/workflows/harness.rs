@@ -48,15 +48,19 @@ pub fn extra_args(
 
 /// Reasoning effort for the harnesses that take one. Codex reads it from
 /// its config (`-c model_reasoning_effort="high"`, accepted by codex
-/// 0.154.0); Claude Code 2.1.277 and agy 1.2.6 have no such flag, so a
-/// step that asks for one on them gets `None` and a run note.
+/// 0.154.0); agy 1.2.10 has `--effort low|medium|high|max` (its `--help`,
+/// 2026-09-25), so another value is not passed. Claude Code 2.1.277 has no
+/// such flag. `None` means the effort is ignored, with a run note.
 pub fn effort_args(harness: Harness, effort: &str) -> Option<Vec<String>> {
     match harness {
         Harness::Codex => Some(vec![
             "-c".into(),
             format!("model_reasoning_effort=\"{}\"", effort.replace('"', "")),
         ]),
-        Harness::Claude | Harness::Antigravity => None,
+        Harness::Antigravity => ["low", "medium", "high", "max"]
+            .contains(&effort)
+            .then(|| vec!["--effort".into(), effort.to_string()]),
+        Harness::Claude => None,
     }
 }
 
@@ -214,6 +218,21 @@ pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effort_per_harness() {
+        assert_eq!(
+            effort_args(Harness::Codex, "low").unwrap(),
+            vec!["-c", "model_reasoning_effort=\"low\""]
+        );
+        assert_eq!(
+            effort_args(Harness::Antigravity, "max").unwrap(),
+            vec!["--effort", "max"]
+        );
+        // agy takes only its own four values
+        assert_eq!(effort_args(Harness::Antigravity, "minimal"), None);
+        assert_eq!(effort_args(Harness::Claude, "high"), None);
+    }
 
     #[test]
     fn extra_args_per_harness_and_insertion() {

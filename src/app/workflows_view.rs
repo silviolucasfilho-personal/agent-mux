@@ -589,6 +589,8 @@ struct RunFacts {
     report: Report,
     steps: Vec<WorkflowStep>,
     reasons: BTreeMap<String, String>,
+    /// The agent each session ran as, by session label.
+    agents: BTreeMap<String, String>,
 }
 
 /// The detail pane's lines wrapped to one width; invalidated by a rebuild
@@ -1133,6 +1135,7 @@ impl WorkflowsViewState {
                             lines.extend(steps_lines(
                                 &facts_for_run.steps,
                                 &facts_for_run.reasons,
+                                &facts_for_run.agents,
                             ));
                             if !facts_for_run.report.headline.counts.is_empty() {
                                 lines.push(Line::raw(""));
@@ -1175,7 +1178,7 @@ impl WorkflowsViewState {
             .and_then(|c| wstore::steps_of(c, &r.id).ok())
             .unwrap_or_default();
         let doc = crate::workflows::document::parse(&r.document).ok();
-        let (mut notes, reasons) = self.run_files(&r.id);
+        let (mut notes, reasons, agents) = self.run_files(&r.id);
         if notes.is_empty()
             && let Some(rec) = facts.recent.iter().find(|x| x.run_id == r.id)
         {
@@ -1202,6 +1205,7 @@ impl WorkflowsViewState {
             report,
             steps,
             reasons,
+            agents,
         });
         self.cache.as_ref().unwrap()
     }
@@ -1209,15 +1213,24 @@ impl WorkflowsViewState {
     /// `result.json` for the notes, `journal.jsonl` for the reason a
     /// session answered `null`. Both are written by the run itself, so a
     /// finished run explains its own gaps without a schema change.
-    fn run_files(&self, run_id: &str) -> (Vec<String>, BTreeMap<String, String>) {
+    #[allow(clippy::type_complexity)]
+    fn run_files(
+        &self,
+        run_id: &str,
+    ) -> (
+        Vec<String>,
+        BTreeMap<String, String>,
+        BTreeMap<String, String>,
+    ) {
         let mut notes = Vec::new();
         let mut reasons = BTreeMap::new();
+        let mut agents = BTreeMap::new();
         let Some(dir) = self
             .runtime
             .as_ref()
             .map(|r| r.join("workflows").join(run_id))
         else {
-            return (notes, reasons);
+            return (notes, reasons, agents);
         };
         if let Ok(text) = std::fs::read_to_string(dir.join("result.json"))
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
@@ -1239,9 +1252,15 @@ impl WorkflowsViewState {
                 ) {
                     reasons.insert(k.to_string(), reason.to_string());
                 }
+                if let (Some(k), Some(agent)) = (
+                    v.get("key").and_then(|k| k.as_str()),
+                    v.get("agent").and_then(|a| a.as_str()),
+                ) {
+                    agents.insert(k.to_string(), agent.to_string());
+                }
             }
         }
-        (notes, reasons)
+        (notes, reasons, agents)
     }
 
     pub fn footer(&self) -> String {
@@ -1561,7 +1580,19 @@ fn votes_text(votes: Option<(u64, u64)>) -> Option<String> {
 
 /// The ledger: one group per step, one row per session, with the reason a
 /// null answer gave.
-fn steps_lines(steps: &[WorkflowStep], reasons: &BTreeMap<String, String>) -> Vec<Line<'static>> {
+/// `reviewer@codex` when the session ran as an agent, the harness otherwise.
+fn runs_on(s: &WorkflowStep, agents: &BTreeMap<String, String>) -> String {
+    match agents.get(&s.session) {
+        Some(a) => format!("{a}@{}", s.harness),
+        None => s.harness.clone(),
+    }
+}
+
+fn steps_lines(
+    steps: &[WorkflowStep],
+    reasons: &BTreeMap<String, String>,
+    agents: &BTreeMap<String, String>,
+) -> Vec<Line<'static>> {
     let dim = Style::default().fg(Color::DarkGray);
     let key = Style::default().fg(Color::Yellow);
     let red = Style::default().fg(Color::Red);
@@ -1584,10 +1615,11 @@ fn steps_lines(steps: &[WorkflowStep], reasons: &BTreeMap<String, String>) -> Ve
             .map(|s| s.tokens.unwrap_or(0).max(0) as u64)
             .sum();
         let phase = group.first().map(|s| s.phase.clone()).unwrap_or_default();
-        let mut on: Vec<&str> = Vec::new();
+        let mut on: Vec<String> = Vec::new();
         for g in &group {
-            if !on.contains(&g.harness.as_str()) {
-                on.push(g.harness.as_str());
+            let r = runs_on(g, agents);
+            if !on.contains(&r) {
+                on.push(r);
             }
         }
         out.push(Line::from(vec![
@@ -1623,7 +1655,7 @@ fn steps_lines(steps: &[WorkflowStep], reasons: &BTreeMap<String, String>) -> Ve
                     format!(
                         "{:<7} {:<8} {:>8} {:>8}",
                         s.kind,
-                        s.harness,
+                        runs_on(s, agents),
                         crate::loops::format_tokens(s.tokens.unwrap_or(0).max(0) as u64),
                         dur
                     ),

@@ -864,7 +864,7 @@ result = "note"
 id = "checked"
 kind = "pipeline"
 over = "find[*]"
-verify = { prompt = "refute it", votes = 1, result = "verdict", harness = "agy", model = "careful-refuter" }
+verify = { prompt = "refute it", votes = 1, result = "verdict", harness = "agy", model = "careful-refuter", effort = "high" }
 
 [[steps]]
 id = "wrap"
@@ -910,6 +910,11 @@ async fn each_role_of_a_step_runs_on_the_harness_and_model_it_was_given() {
     let agy = calls(&f.bin, Harness::Antigravity, "args");
     assert_eq!(agy.len(), 1, "one vote");
     assert!(agy[0].contains("--model\ncareful-refuter\n"), "{}", agy[0]);
+    assert!(
+        agy[0].contains("--effort\nhigh\n"),
+        "agy takes --effort\n{}",
+        agy[0]
+    );
     assert!(
         !agy[0].contains("cheap-finder"),
         "the vote does not inherit the step's model\n{}",
@@ -974,7 +979,7 @@ prompt = "write"
     req.step_overrides = vec![("wrap".into(), "temperature".into(), "hot".into())];
     let err = f.app.start_workflow_run(req).unwrap_err();
     assert!(
-        err.contains("expected harness, profile, model or effort"),
+        err.contains("expected harness, profile, model, effort or agent"),
         "{err}"
     );
 }
@@ -1119,4 +1124,213 @@ async fn an_override_to_a_harness_the_document_forbids_is_refused() {
     let err = f.app.start_workflow_run(req).unwrap_err();
     assert!(err.contains("not allowed by workflow.harness"), "{err}");
     assert!(f.app.live_workflow_runs.is_empty());
+}
+
+const WITH_AGENTS: &str = r#"
+[workflow]
+name = "with-agents"
+description = "every role as an agent"
+output = "wrap"
+[schemas.note]
+fields.note = { type = "string", required = true }
+[schemas.verdict]
+fields.refuted = { type = "boolean", required = true }
+
+[[steps]]
+id = "find"
+kind = "fanout"
+over = ["a"]
+harness = "codex"
+agent = "reviewer"
+prompt = "look"
+result = "note"
+
+[[steps]]
+id = "checked"
+kind = "pipeline"
+over = "find[*]"
+verify = { prompt = "refute it", votes = 1, result = "verdict", harness = "agy", agent = "skeptic" }
+
+[[steps]]
+id = "wrap"
+agent = "reviewer"
+model = "writer"
+prompt = "combine"
+"#;
+
+fn write_agent(f: &Fixture, name: &str, body: &str) {
+    let dir = f.home.join(".agent-mux").join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{name}.toml")),
+        format!("name = \"{name}\"\ndescription = \"the {name}\"\n{body}"),
+    )
+    .unwrap();
+}
+
+/// `agent = "…"` makes each session that agent, the way its harness takes
+/// one: Claude's `--agents`/`--agent`, Codex's developer instructions and
+/// sandbox, an Antigravity agent file; the journal records it and a
+/// resume reruns what a changed agent touches.
+#[tokio::test]
+async fn steps_run_as_agents_on_every_harness() {
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    let note = "```workflow-result\n{\"note\": \"found\"}\n```";
+    let keep = "```workflow-result\n{\"refuted\": false}\n```";
+    fake_harness(&bin, Harness::Codex, &[("find", note)], None, None);
+    fake_harness(&bin, Harness::Antigravity, &[("checked", keep)], None, None);
+    fake_harness(&bin, Harness::Claude, &[("wrap", "done")], None, None);
+    let mut f = fixture(&bin, temp);
+    write_agent(
+        &f,
+        "reviewer",
+        "instructions = \"You review code. SECRET-PERSONA\"\ntools = [\"read\", \"shell\"]\nmodel = \"agent-model\"\n[backends.codex]\nmodel = \"codex-agent-model\"\n",
+    );
+    write_agent(&f, "skeptic", "instructions = \"You doubt everything.\"\n");
+
+    // an unknown agent stops the run before anything launches
+    let ghost = WITH_AGENTS.replacen("agent = \"skeptic\"", "agent = \"ghost\"", 1);
+    let e = f
+        .app
+        .start_workflow_run(request(
+            "with-agents",
+            &ghost,
+            &f.ws.clone(),
+            Harness::Claude,
+            serde_json::Value::Null,
+        ))
+        .unwrap_err();
+    assert!(e.contains("\"ghost\" not found"), "{e}");
+
+    let req = request(
+        "with-agents",
+        WITH_AGENTS,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    let first = run_to_completion(&mut f, req.clone()).await;
+    let recent = &f.app.recent_workflow_runs[0];
+    assert_eq!(
+        recent.status, "finished",
+        "{:?} {:?}",
+        recent.error, recent.notes
+    );
+    // what a harness cannot enforce is noted: the reviewer's tool list on
+    // agy (wrap names no harness); the skeptic has no list, so no note
+    assert!(
+        recent.notes.iter().any(
+            |n| n.contains("step wrap: agent \"reviewer\": agy: the tool list is not enforced")
+        ),
+        "{:?}",
+        recent.notes
+    );
+    assert!(
+        !recent.notes.iter().any(|n| n.contains("skeptic")),
+        "{:?}",
+        recent.notes
+    );
+
+    // codex: developer instructions, read-only in place of --yolo, the
+    // agent's codex model
+    let codex = calls(&f.bin, Harness::Codex, "args");
+    assert_eq!(codex.len(), 1);
+    assert!(
+        codex[0].contains("developer_instructions=\"You review code. SECRET-PERSONA\""),
+        "{}",
+        codex[0]
+    );
+    assert!(codex[0].contains("-s\nread-only\n"), "{}", codex[0]);
+    assert!(!codex[0].contains("--yolo"), "{}", codex[0]);
+    assert!(
+        codex[0].contains("--model\ncodex-agent-model\n"),
+        "{}",
+        codex[0]
+    );
+
+    // agy: the refuter's own agent, from a file written before the launch
+    let agy = calls(&f.bin, Harness::Antigravity, "args");
+    assert_eq!(agy.len(), 1);
+    assert!(
+        agy[0].contains("--agent\nagent-mux-skeptic\n"),
+        "{}",
+        agy[0]
+    );
+    assert!(
+        !agy[0].contains("SECRET-PERSONA"),
+        "a vote is not the step's agent"
+    );
+    let file = f
+        .home
+        .join(".gemini/config/agents/agent-mux-skeptic/agent.md");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("# System Prompt\n\nYou doubt everything."),
+        "{text}"
+    );
+
+    // claude: the agent defined and selected; the step's model wins
+    let claude = calls(&f.bin, Harness::Claude, "args");
+    assert_eq!(claude.len(), 1);
+    assert!(
+        claude[0].contains("--agents\n{\"reviewer\""),
+        "{}",
+        claude[0]
+    );
+    assert!(
+        claude[0].contains("\"tools\":[\"Read\",\"Glob\",\"Grep\",\"Bash\"]"),
+        "{}",
+        claude[0]
+    );
+    assert!(claude[0].contains("--agent\nreviewer\n"), "{}", claude[0]);
+    assert!(claude[0].contains("--model\nwriter\n"), "{}", claude[0]);
+    assert!(!claude[0].contains("agent-model"), "{}", claude[0]);
+
+    // the journal names the agent of each session
+    let journal = std::fs::read_to_string(
+        f.home
+            .join("runtime/workflows")
+            .join(&first)
+            .join("journal.jsonl"),
+    )
+    .unwrap();
+    assert!(journal.contains("\"agent\":\"reviewer\""), "{journal}");
+    assert!(journal.contains("\"agent\":\"skeptic\""), "{journal}");
+
+    // resume: unchanged agents replay everything
+    let mut again = req.clone();
+    again.resume_from = Some(first.clone());
+    let second = run_to_completion(&mut f, again).await;
+    assert_eq!(calls(&f.bin, Harness::Claude, "args").len(), 1);
+    assert_eq!(calls(&f.bin, Harness::Codex, "args").len(), 1);
+
+    // a changed skeptic reruns its step and the steps after it, not find
+    write_agent(
+        &f,
+        "skeptic",
+        "instructions = \"You doubt everything twice.\"\n",
+    );
+    let mut changed = req;
+    changed.resume_from = Some(second);
+    run_to_completion(&mut f, changed).await;
+    let recent = &f.app.recent_workflow_runs[0];
+    assert_eq!(recent.status, "finished", "{:?}", recent.error);
+    assert!(
+        recent
+            .notes
+            .iter()
+            .any(|n| n.contains("step checked and the steps after it run again")),
+        "{:?}",
+        recent.notes
+    );
+    assert_eq!(
+        calls(&f.bin, Harness::Codex, "args").len(),
+        1,
+        "find replayed"
+    );
+    assert_eq!(calls(&f.bin, Harness::Antigravity, "args").len(), 2);
+    assert_eq!(calls(&f.bin, Harness::Claude, "args").len(), 2);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("twice"), "the agy file follows the agent");
 }

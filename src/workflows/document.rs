@@ -123,6 +123,8 @@ pub struct Runner {
     pub model: Option<String>,
     /// Reasoning effort, where the harness takes one (Codex).
     pub effort: Option<String>,
+    /// The agent (`src/agents`) the session runs as: who does the work.
+    pub agent: Option<String>,
 }
 
 impl Runner {
@@ -131,6 +133,7 @@ impl Runner {
             && self.profile.is_none()
             && self.model.is_none()
             && self.effort.is_none()
+            && self.agent.is_none()
     }
 
     /// `self` where it is set, `base` otherwise.
@@ -140,10 +143,12 @@ impl Runner {
             profile: self.profile.clone().or_else(|| base.profile.clone()),
             model: self.model.clone().or_else(|| base.model.clone()),
             effort: self.effort.clone().or_else(|| base.effort.clone()),
+            agent: self.agent.clone().or_else(|| base.agent.clone()),
         }
     }
 
-    /// How it reads in a listing: `codex · gpt-5-mini`.
+    /// How it reads in a listing: `codex · gpt-5-mini`. The agent is
+    /// said apart (`as reviewer`).
     pub fn label(&self) -> String {
         let mut parts: Vec<&str> = Vec::new();
         if let Some(h) = &self.harness {
@@ -204,6 +209,9 @@ pub struct Step {
     pub profile: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The agent the step's own sessions run as. Refuters and judges do
+    /// not inherit it: they are other roles and name their own.
+    pub agent: Option<String>,
     pub isolation: Option<Isolation>,
     pub cwd: Option<String>,
     pub timeout_s: Option<u64>,
@@ -247,6 +255,7 @@ impl Workflow {
             profile: step.profile.clone(),
             model: step.model.clone(),
             effort: step.effort.clone(),
+            agent: step.agent.clone(),
         }
     }
 
@@ -286,6 +295,25 @@ impl Workflow {
             push(&s.judge);
             if let Some(v) = &s.verify {
                 push(&Some(v.actor.clone()));
+            }
+        }
+        out
+    }
+
+    /// Every agent the document names (steps, verify, judge).
+    pub fn agents(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in &self.steps {
+            for a in [
+                &s.agent,
+                &s.judge_runner.agent,
+                &s.verify.as_ref().and_then(|v| v.runner.agent.clone()),
+            ] {
+                if let Some(a) = a
+                    && !out.contains(a)
+                {
+                    out.push(a.clone());
+                }
             }
         }
         out
@@ -358,6 +386,7 @@ struct RawVerify {
     profile: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    agent: Option<String>,
 }
 
 /// `judge = "wf-judge"` or `judge = { skill = …, harness = …, model = … }`.
@@ -377,6 +406,7 @@ struct RawJudgeTable {
     profile: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    agent: Option<String>,
 }
 
 fn one() -> usize {
@@ -412,6 +442,7 @@ struct RawStep {
     profile: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    agent: Option<String>,
     isolation: Option<Isolation>,
     cwd: Option<String>,
     timeout_s: Option<u64>,
@@ -547,6 +578,7 @@ pub fn parse(text: &str) -> Result<Workflow, Vec<String>> {
                     profile: v.profile,
                     model: v.model,
                     effort: v.effort,
+                    agent: v.agent,
                 };
                 actor.map(|actor| Verify {
                     actor,
@@ -567,6 +599,7 @@ pub fn parse(text: &str) -> Result<Workflow, Vec<String>> {
                     profile: t.profile,
                     model: t.model,
                     effort: t.effort,
+                    agent: t.agent,
                 };
                 match (t.skill, t.prompt) {
                     (Some(s), None) => Some(Actor::Skill(s)),
@@ -635,6 +668,7 @@ pub fn parse(text: &str) -> Result<Workflow, Vec<String>> {
             profile: r.profile,
             model: r.model,
             effort: r.effort,
+            agent: r.agent,
             isolation: r.isolation,
             cwd: r.cwd,
             timeout_s: r.timeout_s,
@@ -841,6 +875,20 @@ pub fn validate(doc: &Workflow, skills: Option<&[SkillInfo]>) -> Vec<String> {
                 if let Ok(p) = PathExpr::parse(&ph) {
                     check_path(&p, "prompt", &mut problems);
                 }
+            }
+        }
+        for (what, agent) in [
+            ("agent", &s.agent),
+            (
+                "verify.agent",
+                &s.verify.as_ref().and_then(|v| v.runner.agent.clone()),
+            ),
+            ("judge.agent", &s.judge_runner.agent),
+        ] {
+            if let Some(a) = agent
+                && !is_valid_id(a)
+            {
+                problems.push(format!("{ctx}: {what} {a:?} must match ^[a-z][a-z0-9_-]*$"));
             }
         }
         if let Some(h) = &s.harness

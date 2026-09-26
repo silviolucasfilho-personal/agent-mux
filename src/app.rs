@@ -21,7 +21,9 @@ use tokio::sync::mpsc::Sender;
 pub mod about;
 mod config_view;
 pub mod dir_picker;
+pub mod flow_builder;
 pub mod inbox;
+pub mod loop_builder;
 pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
@@ -59,6 +61,10 @@ pub enum Mode {
     WorkflowsView(Box<workflows_view::WorkflowsViewState>),
     /// The inbox (`I`): what waits on a human, across loops and workflows.
     Inbox(Box<inbox::InboxState>),
+    /// The flow builder (`f` / `o` in the Workflows section).
+    FlowBuilder(Box<flow_builder::FlowBuilderState>),
+    /// The loop builder (`o` / `f` in the Loops section).
+    LoopBuilder(Box<loop_builder::LoopBuilderState>),
 }
 
 /// An external editor the main loop must run for the App: it leaves the
@@ -190,6 +196,12 @@ pub enum Action {
     /// Workflows section: Enter (run dialog or the view), c (compose), e, x.
     OpenWorkflowRun,
     OpenWorkflowPlan,
+    OpenFlowBuilder,
+    OpenFlowBuilderSelected,
+    FlowBuilderKey,
+    OpenLoopBuilder,
+    OpenLoopBuilderNew,
+    LoopBuilderKey,
     EditWorkflow,
     CancelWorkflow,
     /// `W`: the Workflows view.
@@ -531,6 +543,16 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::EnterConfirmRemoveLoop
                 }
+                KeyCode::Char('o')
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
+                {
+                    Action::OpenLoopBuilder
+                }
+                KeyCode::Char('f')
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Loops =>
+                {
+                    Action::OpenLoopBuilderNew
+                }
                 KeyCode::Char(' ')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Active =>
                 {
@@ -616,6 +638,8 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::WorkflowDialog(_) => Action::WorkflowDialogKey,
         Mode::WorkflowsView(_) => Action::WorkflowsKey,
         Mode::Inbox(_) => Action::InboxKey,
+        Mode::FlowBuilder(_) => Action::FlowBuilderKey,
+        Mode::LoopBuilder(_) => Action::LoopBuilderKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 Action::EnterConfirmRemoveLoop
@@ -3839,6 +3863,12 @@ impl App {
             Action::ConfigKey => self.handle_config_key(key),
             Action::OpenWorkflowRun => self.open_workflow_run(),
             Action::OpenWorkflowPlan => self.open_workflow_plan(),
+            Action::OpenFlowBuilder => self.open_flow_builder_new(),
+            Action::OpenFlowBuilderSelected => self.open_flow_builder_selected(),
+            Action::FlowBuilderKey => self.handle_flow_builder_key(key),
+            Action::OpenLoopBuilder => self.open_loop_builder_selected(),
+            Action::OpenLoopBuilderNew => self.open_loop_builder_new(),
+            Action::LoopBuilderKey => self.handle_loop_builder_key(key),
             Action::EditWorkflow => self.edit_selected_workflow(),
             Action::CancelWorkflow => self.cancel_selected_workflow(),
             Action::OpenWorkflowsView => self.open_workflows_view(),
@@ -4494,6 +4524,14 @@ impl App {
             self.dialog_editor_finished(&request.path);
             return;
         }
+        if request.asset_id == "loop:prompt" {
+            self.loop_builder_editor_finished(&request.path);
+            return;
+        }
+        if request.asset_id.starts_with("flow:") {
+            self.flow_editor_finished(&request);
+            return;
+        }
         if let Some(plan_id) = request.asset_id.strip_prefix("plan:") {
             self.reload_planned_after_edit(plan_id);
             if self.notice.is_none() {
@@ -4592,7 +4630,7 @@ impl App {
                 self.loop_audits.clear();
             }
             Some(Kind::Settings) => self.reload_settings(),
-            Some(Kind::Workflow) | Some(Kind::Prompts) | None => {}
+            Some(Kind::Workflow) | Some(Kind::Agent) | Some(Kind::Prompts) | None => {}
         }
     }
 
@@ -4783,7 +4821,7 @@ impl App {
                     }
                     Some(k) => {
                         self.notice = Some(Notice::info(format!(
-                            "{} items are edited in place; n creates skills, loop skills and loop agents",
+                            "{} items are edited in place; n creates skills, workflows, agents, loop skills and loop agents",
                             k.label()
                         )));
                     }

@@ -13,11 +13,11 @@ pub const USAGE: &str = "agent-mux workflow <command>
 
   ls [--json]                      workflows (built-in, library, skill-distributed) with their last run
   show <name>                      the document
-  check [<name>]                   validate every document and step skill; exit 1 on problems
+  check [<name>] [--workspace DIR] validate every document, step skill and agent; exit 1 on problems
   skills                           the step skills and the harnesses they are installed for
   run <name> --workspace DIR [--harness claude|codex|agy] [--profile P]
       [--arg name=value …] [--budget N] [--max-cost USD] [--isolation none|worktree]
-      [--step <id>.<harness|profile|model|effort>=<value> …]  per-step, this run only
+      [--step <id>.<harness|profile|model|effort|agent>=<value> …]  per-step, this run only
       [--resume RUN_ID] [--json]   run to completion and print the result;
                                    exit 0 finished, 1 failed, 2 cancelled, 3 budget exhausted,
                                    4 finished with a verdict the document does not accept
@@ -235,6 +235,9 @@ fn check(args: &Args) -> anyhow::Result<()> {
     let entries = entries();
     let only = args.positional.first();
     let mut bad = 0;
+    let workspace = args.value("--workspace").map(PathBuf::from);
+    let agents = crate::agents::Catalog::load(&crate::assets::root(), workspace.as_deref());
+    let skill_infos = library::skill_infos(&all_skills());
     for e in &entries {
         if let Some(n) = only
             && &e.name != n
@@ -242,11 +245,22 @@ fn check(args: &Args) -> anyhow::Result<()> {
             continue;
         }
         if e.valid() {
-            println!(
-                "{}: ok ({} steps)",
-                e.name,
-                e.doc.as_ref().map(|d| d.steps.len()).unwrap_or(0)
-            );
+            let doc = e.doc.as_ref().expect("valid");
+            let diags = crate::agents::fit::check(doc, &agents, &skill_infos);
+            let errors = crate::agents::fit::errors(&diags);
+            if errors.is_empty() {
+                println!("{}: ok ({} steps)", e.name, doc.steps.len());
+            }
+            for d in &diags {
+                let mark = match d.level {
+                    crate::agents::launch::Level::Error => {
+                        bad += 1;
+                        ""
+                    }
+                    crate::agents::launch::Level::Warning => "warning: ",
+                };
+                println!("{}: {mark}{}", e.name, d.message);
+            }
         } else {
             for p in &e.problems {
                 println!("{}: {p}", e.name);
@@ -647,6 +661,7 @@ fn status(args: &Args) -> anyhow::Result<()> {
     };
     let run = wstore::resolve_run(&conn, id)?.ok_or_else(|| anyhow::anyhow!("no run {id:?}"))?;
     let steps = wstore::steps_of(&conn, &run.id)?;
+    let agents = journal_field(&run.id, "agent");
     if args.flag("--json") {
         let v = serde_json::json!({
             "id": run.id, "workflow": run.workflow, "status": run.status, "harness": run.harness,
@@ -654,7 +669,7 @@ fn status(args: &Args) -> anyhow::Result<()> {
             "cost_usd": run.cost_usd, "result": run.result, "error": run.error,
             "steps": steps.iter().map(|s| serde_json::json!({
                 "session": s.session, "step": s.step_id, "phase": s.phase, "harness": s.harness,
-                "kind": s.kind, "tokens": s.tokens, "cost_usd": s.cost_usd, "launch_id": s.launch_id,
+                "agent": agents.get(&s.session), "kind": s.kind, "tokens": s.tokens, "cost_usd": s.cost_usd, "launch_id": s.launch_id,
             })).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&v)?);
@@ -693,12 +708,17 @@ fn status(args: &Args) -> anyhow::Result<()> {
                 (Some(a), Some(b)) if b > a => wreport::format_duration((b - a) / 1_000_000_000),
                 _ => "-".into(),
             };
+            let on = match agents.get(&s.session) {
+                Some(a) => format!("{a}@{}", s.harness),
+                None => s.harness.clone(),
+            };
             println!(
-                "  {} {:<26} {:<14} {:<7} {:>8} {:>8}",
+                "  {} {:<26} {:<14} {:<7} {:<16} {:>8} {:>8}",
                 if s.kind == "null" { "✗" } else { "✓" },
                 s.session,
                 s.phase,
                 s.kind,
+                on,
                 crate::loops::format_tokens(s.tokens.unwrap_or(0).max(0) as u64),
                 dur
             );
@@ -751,6 +771,11 @@ fn run_notes(run_id: &str) -> Vec<String> {
 }
 
 fn run_reasons(run_id: &str) -> std::collections::BTreeMap<String, String> {
+    journal_field(run_id, "reason")
+}
+
+/// `key → field` over the run's journal lines that carry `field`.
+fn journal_field(run_id: &str, field: &str) -> std::collections::BTreeMap<String, String> {
     let mut out = std::collections::BTreeMap::new();
     let Some(dir) = run_dir(run_id) else {
         return out;
@@ -762,7 +787,7 @@ fn run_reasons(run_id: &str) -> std::collections::BTreeMap<String, String> {
             };
             if let (Some(k), Some(r)) = (
                 v.get("key").and_then(|k| k.as_str()),
-                v.get("reason").and_then(|r| r.as_str()),
+                v.get(field).and_then(|r| r.as_str()),
             ) {
                 out.insert(k.to_string(), r.to_string());
             }

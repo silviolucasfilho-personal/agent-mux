@@ -81,6 +81,28 @@ model: a skill is a prompt, not a process, so it has no model of its own.
 
 Registry: `loops/registry.toml` (embedded), merged by id with `~/.agent-mux/loops/registry.toml` when you add or replace patterns; the skills, the agents and the templates are overridden the same way under `~/.agent-mux/loops/` (the Configuration view `C`, `agent-mux config`, `docs/configuration.md`). A pattern may carry its own `prompt`, replacing `[loop] run` of `prompts.toml` for its runs, and an `agents` list naming the loop agents the scaffolder installs for it (`loops/agents/<name>.md`, built-in or library, including agents brought in with `agent-mux agent import`); an empty list means `loop-verifier` alone when `verifier = true` and no agent otherwise, and a pattern with `verifier = true` must keep `loop-verifier` in the list. Two checkers ship built in: `loop-verifier` runs the tests and reads the diff; `loop-reviewer` reads the diff only, for scope creep, risk areas and missing tests, and answers the same `## Verdict:` line. A pattern that lists `agents = ["loop-verifier", "loop-reviewer"]` requires both: agent-mux collects one verdict per checker sub-agent that answered (a name containing `verifier` or `reviewer`), and only unanimous APPROVEs propose the fix (section 6). Every skill reads `$AGENT_MUX_LOOP_CONTEXT` first, makes its one listing call and compares a fingerprint of it with the `Fingerprint:` line in the state file: unchanged means the run rewrites `Last run:` and ends as `no-op` under 5k tokens (the early exit the cost model assumes); otherwise it follows a bounded procedure, only edits the state file at L1, may call `loop-fix` for one item at L2, hands changes to `loop-verifier`, rewrites the state file, and ends with a fenced `loop-result` block (`outcome`, `items_found`, `actions_taken`, `escalations`, `summary`).
 
+### Editing patterns in the loop builder
+
+Every pattern can be edited, the built-in ones too. `o` in the Loops section opens the **loop builder** on the selected loop's pattern, and `f` starts a new pattern.
+- **Left:** every pattern with its cadence and where it comes from: `built-in`, `edited` (your copy of a built-in) or `yours`. A `*` marks unsaved edits.
+- **Right:** the pattern's cycle, drawn (`every 15m ─▶ loop-ci-triage ─▶ loop-fix ─▶ loop-rules`, `checked by loop-verifier ─▶ writes ci-sweeper-state.md`), then its fields in words:
+  - **What it is:** id, name and goal.
+  - **How it runs:** the interval (`15m`, `2h`, `1d`), the week-one level, the skills (ticked in order, the first being the triage), the checker agents, and the run's prompt (`Ctrl+E` opens your editor, `Ctrl+R` goes back to the default).
+  - **Safety:** verifier, breaker and human gates.
+  - **Models:** the run's model and the checker's model.
+  - **Budget:** runs and tokens a day, priority, risk, token cost, state file and early exit.
+
+Keys:
+
+| Key | Does |
+| --- | --- |
+| `s` | Saves the pattern into `~/.agent-mux/loops/registry.toml`, where a pattern with a built-in id replaces the built-in. It saves only when the same checks as `agent-mux config check` pass. |
+| `R` | Restores an edited built-in. |
+| `c` | Copies the selected pattern under a new id. |
+| `d` | Deletes a pattern of your own. |
+
+Registered loops read their pattern when they run. Skills and agents that the scaffolder already installed in a workspace are refreshed with `agent-mux config push`.
+
 ## 5. Levels and what enforces them
 
 | Level | Meaning | Where | Enforced by |

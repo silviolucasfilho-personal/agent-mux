@@ -13,7 +13,7 @@ pub const USAGE: &str = "agent-mux config <command>
   edit <id>                    copy the built-in text into the library when needed and
                                open it in `editor` (profiles.toml), $VISUAL, $EDITOR or vi
   reset <id>                   delete the override (or a user-added item)
-  new skill|loop-skill|loop-agent <name>
+  new skill|loop-skill|loop-agent|workflow|agent <name>
                                create an item from a skeleton and print its path
   check                        validate every item; exit 1 when one has problems
   push [--dry-run]             rewrite the loop skills and agents in every registered
@@ -137,12 +137,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         Some("new") => {
-            let usage = "usage: agent-mux config new skill|loop-skill|loop-agent <name>";
-            let kind = match positional(0).map(String::as_str) {
-                Some("skill") => Kind::Skill,
-                Some("loop-skill") => Kind::LoopSkill,
-                Some("loop-agent") => Kind::LoopAgent,
-                _ => anyhow::bail!("{usage}"),
+            let usage =
+                "usage: agent-mux config new skill|loop-skill|loop-agent|workflow|agent <name>";
+            let word = positional(0).map(String::as_str);
+            let Some(kind) = Kind::ALL.into_iter().find(|k| k.new_word() == word) else {
+                anyhow::bail!("{usage}");
             };
             let name = positional(1).ok_or_else(|| anyhow::anyhow!("{usage}"))?;
             let path = catalog

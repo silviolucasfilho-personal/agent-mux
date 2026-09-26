@@ -93,6 +93,35 @@ Keep the argument order."
 
 To compose a workflow for a task instead: `c`, type the task, pick the workspace and the profile, `Enter`. The planner session runs the `workflow-author` skill and answers with a document; it appears under **Planned** in the view (`W`) with its validation, where `Enter` runs it, `e` edits it, `s` saves it into the library and `x` discards it. `[workflows] dynamic_approval = "never"` runs a valid document as soon as the planner answers.
 
+### Building a flow step by step
+
+`f` in the Workflows section opens the **flow builder** on a new flow. `o` opens the selected workflow or planned document in it instead, so you can start from a built-in, from a document you saved, or from a draft the planner wrote. The builder writes an ordinary document (section 2) and keeps every key it has no field for, so nothing is lost when an existing workflow goes through it. There are three screens:
+
+- **Steps.** On the left, the flow as a chain: each step, how it runs (`once`, `⇉ 3 in parallel`, `↓ each · 3 votes`, `★ best of 3`), the agent that runs it and what it passes on. On the right are the selected step's fields, in words:
+  - **Runs:** one of six shapes (`←`/`→` change it).
+  - **For each of:** a list you type, or a list an earlier step gives.
+  - **Does:** a step skill or a prompt.
+  - **Who:** the agent.
+  - **Gets:** what it reads from earlier steps.
+  - **Answers with:** the answer's shape.
+  - **Shape-specific fields:** votes and "keep when" for checked steps, attempts and judge for best-of-N, paths for pick-a-path, "same when" for until-quiet.
+  - **Harness, model, effort and isolation.**
+
+  `a` adds a step after the selected one, and `J`/`K` move it. `d` deletes it. The first row, **flow settings**, holds the name, the description, the arguments (`scope=., language*`), the step whose answer the run returns, the budget and the workspace.
+- **What passes** (`w`). The flow is drawn left to right with what each step gets and gives. Below it, you edit the selected step's answer field by field:
+  - `+` adds a field, `←`/`→` change its kind, `r` makes it required, and `Enter` edits the values of a "one of" field.
+  - For a list of items, `Enter` opens the item's own fields.
+  - On the right, you pick what the step reads, in words ("every finding from every review session"), and its filters: `f` sets keep only, `u` drops repeats.
+- **Review** (`v`). The flow is retold one sentence per step, with the same checks `workflow check` runs, the estimated number of sessions, and the document itself. `s` saves it into the library, `Enter` saves it and opens the run dialog, and `e` opens it in `$EDITOR` and brings the edit back.
+
+`g` (or `Enter` on **Who**, **Voters** or **Judge**) opens the agent picker. It lists the workspace's and the library's agents with their descriptions, tools and models. `n` writes a new agent on the spot:
+- **Its text:** a name, what it is for, and its instructions (`Ctrl+E` opens your editor).
+- **What it may use:** ticked from read files, edit files, run commands, web and MCP servers.
+- **Where it runs:** a model per harness, and the effort for Codex and Antigravity.
+- **Where it is saved:** the workspace (`.agent-mux/agents/`, committed with the repository) or the library.
+
+The form shows while you type whether the agent fits the step. `Ctrl+S` saves it and puts it on the step. `Esc` steps back one level at a time. With unsaved changes, it asks before it leaves.
+
 ## 2. The document
 
 ```toml
@@ -160,7 +189,8 @@ args = { subject = "confirmed review findings", shape = "a report grouped by sev
 | `branches` | `route`: `{ label = ["step", …] }`; the classifier's result carries `label`; other branches are skipped |
 | `judge` / `judge_prompt`, `n` | `tournament`: the pairwise judge and how many candidates to generate. `judge` is a skill name or a table (`{ skill \| prompt, harness, profile, model, effort }`) when the judge should run on its own model |
 | `rounds_without_new`, `max_rounds` | `until`: stop after this many quiet rounds (2) or rounds (10); needs `dedupe_by` |
-| `harness`, `profile`, `model`, `effort`, `isolation`, `cwd`, `timeout_s`, `concurrency`, `phase` | Per-step overrides. `harness` and `profile` pick the CLI and its configuration, `model` becomes `--model`, and `effort` becomes Codex's `model_reasoning_effort` (Claude Code and Antigravity take none, and the run notes that it was ignored). The step skills are installed for every harness the document names, so a step may switch CLI safely. |
+| `agent` | Who runs the step's sessions: an agent from `~/.agent-mux/agents/` or the workspace's `.agent-mux/agents/` (`docs/agents.md`). Its instructions become the system prompt; its tools limit the session where the harness can. `verify` and `judge` tables take their own `agent` and do not inherit the step's |
+| `harness`, `profile`, `model`, `effort`, `isolation`, `cwd`, `timeout_s`, `concurrency`, `phase` | Per-step overrides. `harness` and `profile` pick the CLI and its configuration, `model` becomes `--model`, and `effort` becomes Codex's `model_reasoning_effort` or Antigravity's `--effort` (`low`, `medium`, `high` or `max`; Claude Code takes none, and the run notes an effort it ignored). The step skills are installed for every harness the document names, so a step may switch CLI safely. |
 
 Paths: `find` is a step's result; `[*]` flattens one level; `.field` descends; `args.name`, `item`, `index` are the other roots. They are checked when the document loads.
 
@@ -177,7 +207,7 @@ kind = "fanout"
 over = ["correctness", "security"]
 harness = "codex"            # this step runs on Codex
 model = "gpt-5-mini"         # on a cheap model: it only has to notice things
-effort = "low"               # Codex reads this as model_reasoning_effort
+effort = "low"               # Codex: model_reasoning_effort; agy: --effort
 
 [[steps]]
 id = "confirmed"
@@ -209,6 +239,11 @@ agent-mux workflow run review-changes --workspace . \
   --step find.model=gpt-5-mini --step find.harness=codex \
   --step report.model=claude-opus-5
 ```
+
+A step may also run as an **agent**, a persona defined once for all three
+CLIs (`agent = "reviewer"`, `docs/agents.md`). The step's own `model` and
+`effort` win over the agent's, and `--step find.agent=skeptic` swaps it for
+one run.
 
 A step naming a harness the document's `workflow.harness` forbids is a
 load-time problem. A profile that does not exist falls back to the first
@@ -307,7 +342,7 @@ default_budget_tokens = 0   # 0 = none
 ```sh
 agent-mux workflow ls [--json]                       workflows, their last run and when to use each
 agent-mux workflow show <name>                       the document
-agent-mux workflow check [<name>]                    validate documents and step skills; exit 1 on problems
+agent-mux workflow check [<name>] [--workspace DIR]  validate documents, step skills and agents; exit 1 on problems
 agent-mux workflow skills                            step skills and where they are installed
 agent-mux workflow run <name> --workspace DIR [--harness claude|codex|agy] [--profile P]
     [--arg name=value …] [--budget N] [--max-cost USD] [--isolation none|worktree]

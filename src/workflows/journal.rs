@@ -26,6 +26,12 @@ pub struct Entry {
     pub tokens: u64,
     #[serde(default)]
     pub cost_usd: f64,
+    /// The agent the session ran as, and its hash: a resume reruns a
+    /// session whose agent has changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_hash: Option<String>,
 }
 
 impl Entry {
@@ -53,7 +59,18 @@ impl Entry {
             launch_id,
             tokens,
             cost_usd,
+            agent: None,
+            agent_hash: None,
         }
+    }
+
+    /// The same entry, recording the agent it ran as.
+    pub fn with_agent(mut self, agent: Option<(String, String)>) -> Entry {
+        if let Some((name, hash)) = agent {
+            self.agent = Some(name);
+            self.agent_hash = Some(hash);
+        }
+        self
     }
 
     pub fn outcome(&self) -> Outcome {
@@ -109,6 +126,48 @@ pub fn to_replay(entries: &[Entry]) -> BTreeMap<String, SessionDone> {
             )
         })
         .collect()
+}
+
+/// The agent hash a session of `key` would run with now: its verify
+/// block's agent for a vote, its judge's for a judge, the step's otherwise.
+fn agent_of<'a>(doc: &'a crate::workflows::Workflow, step: &str, key: &str) -> Option<&'a String> {
+    let s = doc.step(step)?;
+    if key.contains("/vote") {
+        s.verify.as_ref().and_then(|v| v.runner.agent.as_ref())
+    } else if key.contains("/judge") {
+        s.judge_runner.agent.as_ref()
+    } else {
+        s.agent.as_ref()
+    }
+}
+
+/// The entries a resume may replay: when a session's agent changed (its
+/// hash, or the agent itself), that step and every later step run again,
+/// since their inputs may change with it. `hash_of` is the current hash
+/// of an agent by name.
+pub fn replayable(
+    entries: Vec<Entry>,
+    doc: &crate::workflows::Workflow,
+    hash_of: impl Fn(&str) -> Option<String>,
+) -> (Vec<Entry>, Option<String>) {
+    let stale = entries
+        .iter()
+        .filter(|e| {
+            let now = agent_of(doc, &e.step, &e.key).and_then(|a| hash_of(a));
+            now != e.agent_hash
+        })
+        .filter_map(|e| doc.step_index(&e.step).map(|i| (i, e.step.clone())))
+        .min();
+    match stale {
+        None => (entries, None),
+        Some((from, step)) => (
+            entries
+                .into_iter()
+                .filter(|e| doc.step_index(&e.step).is_some_and(|i| i < from))
+                .collect(),
+            Some(step),
+        ),
+    }
 }
 
 /// Truncates the journal after `key` (inclusive when `inclusive`), for
@@ -182,5 +241,52 @@ mod tests {
         assert_eq!(truncate_after(&path, "find[1]", false).unwrap(), 1);
         assert_eq!(load(&path).len(), 1);
         assert!(load(Path::new("/nonexistent")).is_empty());
+    }
+
+    #[test]
+    fn a_changed_agent_reruns_its_step_and_every_later_one() {
+        let doc = crate::workflows::parse(
+            r#"
+[workflow]
+name = "w"
+description = "d"
+[[steps]]
+id = "brief"
+prompt = "b"
+[[steps]]
+id = "find"
+kind = "fanout"
+over = ["a", "b"]
+prompt = "f"
+agent = "reviewer"
+verify = { prompt = "v", agent = "skeptic" }
+[[steps]]
+id = "report"
+prompt = "r"
+"#,
+        )
+        .unwrap();
+        let e = |key: &str, step: &str, agent: Option<(&str, &str)>| {
+            Entry::from_outcome(key, step, "P", &Outcome::Text("t".into()), None, 1, 0.0)
+                .with_agent(agent.map(|(a, h)| (a.to_string(), h.to_string())))
+        };
+        let entries = vec![
+            e("brief", "brief", None),
+            e("find", "find", Some(("reviewer", "h1"))),
+            e("find[0]/vote1", "find", Some(("skeptic", "s1"))),
+            e("report", "report", None),
+        ];
+        let same = |a: &str| Some(if a == "reviewer" { "h1" } else { "s1" }.to_string());
+        let (kept, stale) = replayable(entries.clone(), &doc, same);
+        assert_eq!((kept.len(), stale), (4, None));
+        // the skeptic changed: find and report run again, brief replays
+        let changed = |a: &str| Some(if a == "reviewer" { "h1" } else { "s2" }.to_string());
+        let (kept, stale) = replayable(entries.clone(), &doc, changed);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].key, "brief");
+        assert_eq!(stale.as_deref(), Some("find"));
+        // a journal from before agents: steps without agents replay
+        let (kept, _) = replayable(vec![e("brief", "brief", None)], &doc, same);
+        assert_eq!(kept.len(), 1);
     }
 }

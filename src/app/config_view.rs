@@ -24,6 +24,9 @@ pub enum ConfigRow {
     Header(Kind),
     /// Index into `Catalog::assets`.
     Item(usize),
+    /// A creatable kind with no items yet (agents have no built-ins): a
+    /// selectable placeholder, so `n` can create the first one.
+    Empty(Kind),
 }
 
 /// A footer question waiting on the user.
@@ -118,6 +121,10 @@ impl ConfigViewState {
                 .map(|(i, _)| i)
                 .collect();
             if items.is_empty() {
+                if kind.creatable() {
+                    self.rows.push(ConfigRow::Header(kind));
+                    self.rows.push(ConfigRow::Empty(kind));
+                }
                 continue;
             }
             self.rows.push(ConfigRow::Header(kind));
@@ -135,7 +142,7 @@ impl ConfigViewState {
         if matches!(self.rows[self.selected], ConfigRow::Header(_)) {
             let next = self.rows[self.selected..]
                 .iter()
-                .position(|r| matches!(r, ConfigRow::Item(_)))
+                .position(|r| !matches!(r, ConfigRow::Header(_)))
                 .map(|p| self.selected + p);
             self.selected = next.unwrap_or(self.selected);
         }
@@ -151,7 +158,7 @@ impl ConfigViewState {
     pub fn selected_asset(&self) -> Option<&Asset> {
         match self.rows.get(self.selected)? {
             ConfigRow::Item(i) => self.catalog.assets.get(*i),
-            ConfigRow::Header(_) => None,
+            ConfigRow::Header(_) | ConfigRow::Empty(_) => None,
         }
     }
 
@@ -159,7 +166,7 @@ impl ConfigViewState {
     pub fn selected_kind(&self) -> Option<Kind> {
         match self.rows.get(self.selected)? {
             ConfigRow::Item(i) => self.catalog.assets.get(*i).map(|a| a.kind),
-            ConfigRow::Header(k) => Some(*k),
+            ConfigRow::Header(k) | ConfigRow::Empty(k) => Some(*k),
         }
     }
 
@@ -218,7 +225,23 @@ impl ConfigViewState {
         let red = Style::default().fg(Color::Red);
         let green = Style::default().fg(Color::Green);
         let Some(asset) = self.selected_asset().cloned() else {
-            self.detail_lines = vec![Line::styled("  nothing selected", dim)];
+            self.detail_lines = match self.rows.get(self.selected) {
+                Some(ConfigRow::Empty(kind)) => vec![
+                    Line::styled(format!("  No {}s yet.", kind.label()), key),
+                    Line::raw(""),
+                    Line::raw("  n creates one: type a name, Enter, and it opens in your editor."),
+                    Line::styled(
+                        match kind {
+                            Kind::Agent => {
+                                "  An agent is who runs a workflow step: agent = \"<name>\" on a step, a verify block or a judge. docs/agents.md"
+                            }
+                            _ => "",
+                        },
+                        dim,
+                    ),
+                ],
+                _ => vec![Line::styled("  nothing selected", dim)],
+            };
             self.copies.clear();
             return;
         };
@@ -330,6 +353,14 @@ impl ConfigViewState {
                 lines.push(row(
                     "Used by",
                     "the Workflows section and `agent-mux workflow run`".into(),
+                    Style::default(),
+                ));
+            }
+            Kind::Agent => {
+                lines.push(row(
+                    "Used by",
+                    "workflow steps that name it (`agent = \"…\"`); see `agent-mux agent show`"
+                        .into(),
                     Style::default(),
                 ));
             }

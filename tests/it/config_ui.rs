@@ -134,7 +134,7 @@ fn c_opens_the_view_grouped_by_kind_and_esc_unwinds() {
     let mut f = fixture();
     press(&mut f.app, KeyCode::Char('C'));
     let v = view(&f.app);
-    assert_eq!(v.item_count(), 82);
+    assert_eq!(v.item_count(), 87);
     assert!(matches!(v.rows[0], ConfigRow::Header(Kind::Prompts)));
     assert_eq!(v.selected, 1, "the first item, never a header");
     assert_eq!(v.selected_asset().unwrap().id, "prompts.toml");
@@ -146,10 +146,11 @@ fn c_opens_the_view_grouped_by_kind_and_esc_unwinds() {
             _ => None,
         })
         .collect();
+    // every group, Agents too: it has no built-ins but a placeholder row
     assert_eq!(headers, Kind::ALL.to_vec());
 
     let text = screen(&f.app);
-    assert!(text.contains("Configuration (82)"), "{text}");
+    assert!(text.contains("Configuration (87)"), "{text}");
     for h in ["Prompts", "Settings", "Skills"] {
         assert!(text.contains(h), "{h}\n{text}");
     }
@@ -308,6 +309,43 @@ fn reset_asks_first_and_restores_the_builtin_text() {
 }
 
 #[test]
+fn built_in_agents_are_listed_and_edited_as_copies() {
+    let mut f = fixture();
+    press(&mut f.app, KeyCode::Char('C'));
+    // Enter on a built-in agent copies it into the library and opens it
+    select(&mut f.app, "agents/skeptic.toml");
+    press(&mut f.app, KeyCode::Enter);
+    let req = f.app.take_editor_request().expect("opens the copy");
+    assert_eq!(req.path, f.library.join("agents/skeptic.toml"));
+    assert_eq!(
+        std::fs::read_to_string(&req.path).unwrap(),
+        agent_mux::agents::builtin("skeptic").unwrap()
+    );
+    f.app.editor_finished(req, Ok(()));
+    assert_eq!(
+        view(&f.app).selected_asset().unwrap().source,
+        Source::Override
+    );
+
+    // n on an agent writes a new one from the blank template
+    press(&mut f.app, KeyCode::Char('n'));
+    assert!(matches!(
+        view(&f.app).pending,
+        Pending::NewName {
+            kind: Kind::Agent,
+            ..
+        }
+    ));
+    type_text(&mut f.app, "sec");
+    press(&mut f.app, KeyCode::Enter);
+    let req = f.app.take_editor_request().expect("opens the new file");
+    assert_eq!(req.path, f.library.join("agents/sec.toml"));
+    let spec =
+        agent_mux::agents::AgentSpec::parse(&std::fs::read_to_string(&req.path).unwrap()).unwrap();
+    assert_eq!(spec.name, "sec");
+}
+
+#[test]
 fn n_creates_a_new_loop_skill_and_opens_it() {
     let mut f = fixture();
     press(&mut f.app, KeyCode::Char('C'));
@@ -347,7 +385,7 @@ fn n_creates_a_new_loop_skill_and_opens_it() {
     );
     assert_eq!(a.source, Source::User);
     assert!(a.valid(), "{:?}", a.problems);
-    assert_eq!(v.item_count(), 83);
+    assert_eq!(v.item_count(), 88);
     f.app.editor_finished(req, Ok(()));
 
     // a bad name is refused and the footer question closes
