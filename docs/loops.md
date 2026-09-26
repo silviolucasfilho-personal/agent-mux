@@ -16,7 +16,7 @@ Design: `docs/superpowers/specs/2026-09-15-loop-engineering-design.md`. Not to b
 
 On screen a level is named by what it lets a run do: `report only` (L1), `propose a fix for you to review` (L2), `fix unattended` (L3). The command line and `loops.json` keep the codes.
 
-Keep L1 (report-only) for a week. Promote to L2 with `e` when the readiness audit allows it (score ≥ 58 and a triage skill) and you have read a week of state files.
+Keep L1 (report-only) for a week. Promote to L2 with `e` once the workspace has a triage skill and you have read a week of state files. The readiness score is advice, not a gate: any level can be set at any score.
 
 ## 2. The files a loop keeps in the workspace
 
@@ -109,9 +109,17 @@ Registered loops read their pattern when they run. Skills and agents that the sc
 | --- | --- | --- | --- |
 | L1 | report-only | the workspace | the `PreToolUse` guard permits only the state file, the run log and `.loop-context/` |
 | L2 | assisted: one fix, verifier, human decides | a worktree `.loop-worktrees/<run>` on branch `loop/<run>`; the state file, run log and ledger stay in the workspace (`$AGENT_MUX_LOOP_STATE`, absolute paths in the context) | guard: denylist, `maxFiles`, no push or merge; post-run gate re-check; inbox |
-| L3 | unattended | worktree | same guard; readiness ≥ 78 with verifier, cost observability and fresh activity |
+| L3 | unattended | worktree | same guard; a verifier, a state file, cost observability and fresh activity |
 
-The readiness score gates L1 at 38 and L2 at 58. A loop can bypass the score for those two levels: **Score** in the add/edit dialog (`Space` toggles it), `loop add --bypass-score`, or `"bypass_score": true` on the entry in `loops.json`. The other gates still hold: a state file for L1; a triage skill, a git repository and a path guard for L2. L3 always needs its score (78), a verifier, cost observability and fresh activity. The card reads `Allowed to  report only · score bypassed`, and the Setup tab says so under **Allowed to**.
+Any level may be set whatever the readiness score. The score (0-100) describes how loop-ready the workspace is and its findings say what to improve, but it never holds a level back. What a level needs to be safe still does:
+
+| Level | Needs |
+| --- | --- |
+| L1 | a state file |
+| L2 | a triage skill, a git repository (for the worktree) and a path guard for the harness |
+| L3 | a verifier, a state file, cost observability (budget doc, run log, `LOOP.md` budget), loop activity in the last 14 days, a git repository and a path guard |
+
+The card and the Setup tab name what a level still needs, in those words. An older `loops.json` with `"bypass_score"` still loads; the key is ignored.
 
 A loop run passes `--dangerously-skip-permissions` (Claude Code) or `--yolo` (Codex) whatever the profile says: print mode cannot answer an approval prompt, and the guard, the gate and the worktree are the controls instead.
 
@@ -220,7 +228,7 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 
 ## 12. Command line
 
-`agent-mux loop ls|add|rm|run|pause|resume|init|audit|status|report|runs|show|cost|inbox|decide` mirror the sidebar; `add` takes `--model`, `--verifier-model` and `--bypass-score`; `report <id>` prints what a run found and who has to act (`--run <run_id>` for an older one), `runs <id>` the folded timeline (`--all` unfolds it) and `show <run_id>` one run in full; `loop run <id> --now` performs one scheduler pass headlessly (for cron) and exits 0 for report-only or no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. The MCP tool `agent_mux_get_loop_context` gives a running loop its context recomputed now.
+`agent-mux loop ls|add|rm|run|pause|resume|init|audit|status|report|runs|show|cost|inbox|decide` mirror the sidebar; `add` takes `--model` and `--verifier-model` (any `--level` is accepted whatever the score); `report <id>` prints what a run found and who has to act (`--run <run_id>` for an older one), `runs <id>` the folded timeline (`--all` unfolds it) and `show <run_id>` one run in full; `loop run <id> --now` performs one scheduler pass headlessly (for cron) and exits 0 for report-only or no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. The MCP tool `agent_mux_get_loop_context` gives a running loop its context recomputed now.
 
 Configuration (`profiles.toml`):
 

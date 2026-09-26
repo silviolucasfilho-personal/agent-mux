@@ -547,8 +547,8 @@ fn the_card_says_what_the_loop_may_do_and_setup_says_what_it_needs() {
         "what the next step needs\n{screen}"
     );
     assert!(
-        screen.contains("(now 7)") && screen.contains("a triage skill"),
-        "the gap in plain words\n{screen}"
+        !screen.contains("(now 7)") && screen.contains("triage skill"),
+        "the gap in plain words, never the score\n{screen}"
     );
     assert!(
         screen
@@ -691,66 +691,37 @@ fn the_inbox_gathers_loop_runs_plans_and_failed_runs() {
     assert!(!screen.contains("Inbox |"), "{screen}");
 }
 
-/// A loop may bypass the readiness score for report only and propose
-/// fixes: the card and the dialog stop asking for the score and keep the
-/// other gates; the choice is saved on the entry.
+/// Any level may be set whatever the readiness score: the card and the
+/// dialog never ask for the score, and the other gates still hold.
 #[test]
-fn a_loop_can_bypass_the_readiness_score_for_l1_and_l2() {
+fn any_level_may_be_set_whatever_the_readiness_score() {
     let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
     app.loop_registry.add(entry(&temp, "daily-triage"));
     app.sidebar_section = SidebarSection::Loops;
     app.refresh_loop_cards(Instant::now());
     let screen = render(&app, 120, 34);
-    assert!(screen.contains("score of 58 (now 7)"), "{screen}");
-
-    app.loop_registry.loops[0].bypass_score = true;
-    app.refresh_loop_cards(Instant::now());
-    let screen = render(&app, 120, 34);
-    assert!(
-        screen.contains("Allowed to  report only · score bypassed"),
-        "{screen}"
-    );
-    assert!(
-        !screen.contains("score of 58"),
-        "the score is no longer asked for\n{screen}"
-    );
+    assert!(!screen.contains("readiness score of"), "{screen}");
     assert!(
         screen.contains("triage skill"),
         "the other gates still hold\n{screen}"
     );
 
-    // the dialog edits it, and its level notes follow
+    // the dialog's level notes name the gates, never the score
     app.handle_key(&key(KeyCode::Char('e')), Instant::now());
     let Mode::NewLoop(d) = &mut app.mode else {
         panic!("{:?}", app.notice)
     };
-    assert!(d.bypass_score, "the edit dialog loads the choice");
     d.level = Level::L2;
-    d.field = LoopField::BypassScore;
-    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
     let Mode::NewLoop(d) = &app.mode else {
         panic!()
     };
-    assert!(!d.bypass_score);
-    assert!(
-        d.level_notes[1]
-            .as_deref()
-            .unwrap_or("")
-            .contains("a readiness score of 58"),
-        "{:?}",
-        d.level_notes
-    );
-    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
-    let Mode::NewLoop(d) = &app.mode else {
-        panic!()
-    };
-    assert!(d.bypass_score);
-    let note = d.level_notes[1].clone().unwrap_or_default();
-    assert!(!note.contains("readiness score"), "{note}");
-    assert!(note.contains("a triage skill"), "{note}");
+    for note in d.level_notes.iter().flatten() {
+        assert!(!note.contains("readiness score"), "{note}");
+    }
     let screen = render(&app, 120, 40);
     assert!(
-        screen.contains("Score       [x] may run below the readiness score"),
-        "{screen}"
+        !screen.contains("Score       ["),
+        "no score switch\n{screen}"
     );
 }

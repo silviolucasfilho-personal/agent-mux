@@ -606,12 +606,6 @@ impl LoopsViewState {
                     .map(|c| c.allowed(entry.level))
                     .unwrap_or((entry.level, None));
                 lines.push(Line::raw(format!("  Allowed to  {}", allowed.can())));
-                if entry.bypass_score {
-                    lines.push(Line::styled(
-                        "              the readiness score is bypassed for report only and propose fixes ([e] edit)",
-                        dim,
-                    ));
-                }
                 if let Some(why) = capped {
                     lines.push(Line::styled(
                         format!(
@@ -640,7 +634,7 @@ impl LoopsViewState {
                     if level > Level::L1 && !is_repo {
                         missing.push("a git repository".into());
                     }
-                    missing.extend(audit.missing_for_with(level, entry.bypass_score));
+                    missing.extend(audit.missing_for(level));
                     let set = if level == entry.level {
                         "  ← set"
                     } else {

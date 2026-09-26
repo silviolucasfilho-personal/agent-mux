@@ -25,7 +25,7 @@ You are one run of a scheduled loop over the loops and sessions of this workspac
    - more than 80% `no-op` over 20 runs → propose a longer `default_interval_s` (double it) for that pattern.
    - mean tokens of a non-no-op run above `cost.tokens_report` → propose lowering `max_tokens_per_day` or narrowing the skill's listing call.
    - `blocked` runs with `tokens today at the cap` → propose a higher `max_tokens_per_day` or fewer `max_runs_per_day`.
-   - a loop at L1 for 7 days or more with readiness score ≥ 58, no failed runs and no gate violation → propose promotion to L2.
+   - a loop at L1 for 7 days or more with a triage skill, no failed runs and no gate violation → propose promotion to L2 (the readiness score is advice, not a requirement).
    - any gate violation, breaker trip, or two REJECT verdicts in the last 10 runs of an L2+ loop → propose demotion to L1.
    - a touched path that a human escalated twice → propose adding its glob to `gate.yaml` `denylist`.
    - `verifier_missing` on any fix run → propose `agents = ["loop-verifier", "loop-reviewer"]` for that pattern.

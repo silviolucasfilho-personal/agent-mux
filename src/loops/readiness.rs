@@ -365,27 +365,13 @@ impl Audit {
     }
 
     /// What `level` still needs in this workspace, in plain words for the
-    /// screen; empty exactly when [`Audit::allows`] is `Ok`.
+    /// screen; empty exactly when [`Audit::allows`] is `Ok`. The readiness
+    /// score is not among them: any level may run at any score, and the
+    /// score stays a description of the workspace. What a level needs to
+    /// be safe still holds.
     pub fn missing_for(&self, level: Level) -> Vec<String> {
-        self.missing_for_with(level, false)
-    }
-
-    /// [`Audit::missing_for`] for a loop that may bypass the score: at L1
-    /// and L2 `bypass_score` drops the score threshold and keeps the rest
-    /// (a state file, a triage skill). L3 always needs its score.
-    pub fn missing_for_with(&self, level: Level, bypass_score: bool) -> Vec<String> {
         let (state, triage, verifier, cost_ready, activity) = self.gates();
-        let score = self.score;
         let mut out = Vec::new();
-        let threshold = match level {
-            Level::L1 => THRESHOLD_L1,
-            Level::L2 => THRESHOLD_L2,
-            Level::L3 => THRESHOLD_L3,
-        };
-        let score_counts = !(bypass_score && level < Level::L3);
-        if score_counts && score < threshold {
-            out.push(format!("a readiness score of {threshold} (now {score})"));
-        }
         match level {
             Level::L1 => {
                 if !state {
@@ -415,60 +401,44 @@ impl Audit {
         out
     }
 
-    /// Whether the workspace may run at `level`, else why not.
+    /// Whether the workspace may run at `level`, else why not. The score
+    /// does not decide it (see [`Audit::missing_for`]).
     pub fn allows(&self, level: Level) -> Result<(), String> {
-        self.allows_with(level, false)
-    }
-
-    /// [`Audit::allows`] for a loop that may bypass the score at L1 and L2
-    /// (`LoopEntry::bypass_score`): the other gates still hold.
-    pub fn allows_with(&self, level: Level, bypass_score: bool) -> Result<(), String> {
         let (state, triage, verifier, cost_ready, activity) = self.gates();
-        let score = self.score;
-        let over = |t: u32| score >= t || bypass_score;
         match level {
             Level::L1 => {
-                if over(THRESHOLD_L1) && state {
+                if state {
                     Ok(())
                 } else {
-                    Err(format!(
-                        "L1 needs score ≥ {THRESHOLD_L1} and a state file (score {score}{})",
-                        if state { "" } else { ", no state file" }
-                    ))
+                    Err("L1 needs a state file".into())
                 }
             }
             Level::L2 => {
-                if over(THRESHOLD_L2) && triage {
+                if triage {
                     Ok(())
                 } else {
-                    Err(format!(
-                        "L2 needs score ≥ {THRESHOLD_L2} and a triage skill (score {score}{})",
-                        if triage { "" } else { ", no triage skill" }
-                    ))
+                    Err("L2 needs a triage skill".into())
                 }
             }
             Level::L3 => {
-                let mut missing = Vec::new();
-                if score < THRESHOLD_L3 {
-                    missing.push(format!("score {score}"));
-                }
+                let mut missing: Vec<&str> = Vec::new();
                 if !verifier {
-                    missing.push("no verifier".into());
+                    missing.push("no verifier");
                 }
                 if !state {
-                    missing.push("no state file".into());
+                    missing.push("no state file");
                 }
                 if !cost_ready {
-                    missing.push("missing cost observability".into());
+                    missing.push("missing cost observability");
                 }
                 if !activity {
-                    missing.push("no fresh activity".into());
+                    missing.push("no fresh activity");
                 }
                 if missing.is_empty() {
                     Ok(())
                 } else {
                     Err(format!(
-                        "L3 needs score ≥ {THRESHOLD_L3}, a verifier, a state file, cost observability and fresh activity ({})",
+                        "L3 needs a verifier, a state file, cost observability and fresh activity ({})",
                         missing.join(", ")
                     ))
                 }
@@ -1211,52 +1181,45 @@ mod tests {
             let temp = copy_fixture(fixture);
             let a = audit(temp.path(), 0);
             for level in [Level::L1, Level::L2, Level::L3] {
-                for bypass in [false, true] {
-                    assert_eq!(
-                        a.allows_with(level, bypass).is_ok(),
-                        a.missing_for_with(level, bypass).is_empty(),
-                        "{fixture} {level:?} bypass {bypass}: {:?}",
-                        a.missing_for_with(level, bypass)
-                    );
-                }
+                assert_eq!(
+                    a.allows(level).is_ok(),
+                    a.missing_for(level).is_empty(),
+                    "{fixture} {level:?}: {:?}",
+                    a.missing_for(level)
+                );
             }
         }
         let temp = copy_fixture("empty");
         let a = audit(temp.path(), 0);
-        assert_eq!(
-            a.missing_for(Level::L1),
-            vec!["a readiness score of 38 (now 7)", "a state file"]
-        );
+        assert_eq!(a.missing_for(Level::L1), vec!["a state file"]);
     }
 
     #[test]
-    fn bypassing_the_score_keeps_the_other_gates_and_never_reaches_l3() {
+    fn the_score_never_holds_a_level_back() {
+        // the empty workspace scores 7: far under every old threshold
         let temp = copy_fixture("empty");
         let a = audit(temp.path(), 0);
-        assert_eq!(a.missing_for_with(Level::L1, true), vec!["a state file"]);
-        assert_eq!(a.missing_for_with(Level::L2, true), vec!["a triage skill"]);
+        assert!(a.score < THRESHOLD_L1);
+        assert_eq!(a.missing_for(Level::L1), vec!["a state file"]);
+        assert_eq!(a.missing_for(Level::L2), vec!["a triage skill"]);
+        let l3 = a.missing_for(Level::L3);
+        assert!(!l3.iter().any(|m| m.contains("score")), "{l3:?}");
         assert!(
-            a.missing_for_with(Level::L3, true)
-                .contains(&"a readiness score of 78 (now 7)".to_string()),
-            "L3 keeps its score"
+            l3.contains(&"a verifier".to_string()),
+            "L3 keeps its other gates"
         );
-        assert!(
-            a.allows_with(Level::L1, true).is_err(),
-            "still no state file"
-        );
-        // a triage skill alone: L2 needs no state file, only the score
+        // a triage skill alone: L2 runs at a score under 58
         let skill = temp.path().join(".claude/skills/loop-triage");
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "---\nname: loop-triage\n---\n").unwrap();
         let a = audit(temp.path(), 0);
         assert!(a.score < THRESHOLD_L2, "score {}", a.score);
-        assert!(a.allows(Level::L2).is_err());
         assert!(
-            a.allows_with(Level::L2, true).is_ok(),
+            a.allows(Level::L2).is_ok(),
             "{:?}",
-            a.missing_for_with(Level::L2, true)
+            a.missing_for(Level::L2)
         );
-        // a stale state file alone: present, but under the L1 score
+        // a stale state file alone: L1 runs at a score under 38
         let temp = copy_fixture("empty");
         std::fs::write(
             temp.path().join("STATE.md"),
@@ -1265,9 +1228,11 @@ mod tests {
         .unwrap();
         let a = audit(temp.path(), 0);
         assert!(a.score < THRESHOLD_L1, "score {}", a.score);
-        assert!(a.allows(Level::L1).is_err());
-        assert!(a.allows_with(Level::L1, true).is_ok());
-        assert!(a.allows_with(Level::L3, true).is_err());
+        assert!(a.allows(Level::L1).is_ok());
+        assert!(
+            a.allows(Level::L3).is_err(),
+            "no verifier, no cost, no activity"
+        );
     }
 
     #[test]
@@ -1320,7 +1285,7 @@ mod tests {
         assert!(a.allows(Level::L2).is_ok());
         let why = a.allows(Level::L3).unwrap_err();
         assert!(
-            why.contains("score 76") && why.contains("no fresh activity"),
+            !why.contains("score") && why.contains("no fresh activity"),
             "{why}"
         );
         // a fresh state file adds activity: 90, still not L3 (no cost observability)
@@ -1411,7 +1376,8 @@ mod tests {
             "{:?}",
             a.findings
         );
-        assert!(a.allows(Level::L2).unwrap_err().contains("score 55"));
+        // the score (55) describes the workspace; it does not hold L2 back
+        assert!(a.allows(Level::L2).is_ok());
 
         set_last_run(
             temp.path(),
