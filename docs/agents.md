@@ -85,9 +85,20 @@ model = "pro"
 
 "Not enforced" means the session gets that harness's own tools, and `workflow check` says so. Antigravity tool names are not written into the agent file because they have not been verified, and a misspelled agy tool name can hang the session.
 
-### A scheduled agent
+### A task agent, on demand or on a schedule
 
-The same file can say what the agent does on its own and when. `[task]` names the loop pattern it runs (the task library, `docs/loops.md` section 4), `[schedule]` when and where, `[limits]` its budgets. Its tools decide what a run may change: with `edit` it works in a worktree and its change waits in the inbox; without it, it reports. A task agent needs no `instructions` (its pattern's prompt is the prompt).
+The same file can say what the agent does on its own and when. `[task]` names exactly one thing: a `pattern` (a loop pattern from the task library, `docs/loops.md` section 4), a `skill` it runs, or a `prompt` in words. Without `[schedule]` it runs when you start it: it is listed under **on demand** in the Agents list, and `Enter` there opens the New session dialog ("New session as <name>") with its persona flags on the command line and its task as the first message (the prompt, or `/skill` / `$skill`, installed first). `r` on a persona row does the same without a first message. `[schedule]` makes it run every interval instead; `[limits]` sets its budgets.
+
+```toml
+name = "todo-digest"
+description = "Summarizes the open TODOs"
+tools = ["read", "shell"]
+
+[task]
+prompt = "Summarize the open TODOs and who owns them."   # or: skill = "heimdall"
+```
+
+A scheduled skill or prompt task defines its own loop pattern, named after the agent: it loads `loop-rules`, keeps `STATE.md`, and its opening prompt carries the agent's instructions and its task (`agents::schedule::task_pattern`). The agent editor edits all of it: **What** has "Does" (nothing, a prompt or a skill) and the task, **When** has "Runs" (when I start it, on a schedule) with Every, In and On. Switching a scheduled agent back to on demand removes its loop. Its tools decide what a run may change: with `edit` it works in a worktree and its change waits in the inbox; without it, it reports. A task agent needs no `instructions` (its pattern's prompt is the prompt).
 
 ```toml
 name = "daily-triage"
@@ -111,7 +122,7 @@ tokens_per_day = 100000
 usd_per_run = 0.5
 ```
 
-Only a one-task agent has a schedule for now; `[schedule]` without `[task]` is refused. Such an agent lives in the library (`~/.agent-mux/agents/`); agent-mux lays it over the loop registry at start (`agents::schedule`), so the file holds the settings and `loops.json` keeps the run state (next run, last run, pause, breaker) plus a copy of the settings for older builds. An agent file alone is enough: a new file becomes a loop the next time agent-mux starts. Removing the loop (`d` on its row, `agent-mux loop rm`) deletes its file. A task agent is not offered as a persona for flow steps.
+Only a task agent has a schedule for now; `[schedule]` without `[task]` is refused. A pattern task: Such an agent lives in the library (`~/.agent-mux/agents/`); agent-mux lays it over the loop registry at start (`agents::schedule`), so the file holds the settings and `loops.json` keeps the run state (next run, last run, pause, breaker) plus a copy of the settings for older builds. An agent file alone is enough: a new file becomes a loop the next time agent-mux starts. Removing the loop (`d` on its row, `agent-mux loop rm`) deletes its file. A task agent is not offered as a persona for flow steps.
 
 The agent editor writes the file: a new scheduled agent gets one from the start, `s` on an existing one rewrites its settings and keeps the rest of the file (instructions, `[backends]`, other tools), and `Ctrl+O` opens it in `$EDITOR`. A loop from an older build keeps its settings in `loops.json` until you run `agent-mux agent migrate`, which only says what it would write; `--write` writes one file per loop (named after its pattern, then pattern and workspace folder), links each entry to its file and copies `loops.json` to `loops.json.bak` first. Nothing is deleted. Workflows need no migration: a library workflow document is already the flow agent's one file.
 

@@ -13,7 +13,7 @@
 //!   registry entry that has none. Nothing is deleted; `loops.json` is
 //!   copied to `loops.json.bak` before it changes.
 
-use super::{AgentSpec, Catalog, Source, Tool};
+use super::{AgentSpec, Catalog, Source, TaskBody, Tool};
 use crate::loops::registry::{self, LoopEntry, Registry};
 use crate::loops::{Level, patterns};
 use std::path::{Path, PathBuf};
@@ -61,10 +61,13 @@ pub fn overlay(reg: &mut Registry, library_root: &Path, now: OffsetDateTime) -> 
         let (Some(task), Some(sched)) = (&spec.task, &spec.schedule) else {
             continue;
         };
-        let Some(pattern) = patterns::find(&task.pattern) else {
+        let id = task.pattern_id(&e.name);
+        // a skill or prompt task defines its pattern in the file itself
+        let own = task_pattern(spec);
+        let Some(pattern) = own.as_ref().or_else(|| patterns::find(&id)) else {
             problems.push(format!(
                 "agent {}: [task] pattern {:?} is not in the library",
-                e.name, task.pattern
+                e.name, id
             ));
             continue;
         };
@@ -126,6 +129,73 @@ fn apply(
     entry.max_cost_usd_per_run = limits.usd_per_run;
 }
 
+/// The loop pattern a library agent's skill or prompt task defines, so
+/// the scheduler runs it like any other: its id is the agent's name, it
+/// keeps `STATE.md`, it loads `loop-rules` first, and its opening prompt
+/// carries the agent's instructions and its task.
+pub fn task_pattern(spec: &AgentSpec) -> Option<crate::loops::Pattern> {
+    let task = spec.task.as_ref()?;
+    let what = match task.body() {
+        TaskBody::Pattern(_) => return None,
+        TaskBody::Skill(skill) => format!(
+            "Run the {skill} skill (/{skill} on Claude Code, ${skill} on Codex) and do what it says."
+        ),
+        TaskBody::Prompt(p) => p,
+    };
+    let who = if spec.instructions.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", spec.instructions)
+    };
+    let limits = spec.limits.clone().unwrap_or_default();
+    let interval = spec.schedule.as_ref().map_or(86_400, |s| s.interval_s);
+    Some(crate::loops::Pattern {
+        id: spec.name.clone(),
+        name: spec.name.clone(),
+        goal: spec.description.clone(),
+        default_interval_s: interval,
+        week_one_level: level_of(spec),
+        state_file: "STATE.md".into(),
+        skills: vec!["loop-rules".into()],
+        verifier: false,
+        breaker: level_of(spec).edits(),
+        human_gates: Vec::new(),
+        risk: if level_of(spec).edits() {
+            "medium"
+        } else {
+            "low"
+        }
+        .into(),
+        token_cost: "medium".into(),
+        max_runs_per_day: limits.runs_per_day.unwrap_or(24),
+        max_tokens_per_day: limits.tokens_per_day.unwrap_or(500_000),
+        priority: 50,
+        cost: crate::loops::PatternCost {
+            tokens_noop: 5_000,
+            tokens_report: 30_000,
+            tokens_action: 80_000,
+            stable_fraction: 0.5,
+            early_exit_required: false,
+        },
+        prompt: Some(format!(
+            "{{invocation}} {who}Your task in {{workspace}}:\n\n{what}\n\nFacts for this run are in $AGENT_MUX_LOOP_CONTEXT (read it first). Write what you found and what you did to {{state_file}}. Finish with a loop-result block."
+        )),
+        agents: Vec::new(),
+        model: spec.model.clone(),
+        verifier_model: None,
+    })
+}
+
+/// The patterns the library's agents define (`task_pattern`).
+pub fn task_patterns(library_root: &Path) -> Vec<crate::loops::Pattern> {
+    Catalog::load(library_root, None)
+        .entries
+        .iter()
+        .filter(|e| matches!(e.source, Source::Library(_)))
+        .filter_map(|e| e.spec.as_ref().and_then(task_pattern))
+        .collect()
+}
+
 /// Where the library keeps agent `name`.
 pub fn file_of(library_root: &Path, name: &str) -> PathBuf {
     super::library_dir(library_root).join(format!("{name}.toml"))
@@ -172,8 +242,18 @@ pub fn render_entry(name: &str, entry: &LoopEntry, existing: &str) -> Result<Str
     } else {
         t.insert("model".into(), s(&entry.model));
     }
-    let mut task = toml::Table::new();
-    task.insert("pattern".into(), s(&entry.pattern));
+    // a skill or prompt task defines its own pattern: keep what it says
+    let mut task = t
+        .get("task")
+        .and_then(|v| v.as_table())
+        .filter(|old| old.contains_key("skill") || old.contains_key("prompt"))
+        .cloned()
+        .unwrap_or_else(|| {
+            let mut task = toml::Table::new();
+            task.insert("pattern".into(), s(&entry.pattern));
+            task
+        });
+    task.remove("verifier_model");
     if !entry.verifier_model.is_empty() {
         task.insert("verifier_model".into(), s(&entry.verifier_model));
     }
@@ -207,7 +287,7 @@ pub fn render_entry(name: &str, entry: &LoopEntry, existing: &str) -> Result<Str
 
 /// The table as TOML with the agent's keys first and its tables in the
 /// order the guide explains them (a `toml::Table` sorts its keys).
-fn ordered(mut t: toml::Table) -> Result<String, String> {
+pub(crate) fn ordered(mut t: toml::Table) -> Result<String, String> {
     const FIRST: [&str; 9] = [
         "name",
         "description",
@@ -416,6 +496,51 @@ mod tests {
         let spec = AgentSpec::parse(&again).unwrap();
         assert_eq!(level_of(&spec), Level::L1);
         assert_eq!(spec.effort_for("codex").as_deref(), Some("high"), "{again}");
+    }
+
+    #[test]
+    fn a_task_names_one_thing_and_a_prompt_task_defines_its_pattern() {
+        let base = "name = \"notes\"\ndescription = \"d\"\ntools = [\"read\"]\n";
+        let e = AgentSpec::parse(&format!(
+            "{base}[task]\npattern = \"daily-triage\"\nprompt = \"x\"\n"
+        ))
+        .unwrap_err();
+        assert!(e.join(" ").contains("names one thing"), "{e:?}");
+        assert!(AgentSpec::parse(&format!("{base}[task]\n")).is_err());
+
+        let spec = AgentSpec::parse(&format!(
+            "{base}instructions = \"You keep notes.\"\n[task]\nprompt = \"List the TODOs.\"\n[schedule]\nevery = \"2h\"\nworkspace = \"/w\"\n"
+        ))
+        .unwrap();
+        let t = spec.task.as_ref().unwrap();
+        assert_eq!(t.pattern_id("notes"), "notes");
+        assert_eq!(t.label(), "\"List the TODOs.\"");
+        let p = task_pattern(&spec).unwrap();
+        assert_eq!((p.id.as_str(), p.default_interval_s), ("notes", 7200));
+        assert_eq!(p.skills, ["loop-rules"]);
+        assert!(crate::loops::STATE_FILES.contains(&p.state_file.as_str()));
+        let prompt = p.prompt.unwrap();
+        assert!(prompt.contains("You keep notes.") && prompt.contains("List the TODOs."));
+        for ph in crate::prompts::placeholders(&prompt) {
+            assert!(
+                crate::prompts::LOOP_PLACEHOLDERS.contains(&ph.as_str()),
+                "{ph}"
+            );
+        }
+
+        let skill = AgentSpec::parse(&format!("{base}[task]\nskill = \"heimdall\"\n")).unwrap();
+        assert!(
+            task_pattern(&skill)
+                .unwrap()
+                .prompt
+                .unwrap()
+                .contains("/heimdall")
+        );
+        let pat = AgentSpec::parse(&format!("{base}[task]\npattern = \"daily-triage\"\n")).unwrap();
+        assert!(
+            task_pattern(&pat).is_none(),
+            "a pattern task uses the library's"
+        );
     }
 
     #[test]

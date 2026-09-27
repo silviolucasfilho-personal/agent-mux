@@ -207,6 +207,7 @@ pub enum Action {
     NewAgentKey,
     NewSessionFromHarness,
     EditPersona,
+    RunAgent,
     DeleteWorkflowRow,
     AgentEditorKey,
     OpenLoopBuilder,
@@ -403,6 +404,8 @@ pub enum RowTag {
     Other,
     Harness,
     Persona,
+    /// An agent with a task it runs when you start it.
+    Task,
     Session,
     /// A run no other row stands for: it has only its sessions.
     Run,
@@ -508,6 +511,15 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::EditPersona
                 }
+                // a task agent runs on Enter; a persona runs as a session on r
+                KeyCode::Enter | KeyCode::Char('r')
+                    if in_list && matches!(ctx.agent_row, RowTag::Task | RowTag::Persona) =>
+                {
+                    Action::RunAgent
+                }
+                KeyCode::Char('e') if in_list && ctx.agent_row == RowTag::Task => {
+                    Action::EditPersona
+                }
                 // a harness or persona row has none of a session's or a
                 // skill's own keys
                 KeyCode::Enter | KeyCode::Char('x' | 'd' | 'r' | 't' | 'h' | ' ')
@@ -516,7 +528,11 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     Action::None
                 }
                 KeyCode::Char('x' | 'd' | 'r' | 't' | 'h' | ' ')
-                    if in_list && matches!(ctx.agent_row, RowTag::Harness | RowTag::Persona) =>
+                    if in_list
+                        && matches!(
+                            ctx.agent_row,
+                            RowTag::Harness | RowTag::Persona | RowTag::Task
+                        ) =>
                 {
                     Action::None
                 }
@@ -827,7 +843,7 @@ fn default_dir_for_profile(profile: Option<&Profile>) -> String {
         })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DialogState {
     pub profile_idx: usize,
     pub dir: String,
@@ -863,6 +879,10 @@ pub struct DialogState {
     /// Budget guard for this launch, as typed; blank = no limit.
     pub max_cost: String,
     pub max_turns: String,
+    /// An agent the session runs as (`Enter` on a task agent): its
+    /// persona flags join the command line and its task is the opening
+    /// message.
+    pub agent: Option<String>,
 }
 
 impl DialogState {
@@ -906,6 +926,7 @@ impl DialogState {
             bypass_default: DEFAULT_BYPASS_APPROVALS,
             resume_last: false,
             one_shot: String::new(),
+            agent: None,
             langfuse_available: false,
             experiment: String::new(),
             variant: String::new(),
@@ -2126,6 +2147,8 @@ pub struct App {
     pub selected_agent: usize,
     /// Persona agents the Agents list shows (`agents_list`).
     pub personas: Vec<String>,
+    /// Agents with a task and no schedule: run when you start them.
+    pub task_agents: Vec<String>,
     /// A harness or persona row under the Agents cursor.
     pub agent_focus: Option<agents_list::AgentFocus>,
     /// The section the Agents cursor was in when Tab went to History.
@@ -2261,6 +2284,7 @@ impl App {
             skills_dir: None,
             selected_agent: 0,
             personas: Vec::new(),
+            task_agents: Vec::new(),
             agent_focus: None,
             list_section: SidebarSection::Active,
             skill_workbench: None,
@@ -3121,6 +3145,9 @@ impl App {
         } else {
             match self.agent_row() {
                 Some(agents_list::AgentKind::Harness(_)) => RowTag::Harness,
+                Some(agents_list::AgentKind::Persona(n)) if self.task_agents.contains(&n) => {
+                    RowTag::Task
+                }
                 Some(agents_list::AgentKind::Persona(_)) => RowTag::Persona,
                 Some(agents_list::AgentKind::Session(_)) => RowTag::Session,
                 Some(agents_list::AgentKind::Run(_)) => RowTag::Run,
@@ -3769,9 +3796,20 @@ impl App {
             Action::LoopTogglePause => self.toggle_selected_loop_pause(),
             Action::OpenNewLoop => self.open_scheduled_editor(None, None),
             Action::EditLoop => {
-                let id = self.selected_loop().map(|l| l.id.clone());
-                if id.is_some() {
-                    self.open_scheduled_editor(id, None);
+                let entry = self.selected_loop().cloned();
+                // an agent whose task is a skill or a prompt is edited with
+                // its task; a pattern's loop in the scheduled editor
+                let own_task = entry.as_ref().and_then(|e| e.agent.clone()).filter(|name| {
+                    crate::agents::Catalog::load(&self.library_root(), None)
+                        .entry(name)
+                        .and_then(|x| x.spec.as_ref())
+                        .and_then(|s| s.task.as_ref())
+                        .is_some_and(|t| !matches!(t.body(), crate::agents::TaskBody::Pattern(_)))
+                });
+                match (own_task, entry) {
+                    (Some(name), _) => self.open_persona_editor(&name),
+                    (None, Some(e)) => self.open_scheduled_editor(Some(e.id), None),
+                    (None, None) => {}
                 }
             }
             Action::EnterConfirmRemoveLoop => {
@@ -3900,6 +3938,11 @@ impl App {
                     self.open_persona_editor(&name);
                 }
             }
+            Action::RunAgent => {
+                if let Some(agents_list::AgentKind::Persona(name)) = self.agent_focus().cloned() {
+                    self.open_agent_session(&name);
+                }
+            }
             Action::OpenNewAgent => self.open_new_agent(),
             Action::NewAgentKey => self.handle_new_agent_key(key),
             Action::OpenHelp => self.mode = Mode::Help,
@@ -4016,6 +4059,8 @@ impl App {
             DialogResult::Consumed => {}
             DialogResult::Cancel => self.mode = Mode::Control,
             DialogResult::Submit => {
+                // a copy: preparing an agent needs the App itself
+                let dialog = dialog.clone();
                 let mut profile = match self.profiles.get(dialog.profile_idx) {
                     Some(p) => p.clone(),
                     None => return,
@@ -4044,18 +4089,46 @@ impl App {
                 // trace planner sees --continue / -p / --resume and can
                 // decide about session-id injection on the same command
                 // line the CLI will get
+                let dir = resolve_working_dir(&dialog.dir);
+                let agent = match dialog.agent.as_deref() {
+                    Some(name) => match self.session_agent(name, dialog.harness, &dir) {
+                        Ok(a) => Some(a),
+                        Err(e) => {
+                            let Mode::NewSession(dialog) = &mut self.mode else {
+                                return;
+                            };
+                            dialog.error = Some(e);
+                            return;
+                        }
+                    },
+                    None => None,
+                };
                 if let Some(harness) = dialog.harness {
-                    let options = dialog.launch_options();
+                    let mut options = dialog.launch_options();
+                    if options.model.is_none() {
+                        options.model = agent.as_ref().and_then(|a| a.0.model.clone());
+                    }
                     if !options.is_empty() {
                         profile.args =
                             crate::harness::compose(&profile.args, &options.render(harness));
                     }
+                    if let Some((plan, opening)) = &agent {
+                        profile.args.retain(|a| !plan.remove.contains(a));
+                        profile.args.extend(plan.args.iter().cloned());
+                        if let Some(e) = plan.effort.as_deref()
+                            && let Some(mut a) = crate::workflows::harness::effort_args(harness, e)
+                        {
+                            profile.args.append(&mut a);
+                        }
+                        profile.args.extend(opening.iter().cloned());
+                    }
                 }
-                let dir = resolve_working_dir(&dialog.dir);
                 let link = dialog.experiment_link();
                 let id = self.next_id;
+                let agent_name = dialog.agent.clone();
                 match self.spawn_traced(id, profile, dir) {
-                    Ok(session) => {
+                    Ok(mut session) => {
+                        session.agent = agent_name;
                         self.next_id += 1;
                         self.sessions.push(session);
                         self.selected = self.sessions.len() - 1;

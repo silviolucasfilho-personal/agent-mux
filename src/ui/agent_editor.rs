@@ -7,7 +7,9 @@ use super::flow::{dim, head, hints, key_style, sel};
 use super::{
     centered, dir_picker_lines, draw_confirm, pane_border, text_area_lines, truncate_chars,
 };
-use crate::app::agent_editor::{AgentEditorState, Body, EdField, PersonaBody, Tab};
+use crate::app::agent_editor::{
+    AgentEditorState, Body, EdField, PersonaBody, Tab, TaskField, TaskKind,
+};
 use crate::app::flow_builder::{AgentField, EFFORTS, FlowBuilderState, TOOL_NAMES};
 use crate::app::loops::{LoopDialogState, LoopField};
 use ratatui::Frame;
@@ -517,22 +519,13 @@ fn persona_fields(
     let form = &p.form;
     let mut out = vec![Line::raw("")];
     if st.tab == Tab::Review {
-        out.extend(form.render().lines().map(|l| Line::raw(format!(" {l}"))));
-        return out;
-    }
-    if st.tab == Tab::When {
-        out.push(Line::raw(" It runs when you use it:"));
-        out.push(Line::raw(
-            "  · as the agent of a flow step, a voter or a judge",
-        ));
-        out.push(Line::raw(
-            "  · as the agent of a run (agent-mux agents run)",
-        ));
-        out.push(Line::raw(""));
-        out.push(Line::styled(
-            " A persona has no schedule of its own.",
-            dim(),
-        ));
+        match p.render() {
+            Ok(text) => out.extend(text.lines().map(|l| Line::raw(format!(" {l}")))),
+            Err(e) => out.push(Line::styled(
+                format!(" ! {e}"),
+                Style::default().fg(Color::Red),
+            )),
+        }
         return out;
     }
     if p.original.is_some() && st.tab == Tab::Who {
@@ -543,10 +536,15 @@ fn persona_fields(
     for (i, field) in st.fields().into_iter().enumerate() {
         let on = i == st.field;
         let typing = on && st.editing;
+        if let EdField::Task(tf) = field {
+            out.extend(task_field(p, tf, field, on, typing, width));
+            out.push(Line::raw(""));
+            continue;
+        }
         let EdField::Agent(af) = field else { continue };
         match af {
             AgentField::Instructions => {
-                let rows = usize::from(height).saturating_sub(3).max(3);
+                let rows = usize::from(height).saturating_sub(out.len() + 3).max(3);
                 out.extend(text_area_lines(
                     "",
                     &form.instructions,
@@ -631,6 +629,94 @@ fn persona_fields(
     out
 }
 
+/// A task or schedule field of the persona form.
+fn task_field(
+    p: &PersonaBody,
+    tf: TaskField,
+    field: EdField,
+    on: bool,
+    typing: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    match tf {
+        TaskField::Kind => {
+            out.push(row(field.label(), p.task.label().to_string(), on, false));
+            out.push(note(
+                "←→ a prompt, a skill, or nothing: a persona steps use",
+            ));
+        }
+        TaskField::Text if p.task == TaskKind::Prompt => {
+            out.push(Line::styled(
+                format!(" {}", "What it does, in words"),
+                if on {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    dim()
+                },
+            ));
+            out.extend(text_area_lines(
+                "",
+                &p.task_text,
+                typing,
+                6,
+                width.saturating_sub(1),
+            ));
+        }
+        TaskField::Text => {
+            out.push(row(
+                "Skill",
+                if typing {
+                    p.task_text.text.clone()
+                } else {
+                    or_blank(&p.task_text.text, "↩ names the skill, e.g. heimdall")
+                },
+                on,
+                typing,
+            ));
+        }
+        TaskField::Runs => {
+            out.push(row(
+                field.label(),
+                if p.scheduled {
+                    "on a schedule".into()
+                } else {
+                    "when I start it".into()
+                },
+                on,
+                false,
+            ));
+            out.push(note(match (p.task, p.scheduled) {
+                (TaskKind::None, _) => "a persona runs when a flow step or a run uses it",
+                (_, false) => "Enter on its row in the Agents list starts it in a session",
+                (_, true) => "every interval, in a workspace, like any scheduled agent",
+            }));
+        }
+        TaskField::Every => {
+            out.push(row(field.label(), p.every.text.clone(), on, typing));
+            out.push(note("15m, 2h, 1d · at least 5m"));
+        }
+        TaskField::Workspace => {
+            out.push(row(field.label(), p.workspace.text.clone(), on, typing));
+            out.push(note(
+                "the folder it runs in; with edit files, in a worktree of it",
+            ));
+        }
+        TaskField::Profile => {
+            out.push(row(
+                field.label(),
+                p.profiles
+                    .get(p.profile_idx)
+                    .map(|(n, h)| format!("{n} ({h})"))
+                    .unwrap_or_else(|| "no Claude Code or Codex profile".into()),
+                on,
+                false,
+            ));
+        }
+    }
+    out
+}
+
 fn persona_facts(st: &AgentEditorState, p: &PersonaBody) -> (String, Vec<Line<'static>>) {
     let l = |s: &str| Line::raw(s.to_string());
     let gap = || Line::raw("");
@@ -661,7 +747,19 @@ fn persona_facts(st: &AgentEditorState, p: &PersonaBody) -> (String, Vec<Line<'s
                 )),
             ],
         ),
-        Tab::When => ("When".into(), vec![]),
+        Tab::When => (
+            "When".into(),
+            vec![
+                gap(),
+                l(
+                    "On demand: Enter on its row starts a session with its task as the first message; r does the same for a persona.",
+                ),
+                gap(),
+                l(
+                    "On a schedule: it runs every interval in its workspace like any scheduled agent, and its runs are in the runs view (E).",
+                ),
+            ],
+        ),
         Tab::Limits => (
             "What it may change".into(),
             vec![

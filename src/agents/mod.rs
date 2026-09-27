@@ -98,12 +98,20 @@ struct RawAgent {
     limits: Option<LimitsSpec>,
 }
 
-/// `[task]`: the one thing the agent does on its own.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+/// `[task]`: the one thing the agent does on its own, exactly one of a
+/// loop pattern, a skill or a prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskSpec {
     /// A loop pattern id (the task library, `loops::patterns`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pattern: String,
+    /// A skill the agent runs (`/name`, `$name`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub skill: String,
+    /// What the agent is asked to do, in words.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
     /// The `loop-verifier` sub-agent's model; absent inherits the run's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier_model: Option<String>,
@@ -117,6 +125,53 @@ struct RawSchedule {
     #[serde(default)]
     profile: String,
     harness: Option<String>,
+}
+
+/// What a task is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskBody {
+    Pattern(String),
+    Skill(String),
+    Prompt(String),
+}
+
+impl TaskSpec {
+    /// `daily-triage`, `/heimdall`, or the prompt's first words.
+    pub fn label(&self) -> String {
+        match self.body() {
+            TaskBody::Pattern(p) => p,
+            TaskBody::Skill(s) => format!("/{s}"),
+            TaskBody::Prompt(p) => {
+                let first: String = p.chars().take(32).collect();
+                if p.chars().count() > 32 {
+                    format!("\"{first}…\"")
+                } else {
+                    format!("\"{first}\"")
+                }
+            }
+        }
+    }
+
+    /// The one thing the task names (parse makes sure there is one).
+    pub fn body(&self) -> TaskBody {
+        if !self.pattern.trim().is_empty() {
+            TaskBody::Pattern(self.pattern.trim().to_string())
+        } else if !self.skill.trim().is_empty() {
+            TaskBody::Skill(self.skill.trim().to_string())
+        } else {
+            TaskBody::Prompt(self.prompt.trim().to_string())
+        }
+    }
+
+    /// The loop pattern a scheduled run of agent `name` executes: the one
+    /// named, or the pattern the agent's skill or prompt defines
+    /// (`schedule::task_pattern`), which has the agent's name.
+    pub fn pattern_id(&self, name: &str) -> String {
+        match self.body() {
+            TaskBody::Pattern(p) => p,
+            _ => name.to_string(),
+        }
+    }
 }
 
 /// `[schedule]`: when and where the task runs.
@@ -195,12 +250,17 @@ impl AgentSpec {
         if raw.instructions.trim().is_empty() && raw.task.is_none() {
             problems.push("instructions are empty: they become the agent's system prompt".into());
         }
-        if let Some(t) = &raw.task
-            && t.pattern.trim().is_empty()
-        {
-            problems.push(
-                "[task] pattern is empty: name a loop pattern (agent-mux loop init --list)".into(),
-            );
+        if let Some(t) = &raw.task {
+            let named = [&t.pattern, &t.skill, &t.prompt]
+                .iter()
+                .filter(|v| !v.trim().is_empty())
+                .count();
+            if named != 1 {
+                problems.push(
+                    "[task] names one thing: a pattern (a loop pattern), a skill or a prompt"
+                        .into(),
+                );
+            }
         }
         let schedule = match raw.schedule {
             None => None,

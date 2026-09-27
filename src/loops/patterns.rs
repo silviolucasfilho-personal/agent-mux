@@ -35,6 +35,17 @@ pub fn parse_registry(text: &str) -> Result<Vec<Pattern>, String> {
 /// value is the library file's parse error, when it has one; the built-in
 /// set is returned then.
 pub fn load(library: &Path) -> (Vec<Pattern>, Option<String>) {
+    let (mut out, problem) = load_registry(library);
+    // an agent whose task is a skill or a prompt defines its own pattern
+    for p in crate::agents::schedule::task_patterns(library) {
+        if !out.iter().any(|q| q.id == p.id) {
+            out.push(p);
+        }
+    }
+    (out, problem)
+}
+
+fn load_registry(library: &Path) -> (Vec<Pattern>, Option<String>) {
     let mut out = builtin();
     let path = library.join("loops").join("registry.toml");
     let Ok(text) = std::fs::read_to_string(&path) else {

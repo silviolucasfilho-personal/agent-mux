@@ -37,12 +37,167 @@ impl Tab {
     }
 }
 
-/// A persona agent in the form, with where it came from.
+/// What a persona-shaped agent does on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    /// A persona: steps and runs use it.
+    None,
+    Prompt,
+    Skill,
+}
+
+impl TaskKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskKind::None => "nothing on its own (a persona)",
+            TaskKind::Prompt => "a prompt",
+            TaskKind::Skill => "a skill",
+        }
+    }
+}
+
+/// The task and schedule fields of the persona form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskField {
+    Kind,
+    Text,
+    Runs,
+    Every,
+    Workspace,
+    Profile,
+}
+
+/// A persona or task agent in the form, with where it came from.
 #[derive(Debug)]
 pub struct PersonaBody {
     pub form: AgentForm,
     /// The name it was loaded under; `None` for a new one.
     pub original: Option<String>,
+    pub task: TaskKind,
+    /// The prompt, or the skill's id.
+    pub task_text: TextArea,
+    /// On a schedule, rather than when started.
+    pub scheduled: bool,
+    pub every: TextArea,
+    pub workspace: TextArea,
+    /// `(profile name, harness)` of the Claude Code and Codex profiles.
+    pub profiles: Vec<(String, String)>,
+    pub profile_idx: usize,
+    /// The task field under the cursor; `None` when it is a form field.
+    pub task_field: Option<TaskField>,
+    /// Tables of the file the form has no field for (`[limits]`), kept.
+    pub keep: toml::Table,
+}
+
+impl PersonaBody {
+    fn new(form: AgentForm, original: Option<String>, profiles: Vec<(String, String)>) -> Self {
+        PersonaBody {
+            form,
+            original,
+            task: TaskKind::None,
+            task_text: TextArea::default(),
+            scheduled: false,
+            every: TextArea::new("1d"),
+            workspace: TextArea::default(),
+            profiles,
+            profile_idx: 0,
+            task_field: None,
+            keep: toml::Table::new(),
+        }
+    }
+
+    /// Fills the task and schedule fields from the agent file's text.
+    fn load(&mut self, text: &str) {
+        let Ok(spec) = crate::agents::AgentSpec::parse(text) else {
+            return;
+        };
+        if let Some(t) = &spec.task {
+            match t.body() {
+                crate::agents::TaskBody::Prompt(p) => {
+                    self.task = TaskKind::Prompt;
+                    self.task_text.set(p);
+                }
+                crate::agents::TaskBody::Skill(s) => {
+                    self.task = TaskKind::Skill;
+                    self.task_text.set(s);
+                }
+                crate::agents::TaskBody::Pattern(_) => {}
+            }
+        }
+        if let Some(sch) = &spec.schedule {
+            self.scheduled = true;
+            self.every.set(sch.every.clone());
+            self.workspace.set(sch.workspace.clone());
+            if let Some(i) = self.profiles.iter().position(|(n, _)| *n == sch.profile) {
+                self.profile_idx = i;
+            }
+        }
+        if let Ok(t) = text.parse::<toml::Table>()
+            && let Some(l) = t.get("limits")
+        {
+            self.keep.insert("limits".into(), l.clone());
+        }
+    }
+
+    pub fn text_mut(&mut self) -> Option<&mut TextArea> {
+        match self.task_field {
+            Some(TaskField::Text) => Some(&mut self.task_text),
+            Some(TaskField::Every) => Some(&mut self.every),
+            Some(TaskField::Workspace) => Some(&mut self.workspace),
+            Some(_) => None,
+            None => self.form.text_mut(),
+        }
+    }
+
+    /// The agent file: the form's text with `[task]` and `[schedule]`.
+    pub fn render(&self) -> Result<String, String> {
+        let mut t: toml::Table = self
+            .form
+            .render()
+            .parse()
+            .map_err(|e: toml::de::Error| e.to_string())?;
+        let s = |v: &str| toml::Value::String(v.trim().to_string());
+        let text = self.task_text.text.trim();
+        match self.task {
+            TaskKind::None => {}
+            TaskKind::Prompt | TaskKind::Skill if text.is_empty() => {
+                return Err(match self.task {
+                    TaskKind::Prompt => "the task's prompt is empty: say what the agent does",
+                    _ => "the task's skill is empty: name the skill it runs",
+                }
+                .into());
+            }
+            kind => {
+                let mut task = toml::Table::new();
+                let key = if kind == TaskKind::Prompt {
+                    "prompt"
+                } else {
+                    "skill"
+                };
+                task.insert(key.into(), s(text));
+                t.insert("task".into(), toml::Value::Table(task));
+            }
+        }
+        if self.scheduled {
+            if self.task == TaskKind::None {
+                return Err("a schedule needs a task: pick a prompt or a skill on What".into());
+            }
+            let (profile, harness) =
+                self.profiles.get(self.profile_idx).cloned().ok_or(
+                    "a schedule runs on a Claude Code or Codex profile; none is configured",
+                )?;
+            let mut sch = toml::Table::new();
+            sch.insert("every".into(), s(&self.every.text));
+            sch.insert("workspace".into(), s(&self.workspace.text));
+            sch.insert("profile".into(), s(&profile));
+            sch.insert("harness".into(), s(&harness));
+            t.insert("schedule".into(), toml::Value::Table(sch));
+        }
+        for (k, v) in &self.keep {
+            t.insert(k.clone(), v.clone());
+        }
+        crate::agents::schedule::ordered(t)
+    }
 }
 
 #[derive(Debug)]
@@ -71,6 +226,7 @@ pub struct AgentEditorState {
 pub enum EdField {
     Loop(LoopField),
     Agent(AgentField),
+    Task(TaskField),
 }
 
 impl EdField {
@@ -102,6 +258,14 @@ impl EdField {
                 AgentField::EffortAgy => "Antigravity effort",
                 AgentField::SaveTo => "Saved in",
             },
+            EdField::Task(f) => match f {
+                TaskField::Kind => "Does",
+                TaskField::Text => "Task",
+                TaskField::Runs => "Runs",
+                TaskField::Every => "Every",
+                TaskField::Workspace => "In",
+                TaskField::Profile => "On",
+            },
         }
     }
 
@@ -128,6 +292,9 @@ impl EdField {
                     | AgentField::ModelCodex
                     | AgentField::ModelAgy
             ),
+            EdField::Task(f) => {
+                matches!(f, TaskField::Text | TaskField::Every | TaskField::Workspace)
+            }
         }
     }
 }
@@ -176,7 +343,11 @@ impl AgentEditorState {
         match &self.body {
             Body::Scheduled(_) => "scheduled",
             Body::Flow(_) => "flow",
-            Body::Persona(_) => "persona",
+            Body::Persona(p) => match (p.task, p.scheduled) {
+                (TaskKind::None, _) => "persona",
+                (_, false) => "on demand",
+                (_, true) => "scheduled",
+            },
         }
     }
 
@@ -201,24 +372,41 @@ impl AgentEditorState {
                 } else {
                     vec![A::Name, A::Purpose]
                 };
+                let agent = |v: Vec<AgentField>| v.into_iter().map(EdField::Agent).collect();
                 match self.tab {
-                    Tab::Who => who
-                        .into_iter()
-                        .chain([
-                            A::ModelClaude,
-                            A::ModelCodex,
-                            A::ModelAgy,
-                            A::EffortCodex,
-                            A::EffortAgy,
-                        ])
-                        .collect(),
-                    Tab::What => vec![A::Instructions],
-                    Tab::Limits => vec![A::Tools, A::Mcp],
-                    Tab::When | Tab::Review => vec![],
+                    Tab::Who => agent(
+                        who.into_iter()
+                            .chain([
+                                A::ModelClaude,
+                                A::ModelCodex,
+                                A::ModelAgy,
+                                A::EffortCodex,
+                                A::EffortAgy,
+                            ])
+                            .collect(),
+                    ),
+                    Tab::What => {
+                        let mut v = vec![EdField::Task(TaskField::Kind)];
+                        if p.task != TaskKind::None {
+                            v.push(EdField::Task(TaskField::Text));
+                        }
+                        v.push(EdField::Agent(A::Instructions));
+                        v
+                    }
+                    Tab::When => {
+                        let mut v = vec![EdField::Task(TaskField::Runs)];
+                        if p.scheduled {
+                            v.extend([
+                                EdField::Task(TaskField::Every),
+                                EdField::Task(TaskField::Workspace),
+                                EdField::Task(TaskField::Profile),
+                            ]);
+                        }
+                        v
+                    }
+                    Tab::Limits => agent(vec![A::Tools, A::Mcp]),
+                    Tab::Review => vec![],
                 }
-                .into_iter()
-                .map(EdField::Agent)
-                .collect()
             }
             Body::Flow(_) => vec![],
         }
@@ -279,7 +467,11 @@ impl AgentEditorState {
         let cur = self.current();
         match (&mut self.body, cur) {
             (Body::Scheduled(d), Some(EdField::Loop(f))) => d.field = f,
-            (Body::Persona(p), Some(EdField::Agent(f))) => p.form.field = f,
+            (Body::Persona(p), Some(EdField::Agent(f))) => {
+                p.form.field = f;
+                p.task_field = None;
+            }
+            (Body::Persona(p), Some(EdField::Task(f))) => p.task_field = Some(f),
             _ => {}
         }
     }
@@ -287,7 +479,7 @@ impl AgentEditorState {
     /// The text being typed, for `Ctrl+O`.
     pub fn text_mut(&mut self) -> Option<&mut TextArea> {
         match &mut self.body {
-            Body::Persona(p) if self.editing => p.form.text_mut(),
+            Body::Persona(p) if self.editing => p.text_mut(),
             _ => None,
         }
     }
@@ -328,6 +520,23 @@ impl App {
         self.mode = Mode::AgentEditor(Box::new(st));
     }
 
+    /// The profiles a schedule can run on: Claude Code and Codex.
+    fn schedule_profiles(&self) -> Vec<(String, String)> {
+        self.profiles
+            .iter()
+            .filter_map(|p| {
+                crate::harness::Harness::detect(&p.command)
+                    .filter(|h| {
+                        matches!(
+                            h,
+                            crate::harness::Harness::Claude | crate::harness::Harness::Codex
+                        )
+                    })
+                    .map(|h| (p.name.clone(), h.as_str().to_string()))
+            })
+            .collect()
+    }
+
     /// A persona in the editor: an existing one by name.
     pub fn open_persona_editor(&mut self, name: &str) {
         let catalog = crate::agents::Catalog::load(&self.library_root(), None);
@@ -339,10 +548,9 @@ impl App {
             self.edit_persona(name);
             return;
         };
-        let st = AgentEditorState::new(Body::Persona(Box::new(PersonaBody {
-            form,
-            original: Some(name.to_string()),
-        })));
+        let mut body = PersonaBody::new(form, Some(name.to_string()), self.schedule_profiles());
+        body.load(&crate::agents::text_of(entry).unwrap_or_default());
+        let st = AgentEditorState::new(Body::Persona(Box::new(body)));
         self.mode = Mode::AgentEditor(Box::new(st));
     }
 
@@ -371,10 +579,14 @@ impl App {
             // a template that leaves the tools open starts reading, not editing
             form.tools = [true, false, true, false];
         }
-        let mut st = AgentEditorState::new(Body::Persona(Box::new(PersonaBody {
-            form,
-            original: None,
-        })));
+        let mut body = PersonaBody::new(form, None, self.schedule_profiles());
+        body.workspace.set(
+            self.workspace_choices()
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
+        );
+        let mut st = AgentEditorState::new(Body::Persona(Box::new(body)));
         st.dirty = true;
         self.mode = Mode::AgentEditor(Box::new(st));
     }
@@ -551,6 +763,36 @@ impl App {
                 }
             }
             Body::Persona(p) => {
+                match field {
+                    EdField::Task(TaskField::Kind) => {
+                        let all = [TaskKind::None, TaskKind::Prompt, TaskKind::Skill];
+                        let at = all.iter().position(|k| *k == p.task).unwrap_or(0) as isize;
+                        p.task = all[(at + delta).rem_euclid(3) as usize];
+                        if p.task == TaskKind::None {
+                            p.scheduled = false;
+                        }
+                        st.dirty = true;
+                        return;
+                    }
+                    EdField::Task(TaskField::Runs) => {
+                        if p.task == TaskKind::None {
+                            st.error = Some(
+                                "a schedule needs a task: pick a prompt or a skill on What".into(),
+                            );
+                            return;
+                        }
+                        p.scheduled = !p.scheduled;
+                        st.dirty = true;
+                        return;
+                    }
+                    EdField::Task(TaskField::Profile) => {
+                        let n = p.profiles.len().max(1) as isize;
+                        p.profile_idx = (p.profile_idx as isize + delta).rem_euclid(n) as usize;
+                        st.dirty = true;
+                        return;
+                    }
+                    _ => {}
+                }
                 let form = &mut p.form;
                 match field {
                     EdField::Agent(AgentField::Tools) => {
@@ -633,7 +875,7 @@ impl App {
                 KeyCode::Esc => st.editing = false,
                 KeyCode::Enter if key.modifiers.is_empty() => st.editing = false,
                 _ => {
-                    if let Some(t) = p.form.text_mut() {
+                    if let Some(t) = p.text_mut() {
                         text_key(t, key, ctrl);
                         st.dirty = true;
                     }
@@ -698,9 +940,28 @@ impl App {
                     p.original = Some(name.clone());
                     st.dirty = false;
                     st.error = None;
-                    self.reload_personas();
+                    self.after_agent_saved(&name, p.scheduled);
                     self.notice = Some(Notice::info(format!("agent {name} saved")));
                     if run {
+                        if p.scheduled {
+                            if let Some(i) = self
+                                .loop_registry
+                                .loops
+                                .iter()
+                                .position(|l| l.agent.as_deref() == Some(name.as_str()))
+                            {
+                                self.selected_loop = i;
+                                self.run_selected_loop_now();
+                            }
+                            return After::Close;
+                        }
+                        if p.task != TaskKind::None {
+                            self.open_agent_session(&name);
+                            return After::Into(Box::new(std::mem::replace(
+                                &mut self.mode,
+                                Mode::Control,
+                            )));
+                        }
                         self.notice = Some(Notice::info(format!(
                             "agent {name} saved; a persona runs as a flow step or a run's agent"
                         )));
@@ -713,6 +974,31 @@ impl App {
         st.field = st.field.min(st.fields().len().saturating_sub(1));
         st.sync_loop_field();
         After::Stay
+    }
+
+    /// After an agent file changed: the lists, the patterns it may define,
+    /// and the loops (a schedule it lost stops its loop).
+    fn after_agent_saved(&mut self, name: &str, scheduled: bool) {
+        self.reload_personas();
+        crate::loops::patterns::reload();
+        if !scheduled {
+            let gone: Vec<String> = self
+                .loop_registry
+                .loops
+                .iter()
+                .filter(|l| l.agent.as_deref() == Some(name))
+                .map(|l| l.id.clone())
+                .collect();
+            for id in &gone {
+                self.loop_registry.remove(id);
+                self.loop_cards.remove(id);
+            }
+            if !gone.is_empty() {
+                let _ = self.save_loop_registry();
+            }
+        }
+        self.load_loop_registry();
+        self.refresh_loop_cards(std::time::Instant::now());
     }
 
     /// Writes the persona's file; a built-in one is written as the
@@ -734,7 +1020,7 @@ impl App {
                 crate::agents::library_dir(&self.library_root()).join(format!("{name}.toml"))
             }
         };
-        let text = p.form.render();
+        let text = p.render()?;
         crate::agents::AgentSpec::parse(&text).map_err(|e| e.join("; "))?;
         path.parent()
             .map_or(Ok(()), std::fs::create_dir_all)

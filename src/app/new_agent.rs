@@ -13,6 +13,7 @@ pub enum Start {
     Describe,
     Session,
     Scheduled,
+    Task,
     Flow,
     Persona,
     Pattern(String),
@@ -55,6 +56,12 @@ impl App {
                 start: Start::Scheduled,
                 label: "a scheduled agent".into(),
                 detail: "runs one task every interval in a workspace".into(),
+            },
+            Choice {
+                group: "Blank",
+                start: Start::Task,
+                label: "a task".into(),
+                detail: "a prompt or a skill it runs when you start it, or on a schedule".into(),
             },
             Choice {
                 group: "Blank",
@@ -151,6 +158,16 @@ impl App {
             Start::Scheduled => self.open_scheduled_editor(None, None),
             Start::Flow => self.open_flow_builder_new(),
             Start::Persona => self.new_persona_editor("blank", "my-agent"),
+            Start::Task => {
+                self.new_persona_editor("blank", "my-task");
+                if let Mode::AgentEditor(st) = &mut self.mode
+                    && let super::agent_editor::Body::Persona(p) = &mut st.body
+                {
+                    p.task = super::agent_editor::TaskKind::Prompt;
+                    p.form.instructions.set("");
+                    st.set_tab(super::agent_editor::Tab::What);
+                }
+            }
             Start::Pattern(id) => self.open_scheduled_editor(None, Some(&id)),
             Start::Workflow(name) => {
                 let Some(e) = self.workflow_entries().into_iter().find(|e| e.name == name) else {
@@ -193,6 +210,85 @@ impl App {
             asset_id: format!("agent:{name}"),
             command: crate::assets::editor_command(self.editor.as_deref()),
         });
+    }
+
+    /// `Enter` on a task agent, `r` on a persona: the New session dialog
+    /// with the agent attached. The first profile on a harness the agent
+    /// names a model for is preselected.
+    pub fn open_agent_session(&mut self, name: &str) {
+        let catalog = crate::agents::Catalog::load(&self.library_root(), None);
+        let Some(spec) = catalog.entry(name).and_then(|e| e.spec.clone()) else {
+            self.notice = Some(Notice::error(format!("agent {name} does not load")));
+            return;
+        };
+        if let Some(t) = &spec.task
+            && let crate::agents::TaskBody::Pattern(p) = t.body()
+        {
+            self.notice = Some(Notice::info(format!(
+                "{name} runs the {p} loop: give it a schedule (e, When) to run it"
+            )));
+            return;
+        }
+        let preferred = spec.backends.keys().next().cloned();
+        let profile = preferred.and_then(|h| {
+            self.profiles.iter().position(|p| {
+                crate::harness::Harness::detect(&p.command).map(|x| x.as_str()) == Some(h.as_str())
+            })
+        });
+        self.open_new_session_dialog(profile);
+        if let Mode::NewSession(d) = &mut self.mode {
+            d.agent = Some(name.to_string());
+        }
+    }
+
+    /// The agent's command-line changes on `harness` and its opening
+    /// message: the task's prompt, or its skill's invocation (installed
+    /// first). A persona has no opening message.
+    pub fn session_agent(
+        &mut self,
+        name: &str,
+        harness: Option<crate::harness::Harness>,
+        dir: &std::path::Path,
+    ) -> Result<(crate::agents::launch::LaunchPlan, Vec<String>), String> {
+        use crate::agents::TaskBody;
+        use crate::harness::Harness;
+        let harness = harness.ok_or(
+            "an agent runs on Claude Code, Codex or Antigravity: pick one of their profiles",
+        )?;
+        let catalog =
+            crate::agents::Catalog::load(&self.library_root(), Some(dir).filter(|d| d.is_dir()));
+        let spec = catalog
+            .entry(name)
+            .and_then(|e| e.spec.clone())
+            .ok_or_else(|| format!("agent {name} does not load"))?;
+        let plan = crate::agents::launch::plan(&spec, harness);
+        if harness == Harness::Antigravity {
+            crate::agents::launch::install_agy(&spec, &self.skill_home())
+                .map_err(|e| format!("agent {name}: {e}"))?;
+        }
+        let text = match spec.task.as_ref().map(|t| t.body()) {
+            None => None,
+            Some(TaskBody::Prompt(p)) => Some(p),
+            Some(TaskBody::Skill(skill)) => {
+                if let Some(pkg) = self.skills.iter().find(|s| s.id == skill).cloned() {
+                    crate::skill::install::install(&pkg, harness, &self.skill_home(), false)
+                        .map_err(|e| format!("skill {skill}: {e}"))?;
+                }
+                Some(match harness {
+                    Harness::Codex => format!("${skill}"),
+                    _ => format!("/{skill}"),
+                })
+            }
+            Some(TaskBody::Pattern(p)) => {
+                return Err(format!("{name} runs the {p} loop on its schedule"));
+            }
+        };
+        let opening = match (text, harness) {
+            (None, _) => Vec::new(),
+            (Some(t), Harness::Antigravity) => vec!["--prompt-interactive".into(), t],
+            (Some(t), _) => vec![t],
+        };
+        Ok((plan, opening))
     }
 
     /// The New session dialog, on harness profile `profile` when given.

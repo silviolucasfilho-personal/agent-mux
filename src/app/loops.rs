@@ -498,6 +498,8 @@ impl App {
     /// files laid over it, applies the catch-up rule and sweeps old
     /// context snapshots. Called once at startup.
     pub fn load_loop_registry(&mut self) {
+        // agent files may define patterns (a skill or prompt task)
+        patterns::reload();
         let path = self.loops_file.clone().or_else(registry::registry_path);
         if let Some(p) = &path {
             let (reg, problems) = crate::agents::schedule::load_registry(p, &self.library_root());
@@ -1003,13 +1005,63 @@ impl App {
         }
     }
 
+    /// The pattern a loop runs: the library's, else the one its agent
+    /// file's skill or prompt task defines (read from this App's library,
+    /// which the global pattern cache may not be).
+    pub fn loop_pattern(&self, entry: &LoopEntry) -> Option<crate::loops::Pattern> {
+        if let Some(p) = patterns::find(&entry.pattern) {
+            return Some(p.clone());
+        }
+        let name = entry.agent.as_deref()?;
+        let catalog = crate::agents::Catalog::load(&self.library_root(), None);
+        catalog
+            .entry(name)?
+            .spec
+            .as_ref()
+            .and_then(crate::agents::schedule::task_pattern)
+    }
+
+    /// A skill task's skill, installed where the loop's harness reads it.
+    fn install_task_skill(&mut self, entry: &LoopEntry) {
+        let Some(name) = entry.agent.as_deref() else {
+            return;
+        };
+        let catalog = crate::agents::Catalog::load(&self.library_root(), None);
+        let Some(crate::agents::TaskBody::Skill(skill)) = catalog
+            .entry(name)
+            .and_then(|e| e.spec.as_ref())
+            .and_then(|s| s.task.as_ref())
+            .map(|t| t.body())
+        else {
+            return;
+        };
+        let Some(harness) = Harness::detect(&entry.harness) else {
+            return;
+        };
+        match self.skills.iter().find(|s| s.id == skill).cloned() {
+            Some(pkg) => {
+                let home = self.skill_home();
+                if let Err(e) = crate::skill::install::install(&pkg, harness, &home, false) {
+                    self.notice = Some(Notice::warn(format!("{name}: skill {skill}: {e}")));
+                }
+            }
+            None => {
+                self.notice = Some(Notice::warn(format!(
+                    "{name}: no skill {skill} in the library; the run is asked to use it anyway"
+                )))
+            }
+        }
+    }
+
     /// The whole of section 8: pre-flight, isolation, context, launch.
     pub fn start_loop_run(&mut self, loop_id: &str) -> Option<String> {
         let entry = self.loop_registry.find(loop_id).cloned()?;
-        let Some(pattern) = patterns::find(&entry.pattern) else {
+        let Some(pattern) = self.loop_pattern(&entry) else {
             self.notice = Some(Notice::error(format!("unknown pattern {}", entry.pattern)));
             return None;
         };
+        let pattern = &pattern;
+        self.install_task_skill(&entry);
         let wall = crate::loops::now();
         let now = Instant::now();
         let harness = Harness::detect(&entry.harness);

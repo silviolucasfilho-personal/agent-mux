@@ -127,6 +127,9 @@ pub struct Session {
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     /// Skill this session was launched around from the sidebar, if any.
     pub skill_id: Option<String>,
+    /// The agent this session runs as (`Enter` on a task agent), which
+    /// the Agents list nests it under.
+    pub agent: Option<String>,
     /// The loop or workflow run that launched this session, if any: what
     /// the Active sidebar hangs the row under. Recorded at spawn so the
     /// tree survives the run's own bookkeeping being pruned.
@@ -283,6 +286,7 @@ impl Session {
             master: pair.master,
             child,
             skill_id: None,
+            agent: None,
             group: None,
             briefing_path: None,
             conversation: None,

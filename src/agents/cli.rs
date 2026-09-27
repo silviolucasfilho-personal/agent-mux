@@ -197,8 +197,8 @@ fn ls(args: &Args) -> anyhow::Result<()> {
                 s.description,
                 s.tools_label(),
                 match (&s.task, &s.schedule) {
-                    (Some(t), Some(sch)) => format!("  ⟳ {} every {}", t.pattern, sch.every),
-                    (Some(t), None) => format!("  task {}", t.pattern),
+                    (Some(t), Some(sch)) => format!("  ⟳ {} every {}", t.label(), sch.every),
+                    (Some(t), None) => format!("  task {}", t.label()),
                     _ => String::new(),
                 }
             ),

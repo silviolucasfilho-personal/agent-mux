@@ -89,6 +89,11 @@ impl App {
             // a run no row stands for still keeps its sessions together
             return known.unwrap_or_else(|| AgentKind::Run(g.key()));
         }
+        if let Some(agent) = &s.agent
+            && (self.task_agents.contains(agent) || self.personas.contains(agent))
+        {
+            return AgentKind::Persona(agent.clone());
+        }
         if let Some(skill) = &s.skill_id
             && let Some(i) = self.skills.iter().position(|k| k.id == *skill)
         {
@@ -163,6 +168,15 @@ impl App {
             });
             for i in 0..self.skills.len() {
                 push(&mut out, AgentKind::Skill(i));
+            }
+        }
+        if !self.task_agents.is_empty() {
+            out.push(AgentLine {
+                kind: AgentKind::Header("on demand"),
+                depth: 0,
+            });
+            for name in &self.task_agents {
+                push(&mut out, AgentKind::Persona(name.clone()));
             }
         }
         if !self.personas.is_empty() {
@@ -304,12 +318,20 @@ impl App {
     /// Re-reads the persona agents the list shows.
     pub fn reload_personas(&mut self) {
         let catalog = crate::agents::Catalog::load(&self.library_root(), None);
-        self.personas = catalog
-            .entries
-            .iter()
-            // a scheduled agent is listed with the scheduled ones
-            .filter(|e| e.spec.as_ref().is_some_and(|s| !s.is_task()))
-            .map(|e| e.name.clone())
-            .collect();
+        let listed = |task: bool| -> Vec<String> {
+            catalog
+                .entries
+                .iter()
+                // a scheduled agent is listed with the scheduled ones
+                .filter(|e| {
+                    e.spec
+                        .as_ref()
+                        .is_some_and(|s| s.schedule.is_none() && s.is_task() == task)
+                })
+                .map(|e| e.name.clone())
+                .collect()
+        };
+        self.task_agents = listed(true);
+        self.personas = listed(false);
     }
 }

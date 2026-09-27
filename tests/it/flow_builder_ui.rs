@@ -565,8 +565,9 @@ fn a_persona_is_written_and_edited_in_the_agent_editor() {
         "nothing written before s"
     );
 
-    // What: the instructions
+    // What: "Does" (nothing: a persona), then the instructions
     press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     ctrl(&mut app, 'u');
     type_text(&mut app, "Review the diff.");
@@ -604,4 +605,114 @@ fn a_persona_is_written_and_edited_in_the_agent_editor() {
     }
     let copy = std::fs::read_to_string(dir.join("reviewer.toml")).unwrap();
     assert!(copy.contains("Mine."), "{copy}");
+}
+
+#[test]
+fn a_task_agent_runs_on_demand_then_on_a_schedule() {
+    let (mut app, temp) = app();
+    let ws = temp.path().join("ws");
+    let file = temp.path().join("library/agents/my-task.toml");
+    press(&mut app, KeyCode::Char('n'));
+    let Mode::NewAgent(ch) = &mut app.mode else {
+        panic!("{:?}", app.mode)
+    };
+    ch.selected = ch
+        .choices
+        .iter()
+        .position(|c| c.start == agent_mux::app::new_agent::Start::Task)
+        .unwrap();
+    press(&mut app, KeyCode::Enter);
+    // What: a prompt; the cursor starts on "Does", the prompt is next
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "Summarize the open TODOs.");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('s'));
+    if let Mode::AgentEditor(e) = &app.mode {
+        assert!(e.error.is_none(), "{:?}", e.error);
+    }
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("[task]") && text.contains("Summarize the open TODOs."),
+        "{text}"
+    );
+    assert!(!text.contains("[schedule]"), "{text}");
+    press(&mut app, KeyCode::Esc);
+    assert!(app.task_agents.contains(&"my-task".to_string()));
+    assert!(!app.personas.contains(&"my-task".to_string()));
+
+    // on demand: a session with the agent's flags and its task first
+    let (plan, opening) = app
+        .session_agent("my-task", Some(agent_mux::harness::Harness::Claude), &ws)
+        .unwrap();
+    assert_eq!(opening, ["Summarize the open TODOs."]);
+    assert!(
+        plan.args.contains(&"--agent".to_string()),
+        "{:?}",
+        plan.args
+    );
+    app.open_agent_session("my-task");
+    let Mode::NewSession(d) = &app.mode else {
+        panic!("{:?}", app.mode)
+    };
+    assert_eq!(d.agent.as_deref(), Some("my-task"));
+    let out = render(&app);
+    assert!(out.contains("New session as my-task"), "{out}");
+    press(&mut app, KeyCode::Esc);
+
+    // When: on a schedule, every 2h, in the workspace
+    app.open_persona_editor("my-task");
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    ctrl(&mut app, 'u');
+    type_text(&mut app, "2h");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    ctrl(&mut app, 'u');
+    type_text(&mut app, &ws.to_string_lossy());
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('s'));
+    if let Mode::AgentEditor(e) = &app.mode {
+        assert!(e.error.is_none(), "{:?}", e.error);
+    }
+    let entry = app
+        .loop_registry
+        .loops
+        .iter()
+        .find(|l| l.agent.as_deref() == Some("my-task"))
+        .cloned()
+        .expect("the schedule made a loop");
+    assert_eq!(
+        (entry.interval_s, entry.pattern.as_str()),
+        (7200, "my-task")
+    );
+    let pattern = app
+        .loop_pattern(&entry)
+        .expect("the task defines its pattern");
+    assert!(
+        pattern
+            .prompt
+            .unwrap()
+            .contains("Summarize the open TODOs."),
+        "the run is asked to do the task"
+    );
+    assert!(
+        !app.task_agents.contains(&"my-task".to_string()),
+        "listed as scheduled now"
+    );
+
+    // back to on demand: the loop goes
+    press(&mut app, KeyCode::Char('g'));
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Char('s'));
+    assert!(
+        !app.loop_registry
+            .loops
+            .iter()
+            .any(|l| l.agent.as_deref() == Some("my-task"))
+    );
+    assert!(app.task_agents.contains(&"my-task".to_string()));
 }

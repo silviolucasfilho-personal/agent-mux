@@ -1846,9 +1846,11 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
         .max(18);
     let area = centered(f.area(), width, height);
     f.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" New session ");
+    let title = match &dialog.agent {
+        Some(a) => format!(" New session as {a} "),
+        None => " New session ".to_string(),
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::raw("Profile:"));
     for (i, p) in app.profiles.iter().enumerate() {
