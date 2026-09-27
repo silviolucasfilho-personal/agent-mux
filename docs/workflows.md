@@ -13,12 +13,12 @@ Design: `docs/superpowers/specs/2026-09-17-workflows-design.md`. The idea follow
    Above the library the section lists what is going on, each group under its heading: **Running** (`▶ name 3/7`), **Plans to review** (`⏸`, the planner's documents waiting for you), and **Recent** (`✓ name done`, the last three runs finished since agent-mux started). `Enter` on a run or a plan opens the Workflows view on it; `Enter` on a library document opens the run dialog. The selection stays on its row when a run starts or ends.
 2. `Enter` opens the run dialog on what the run is for: one field per declared arg first, then the workspace (one line; the shared directory picker opens while the field has focus), the profile (one per harness the document allows) and **More ▸**, whose summary says what it hides (`no token budget · no cost cap · in place`). `Space` or `→` on **More** shows a token budget, a USD cap, the isolation default and one **Steps** row per step: the CLI that step runs on for this run (`←`/`→` or `Space`; it starts on the step's default, shown as `codex · set by the document` or `claude · the run's profile`, and offers only harnesses you have a profile for). Under the form, about how many sessions the run starts. `Enter` starts the run from any field.
 3. The run's sessions appear in **Active** under one header — `▾ ⚙ <workflow> <running>/<total>▶ #<run>` — with each step hanging off it by its own name; attach to any of them to watch it. `space` folds the run away into that single row, and the trace browser (`T`) groups the same run the same way. The run's row under **Running** shows `▶ done/started`.
-4. `W` opens the Workflows view: the run's report, the step ledger behind it, the document and the result.
+4. `W` opens the runs view, where the run is listed under **Running**; `Enter` on it opens the Workflows view: the run's report, the step ledger behind it, the document and the result.
 5. When the run finishes, the notice leads with what the run answered; the preview card shows the last run; the report is in the view and in `agent-mux workflow status <run>`, and the raw result in the **Result** tab and in `result.json` under the run directory.
 
 ### Reading a run in the view
 
-`W` opens the view on the **Report** tab: what the run answered, the
+`Enter` on a flow run in the runs view (`W`), or on the flow's row, opens the view on the **Report** tab: what the run answered, the
 evidence behind it, and what it dropped on the way. The report is built
 from the document's schemas, so a new document gets one without saying
 anything: a `file` (and `line`) field becomes an openable location, a

@@ -983,7 +983,7 @@ fn verifier_verdict(r: &LoopRun) -> Option<&str> {
     r.detail.get("verifier")?.get("verdict")?.as_str()
 }
 
-fn verifier_text(r: &LoopRun) -> String {
+pub(crate) fn verifier_text(r: &LoopRun) -> String {
     let ran = r
         .detail
         .get("verifier")

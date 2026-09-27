@@ -27,6 +27,7 @@ pub mod flow_builder;
 pub mod inbox;
 pub mod loop_builder;
 pub mod new_agent;
+pub mod runs_view;
 pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
@@ -67,6 +68,8 @@ pub enum Mode {
     AgentEditor(Box<agent_editor::AgentEditorState>),
     /// The loop builder (`o` / `f` in the Loops section).
     LoopBuilder(Box<loop_builder::LoopBuilderState>),
+    /// The runs view (`E` / `W`): every run of every agent.
+    RunsView(Box<runs_view::RunsViewState>),
     /// `n` in the Agents list: how to start a new agent.
     NewAgent(Box<new_agent::NewAgentState>),
 }
@@ -213,6 +216,8 @@ pub enum Action {
     CancelWorkflow,
     /// `W`: the Workflows view.
     OpenWorkflowsView,
+    OpenRunsView,
+    RunsKey,
     OpenInbox,
     InboxKey,
     WorkflowsKey,
@@ -594,11 +599,11 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::ToggleSessionGroup
                 }
-                KeyCode::Char('W') => Action::OpenWorkflowsView,
+                KeyCode::Char('W') => Action::OpenRunsView,
                 KeyCode::Char('I') => Action::OpenInbox,
                 KeyCode::Char('v') | KeyCode::Char('V') => Action::OpenAbout,
                 KeyCode::Char('K') => Action::ToggleKillSwitch,
-                KeyCode::Char('E') => Action::OpenLoopsView,
+                KeyCode::Char('E') => Action::OpenRunsView,
                 KeyCode::Char('h') | KeyCode::Char('H')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Agents =>
                 {
@@ -687,6 +692,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::WorkflowsView(_) => Action::WorkflowsKey,
         Mode::Inbox(_) => Action::InboxKey,
         Mode::AgentEditor(_) => Action::AgentEditorKey,
+        Mode::RunsView(_) => Action::RunsKey,
         Mode::NewAgent(_) => Action::NewAgentKey,
         Mode::LoopBuilder(_) => Action::LoopBuilderKey,
         Mode::ConfirmRemoveLoop => match key.code {
@@ -3793,6 +3799,8 @@ impl App {
             Action::EditWorkflow => self.edit_selected_workflow(),
             Action::CancelWorkflow => self.cancel_selected_workflow(),
             Action::OpenWorkflowsView => self.open_workflows_view(),
+            Action::OpenRunsView => self.open_runs_view(),
+            Action::RunsKey => self.handle_runs_view_key(key),
             Action::WorkflowsKey => self.handle_workflows_view_key(key),
             Action::OpenInbox => self.open_inbox(),
             Action::InboxKey => self.handle_inbox_key(key),

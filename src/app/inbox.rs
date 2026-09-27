@@ -72,7 +72,7 @@ impl InboxItem {
         }
     }
 
-    fn key(&self) -> String {
+    pub(crate) fn key(&self) -> String {
         match self {
             InboxItem::Loop(r) => format!("loop:{}", r.id),
             InboxItem::Plan { id, .. } => format!("plan:{id}"),

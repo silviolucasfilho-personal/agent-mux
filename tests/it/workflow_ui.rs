@@ -255,7 +255,7 @@ fn c_opens_the_compose_dialog_and_w_the_view() {
     assert!(text.contains("audit the parser"), "{text}");
     press(&mut app, KeyCode::Esc);
 
-    press(&mut app, KeyCode::Char('W'));
+    app.open_workflows_view();
     let Mode::WorkflowsView(v) = &app.mode else {
         panic!("not the view: {:?}", app.mode);
     };
@@ -292,7 +292,7 @@ fn a_planned_document_is_listed_run_saved_or_discarded_from_the_view() {
         run_id: None,
         agents: Vec::new(),
     });
-    press(&mut app, KeyCode::Char('W'));
+    app.open_workflows_view();
     let Mode::WorkflowsView(v) = &app.mode else {
         panic!()
     };
@@ -345,7 +345,7 @@ fn the_help_overlay_and_the_section_hints_mention_workflows() {
     let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
     press(&mut app, KeyCode::Char('?'));
     let text = render(&app, 120, 64);
-    assert!(text.contains("workflows view"), "{text}");
+    assert!(text.contains("runs view (every run)"), "{text}");
     assert!(text.contains("A flow row"), "{text}");
 }
 
@@ -569,7 +569,7 @@ fn a_long_result_wraps_and_scrolls_in_the_result_tab() {
     drop(conn);
     app.trace_db_path = Some(db);
 
-    press(&mut app, KeyCode::Char('W'));
+    app.open_workflows_view();
     // Progress → Document → Result
     press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Tab);
@@ -715,7 +715,7 @@ input = "confirmed"
     drop(conn);
     app.trace_db_path = Some(db);
 
-    press(&mut app, KeyCode::Char('W'));
+    app.open_workflows_view();
     let Mode::WorkflowsView(v) = &app.mode else {
         panic!("the view is open")
     };

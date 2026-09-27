@@ -141,7 +141,10 @@ Then: the `loop_runs` row, the run-log line, the ledger attempt (fix patterns), 
 
 ## 8. Reading a run
 
-`E` opens the Loops view on the **Report** tab: what the selected run found
+`E` (or `W`) opens the runs view: every run of every agent, what needs you
+first (`Enter` applies a change, `d` rejects it), then earlier runs, with
+each run's Report, Sessions, Change and Result. `Enter` on a loop run opens
+the Loops view on its **Report** tab: what the selected run found
 and who has to act. It is the state file the run wrote, parsed into the
 shape every loop skill already keeps.
 
@@ -216,7 +219,7 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 | Loop shows `‖` with a reason | `p` resumes; a breaker reason also resets the trailing failures in the ledger |
 | `!` with a count, or `● N need you` in the status bar | `I`, decide with `a` (apply) or `d` (reject) |
 | Run blocked: tokens at the cap | raise the cap with `e`, or wait for UTC midnight |
-| Card says "held back: needs …" | `E` → Setup tab (`3`) lists what each level needs and the readiness findings |
+| Card says "held back: needs …" | `Enter` on the loop's row → Setup tab (`3`) lists what each level needs and the readiness findings |
 | Held back: no path guard | Codex: `agent-mux trace hooks install codex`; Claude: the binary must run from an absolute path |
 | `verifier_missing` on a fix | the skill did not hand the change to `loop-verifier`; treat the fix as unverified |
 | Run failed: "the harness did not find /loop-…" | the skill file is missing from the run's directory; edit the loop with Scaffold on or run `agent-mux loop init`, and commit `.claude/skills` if you want it in every checkout |

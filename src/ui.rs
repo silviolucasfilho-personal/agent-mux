@@ -2,6 +2,7 @@ use crate::app::about::{AboutRow, AboutState};
 mod agent_editor;
 mod flow;
 mod loop_builder;
+mod runs;
 
 use crate::app::loops::LoopStatus;
 use crate::app::loops_view::{LoopRow, LoopsPane, LoopsTab, LoopsViewState};
@@ -284,6 +285,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::WorkflowsView(view) => draw_workflows_view(f, view, app),
         Mode::Inbox(state) => draw_inbox(f, state),
         Mode::AgentEditor(state) => agent_editor::draw(f, state),
+        Mode::RunsView(state) => runs::draw(f, state, app),
         Mode::NewAgent(state) => draw_new_agent(f, state),
         Mode::LoopBuilder(state) => loop_builder::draw(f, state),
         Mode::ConfirmRemoveLoop => draw_confirm(
@@ -1592,7 +1594,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 }
             }
             // full-screen editors keep their own footer; this row is for notices
-            Mode::AgentEditor(_) | Mode::LoopBuilder(_) => Line::raw(""),
+            Mode::AgentEditor(_) | Mode::LoopBuilder(_) | Mode::RunsView(_) => Line::raw(""),
             _ => Line::raw(fit(
                 "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
             )),
@@ -1718,8 +1720,8 @@ fn draw_help(f: &mut Frame) {
             "configuration: edit every prompt, skill, loop pattern, loop skill, agent and template",
         ),
         row(
-            "E K W I",
-            "loops view · kill switch (pause every loop) · workflows view · inbox",
+            "E/W K I",
+            "runs view (every run) · kill switch (pause every loop) · inbox",
         ),
         row("v", "about: version, build time, paths and this session"),
         row(
@@ -3625,7 +3627,7 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Loops ");
-        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [n] new loop (pattern, harness, cadence, what it may do)   [o] edit the patterns   [E] Loops view   [?] help\n\n  Start with report only for a week. Let it propose fixes when the Setup tab says it is ready.";
+        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [n] new loop (pattern, harness, cadence, what it may do)   [o] edit the patterns   [E] runs   [?] help\n\n  Start with report only for a week. Let it propose fixes when the Setup tab says it is ready.";
         f.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
@@ -3909,7 +3911,7 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         fit_hints(
-            " [Enter] details  [r] run now  [p] pause  [e] edit  [d] remove  [o] pattern  [K] kill switch  [E] loops view",
+            " [Enter] details  [r] run now  [p] pause  [e] edit  [d] remove  [o] pattern  [K] kill switch  [E] runs",
             width,
         ),
         dim,
@@ -4230,7 +4232,7 @@ fn draw_workflow_preview(f: &mut Frame, area: Rect, app: &App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Workflows ");
-        let text = "\n  No workflows.\n\n  A workflow runs several harness sessions with one focused goal each and\n  composes their answers: fan-out, verification votes, tournaments, loops until done.\n\n  [c] compose one for a task   [W] Workflows view   [?] help";
+        let text = "\n  No workflows.\n\n  A workflow runs several harness sessions with one focused goal each and\n  composes their answers: fan-out, verification votes, tournaments, loops until done.\n\n  [c] compose one for a task   [W] runs   [?] help";
         f.render_widget(Paragraph::new(text).block(block), area);
         return;
     };

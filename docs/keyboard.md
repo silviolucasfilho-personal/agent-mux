@@ -46,7 +46,7 @@ For `Option` combinations, turn on "Use Option as Meta key" (Terminal.app) or "E
 
 | Place | Keys of its own |
 | --- | --- |
-| Main screen | `b` sidebar, `Tab` section, `l` session logs, `t`/`T` tracing / traces, `S` skills, `C` configuration, `E` loops view, `W` workflows view, `I` inbox, `v` about, `K` loops kill switch, `X` clear exited sessions |
+| Main screen | `b` sidebar, `Tab` section, `l` session logs, `t`/`T` tracing / traces, `S` skills, `C` configuration, `E` or `W` runs view, `I` inbox, `v` about, `K` loops kill switch, `X` clear exited sessions |
 | Loops section | `p` pause, `o` the loop's pattern in the loop builder |
 | Workflows section | `c` compose a workflow for a task |
 | Trace browser | `/` search, `v` detail view, `Space` fold, `a` all projects, `+` verdict |
@@ -54,4 +54,5 @@ For `Option` combinations, turn on "Use Option as Meta key" (Terminal.app) or "E
 | Configuration view | `u` push loop skills to workspaces |
 | Agent editor | `1`-`5` Who · What · When · Limits · Review (`Tab` / `Shift+Tab` in a scheduled agent or a persona); `Enter` types a field, `←` `→` `Space` change the others; `e` on What edits a scheduled agent's task; a flow's fields: `Space` makes a field required, `[` `]` previous / next step, `Enter` on Answers with opens what passes |
 | Loop builder | `c` copies a pattern |
+| Runs view | `1`-`4` Report · Sessions · Change · Result; `Enter` applies a change, attaches to a running run or opens its record; `d` rejects or dismisses; `r` runs a scheduled agent again; `x` stops; `e` edits the run's agent; `T` traces |
 | Attached to a session | `Ctrl+Q` detach; every other key goes to the harness |

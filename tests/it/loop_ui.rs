@@ -180,7 +180,7 @@ fn keys_of_the_loops_section_pause_run_and_toggle_the_kill_switch() {
 
     // E opens the Loops view from any section, Esc closes it
     app.sidebar_section = SidebarSection::Active;
-    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    app.open_loops_view();
     assert!(matches!(app.mode, Mode::LoopsView(_)));
     let screen = render(&app, 120, 40);
     assert!(screen.contains("History"), "{screen}");
@@ -376,7 +376,7 @@ fn the_report_tab_shows_what_the_run_found_and_who_has_to_act() {
     agent_mux::loops::state::write_snapshot(&runtime, &loop_id, "2026-09-17T17:36:53Z", STATE)
         .unwrap();
 
-    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    app.open_loops_view();
     let out = render(&app, 120, 40);
     assert!(out.contains("Report"), "the first tab is the report\n{out}");
     assert!(
@@ -457,7 +457,7 @@ fn the_runs_timeline_folds_quiet_runs_and_opens_the_selected_one() {
         );
     }
 
-    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    app.open_loops_view();
     app.handle_key(&key(KeyCode::Char('2')), Instant::now()); // the Runs timeline
     let out = render(&app, 120, 40);
     assert!(
@@ -558,7 +558,7 @@ fn the_card_says_what_the_loop_may_do_and_setup_says_what_it_needs() {
         assert!(!screen.contains(code), "{code:?} left the card\n{screen}");
     }
 
-    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    app.open_loops_view();
     app.handle_key(&key(KeyCode::Char('3')), Instant::now());
     let setup = render(&app, 120, 100);
     assert!(setup.contains("What this loop may do"), "{setup}");
@@ -679,7 +679,7 @@ fn the_inbox_gathers_loop_runs_plans_and_failed_runs() {
 
     // the Loops view keeps three tabs
     app.mode = Mode::Control;
-    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    app.open_loops_view();
     let screen = render(&app, 120, 34);
     assert!(screen.contains("Report | History | Setup"), "{screen}");
     assert!(!screen.contains("Inbox |"), "{screen}");
@@ -734,4 +734,83 @@ fn dialog_mut(app: &mut App) -> &mut LoopDialogState {
         },
         other => panic!("not in the agent editor: {other:?}"),
     }
+}
+
+/// `E` (and `W`) open one runs view: what needs the user first, earlier
+/// runs of every agent below, the selected run's tabs on the right.
+#[test]
+fn the_runs_view_lists_every_run_and_decides_the_ones_that_need_you() {
+    let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
+    let db = temp.path().join("traces.db");
+    let _store =
+        agent_mux::tracing::store::open_rw(&db, agent_mux::tracing::store::OpenOptions::default())
+            .unwrap();
+    app.trace_db_path = Some(db.clone());
+    let e = entry(&temp, "pr-babysitter");
+    let loop_id = e.id.clone();
+    app.loop_registry.loops.push(e);
+    store_run(
+        &db,
+        &loop_id,
+        "2026-09-17T17:36:53Z",
+        agent_mux::loops::Outcome::Escalated,
+        serde_json::json!({"summary": "two PRs need a human", "exit_code": 0,
+                           "final_message": "PR 12 and PR 14 wait on review"}),
+    );
+    store_run(
+        &db,
+        &loop_id,
+        "2026-09-17T17:21:53Z",
+        agent_mux::loops::Outcome::NoOp,
+        serde_json::json!({"quiet": true}),
+    );
+
+    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    let Mode::RunsView(st) = &app.mode else {
+        panic!("{:?}", app.mode)
+    };
+    assert_eq!(st.items.len(), 2, "{:?}", st.items);
+    assert_eq!(st.selected, 0, "it starts on what needs the user");
+    let out = render(&app, 120, 34);
+    assert!(out.contains("Needs you"), "{out}");
+    assert!(out.contains("Earlier"), "{out}");
+    assert!(
+        out.contains("today 0 run(s)"),
+        "the runs are days old: {out}"
+    );
+    assert!(out.contains("It needs your decision"), "{out}");
+    assert!(out.contains("two PRs need a human"), "{out}");
+
+    // 4 Result: what the run said
+    app.handle_key(&key(KeyCode::Char('4')), Instant::now());
+    let out = render(&app, 120, 34);
+    assert!(out.contains("PR 12 and PR 14 wait on review"), "{out}");
+
+    // d dismisses it: it moves to Earlier with the decision
+    app.handle_key(&key(KeyCode::Char('d')), Instant::now());
+    let Mode::RunsView(st) = &app.mode else {
+        panic!("{:?}", app.mode)
+    };
+    assert!(
+        st.items
+            .iter()
+            .all(|i| i.group == agent_mux::app::runs_view::Group::Earlier),
+        "{:?}",
+        st.items
+    );
+    assert!(
+        st.items.iter().any(|i| i.word == "rejected"),
+        "{:?}",
+        st.items
+    );
+
+    // e: the run's agent in the agent editor
+    app.handle_key(&key(KeyCode::Char('e')), Instant::now());
+    assert!(matches!(app.mode, Mode::AgentEditor(_)), "{:?}", app.mode);
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    // W opens the same view; Esc closes it
+    app.handle_key(&key(KeyCode::Char('W')), Instant::now());
+    assert!(matches!(app.mode, Mode::RunsView(_)));
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    assert!(matches!(app.mode, Mode::Control));
 }
