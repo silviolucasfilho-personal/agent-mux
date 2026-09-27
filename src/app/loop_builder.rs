@@ -381,6 +381,19 @@ impl App {
                 crate::loops::patterns::reload();
                 self.loop_audits.clear();
                 self.mode = Mode::Control;
+                // back to the agent editor it was opened from, on the same
+                // task (the reload may have moved it in the list)
+                if let Some((mut back, id)) = self.loop_builder_return.take() {
+                    if let Mode::AgentEditor(ed) = &mut *back
+                        && let super::agent_editor::Body::Scheduled(d) = &mut ed.body
+                        && let Some(i) = crate::loops::patterns::all()
+                            .iter()
+                            .position(|p| p.id == id)
+                    {
+                        d.pattern_idx = i;
+                    }
+                    self.mode = *back;
+                }
             }
         }
     }

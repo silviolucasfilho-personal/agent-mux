@@ -683,6 +683,18 @@ impl App {
                     // the task itself is a pattern: the task builder edits it
                     let id = d.pattern().map(|p| p.id.clone());
                     if let Some(bst) = self.loop_builder_state(id.as_deref()) {
+                        // the builder hands the editor back when it closes
+                        let back = std::mem::replace(
+                            st,
+                            AgentEditorState::new(Body::Scheduled(Box::new(LoopDialogState::new(
+                                &[],
+                                Vec::new(),
+                            )))),
+                        );
+                        self.loop_builder_return = Some((
+                            Box::new(Mode::AgentEditor(Box::new(back))),
+                            id.clone().unwrap_or_default(),
+                        ));
                         return After::Into(Box::new(Mode::LoopBuilder(Box::new(bst))));
                     }
                 }

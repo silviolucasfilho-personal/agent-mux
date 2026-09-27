@@ -2149,6 +2149,9 @@ pub struct App {
     pub personas: Vec<String>,
     /// Agents with a task and no schedule: run when you start them.
     pub task_agents: Vec<String>,
+    /// The agent editor the loop builder was opened from (`e` on What),
+    /// shown again when the builder closes.
+    pub loop_builder_return: Option<(Box<Mode>, String)>,
     /// A harness or persona row under the Agents cursor.
     pub agent_focus: Option<agents_list::AgentFocus>,
     /// The section the Agents cursor was in when Tab went to History.
@@ -2285,6 +2288,7 @@ impl App {
             selected_agent: 0,
             personas: Vec::new(),
             task_agents: Vec::new(),
+            loop_builder_return: None,
             agent_focus: None,
             list_section: SidebarSection::Active,
             skill_workbench: None,

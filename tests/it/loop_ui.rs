@@ -833,3 +833,19 @@ fn the_runs_view_lists_every_run_and_decides_the_ones_that_need_you() {
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(matches!(app.mode, Mode::Control));
 }
+
+/// `e` on a scheduled agent's What opens the task in the loop builder;
+/// leaving the builder comes back to the editor on the same task.
+#[test]
+fn the_loop_builder_hands_the_editor_back() {
+    let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
+    app.open_scheduled_editor(None, Some("ci-sweeper"));
+    app.handle_key(&key(KeyCode::Char('e')), Instant::now());
+    assert!(matches!(app.mode, Mode::LoopBuilder(_)), "{:?}", app.mode);
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    if matches!(app.mode, Mode::LoopBuilder(_)) {
+        app.handle_key(&key(KeyCode::Esc), Instant::now());
+    }
+    let d = dialog(&app);
+    assert_eq!(d.pattern().unwrap().id, "ci-sweeper");
+}
