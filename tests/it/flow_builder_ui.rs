@@ -137,13 +137,9 @@ fn open_agents(app: &mut App) {
 }
 
 fn to_workflows(app: &mut App) {
-    for _ in 0..6 {
-        if app.sidebar_section == SidebarSection::Workflows {
-            return;
-        }
-        press(app, KeyCode::Tab);
-    }
-    panic!("Tab never reached the Workflows section");
+    // the Agents list: the first row of that kind takes the section's keys
+    app.select_first_row_of(SidebarSection::Workflows);
+    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
 }
 
 /// Adds a step running as the `n`th shape, named `name`.
@@ -165,6 +161,7 @@ fn a_flow_is_built_step_by_step_and_saved() {
     let ws = temp.path().join("ws");
     to_workflows(&mut app);
     press(&mut app, KeyCode::Char('n'));
+    press(&mut app, KeyCode::Enter); // the chooser starts on it
     assert!(matches!(app.mode, Mode::FlowBuilder(_)));
     let text = render(&app);
     assert!(text.contains("New flow"), "{text}");
@@ -378,6 +375,7 @@ fn leaving_with_changes_asks_first_and_a_document_opens_in_the_builder() {
     let (mut app, _temp) = app();
     to_workflows(&mut app);
     press(&mut app, KeyCode::Char('n'));
+    press(&mut app, KeyCode::Enter); // the chooser starts on it
     add_step(&mut app, "only", 0);
     press(&mut app, KeyCode::Esc); // fields → list
     press(&mut app, KeyCode::Esc); // list → close?
@@ -424,6 +422,7 @@ fn a_built_in_agent_is_edited_as_a_library_copy() {
     let (mut app, temp) = app();
     to_workflows(&mut app);
     press(&mut app, KeyCode::Char('n'));
+    press(&mut app, KeyCode::Enter); // the chooser starts on it
     add_step(&mut app, "look", 0);
     open_agents(&mut app);
     let Some(Overlay::Agent(p)) = &st(&app).overlay else {

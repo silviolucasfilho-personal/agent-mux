@@ -67,43 +67,26 @@ fn press(app: &mut App, code: KeyCode) {
 }
 
 fn to_workflows(app: &mut App) {
-    for _ in 0..6 {
-        if app.sidebar_section == SidebarSection::Workflows {
-            return;
-        }
-        press(app, KeyCode::Tab);
-    }
-    panic!("Tab never reached the Workflows section");
+    // the Agents list: the first row of that kind takes the section's keys
+    app.select_first_row_of(SidebarSection::Workflows);
+    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
 }
 
 #[test]
 fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
+    // flows are rows of the Agents list, under their own heading
     let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
     let text = render(&app, 120, 40);
-    assert!(
-        text.contains("Workflows [0]") || text.contains("Workflows ["),
-        "{text}"
-    );
+    assert!(text.contains(" flows"), "{text}");
     assert_eq!(app.sidebar_section, SidebarSection::Active);
-    press(&mut app, KeyCode::Tab);
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
-    press(&mut app, KeyCode::Tab);
-    assert_eq!(app.sidebar_section, SidebarSection::Loops);
-    press(&mut app, KeyCode::Tab);
-    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
     assert_eq!(
         app.workflow_list.len(),
         9,
-        "the built-ins are listed on entry"
+        "the built-ins are listed from the start"
     );
-    press(&mut app, KeyCode::Tab);
-    assert_eq!(app.sidebar_section, SidebarSection::History);
-    press(&mut app, KeyCode::Tab);
-    assert_eq!(app.sidebar_section, SidebarSection::Active);
 
     to_workflows(&mut app);
     let text = render(&app, 120, 40);
-    assert!(text.contains("Workflows [9]"), "{text}");
     assert!(text.contains("review-changes"), "{text}");
     assert!(
         text.contains("[c] compose"),
@@ -119,23 +102,30 @@ fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
     assert!(!text.contains("fanout"), "{text}");
     assert!(text.contains("Typical"), "{text}");
 
-    // j/k move within the section and continue into History and back
+    // j/k walk the flows and continue into the rows around them
     press(&mut app, KeyCode::Char('j'));
     assert_eq!(app.selected_workflow, 1);
     assert_eq!(app.selected_workflow_entry().unwrap().name, "understand");
-    for _ in 0..10 {
+    for _ in 0..8 {
         press(&mut app, KeyCode::Char('j'));
     }
-    assert_eq!(app.selected_workflow, 8, "no history sessions, so it stays");
+    assert_ne!(
+        app.sidebar_section,
+        SidebarSection::Workflows,
+        "past the last flow: the skills below"
+    );
     press(&mut app, KeyCode::Char('k'));
-    assert_eq!(app.selected_workflow, 7);
-    for _ in 0..8 {
+    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
+    assert_eq!(app.selected_workflow, 8, "back on the last flow");
+    for _ in 0..9 {
         press(&mut app, KeyCode::Char('k'));
     }
-    assert_eq!(
-        app.sidebar_section,
-        SidebarSection::Loops,
-        "k leaves upward"
+    assert!(
+        matches!(
+            app.agent_row(),
+            Some(agent_mux::app::agents_list::AgentKind::Harness(0))
+        ),
+        "k leaves upward, to the harness"
     );
 }
 
@@ -356,7 +346,7 @@ fn the_help_overlay_and_the_section_hints_mention_workflows() {
     press(&mut app, KeyCode::Char('?'));
     let text = render(&app, 120, 64);
     assert!(text.contains("workflows view"), "{text}");
-    assert!(text.contains("Workflows section"), "{text}");
+    assert!(text.contains("A flow row"), "{text}");
 }
 
 fn press_mod(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -1014,8 +1004,7 @@ fn a_recent_run_is_listed_above_the_library_and_opens_in_the_view() {
     );
 
     let text = render(&app, 120, 40);
-    assert!(text.contains("Recent"), "{text}");
-    assert!(text.contains("Library"), "{text}");
+    assert!(text.contains(" flows"), "{text}");
     assert!(
         text.lines()
             .any(|l| l.contains("✓ understand") && l.contains("done")),

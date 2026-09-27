@@ -116,13 +116,14 @@ async fn heimdall_is_listed_in_the_agents_section_and_the_picker_defaults_to_its
         .position(|s| s.id == "heimdall")
         .expect("compiled-in heimdall");
     assert_eq!(app.sidebar_section, SidebarSection::Active);
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    // skills are rows of the Agents list
+    app.select_first_row_of(SidebarSection::Agents);
     assert_eq!(app.sidebar_section, SidebarSection::Agents);
     app.selected_agent = heimdall;
 
     // the agent owns the main pane: its telemetry briefing, not a terminal
     let text = screen(&app);
-    assert!(text.contains("Agents ["), "sidebar section is named Agents");
+    assert!(text.contains(" Agents "), "sidebar section is named Agents");
     assert!(text.contains("Heimdall"));
     assert!(
         text.contains("Executive Briefing"),
@@ -167,8 +168,9 @@ async fn a_running_agent_is_attached_to_instead_of_relaunched() {
     app.selected_agent = heimdall;
     let text = screen(&app);
     assert!(
-        text.contains("[codex]"),
-        "sidebar shows the running harness"
+        text.lines()
+            .any(|l| l.contains("Heimdall") && l.contains("codex")),
+        "sidebar shows the running harness\n{text}"
     );
 
     app.handle_key(&key(KeyCode::Enter), Instant::now());

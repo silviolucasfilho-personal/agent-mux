@@ -75,57 +75,33 @@ fn render(app: &App, width: u16, height: u16) -> String {
     out
 }
 
+/// The sidebar is the Agents list and History: History keeps a few rows
+/// (never more than a third), and a scheduled agent is a row of the list.
 #[test]
-fn the_sidebar_has_four_sections_and_tab_visits_loops() {
-    let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
-    let (active, agents, loops, workflows, history) = agent_mux::ui::sidebar_areas(33, 1, 1, 1);
+fn the_sidebar_is_agents_and_history_and_a_loop_is_an_agent() {
+    let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
+    let (agents, history) = agent_mux::ui::sidebar_areas(33, 5);
+    assert_eq!([agents.height, history.height], [26, 6]);
+    assert_eq!(history.y, agents.y + agents.height);
+    let (agents, history) = agent_mux::ui::sidebar_areas(13, 5);
+    assert_eq!([agents.height, history.height], [8, 4], "a short terminal");
+    let (_, history) = agent_mux::ui::sidebar_areas(33, 0);
     assert_eq!(
-        [
-            active.height,
-            agents.height,
-            loops.height,
-            workflows.height,
-            history.height
-        ],
-        [8, 7, 7, 6, 4],
-        "history stays compact and the three development sections share the freed rows"
+        history.height, 3,
+        "an empty History keeps a border and a line"
     );
-    assert_eq!(loops.y, agents.y + agents.height);
-    assert_eq!(workflows.y, loops.y + loops.height);
-    assert_eq!(history.y, workflows.y + workflows.height);
-    // A short terminal still fits every block: history gives way first and
-    // the active quarter never moves; sixteen rows give history its cap.
-    let (a, b, c, w, d) = agent_mux::ui::sidebar_areas(13, 1, 1, 1);
-    assert_eq!(
-        [a.height, b.height, c.height, w.height, d.height],
-        [3, 2, 2, 2, 3]
-    );
-    let (a, b, c, w, d) = agent_mux::ui::sidebar_areas(16, 1, 1, 1);
-    assert_eq!(
-        [a.height, b.height, c.height, w.height, d.height],
-        [3, 3, 3, 2, 4]
-    );
-    // an empty section shrinks to a border and one line; the others share
-    // what it frees
-    let (_, agents, loops, workflows, _) = agent_mux::ui::sidebar_areas(33, 1, 0, 1);
-    assert_eq!([agents.height, loops.height, workflows.height], [9, 3, 8]);
-    let (_, agents, loops, workflows, _) = agent_mux::ui::sidebar_areas(33, 1, 0, 0);
-    assert_eq!([agents.height, loops.height, workflows.height], [14, 3, 3]);
 
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    app.loop_registry.add(entry(&temp, "daily-triage"));
+    app.select_first_row_of(SidebarSection::Loops);
     assert_eq!(app.sidebar_section, SidebarSection::Loops);
     let screen = render(&app, 120, 34);
-    assert!(screen.contains("Loops [0]"), "{screen}");
-    assert!(
-        screen.contains("No loops yet"),
-        "the preview explains loops:\n{screen}"
-    );
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
+    assert!(screen.contains(" scheduled"), "{screen}");
+    assert!(screen.contains("daily-triage"), "{screen}");
+    // Tab goes to History and back to the same row
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::Loops);
 }
 
 #[test]
@@ -147,7 +123,7 @@ fn the_hint_lines_fit_a_hundred_columns_and_the_help_fits() {
 
     app.mode = Mode::Help;
     let screen = render(&app, 100, 70);
-    assert!(screen.contains("Loops section"), "{screen}");
+    assert!(screen.contains("A scheduled row"), "{screen}");
     assert!(screen.contains("kill switch"), "{screen}");
     assert!(
         screen.contains("[Esc] or [?] to close"),
@@ -183,7 +159,7 @@ fn keys_of_the_loops_section_pause_run_and_toggle_the_kill_switch() {
     assert!(app.loop_registry.pause_all);
     assert!(app.notice.as_ref().unwrap().text.contains("LOOPS PAUSED"));
     let screen = render(&app, 120, 34);
-    assert!(screen.contains("Loops [1] PAUSED"), "{screen}");
+    assert!(screen.contains("Agents · PAUSED"), "{screen}");
     // run now while the kill switch is on is refused with a notice
     app.handle_key(&key(KeyCode::Char('r')), Instant::now());
     assert!(app.notice.as_ref().unwrap().text.contains("paused"));
@@ -223,8 +199,17 @@ fn the_dialog_lists_no_antigravity_profile_and_validates() {
         profile("Codex", "codex"),
         profile("Claude Code", "claude"),
     ]);
-    app.sidebar_section = SidebarSection::Loops;
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    // the chooser: a scheduled agent
+    let Mode::NewAgent(st) = &mut app.mode else {
+        panic!("{:?}", app.mode)
+    };
+    st.selected = st
+        .choices
+        .iter()
+        .position(|c| c.start == agent_mux::app::new_agent::Start::Scheduled)
+        .unwrap();
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
     let Mode::NewLoop(dialog) = &app.mode else {
         panic!("{:?}", app.notice);
     };

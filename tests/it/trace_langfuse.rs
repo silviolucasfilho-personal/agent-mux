@@ -619,6 +619,7 @@ exit 0
 
     // launch 1: profile "Claude Both" (dialog default)
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // the chooser starts on a session
     let Mode::NewSession(dialog) = &app.mode else {
         panic!("dialog");
     };
@@ -639,6 +640,7 @@ exit 0
     );
     // launch 2: profile "Claude Langfuse"
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // the chooser starts on a session
     app.handle_key(&key(KeyCode::Down), Instant::now());
     let Mode::NewSession(dialog) = &app.mode else {
         panic!("dialog");

@@ -67,13 +67,9 @@ fn st(app: &App) -> &LoopBuilderState {
 }
 
 fn to_loops(app: &mut App) {
-    for _ in 0..6 {
-        if app.sidebar_section == SidebarSection::Loops {
-            return;
-        }
-        press(app, KeyCode::Tab);
-    }
-    panic!("Tab never reached the Loops section");
+    // the Agents list: the first row of that kind takes the section's keys
+    app.select_first_row_of(SidebarSection::Loops);
+    assert_eq!(app.sidebar_section, SidebarSection::Loops);
 }
 
 fn to_field(app: &mut App, f: LField) {

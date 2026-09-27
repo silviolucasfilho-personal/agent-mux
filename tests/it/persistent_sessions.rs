@@ -241,67 +241,51 @@ async fn test_sidebar_split_navigation() {
         },
     ];
 
-    // Starts in Active section
+    // The cursor starts on the session, under its harness
     assert_eq!(app.sidebar_section, SidebarSection::Active);
+    assert!(matches!(
+        app.agent_row(),
+        Some(agent_mux::app::agents_list::AgentKind::Session(0))
+    ));
 
-    // Tab cycles: Active -> Agents -> Loops -> History -> Active
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
-
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Loops);
-
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
-
+    // Tab switches between the Agents list and History, and back
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::History);
-
     app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Active);
+    assert_ne!(app.sidebar_section, SidebarSection::History);
+    assert!(matches!(
+        app.agent_row(),
+        Some(agent_mux::app::agents_list::AgentKind::Session(0))
+    ));
 
-    // Down at the end of active sessions transitions into Agents
-    app.handle_key(&key(KeyCode::Down), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
-
-    // Down traverses every discovered skill before transitioning into Loops.
-    // App::new intentionally reads the user's library, so this must not assume
-    // the machine has exactly one visible skill.
-    while app.sidebar_section == SidebarSection::Agents {
-        app.handle_key(&key(KeyCode::Down), Instant::now());
-    }
-    assert_eq!(app.sidebar_section, SidebarSection::Loops);
-    app.handle_key(&key(KeyCode::Down), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
-    while app.sidebar_section == SidebarSection::Workflows {
+    // Up from the session is its harness; Down walks every agent row
+    // (the machine's own skills and flows among them) and then History
+    app.handle_key(&key(KeyCode::Up), Instant::now());
+    assert!(matches!(
+        app.agent_row(),
+        Some(agent_mux::app::agents_list::AgentKind::Harness(0))
+    ));
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..500 {
+        if app.sidebar_section == SidebarSection::History {
+            break;
+        }
+        seen.insert(app.sidebar_section);
         app.handle_key(&key(KeyCode::Down), Instant::now());
     }
     assert_eq!(app.sidebar_section, SidebarSection::History);
+    assert!(seen.contains(&SidebarSection::Workflows), "flows are rows");
     assert_eq!(app.selected_history, 0);
 
     // Down in History navigates history items
     app.handle_key(&key(KeyCode::Down), Instant::now());
     assert_eq!(app.selected_history, 1);
-
-    // Up in History navigates back up
     app.handle_key(&key(KeyCode::Up), Instant::now());
     assert_eq!(app.selected_history, 0);
 
-    // Up at top of History transitions to Workflows, through it to Loops, then Agents
+    // Up at the top of History is the last agent row
     app.handle_key(&key(KeyCode::Up), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
-    while app.sidebar_section == SidebarSection::Workflows {
-        app.handle_key(&key(KeyCode::Up), Instant::now());
-    }
-    assert_eq!(app.sidebar_section, SidebarSection::Loops);
-    app.handle_key(&key(KeyCode::Up), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
-
-    // Up traverses the discovered skills before returning to Active.
-    while app.sidebar_section == SidebarSection::Agents {
-        app.handle_key(&key(KeyCode::Up), Instant::now());
-    }
-    assert_eq!(app.sidebar_section, SidebarSection::Active);
+    assert_ne!(app.sidebar_section, SidebarSection::History);
 
     app.kill_all();
 }
@@ -386,8 +370,8 @@ async fn test_sidebar_mouse_click_selection() {
         },
     ];
 
-    let (active_rect, agents_rect, _loops_rect, _workflows_rect, history_rect) =
-        agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.skills.len(), 0, 0);
+    let (agents_rect, history_rect) =
+        agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, app.history_sessions.len());
 
     // Click in history area
     let click_hist = MouseEvent {
@@ -400,26 +384,31 @@ async fn test_sidebar_mouse_click_selection() {
     assert_eq!(app.sidebar_section, SidebarSection::History);
     assert_eq!(app.selected_history, 1);
 
-    // Click in agents area
-    let click_agents = MouseEvent {
+    // The Agents list: the harness first, its session under it
+    let click_harness = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 5,
         row: agents_rect.y + 1,
         modifiers: KeyModifiers::NONE,
     };
-    app.handle_mouse(click_agents, Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
-
-    // Click in active area
-    let click_active = MouseEvent {
+    app.handle_mouse(click_harness, Instant::now());
+    assert!(matches!(
+        app.agent_row(),
+        Some(agent_mux::app::agents_list::AgentKind::Harness(0))
+    ));
+    let click_session = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 5,
-        row: active_rect.y + 1, // first item
+        row: agents_rect.y + 2,
         modifiers: KeyModifiers::NONE,
     };
-    app.handle_mouse(click_active, Instant::now());
+    app.handle_mouse(click_session, Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Active);
     assert_eq!(app.selected, 0);
+    assert!(matches!(
+        app.agent_row(),
+        Some(agent_mux::app::agents_list::AgentKind::Session(0))
+    ));
 
     app.kill_all();
 }

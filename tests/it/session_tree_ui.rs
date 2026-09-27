@@ -95,45 +95,27 @@ fn a_workflow_runs_steps_gather_under_one_header() {
         Some(wf("abcd1234ef", "read:tests")),
     ]);
     let out = render(&app, 120, 40);
-    assert!(out.contains("▾"), "an open header draws its fold marker");
-    assert!(out.contains("⚙"), "a workflow header carries its glyph");
-    assert!(out.contains("map-codeba"), "the header names the workflow");
-    assert!(out.contains("├"), "the first step hangs off the header");
-    assert!(out.contains("└"), "and the last one closes the family");
+    assert!(out.contains("⚙"), "a workflow run carries its glyph");
+    assert!(out.contains("map-codeba"), "the row names the workflow");
+    assert!(out.contains("├"), "its steps hang off it");
     assert!(
         out.contains("read:src"),
         "a step is named by its step, not its profile: {out}"
     );
-}
-
-#[test]
-fn space_folds_the_run_and_the_cursor_skips_the_family() {
-    let (mut app, _t) = app_with_sessions(&[
-        None,
-        Some(wf("abcd1234ef", "read:src")),
-        Some(wf("abcd1234ef", "read:tests")),
-        None,
-    ]);
-    app.sidebar_section = SidebarSection::Active;
-    // down once: the loose session, then the first step
-    app.handle_key(&key(KeyCode::Char('j')), Instant::now());
-    assert_eq!(app.selected, 1);
-    // fold the run the step belongs to
-    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
-    let out = render(&app, 120, 40);
-    assert!(out.contains("▸"), "a folded header draws a closed marker");
-    assert!(
-        !out.contains("read:src"),
-        "the steps are hidden while folded: {out}"
+    // the steps sit right under their run in the Agents list
+    let lines = app.agent_lines();
+    let run = lines
+        .iter()
+        .position(|l| matches!(&l.kind, agent_mux::app::agents_list::AgentKind::Run(k) if k == "wf:abcd1234ef"))
+        .expect("a row for the run");
+    assert_eq!(
+        lines[run + 1].kind,
+        agent_mux::app::agents_list::AgentKind::Session(1)
     );
-    // one more step down leaves the whole family behind
-    app.handle_key(&key(KeyCode::Char('j')), Instant::now());
-    assert_eq!(app.selected, 3, "the folded run is a single stop");
-    app.handle_key(&key(KeyCode::Char('k')), Instant::now());
-    assert_eq!(app.selected, 1, "and back onto the header it stands for");
-    // unfolding brings the steps back
-    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
-    assert!(render(&app, 120, 40).contains("read:src"));
+    assert_eq!(
+        lines[run + 2].kind,
+        agent_mux::app::agents_list::AgentKind::Session(2)
+    );
 }
 
 #[test]
@@ -334,32 +316,36 @@ fn the_trace_browser_draws_the_runs_as_a_tree() {
 /// a child selects. The Active pane starts at row 0, so its first list row
 /// is row 1.
 #[test]
-fn clicking_a_header_folds_it_and_clicking_a_child_selects_it() {
+fn clicking_a_run_selects_it_and_clicking_a_step_selects_the_session() {
+    use agent_mux::app::agents_list::AgentKind;
     let (mut app, _t) = app_with_sessions(&[
         None,
         Some(wf("abcd1234ef", "read:src")),
         Some(wf("abcd1234ef", "read:tests")),
     ]);
     app.set_pane_size(30, 100);
+    let lines = app.agent_lines();
+    let at = |k: &AgentKind| lines.iter().position(|l| l.kind == *k).unwrap() as u16;
+    let (agents, _) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, 0);
     let click = |row: u16| MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 4,
-        row,
+        row: agents.y + 1 + row,
         modifiers: KeyModifiers::NONE,
     };
-    // rows: 1 "p0", 2 header, 3 read:src, 4 read:tests
-    app.handle_mouse(click(3), Instant::now());
+    app.handle_mouse(click(at(&AgentKind::Session(1))), Instant::now());
     assert_eq!(app.selected, 1, "clicked the first step");
-    app.handle_mouse(click(2), Instant::now());
-    assert!(
-        app.collapsed_groups.contains("wf:abcd1234ef"),
-        "clicking the header folded the run"
+    app.handle_mouse(
+        click(at(&AgentKind::Run("wf:abcd1234ef".into()))),
+        Instant::now(),
     );
-    app.handle_mouse(click(2), Instant::now());
-    assert!(
-        app.collapsed_groups.is_empty(),
-        "and clicking it again opened it"
+    assert_eq!(
+        app.agent_row(),
+        Some(AgentKind::Run("wf:abcd1234ef".into()))
     );
+    // a run row has no session keys: Enter does not attach
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(matches!(app.mode, Mode::Control));
 }
 
 /// A run that starts while the browser is open has to find its header:

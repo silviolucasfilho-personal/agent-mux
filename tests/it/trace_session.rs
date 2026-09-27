@@ -113,6 +113,7 @@ exit 0
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // the chooser starts on a session
     assert!(matches!(app.mode, Mode::NewSession(_)));
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(
@@ -245,6 +246,7 @@ async fn toggle_tracing_attaches_and_stops_on_demand() {
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // the chooser starts on a session
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert_eq!(app.sessions.len(), 1);
     assert!(
@@ -387,6 +389,7 @@ exit 0
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // the chooser starts on a session
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(matches!(app.mode, Mode::Control), "spawn: {:?}", app.notice);
 
@@ -530,6 +533,7 @@ sleep 30
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // the chooser starts on a session
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert_eq!(app.sessions.len(), 1, "spawn failed: {:?}", app.notice);
 

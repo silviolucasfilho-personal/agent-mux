@@ -55,6 +55,7 @@ async fn pump_until(
 fn create_session_via_dialog(app: &mut App) {
     let now = Instant::now();
     app.handle_key(&key(KeyCode::Char('n')), now);
+    app.handle_key(&key(KeyCode::Enter), now); // the chooser starts on a session
     assert!(matches!(app.mode, Mode::NewSession(_)));
     app.handle_key(&key(KeyCode::Enter), now);
 }
@@ -82,6 +83,7 @@ async fn dialog_submit_with_bad_directory_stays_open_with_error() {
     let mut app = App::new(shell_profiles(), None, tx);
     let now = Instant::now();
     app.handle_key(&key(KeyCode::Char('n')), now);
+    app.handle_key(&key(KeyCode::Enter), now); // the chooser starts on a session
     // wipe the prefilled dir and type a bad one
     if let Mode::NewSession(d) = &mut app.mode {
         d.dir = "Z:/no/such/dir".into();

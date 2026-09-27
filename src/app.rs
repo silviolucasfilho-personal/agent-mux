@@ -19,11 +19,13 @@ use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
 pub mod about;
+pub mod agents_list;
 mod config_view;
 pub mod dir_picker;
 pub mod flow_builder;
 pub mod inbox;
 pub mod loop_builder;
+pub mod new_agent;
 pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
@@ -65,6 +67,8 @@ pub enum Mode {
     FlowBuilder(Box<flow_builder::FlowBuilderState>),
     /// The loop builder (`o` / `f` in the Loops section).
     LoopBuilder(Box<loop_builder::LoopBuilderState>),
+    /// `n` in the Agents list: how to start a new agent.
+    NewAgent(Box<new_agent::NewAgentState>),
 }
 
 /// An external editor the main loop must run for the App: it leaves the
@@ -86,7 +90,7 @@ struct SkillWorkbenchBookmark {
     tab: SkillsTab,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SidebarSection {
     #[default]
     Active,
@@ -198,6 +202,10 @@ pub enum Action {
     OpenWorkflowPlan,
     OpenFlowBuilder,
     OpenFlowBuilderSelected,
+    OpenNewAgent,
+    NewAgentKey,
+    NewSessionFromHarness,
+    EditPersona,
     DeleteWorkflowRow,
     FlowBuilderKey,
     OpenLoopBuilder,
@@ -384,7 +392,21 @@ struct AgentLaunchPrep {
     briefing_path: Option<std::path::PathBuf>,
 }
 
+/// What kind of Agents-list row the cursor is on, for the keys that act
+/// on a row with no older section of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowTag {
+    #[default]
+    Other,
+    Harness,
+    Persona,
+    Session,
+    /// A run no other row stands for: it has only its sessions.
+    Run,
+}
+
 pub struct DispatchCtx {
+    pub agent_row: RowTag,
     pub selected_status: Option<Status>,
     pub any_working: bool,
     pub just_detached: bool,
@@ -470,7 +492,31 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     Action::None
                 };
             }
+            let in_list = !ctx.sidebar_hidden && ctx.sidebar_section != SidebarSection::History;
             match key.code {
+                // n makes a new agent; the chooser starts on the kind of
+                // row the cursor is on (a session, a scheduled agent, a flow)
+                KeyCode::Char('n') if in_list => Action::OpenNewAgent,
+                KeyCode::Enter if in_list && ctx.agent_row == RowTag::Harness => {
+                    Action::NewSessionFromHarness
+                }
+                KeyCode::Enter | KeyCode::Char('e')
+                    if in_list && ctx.agent_row == RowTag::Persona =>
+                {
+                    Action::EditPersona
+                }
+                // a harness or persona row has none of a session's or a
+                // skill's own keys
+                KeyCode::Enter | KeyCode::Char('x' | 'd' | 'r' | 't' | 'h' | ' ')
+                    if in_list && ctx.agent_row == RowTag::Run =>
+                {
+                    Action::None
+                }
+                KeyCode::Char('x' | 'd' | 'r' | 't' | 'h' | ' ')
+                    if in_list && matches!(ctx.agent_row, RowTag::Harness | RowTag::Persona) =>
+                {
+                    Action::None
+                }
                 _ if !ctx.sidebar_hidden
                     && ctx.sidebar_section == SidebarSection::Workflows
                     && App::workflows_section_action(key).is_some() =>
@@ -644,6 +690,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::WorkflowsView(_) => Action::WorkflowsKey,
         Mode::Inbox(_) => Action::InboxKey,
         Mode::FlowBuilder(_) => Action::FlowBuilderKey,
+        Mode::NewAgent(_) => Action::NewAgentKey,
         Mode::LoopBuilder(_) => Action::LoopBuilderKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
@@ -1018,7 +1065,7 @@ impl DialogState {
         self.dir_picker.refresh(&self.dir);
     }
 
-    fn set_profile(&mut self, idx: usize, profiles: &[Profile]) {
+    pub(crate) fn set_profile(&mut self, idx: usize, profiles: &[Profile]) {
         self.profile_idx = idx;
         if let Some(p) = profiles.get(idx) {
             self.harness = crate::harness::Harness::detect(&p.command);
@@ -2074,6 +2121,12 @@ pub struct App {
     pub skills_dir: Option<std::path::PathBuf>,
     /// Selected row of the Agents sidebar section (index into `skills`).
     pub selected_agent: usize,
+    /// Persona agents the Agents list shows (`agents_list`).
+    pub personas: Vec<String>,
+    /// A harness or persona row under the Agents cursor.
+    pub agent_focus: Option<agents_list::AgentFocus>,
+    /// The section the Agents cursor was in when Tab went to History.
+    pub list_section: SidebarSection,
     /// Last managed package inspected in the Skills workbench.
     skill_workbench: Option<SkillWorkbenchBookmark>,
     /// `[agents]`: whether launches get briefing snapshots and MCP.
@@ -2173,7 +2226,7 @@ impl App {
             &crate::tracing::analysis::default_snapshot_dir(),
             std::time::Duration::from_secs(24 * 3600),
         );
-        App {
+        let mut app = App {
             sessions: Vec::new(),
             selected: 0,
             sidebar_section: SidebarSection::Active,
@@ -2204,6 +2257,9 @@ impl App {
             skill_install_home: None,
             skills_dir: None,
             selected_agent: 0,
+            personas: Vec::new(),
+            agent_focus: None,
+            list_section: SidebarSection::Active,
             skill_workbench: None,
             agents: crate::config::AgentsSettings::default(),
             agy_mcp_checked: false,
@@ -2242,7 +2298,11 @@ impl App {
             selected_workflow: 0,
             workflow_anchor: None,
             inbox_dismissed: Default::default(),
-        }
+        };
+        // the Agents list shows flows and personas from the start
+        app.workflow_list = app.workflow_entries();
+        app.reload_personas();
+        app
     }
 
     /// Rescans the user skill directory and the compiled-in packages,
@@ -2256,6 +2316,8 @@ impl App {
         self.selected_agent = keep
             .and_then(|id| self.skills.iter().position(|s| s.id == id))
             .unwrap_or_else(|| self.selected_agent.min(self.skills.len().saturating_sub(1)));
+        self.reload_personas();
+        self.reload_workflow_list();
     }
 
     /// The package selected in the Agents sidebar section, if any.
@@ -3051,7 +3113,19 @@ impl App {
             .get(self.selected)
             .map(|s| s.parser.screen().application_cursor())
             .unwrap_or(false);
+        let agent_row = if self.sidebar_hidden {
+            RowTag::Other
+        } else {
+            match self.agent_row() {
+                Some(agents_list::AgentKind::Harness(_)) => RowTag::Harness,
+                Some(agents_list::AgentKind::Persona(_)) => RowTag::Persona,
+                Some(agents_list::AgentKind::Session(_)) => RowTag::Session,
+                Some(agents_list::AgentKind::Run(_)) => RowTag::Run,
+                _ => RowTag::Other,
+            }
+        };
         let ctx = DispatchCtx {
+            agent_row,
             selected_status: self.sessions.get(self.selected).map(|s| s.status(now)),
             any_working: self
                 .sessions
@@ -3351,89 +3425,25 @@ impl App {
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
-            let (active_rect, agents_rect, loops_rect, workflows_rect, history_rect) =
-                ui::sidebar_areas(
-                    self.pane_size.0 + 3,
-                    self.skills.len(),
-                    self.loop_registry.loops.len(),
-                    self.workflow_section_lines().len(),
-                );
-            if ev.row >= active_rect.y && ev.row < active_rect.y + active_rect.height {
-                if ev.row > active_rect.y
-                    && ev.row < active_rect.y + active_rect.height.saturating_sub(1)
-                {
-                    // The pane draws a tree, so a click lands on a row:
-                    // a header folds, a session is selected.
-                    let rows = self.active_rows();
-                    let visible = usize::from(active_rect.height.saturating_sub(2));
-                    let cursor = crate::tree::row_of(&rows, self.selected).unwrap_or(0);
-                    let offset = usize::from(ev.row - active_rect.y - 1);
-                    let at = ui::sidebar_window(cursor, rows.len(), visible) + offset;
-                    match rows.get(at) {
-                        Some(crate::tree::Row::Group { key, .. }) => {
-                            let key = key.clone();
-                            self.sidebar_section = SidebarSection::Active;
-                            crate::tree::toggle(&mut self.collapsed_groups, &key);
-                        }
-                        Some(row) => {
-                            let idx = crate::tree::item_of(row).unwrap_or(self.selected);
-                            self.sidebar_section = SidebarSection::Active;
-                            if idx != self.selected {
-                                self.selection = None;
-                                self.selected = idx;
-                                if matches!(self.mode, Mode::Attached)
-                                    && let Some(s) = self.sessions.get_mut(idx)
-                                {
-                                    s.tracker.on_attach();
-                                }
-                            }
-                        }
-                        None => {}
-                    }
-                }
-                return;
-            } else if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height {
-                self.sidebar_section = SidebarSection::Agents;
+            let (agents_rect, history_rect) =
+                ui::sidebar_areas(self.pane_size.0 + 3, self.history_sessions.len());
+            if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height {
                 if ev.row > agents_rect.y
                     && ev.row < agents_rect.y + agents_rect.height.saturating_sub(1)
                 {
+                    // the list draws one row per line, scrolled around the cursor
+                    let lines = self.agent_lines();
                     let visible = usize::from(agents_rect.height.saturating_sub(2));
-                    let row = usize::from(ev.row - agents_rect.y - 1);
-                    let idx =
-                        ui::sidebar_window(self.selected_agent, self.skills.len(), visible) + row;
-                    if idx < self.skills.len() {
-                        self.selected_agent = idx;
-                    }
-                }
-                return;
-            } else if ev.row >= workflows_rect.y
-                && ev.row < workflows_rect.y + workflows_rect.height
-            {
-                if ev.row > workflows_rect.y
-                    && ev.row < workflows_rect.y + workflows_rect.height.saturating_sub(1)
-                {
-                    let visible = usize::from(workflows_rect.height.saturating_sub(2));
-                    let row = usize::from(ev.row - workflows_rect.y - 1);
-                    let lines = self.workflow_section_lines();
-                    let start = self.workflow_section_start(&lines, visible);
-                    if let Some(workflows::SectionLine::Row(idx)) = lines.get(start + row) {
-                        self.sidebar_section = SidebarSection::Workflows;
-                        self.select_workflow_row(*idx);
-                    }
-                }
-                return;
-            }
-            if ev.row >= loops_rect.y && ev.row < loops_rect.y + loops_rect.height {
-                self.sidebar_section = SidebarSection::Loops;
-                if ev.row > loops_rect.y
-                    && ev.row < loops_rect.y + loops_rect.height.saturating_sub(1)
-                {
-                    let visible = usize::from(loops_rect.height.saturating_sub(2));
-                    let row = usize::from(ev.row - loops_rect.y - 1);
-                    let n = self.loop_registry.loops.len();
-                    let idx = ui::sidebar_window(self.selected_loop, n, visible) + row;
-                    if idx < n {
-                        self.selected_loop = idx;
+                    let cursor = self.agent_cursor(&lines).unwrap_or(0);
+                    let start = ui::sidebar_window(cursor, lines.len(), visible.saturating_sub(1));
+                    let at = start + usize::from(ev.row - agents_rect.y - 1);
+                    if lines.get(at).is_some_and(|l| l.kind.selectable()) {
+                        self.select_agent_line(&lines, at);
+                        if matches!(self.mode, Mode::Attached)
+                            && let Some(s) = self.sessions.get_mut(self.selected)
+                        {
+                            s.tracker.on_attach();
+                        }
                     }
                 }
                 return;
@@ -3493,37 +3503,10 @@ impl App {
             ) =>
             {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
-                    let (_, agents_rect, loops_rect, _workflows_rect, history_rect) =
-                        ui::sidebar_areas(
-                            self.pane_size.0 + 3,
-                            self.skills.len(),
-                            self.loop_registry.loops.len(),
-                            self.workflow_section_lines().len(),
-                        );
-                    if ev.row >= loops_rect.y
-                        && ev.row < loops_rect.y + loops_rect.height
-                        && !self.loop_registry.loops.is_empty()
-                    {
-                        if matches!(ev.kind, MouseEventKind::ScrollUp) {
-                            self.selected_loop = self.selected_loop.saturating_sub(1);
-                        } else {
-                            self.selected_loop =
-                                (self.selected_loop + 1).min(self.loop_registry.loops.len() - 1);
-                        }
-                        return;
-                    }
-                    if ev.row >= agents_rect.y
-                        && ev.row < agents_rect.y + agents_rect.height
-                        && !self.skills.is_empty()
-                    {
-                        if matches!(ev.kind, MouseEventKind::ScrollUp) {
-                            self.selected_agent = self.selected_agent.saturating_sub(1);
-                        } else {
-                            self.selected_agent =
-                                (self.selected_agent + 1).min(self.skills.len() - 1);
-                        }
-                        return;
-                    }
+                    // over the Agents list a wheel scrolls the selected
+                    // session (a trackpad often rests there); History scrolls
+                    let (_, history_rect) =
+                        ui::sidebar_areas(self.pane_size.0 + 3, self.history_sessions.len());
                     if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
                         let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
                             -1
@@ -3719,111 +3702,33 @@ impl App {
                     if !self.sessions.is_empty() {
                         self.selected = (self.selected + 1).min(self.sessions.len() - 1);
                     }
-                } else {
-                    match self.sidebar_section {
-                        SidebarSection::Active => {
-                            // Down walks the tree, not the session list: a
-                            // folded loop or workflow is one stop for the
-                            // whole family it hides.
-                            let rows = self.active_rows();
-                            let next = crate::tree::step(&rows, self.selected, 1);
-                            if !self.sessions.is_empty() && next != self.selected {
-                                self.selected = next;
-                            } else {
-                                self.sidebar_section = SidebarSection::Agents;
-                                self.selected_agent = 0;
-                            }
-                        }
-                        SidebarSection::Agents => {
-                            if !self.skills.is_empty()
-                                && self.selected_agent + 1 < self.skills.len()
-                            {
-                                self.selected_agent += 1;
-                            } else {
-                                self.sidebar_section = SidebarSection::Loops;
-                                self.selected_loop = 0;
-                            }
-                        }
-                        SidebarSection::Loops => {
-                            if !self.loop_registry.loops.is_empty()
-                                && self.selected_loop + 1 < self.loop_registry.loops.len()
-                            {
-                                self.selected_loop += 1;
-                            } else {
-                                self.sidebar_section = SidebarSection::Workflows;
-                                self.reload_workflow_list();
-                                self.select_workflow_row(0);
-                            }
-                        }
-                        SidebarSection::Workflows => {
-                            if self.selected_workflow + 1 < self.workflow_rows().len() {
-                                self.select_workflow_row(self.selected_workflow + 1);
-                            } else if !self.history_sessions.is_empty() {
-                                self.sidebar_section = SidebarSection::History;
-                                self.selected_history = 0;
-                            }
-                        }
-                        SidebarSection::History => {
-                            if !self.history_sessions.is_empty() {
-                                self.selected_history = (self.selected_history + 1)
-                                    .min(self.history_sessions.len() - 1);
-                            }
-                        }
+                } else if self.sidebar_section == SidebarSection::History {
+                    if !self.history_sessions.is_empty() {
+                        self.selected_history =
+                            (self.selected_history + 1).min(self.history_sessions.len() - 1);
                     }
+                } else if !self.move_agent_cursor(1) && !self.history_sessions.is_empty() {
+                    // past the last agent: into History
+                    self.sidebar_section = SidebarSection::History;
+                    self.selected_history = 0;
                 }
             }
             Action::MoveUp => {
                 self.selection = None;
                 if self.sidebar_hidden {
                     self.selected = self.selected.saturating_sub(1);
-                } else {
-                    match self.sidebar_section {
-                        SidebarSection::Active => {
-                            self.selected =
-                                crate::tree::step(&self.active_rows(), self.selected, -1);
-                        }
-                        SidebarSection::Agents => {
-                            if self.selected_agent > 0 {
-                                self.selected_agent -= 1;
-                            } else if !self.sessions.is_empty() {
-                                self.sidebar_section = SidebarSection::Active;
-                                self.selected = self
-                                    .active_rows()
-                                    .iter()
-                                    .rev()
-                                    .find_map(crate::tree::item_of)
-                                    .unwrap_or(self.sessions.len() - 1);
-                            }
-                        }
-                        SidebarSection::Loops => {
-                            if self.selected_loop > 0 {
-                                self.selected_loop -= 1;
-                            } else {
-                                self.sidebar_section = SidebarSection::Agents;
-                                self.selected_agent = self.skills.len().saturating_sub(1);
-                            }
-                        }
-                        SidebarSection::Workflows => {
-                            if self.selected_workflow > 0 {
-                                self.select_workflow_row(self.selected_workflow - 1);
-                            } else {
-                                self.sidebar_section = SidebarSection::Loops;
-                                self.selected_loop =
-                                    self.loop_registry.loops.len().saturating_sub(1);
-                            }
-                        }
-                        SidebarSection::History => {
-                            if self.selected_history > 0 {
-                                self.selected_history -= 1;
-                            } else {
-                                self.sidebar_section = SidebarSection::Workflows;
-                                self.reload_workflow_list();
-                                self.select_workflow_row(
-                                    self.workflow_rows().len().saturating_sub(1),
-                                );
-                            }
+                } else if self.sidebar_section == SidebarSection::History {
+                    if self.selected_history > 0 {
+                        self.selected_history -= 1;
+                    } else {
+                        // back onto the last agent row
+                        let lines = self.agent_lines();
+                        if let Some(last) = lines.iter().rposition(|l| l.kind.selectable()) {
+                            self.select_agent_line(&lines, last);
                         }
                     }
+                } else {
+                    self.move_agent_cursor(-1);
                 }
             }
             Action::ToggleSessionGroup => self.toggle_selected_group(),
@@ -3832,20 +3737,12 @@ impl App {
                     if !self.sessions.is_empty() {
                         self.selected = (self.selected + 1) % self.sessions.len();
                     }
+                } else if self.sidebar_section == SidebarSection::History {
+                    // back to the Agents list, on the row it left
+                    self.sidebar_section = self.list_section;
                 } else {
-                    self.sidebar_section = match self.sidebar_section {
-                        SidebarSection::Active => {
-                            self.reload_skills();
-                            SidebarSection::Agents
-                        }
-                        SidebarSection::Agents => SidebarSection::Loops,
-                        SidebarSection::Loops => {
-                            self.reload_workflow_list();
-                            SidebarSection::Workflows
-                        }
-                        SidebarSection::Workflows => SidebarSection::History,
-                        SidebarSection::History => SidebarSection::Active,
-                    };
+                    self.list_section = self.sidebar_section;
+                    self.sidebar_section = SidebarSection::History;
                 }
             }
             Action::OpenAbout => self.open_about(),
@@ -3937,14 +3834,20 @@ impl App {
                 let target = if self.sidebar_hidden {
                     (idx < self.sessions.len()).then_some(idx)
                 } else {
-                    crate::tree::visible_items(&self.active_rows())
-                        .get(idx)
-                        .copied()
+                    // the digits count sessions in the Agents list's order
+                    self.agent_lines()
+                        .iter()
+                        .filter_map(|l| match l.kind {
+                            agents_list::AgentKind::Session(i) => Some(i),
+                            _ => None,
+                        })
+                        .nth(idx)
                 };
                 if let Some(target) = target {
                     self.selection = None;
                     self.selected = target;
                     self.sidebar_section = SidebarSection::Active;
+                    self.agent_focus = None;
                 }
             }
             Action::Attach => {
@@ -3975,18 +3878,26 @@ impl App {
                 self.snap_selected_to_live();
                 self.forward_bytes(&bytes);
             }
-            Action::OpenNewSession => {
-                let (default, available) = match &self.tracing {
-                    Some(rt) => (rt.default_backend(), rt.langfuse_configured()),
-                    None => (crate::config::Backend::Local, false),
+            Action::OpenNewSession => self.open_new_session_dialog(None),
+            Action::NewSessionFromHarness => {
+                // the harness under the cursor, or the one a session runs on
+                let p = match self.agent_row() {
+                    Some(agents_list::AgentKind::Harness(p)) => Some(p),
+                    Some(agents_list::AgentKind::Session(i)) => self
+                        .sessions
+                        .get(i)
+                        .and_then(|s| self.profiles.iter().position(|p| p.name == s.profile.name)),
+                    _ => None,
                 };
-                self.mode = Mode::NewSession(
-                    DialogState::new(&self.profiles)
-                        .with_bypass_default(self.bypass_approvals_default, &self.profiles)
-                        .with_backend_options(default, available, &self.profiles)
-                        .with_experiments(self.tracing.is_some()),
-                );
+                self.open_new_session_dialog(p);
             }
+            Action::EditPersona => {
+                if let Some(agents_list::AgentKind::Persona(name)) = self.agent_focus().cloned() {
+                    self.edit_persona(&name);
+                }
+            }
+            Action::OpenNewAgent => self.open_new_agent(),
+            Action::NewAgentKey => self.handle_new_agent_key(key),
             Action::OpenHelp => self.mode = Mode::Help,
             Action::EnterConfirmKill => self.mode = Mode::ConfirmKill,
             Action::KillSelected => {
@@ -4550,6 +4461,17 @@ impl App {
         }
         if request.asset_id == "dialog:text" {
             self.dialog_editor_finished(&request.path);
+            return;
+        }
+        if let Some(name) = request.asset_id.strip_prefix("agent:") {
+            self.reload_personas();
+            let catalog = crate::agents::Catalog::load(&self.library_root(), None);
+            self.notice = Some(match catalog.entry(name) {
+                Some(e) if !e.problems.is_empty() => {
+                    Notice::warn(format!("agent {name}: {}", e.problems.join("; ")))
+                }
+                _ => Notice::info(format!("agent {name} saved")),
+            });
             return;
         }
         if request.asset_id == "loop:prompt" {
@@ -5515,6 +5437,7 @@ mod dispatch_tests {
 
     fn ctx(selected: Option<Status>) -> DispatchCtx {
         DispatchCtx {
+            agent_row: RowTag::Other,
             selected_status: selected,
             any_working: false,
             just_detached: false,
@@ -5552,8 +5475,15 @@ mod dispatch_tests {
             dispatch(&Mode::Control, &key(KeyCode::Enter), &c),
             Action::Attach
         ));
+        // n makes a new agent: the chooser, which starts on a session here
         assert!(matches!(
             dispatch(&Mode::Control, &key(KeyCode::Char('n')), &c),
+            Action::OpenNewAgent
+        ));
+        let mut hidden = ctx(Some(Status::Idle));
+        hidden.sidebar_hidden = true;
+        assert!(matches!(
+            dispatch(&Mode::Control, &key(KeyCode::Char('n')), &hidden),
             Action::OpenNewSession
         ));
     }
@@ -5778,6 +5708,7 @@ mod confirm_modes {
 
     fn ctx(selected: Option<Status>) -> DispatchCtx {
         DispatchCtx {
+            agent_row: RowTag::Other,
             selected_status: selected,
             any_working: false,
             just_detached: false,
@@ -6353,6 +6284,7 @@ mod history_tests {
 
     fn ctx() -> DispatchCtx {
         DispatchCtx {
+            agent_row: RowTag::Other,
             selected_status: None,
             any_working: false,
             just_detached: false,

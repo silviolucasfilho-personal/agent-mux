@@ -820,7 +820,7 @@ impl App {
         self.open_flow_builder_text(&text, origin, plan_agents, workspace);
     }
 
-    fn open_flow_builder_text(
+    pub(crate) fn open_flow_builder_text(
         &mut self,
         text: &str,
         origin: Origin,

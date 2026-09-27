@@ -446,6 +446,7 @@ exit 0
     app.clipboard_enabled = false;
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // the chooser starts on a session
     assert!(matches!(app.mode, Mode::NewSession(_)));
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(

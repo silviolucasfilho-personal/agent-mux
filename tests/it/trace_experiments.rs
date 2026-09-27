@@ -306,6 +306,7 @@ async fn a_dialog_launch_naming_an_experiment_is_recorded_when_it_ends() {
     app.clipboard_enabled = false;
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now()); // the chooser starts on a session
     let Mode::NewSession(dialog) = &mut app.mode else {
         panic!("dialog did not open");
     };

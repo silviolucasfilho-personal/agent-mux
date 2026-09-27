@@ -66,64 +66,16 @@ pub fn sidebar_window(selected: usize, len: usize, visible: usize) -> usize {
     }
 }
 
-/// Splits the sidebar into active sessions, the three development
-/// sections, and a compact history section. A development section with
-/// nothing in it shrinks to its title and a one-line hint, and the rows it
-/// frees go to the others.
-pub fn sidebar_areas(
-    total_height: u16,
-    agent_count: usize,
-    loop_count: usize,
-    workflow_count: usize,
-) -> (Rect, Rect, Rect, Rect, Rect) {
+/// Splits the sidebar into the Agents list and a compact History: History
+/// keeps up to six rows (fewer when it has fewer sessions, and never more
+/// than a third of the height); the Agents list takes the rest.
+pub fn sidebar_areas(total_height: u16, history_count: usize) -> (Rect, Rect) {
     let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
-    // Active keeps its quarter. History is capped at four rows; on a short
-    // terminal it yields rows until Agents, Loops and Workflows can each keep
-    // two. The three development sections share every remaining row.
-    let active_rows = side_area.height / 4;
-    let rest = side_area.height.saturating_sub(active_rows);
-    let history_rows = if rest == 0 {
-        0
-    } else {
-        rest.saturating_sub(6).clamp(1, 4)
-    };
-    let development_rows = rest.saturating_sub(history_rows);
-    let empty = [agent_count == 0, loop_count == 0, workflow_count == 0];
-    let open = empty.iter().filter(|e| !**e).count() as u16;
-    // an empty section keeps a border and one line, never more than an
-    // equal share would give it
-    let closed_rows = (development_rows / 3).min(3);
-    let [agent_rows, loop_rows, workflow_rows] = if open == 0 || open == 3 {
-        let shared_rows = development_rows / 3;
-        let remainder = development_rows % 3;
-        [
-            shared_rows + u16::from(remainder > 0),
-            shared_rows + u16::from(remainder > 1),
-            shared_rows,
-        ]
-    } else {
-        let spare = development_rows.saturating_sub(closed_rows * (3 - open));
-        let share = spare / open;
-        let mut remainder = spare % open;
-        empty.map(|e| {
-            if e {
-                closed_rows
-            } else {
-                let extra = u16::from(remainder > 0);
-                remainder = remainder.saturating_sub(1);
-                share + extra
-            }
-        })
-    };
-    let [active, skills, loops, workflows, history] = Layout::vertical([
-        Constraint::Length(active_rows),
-        Constraint::Length(agent_rows),
-        Constraint::Length(loop_rows),
-        Constraint::Length(workflow_rows),
-        Constraint::Length(history_rows),
-    ])
-    .areas(side_area);
-    (active, skills, loops, workflows, history)
+    let wanted = (history_count as u16 + 2).clamp(3, 6);
+    let history_rows = wanted.min(side_area.height / 3);
+    let [agents, history] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(history_rows)]).areas(side_area);
+    (agents, history)
 }
 
 /// Char-boundary-safe truncation with an ellipsis. Byte slicing here
@@ -332,6 +284,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::WorkflowsView(view) => draw_workflows_view(f, view, app),
         Mode::Inbox(state) => draw_inbox(f, state),
         Mode::FlowBuilder(state) => flow::draw(f, state),
+        Mode::NewAgent(state) => draw_new_agent(f, state),
         Mode::LoopBuilder(state) => loop_builder::draw(f, state),
         Mode::ConfirmRemoveLoop => draw_confirm(
             f,
@@ -342,171 +295,33 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let (active_area, agents_area, loops_area, workflows_area, history_area) = sidebar_areas(
-        area.height,
-        app.skills.len(),
-        app.loop_registry.loops.len(),
-        app.workflow_section_lines().len(),
-    );
-
-    draw_active_sidebar(f, active_area, app, now);
-    draw_agents_sidebar(f, agents_area, app);
-    draw_loops_sidebar(f, loops_area, app);
-    draw_workflows_sidebar(f, workflows_area, app);
+    let (agents_area, history_area) = sidebar_areas(area.height, app.history_sessions.len());
+    draw_agents_list(f, agents_area, app, now);
     draw_history_sidebar(f, history_area, app);
 }
 
-fn draw_workflows_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    use crate::app::workflows::{SectionLine, WorkflowRow};
+/// The Agents list (`app::agents_list`): harnesses, scheduled agents,
+/// flows, skills and personas, with running sessions under their agent.
+fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
+    use crate::app::agents_list::AgentKind;
     let is_focused =
-        app.sidebar_section == SidebarSection::Workflows && matches!(app.mode, Mode::Control);
-    let n = app.workflow_list.len();
-    let live = app.live_workflow_runs.len();
-    let title = if live > 0 {
-        format!("Workflows · {live} running")
-    } else {
-        format!("Workflows [{n}]")
-    };
-    let border_style = if is_focused {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let title_style = if is_focused {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(format!(" {title} "), title_style));
-    let rows = app.workflow_rows();
-    if rows.is_empty() {
-        let hint = Paragraph::new("[n] build one step by step  [c] compose one for a task")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
-        f.render_widget(hint, area);
-        return;
-    }
-    let lines = app.workflow_section_lines();
-    let visible = usize::from(area.height.saturating_sub(2));
-    let start = app.workflow_section_start(&lines, visible);
-    let end = (start + visible.max(1)).min(lines.len());
-    let inner_width = usize::from(area.width.saturating_sub(2));
-    let items: Vec<ListItem> = lines[start..end]
+        app.sidebar_section != SidebarSection::History && matches!(app.mode, Mode::Control);
+    let lines = app.agent_lines();
+    let cursor = app.agent_cursor(&lines);
+    let running = app
+        .sessions
         .iter()
-        .map(|line| {
-            let i = match line {
-                SectionLine::Header(h) => {
-                    return ListItem::new(Line::styled(
-                        h.to_string(),
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                }
-                SectionLine::Row(i) => *i,
-            };
-            let is_selected = i == app.selected_workflow;
-            let marker = if is_selected && is_focused {
-                "> "
-            } else if is_selected {
-                "* "
-            } else {
-                "  "
-            };
-            let (glyph, color, name, right) = match &rows[i] {
-                WorkflowRow::Live(id) => {
-                    let r = app.live_workflow_runs.iter().find(|r| &r.run_id == id);
-                    (
-                        "▶",
-                        Color::Cyan,
-                        r.map(|r| r.name.clone()).unwrap_or_default(),
-                        r.map(|r| {
-                            format!("{}/{}", r.state.records.len(), r.state.sessions_started)
-                        })
-                        .unwrap_or_default(),
-                    )
-                }
-                WorkflowRow::Planned(id) => {
-                    let p = app.planned_workflows.iter().find(|p| &p.id == id);
-                    let ok = p.is_some_and(|p| p.valid());
-                    (
-                        if ok { "⏸" } else { "!" },
-                        if ok { Color::Cyan } else { Color::Yellow },
-                        p.map(|p| p.name.clone()).unwrap_or_default(),
-                        "plan".to_string(),
-                    )
-                }
-                WorkflowRow::Recent(id) => {
-                    let r = app.recent_workflow_runs.iter().find(|r| &r.run_id == id);
-                    let ok = r.is_some_and(|r| r.status == "finished" && r.error.is_none());
-                    (
-                        if ok { "✓" } else { "!" },
-                        if ok { Color::Green } else { Color::Yellow },
-                        r.map(|r| r.name.clone()).unwrap_or_default(),
-                        r.map(|r| {
-                            if ok {
-                                "done".to_string()
-                            } else {
-                                r.status.clone()
-                            }
-                        })
-                        .unwrap_or_default(),
-                    )
-                }
-                WorkflowRow::Doc(d) => {
-                    let e = &app.workflow_list[*d];
-                    if e.valid() {
-                        (" ", Color::DarkGray, e.name.clone(), String::new())
-                    } else {
-                        ("!", Color::Yellow, e.name.clone(), "invalid".to_string())
-                    }
-                }
-            };
-            let right = truncate_chars(&right, 8);
-            let name_width = inner_width
-                .saturating_sub(4 + right.chars().count() + 1)
-                .max(6);
-            let line = Line::from(vec![
-                Span::raw(marker),
-                Span::styled(format!("{glyph} "), Style::default().fg(color)),
-                Span::styled(
-                    format!("{:<w$}", truncate_chars(&name, name_width), w = name_width),
-                    if is_selected {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::White)
-                    },
-                ),
-                Span::styled(format!(" {right}"), Style::default().fg(color)),
-            ]);
-            let item = ListItem::new(line);
-            if is_selected && is_focused {
-                item.style(Style::default().add_modifier(Modifier::REVERSED))
-            } else {
-                item
-            }
-        })
-        .collect();
-    f.render_widget(List::new(items).block(block), area);
-}
-
-fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    let is_focused =
-        app.sidebar_section == SidebarSection::Loops && matches!(app.mode, Mode::Control);
-    let n = app.loop_registry.loops.len();
-    let title = if app.loop_registry.pause_all {
-        format!("Loops [{}] PAUSED", n)
-    } else if n == 0 {
-        "Loops [0]".to_string()
+        .filter(|s| !matches!(s.status(now), Status::Exited(_)))
+        .count();
+    let mut title = if running > 0 {
+        format!("Agents · {running} running")
     } else {
-        format!("Loops [{}/{}]", (app.selected_loop + 1).min(n), n)
+        "Agents".to_string()
     };
-    let border_style = if is_focused {
+    if app.loop_registry.pause_all {
+        title.push_str(" · PAUSED");
+    }
+    let accent = if is_focused {
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
@@ -518,360 +333,227 @@ fn draw_loops_sidebar(f: &mut Frame, area: Rect, app: &App) {
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD)
     } else if is_focused {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        accent
     } else {
         Style::default().fg(Color::Gray)
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style)
+        .border_style(accent)
         .title(Span::styled(format!(" {title} "), title_style));
-    if n == 0 {
-        let hint = Paragraph::new("[n] new loop  [o] patterns")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(block);
-        f.render_widget(hint, area);
-        return;
-    }
+    let inner = usize::from(area.width.saturating_sub(2));
     let visible = usize::from(area.height.saturating_sub(2));
-    let start = sidebar_window(app.selected_loop, n, visible);
-    let end = (start + visible.max(1)).min(n);
-    // Marker, glyph, then the pattern and the workspace sharing the rest
-    // with the right label: two loops of one pattern differ by workspace.
-    let name_width = usize::from(area.width.saturating_sub(2))
-        .saturating_sub(9)
-        .max(6);
-    let items: Vec<ListItem> = app.loop_registry.loops[start..end]
-        .iter()
-        .enumerate()
-        .map(|(offset, entry)| {
-            let i = start + offset;
-            let is_selected = i == app.selected_loop;
-            let marker = if is_selected && is_focused {
-                "> "
-            } else if is_selected {
-                "* "
-            } else {
-                "  "
-            };
-            let (status, right) = app.loop_row(entry);
-            let pattern = truncate_chars(&entry.pattern, name_width);
-            let room = name_width.saturating_sub(pattern.chars().count() + 1);
-            let workspace = if room >= 5 {
-                format!(" {}", truncate_chars(&entry.workspace_name(), room))
-            } else {
-                String::new()
-            };
-            let line = Line::from(vec![
-                Span::raw(marker),
-                Span::styled(
-                    format!("{} ", status.glyph()),
-                    Style::default().fg(status.color()),
-                ),
-                Span::styled(
-                    pattern.clone(),
-                    if is_selected {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::White)
-                    },
-                ),
-                Span::styled(
-                    format!(
-                        "{:<w$}",
-                        workspace,
-                        w = name_width - pattern.chars().count()
-                    ),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(format!(" {right:>4}"), Style::default().fg(status.color())),
-            ]);
-            let item = ListItem::new(line);
-            if is_selected && is_focused {
-                item.style(Style::default().add_modifier(Modifier::REVERSED))
-            } else {
-                item
-            }
-        })
-        .collect();
-    f.render_widget(List::new(items).block(block), area);
-}
-
-fn draw_active_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let is_focused =
-        app.sidebar_section == SidebarSection::Active && matches!(app.mode, Mode::Control);
-    // The tree, and the cursor's place in it: with a run folded away the
-    // session index and the drawn position are no longer the same number.
-    let rows = app.active_rows();
-    let drawn = crate::tree::visible_items(&rows);
-    let title = if app.sessions.is_empty() {
-        "Active [0]".to_string()
-    } else {
-        let at = drawn
-            .iter()
-            .position(|i| *i == app.selected)
-            .map(|n| n + 1)
-            .unwrap_or(app.selected + 1);
-        format!("Active [{at}/{}]", app.sessions.len())
-    };
-    let border_style = if is_focused {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(
-            format!(" {title} "),
-            if is_focused {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            },
-        ));
-
-    if app.sessions.is_empty() {
-        let hint = Paragraph::new("no sessions\n\n[n] new session").block(block);
-        f.render_widget(hint, area);
-        return;
+    let start = sidebar_window(cursor.unwrap_or(0), lines.len(), visible.saturating_sub(1));
+    let end = (start + visible.max(1)).min(lines.len());
+    let wf_rows = app.workflow_rows();
+    // the digit beside a session is the digit that selects it
+    let mut digit = 0usize;
+    let mut digits = std::collections::HashMap::new();
+    for l in &lines {
+        if let AgentKind::Session(i) = l.kind {
+            digit += 1;
+            digits.insert(i, digit);
+        }
     }
-
-    // The cursor sits on a row, not on a session index, so the scroll
-    // window has to follow the row.
-    let cursor = crate::tree::row_of(&rows, app.selected).unwrap_or(0);
-    let visible = usize::from(area.height.saturating_sub(2));
-    let start = sidebar_window(cursor, rows.len(), visible);
-    let end = (start + visible.max(1)).min(rows.len());
-    // Numbering counts drawn sessions, so the digit beside a row is the
-    // digit that selects it.
-    let numbers: std::collections::HashMap<usize, usize> = drawn
-        .into_iter()
-        .enumerate()
-        .map(|(n, index)| (index, n))
-        .collect();
-    let items: Vec<ListItem> = rows[start..end]
-        .iter()
-        .enumerate()
-        .map(|(offset, row)| {
-            session_row(
-                app,
-                row,
-                start + offset == cursor,
-                is_focused,
-                &numbers,
-                now,
-            )
-        })
-        .collect();
-    f.render_widget(List::new(items).block(block), area);
-}
-
-/// One row of the Active tree: a loop or workflow header, or a session
-/// under it.
-fn session_row<'a>(
-    app: &'a App,
-    row: &crate::tree::Row,
-    is_cursor: bool,
-    is_focused: bool,
-    numbers: &std::collections::HashMap<usize, usize>,
-    now: Instant,
-) -> ListItem<'a> {
-    let marker = if is_cursor { "> " } else { "  " };
-    let spans = match row {
-        crate::tree::Row::Group {
-            kind,
-            title,
-            detail,
-            members,
-            collapsed,
-            ..
-        } => {
-            // A folded header answers for the family it hides: how many
-            // calls, and how many of them are still running.
-            let running = members
-                .iter()
-                .filter_map(|i| app.sessions.get(*i))
-                .filter(|s| !matches!(s.status(now), Status::Exited(_)))
-                .count();
-            let mut spans = vec![
-                Span::raw(marker.to_string()),
-                Span::styled(
-                    if *collapsed { "▸ " } else { "▾ " }.to_string(),
-                    Style::default().fg(Color::DarkGray),
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut items: Vec<ListItem> = Vec::new();
+    for (n, line) in lines[start..end].iter().enumerate() {
+        let is_cursor = cursor == Some(start + n);
+        let marker = if is_cursor { "> " } else { "  " };
+        // name, then a right-hand label, both fitted to the row
+        let (glyph, gstyle, name, right, rstyle): (String, Style, String, String, Style) =
+            match &line.kind {
+                AgentKind::Header(h) => {
+                    items.push(ListItem::new(Line::styled(format!(" {h}"), dim)));
+                    continue;
+                }
+                AgentKind::Harness(p) => (
+                    String::new(),
+                    dim,
+                    app.profiles
+                        .get(*p)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default(),
+                    "harness".into(),
+                    dim,
                 ),
-                Span::styled(
-                    format!("{} ", kind.glyph()),
-                    Style::default().fg(Color::Magenta),
-                ),
-                Span::styled(
-                    truncate_chars(title, 14),
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                if running > 0 {
-                    Span::styled(
-                        format!(" {running}/{}▶", members.len()),
+                AgentKind::Session(i) => {
+                    let Some(s) = app.sessions.get(*i) else {
+                        continue;
+                    };
+                    let (label, style) = status_label_style(s.status(now));
+                    let name = match &s.group {
+                        Some(g) if !g.label.is_empty() => g.label.clone(),
+                        _ => s.profile.name.clone(),
+                    };
+                    let d = digits.get(i).filter(|d| **d <= 9);
+                    (
+                        format!(
+                            "├ {}",
+                            d.map(|d| format!("{d} ")).unwrap_or_else(|| "  ".into())
+                        ),
+                        dim,
+                        name,
+                        label,
+                        style,
+                    )
+                }
+                AgentKind::Loop(i) => {
+                    let Some(entry) = app.loop_registry.loops.get(*i) else {
+                        continue;
+                    };
+                    let (status, right) = app.loop_row(entry);
+                    (
+                        format!("{} ", status.glyph()),
+                        Style::default().fg(status.color()),
+                        format!("{} {}", entry.pattern, entry.workspace_name()),
+                        format!("⟳ {right}"),
+                        Style::default().fg(Color::Cyan),
+                    )
+                }
+                AgentKind::Flow(i) => {
+                    let Some(row) = wf_rows.get(*i) else { continue };
+                    let (g, color, name, right) = workflow_row_parts(app, row);
+                    (
+                        format!("{g} "),
+                        Style::default().fg(color),
+                        name,
+                        if right.is_empty() {
+                            "⚙".into()
+                        } else {
+                            right
+                        },
+                        Style::default().fg(color),
+                    )
+                }
+                AgentKind::Skill(i) => {
+                    let Some(skill) = app.skills.get(*i) else {
+                        continue;
+                    };
+                    let running = app
+                        .running_skill_harness(&skill.id)
+                        .map(|h| h.as_str().to_string())
+                        .unwrap_or_default();
+                    (
+                        format!("{} ", skill.icon.as_deref().unwrap_or("⚡")),
+                        Style::default().fg(Color::Yellow),
+                        skill.name.clone(),
+                        running,
                         Style::default().fg(Color::Green),
                     )
-                } else {
-                    Span::styled(
-                        format!(" {}", members.len()),
-                        Style::default().fg(Color::DarkGray),
+                }
+                AgentKind::Run(key) => {
+                    let g = app
+                        .sessions
+                        .iter()
+                        .find_map(|s| s.group.as_ref().filter(|g| g.key() == *key));
+                    let Some(g) = g else { continue };
+                    (
+                        format!("{} ", g.kind.glyph()),
+                        Style::default().fg(Color::Magenta),
+                        g.title.clone(),
+                        truncate_chars(&g.detail, 10),
+                        dim,
                     )
-                },
-            ];
-            spans.push(Span::styled(
-                format!(" {}", truncate_chars(detail, 10)),
-                Style::default().fg(Color::DarkGray),
-            ));
-            spans
-        }
-        crate::tree::Row::Item { index, depth, last } => {
-            let Some(s) = app.sessions.get(*index) else {
-                return ListItem::new(Line::raw(String::new()));
+                }
+                AgentKind::Persona(name) => (
+                    "◇ ".into(),
+                    Style::default().fg(Color::Magenta),
+                    name.clone(),
+                    String::new(),
+                    dim,
+                ),
             };
-            let (label, style) = status_label_style(s.status(now));
-            let num = match numbers.get(index) {
-                Some(n) if *n < 9 => format!("{} ", n + 1),
-                _ => "  ".into(),
-            };
-            // A session the tree owns says what it is in the run (a
-            // workflow step, a loop run); a loose one keeps its profile.
-            let name = match (&s.group, depth) {
-                (Some(g), 1) if !g.label.is_empty() => g.label.clone(),
-                _ => s.profile.name.clone(),
-            };
-            let mut spans = vec![Span::raw(marker.to_string())];
-            if *depth > 0 {
-                spans.push(Span::styled(
-                    if *last { "└ " } else { "├ " }.to_string(),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            spans.push(Span::styled(num, Style::default().fg(Color::DarkGray)));
-            spans.push(Span::raw(format!("{} ", truncate_chars(&name, 12))));
-            spans.push(Span::styled(format!("[{label}]"), style));
-            if s.trace.is_some() {
-                spans.push(Span::styled(
-                    format!(
-                        " {}",
-                        trace_badge(s.trace_stats.as_ref(), false, session_backend(s))
-                    ),
-                    Style::default().fg(Color::Cyan),
-                ));
-            }
-            spans
-        }
-    };
-    let item = ListItem::new(Line::from(spans));
-    if is_cursor && is_focused {
-        item.style(Style::default().add_modifier(Modifier::REVERSED))
-    } else if is_cursor {
-        item.style(Style::default().fg(Color::Cyan))
-    } else {
-        item
+        let indent = if line.depth > 0 { " " } else { "" };
+        let right = truncate_chars(&right, 11);
+        // display width, not characters: an icon may take two columns
+        let width = |t: &str| Span::raw(t.to_string()).width();
+        let used = width(marker) + width(indent) + width(&glyph) + width(&right) + 1;
+        let room = inner.saturating_sub(used).max(4);
+        let name = truncate_chars(&name, room);
+        let pad = room.saturating_sub(width(&name));
+        let name_style = if line.depth == 0 {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let item = ListItem::new(Line::from(vec![
+            Span::raw(marker),
+            Span::raw(indent),
+            Span::styled(glyph, gstyle),
+            Span::styled(name, name_style),
+            Span::raw(" ".repeat(pad + 1)),
+            Span::styled(right, rstyle),
+        ]));
+        items.push(if is_cursor && is_focused {
+            item.style(Style::default().add_modifier(Modifier::REVERSED))
+        } else if is_cursor {
+            item.style(Style::default().fg(Color::Cyan))
+        } else {
+            item
+        });
     }
+    if lines.is_empty() {
+        items.push(ListItem::new(Line::styled(" no agents: n makes one", dim)));
+    } else if end == lines.len() && items.len() < visible {
+        items.push(ListItem::new(Line::styled(" + new agent  n", dim)));
+    }
+    f.render_widget(List::new(items).block(block), area);
 }
 
-fn draw_agents_sidebar(f: &mut Frame, area: Rect, app: &App) {
-    let is_focused =
-        app.sidebar_section == SidebarSection::Agents && matches!(app.mode, Mode::Control);
-    let border_style = if is_focused {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let title = if app.skills.is_empty() {
-        "Agents [0]".to_string()
-    } else {
-        let current = (app.selected_agent + 1).min(app.skills.len());
-        format!("Agents [{current}/{}]", app.skills.len())
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(Span::styled(
-            format!(" {title} "),
-            if is_focused {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            },
-        ));
-
-    if app.skills.is_empty() {
-        let hint = Paragraph::new("no skills found\n\n~/.agent-mux/skills/").block(block);
-        f.render_widget(hint, area);
-        return;
-    }
-
-    let visible = usize::from(area.height.saturating_sub(2));
-    let start = sidebar_window(app.selected_agent, app.skills.len(), visible);
-    let end = (start + visible.max(1)).min(app.skills.len());
-    let items: Vec<ListItem> = app.skills[start..end]
-        .iter()
-        .enumerate()
-        .map(|(offset, agent)| {
-            let i = start + offset;
-            let is_selected = i == app.selected_agent;
-            let marker = if is_selected && is_focused {
-                "> "
-            } else if is_selected {
-                "* "
-            } else {
-                "  "
-            };
-
-            let running_harness = app.running_skill_harness(&agent.id);
-
-            let icon_str = agent.icon.as_deref().unwrap_or("⚡");
-            let mut spans = vec![
-                Span::raw(marker),
-                Span::styled(format!("{icon_str} "), Style::default().fg(Color::Yellow)),
-                Span::styled(
-                    &agent.name,
-                    if is_selected && is_focused {
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else if is_selected {
-                        Style::default().fg(Color::Cyan)
+/// Glyph, colour, name and right-hand label of a workflow row.
+fn workflow_row_parts(
+    app: &App,
+    row: &crate::app::workflows::WorkflowRow,
+) -> (&'static str, Color, String, String) {
+    use crate::app::workflows::WorkflowRow;
+    match row {
+        WorkflowRow::Live(id) => {
+            let r = app.live_workflow_runs.iter().find(|r| &r.run_id == id);
+            (
+                "▶",
+                Color::Cyan,
+                r.map(|r| r.name.clone()).unwrap_or_default(),
+                r.map(|r| format!("{}/{}", r.state.records.len(), r.state.sessions_started))
+                    .unwrap_or_default(),
+            )
+        }
+        WorkflowRow::Planned(id) => {
+            let p = app.planned_workflows.iter().find(|p| &p.id == id);
+            let ok = p.is_some_and(|p| p.valid());
+            (
+                if ok { "⏸" } else { "!" },
+                if ok { Color::Cyan } else { Color::Yellow },
+                p.map(|p| p.name.clone()).unwrap_or_default(),
+                "plan".to_string(),
+            )
+        }
+        WorkflowRow::Recent(id) => {
+            let r = app.recent_workflow_runs.iter().find(|r| &r.run_id == id);
+            let ok = r.is_some_and(|r| r.status == "finished" && r.error.is_none());
+            (
+                if ok { "✓" } else { "!" },
+                if ok { Color::Green } else { Color::Yellow },
+                r.map(|r| r.name.clone()).unwrap_or_default(),
+                r.map(|r| {
+                    if ok {
+                        "done".to_string()
                     } else {
-                        Style::default().fg(Color::White)
-                    },
-                ),
-            ];
-            if let Some(h) = running_harness {
-                spans.push(Span::styled(
-                    format!(" [{}]", h.as_str()),
-                    Style::default().fg(Color::Green),
-                ));
-            }
-
-            let line = Line::from(spans);
-            let item = ListItem::new(line);
-            if is_selected && is_focused {
-                item.style(Style::default().add_modifier(Modifier::REVERSED))
-            } else if is_selected {
-                item.style(Style::default().fg(Color::Cyan))
+                        r.status.clone()
+                    }
+                })
+                .unwrap_or_default(),
+            )
+        }
+        WorkflowRow::Doc(d) => {
+            let e = &app.workflow_list[*d];
+            if e.valid() {
+                (" ", Color::DarkGray, e.name.clone(), String::new())
             } else {
-                item
+                ("!", Color::Yellow, e.name.clone(), "invalid".to_string())
             }
-        })
-        .collect();
-    f.render_widget(List::new(items).block(block), area);
+        }
+    }
 }
 
 fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
@@ -960,6 +642,23 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
+    // a harness or persona row: its card
+    if !app.sidebar_hidden
+        && matches!(app.mode, Mode::Control)
+        && app.sidebar_section != SidebarSection::History
+    {
+        match app.agent_row() {
+            Some(crate::app::agents_list::AgentKind::Harness(p)) => {
+                draw_harness_card(f, area, app, p, now);
+                return;
+            }
+            Some(crate::app::agents_list::AgentKind::Persona(name)) => {
+                draw_persona_card(f, area, app, &name);
+                return;
+            }
+            _ => {}
+        }
+    }
     if !app.sidebar_hidden
         && app.sidebar_section == SidebarSection::Agents
         && matches!(app.mode, Mode::Control)
@@ -1850,32 +1549,44 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                         "[b] sidebar  [Tab] select  [Enter] attach  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
                     ))
                 } else {
-                    match app.sidebar_section {
-                        SidebarSection::Active => Line::raw(fit(
-                            "[b] side [Enter] attach [n] new [S] skills [C] config [X] clear exited [t/T] trace [?] help [q] quit",
+                    use crate::app::agents_list::AgentKind;
+                    let row = if app.sidebar_section == SidebarSection::History {
+                        None
+                    } else {
+                        app.agent_row()
+                    };
+                    match (app.sidebar_section, row) {
+                        (SidebarSection::History, _) => Line::raw(fit(
+                            "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
                         )),
-                        SidebarSection::Agents => Line::raw(fit(
-                            "[b] sidebar  [Enter/h] launch agent  [Tab] loops  [n] new  [S] skills  [C] config  [?] help  [q] quit",
+                        (_, Some(AgentKind::Harness(_))) => Line::raw(fit(
+                            "[Enter] new session  [n] new agent  [Tab] history  [S] skills  [C] config  [?] help  [q] quit",
                         )),
-                        SidebarSection::Loops => {
-                            if app.loop_registry.pause_all {
-                                Line::styled(
-                                    fit(
-                                        "‖ LOOPS PAUSED  [K] resume all  [Enter] details  [r] run now  [p] pause  [n] new  [e] edit  [d] remove",
-                                    ),
-                                    Style::default().fg(Color::Yellow),
-                                )
-                            } else {
-                                Line::raw(fit(
-                                    "[b] sidebar  [Enter] details  [r] run now  [p] pause  [n] new  [e] edit  [d] remove  [o] its pattern  [K] kill  [?] help",
-                                ))
-                            }
+                        (_, Some(AgentKind::Session(_))) => Line::raw(fit(
+                            "[Enter] attach  [n] new agent  [x] stop  [d] remove  [X] clear exited  [t/T] trace  [Tab] history  [?] help  [q] quit",
+                        )),
+                        (_, Some(AgentKind::Loop(_))) if app.loop_registry.pause_all => {
+                            Line::styled(
+                                fit(
+                                    "‖ LOOPS PAUSED  [K] resume all  [Enter] details  [n] new agent  [r] run now  [p] pause  [e] edit  [d] remove",
+                                ),
+                                Style::default().fg(Color::Yellow),
+                            )
                         }
-                        SidebarSection::Workflows => Line::raw(fit(
-                            "[b] sidebar  [Enter] run / view  [n] new flow  [e] edit  [c] compose  [x] stop  [d] discard plan  [⌃O] file  [W] view  [?] help",
+                        (_, Some(AgentKind::Loop(_))) => Line::raw(fit(
+                            "[Enter] details  [r] run now  [p] pause  [n] new agent  [e] edit  [d] remove  [o] its pattern  [K] kill  [?] help",
                         )),
-                        SidebarSection::History => Line::raw(fit(
-                            "[b] sidebar  [Enter/r] restart  [a] all  [n] new  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
+                        (_, Some(AgentKind::Flow(_))) => Line::raw(fit(
+                            "[Enter] run / view  [n] new agent  [e] edit  [c] compose  [x] stop  [d] discard plan  [⌃O] file  [W] view  [?] help",
+                        )),
+                        (_, Some(AgentKind::Skill(_))) => Line::raw(fit(
+                            "[Enter] launch  [n] new agent  [S] skills  [C] config  [Tab] history  [b] sidebar  [?] help  [q] quit",
+                        )),
+                        (_, Some(AgentKind::Persona(_))) => Line::raw(fit(
+                            "[Enter/e] edit  [n] new agent  [Tab] history  [C] config  [?] help  [q] quit",
+                        )),
+                        _ => Line::raw(fit(
+                            "[j/k] its sessions  [n] new agent  [Tab] history  [b] sidebar  [?] help  [q] quit",
                         )),
                     }
                 }
@@ -1989,17 +1700,16 @@ fn draw_help(f: &mut Frame) {
         Line::raw(""),
         Line::styled("Control mode", head),
         row("b", "toggle sidebar (hide / full harness)"),
-        row("j/k, ↑/↓", "select session"),
         row(
-            "1-9, space",
-            "jump to session N · fold the session's loop or workflow",
+            "j/k, ↑/↓",
+            "walk the Agents list: sessions sit under their agent",
         ),
-        row("Tab", "cycle active / agents / loops / history sections"),
+        row("1-9", "jump to session N"),
+        row("Tab", "Agents list ⇄ History"),
         row(
             "Enter",
-            "attach (active), launch agent (agents), or restart (history)",
+            "new session (harness) · attach · launch / attach the selected agent",
         ),
-        row("h", "launch / attach the selected agent (agents)"),
         row("S", "skills view: every skill, where installed, when used"),
         row(
             "C",
@@ -2012,7 +1722,7 @@ fn draw_help(f: &mut Frame) {
         row("v", "about: version, build time, paths and this session"),
         row(
             "n",
-            "new, in the section: a session · a loop (Loops) · a flow (Workflows)",
+            "new agent: describe it, blank (session, scheduled, flow, persona) or a template",
         ),
         row("l", "browse past session logs"),
         row("t / T", "toggle tracing / browse local traces"),
@@ -2047,15 +1757,15 @@ fn draw_help(f: &mut Frame) {
         row("Tab, ←/→ · a", "switch pane · this project / all projects"),
         row("r or Enter", "resume the selected session"),
         Line::raw(""),
-        Line::styled("Workflows section", head),
+        Line::styled("A flow row", head),
         row(
-            "n e c x d",
-            "new flow · edit in the builder · compose for a task · stop · discard plan",
+            "Enter e c x d",
+            "run / view · edit in the builder · compose for a task · stop · discard plan",
         ),
-        Line::styled("Loops section", head),
+        Line::styled("A scheduled row", head),
         row(
-            "Enter r p n e d o",
-            "details · run now · pause · new · edit · remove · its pattern",
+            "Enter r p e d o",
+            "details · run now · pause · edit · remove · its pattern",
         ),
         row(
             "Loops view",
@@ -5564,6 +5274,205 @@ fn draw_workflows_view(f: &mut Frame, view: &WorkflowsViewState, app: &App) {
     );
 }
 
+fn card_row(key: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("  {key:<12}"), Style::default().fg(Color::Yellow)),
+        Span::raw(value),
+    ])
+}
+
+/// A harness profile as an agent: what it runs and its sessions.
+fn draw_harness_card(f: &mut Frame, area: Rect, app: &App, p: usize, now: Instant) {
+    let Some(profile) = app.profiles.get(p) else {
+        return;
+    };
+    let dim = Style::default().fg(Color::DarkGray);
+    let mine: Vec<&crate::session::Session> = app
+        .sessions
+        .iter()
+        .filter(|s| s.profile.name == profile.name && s.group.is_none() && s.skill_id.is_none())
+        .collect();
+    let running = mine
+        .iter()
+        .filter(|s| !matches!(s.status(now), Status::Exited(_)))
+        .count();
+    let mut lines = vec![
+        Line::styled(
+            format!(" {}", profile.name),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            " A built-in agent: the harness as it is, in a folder you pick.",
+            dim,
+        ),
+        Line::raw(""),
+        card_row(
+            "Runs",
+            format!("{} {}", profile.command, profile.args.join(" ")),
+        ),
+        card_row(
+            "Model",
+            profile
+                .model
+                .clone()
+                .unwrap_or_else(|| "the CLI's default".into()),
+        ),
+        card_row("Sessions", format!("{} · {running} running", mine.len())),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("  ↩ n", Style::default().fg(Color::Cyan)),
+            Span::raw(" new session   "),
+            Span::styled("j k", Style::default().fg(Color::Cyan)),
+            Span::raw(" its sessions are the rows under it"),
+        ]),
+        Line::styled("  Profiles are edited in profiles.toml (C, Settings).", dim),
+    ];
+    lines.shrink_to_fit();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", profile.name));
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// A persona agent: who it is, its tools and models.
+fn draw_persona_card(f: &mut Frame, area: Rect, app: &App, name: &str) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let catalog = crate::agents::Catalog::load(&app.library_root(), None);
+    let Some(entry) = catalog.entry(name) else {
+        return;
+    };
+    let mut lines = vec![Line::styled(
+        format!(" ◇ {name}"),
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    )];
+    match &entry.spec {
+        Some(spec) => {
+            lines.push(Line::raw(format!(" {}", spec.description)));
+            lines.push(Line::raw(""));
+            lines.push(card_row("Tools", spec.tools_label()));
+            lines.push(card_row(
+                "Changes",
+                if spec.can(&crate::agents::Tool::Edit) {
+                    "edits files: in a worktree, you apply its change".into()
+                } else {
+                    "reads and reports only".into()
+                },
+            ));
+            for h in crate::agents::HARNESSES {
+                if let Some(m) = spec.model_for(h) {
+                    lines.push(card_row(&format!("Model {h}"), m));
+                }
+            }
+            lines.push(card_row("Source", entry.source.label().into()));
+            lines.push(Line::raw(""));
+            for l in spec.instructions.lines().take(12) {
+                lines.push(Line::styled(format!("  {l}"), dim));
+            }
+        }
+        None => {
+            for p in &entry.problems {
+                lines.push(Line::styled(
+                    format!(" ✗ {p}"),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("  e", Style::default().fg(Color::Cyan)),
+        Span::raw(" edit (a built-in becomes your copy)   "),
+        Span::styled("n", Style::default().fg(Color::Cyan)),
+        Span::raw(" new agent   used by flows: agent = \""),
+        Span::raw(name.to_string()),
+        Span::raw("\""),
+    ]));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {name} "));
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(block),
+        area,
+    );
+}
+
+/// `n` in the Agents list: how the new agent starts.
+fn draw_new_agent(f: &mut Frame, st: &crate::app::new_agent::NewAgentState) {
+    let area = centered(f.area(), 100, 32);
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " New agent ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let dim = Style::default().fg(Color::DarkGray);
+    let head = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let w = usize::from(inner.width);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut sel_line = 0;
+    let mut group = "";
+    for (i, c) in st.choices.iter().enumerate() {
+        if c.group != group {
+            group = c.group;
+            let n = match group {
+                "Describe it" => "1",
+                "Blank" => "2",
+                _ => "3",
+            };
+            if !lines.is_empty() {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::styled(format!(" {n}  {group}"), head));
+        }
+        if i == st.selected {
+            sel_line = lines.len();
+        }
+        let on = i == st.selected;
+        let label = format!("    {:<30}", truncate_chars(&c.label, 30));
+        let detail = truncate_chars(&c.detail, w.saturating_sub(36));
+        lines.push(Line::from(vec![
+            Span::styled(
+                label,
+                if on {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                },
+            ),
+            Span::styled(format!(" {detail}"), dim),
+        ]));
+    }
+    let visible = usize::from(inner.height).saturating_sub(2);
+    let start = sel_line.saturating_sub(visible.saturating_sub(3));
+    let mut body: Vec<Line> = lines.into_iter().skip(start).take(visible).collect();
+    body.push(Line::raw(""));
+    body.push(Line::from(vec![
+        Span::styled(" 1 2 3", Style::default().fg(Color::Cyan)),
+        Span::styled(" how to start   ", dim),
+        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+        Span::styled(" choose   ", dim),
+        Span::styled("↩", Style::default().fg(Color::Cyan)),
+        Span::styled(" start   ", dim),
+        Span::styled("Esc", Style::default().fg(Color::Cyan)),
+        Span::styled(" cancel", dim),
+    ]));
+    f.render_widget(Paragraph::new(body), inner);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5693,8 +5602,12 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("no sessions"), "got: {text}");
-        assert!(text.contains("[n]"), "keybinding hint missing: {text}");
+        // the cursor starts on the first harness agent: its card says how to start
+        assert!(text.contains("Agents"), "got: {text}");
+        assert!(
+            text.contains("new session"),
+            "keybinding hint missing: {text}"
+        );
     }
 
     #[test]
@@ -5764,7 +5677,6 @@ mod tests {
             "open the selected execution's traces",
             "list → tree → timeline → loop",
             "fold a loop or workflow run",
-            "fold the session's loop or workflow",
             "also sent to Langfuse",
             "resume the selected session",
             "clear all exited sessions",
@@ -5797,12 +5709,14 @@ mod tests {
     }
 
     #[test]
-    fn active_control_hint_advertises_clear_exited() {
+    fn a_harness_row_hint_offers_a_session_and_a_new_agent() {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let app = App::new(Config::default_profiles(), None, tx);
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
-        assert!(buffer_text(&terminal).contains("[X] clear exited"));
+        let text = buffer_text(&terminal);
+        assert!(text.contains("[Enter] new session"), "{text}");
+        assert!(text.contains("[n] new agent"), "{text}");
     }
 
     #[test]

@@ -329,7 +329,15 @@ There are three separate notions of "history": terminal scrollback (memory owned
 
 ### 4.1 Main screen
 
-#### Active sidebar (`draw_active_sidebar`)
+#### The sidebar: Agents and History (`draw_agents_list`, `src/app/agents_list.rs`)
+
+Since the agent-first redesign (`docs/superpowers/specs/2026-09-26-agent-first-design.md`) the sidebar has two sections. **Agents** lists everything runnable, one row each, under dim headings: the harness profiles (Claude Code, Codex, Antigravity) first, then `scheduled` agents (loops, `⟳ <next>`), `flows` (live runs, plans, recent runs and the workflow library, `⚙`), `skills` and `personas`. Every session is a row under the agent that started it: a plain session under its harness, a loop run under its loop, a workflow step under its run, a skill session under its skill; a run no other row stands for gets a row of its own. **History** keeps its few rows below.
+
+`j`/`k` walk the list (and on into History), `Tab` switches Agents ⇄ History, `1`-`9` select sessions in list order. The row under the cursor decides what the keys do, the way the old sections did: a session attaches, stops (`x`) and is removed (`d`); a harness starts a session (`Enter`); a scheduled row runs now (`r`), pauses (`p`), is edited (`e`) or removed (`d`); a flow row runs (`Enter`), opens in the builder (`e`) or is stopped (`x`); a skill launches (`Enter`); a persona is edited (`Enter`/`e`). `n` anywhere opens the new-agent chooser (describe it, blank, or a template), which starts on the kind of row the cursor is on. The status bar and the help overlay follow the row.
+
+The subsections below describe the older per-section model the rows reuse.
+
+#### Active sidebar (`draw_active_sidebar`, replaced by the Agents list)
 
 Title `Active [<drawn position>/<count>]`. Each session row shows a `>` marker, index `1`-`9`, profile name, a coloured status label, and a trace badge when the session is traced.
 
