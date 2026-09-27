@@ -129,7 +129,7 @@ impl Field {
 }
 
 const HARNESSES: [&str; 4] = ["", "claude", "codex", "agy"];
-const EFFORTS: [&str; 5] = ["", "low", "medium", "high", "max"];
+pub(crate) const EFFORTS: [&str; 5] = ["", "low", "medium", "high", "max"];
 
 /// What an inline text edit writes back to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +242,49 @@ impl AgentForm {
             to_workspace: true,
             error: None,
         }
+    }
+
+    /// The form of an agent file that loads.
+    pub(crate) fn from_spec(spec: &agents::AgentSpec) -> AgentForm {
+        let mut f = AgentForm::new(&spec.name);
+        f.purpose.set(spec.description.clone());
+        f.instructions.set(spec.instructions.clone());
+        let mut mcp = Vec::new();
+        match &spec.tools {
+            // the harness's own tool set: every tool the form knows
+            None => f.tools = [true; 4],
+            Some(tools) => {
+                f.tools = [false; 4];
+                for t in tools {
+                    match t {
+                        agents::Tool::Read => f.tools[0] = true,
+                        agents::Tool::Edit => f.tools[1] = true,
+                        agents::Tool::Shell => f.tools[2] = true,
+                        agents::Tool::Web => f.tools[3] = true,
+                        agents::Tool::Mcp(s) => mcp.push(s.clone()),
+                    }
+                }
+            }
+        }
+        f.mcp.set(mcp.join(", "));
+        for (i, h) in agents::HARNESSES.iter().enumerate() {
+            let b = spec.backends.get(*h);
+            let model = b
+                .and_then(|b| b.model.clone())
+                .or_else(|| spec.model.clone());
+            f.models[i].set(model.unwrap_or_default());
+            if i > 0 {
+                let effort = b
+                    .and_then(|b| b.effort.clone())
+                    .or_else(|| spec.effort.clone());
+                f.efforts[i - 1] = EFFORTS
+                    .iter()
+                    .position(|e| Some(*e) == effort.as_deref())
+                    .unwrap_or(0);
+            }
+        }
+        f.to_workspace = false;
+        f
     }
 
     pub fn text_mut(&mut self) -> Option<&mut TextArea> {
@@ -680,7 +723,7 @@ fn cycle<T: PartialEq + Copy>(all: &[T], cur: T, delta: isize) -> T {
 }
 
 /// What a key did to the builder.
-enum After {
+pub(crate) enum After {
     Stay,
     Close,
     Into(Box<Mode>),
@@ -758,7 +801,7 @@ impl App {
         let mut st = self.builder_state(Draft::blank(&name), Origin::New, workspace);
         st.focus = Focus::List;
         self.notice = Some(Notice::info("a new flow: n adds the first step"));
-        self.mode = Mode::FlowBuilder(Box::new(st));
+        self.mode = App::agent_editor_mode(super::agent_editor::AgentEditorState::flow(st));
     }
 
     /// `o` in the Workflows section: the selected document or plan in the
@@ -833,21 +876,9 @@ impl App {
                 st.plan_agents = plan_agents;
                 st.focus = Focus::List;
                 st.selected = 1.min(st.draft.len());
-                self.mode = Mode::FlowBuilder(Box::new(st));
+                self.mode = App::agent_editor_mode(super::agent_editor::AgentEditorState::flow(st));
             }
             Err(e) => self.notice = Some(Notice::error(e)),
-        }
-    }
-
-    pub fn handle_flow_builder_key(&mut self, key: &KeyEvent) {
-        let Mode::FlowBuilder(mut st) = std::mem::replace(&mut self.mode, Mode::Control) else {
-            return;
-        };
-        let after = self.flow_key(&mut st, key);
-        match after {
-            After::Stay => self.mode = Mode::FlowBuilder(st),
-            After::Close => self.mode = Mode::Control,
-            After::Into(m) => self.mode = *m,
         }
     }
 
@@ -857,7 +888,7 @@ impl App {
         st.clamp();
     }
 
-    fn flow_key(&mut self, st: &mut FlowBuilderState, key: &KeyEvent) -> After {
+    pub(crate) fn flow_key(&mut self, st: &mut FlowBuilderState, key: &KeyEvent) -> After {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // Ctrl+O: the text being typed goes to $EDITOR and comes back
         if ctrl && key.code == KeyCode::Char('o') && self.flow_text_mut(st).is_some() {
@@ -986,7 +1017,11 @@ impl App {
                 return;
             }
         };
-        let Mode::FlowBuilder(mut st) = std::mem::replace(&mut self.mode, Mode::Control) else {
+        let Mode::AgentEditor(mut ed) = std::mem::replace(&mut self.mode, Mode::Control) else {
+            return;
+        };
+        let super::agent_editor::Body::Flow(st) = &mut ed.body else {
+            self.mode = Mode::AgentEditor(ed);
             return;
         };
         if request.asset_id.starts_with("flow:agent:") {
@@ -1016,11 +1051,11 @@ impl App {
                     )))
                 }
             }
-        } else if let Some(t) = self.flow_text_mut(&mut st) {
+        } else if let Some(t) = self.flow_text_mut(st) {
             t.set(text.trim_end_matches('\n'));
         }
-        self.flow_refresh(&mut st);
-        self.mode = Mode::FlowBuilder(st);
+        self.flow_refresh(st);
+        self.mode = Mode::AgentEditor(ed);
     }
 
     fn flow_close(&mut self, st: &mut FlowBuilderState) -> After {

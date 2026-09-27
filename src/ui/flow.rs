@@ -98,24 +98,20 @@ fn passes(st: &FlowBuilderState, i: usize) -> (String, String) {
     }
 }
 
-pub fn draw(f: &mut Frame, st: &FlowBuilderState) {
-    // the last row stays the status bar, where notices show
-    let full = f.area();
-    let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
-    f.render_widget(Clear, area);
-    let [top, body, foot] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .areas(area);
-    draw_header(f, top, st);
+/// The builder's screen under the agent editor's header and tabs: the
+/// body, the footer, and an overlay over the whole frame.
+pub(super) fn draw_body(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
+    let [body, foot] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     match st.screen {
         Screen::Steps => draw_steps(f, body, st),
         Screen::Exchange => draw_exchange(f, body, st),
         Screen::Review => draw_review(f, body, st),
     }
     f.render_widget(Paragraph::new(footer(st)), foot);
+    draw_overlay(f, st);
+}
+
+pub(super) fn draw_overlay(f: &mut Frame, st: &FlowBuilderState) {
     match &st.overlay {
         Some(Overlay::AddStep {
             name,
@@ -135,7 +131,7 @@ pub fn draw(f: &mut Frame, st: &FlowBuilderState) {
     }
 }
 
-fn draw_header(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
+pub(super) fn draw_header(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
     let title = match &st.origin {
         crate::app::flow_builder::Origin::New => "⚙ New flow",
         crate::app::flow_builder::Origin::Document(_) => match st.builtin {
@@ -194,7 +190,7 @@ fn draw_header(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn footer(st: &FlowBuilderState) -> Line<'static> {
+pub(super) fn footer(st: &FlowBuilderState) -> Line<'static> {
     use crate::keymap::{Verb, ctrl_label, label, newline_label};
     let editor = ctrl_label('o');
     if st.edit.is_some() {
@@ -207,7 +203,7 @@ fn footer(st: &FlowBuilderState) -> Line<'static> {
     }
     // the same on every screen
     let common: [(&str, &str); 4] = [
-        ("1 2 3", "steps · passes · review"),
+        ("1-5", "tabs"),
         (label(Verb::Save), "save"),
         (label(Verb::Run), "save and run"),
         ("Esc", "back"),

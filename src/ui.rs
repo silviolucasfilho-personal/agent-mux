@@ -1,8 +1,9 @@
 use crate::app::about::{AboutRow, AboutState};
+mod agent_editor;
 mod flow;
 mod loop_builder;
 
-use crate::app::loops::{LoopDialogState, LoopField, LoopStatus};
+use crate::app::loops::LoopStatus;
 use crate::app::loops_view::{LoopRow, LoopsPane, LoopsTab, LoopsViewState};
 use crate::app::workflows_view::{
     DialogField as WfField, DialogPurpose, RunRow, ViewPane, ViewPending, WorkflowDialogState,
@@ -278,12 +279,11 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::SkillLauncher(launcher) => draw_skill_launcher(f, launcher, app),
         Mode::About(state) => draw_about(f, state),
         Mode::LoopsView(view) => draw_loops_view(f, view, app),
-        Mode::NewLoop(dialog) => draw_loop_dialog(f, dialog, app),
         Mode::ConfigView(view) => draw_config_view(f, view),
         Mode::WorkflowDialog(dialog) => draw_workflow_dialog(f, dialog),
         Mode::WorkflowsView(view) => draw_workflows_view(f, view, app),
         Mode::Inbox(state) => draw_inbox(f, state),
-        Mode::FlowBuilder(state) => flow::draw(f, state),
+        Mode::AgentEditor(state) => agent_editor::draw(f, state),
         Mode::NewAgent(state) => draw_new_agent(f, state),
         Mode::LoopBuilder(state) => loop_builder::draw(f, state),
         Mode::ConfirmRemoveLoop => draw_confirm(
@@ -1591,6 +1591,8 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                     }
                 }
             }
+            // full-screen editors keep their own footer; this row is for notices
+            Mode::AgentEditor(_) | Mode::LoopBuilder(_) => Line::raw(""),
             _ => Line::raw(fit(
                 "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
             )),
@@ -4008,193 +4010,6 @@ fn dir_picker_lines(
         ));
     }
     lines
-}
-
-fn draw_loop_dialog(f: &mut Frame, dialog: &LoopDialogState, _app: &App) {
-    let width = 84.min(f.area().width.saturating_sub(4)).max(40);
-    let height = 30.min(f.area().height.saturating_sub(2)).max(16);
-    let area = centered(f.area(), width, height);
-    f.render_widget(Clear, area);
-    let title = if dialog.editing.is_some() {
-        " Edit loop "
-    } else {
-        " Add loop "
-    };
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let dim = Style::default().fg(Color::DarkGray);
-    let sel = |on: bool| {
-        if on {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default()
-        }
-    };
-    let pattern = dialog.pattern();
-    let mut lines: Vec<Line> = Vec::new();
-    let field = |label: &str, value: String, on: bool| {
-        Line::from(vec![
-            Span::styled(format!("{label:<12}"), dim),
-            Span::styled(value, sel(on)),
-        ])
-    };
-    // the subfolder list shrinks on a short terminal so the fields below
-    // it stay on screen: 22 rows are fixed (border, fields, notes, footer)
-    let max_visible = usize::from(height).saturating_sub(22).clamp(1, 4);
-    lines.extend(dir_picker_lines(
-        &format!("{:<12}", "Workspace"),
-        &dialog.workspace,
-        &dialog.dir_picker,
-        dialog.field == LoopField::Workspace,
-        max_visible,
-    ));
-    lines.push(field(
-        "Pattern",
-        pattern
-            .map(|p| format!("{} — {}", p.id, p.name))
-            .unwrap_or_default(),
-        dialog.field == LoopField::Pattern,
-    ));
-    if let Some(p) = pattern {
-        lines.push(Line::styled(
-            format!(
-                "            {} · starts: {} · risk {} · cost {}",
-                truncate_chars(&p.goal, 48),
-                p.week_one_level.short(),
-                p.risk,
-                p.token_cost
-            ),
-            dim,
-        ));
-    }
-    let profile_text = if dialog.no_profiles {
-        "no Claude Code or Codex profile in profiles.toml".to_string()
-    } else {
-        dialog
-            .profiles
-            .get(dialog.profile_idx)
-            .map(|(n, h)| format!("{n} ({})", h.as_str()))
-            .unwrap_or_default()
-    };
-    lines.push(field(
-        "Profile",
-        profile_text,
-        dialog.field == LoopField::Profile,
-    ));
-    lines.push(Line::styled(
-        "            Antigravity: not supported for loops yet (see docs/loops.md)",
-        dim,
-    ));
-    lines.push(field(
-        "Model",
-        format!("{} ", dialog.model),
-        dialog.field == LoopField::Model,
-    ));
-    lines.push(Line::styled(
-        "            the run's model; blank keeps the profile's",
-        dim,
-    ));
-    lines.push(field(
-        "Verifier",
-        format!("{} ", dialog.verifier_model),
-        dialog.field == LoopField::VerifierModel,
-    ));
-    lines.push(Line::styled(
-        if dialog.pattern().is_some_and(|p| p.verifier) {
-            "            the loop-verifier sub-agent's model; blank inherits the run's"
-        } else {
-            "            this pattern runs no verifier"
-        },
-        dim,
-    ));
-    lines.push(field(
-        "Every",
-        format!("{} ", dialog.every),
-        dialog.field == LoopField::Every,
-    ));
-    let level_line: Vec<Span> = {
-        let mut spans = vec![Span::styled(format!("{:<12}", "Edits files"), dim)];
-        for (i, l) in [crate::loops::Level::L1, crate::loops::Level::L2]
-            .into_iter()
-            .enumerate()
-        {
-            let blocked = dialog.level_notes[i].is_some();
-            let on = dialog.level == l;
-            let style = if on && dialog.field == LoopField::Level {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else if on {
-                Style::default().fg(Color::Cyan)
-            } else if blocked {
-                dim
-            } else {
-                Style::default()
-            };
-            spans.push(Span::styled(
-                format!("[{}{}] ", l.short(), if blocked { " ✗" } else { "" }),
-                style,
-            ));
-        }
-        spans
-    };
-    lines.push(Line::from(level_line));
-    if let Some(note) = &dialog.level_notes[match dialog.level {
-        crate::loops::Level::L1 => 0,
-        crate::loops::Level::L2 => 1,
-    }] {
-        lines.push(Line::styled(
-            format!("            ✗ {note}"),
-            Style::default().fg(Color::Yellow),
-        ));
-    } else {
-        lines.push(Line::styled(
-            format!("            a run may {}", dialog.level.can()),
-            dim,
-        ));
-    }
-    lines.push(field(
-        "Runs/day",
-        format!("{} ", dialog.max_runs),
-        dialog.field == LoopField::MaxRuns,
-    ));
-    lines.push(field(
-        "Tokens/day",
-        format!("{} ", dialog.max_tokens),
-        dialog.field == LoopField::MaxTokens,
-    ));
-    lines.push(field(
-        "USD/run",
-        format!(
-            "{} ",
-            if dialog.max_cost.is_empty() {
-                "(no cap)".to_string()
-            } else {
-                dialog.max_cost.clone()
-            }
-        ),
-        dialog.field == LoopField::MaxCost,
-    ));
-    lines.push(field(
-        "Scaffold",
-        if dialog.scaffold {
-            "[x] write missing skills and contract files (never overwrites)".into()
-        } else {
-            "[ ] register only".into()
-        },
-        dialog.field == LoopField::Scaffold,
-    ));
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(format!("  {}", dialog.audit_note), dim));
-    if let Some(e) = &dialog.error {
-        lines.push(Line::styled(
-            format!("  {e}"),
-            Style::default().fg(Color::Red),
-        ));
-    }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        "  [Tab/↑/↓] field  [←/→ / Space] choose  [↓ type] search folders  [Enter] save  [Esc] cancel",
-        dim,
-    ));
-    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_loops_view(f: &mut Frame, view: &LoopsViewState, app: &App) {

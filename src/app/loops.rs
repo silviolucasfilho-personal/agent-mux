@@ -3,7 +3,6 @@
 //! cards and the add/edit dialog. Pure decisions live in `crate::loops`;
 //! this file is where they meet sessions, the store and the files.
 
-use super::dir_picker::PickerEvent;
 use super::{App, Mode, Notice, SidebarSection};
 use crate::config::Profile;
 use crate::harness::Harness;
@@ -351,16 +350,7 @@ impl LoopDialogState {
             .unwrap_or_default()
     }
 
-    fn step_field(&mut self, delta: isize) {
-        let at = LoopField::ALL
-            .iter()
-            .position(|f| *f == self.field)
-            .unwrap_or(0) as isize;
-        let len = LoopField::ALL.len() as isize;
-        self.field = LoopField::ALL[((at + delta).rem_euclid(len)) as usize];
-    }
-
-    fn cycle(&mut self, delta: isize) {
+    pub(crate) fn cycle(&mut self, delta: isize) {
         match self.field {
             LoopField::Pattern => {
                 let len = patterns::all().len() as isize;
@@ -388,7 +378,7 @@ impl LoopDialogState {
         }
     }
 
-    fn text_mut(&mut self) -> Option<&mut String> {
+    pub(crate) fn text_mut(&mut self) -> Option<&mut String> {
         match self.field {
             LoopField::Model => Some(&mut self.model),
             LoopField::VerifierModel => Some(&mut self.verifier_model),
@@ -1926,7 +1916,7 @@ impl App {
     /// Known directories, most relevant first: open sessions, the current
     /// directory, profile defaults, past sessions, registered loops. The
     /// first one seeds the Workspace field; the picker navigates from there.
-    fn workspace_choices(&self) -> Vec<String> {
+    pub(crate) fn workspace_choices(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut push = |p: &Path| {
             let s = p.to_string_lossy().into_owned();
@@ -1956,20 +1946,7 @@ impl App {
         out
     }
 
-    pub fn open_loop_dialog(&mut self, edit: Option<String>) {
-        let choices = self.workspace_choices();
-        let mut dialog = match edit
-            .as_deref()
-            .and_then(|id| self.loop_registry.find(id).cloned())
-        {
-            Some(entry) => LoopDialogState::from_entry(&self.profiles, choices, &entry),
-            None => LoopDialogState::new(&self.profiles, choices),
-        };
-        self.refresh_dialog_audit(&mut dialog);
-        self.mode = Mode::NewLoop(Box::new(dialog));
-    }
-
-    fn refresh_dialog_audit(&mut self, dialog: &mut LoopDialogState) {
+    pub(crate) fn refresh_dialog_audit(&mut self, dialog: &mut LoopDialogState) {
         let ws = PathBuf::from(shellexpand_home(dialog.workspace.trim()));
         if !ws.is_dir() {
             dialog.audit_note = "workspace: not a directory".into();
@@ -2010,111 +1987,11 @@ impl App {
         dialog.level_notes = [None, note(Level::L2)];
     }
 
-    pub fn handle_loop_dialog_key(&mut self, key: &KeyEvent) {
-        let Mode::NewLoop(dialog) = &mut self.mode else {
-            return;
-        };
-        let mut refresh = false;
-        // The Workspace field is the shared directory picker: it gets the
-        // key first and the dialog only sees what it does not take.
-        if dialog.field == LoopField::Workspace {
-            let LoopDialogState {
-                dir_picker,
-                workspace,
-                ..
-            } = &mut **dialog;
-            match dir_picker.handle_key(key, workspace) {
-                PickerEvent::Submit => {
-                    let d = (**dialog).clone();
-                    self.confirm_loop_dialog(d);
-                    return;
-                }
-                PickerEvent::Consumed { path_changed } => {
-                    dialog.error = None;
-                    if path_changed {
-                        self.refresh_loop_dialog_audit();
-                    }
-                    return;
-                }
-                PickerEvent::Ignored => {}
-            }
-        }
-        match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::Control;
-                return;
-            }
-            KeyCode::Enter => {
-                let d = (**dialog).clone();
-                self.confirm_loop_dialog(d);
-                return;
-            }
-            KeyCode::Tab | KeyCode::Down => {
-                dialog.step_field(1);
-                dialog.dir_picker.leave();
-            }
-            KeyCode::BackTab | KeyCode::Up => {
-                dialog.step_field(-1);
-                dialog.dir_picker.leave();
-            }
-            KeyCode::Left => {
-                dialog.cycle(-1);
-                refresh = matches!(dialog.field, LoopField::Profile | LoopField::Pattern);
-            }
-            KeyCode::Right | KeyCode::Char(' ')
-                if !matches!(
-                    dialog.field,
-                    LoopField::Every
-                        | LoopField::MaxRuns
-                        | LoopField::MaxTokens
-                        | LoopField::MaxCost
-                ) || key.code == KeyCode::Right =>
-            {
-                dialog.cycle(1);
-                refresh = matches!(dialog.field, LoopField::Profile | LoopField::Pattern);
-            }
-            KeyCode::Backspace => {
-                if let Some(t) = dialog.text_mut() {
-                    t.pop();
-                }
-            }
-            KeyCode::Char(c) => {
-                if let Some(t) = dialog.text_mut() {
-                    t.push(c);
-                }
-            }
-            _ => {}
-        }
-        dialog.error = None;
-        if refresh {
-            self.refresh_loop_dialog_audit();
-        }
-    }
-
-    /// Re-runs the readiness audit for the open dialog's workspace and
-    /// profile and writes the notes back into it.
-    fn refresh_loop_dialog_audit(&mut self) {
-        let Mode::NewLoop(dialog) = &self.mode else {
-            return;
-        };
-        let mut d = (**dialog).clone();
-        self.refresh_dialog_audit(&mut d);
-        if let Mode::NewLoop(dialog) = &mut self.mode {
-            dialog.audit_note = d.audit_note;
-            dialog.level_notes = d.level_notes;
-        }
-    }
-
-    fn confirm_loop_dialog(&mut self, dialog: LoopDialogState) {
-        let v = match dialog.validate() {
-            Ok(v) => v,
-            Err(e) => {
-                if let Mode::NewLoop(d) = &mut self.mode {
-                    d.error = Some(e);
-                }
-                return;
-            }
-        };
+    /// Validates the dialog's values, scaffolds the workspace when asked,
+    /// and adds or updates the registry entry; the loop's id (the agent
+    /// editor's save of a scheduled agent).
+    pub(crate) fn save_loop_dialog(&mut self, dialog: &LoopDialogState) -> Result<String, String> {
+        let v = dialog.validate()?;
         let now = crate::loops::now();
         if v.scaffold {
             let caps = crate::loops::scaffold::Caps {
@@ -2122,29 +1999,21 @@ impl App {
                 max_tokens_per_day: v.max_tokens,
                 verifier_model: v.verifier_model.clone(),
             };
-            match crate::loops::scaffold::scaffold(
+            let report = crate::loops::scaffold::scaffold(
                 &v.workspace,
                 v.pattern,
                 v.harness,
                 v.level,
                 &caps,
-            ) {
-                Ok(report) => {
-                    self.invalidate_audit(&v.workspace);
-                    self.notice = Some(Notice::info(format!(
-                        "scaffolded {} file(s) in {}, {} kept",
-                        report.written.len(),
-                        v.workspace.display(),
-                        report.skipped.len()
-                    )));
-                }
-                Err(e) => {
-                    if let Mode::NewLoop(d) = &mut self.mode {
-                        d.error = Some(format!("scaffold: {e}"));
-                    }
-                    return;
-                }
-            }
+            )
+            .map_err(|e| format!("scaffold: {e}"))?;
+            self.invalidate_audit(&v.workspace);
+            self.notice = Some(Notice::info(format!(
+                "scaffolded {} file(s) in {}, {} kept",
+                report.written.len(),
+                v.workspace.display(),
+                report.skipped.len()
+            )));
         }
         let mut entry = match dialog
             .editing
@@ -2190,19 +2059,18 @@ impl App {
             .position(|l| l.id == id)
             .unwrap_or(0);
         self.sidebar_section = SidebarSection::Loops;
-        self.mode = Mode::Control;
         let audit = self.audit_for(&v.workspace, Instant::now());
         if self.notice.is_none() || dialog.editing.is_some() {
             self.notice = Some(Notice::info(format!(
-                "{} every {} at {} · readiness {}/100 {}",
+                "{} every {} · {} · readiness {}/100",
                 v.pattern.id,
                 crate::loops::format_interval(v.interval_s),
-                v.level.as_str(),
+                v.level.label(),
                 audit.score,
-                audit.level_str()
             )));
         }
         self.refresh_loop_cards(Instant::now());
+        Ok(id)
     }
 
     // ----- view ---------------------------------------------------------

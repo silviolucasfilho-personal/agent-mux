@@ -52,6 +52,6 @@ For `Option` combinations, turn on "Use Option as Meta key" (Terminal.app) or "E
 | Trace browser | `/` search, `v` detail view, `Space` fold, `a` all projects, `+` verdict |
 | Skills view | `v` validate, `1`-`3` harness filter |
 | Configuration view | `u` push loop skills to workspaces |
-| Flow builder | `1` steps, `2` what passes, `3` review; `Space` makes a field required; `[` `]` previous / next step |
+| Agent editor | `1`-`5` Who · What · When · Limits · Review (`Tab` / `Shift+Tab` in a scheduled agent or a persona); `Enter` types a field, `←` `→` `Space` change the others; `e` on What edits a scheduled agent's task; a flow's fields: `Space` makes a field required, `[` `]` previous / next step, `Enter` on Answers with opens what passes |
 | Loop builder | `c` copies a pattern |
 | Attached to a session | `Ctrl+Q` detach; every other key goes to the harness |

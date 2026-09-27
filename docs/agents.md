@@ -32,7 +32,7 @@ Five agents ship built in, ready for `agent = "…"`:
 | `judge` | picking the better of two candidates, with the deciding reason | read |
 
 Every built-in can be edited, the same way built-in workflows and loops are:
-- **Where:** `Enter` on it in the Configuration view (`C`), or `e` on it in the flow builder's agent picker (both open it in `$EDITOR`).
+- **Where:** `Enter` on it in the Agents list opens it in the agent editor (Who: purpose and a model per harness; What: the instructions; Limits: tools and MCP servers; `s` saves, `Ctrl+O` opens the whole file in `$EDITOR`). `Enter` on it in the Configuration view (`C`), or `e` on it in the flow builder's agent picker, opens the file in `$EDITOR`.
 - **What changes:** an edit makes your copy in `~/.agent-mux/agents/<name>.toml`, and that copy replaces the built-in everywhere.
 - **Undo:** `R` in the Configuration view restores the built-in.
 
@@ -160,5 +160,5 @@ agent-mux workflow run <name> --workspace DIR --step <id>.agent=<name>
 ## 8. Not yet
 
 - **An agent's own sub-agents.** In agent-builder's plan, an agent lists `subagents`, which would join the launch (Claude's `--agents` JSON, agent files for Codex and agy). Delegation inside a step would stay model-driven, and order across steps would stay the workflow's.
-- **Editing an existing agent in the flow builder's form.** The builder writes new agents; an existing one is edited in the Configuration view (`C`).
+- **Renaming a saved agent in the agent editor.** A saved agent keeps its name there; rename the file in the Configuration view (`C`).
 - **Enforced tool lists on Antigravity**, once agy's tool names are verified.

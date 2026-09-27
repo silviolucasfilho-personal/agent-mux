@@ -1,8 +1,8 @@
 //! `n` in the Agents list: how a new agent starts (spec section 4). Describe
 //! it (the planner drafts), start blank (a session, a scheduled agent, a
 //! flow, a persona), or start from a template (a loop pattern, a workflow,
-//! a built-in persona). Each choice opens the creator that already exists
-//! for it; the unified agent editor replaces them in a later step.
+//! a built-in persona). A scheduled agent, a flow or a persona opens in the
+//! agent editor (`agent_editor`); a session opens the New session dialog.
 
 use super::{App, Mode, Notice};
 use crate::keymap::{Verb, verb};
@@ -148,19 +148,10 @@ impl App {
         match start {
             Start::Describe => self.open_workflow_plan(),
             Start::Session => self.open_new_session_dialog(None),
-            Start::Scheduled => self.open_loop_dialog(None),
+            Start::Scheduled => self.open_scheduled_editor(None, None),
             Start::Flow => self.open_flow_builder_new(),
-            Start::Persona => self.new_persona("blank", "my-agent"),
-            Start::Pattern(id) => {
-                self.open_loop_dialog(None);
-                if let Mode::NewLoop(d) = &mut self.mode
-                    && let Some(i) = crate::loops::patterns::all()
-                        .iter()
-                        .position(|p| p.id == id)
-                {
-                    d.pattern_idx = i;
-                }
-            }
+            Start::Persona => self.new_persona_editor("blank", "my-agent"),
+            Start::Pattern(id) => self.open_scheduled_editor(None, Some(&id)),
             Start::Workflow(name) => {
                 let Some(e) = self.workflow_entries().into_iter().find(|e| e.name == name) else {
                     return;
@@ -173,44 +164,13 @@ impl App {
                     .unwrap_or_default();
                 self.open_flow_builder_text(&e.text, origin, Vec::new(), ws);
             }
-            Start::PersonaTemplate(t) => self.new_persona(&t, &format!("my-{t}")),
+            Start::PersonaTemplate(t) => self.new_persona_editor(&t, &format!("my-{t}")),
         }
     }
 
-    /// Writes a new persona agent into the library from `template` under
-    /// a free name, and opens it in `$EDITOR`.
-    fn new_persona(&mut self, template: &str, base: &str) {
-        let dir = crate::agents::library_dir(&self.library_root());
-        let taken =
-            |n: &str| dir.join(format!("{n}.toml")).exists() || crate::agents::builtin(n).is_some();
-        let name = (1..)
-            .map(|i| {
-                if i == 1 {
-                    base.to_string()
-                } else {
-                    format!("{base}-{i}")
-                }
-            })
-            .find(|n| !taken(n))
-            .expect("a free name");
-        let Some(text) = crate::agents::from_template(template, &name) else {
-            return;
-        };
-        let path = dir.join(format!("{name}.toml"));
-        if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, text)) {
-            self.notice = Some(Notice::error(format!("{}: {e}", path.display())));
-            return;
-        }
-        self.reload_personas();
-        self.editor_request = Some(super::EditorRequest {
-            path,
-            asset_id: format!("agent:{name}"),
-            command: crate::assets::editor_command(self.editor.as_deref()),
-        });
-    }
-
-    /// `e` / `Enter` on a persona: its file in `$EDITOR`; a built-in one is
-    /// copied into the library first and the copy is what changes.
+    /// `Ctrl+O` on a persona in the editor: its file in `$EDITOR`; a
+    /// built-in one is copied into the library first and the copy is what
+    /// changes.
     pub fn edit_persona(&mut self, name: &str) {
         let catalog = crate::agents::Catalog::load(&self.library_root(), None);
         let Some(entry) = catalog.entry(name).cloned() else {

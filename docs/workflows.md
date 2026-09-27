@@ -95,7 +95,7 @@ To compose a workflow for a task instead: `c`, type the task, pick the workspace
 
 ### Building a flow step by step
 
-`n` in the Workflows section opens the **flow builder** on a new flow. `e` opens the selected workflow or planned document in it instead (`Ctrl+O` opens the file in `$EDITOR`), so you can start from a built-in, from a document you saved, or from a draft the planner wrote. The builder writes an ordinary document (section 2) and keeps every key it has no field for, so nothing is lost when an existing workflow goes through it. There are three screens, `1`, `2` and `3`. On every screen `s` saves, `r` saves and opens the run dialog, `R` restores a built-in, `Ctrl+O` opens the document in `$EDITOR`, and `Esc` (or `q`) goes back:
+`n` in the Workflows section opens the **flow builder** on a new flow. `e` opens the selected workflow or planned document in it instead (`Ctrl+O` opens the file in `$EDITOR`), so you can start from a built-in, from a document you saved, or from a draft the planner wrote. The builder writes an ordinary document (section 2) and keeps every key it has no field for, so nothing is lost when an existing workflow goes through it. It opens in the agent editor, whose tabs are `1` to `5`: **Who** is the flow settings row, **What** the steps, **When** and **Limits** say when it runs and what it may change, and **Review** is the builder's review. What passes between steps opens from a step's Answers with field. On every tab `s` saves, `r` saves and opens the run dialog, `R` restores a built-in, `Ctrl+O` opens the document in `$EDITOR`, and `Esc` (or `q`) goes back:
 
 - **Steps.** On the left, the flow as a chain: each step, how it runs (`once`, `⇉ 3 in parallel`, `↓ each · 3 votes`, `★ best of 3`), the agent that runs it and what it passes on. On the right are the selected step's fields, in words:
   - **Runs:** one of six shapes (`←`/`→` change it).
@@ -108,7 +108,7 @@ To compose a workflow for a task instead: `c`, type the task, pick the workspace
   - **Harness, model, effort and isolation.**
 
   `n` adds a step after the selected one, and `J`/`K` move it. `d` deletes it. The first row, **flow settings**, holds the name, the description, the arguments (`scope=., language*`), the step whose answer the run returns, the budget and the workspace.
-- **What passes** (`2`). The flow is drawn left to right with what each step gets and gives. Below it, you edit the selected step's answer field by field:
+- **What passes** (`Enter` on Answers with). The flow is drawn left to right with what each step gets and gives. Below it, you edit the selected step's answer field by field:
   - `n` adds a field, `←`/`→` change its kind, `Space` makes it required, `e` renames it, and `Enter` edits the values of a "one of" field.
   - For a list of items, `Enter` opens the item's own fields.
   - On the right, you pick what the step reads, in words ("every finding from every review session"), and its filters, "keep only" and "drop repeats by", as the last two rows (`Enter` edits them).

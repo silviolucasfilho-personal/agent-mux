@@ -308,7 +308,7 @@ enum After {
 }
 
 impl App {
-    fn loop_builder_state(&mut self, select: Option<&str>) -> Option<LoopBuilderState> {
+    pub(crate) fn loop_builder_state(&mut self, select: Option<&str>) -> Option<LoopBuilderState> {
         let root = self.library_root();
         let (items, error) = builder::load(&root);
         let skills: Vec<(String, String)> = crate::assets::loop_skill_names(&root)

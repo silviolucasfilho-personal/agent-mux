@@ -3,7 +3,8 @@
 //! section, the hint lines under 100 columns, the help overlay's height,
 //! and the dialog offering no Antigravity profile.
 
-use agent_mux::app::loops::LoopField;
+use agent_mux::app::agent_editor::Body;
+use agent_mux::app::loops::{LoopDialogState, LoopField};
 use agent_mux::app::{App, Mode, SidebarSection};
 use agent_mux::config::Profile;
 use agent_mux::loops::registry::{self, LoopEntry};
@@ -210,44 +211,54 @@ fn the_dialog_lists_no_antigravity_profile_and_validates() {
         .position(|c| c.start == agent_mux::app::new_agent::Start::Scheduled)
         .unwrap();
     app.handle_key(&key(KeyCode::Enter), Instant::now());
-    let Mode::NewLoop(dialog) = &app.mode else {
-        panic!("{:?}", app.notice);
-    };
-    let names: Vec<&str> = dialog.profiles.iter().map(|(n, _)| n.as_str()).collect();
+    let d = dialog(&app);
+    let names: Vec<&str> = d.profiles.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, vec!["Codex", "Claude Code"]);
-    assert_eq!(dialog.level, Level::L1);
-    assert_eq!(dialog.every, "1d", "the pattern's default cadence");
-    assert_eq!(dialog.max_tokens, "100000");
+    assert_eq!(d.level, Level::L1);
+    assert_eq!(d.every, "1d", "the pattern's default cadence");
+    assert_eq!(d.max_tokens, "100000");
     let screen = render(&app, 120, 40);
-    assert!(screen.contains("Add loop"), "{screen}");
+    assert!(screen.contains("1 Who"), "the editor's tabs: {screen}");
+    assert!(
+        screen.contains("What it does"),
+        "a new one starts on What: {screen}"
+    );
+    app.handle_key(&key(KeyCode::Char('1')), Instant::now());
+    let screen = render(&app, 120, 40);
     assert!(screen.contains("Antigravity: not supported"), "{screen}");
+    // When: Every, In (the workspace), Set up files
+    app.handle_key(&key(KeyCode::Char('3')), Instant::now());
+    app.handle_key(&key(KeyCode::Down), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    let screen = render(&app, 120, 40);
     assert!(
         screen.contains("Select subfolder"),
-        "the Workspace field is the shared directory picker: {screen}"
+        "the workspace field is the shared directory picker: {screen}"
     );
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
 
-    // an empty workspace path is refused with a field error
-    if let Mode::NewLoop(d) = &mut app.mode {
-        d.workspace.clear();
-    }
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
-    let Mode::NewLoop(dialog) = &app.mode else {
-        panic!("the dialog stays open on an error");
+    // an empty workspace path is refused with an error, the editor stays
+    dialog_mut(&mut app).workspace.clear();
+    app.handle_key(&key(KeyCode::Char('s')), Instant::now());
+    let Mode::AgentEditor(ed) = &app.mode else {
+        panic!("the editor stays open on an error");
     };
-    assert!(dialog.error.as_deref().unwrap().contains("workspace"));
+    assert!(ed.error.as_deref().unwrap().contains("workspace"));
 
     // a real workspace, register only (no scaffold), saves an entry
     let ws = temp.path().join("proj");
     std::fs::create_dir_all(&ws).unwrap();
-    if let Mode::NewLoop(d) = &mut app.mode {
-        d.workspace = ws.to_string_lossy().into_owned();
-        d.field = LoopField::Scaffold;
-    }
+    dialog_mut(&mut app).workspace = ws.to_string_lossy().into_owned();
+    app.handle_key(&key(KeyCode::Down), Instant::now());
+    assert_eq!(dialog(&app).field, LoopField::Scaffold);
     app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
-    if let Mode::NewLoop(d) = &app.mode {
-        assert!(!d.scaffold);
-    }
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(!dialog(&app).scaffold);
+    app.handle_key(&key(KeyCode::Char('s')), Instant::now());
+    assert!(
+        matches!(app.mode, Mode::AgentEditor(_)),
+        "s saves and stays"
+    );
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(matches!(app.mode, Mode::Control), "{:?}", app.notice);
     assert_eq!(app.loop_registry.loops.len(), 1);
     let saved = app.loop_registry.loops[0].clone();
@@ -259,11 +270,9 @@ fn the_dialog_lists_no_antigravity_profile_and_validates() {
 
     // edit prefills and keeps the id
     app.handle_key(&key(KeyCode::Char('e')), Instant::now());
-    let Mode::NewLoop(dialog) = &app.mode else {
-        panic!();
-    };
-    assert_eq!(dialog.editing.as_deref(), Some(saved.id.as_str()));
-    assert_eq!(dialog.every, "1d");
+    let d = dialog(&app);
+    assert_eq!(d.editing.as_deref(), Some(saved.id.as_str()));
+    assert_eq!(d.every, "1d");
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     let _ = PathBuf::new();
 }
@@ -693,14 +702,9 @@ fn any_level_may_be_set_whatever_the_readiness_score() {
 
     // the dialog's level notes name the gates, never the score
     app.handle_key(&key(KeyCode::Char('e')), Instant::now());
-    let Mode::NewLoop(d) = &mut app.mode else {
-        panic!("{:?}", app.notice)
-    };
-    d.level = Level::L2;
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    let Mode::NewLoop(d) = &app.mode else {
-        panic!()
-    };
+    dialog_mut(&mut app).level = Level::L2;
+    app.handle_key(&key(KeyCode::Char('4')), Instant::now());
+    let d = dialog(&app);
     for note in d.level_notes.iter().flatten() {
         assert!(!note.contains("readiness score"), "{note}");
     }
@@ -709,4 +713,25 @@ fn any_level_may_be_set_whatever_the_readiness_score() {
         !screen.contains("Score       ["),
         "no score switch\n{screen}"
     );
+}
+
+/// The scheduled agent open in the agent editor.
+fn dialog(app: &App) -> &LoopDialogState {
+    match &app.mode {
+        Mode::AgentEditor(e) => match &e.body {
+            Body::Scheduled(d) => d,
+            other => panic!("not a scheduled agent: {other:?}"),
+        },
+        other => panic!("not in the agent editor: {other:?}"),
+    }
+}
+
+fn dialog_mut(app: &mut App) -> &mut LoopDialogState {
+    match &mut app.mode {
+        Mode::AgentEditor(e) => match &mut e.body {
+            Body::Scheduled(d) => d,
+            other => panic!("not a scheduled agent: {other:?}"),
+        },
+        other => panic!("not in the agent editor: {other:?}"),
+    }
 }

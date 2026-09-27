@@ -2,6 +2,7 @@
 //! steps added one by one, what passes between them, agents written on
 //! the spot, the review and the save. Nothing here spawns a harness.
 
+use agent_mux::app::agent_editor::Body;
 use agent_mux::app::flow_builder::{Field, FlowBuilderState, Overlay, Screen};
 use agent_mux::app::{App, Mode, SidebarSection};
 use agent_mux::config::Profile;
@@ -74,8 +75,11 @@ fn type_text(app: &mut App, text: &str) {
 
 fn st(app: &App) -> &FlowBuilderState {
     match &app.mode {
-        Mode::FlowBuilder(s) => s,
-        other => panic!("not in the flow builder: {other:?}"),
+        Mode::AgentEditor(e) => match &e.body {
+            Body::Flow(s) => s,
+            other => panic!("not a flow: {other:?}"),
+        },
+        other => panic!("not in the agent editor: {other:?}"),
     }
 }
 
@@ -162,7 +166,7 @@ fn a_flow_is_built_step_by_step_and_saved() {
     to_workflows(&mut app);
     press(&mut app, KeyCode::Char('n'));
     press(&mut app, KeyCode::Enter); // the chooser starts on it
-    assert!(matches!(app.mode, Mode::FlowBuilder(_)));
+    assert!(matches!(app.mode, Mode::AgentEditor(_)));
     let text = render(&app);
     assert!(text.contains("New flow"), "{text}");
     assert!(text.contains("flow settings"), "{text}");
@@ -218,7 +222,8 @@ fn a_flow_is_built_step_by_step_and_saved() {
     assert!(text.contains("├─ security"), "{text}");
 
     // what review gives: findings, a list of items with a file and a severity
-    press(&mut app, KeyCode::Char('2'));
+    to_field(&mut app, Field::Answers);
+    press(&mut app, KeyCode::Enter); // the answer's shape
     assert_eq!(st(&app).screen, Screen::Exchange);
     press(&mut app, KeyCode::Char('n'));
     type_text(&mut app, "findings");
@@ -320,7 +325,7 @@ fn a_flow_is_built_step_by_step_and_saved() {
     assert_eq!(st(&app).draft.check_votes(2), Some((2, 2)));
 
     // review: the flow in words, the checks, then save
-    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('5')); // Review
     let text = render(&app);
     assert!(text.contains("In words"), "{text}");
     assert!(text.contains("✓ ready to run"), "{text}");
@@ -381,7 +386,7 @@ fn leaving_with_changes_asks_first_and_a_document_opens_in_the_builder() {
     press(&mut app, KeyCode::Esc); // list → close?
     assert!(matches!(st(&app).overlay, Some(Overlay::Confirm { .. })));
     press(&mut app, KeyCode::Char('n'));
-    assert!(matches!(app.mode, Mode::FlowBuilder(_)), "n stays");
+    assert!(matches!(app.mode, Mode::AgentEditor(_)), "n stays");
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('y'));
     assert!(matches!(app.mode, Mode::Control));
@@ -500,8 +505,11 @@ fn a_built_in_workflow_is_edited_as_a_copy_and_restored() {
     ctrl(&mut app, 'u');
     type_text(&mut app, "My stricter review");
     press(&mut app, KeyCode::Enter);
-    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('5')); // Review
     press(&mut app, KeyCode::Char('s'));
+    if let Mode::AgentEditor(e) = &app.mode {
+        assert!(e.error.is_none(), "{:?}", e.error);
+    }
     let copy = temp.path().join("library/workflows/santa-review.toml");
     assert!(
         std::fs::read_to_string(&copy)
@@ -524,4 +532,76 @@ fn a_built_in_workflow_is_edited_as_a_copy_and_restored() {
     assert!(!copy.exists());
     assert_ne!(st(&app).draft.flow_str("description"), "My stricter review");
     assert!(render(&app).contains("Built-in flow"));
+}
+
+fn persona(app: &App) -> &agent_mux::app::agent_editor::PersonaBody {
+    match &app.mode {
+        Mode::AgentEditor(e) => match &e.body {
+            Body::Persona(p) => p,
+            other => panic!("not a persona: {other:?}"),
+        },
+        other => panic!("not in the agent editor: {other:?}"),
+    }
+}
+
+#[test]
+fn a_persona_is_written_and_edited_in_the_agent_editor() {
+    let (mut app, temp) = app();
+    let dir = temp.path().join("library").join("agents");
+    press(&mut app, KeyCode::Char('n'));
+    let Mode::NewAgent(ch) = &mut app.mode else {
+        panic!("{:?}", app.mode)
+    };
+    ch.selected = ch
+        .choices
+        .iter()
+        .position(|c| c.start == agent_mux::app::new_agent::Start::Persona)
+        .unwrap();
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(persona(&app).form.name.text, "my-agent");
+    assert!(persona(&app).original.is_none());
+    assert!(
+        !dir.join("my-agent.toml").exists(),
+        "nothing written before s"
+    );
+
+    // What: the instructions
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Enter);
+    ctrl(&mut app, 'u');
+    type_text(&mut app, "Review the diff.");
+    press(&mut app, KeyCode::Enter);
+    // Limits: edit files on
+    press(&mut app, KeyCode::Char('4'));
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Char(' '));
+    assert!(persona(&app).form.tools[1]);
+    let text = render(&app);
+    assert!(text.contains("4 Limits"), "{text}");
+    assert!(text.contains("With \"edit files\""), "{text}");
+    press(&mut app, KeyCode::Char('s'));
+    let saved = std::fs::read_to_string(dir.join("my-agent.toml")).unwrap();
+    assert!(saved.contains("Review the diff."), "{saved}");
+    assert!(saved.contains("\"edit\""), "{saved}");
+    assert_eq!(persona(&app).original.as_deref(), Some("my-agent"));
+    press(&mut app, KeyCode::Esc);
+    assert!(
+        matches!(app.mode, Mode::Control),
+        "saved: nothing to confirm"
+    );
+    assert!(app.personas.contains(&"my-agent".to_string()));
+
+    // a built-in one: the change is written as the library copy
+    app.open_persona_editor("reviewer");
+    let text = render(&app);
+    assert!(text.contains("a saved agent keeps its name"), "{text}");
+    press(&mut app, KeyCode::Enter); // Purpose
+    type_text(&mut app, " Mine.");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('s'));
+    if let Mode::AgentEditor(e) = &app.mode {
+        assert!(e.error.is_none(), "{:?}", e.error);
+    }
+    let copy = std::fs::read_to_string(dir.join("reviewer.toml")).unwrap();
+    assert!(copy.contains("Mine."), "{copy}");
 }

@@ -19,6 +19,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
 pub mod about;
+pub mod agent_editor;
 pub mod agents_list;
 mod config_view;
 pub mod dir_picker;
@@ -49,8 +50,6 @@ pub enum Mode {
     SkillLauncher(SkillLauncherState),
     /// The Loops view (`E`): runs, inbox, readiness, budget, files.
     LoopsView(Box<loops_view::LoopsViewState>),
-    /// The add / edit loop dialog (`a` / `e` in the Loops section).
-    NewLoop(Box<loops::LoopDialogState>),
     /// `x` on a loop: remove the registry entry (files stay).
     ConfirmRemoveLoop,
     /// The About overlay (`v`): version, build stamp, paths, this session.
@@ -63,8 +62,9 @@ pub enum Mode {
     WorkflowsView(Box<workflows_view::WorkflowsViewState>),
     /// The inbox (`I`): what waits on a human, across loops and workflows.
     Inbox(Box<inbox::InboxState>),
-    /// The flow builder (`f` / `o` in the Workflows section).
-    FlowBuilder(Box<flow_builder::FlowBuilderState>),
+    /// The agent editor: a scheduled agent, a flow or a persona, in the
+    /// tabs Who · What · When · Limits · Review.
+    AgentEditor(Box<agent_editor::AgentEditorState>),
     /// The loop builder (`o` / `f` in the Loops section).
     LoopBuilder(Box<loop_builder::LoopBuilderState>),
     /// `n` in the Agents list: how to start a new agent.
@@ -191,8 +191,6 @@ pub enum Action {
     AboutKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
     LoopsKey,
-    /// NewLoop mode: App routes the key to the LoopDialogState it owns.
-    LoopDialogKey,
     /// `C`: the Configuration view.
     OpenConfigView,
     /// ConfigView mode: App routes the key to the ConfigViewState it owns.
@@ -207,7 +205,7 @@ pub enum Action {
     NewSessionFromHarness,
     EditPersona,
     DeleteWorkflowRow,
-    FlowBuilderKey,
+    AgentEditorKey,
     OpenLoopBuilder,
     OpenLoopBuilderNew,
     LoopBuilderKey,
@@ -684,12 +682,11 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
             _ => Action::AboutKey,
         },
         Mode::LoopsView(_) => Action::LoopsKey,
-        Mode::NewLoop(_) => Action::LoopDialogKey,
         Mode::ConfigView(_) => Action::ConfigKey,
         Mode::WorkflowDialog(_) => Action::WorkflowDialogKey,
         Mode::WorkflowsView(_) => Action::WorkflowsKey,
         Mode::Inbox(_) => Action::InboxKey,
-        Mode::FlowBuilder(_) => Action::FlowBuilderKey,
+        Mode::AgentEditor(_) => Action::AgentEditorKey,
         Mode::NewAgent(_) => Action::NewAgentKey,
         Mode::LoopBuilder(_) => Action::LoopBuilderKey,
         Mode::ConfirmRemoveLoop => match key.code {
@@ -3762,14 +3759,13 @@ impl App {
             }
             Action::OpenLoopsView => self.open_loops_view(),
             Action::LoopsKey => self.handle_loops_view_key(key),
-            Action::LoopDialogKey => self.handle_loop_dialog_key(key),
             Action::LoopRunNow => self.run_selected_loop_now(),
             Action::LoopTogglePause => self.toggle_selected_loop_pause(),
-            Action::OpenNewLoop => self.open_loop_dialog(None),
+            Action::OpenNewLoop => self.open_scheduled_editor(None, None),
             Action::EditLoop => {
                 let id = self.selected_loop().map(|l| l.id.clone());
                 if id.is_some() {
-                    self.open_loop_dialog(id);
+                    self.open_scheduled_editor(id, None);
                 }
             }
             Action::EnterConfirmRemoveLoop => {
@@ -3790,7 +3786,7 @@ impl App {
             Action::OpenFlowBuilder => self.open_flow_builder_new(),
             Action::OpenFlowBuilderSelected => self.open_flow_builder_selected(),
             Action::DeleteWorkflowRow => self.delete_selected_workflow_row(),
-            Action::FlowBuilderKey => self.handle_flow_builder_key(key),
+            Action::AgentEditorKey => self.handle_agent_editor_key(key),
             Action::OpenLoopBuilder => self.open_loop_builder_selected(),
             Action::OpenLoopBuilderNew => self.open_loop_builder_new(),
             Action::LoopBuilderKey => self.handle_loop_builder_key(key),
@@ -3893,7 +3889,7 @@ impl App {
             }
             Action::EditPersona => {
                 if let Some(agents_list::AgentKind::Persona(name)) = self.agent_focus().cloned() {
-                    self.edit_persona(&name);
+                    self.open_persona_editor(&name);
                 }
             }
             Action::OpenNewAgent => self.open_new_agent(),
@@ -4458,6 +4454,10 @@ impl App {
     pub fn editor_finished(&mut self, request: EditorRequest, result: Result<(), String>) {
         if let Err(e) = result {
             self.notice = Some(Notice::error(format!("editor: {e}")));
+        }
+        if request.asset_id == "agent-editor:text" {
+            self.agent_editor_text_finished(&request.path);
+            return;
         }
         if request.asset_id == "dialog:text" {
             self.dialog_editor_finished(&request.path);
