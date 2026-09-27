@@ -477,6 +477,29 @@ impl App {
                 return After::Stay;
             }
             KeyCode::Char('o') if ctrl => {
+                if let Body::Scheduled(d) = &st.body
+                    && let Some(name) = d
+                        .editing
+                        .as_deref()
+                        .and_then(|id| self.loop_registry.find(id))
+                        .and_then(|e| e.agent.clone())
+                {
+                    // the agent file in $EDITOR; the registry reloads after
+                    self.editor_request = Some(super::EditorRequest {
+                        path: crate::agents::schedule::file_of(&self.library_root(), &name),
+                        asset_id: format!("agent:{name}"),
+                        command: crate::assets::editor_command(self.editor.as_deref()),
+                    });
+                    return After::Close;
+                }
+                if let Body::Scheduled(d) = &st.body
+                    && d.editing.is_some()
+                {
+                    self.notice = Some(Notice::info(
+                        "this loop keeps its settings in loops.json: `agent-mux agent migrate --write` gives it an agent file",
+                    ));
+                    return After::Stay;
+                }
                 if let Body::Persona(p) = &st.body
                     && let Some(name) = p.original.clone()
                 {

@@ -45,6 +45,11 @@ pub struct LoopEntry {
     /// on resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_reason: Option<String>,
+    /// The agent file (`<library>/agents/<name>.toml`) that holds this
+    /// loop's settings; the registry keeps its run state. `None`: the
+    /// settings live here (`agent-mux agent migrate` moves them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 impl LoopEntry {
@@ -215,6 +220,7 @@ pub fn new_entry(
         next_run_at: None,
         last_run_id: None,
         paused_reason: None,
+        agent: None,
     };
     entry.set_next_run(now + time::Duration::seconds(interval_s as i64));
     entry

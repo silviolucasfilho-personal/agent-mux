@@ -38,6 +38,8 @@ fn app_with(profiles: Vec<Profile>) -> (App, tempfile::TempDir) {
     let mut app = App::new(profiles, None, tx);
     app.clipboard_enabled = false;
     app.set_pane_size(30, 100);
+    // scheduled agent files in the real library must not leak in
+    app.library_root = Some(temp.path().join("library"));
     app.loops_file = Some(temp.path().join("loops.json"));
     app.runtime_dir = Some(temp.path().join("runtime"));
     app.load_loop_registry();
@@ -267,6 +269,23 @@ fn the_dialog_lists_no_antigravity_profile_and_validates() {
     assert_eq!(saved.workspace, ws);
     assert!(!ws.join("STATE.md").exists(), "register only wrote nothing");
     assert_eq!(app.sidebar_section, SidebarSection::Loops);
+
+    // a new scheduled agent is an agent file; the registry keeps its state
+    assert_eq!(saved.agent.as_deref(), Some("daily-triage"));
+    assert_eq!(saved.id, "daily-triage");
+    let file = temp.path().join("library/agents/daily-triage.toml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        text.contains("[schedule]") && text.contains("every = \"1d\""),
+        "{text}"
+    );
+    // the file is where its settings live
+    std::fs::write(&file, text.replace("every = \"1d\"", "every = \"6h\"")).unwrap();
+    app.load_loop_registry();
+    assert_eq!(app.loop_registry.loops.len(), 1);
+    assert_eq!(app.loop_registry.loops[0].interval_s, 6 * 3600);
+    std::fs::write(&file, text).unwrap();
+    app.load_loop_registry();
 
     // edit prefills and keeps the id
     app.handle_key(&key(KeyCode::Char('e')), Instant::now());

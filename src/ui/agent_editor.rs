@@ -147,8 +147,11 @@ fn footer(st: &AgentEditorState) -> Line<'static> {
     }
     v.push((label(Verb::Save), "save"));
     match &st.body {
-        Body::Scheduled(_) => {
+        Body::Scheduled(d) => {
             v.push((label(Verb::Run), "save and run now"));
+            if d.editing.is_some() {
+                v.push((&editor, "agent file"));
+            }
             if st.tab == Tab::What {
                 v.push((label(Verb::Edit), "edit the task"));
             }

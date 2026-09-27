@@ -85,6 +85,36 @@ model = "pro"
 
 "Not enforced" means the session gets that harness's own tools, and `workflow check` says so. Antigravity tool names are not written into the agent file because they have not been verified, and a misspelled agy tool name can hang the session.
 
+### A scheduled agent
+
+The same file can say what the agent does on its own and when. `[task]` names the loop pattern it runs (the task library, `docs/loops.md` section 4), `[schedule]` when and where, `[limits]` its budgets. Its tools decide what a run may change: with `edit` it works in a worktree and its change waits in the inbox; without it, it reports. A task agent needs no `instructions` (its pattern's prompt is the prompt).
+
+```toml
+name = "daily-triage"
+description = "Daily Triage in api"
+tools = ["read", "shell"]              # add "edit" to let it propose changes
+model = "gpt-5.5"                      # optional; the run's model
+
+[task]
+pattern = "daily-triage"
+verifier_model = "claude-sonnet-5"     # optional; the loop-verifier's model
+
+[schedule]
+every = "1d"                           # <n>m, <n>h or <n>d, at least 5m
+workspace = "~/code/api"
+profile = "Codex"                      # the harness profile the runs launch with
+harness = "codex"                      # claude or codex
+
+[limits]                               # optional; absent values take the pattern's
+runs_per_day = 2
+tokens_per_day = 100000
+usd_per_run = 0.5
+```
+
+Only a one-task agent has a schedule for now; `[schedule]` without `[task]` is refused. Such an agent lives in the library (`~/.agent-mux/agents/`); agent-mux lays it over the loop registry at start (`agents::schedule`), so the file holds the settings and `loops.json` keeps the run state (next run, last run, pause, breaker) plus a copy of the settings for older builds. An agent file alone is enough: a new file becomes a loop the next time agent-mux starts. Removing the loop (`d` on its row, `agent-mux loop rm`) deletes its file. A task agent is not offered as a persona for flow steps.
+
+The agent editor writes the file: a new scheduled agent gets one from the start, `s` on an existing one rewrites its settings and keeps the rest of the file (instructions, `[backends]`, other tools), and `Ctrl+O` opens it in `$EDITOR`. A loop from an older build keeps its settings in `loops.json` until you run `agent-mux agent migrate`, which only says what it would write; `--write` writes one file per loop (named after its pattern, then pattern and workspace folder), links each entry to its file and copies `loops.json` to `loops.json.bak` first. Nothing is deleted. Workflows need no migration: a library workflow document is already the flow agent's one file.
+
 ## 3. How a session becomes the agent
 
 | Harness | Command line | Files |
@@ -152,6 +182,7 @@ agent-mux agent new <name> [--template T] [--workspace DIR]
     [--description TEXT] [--instructions TEXT] [--tools a,b] [--model M] [--effort E]
 agent-mux agent check [<name>] [--workspace DIR]
 agent-mux agent templates
+agent-mux agent migrate [--write]           # an agent file for every loop that has none
 agent-mux agent import <file> [--force]     # a Claude-shaped file as a loop agent (docs/loops.md)
 agent-mux workflow check [<name>] [--workspace DIR]
 agent-mux workflow run <name> --workspace DIR --step <id>.agent=<name>

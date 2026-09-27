@@ -178,7 +178,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         Some("push") => {
             let registry = crate::loops::registry::registry_path()
-                .map(|p| crate::loops::registry::load(&p))
+                .map(|p| crate::agents::schedule::load_registry(&p, &crate::assets::root()).0)
                 .unwrap_or_default();
             let report = catalog.push(&registry, flag("--dry-run"));
             let verb = if flag("--dry-run") {

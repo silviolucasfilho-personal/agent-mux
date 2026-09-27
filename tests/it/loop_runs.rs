@@ -186,6 +186,8 @@ fn fixture(pattern: &str, level: Level, spec: &FakeSpec) -> Fixture {
     app.skill_install_home = Some(home.clone());
     app.skills_dir = Some(home.join("skills"));
     app.runtime_dir = Some(home.join("runtime"));
+    // scheduled agent files in the real library must not leak in
+    app.library_root = Some(temp.path().join("library"));
     app.loops_file = Some(temp.path().join("loops.json"));
     app.loops = LoopRunnerSettings::default();
 

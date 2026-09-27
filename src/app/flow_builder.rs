@@ -1605,7 +1605,7 @@ impl App {
             st.catalog
                 .entries
                 .iter()
-                .filter(|e| e.spec.is_some())
+                .filter(|e| e.spec.as_ref().is_some_and(|s| !s.is_task()))
                 .map(|e| Some(e.name.clone())),
         );
         let cur = st.draft.agent(i, role);

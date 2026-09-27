@@ -4473,6 +4473,9 @@ impl App {
         }
         if let Some(name) = request.asset_id.strip_prefix("agent:") {
             self.reload_personas();
+            // a scheduled agent's file holds its loop's settings
+            self.load_loop_registry();
+            self.refresh_loop_cards(Instant::now());
             let catalog = crate::agents::Catalog::load(&self.library_root(), None);
             self.notice = Some(match catalog.entry(name) {
                 Some(e) if !e.problems.is_empty() => {

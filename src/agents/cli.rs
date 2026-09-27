@@ -17,6 +17,10 @@ pub const USAGE: &str = "agent-mux agent <command>
                                    otherwise into the library
   check [<name>] [--workspace DIR] validate agents; exit 1 on problems
   templates                        the starting points for `new`
+  migrate [--write]                an agent file for every loop in loops.json that has
+                                   none ([task], [schedule], [limits]); without --write
+                                   it only says what it would do. loops.json is copied
+                                   to loops.json.bak first and keeps the run state
   import <file> [--force]          copy a Claude-shaped agent file into the library
                                    as a loop agent (loops/agents/, docs/loops.md)
 
@@ -99,6 +103,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         Some("show") => show(&args),
         Some("new") => new(&args),
         Some("check") => check(&args),
+        Some("migrate") => migrate(&args),
         Some("import") => crate::loops::agents::run_cli(raw).map_err(|e| anyhow::anyhow!(e)),
         Some("templates") => {
             for (name, text) in super::templates() {
@@ -115,6 +120,41 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         }
         Some(other) => anyhow::bail!("unknown agent command {other:?}\n\n{USAGE}"),
     }
+}
+
+fn migrate(args: &Args) -> anyhow::Result<()> {
+    let path = crate::loops::registry::registry_path()
+        .ok_or_else(|| anyhow::anyhow!("no home directory for loops.json"))?;
+    let write = args.flag("--write");
+    let m = super::schedule::migrate(&path, &crate::assets::root(), write)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if m.moves.is_empty() && m.skipped.is_empty() {
+        println!(
+            "nothing to migrate: every loop in {} has an agent file",
+            path.display()
+        );
+        return Ok(());
+    }
+    for mv in &m.moves {
+        println!(
+            "{} {} ({} in {}) → {}",
+            if write { "wrote" } else { "would write" },
+            mv.name,
+            mv.pattern,
+            mv.workspace.display(),
+            mv.path.display()
+        );
+    }
+    for (id, why) in &m.skipped {
+        println!("skipped {id}: {why}");
+    }
+    if let Some(b) = &m.backup {
+        println!("loops.json was copied to {}", b.display());
+    }
+    if !write && !m.moves.is_empty() {
+        println!("\nrun `agent-mux agent migrate --write` to write them");
+    }
+    Ok(())
 }
 
 fn catalog(args: &Args) -> Catalog {
@@ -151,11 +191,16 @@ fn ls(args: &Args) -> anyhow::Result<()> {
     for e in &cat.entries {
         match &e.spec {
             Some(s) => println!(
-                "{:<18} {:<9} {}  [{}]",
+                "{:<18} {:<9} {}  [{}]{}",
                 e.name,
                 e.source.label(),
                 s.description,
-                s.tools_label()
+                s.tools_label(),
+                match (&s.task, &s.schedule) {
+                    (Some(t), Some(sch)) => format!("  ⟳ {} every {}", t.pattern, sch.every),
+                    (Some(t), None) => format!("  task {}", t.pattern),
+                    _ => String::new(),
+                }
             ),
             None => println!(
                 "{:<18} {:<9} ! {}",

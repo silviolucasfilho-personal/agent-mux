@@ -66,6 +66,8 @@ fn app_with_sessions(groups: &[Option<GroupRef>]) -> (App, tempfile::TempDir) {
     let mut app = App::new(vec![profile("Claude Code")], None, tx.clone());
     app.clipboard_enabled = false;
     app.set_pane_size(30, 120);
+    // scheduled agent files in the real library must not leak in
+    app.library_root = Some(temp.path().join("library"));
     app.loops_file = Some(temp.path().join("loops.json"));
     app.runtime_dir = Some(temp.path().join("runtime"));
     app.history_sessions.clear();

@@ -494,12 +494,17 @@ fn invocation(skill: &str, harness: Harness) -> String {
 impl App {
     // ----- registry -----------------------------------------------------
 
-    /// Loads `~/.agent-mux/loops.json`, applies the catch-up rule and
-    /// sweeps old context snapshots. Called once at startup.
+    /// Loads `~/.agent-mux/loops.json` with the library's scheduled agent
+    /// files laid over it, applies the catch-up rule and sweeps old
+    /// context snapshots. Called once at startup.
     pub fn load_loop_registry(&mut self) {
         let path = self.loops_file.clone().or_else(registry::registry_path);
         if let Some(p) = &path {
-            self.loop_registry = registry::load(p);
+            let (reg, problems) = crate::agents::schedule::load_registry(p, &self.library_root());
+            self.loop_registry = reg;
+            if !problems.is_empty() {
+                self.notice = Some(Notice::warn(problems.join("; ")));
+            }
         }
         let moved = crate::loops::schedule::apply_catch_up(
             &mut self.loop_registry,
@@ -586,15 +591,25 @@ impl App {
         };
         self.loop_registry.remove(&entry.id);
         self.loop_cards.remove(&entry.id);
+        let file = crate::agents::schedule::remove_file(&self.library_root(), &entry);
         self.selected_loop = self
             .selected_loop
             .min(self.loop_registry.loops.len().saturating_sub(1));
         let _ = self.save_loop_registry();
-        self.notice = Some(Notice::info(format!(
-            "{} removed from the registry; the files in {} stay",
-            entry.pattern,
-            entry.workspace_name()
-        )));
+        self.notice = Some(match file {
+            Ok(Some(path)) => Notice::info(format!(
+                "{} removed with its agent file {}; the files in {} stay",
+                entry.pattern,
+                path.display(),
+                entry.workspace_name()
+            )),
+            Ok(None) => Notice::info(format!(
+                "{} removed from the registry; the files in {} stay",
+                entry.pattern,
+                entry.workspace_name()
+            )),
+            Err(e) => Notice::error(format!("{}: its agent file stays: {e}", entry.pattern)),
+        });
     }
 
     /// `r`: the next scheduler pass starts the loop (pre-flight still runs).
@@ -2047,6 +2062,33 @@ impl App {
         entry.max_runs_per_day = v.max_runs;
         entry.max_tokens_per_day = v.max_tokens;
         entry.max_cost_usd_per_run = v.max_cost;
+        // a new one is an agent file from the start; an older loop gets
+        // one from `agent-mux agent migrate`
+        if dialog.editing.is_none() {
+            let taken: Vec<String> = self
+                .loop_registry
+                .loops
+                .iter()
+                .filter_map(|l| l.agent.clone())
+                .collect();
+            entry.agent = Some(crate::agents::schedule::free_name(
+                &self.library_root(),
+                &entry,
+                &taken,
+            ));
+            if self
+                .loop_registry
+                .find(entry.agent.as_deref().unwrap_or(""))
+                .is_none()
+            {
+                entry.id = entry.agent.clone().unwrap_or(entry.id);
+            }
+        }
+        if entry.agent.is_some()
+            && let Err(e) = crate::agents::schedule::write_entry(&self.library_root(), &entry)
+        {
+            return Err(format!("agent file: {e}"));
+        }
         let id = entry.id.clone();
         self.loop_registry.add(entry);
         if let Err(e) = self.save_loop_registry() {

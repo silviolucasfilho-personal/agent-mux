@@ -106,9 +106,14 @@ fn registry_path() -> anyhow::Result<PathBuf> {
     registry::registry_path().ok_or_else(|| anyhow::anyhow!("no home directory for loops.json"))
 }
 
+/// The registry with the library's scheduled agent files laid over it.
 fn load_registry() -> anyhow::Result<(PathBuf, Registry)> {
     let path = registry_path()?;
-    Ok((path.clone(), registry::load(&path)))
+    let (reg, problems) = crate::agents::schedule::load_registry(&path, &crate::assets::root());
+    for p in problems {
+        eprintln!("warning: {p}");
+    }
+    Ok((path.clone(), reg))
 }
 
 fn save_registry(path: &Path, reg: &Registry) -> anyhow::Result<()> {
@@ -517,6 +522,10 @@ fn rm(args: &Args) -> anyhow::Result<()> {
     let (path, mut reg) = load_registry()?;
     let id = resolve_entry(&reg, needle)?.id.clone();
     let gone = reg.remove(&id).unwrap();
+    // an agent file would bring it back on the next load
+    if let Some(file) = crate::agents::schedule::remove_file(&crate::assets::root(), &gone)? {
+        println!("removed its agent file {}", file.display());
+    }
     save_registry(&path, &reg)?;
     println!(
         "removed {} ({} in {}); the files in the workspace stay",

@@ -433,6 +433,7 @@ mod tests {
             next_run_at: None,
             last_run_id: None,
             paused_reason: None,
+            agent: None,
         }
     }
 

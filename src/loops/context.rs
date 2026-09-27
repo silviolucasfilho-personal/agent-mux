@@ -182,7 +182,7 @@ pub fn live(
     use crate::loops::{patterns, registry, store as lstore};
     let conn = crate::tracing::store::open_ro(db)?;
     let reg = registry::registry_path()
-        .map(|p| registry::load(&p))
+        .map(|p| crate::agents::schedule::load_registry(&p, &crate::assets::root()).0)
         .unwrap_or_default();
     let run = match run_id {
         Some(id) => lstore::get_run(&conn, id).map_err(|e| e.to_string())?,
@@ -369,7 +369,10 @@ pub fn doctor_lines(
     use crate::loops::{patterns, registry, scaffold};
     let mut out = Vec::new();
     let path = registry::registry_path();
-    let reg = path.as_ref().map(|p| registry::load(p)).unwrap_or_default();
+    let reg = path
+        .as_ref()
+        .map(|p| crate::agents::schedule::load_registry(p, &crate::assets::root()).0)
+        .unwrap_or_default();
     out.push((
         true,
         "registry".into(),

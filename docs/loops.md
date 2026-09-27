@@ -229,6 +229,8 @@ Not supported for loops in this version. agy 1.2.3 requires a `decision` in ever
 
 ## 12. Command line
 
+A loop's settings live in its agent file (`~/.agent-mux/agents/<name>.toml`, `[task]`, `[schedule]`, `[limits]`; docs/agents.md, "A scheduled agent"); `loops.json` keeps the run state. `agent-mux agent migrate --write` gives a loop from an older build its file.
+
 `agent-mux loop ls|add|rm|run|pause|resume|init|audit|status|report|runs|show|cost|inbox|decide` mirror the sidebar; `add` takes `--model` and `--verifier-model` (any `--level` is accepted whatever the score); `report <id>` prints what a run found and who has to act (`--run <run_id>` for an older one), `runs <id>` the folded timeline (`--all` unfolds it) and `show <run_id>` one run in full; `loop run <id> --now` performs one scheduler pass headlessly (for cron) and exits 0 for report-only or no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. The MCP tool `agent_mux_get_loop_context` gives a running loop its context recomputed now.
 
 Configuration (`profiles.toml`):

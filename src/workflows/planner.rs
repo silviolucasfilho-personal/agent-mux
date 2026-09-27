@@ -138,7 +138,7 @@ pub fn plan_context(
             .entries
             .iter()
             .filter_map(|e| {
-                e.spec.as_ref().map(|s| AgentSummary {
+                e.spec.as_ref().filter(|s| !s.is_task()).map(|s| AgentSummary {
                     name: s.name.clone(),
                     description: s.description.clone(),
                     tools: match &s.tools {

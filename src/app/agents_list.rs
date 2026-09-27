@@ -307,7 +307,8 @@ impl App {
         self.personas = catalog
             .entries
             .iter()
-            .filter(|e| e.spec.is_some())
+            // a scheduled agent is listed with the scheduled ones
+            .filter(|e| e.spec.as_ref().is_some_and(|s| !s.is_task()))
             .map(|e| e.name.clone())
             .collect();
     }

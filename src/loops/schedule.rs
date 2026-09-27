@@ -123,6 +123,7 @@ mod tests {
             next_run_at: Some(next.into()),
             last_run_id: None,
             paused_reason: None,
+            agent: None,
         }
     }
 

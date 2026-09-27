@@ -103,7 +103,7 @@ A single agent file (identity, body, trigger and limits in one TOML) comes in ph
 
 1. **This spec and the mockups** (design canvas "Agent-first agent-mux").
 2. **The Agents section and the agent editor** over the existing loop and workflow runtimes; levels removed; the runs view.
-3. **One agent file** and the migration of `loops.json`, patterns and workflow documents into it.
+3. **One agent file** and the migration of `loops.json`, patterns and workflow documents into it. Done for scheduled agents (2026-09-27): `[task]`, `[schedule]`, `[limits]` in the agent file, overlaid on `loops.json` (which keeps the run state), `agent-mux agent migrate [--write]`. Patterns stay the task library a `[task]` names; a library workflow document already is a flow agent's one file.
 4. **Scheduled flows**, if wanted.
 
 ## 8. Open

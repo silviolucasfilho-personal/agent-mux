@@ -5,6 +5,13 @@
 //! `effort`, `[backends.<harness>]` overrides) found in the workspace's
 //! `.agent-mux/agents/`, then in the library's `agents/`.
 //!
+//! The same file can say what the agent does on its own and when
+//! (agent-first spec, phase 3): `[task]` names the loop pattern it runs,
+//! `[schedule]` when and where, `[limits]` its budgets. Such an agent is a
+//! scheduled agent; `schedule` overlays it on the loop registry, which
+//! keeps the run state, and `agent-mux agent migrate` writes these files
+//! from the registry.
+//!
 //! The workflow keeps owning order, context, budgets and isolation; the
 //! agent only changes how each session is launched (`launch`) and what
 //! `workflow check` says about the steps that name it (`fit`). The design
@@ -15,6 +22,7 @@
 pub mod cli;
 pub mod fit;
 pub mod launch;
+pub mod schedule;
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -78,16 +86,66 @@ pub struct BackendOverride {
 struct RawAgent {
     name: String,
     description: String,
+    #[serde(default)]
     instructions: String,
     tools: Option<Vec<String>>,
     model: Option<String>,
     effort: Option<String>,
     #[serde(default)]
     backends: BTreeMap<String, BackendOverride>,
+    task: Option<TaskSpec>,
+    schedule: Option<RawSchedule>,
+    limits: Option<LimitsSpec>,
+}
+
+/// `[task]`: the one thing the agent does on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskSpec {
+    /// A loop pattern id (the task library, `loops::patterns`).
+    pub pattern: String,
+    /// The `loop-verifier` sub-agent's model; absent inherits the run's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_model: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSchedule {
+    every: String,
+    workspace: String,
+    #[serde(default)]
+    profile: String,
+    harness: Option<String>,
+}
+
+/// `[schedule]`: when and where the task runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleSpec {
+    /// As written (`15m`).
+    pub every: String,
+    pub interval_s: u64,
+    pub workspace: String,
+    /// The harness profile the runs launch with.
+    pub profile: String,
+    /// `claude` | `codex`; absent keeps what the registry says.
+    pub harness: Option<String>,
+}
+
+/// `[limits]`: budgets; absent values take the pattern's.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LimitsSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_per_day: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_day: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usd_per_run: Option<f64>,
 }
 
 /// A parsed, validated agent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentSpec {
     pub name: String,
     /// What the agent is for; shown in listings and the planner's catalog.
@@ -100,6 +158,9 @@ pub struct AgentSpec {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub backends: BTreeMap<String, BackendOverride>,
+    pub task: Option<TaskSpec>,
+    pub schedule: Option<ScheduleSpec>,
+    pub limits: Option<LimitsSpec>,
     /// sha256 of the file's text: a changed agent reruns its sessions on
     /// resume.
     pub hash: String,
@@ -130,9 +191,53 @@ impl AgentSpec {
         if raw.description.trim().is_empty() {
             problems.push("description is empty: say in one line what the agent is for".into());
         }
-        if raw.instructions.trim().is_empty() {
+        // a task agent's prompt is its pattern's; a persona's is its instructions
+        if raw.instructions.trim().is_empty() && raw.task.is_none() {
             problems.push("instructions are empty: they become the agent's system prompt".into());
         }
+        if let Some(t) = &raw.task
+            && t.pattern.trim().is_empty()
+        {
+            problems.push(
+                "[task] pattern is empty: name a loop pattern (agent-mux loop init --list)".into(),
+            );
+        }
+        let schedule = match raw.schedule {
+            None => None,
+            Some(_) if raw.task.is_none() => {
+                problems.push(
+                    "[schedule] needs a [task]: only a one-task agent runs on a schedule for now"
+                        .into(),
+                );
+                None
+            }
+            Some(s) => {
+                let interval = crate::loops::parse_interval(&s.every);
+                if interval.is_none() {
+                    problems.push(format!(
+                        "[schedule] every = {:?}: use <n>m, <n>h or <n>d, at least 5m",
+                        s.every
+                    ));
+                }
+                if s.workspace.trim().is_empty() {
+                    problems.push("[schedule] workspace is empty: the folder it runs in".into());
+                }
+                if let Some(h) = &s.harness
+                    && !matches!(h.as_str(), "claude" | "codex")
+                {
+                    problems.push(format!(
+                        "[schedule] harness {h:?}: a scheduled agent runs on claude or codex"
+                    ));
+                }
+                interval.map(|interval_s| ScheduleSpec {
+                    every: s.every.trim().to_string(),
+                    interval_s,
+                    workspace: s.workspace.trim().to_string(),
+                    profile: s.profile.trim().to_string(),
+                    harness: s.harness,
+                })
+            }
+        };
         let tools = match raw.tools {
             None => None,
             Some(list) => {
@@ -165,8 +270,17 @@ impl AgentSpec {
             model: raw.model.filter(|m| !m.trim().is_empty()),
             effort: raw.effort.filter(|e| !e.trim().is_empty()),
             backends: raw.backends,
+            task: raw.task,
+            schedule,
+            limits: raw.limits,
             hash: hash_text(text),
         })
+    }
+
+    /// An agent that does something on its own (`[task]`), rather than a
+    /// persona that steps and runs use.
+    pub fn is_task(&self) -> bool {
+        self.task.is_some()
     }
 
     pub fn can(&self, tool: &Tool) -> bool {
