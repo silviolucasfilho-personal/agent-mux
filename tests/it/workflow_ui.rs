@@ -3,7 +3,7 @@
 //! here spawns a harness: starting a run needs a profile whose command
 //! exists, and the tests stop at the dialog's validation.
 
-use agent_mux::app::workflows_view::{DialogField, DialogPurpose, RunRow};
+use agent_mux::app::workflows_view::{DialogField, DialogPurpose};
 use agent_mux::app::{App, Mode, SidebarSection};
 use agent_mux::config::Profile;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -255,20 +255,19 @@ fn c_opens_the_compose_dialog_and_w_the_view() {
     assert!(text.contains("audit the parser"), "{text}");
     press(&mut app, KeyCode::Esc);
 
-    app.open_workflows_view();
-    let Mode::WorkflowsView(v) = &app.mode else {
+    press(&mut app, KeyCode::Char('W'));
+    let Mode::RunsView(v) = &app.mode else {
         panic!("not the view: {:?}", app.mode);
     };
-    assert!(v.rows.is_empty(), "no runs yet");
+    assert!(v.items.is_empty(), "no runs yet");
     let text = render(&app, 120, 40);
-    assert!(text.contains("Workflow runs (0)"), "{text}");
     assert!(text.contains("no runs yet"), "{text}");
     assert!(text.contains("Report"), "{text}");
     press(&mut app, KeyCode::Tab);
-    let Mode::WorkflowsView(v) = &app.mode else {
+    let Mode::RunsView(v) = &app.mode else {
         panic!()
     };
-    assert_eq!(v.tab, agent_mux::app::workflows_view::ViewTab::Steps);
+    assert_eq!(v.tab, agent_mux::app::runs_view::RunTab::Sessions);
     press(&mut app, KeyCode::Esc);
     assert!(matches!(app.mode, Mode::Control));
 }
@@ -292,23 +291,23 @@ fn a_planned_document_is_listed_run_saved_or_discarded_from_the_view() {
         run_id: None,
         agents: Vec::new(),
     });
-    app.open_workflows_view();
-    let Mode::WorkflowsView(v) = &app.mode else {
+    app.open_runs_view();
+    let Mode::RunsView(v) = &app.mode else {
         panic!()
     };
-    assert_eq!(v.rows[0], RunRow::Header("Planned"));
-    assert_eq!(v.selected, 1);
-    let text = render(&app, 120, 40);
+    assert_eq!(
+        v.selected_item().map(|i| i.run.key()).as_deref(),
+        Some("plan:plan-1"),
+        "it starts on what needs the user"
+    );
+    let text = render(&app, 160, 40);
     assert!(text.contains("quick-look"), "{text}");
     assert!(text.contains("valid · Enter runs it"), "{text}");
 
     // s saves it under a name typed in the footer
     press(&mut app, KeyCode::Char('s'));
-    let text = render(&app, 120, 40);
-    assert!(
-        text.contains("Save to the library as: quick-look_"),
-        "{text}"
-    );
+    let text = render(&app, 160, 40);
+    assert!(text.contains("Save the document as: quick-look▏"), "{text}");
     press(&mut app, KeyCode::Backspace);
     press(&mut app, KeyCode::Backspace);
     press(&mut app, KeyCode::Backspace);
@@ -334,10 +333,10 @@ fn a_planned_document_is_listed_run_saved_or_discarded_from_the_view() {
     assert!(!app.planned_workflows.is_empty(), "it asks first");
     press(&mut app, KeyCode::Char('y'));
     assert!(app.planned_workflows.is_empty());
-    let Mode::WorkflowsView(v) = &app.mode else {
+    let Mode::RunsView(v) = &app.mode else {
         panic!()
     };
-    assert!(v.rows.iter().all(|r| !matches!(r, RunRow::Planned(_))));
+    assert!(v.items.iter().all(|i| !i.run.key().starts_with("plan:")));
 }
 
 #[test]
@@ -569,47 +568,35 @@ fn a_long_result_wraps_and_scrolls_in_the_result_tab() {
     drop(conn);
     app.trace_db_path = Some(db);
 
-    app.open_workflows_view();
-    // Progress → Document → Result
-    press(&mut app, KeyCode::Tab);
-    press(&mut app, KeyCode::Tab);
-    let Mode::WorkflowsView(v) = &app.mode else {
+    app.open_runs_view();
+    press(&mut app, KeyCode::Char('4'));
+    let Mode::RunsView(v) = &app.mode else {
         panic!("the view is open")
     };
-    assert_eq!(v.tab, agent_mux::app::workflows_view::ViewTab::Result);
+    assert_eq!(v.tab, agent_mux::app::runs_view::RunTab::Result);
 
-    let top = render(&app, 100, 30);
+    let top = render(&app, 140, 30);
     assert!(top.contains("FIRSTMARK"), "the long line wraps\n{top}");
     assert!(
         !top.contains("LASTMARK"),
         "the tail is below the fold\n{top}"
     );
-    assert!(
-        top.lines()
-            .any(|l| l.contains("Result") && l.contains("1–") && l.contains("/88")),
-        "the pane title carries the scroll position\n{top}"
-    );
     assert!(!top.lines().any(|l| l.contains("very long very long very long very long very long very long very long very long very long")), "no row runs past the pane");
 
-    // End reaches the bottom, Home comes back
-    press(&mut app, KeyCode::End);
-    let bottom = render(&app, 100, 30);
+    // Ctrl+D pages down to the end and stops there; Ctrl+U comes back
+    for _ in 0..20 {
+        press_mod(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+    }
+    let bottom = render(&app, 140, 30);
     assert!(
         bottom.contains("LASTMARK"),
-        "End scrolls to the end\n{bottom}"
+        "the end is reachable\n{bottom}"
     );
     assert!(!bottom.contains("FIRSTMARK"), "{bottom}");
-    press(&mut app, KeyCode::Home);
-    assert_eq!(render(&app, 100, 30), top);
-
-    // the wheel over the detail pane scrolls it too
-    press(&mut app, KeyCode::Right);
-    app.scroll_workflows_view(3);
-    let Mode::WorkflowsView(v) = &app.mode else {
-        panic!()
-    };
-    assert_eq!(v.scroll_offset, 3);
-    assert!(v.max_scroll() > 60, "the wrapped rows outgrow the pane");
+    for _ in 0..20 {
+        press_mod(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    }
+    assert_eq!(render(&app, 140, 30), top);
 }
 
 /// A finished review run: two findings found, one of them refuted by two of
@@ -715,13 +702,13 @@ input = "confirmed"
     drop(conn);
     app.trace_db_path = Some(db);
 
-    app.open_workflows_view();
-    let Mode::WorkflowsView(v) = &app.mode else {
+    app.open_runs_view();
+    let Mode::RunsView(v) = &app.mode else {
         panic!("the view is open")
     };
-    assert_eq!(v.tab, agent_mux::app::workflows_view::ViewTab::Report);
+    assert_eq!(v.tab, agent_mux::app::runs_view::RunTab::Report);
 
-    let out = render(&app, 120, 40);
+    let out = render(&app, 180, 50);
     assert!(out.contains("finished"), "{out}");
     assert!(
         out.contains("Review of the branch"),
@@ -759,7 +746,7 @@ input = "confirmed"
         "the verdict is not repeated under the report's title\n{out}"
     );
     assert!(
-        out.lines().next().unwrap().starts_with("┌ Workflow runs"),
+        out.lines().next().unwrap().starts_with(" Runs "),
         "the view is the whole screen\n{out}"
     );
     assert!(out.contains("Refuted (1)"), "{out}");
@@ -1019,11 +1006,11 @@ fn a_recent_run_is_listed_above_the_library_and_opens_in_the_view() {
         "the preview is the run's\n{text}"
     );
     press(&mut app, KeyCode::Enter);
-    let Mode::WorkflowsView(v) = &app.mode else {
+    let Mode::RunsView(v) = &app.mode else {
         panic!("not the view: {:?}", app.mode)
     };
     assert_eq!(
-        v.selected_row(),
-        Some(&RunRow::Stored("run-00000009".into()))
+        v.selected_item().map(|i| i.run.key()).as_deref(),
+        Some("flow:run-00000009")
     );
 }

@@ -54,5 +54,5 @@ For `Option` combinations, turn on "Use Option as Meta key" (Terminal.app) or "E
 | Configuration view | `u` push loop skills to workspaces |
 | Agent editor | `1`-`5` Who · What · When · Limits · Review (`Tab` / `Shift+Tab` in a scheduled agent or a persona); `Enter` types a field, `←` `→` `Space` change the others; `e` on What edits a scheduled agent's task; a flow's fields: `Space` makes a field required, `[` `]` previous / next step, `Enter` on Answers with opens what passes |
 | Loop builder | `c` copies a pattern |
-| Runs view | `1`-`4` Report · Sessions · Change · Result; `Enter` applies a change, attaches to a running run or opens its record; `d` rejects or dismisses; `r` runs a scheduled agent again; `x` stops; `e` edits the run's agent; `T` traces |
+| Runs view | `1`-`5` Report · History or Steps · Change · Result · Setup or Document; `p` pauses a loop; `s` saves a flow's document; `Enter` applies a change, runs a plan or attaches to a running run; `d` rejects or dismisses (a plan asks first); `r` runs a scheduled agent again or resumes a flow run; `x` stops; `e` edits the run's agent; `T` traces |
 | Attached to a session | `Ctrl+Q` detach; every other key goes to the harness |

@@ -53,6 +53,7 @@ fn compact(n: i64) -> String {
 
 fn glyph_color(g: &str) -> Color {
     match g {
+        "⟳" | "‖" => Color::Cyan,
         "✗" => Color::Red,
         "!" => Color::Yellow,
         "·" => Color::DarkGray,
@@ -143,8 +144,9 @@ fn draw_detail(f: &mut Frame, area: Rect, st: &RunsViewState, app: &App) {
     f.render_widget(block, area);
     let [tabs, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
     let mut spans = Vec::new();
+    let flow = st.selected_item().is_some_and(|i| i.run.is_flow());
     for (i, t) in RunTab::ALL.iter().enumerate() {
-        let text = format!(" {} {} ", i + 1, t.label());
+        let text = format!(" {} {} ", i + 1, t.label(flow));
         spans.push(if *t == st.tab {
             Span::styled(
                 text,
@@ -159,6 +161,17 @@ fn draw_detail(f: &mut Frame, area: Rect, st: &RunsViewState, app: &App) {
         spans.push(Span::raw(" "));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), tabs);
+    // the loop's and the workflow's own detail builders, where they apply
+    if let Some(detail) = &st.detail {
+        let scroll = clamp_scroll(st, detail, body);
+        f.render_widget(
+            Paragraph::new(detail.clone())
+                .wrap(Wrap { trim: false })
+                .scroll((scroll as u16, 0)),
+            body,
+        );
+        return;
+    }
     let lines: Vec<Line> = tab_lines(app, st)
         .into_iter()
         .map(|l| {
@@ -183,41 +196,86 @@ fn draw_detail(f: &mut Frame, area: Rect, st: &RunsViewState, app: &App) {
             }
         })
         .collect();
+    let scroll = clamp_scroll(st, &lines, body);
     f.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((st.scroll as u16, 0)),
+            .scroll((scroll as u16, 0)),
         body,
     );
 }
 
+/// The rows `lines` wrap to in `area`; records how far the view can
+/// scroll and returns the scroll to draw with.
+fn clamp_scroll(st: &RunsViewState, lines: &[Line], area: Rect) -> usize {
+    let w = usize::from(area.width).max(1);
+    let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(w)).sum();
+    let max = rows.saturating_sub(usize::from(area.height));
+    st.max_scroll.set(max);
+    st.scroll.min(max)
+}
+
 fn footer(st: &RunsViewState) -> Line<'static> {
+    use crate::app::inbox::InboxItem;
+    if st.confirm_discard {
+        return Line::from(vec![Span::styled(" Discard this plan? [y/n]", key_style())]);
+    }
+    if let Some(name) = &st.save_name {
+        return Line::from(vec![
+            Span::styled(" Save the document as: ", key_style()),
+            Span::raw(format!("{name}▏")),
+            Span::styled("   ↩ save   Esc cancel", dim()),
+        ]);
+    }
     let own: Vec<(&str, &str)> = match st.selected_item().map(|i| &i.run) {
-        Some(RunRef::Inbox(crate::app::inbox::InboxItem::Loop(r))) if r.branch.is_some() => {
-            vec![
-                ("↩", "apply"),
-                ("d", "reject"),
-                ("r", "run again"),
-                ("e", "edit the agent"),
-            ]
-        }
-        Some(RunRef::Inbox(_)) => vec![("↩", "open"), ("d", "dismiss"), ("e", "edit the agent")],
-        Some(RunRef::LoopLive { .. }) => {
-            vec![("↩", "attach"), ("x", "stop"), ("e", "edit the agent")]
-        }
-        Some(RunRef::FlowLive(_)) => vec![("↩", "open"), ("x", "stop"), ("e", "edit the agent")],
-        Some(RunRef::Loop(_)) => vec![
-            ("↩", "its record"),
+        Some(RunRef::Inbox(InboxItem::Loop(r))) if r.branch.is_some() => vec![
+            ("↩", "apply"),
+            ("d", "reject"),
             ("r", "run again"),
+            ("p", "pause"),
+            ("e", "edit the agent"),
+        ],
+        Some(RunRef::Inbox(InboxItem::Loop(_))) => vec![
+            ("d", "dismiss"),
+            ("r", "run again"),
+            ("p", "pause"),
             ("e", "edit the agent"),
             ("T", "traces"),
         ],
-        Some(RunRef::Flow(_)) => vec![("↩", "its record"), ("e", "edit the agent")],
+        Some(RunRef::Inbox(InboxItem::Plan { .. })) => vec![
+            ("↩", "run it"),
+            ("e", "edit"),
+            ("s", "save"),
+            ("d", "discard"),
+        ],
+        Some(RunRef::Inbox(InboxItem::Run { .. })) => vec![
+            ("r", "resume"),
+            ("s", "save"),
+            ("d", "dismiss"),
+            ("e", "edit the agent"),
+        ],
+        Some(RunRef::LoopLive { .. }) => {
+            vec![("↩", "attach"), ("x", "stop"), ("e", "edit the agent")]
+        }
+        Some(RunRef::FlowLive(_)) => vec![
+            ("↩", "attach"),
+            ("x", "stop"),
+            ("s", "save"),
+            ("e", "edit the agent"),
+        ],
+        Some(RunRef::Loop(_)) => vec![
+            ("r", "run again"),
+            ("p", "pause"),
+            ("e", "edit the agent"),
+            ("T", "traces"),
+        ],
+        Some(RunRef::Flow(_)) => vec![("r", "resume"), ("s", "save"), ("e", "edit the agent")],
+        Some(RunRef::Next(_)) => vec![("r", "run now"), ("p", "pause"), ("e", "edit the agent")],
         None => vec![],
     };
-    let mut v: Vec<(&str, &str)> = vec![("↑↓", "runs"), ("1-4", "tabs")];
+    let mut v: Vec<(&str, &str)> = vec![("↑↓", "runs"), ("1-5", "tabs")];
     v.extend(own);
-    v.push(("⌃R", "reload"));
+    v.push(("⌃D ⌃U", "scroll"));
     v.push(("Esc", "back"));
     hints(&v)
 }

@@ -135,7 +135,7 @@ Terminal rendering and telemetry are separate paths. The PTY's escape sequences 
 | [src/config.rs](src/config.rs), [src/harness.rs](src/harness.rs) | TOML configuration and resolution, harness detection and flag composition. |
 | [src/history.rs](src/history.rs), [src/transcript.rs](src/transcript.rs), [src/persistence.rs](src/persistence.rs) | Provider transcript discovery, JSONL parsers for all three providers, saved sessions. |
 | [src/skill/](src/skill/) | Package discovery, per-harness rendering, managed installation, `skill` CLI, launch composition. |
-| [src/loops/](src/loops/), [src/app/loops.rs](src/app/loops.rs), [src/app/loops_view.rs](src/app/loops_view.rs), [loops/](loops/) | Loop Engineering: patterns, registry, readiness, gate, breaker, cost, run log, scheduler, worktrees, context, `loop_runs` store access, `loop` CLI; the App's scheduler pass and run lifecycle; the Loops view; the embedded skills, verifier and templates. |
+| [src/loops/](src/loops/), [src/app/loops.rs](src/app/loops.rs), [src/app/loops_view.rs](src/app/loops_view.rs), [loops/](loops/) | Loop Engineering: patterns, registry, readiness, gate, breaker, cost, run log, scheduler, worktrees, context, `loop_runs` store access, `loop` CLI; the App's scheduler pass and run lifecycle; a loop run's detail in the runs view; the embedded skills, verifier and templates. |
 | [src/tracing/mod.rs](src/tracing/mod.rs) | `TraceRuntime`, launch planning, per-launch pipeline task, finalize and shutdown. |
 | [src/tracing/hooks/](src/tracing/hooks/) | Hook payload parsing (`mod.rs`), per-launch registration (`register.rs`), persistent installers (`install.rs`), feed reader (`feed.rs`), budget guard (`guard.rs`). |
 | [src/tracing/correlate.rs](src/tracing/correlate.rs), [src/tracing/tail.rs](src/tracing/tail.rs) | Bind a launch to a provider transcript; follow a file incrementally. |
@@ -359,7 +359,7 @@ Title `Agents [<sel>/<count>]`; rows show the package icon (default `⚡`), disp
 Title `Loops [<sel>/<count>]`, or `Loops [<count>] PAUSED` in yellow while the kill switch is on. Rows show a status glyph (`○` scheduled, `●` running, `‖` paused, `!` waiting on a human, `✗` last run failed or blocked), the pattern id, the configured level, and a right column with the countdown to the next run (`due`, `6h`, `12m`), `now` while running, `—` when paused or `in2` with two inbox items.
 
 - **Population:** `App.loop_registry` (`~/.agent-mux/loops.json`, `AGENT_MUX_LOOPS_FILE` in tests) loaded by `load_loop_registry` at startup, which also applies the catch-up rule and sweeps old context snapshots. Status and the right column come from `App.loop_cards`, rebuilt every second by `refresh_loop_cards` from the registry, the store (`spend_since`, `recent_runs`, `inbox`), the ledger, the workspace files and a readiness audit cached 60 s per workspace.
-- **Keys:** `Enter` details (Loops view), `r` run now, `p` pause / resume, `n` new, `e` edit, `d` remove (confirmation; files stay), `o` the pattern in the loop builder, `K` kill switch, `E` runs view.
+- **Keys:** `Enter` its runs (runs view), `r` run now, `p` pause / resume, `n` new, `e` edit, `d` remove (confirmation; files stay), `o` the pattern in the loop builder, `K` kill switch, `E` runs view.
 
 #### History sidebar (`draw_history_sidebar`)
 
@@ -398,7 +398,7 @@ Every screen shares one keymap (`src/keymap.rs`, `docs/keyboard.md`): `n` new, `
 | `j`/`k`, `↓`/`↑` | Move within the focused section; at the edges continue into the adjacent section (Active ↔ Agents ↔ Loops ↔ History). |
 | `Tab`, `BackTab` | Both advance Active → Agents → Loops → History → Active (BackTab does **not** reverse). Entering Agents rescans packages. With the sidebar hidden, cycle active sessions. |
 | `1`-`9` | Select active session; only when Active is focused or the sidebar is hidden. |
-| `Enter` | Active: attach. Agents: open the harness picker, or attach to the running agent session. Loops: the Loops view on the selected loop. History: resume. |
+| `Enter` | Active: attach. Agents: open the harness picker, or attach to the running agent session. Loops: the runs view on the loop's newest run. History: resume. |
 | `r` | Active: respawn, only when the selected session has exited (new PTY, same profile and directory, tracing replanned; an agent session keeps its skill id). Agents: picker/attach. Loops: run now (pre-flight still applies). History: resume. |
 | `p`, `n`, `e`, `d`, `o` (Loops focused) | Pause / resume, new loop, edit, remove (confirmation) the selected loop; `o` opens its pattern in the loop builder. |
 | `E` | Runs view (section 4.10): every run of every agent, from any section. |
@@ -407,7 +407,7 @@ Every screen shares one keymap (`src/keymap.rs`, `docs/keyboard.md`): `n` new, `
 | `h` | Agents focused: open the harness picker. |
 | `S` | Skills view (section 4.4), from any section. |
 | `C` | Configuration view (section 16), from any section: edit every prompt, skill, loop pattern, loop skill, agent and template in your editor. |
-| `W` | Runs view, as `E`. `Enter` on a flow run opens the Workflows view (section 17): runs, planned documents, results, journal. |
+| `W` | Runs view, as `E` (section 4.10): a flow run's report, steps, result and document are its tabs. |
 | `Enter`, `n`, `e`, `c`, `x`, `d`, `Ctrl+O` (Workflows section) | Run the selected workflow (or open the view when a run is live), build a new flow, edit the selected one in the flow builder, compose one for a task with the planner, stop the live run, discard a plan, open the document in `$EDITOR`. |
 | `n` | New, in the focused section: a session (Active, Agents, History), a loop (Loops), a flow (Workflows). |
 | `l` | Session Logs dialog. |
@@ -595,8 +595,8 @@ Every fact is gathered once by `App::open_about` when the overlay opens — the 
 | Skills view Details | `SkillsViewState.detail_lines` | `rebuild_detail` | package, install state, `skill_stats` via `skill_reports` | selection change |
 | Skills view Executions | `.launches`, `.turns` | `load_executions` | `skill_launches`, `traces_with_skill_detail` | selection change, 500 ms while visible |
 | Loops rows and preview | `App.loop_registry`, `App.loop_cards` | `load_loop_registry`, `refresh_loop_cards` | `loops.json`; `spend_since`, `recent_runs`, `inbox`; ledger, contract files, `readiness::audit` (60 s cache) | startup; every 1 s; after every loop action |
-| Loops view Runs / Inbox | `LoopsViewState.runs`, `.inbox` | `load_runs`, `load_inbox` | `recent_runs`, `inbox` | open, selection change, 1 s while visible |
-| Loops view Readiness / Budget / Files | `LoopsViewState.detail_lines` | `rebuild_detail` | `readiness::audit`, `spend_since`, `cost::estimate`, `contract_files`, `.loop-worktrees/manifest.json` | tab or selection change |
+| Runs view list | `RunsViewState.items` | `runs_view_items` | live runs, `inbox_items`, `loops.json`, `all_recent_runs`, `workflows::store::recent_runs` | open, every 2 s while visible, after an action |
+| Runs view detail | `RunsViewState.detail` | `build_run_detail` (`LoopsViewState`, `WorkflowsViewState`) | `recent_runs`, state snapshots, `readiness::audit`, `spend_since`, `contract_files`; `steps_of`, the run's journal | selection or tab change |
 | History rows and preview | `App.history_sessions` | `history::discover_sessions` | `~/.claude/projects/*/*.jsonl`, Antigravity `transcript.jsonl` | startup, PTY exit, `a` |
 | Session Logs left/right | `HistoryState.sessions`, `.log_lines` | `HistoryState::new`, `load_selected_log` | same files, parsed by `transcript.rs` | open, `a`, selection change |
 | Trace Browser Sessions | `Vec<SessionStat>` | `list_sessions` | `session_stats` view | open, 500 ms live refresh |
@@ -608,13 +608,11 @@ Every fact is gathered once by `App::open_about` when the overlay opens — the 
 
 ---
 
-### 4.10 Loops: the agent editor and the Loops view
+### 4.10 Loops: the agent editor and the runs view
 
 **The agent editor** (`src/app/agent_editor.rs`, `src/ui/agent_editor.rs`, `Mode::AgentEditor`) edits a scheduled agent (a loop: `e` on it, or a new one from `n`), a flow (the flow builder's screens) and a persona, in five tabs, `1`-`5` (`Tab` / `Shift+Tab` also step through them). A scheduled agent's values are `LoopDialogState`'s: **Who** has the profile (only profiles whose command is `claude` or `codex`; Antigravity is not offered), the run's model (blank = the profile's) and the verifier's; **What** has the task (the patterns, `←`/`→`; `e` opens the task itself in the loop builder, and leaving the builder returns to the editor); **When** has Every (`<n>m|h|d`, at least `5m`, prefilled with the pattern's default), the workspace (the shared directory picker) and whether to write missing files and skills (never overwriting); **Limits** has whether runs may edit files (no: report only; yes: in a worktree, marked `✗` with the reason when the git repository or the harness guard refuses it), runs and tokens a day and USD a run (blank = no cap; otherwise the profile's budget guard and, on Claude, `--max-budget-usd`); **Review** says it in words. `↑`/`↓` move, `Enter` types a text field (`Enter` or `Esc` ends), `←`/`→`/`Space` change the others, `s` saves (`App::save_loop_dialog`), `r` saves and runs now, `Esc` leaves (asking first when something is unsaved). The readiness score is advice on the Limits tab, never a gate.
 
-**Runs view** (`E` or `W`, `Mode::RunsView`, `src/app/runs_view.rs`, `src/ui/runs.rs`): every run of every agent in three groups, **Running** (live loop and flow runs), **Needs you** (the inbox's items: a change to apply, a decision, a plan, a run that did not finish) and **Earlier** (the last 50 `loop_runs` and `workflow_runs` rows, newest first), with the selected run's **Report**, **Sessions**, **Change** and **Result** (`1`-`4`). `Enter` applies a change, reviews a plan, attaches to a running loop run or opens the run's record in the Loops or Workflows view; `d` rejects, discards or dismisses; `r` runs a scheduled agent again; `x` stops a running run; `e` opens its agent in the agent editor; `T` its traces; `Ctrl+R` reloads.
-
-**Loops view** (`Enter` on a scheduled row, or from a loop run in the runs view, `Mode::LoopsView`, `draw_loops_view`, `src/app/loops_view.rs`): a left list of loops grouped by workspace and a right pane with five tabs (`Tab`, or `1`-`5`): **Runs** (every `loop_runs` row of the loop, newest first: time, outcome, effective level, found / actions / escalations, tokens, cost, duration, verifier, files; the selected run expands its block reason, cap reason, summary, gate violation, files and launch id; `Enter` attaches to a live run or opens its traces, `T` opens the traces), **Inbox** (runs of every loop with outcome `fix-proposed` or `escalated` and no decision: branch, worktree, files, verdict, `git diff --stat`; `a` applied, `x` rejected), **Readiness** (the audit's score bar, findings and recommendations, the three level gates, the activity evidence), **Budget** (today's runs and tokens per loop with the mode, the cost estimate of the selected loop at its cadence and level, the last seven days of tokens), **Files** (the contract files with present / missing / stale, the installed skills and verifier paths, the worktree manifest). `r` runs the selected loop now, `p` pauses or resumes it, `R` reloads the registry, `Esc` closes.
+**Runs view** (`E` or `W`, `Mode::RunsView`, `src/app/runs_view.rs`, `src/ui/runs.rs`): every run of every agent in four groups: **Running** (live loop and flow runs), **Needs you** (the inbox's items: a change to apply, a decision, a plan, a run that did not finish), **Next** (each scheduled agent's next run, soonest first, or `paused`) and **Earlier** (the last 50 `loop_runs` and `workflow_runs` rows, newest first; consecutive quiet runs of one loop fold into `quiet ×N`). The selected run has five tabs, `1`-`5`: **Report**, **History** (a loop's runs over time, quiet ones folded) or **Steps** (a flow's ledger: one row per session, with the reason a `null` answer gave), **Change**, **Result**, and **Setup** (a loop's readiness, what it may do, budget and files) or **Document** (a flow's TOML). A loop run's tabs are built by `loops_view::LoopsViewState` and a flow run's by `workflows_view::WorkflowsViewState`, which have no screen of their own. Keys: `Enter` applies a change, runs a plan or attaches to a running session; `d` rejects, dismisses or (asking first) discards a plan; `r` runs a scheduled agent again or resumes a stored flow run; `p` pauses or resumes a loop; `x` stops a running run; `s` saves a flow's document into the library under a name typed in the footer; `e` opens the agent in the agent editor (a plan in the flow builder); `Ctrl+O` a plan's document in `$EDITOR`; `T` a loop run's traces; `Ctrl+D`/`Ctrl+U` scroll the tab; `Ctrl+R` reloads; the list refreshes every two seconds.
 
 ## 5. Trace capture pipeline
 
@@ -1427,8 +1425,8 @@ All read queries take a plain `rusqlite::Connection` so callers can use a read-o
 | Tree view; `trace show --tree` | `list_observations_tree` → `nest_observations` | same rows, reordered parent-first in Rust with a `depth` |
 | Browser `/`; `trace search` | `search` | `SELECT t.id, t.name, t.start_ns, snippet(traces_fts, -1, '[', ']', '…', 12) FROM traces_fts f JOIN traces t ON t.rid = f.rowid WHERE traces_fts MATCH ?1 ORDER BY rank LIMIT ?2` and the same over `observations_fts`/`observations`; merged newest first |
 | Loops pre-flight and preview; `loop status` | `loops::store::spend_since` | `SELECT COUNT(*), COALESCE(SUM(tokens), 0), COALESCE(SUM(cost_usd), 0) FROM loop_runs WHERE loop_id = ?1 AND started_ns >= ?2 AND outcome != 'blocked'` (`?2` = UTC midnight) |
-| Loops preview, context snapshot, Loops view Runs | `loops::store::recent_runs` | `SELECT … FROM loop_runs WHERE loop_id = ?1 ORDER BY scheduled_ns DESC LIMIT ?2` |
-| Loops view Inbox; `loop inbox` | `loops::store::inbox` | `SELECT … FROM loop_runs WHERE outcome IN ('fix-proposed','escalated') AND decision IS NULL ORDER BY started_ns DESC` |
+| Loops preview, context snapshot, a loop run's History tab | `loops::store::recent_runs` | `SELECT … FROM loop_runs WHERE loop_id = ?1 ORDER BY scheduled_ns DESC LIMIT ?2` |
+| Runs view Needs you, inbox; `loop inbox` | `loops::store::inbox` | `SELECT … FROM loop_runs WHERE outcome IN ('fix-proposed','escalated') AND decision IS NULL ORDER BY started_ns DESC` |
 | Readiness audit (store evidence) | `loops::store::activity_count` | `SELECT COUNT(*) FROM loop_runs WHERE workspace = ?1 AND ended_ns >= ?2 AND outcome NOT IN ('blocked','failed')` |
 | Post-run accounting | `loops::store::run_facts` | `launch_stats` over `trace_stats`; `SELECT … FROM observations o JOIN traces t … WHERE t.launch_id = ?1 AND o.type = 'agent'` for the verifier; write-tool observations' `input` for files touched; `experiments::final_message` |
 | Loop guard `max_files` | `loops::store::files_touched` | the same write-tool observation scan, per launch |
@@ -1752,7 +1750,7 @@ The implementation is best-effort capture with provider-dependent evidence, heur
 
 ## 15. Loop Engineering
 
-A **loop** is a scheduled, bounded agent run against one workspace, driven from the Loops sidebar section (4.1), the add-loop dialog and the Loops view (4.10), and `agent-mux loop …` (9). agent-mux is the scheduler, the observer and the enforcer; the skills are its own (`loops/skills`, nine of them, plus `loops/agents/loop-verifier.md` and eight templates, embedded with `include_str!`); the files a workspace keeps follow the loop-engineering method's conventions. Nothing from another vendor is installed or executed. Operator guide: [docs/loops.md](docs/loops.md); design: `docs/superpowers/specs/2026-09-15-loop-engineering-design.md`.
+A **loop** is a scheduled, bounded agent run against one workspace, driven from its row in the Agents list (4.1), the agent editor and the runs view (4.10), and `agent-mux loop …` (9). agent-mux is the scheduler, the observer and the enforcer; the skills are its own (`loops/skills`, nine of them, plus `loops/agents/loop-verifier.md` and eight templates, embedded with `include_str!`); the files a workspace keeps follow the loop-engineering method's conventions. Nothing from another vendor is installed or executed. Operator guide: [docs/loops.md](docs/loops.md); design: `docs/superpowers/specs/2026-09-15-loop-engineering-design.md`.
 
 ### 15.1 Modules
 

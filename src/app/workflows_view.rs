@@ -1,5 +1,6 @@
-//! The Workflows section's dialog and the Workflows view (`W`): state and
-//! detail text only. Starting, cancelling and saving are `App` methods in
+//! The Workflows section's run dialog, and the detail of a flow run in the
+//! runs view (`app::runs_view`): its Report, Steps, Result and Document
+//! tabs, text only. Starting, cancelling and saving are `App` methods in
 //! `crate::app::workflows`.
 
 use crate::app::dir_picker::DirPicker;
@@ -16,7 +17,6 @@ use ratatui::text::{Line, Span};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 /// What the dialog starts: a run of a document, or the planner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -556,8 +556,6 @@ pub enum ViewPending {
     SaveName(String),
 }
 
-const REFRESH: Duration = Duration::from_millis(1000);
-
 pub struct WorkflowsViewState {
     conn: Option<rusqlite::Connection>,
     pub error: Option<String>,
@@ -576,7 +574,6 @@ pub struct WorkflowsViewState {
     wrapped: RefCell<WrapCache>,
     detail_rev: u64,
     pub pending: ViewPending,
-    last_refresh: Instant,
     /// `<runtime>/workflows/<run>/` holds the notes and the null reasons a
     /// finished run wrote about itself.
     runtime: Option<PathBuf>,
@@ -635,7 +632,6 @@ impl WorkflowsViewState {
             wrapped: RefCell::new(WrapCache::default()),
             detail_rev: 0,
             pending: ViewPending::None,
-            last_refresh: Instant::now(),
             runtime: runtime.map(Path::to_path_buf),
             cache: None,
         };
@@ -643,7 +639,7 @@ impl WorkflowsViewState {
         v
     }
 
-    pub fn reload(&mut self, facts: &ViewFacts<'_>) {
+    fn reload(&mut self, facts: &ViewFacts<'_>) {
         let keep = self.rows.get(self.selected).cloned();
         self.stored = self
             .conn
@@ -711,66 +707,13 @@ impl WorkflowsViewState {
         }
     }
 
-    pub fn refresh_if_due(&mut self, now: Instant, facts: &ViewFacts<'_>) {
-        if now.saturating_duration_since(self.last_refresh) >= REFRESH {
-            self.last_refresh = now;
-            self.reload(facts);
-        }
-    }
-
     pub fn selected_row(&self) -> Option<&RunRow> {
         self.rows.get(self.selected)
-    }
-
-    pub fn step(&mut self, delta: isize, facts: &ViewFacts<'_>) {
-        if self.rows.is_empty() {
-            return;
-        }
-        let len = self.rows.len() as isize;
-        let mut i = self.selected as isize;
-        let dir = delta.signum();
-        let mut remaining = delta.abs();
-        while remaining > 0 {
-            let mut j = i + dir;
-            while j >= 0 && j < len && matches!(self.rows[j as usize], RunRow::Header(_)) {
-                j += dir;
-            }
-            if j < 0 || j >= len {
-                break;
-            }
-            i = j;
-            remaining -= 1;
-        }
-        if i as usize != self.selected {
-            self.selected = i as usize;
-            self.scroll_offset = 0;
-            self.rebuild_detail(facts);
-        }
-    }
-
-    pub fn next_tab(&mut self, facts: &ViewFacts<'_>) {
-        let at = ViewTab::ALL
-            .iter()
-            .position(|t| *t == self.tab)
-            .unwrap_or(0);
-        self.tab = ViewTab::ALL[(at + 1) % ViewTab::ALL.len()];
-        self.scroll_offset = 0;
-        self.rebuild_detail(facts);
     }
 
     /// `1`-`4`: straight to a tab, as in the Loops view.
     pub fn set_tab(&mut self, tab: ViewTab, facts: &ViewFacts<'_>) {
         self.tab = tab;
-        self.scroll_offset = 0;
-        self.rebuild_detail(facts);
-    }
-
-    pub fn prev_tab(&mut self, facts: &ViewFacts<'_>) {
-        let at = ViewTab::ALL
-            .iter()
-            .position(|t| *t == self.tab)
-            .unwrap_or(0);
-        self.tab = ViewTab::ALL[(at + ViewTab::ALL.len() - 1) % ViewTab::ALL.len()];
         self.scroll_offset = 0;
         self.rebuild_detail(facts);
     }
@@ -792,91 +735,15 @@ impl WorkflowsViewState {
             .collect();
     }
 
-    /// Records the detail pane's size. The renderer calls this as soon as
-    /// it knows it, so the pane's title and `max_scroll` agree with what is
-    /// about to be drawn.
-    pub fn measure(&self, width: u16, height: u16) {
-        self.wrap_width.set(width);
-        self.viewport_rows.set(usize::from(height));
-    }
-
-    /// The rows the detail pane shows at `width`, from the scroll offset.
-    pub fn visible_rows(&self, width: u16, height: u16) -> Vec<Line<'static>> {
-        self.measure(width, height);
-        self.ensure_wrapped(width);
-        self.wrapped
-            .borrow()
-            .rows
-            .iter()
-            .skip(self.scroll_offset)
-            .take(usize::from(height))
-            .cloned()
-            .collect()
-    }
-
     /// Scrollable rows: the wrapped count once the pane has been drawn.
-    pub fn total_rows(&self) -> usize {
+    fn total_rows(&self) -> usize {
         self.ensure_wrapped(self.wrap_width.get());
         self.wrapped.borrow().rows.len()
     }
 
-    pub fn max_scroll(&self) -> usize {
+    fn max_scroll(&self) -> usize {
         self.total_rows()
             .saturating_sub(self.viewport_rows.get().max(1))
-    }
-
-    pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = 0;
-    }
-
-    pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.max_scroll();
-    }
-
-    /// Where the detail pane sits, for the pane title: `None` when it all
-    /// fits on screen.
-    pub fn scroll_position(&self) -> Option<String> {
-        let total = self.total_rows();
-        let rows = self.viewport_rows.get().max(1);
-        (total > rows).then(|| {
-            let last = (self.scroll_offset + rows).min(total);
-            format!("{}–{last}/{total}", self.scroll_offset + 1)
-        })
-    }
-
-    pub fn scroll(&mut self, delta: isize) {
-        self.scroll_offset = if delta < 0 {
-            self.scroll_offset.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.scroll_offset
-                .saturating_add(delta as usize)
-                .min(self.max_scroll())
-        };
-    }
-
-    /// The title of the selected row.
-    pub fn selected_title(&self, facts: &ViewFacts<'_>) -> String {
-        match self.selected_row() {
-            Some(RunRow::Planned(id)) => facts
-                .planned
-                .iter()
-                .find(|p| p.id == *id)
-                .map(|p| format!("planned · {} · {}", p.name, short(&p.task, 40)))
-                .unwrap_or_default(),
-            Some(RunRow::Live(id)) => facts
-                .live
-                .iter()
-                .find(|r| r.run_id == *id)
-                .map(|r| format!("{} · running · {}", r.name, r.progress()))
-                .unwrap_or_default(),
-            Some(RunRow::Stored(id)) => self
-                .stored
-                .iter()
-                .find(|r| r.id == *id)
-                .map(|r| format!("{} · {} · {}", r.workflow, r.status, &r.id[..8]))
-                .unwrap_or_default(),
-            _ => String::new(),
-        }
     }
 
     pub fn rebuild_detail(&mut self, facts: &ViewFacts<'_>) {
@@ -1264,17 +1131,6 @@ impl WorkflowsViewState {
         }
         (notes, reasons, agents)
     }
-
-    pub fn footer(&self) -> String {
-        match &self.pending {
-            ViewPending::Cancel => " Cancel this run? [y/n]".into(),
-            ViewPending::Discard(_) => " Discard this planned document? [y/n]".into(),
-            ViewPending::SaveName(n) => {
-                format!(" Save to the library as: {n}_   [Enter] save  [Esc] cancel")
-            }
-            ViewPending::None => " [Tab/1-4] tab  [←/→] pane  [↑/↓] select  [⌃D/G] scroll  [Enter] run/attach  [r] resume  [e] edit plan  [s] save  [x] stop run  [d] discard plan  [⌃R] reload  [I] inbox  [Esc] close".into(),
-        }
-    }
 }
 
 fn pretty(v: &serde_json::Value) -> String {
@@ -1355,15 +1211,6 @@ pub(crate) fn wrap_line_hanging(
         }
     }
     out
-}
-
-fn short(s: &str, n: usize) -> String {
-    let t: String = s.chars().take(n).collect();
-    if s.chars().count() > n {
-        format!("{t}…")
-    } else {
-        t
-    }
 }
 
 impl std::fmt::Debug for WorkflowsViewState {

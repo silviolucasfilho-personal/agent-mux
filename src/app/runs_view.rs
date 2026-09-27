@@ -1,10 +1,12 @@
 //! The runs view (`E` / `W`, spec `docs/superpowers/specs/2026-09-26-agent-first-design.md`,
 //! section 4): every run of every agent in one list, **Running**, **Needs
 //! you** (the inbox's items) and **Earlier**, with the selected run's
-//! Report, Sessions, Change and Result. Loop runs come from `loop_runs`,
-//! flow runs from `workflow_runs` and the live runs from the App; the
-//! Loops and Workflows views stay one `Enter` away for everything else
-//! about a run.
+//! Report, History or Steps, Change, Result, and Setup or Document. Loop
+//! runs come from `loop_runs`, flow runs from `workflow_runs` and the live
+//! runs from the App. The detail tabs are built by the loop and workflow
+//! detail builders (`loops_view::LoopsViewState`,
+//! `workflows_view::WorkflowsViewState`), which have no screen of their
+//! own any more.
 
 use super::inbox::InboxItem;
 use super::workflows_view::RunRow;
@@ -12,7 +14,12 @@ use super::{App, Mode, Notice};
 use crate::keymap::{Verb, verb};
 use crate::loops::store::{self as lstore, LoopRun};
 use crate::workflows::store::{self as wstore, WorkflowRun, WorkflowStep};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::text::Line;
+use std::time::{Duration, Instant};
+
+/// How often an open view re-reads the runs.
+const REFRESH: Duration = Duration::from_millis(2000);
 
 /// How many stored runs of each kind the Earlier group reads.
 const EARLIER: usize = 50;
@@ -21,6 +28,8 @@ const EARLIER: usize = 50;
 pub enum Group {
     Running,
     NeedsYou,
+    /// The scheduled agents' next runs.
+    Next,
     Earlier,
 }
 
@@ -29,6 +38,7 @@ impl Group {
         match self {
             Group::Running => "Running",
             Group::NeedsYou => "Needs you",
+            Group::Next => "Next",
             Group::Earlier => "Earlier",
         }
     }
@@ -48,6 +58,8 @@ pub enum RunRef {
     Inbox(InboxItem),
     Loop(Box<LoopRun>),
     Flow(Box<WorkflowRun>),
+    /// A scheduled agent's next run (its loop id).
+    Next(String),
 }
 
 #[derive(Debug, Clone)]
@@ -68,25 +80,68 @@ pub struct RunItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunTab {
     Report,
+    /// A loop's runs over time (History), a flow's steps (Steps).
     Sessions,
     Change,
     Result,
+    /// A loop's setup (readiness, budget, files), a flow's document.
+    Setup,
 }
 
 impl RunTab {
-    pub const ALL: [RunTab; 4] = [
+    pub const ALL: [RunTab; 5] = [
         RunTab::Report,
         RunTab::Sessions,
         RunTab::Change,
         RunTab::Result,
+        RunTab::Setup,
     ];
 
-    pub fn label(self) -> &'static str {
+    /// The tab's name for a loop run or a flow run.
+    pub fn label(self, flow: bool) -> &'static str {
+        match (self, flow) {
+            (RunTab::Report, _) => "Report",
+            (RunTab::Sessions, false) => "History",
+            (RunTab::Sessions, true) => "Steps",
+            (RunTab::Change, _) => "Change",
+            (RunTab::Result, _) => "Result",
+            (RunTab::Setup, false) => "Setup",
+            (RunTab::Setup, true) => "Document",
+        }
+    }
+}
+
+impl RunRef {
+    /// Stable across reloads, to keep the selection.
+    pub fn key(&self) -> String {
         match self {
-            RunTab::Report => "Report",
-            RunTab::Sessions => "Sessions",
-            RunTab::Change => "Change",
-            RunTab::Result => "Result",
+            RunRef::LoopLive { run_id, .. } => format!("loop:{run_id}"),
+            RunRef::FlowLive(id) => format!("flow:{id}"),
+            RunRef::Inbox(InboxItem::Loop(r)) => format!("loop:{}", r.id),
+            RunRef::Inbox(InboxItem::Plan { id, .. }) => format!("plan:{id}"),
+            RunRef::Inbox(InboxItem::Run { run_id, .. }) => format!("flow:{run_id}"),
+            RunRef::Loop(r) => format!("loop:{}", r.id),
+            RunRef::Flow(r) => format!("flow:{}", r.id),
+            RunRef::Next(id) => format!("next:{id}"),
+        }
+    }
+
+    /// A flow's run or plan, rather than a loop's run.
+    pub fn is_flow(&self) -> bool {
+        matches!(
+            self,
+            RunRef::FlowLive(_)
+                | RunRef::Flow(_)
+                | RunRef::Inbox(InboxItem::Plan { .. } | InboxItem::Run { .. })
+        )
+    }
+
+    /// The loop a loop run belongs to.
+    pub fn loop_id(&self) -> Option<&str> {
+        match self {
+            RunRef::LoopLive { loop_id, .. } | RunRef::Next(loop_id) => Some(loop_id),
+            RunRef::Inbox(InboxItem::Loop(r)) | RunRef::Loop(r) => Some(&r.loop_id),
+            _ => None,
         }
     }
 }
@@ -103,12 +158,47 @@ pub struct RunsViewState {
     pub steps: Vec<WorkflowStep>,
     /// Today's runs, tokens and cost, for the header.
     pub today: (usize, i64, f64),
+    /// The selected run's tab as the loop or workflow detail builder
+    /// renders it; `None` when this view writes the tab itself.
+    pub detail: Option<Vec<Line<'static>>>,
+    /// `s`: the library name being typed for a flow's document.
+    pub save_name: Option<String>,
+    /// `d` on a plan asks first: `y` discards it.
+    pub confirm_discard: bool,
+    /// How far the detail can scroll, as the renderer last measured it.
+    pub max_scroll: std::cell::Cell<usize>,
+    pub last_refresh: Instant,
 }
 
 impl RunsViewState {
     pub fn selected_item(&self) -> Option<&RunItem> {
         self.items.get(self.selected)
     }
+}
+
+/// Consecutive quiet runs of one loop fold into their newest, so the runs
+/// that found something stay on the screen: `quiet ×3`.
+fn fold_quiet(items: Vec<RunItem>) -> Vec<RunItem> {
+    let quiet = |i: &RunItem| match &i.run {
+        RunRef::Loop(r) => (r.outcome == crate::loops::Outcome::NoOp && r.decision.is_none())
+            .then(|| r.loop_id.clone()),
+        _ => None,
+    };
+    let mut out: Vec<RunItem> = Vec::new();
+    let mut count = 0usize;
+    for item in items {
+        let q = quiet(&item);
+        if let (Some(l), Some(last)) = (&q, out.last_mut())
+            && quiet(last).as_ref() == Some(l)
+        {
+            count += 1;
+            last.word = format!("quiet ×{}", count + 1);
+            continue;
+        }
+        count = 0;
+        out.push(item);
+    }
+    out
 }
 
 /// `12m ago`, `3h ago`, `2d ago`.
@@ -214,6 +304,44 @@ impl App {
                 _ => None,
             })
             .collect();
+        // what runs next, soonest first; a loop running now is under Running
+        let mut next: Vec<RunItem> = self
+            .loop_registry
+            .loops
+            .iter()
+            .filter(|l| {
+                !self
+                    .live_loop_runs
+                    .iter()
+                    .any(|r| r.loop_id == l.id && r.exited_at.is_none())
+            })
+            .map(|l| {
+                let at = l.next_run().map(|t| t.unix_timestamp_nanos() as i64);
+                let word = if self.loop_registry.pause_all || l.paused() {
+                    "paused".to_string()
+                } else {
+                    match at {
+                        Some(t) if t > now => format!(
+                            "in {}",
+                            super::loops::short_duration(((t - now) / 1_000_000_000) as u64)
+                        ),
+                        Some(_) => "due now".into(),
+                        None => "not scheduled".into(),
+                    }
+                };
+                RunItem {
+                    group: Group::Next,
+                    agent: l.pattern.clone(),
+                    when: l.workspace_name(),
+                    glyph: if word == "paused" { "‖" } else { "⟳" },
+                    word,
+                    run: RunRef::Next(l.id.clone()),
+                    at_ns: at.unwrap_or(i64::MAX),
+                }
+            })
+            .collect();
+        next.sort_by_key(|i| i.at_ns);
+        items.extend(next);
         let mut earlier: Vec<RunItem> = Vec::new();
         match self.trace_db_path.as_deref() {
             None => {}
@@ -256,7 +384,7 @@ impl App {
         }
         earlier.sort_by_key(|i| std::cmp::Reverse(i.at_ns));
         earlier.truncate(EARLIER);
-        items.extend(earlier);
+        items.extend(fold_quiet(earlier));
         (items, error)
     }
 
@@ -267,7 +395,10 @@ impl App {
             .replace_time(time::Time::MIDNIGHT)
             .unix_timestamp_nanos() as i64;
         let mut out = (0, 0, 0.0);
-        for i in items.iter().filter(|i| i.at_ns >= midnight) {
+        for i in items
+            .iter()
+            .filter(|i| i.at_ns >= midnight && i.group != Group::Next)
+        {
             let (t, c) = match &i.run {
                 RunRef::Loop(r) => (r.tokens.unwrap_or(0), r.cost_usd.unwrap_or(0.0)),
                 RunRef::Flow(r) => (r.tokens.unwrap_or(0), r.cost_usd.unwrap_or(0.0)),
@@ -299,22 +430,156 @@ impl App {
             error,
             steps: Vec::new(),
             today,
+            detail: None,
+            save_name: None,
+            confirm_discard: false,
+            max_scroll: std::cell::Cell::new(usize::MAX),
+            last_refresh: Instant::now(),
         };
         self.load_run_steps(&mut st);
         self.mode = Mode::RunsView(Box::new(st));
     }
 
+    /// The runs view with the run whose key (`RunRef::key`) is `key`
+    /// selected, on `tab`.
+    pub fn open_runs_view_on(&mut self, key: &str, tab: RunTab) {
+        self.open_runs_view();
+        if let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Control) {
+            if let Some(i) = st.items.iter().position(|i| i.run.key() == key) {
+                st.selected = i;
+            }
+            st.tab = tab;
+            self.load_run_steps(&mut st);
+            self.mode = Mode::RunsView(st);
+        }
+    }
+
+    /// The runs view on the newest run of loop `loop_id`.
+    pub fn open_runs_view_on_loop(&mut self, loop_id: &str) {
+        self.open_runs_view();
+        if let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Control) {
+            // its newest run, else its next one
+            let of = |i: &RunItem| i.run.loop_id() == Some(loop_id);
+            let at = st
+                .items
+                .iter()
+                .position(|i| of(i) && !matches!(i.run, RunRef::Next(_)))
+                .or_else(|| st.items.iter().position(of));
+            if let Some(i) = at {
+                st.selected = i;
+            }
+            self.load_run_steps(&mut st);
+            self.mode = Mode::RunsView(st);
+        }
+    }
+
     fn reload_runs_view(&mut self, st: &mut RunsViewState) {
+        let keep = st.selected_item().map(|i| i.run.key());
         let (items, error) = self.runs_view_items();
         st.today = self.runs_today(&items);
         st.items = items;
         st.error = error;
-        st.selected = st.selected.min(st.items.len().saturating_sub(1));
+        st.selected = keep
+            .and_then(|k| st.items.iter().position(|i| i.run.key() == k))
+            .unwrap_or(st.selected)
+            .min(st.items.len().saturating_sub(1));
+        st.last_refresh = Instant::now();
         self.load_run_steps(st);
     }
 
-    /// The selected flow run's steps, from the store.
+    /// Ticks the open view: live runs move, finished ones land.
+    pub fn refresh_runs_view(&mut self, now: Instant) {
+        let due = matches!(&self.mode, Mode::RunsView(st)
+            if now.saturating_duration_since(st.last_refresh) >= REFRESH && st.save_name.is_none());
+        if !due {
+            return;
+        }
+        if let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Control) {
+            self.reload_runs_view(&mut st);
+            self.mode = Mode::RunsView(st);
+        }
+    }
+
+    /// The selected run's tab from the loop or workflow detail builder.
+    fn build_run_detail(&self, st: &mut RunsViewState) {
+        st.detail = None;
+        let Some(item) = st.selected_item() else {
+            return;
+        };
+        if st.tab == RunTab::Change {
+            return;
+        }
+        if item.run.is_flow() {
+            use super::workflows_view::{ViewTab, WorkflowsViewState};
+            let row = match &item.run {
+                RunRef::FlowLive(id) => RunRow::Live(id.clone()),
+                RunRef::Flow(r) => RunRow::Stored(r.id.clone()),
+                RunRef::Inbox(InboxItem::Run { run_id, .. }) => RunRow::Stored(run_id.clone()),
+                RunRef::Inbox(InboxItem::Plan { id, .. }) => RunRow::Planned(id.clone()),
+                _ => return,
+            };
+            let facts = self.view_facts();
+            let mut v = WorkflowsViewState::new(
+                self.trace_db_path.as_deref(),
+                self.runtime_dir.as_deref(),
+                &facts,
+            );
+            v.select(&row, &facts);
+            if v.selected_row() != Some(&row) {
+                return;
+            }
+            let tab = match st.tab {
+                RunTab::Report => ViewTab::Report,
+                RunTab::Sessions => ViewTab::Steps,
+                RunTab::Result => ViewTab::Result,
+                _ => ViewTab::Document,
+            };
+            v.set_tab(tab, &facts);
+            st.detail = Some(v.detail_lines.clone());
+        } else {
+            use super::loops_view::{LoopsTab, LoopsViewState};
+            if st.tab == RunTab::Result {
+                return;
+            }
+            let Some(loop_id) = item.run.loop_id() else {
+                return;
+            };
+            if self.loop_registry.find(loop_id).is_none() {
+                return;
+            }
+            let run_id = item.run.key().trim_start_matches("loop:").to_string();
+            let runtime = self.loops_runtime_dir();
+            let mut v = LoopsViewState::new(
+                self.trace_db_path.as_deref(),
+                Some(runtime.as_path()),
+                &self.loop_registry,
+                Some(loop_id),
+                &self.loops.worktrees_dir,
+            );
+            v.cards = self.loop_cards.clone();
+            v.live = self
+                .live_loop_runs
+                .iter()
+                .filter(|r| r.exited_at.is_none())
+                .map(|r| (r.loop_id.clone(), r.session_id))
+                .collect();
+            if let Some(i) = v.runs.iter().position(|r| r.id == run_id) {
+                v.selected_run = i;
+            }
+            v.tab = match st.tab {
+                RunTab::Sessions => LoopsTab::History,
+                RunTab::Setup => LoopsTab::Setup,
+                _ => LoopsTab::Report,
+            };
+            v.rebuild_detail();
+            st.detail = Some(v.detail_lines.clone());
+        }
+    }
+
+    /// The selected flow run's steps, from the store, and the selected
+    /// tab's detail.
     fn load_run_steps(&self, st: &mut RunsViewState) {
+        self.build_run_detail(st);
         st.steps.clear();
         let id = match st.selected_item().map(|i| &i.run) {
             Some(RunRef::Flow(r)) => r.id.clone(),
@@ -334,17 +599,72 @@ impl App {
             return;
         };
         let n = st.items.len();
-        let before = st.selected;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let before = (st.selected, st.tab);
         let mut stay = true;
+        if st.confirm_discard {
+            st.confirm_discard = false;
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                self.runs_view_reject(&mut st);
+            }
+            self.mode = Mode::RunsView(st);
+            return;
+        }
+        if let Some(name) = st.save_name.as_mut() {
+            match key.code {
+                KeyCode::Esc => st.save_name = None,
+                KeyCode::Backspace => {
+                    name.pop();
+                }
+                KeyCode::Enter => {
+                    let name = st.save_name.take().unwrap_or_default();
+                    self.runs_view_save(&st, name.trim());
+                    self.reload_runs_view(&mut st);
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => name.push(c),
+                _ => {}
+            }
+            self.mode = Mode::RunsView(st);
+            return;
+        }
         match key.code {
-            KeyCode::Char(c @ '1'..='4') => {
+            KeyCode::Char(c @ '1'..='5') => {
                 st.tab = RunTab::ALL[c as usize - '1' as usize];
                 st.scroll = 0;
             }
             KeyCode::Tab => {
                 let at = RunTab::ALL.iter().position(|t| *t == st.tab).unwrap_or(0);
-                st.tab = RunTab::ALL[(at + 1) % 4];
+                st.tab = RunTab::ALL[(at + 1) % RunTab::ALL.len()];
                 st.scroll = 0;
+            }
+            KeyCode::Char('p') if !ctrl => self.runs_view_pause(&mut st),
+            // a plan's document in $EDITOR
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(RunRef::Inbox(InboxItem::Plan { id, .. })) =
+                    st.selected_item().map(|i| &i.run)
+                    && let Some(p) = self.planned_workflows.iter().find(|p| &p.id == id).cloned()
+                {
+                    let path = self
+                        .workflows_runtime_dir()
+                        .join("workflows")
+                        .join("plans")
+                        .join(format!("{}.toml", p.id));
+                    let _ = std::fs::write(&path, &p.document);
+                    self.editor_request = Some(super::EditorRequest {
+                        path,
+                        asset_id: format!("plan:{}", p.id),
+                        command: crate::assets::editor_command(self.editor.as_deref()),
+                    });
+                }
+            }
+            KeyCode::Char('s') if !ctrl => {
+                st.save_name = st
+                    .selected_item()
+                    .filter(|i| i.run.is_flow())
+                    .map(|i| i.agent.clone());
+                if st.save_name.is_none() {
+                    self.notice = Some(Notice::info("s saves a flow's document into the library"));
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 st.selected = (st.selected + 1).min(n.saturating_sub(1))
@@ -352,23 +672,36 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => st.selected = st.selected.saturating_sub(1),
             KeyCode::Char('E') | KeyCode::Char('W') => stay = false,
             KeyCode::Enter => stay = self.runs_view_open(&mut st),
-            KeyCode::Char('d') => self.runs_view_reject(&mut st),
-            KeyCode::Char('r') => self.runs_view_again(&st),
-            KeyCode::Char('x') => self.runs_view_stop(&mut st),
-            KeyCode::Char('e') => stay = !self.runs_view_edit(&st),
-            KeyCode::Char('T') => self.runs_view_traces(&st),
+            KeyCode::Char('d') if !ctrl => {
+                if matches!(
+                    st.selected_item().map(|i| &i.run),
+                    Some(RunRef::Inbox(InboxItem::Plan { .. }))
+                ) {
+                    st.confirm_discard = true;
+                } else {
+                    self.runs_view_reject(&mut st);
+                }
+            }
+            KeyCode::Char('r') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.runs_view_again(&mut st)
+            }
+            KeyCode::Char('x') if !ctrl => self.runs_view_stop(&mut st),
+            KeyCode::Char('e') if !ctrl => stay = !self.runs_view_edit(&st),
+            KeyCode::Char('T') if !ctrl => self.runs_view_traces(&st),
             _ => match verb(&crate::keymap::list_alias(key)) {
                 Some(Verb::Back) => stay = false,
                 Some(Verb::Top) => st.selected = 0,
                 Some(Verb::Bottom) => st.selected = n.saturating_sub(1),
-                Some(Verb::PageDown) => st.scroll += 10,
+                Some(Verb::PageDown) => st.scroll = (st.scroll + 10).min(st.max_scroll.get()),
                 Some(Verb::PageUp) => st.scroll = st.scroll.saturating_sub(10),
                 Some(Verb::Reload) => self.reload_runs_view(&mut st),
                 _ => {}
             },
         }
-        if st.selected != before {
-            st.scroll = 0;
+        if (st.selected, st.tab) != before {
+            if st.selected != before.0 {
+                st.scroll = 0;
+            }
             self.load_run_steps(&mut st);
         }
         // an action that opened another screen keeps it
@@ -377,9 +710,8 @@ impl App {
         }
     }
 
-    /// `Enter`: apply a change, review a plan, attach to a running
-    /// session, or open the run's full record. `false` when the view
-    /// closes.
+    /// `Enter`: apply a change, run a plan, attach to a running session.
+    /// `false` when the view closes.
     fn runs_view_open(&mut self, st: &mut RunsViewState) -> bool {
         let Some(item) = st.selected_item().cloned() else {
             return true;
@@ -393,62 +725,128 @@ impl App {
                 self.reload_runs_view(st);
                 true
             }
-            RunRef::Inbox(InboxItem::Loop(r)) => {
-                self.open_loop_run_record(&r.loop_id);
-                false
-            }
             RunRef::Inbox(InboxItem::Plan { id, .. }) => {
-                self.open_workflows_view_on(RunRow::Planned(id));
-                false
-            }
-            RunRef::Inbox(InboxItem::Run { run_id, .. }) => {
-                self.open_workflows_view_on(RunRow::Stored(run_id));
-                false
-            }
-            RunRef::LoopLive { session_id, .. } => {
-                match self.sessions.iter().position(|s| s.id == session_id) {
-                    Some(i) => {
-                        self.selected = i;
-                        self.selection = None;
-                        self.mode = Mode::Attached;
-                        if let Some(s) = self.sessions.get_mut(i) {
-                            s.tracker.on_attach();
-                        }
+                match self.run_planned_workflow(&id) {
+                    Ok(rid) => {
+                        self.notice = Some(Notice::info(format!("run {} started", &rid[..8])))
                     }
-                    None => self.notice = Some(Notice::info("the run's session is gone")),
+                    Err(e) => self.notice = Some(Notice::warn(e)),
                 }
-                false
+                self.reload_runs_view(st);
+                true
             }
+            RunRef::LoopLive { session_id, .. } => self.runs_view_attach(session_id),
             RunRef::FlowLive(id) => {
-                self.open_workflows_view_on(RunRow::Live(id));
-                false
+                let sid = self
+                    .live_workflow_runs
+                    .iter()
+                    .find(|r| r.run_id == id)
+                    .and_then(|r| r.sessions.iter().find(|s| s.exited_at.is_none()))
+                    .map(|s| s.session_id);
+                match sid {
+                    Some(sid) => self.runs_view_attach(sid),
+                    None => {
+                        self.notice = Some(Notice::info("no session of the run is running now"));
+                        true
+                    }
+                }
             }
-            RunRef::Loop(r) => {
-                self.open_loop_run_record(&r.loop_id);
-                false
+            RunRef::Inbox(InboxItem::Loop(_)) => {
+                self.notice = Some(Notice::info("d dismisses it; e edits the agent; T traces"));
+                true
             }
-            RunRef::Flow(r) => {
-                self.open_workflows_view_on(RunRow::Stored(r.id.clone()));
-                false
+            RunRef::Loop(_) => {
+                self.notice = Some(Notice::info("r runs it again; T its traces; 2 its history"));
+                true
+            }
+            RunRef::Flow(_) | RunRef::Inbox(InboxItem::Run { .. }) => {
+                self.notice = Some(Notice::info("r resumes the run; s saves its document"));
+                true
+            }
+            RunRef::Next(_) => {
+                self.notice = Some(Notice::info("r runs it now; p pauses it; 5 its setup"));
+                true
             }
         }
     }
 
-    /// The Loops view on `loop_id`'s runs.
-    fn open_loop_run_record(&mut self, loop_id: &str) {
-        if let Some(i) = self
-            .loop_registry
-            .loops
-            .iter()
-            .position(|l| l.id == loop_id)
-        {
-            self.selected_loop = i;
+    /// Attaches to session `session_id`; `false` (the view closes) when it
+    /// is there.
+    fn runs_view_attach(&mut self, session_id: usize) -> bool {
+        match self.sessions.iter().position(|s| s.id == session_id) {
+            Some(i) => {
+                self.selected = i;
+                self.selection = None;
+                self.mode = Mode::Attached;
+                if let Some(s) = self.sessions.get_mut(i) {
+                    s.tracker.on_attach();
+                }
+                false
+            }
+            None => {
+                self.notice = Some(Notice::info("the run's session is gone"));
+                true
+            }
         }
-        self.open_loops_view();
-        if let Mode::LoopsView(view) = &mut self.mode {
-            view.tab = super::loops_view::LoopsTab::History;
-            view.rebuild_detail();
+    }
+
+    /// `p`: pauses or resumes the loop of a loop run.
+    fn runs_view_pause(&mut self, st: &mut RunsViewState) {
+        let at = st
+            .selected_item()
+            .and_then(|i| i.run.loop_id())
+            .and_then(|id| self.loop_registry.loops.iter().position(|l| l.id == id));
+        match at {
+            Some(i) => {
+                self.selected_loop = i;
+                self.toggle_selected_loop_pause();
+                self.load_run_steps(st);
+            }
+            None => self.notice = Some(Notice::info("p pauses the scheduled agent of a loop run")),
         }
+    }
+
+    /// `s`, then a name: the flow's document saved into the library.
+    fn runs_view_save(&mut self, st: &RunsViewState, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        let doc = match st.selected_item().map(|i| &i.run) {
+            Some(RunRef::Inbox(InboxItem::Plan { id, .. })) => {
+                let id = id.clone();
+                self.notice = Some(match self.save_planned_workflow(&id, name) {
+                    Ok(p) => {
+                        self.reload_workflow_list();
+                        Notice::info(format!("saved {}", p.display()))
+                    }
+                    Err(e) => Notice::warn(e),
+                });
+                return;
+            }
+            Some(RunRef::FlowLive(id)) => self
+                .live_workflow_runs
+                .iter()
+                .find(|r| &r.run_id == id)
+                .map(|r| r.document.clone()),
+            Some(RunRef::Flow(r)) => Some(r.document.clone()),
+            Some(RunRef::Inbox(InboxItem::Run { run_id, .. })) => self
+                .trace_db_path
+                .as_deref()
+                .and_then(|p| crate::tracing::store::open_ro(p).ok())
+                .and_then(|c| wstore::get_run(&c, run_id).ok().flatten())
+                .map(|r| r.document),
+            _ => None,
+        };
+        let Some(doc) = doc else { return };
+        self.notice = Some(
+            match super::workflows::save_document(&self.library_root(), name, &doc) {
+                Ok(path) => {
+                    self.reload_workflow_list();
+                    Notice::info(format!("saved {}", path.display()))
+                }
+                Err(e) => Notice::warn(e),
+            },
+        );
     }
 
     /// `d`: reject a change, discard a plan, dismiss a failed run.
@@ -477,14 +875,29 @@ impl App {
         self.reload_runs_view(st);
     }
 
-    /// `r`: a scheduled agent runs again now.
-    fn runs_view_again(&mut self, st: &RunsViewState) {
-        let loop_id = match st.selected_item().map(|i| &i.run) {
-            Some(RunRef::Loop(r)) => Some(r.loop_id.clone()),
-            Some(RunRef::Inbox(InboxItem::Loop(r))) => Some(r.loop_id.clone()),
-            Some(RunRef::LoopLive { loop_id, .. }) => Some(loop_id.clone()),
+    /// `r`: a scheduled agent runs again now; a stored flow run resumes.
+    fn runs_view_again(&mut self, st: &mut RunsViewState) {
+        let stored = match st.selected_item().map(|i| &i.run) {
+            Some(RunRef::Flow(r)) => Some((**r).clone()),
+            Some(RunRef::Inbox(InboxItem::Run { run_id, .. })) => self
+                .trace_db_path
+                .as_deref()
+                .and_then(|p| crate::tracing::store::open_ro(p).ok())
+                .and_then(|c| wstore::get_run(&c, run_id).ok().flatten()),
             _ => None,
         };
+        if let Some(r) = stored {
+            self.notice = Some(match self.resume_workflow_run(&r) {
+                Ok(rid) => Notice::info(format!("resumed as {}", &rid[..8])),
+                Err(e) => Notice::warn(e),
+            });
+            self.reload_runs_view(st);
+            return;
+        }
+        let loop_id = st
+            .selected_item()
+            .and_then(|i| i.run.loop_id())
+            .map(str::to_string);
         match loop_id.and_then(|id| self.loop_registry.loops.iter().position(|l| l.id == id)) {
             Some(i) => {
                 self.selected_loop = i;
@@ -492,7 +905,7 @@ impl App {
             }
             None => {
                 self.notice = Some(Notice::info(
-                    "r runs a scheduled agent again; a flow runs from its row (Enter)",
+                    "r runs a scheduled agent again or resumes a flow run",
                 ))
             }
         }
@@ -519,10 +932,18 @@ impl App {
 
     /// `e`: the run's agent in the agent editor; `true` when it opened.
     fn runs_view_edit(&mut self, st: &RunsViewState) -> bool {
+        if let Some(RunRef::Inbox(InboxItem::Plan { id, .. })) = st.selected_item().map(|i| &i.run)
+        {
+            let id = id.clone();
+            self.open_flow_builder_plan(&id);
+            return true;
+        }
         let (loop_id, flow) = match st.selected_item().map(|i| &i.run) {
             Some(RunRef::Loop(r)) => (Some(r.loop_id.clone()), None),
             Some(RunRef::Inbox(InboxItem::Loop(r))) => (Some(r.loop_id.clone()), None),
-            Some(RunRef::LoopLive { loop_id, .. }) => (Some(loop_id.clone()), None),
+            Some(RunRef::LoopLive { loop_id, .. } | RunRef::Next(loop_id)) => {
+                (Some(loop_id.clone()), None)
+            }
             Some(RunRef::Flow(r)) => (None, Some(r.workflow.clone())),
             Some(i) => (
                 None,
@@ -579,6 +1000,18 @@ pub fn tab_lines(app: &App, st: &RunsViewState) -> Vec<String> {
         return vec!["no runs yet: r on a scheduled agent, Enter on a flow".into()];
     };
     match (&item.run, st.tab) {
+        (RunRef::Next(id), _) => match app.loop_registry.find(id) {
+            Some(l) => vec![
+                format!(
+                    "{} has not run yet in {}.",
+                    l.pattern,
+                    l.workspace.display()
+                ),
+                String::new(),
+                "r runs it now; p pauses it; e edits it; 5 shows its setup.".into(),
+            ],
+            None => vec!["it is no longer scheduled: Ctrl+R reloads".into()],
+        },
         (RunRef::Inbox(InboxItem::Loop(r)) | RunRef::Loop(r), tab) => loop_tab(r, tab),
         (RunRef::Flow(r), tab) => flow_tab(r, &st.steps, tab),
         (RunRef::Inbox(InboxItem::Plan { task, problems, .. }), _) => {
@@ -653,7 +1086,7 @@ pub fn tab_lines(app: &App, st: &RunsViewState) -> Vec<String> {
                     format!("{} is running in {}", r.name, r.workspace.display()),
                     format!("{} session(s) so far", r.sessions.len()),
                     String::new(),
-                    "Enter opens it in the Workflows view; x stops it.".into(),
+                    "Enter attaches to a running session; x stops it.".into(),
                 ],
             }
         }
@@ -753,6 +1186,10 @@ fn loop_tab(r: &LoopRun, tab: RunTab) -> Vec<String> {
             }
             v
         }
+        RunTab::Setup => vec![format!(
+            "{} is no longer a scheduled agent; its setup went with it.",
+            r.pattern
+        )],
         RunTab::Result => match r.detail_str("final_message") {
             Some(m) => m.lines().map(str::to_string).collect(),
             None => vec!["The run left no final message.".into()],
@@ -762,6 +1199,7 @@ fn loop_tab(r: &LoopRun, tab: RunTab) -> Vec<String> {
 
 fn flow_tab(r: &WorkflowRun, steps: &[WorkflowStep], tab: RunTab) -> Vec<String> {
     match tab {
+        RunTab::Setup => r.document.lines().map(str::to_string).collect(),
         RunTab::Report => {
             let mut v = vec![
                 format!("{} ended {}", r.workflow, r.status),

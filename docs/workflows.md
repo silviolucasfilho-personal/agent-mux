@@ -10,13 +10,13 @@ Design: `docs/superpowers/specs/2026-09-17-workflows-design.md`. The idea follow
 
 1. In the **Agents** list, the flows are the rows under the `flows` heading. The nine built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`, `santa-review`, `grimoire-review`. The main pane describes the selected one in words: each step, what it starts sessions for and what it filters or checks (the skill and any CLI it names in grey under it), the arguments it needs or takes, about how many sessions a run starts, and the last run.
 
-   Above the library the section lists what is going on, each group under its heading: **Running** (`▶ name 3/7`), **Plans to review** (`⏸`, the planner's documents waiting for you), and **Recent** (`✓ name done`, the last three runs finished since agent-mux started). `Enter` on a run or a plan opens the Workflows view on it; `Enter` on a library document opens the run dialog. The selection stays on its row when a run starts or ends.
+   Above the library the section lists what is going on, each group under its heading: **Running** (`▶ name 3/7`), **Plans to review** (`⏸`, the planner's documents waiting for you), and **Recent** (`✓ name done`, the last three runs finished since agent-mux started). `Enter` on a run or a plan opens the runs view on it; `Enter` on a library document opens the run dialog. The selection stays on its row when a run starts or ends.
 2. `Enter` opens the run dialog on what the run is for: one field per declared arg first, then the workspace (one line; the shared directory picker opens while the field has focus), the profile (one per harness the document allows) and **More ▸**, whose summary says what it hides (`no token budget · no cost cap · in place`). `Space` or `→` on **More** shows a token budget, a USD cap, the isolation default and one **Steps** row per step: the CLI that step runs on for this run (`←`/`→` or `Space`; it starts on the step's default, shown as `codex · set by the document` or `claude · the run's profile`, and offers only harnesses you have a profile for). Under the form, about how many sessions the run starts. `Enter` starts the run from any field.
 3. The run's sessions appear in **Active** under one header — `▾ ⚙ <workflow> <running>/<total>▶ #<run>` — with each step hanging off it by its own name; attach to any of them to watch it. `space` folds the run away into that single row, and the trace browser (`T`) groups the same run the same way. The run's row under **Running** shows `▶ done/started`.
-4. `W` opens the runs view, where the run is listed under **Running**; `Enter` on it opens the Workflows view: the run's report, the step ledger behind it, the document and the result.
-5. When the run finishes, the notice leads with what the run answered; the preview card shows the last run; the report is in the view and in `agent-mux workflow status <run>`, and the raw result in the **Result** tab and in `result.json` under the run directory.
+4. `W` opens the runs view, where the run is listed under **Running**; its tabs are the run's report, the step ledger behind it, what it changed, the result and the document.
+5. When the run finishes, the notice leads with what the run answered; the preview card shows the last run; the report is in the runs view and in `agent-mux workflow status <run>`, and the raw result in the **Result** tab and in `result.json` under the run directory.
 
-### Reading a run in the view
+### Reading a run in the runs view
 
 `Enter` on a flow run in the runs view (`W`), or on the flow's row, opens the view on the **Report** tab: what the run answered, the
 evidence behind it, and what it dropped on the way. The report is built
@@ -61,11 +61,11 @@ in flight.
 
 | Key | In the view |
 | --- | --- |
-| `Tab`, `Shift+Tab`, `1`-`4` | Report → Steps → Result → Document, the same keys as the Loops view. The tab change goes back to the top. |
-| `↑` `↓` / `j` `k` | The runs list when the left pane has focus (`←`), the result when the right one does (`→`). |
-| `Ctrl+D`, `Ctrl+U`, `Space` (or `PgDn`, `PgUp`) | Scroll by a screen, whichever pane has focus. |
-| `Home` / `g`, `End` / `G` | Top and bottom. |
-| Wheel | Scrolls the pane that has focus. |
+| `Tab`, `1`-`5` | Report → Steps → Change → Result → Document, the same tabs as a loop run's. |
+| `↑` `↓` / `j` `k` | The runs list. |
+| `Ctrl+D`, `Ctrl+U` (or `PgDn`, `PgUp`), wheel | Scroll the tab. |
+| `Home` / `g`, `End` / `G` | The first and the last run. |
+| `r`, `s`, `x`, `e` | Resume a stored run, save its document, stop a live one, edit the flow (a plan: `Enter` runs it, `d` discards it after a `y`). |
 
 ### Writing a prompt in a field
 
@@ -91,7 +91,7 @@ agent-mux workflow run migrate --workspace . \
 Keep the argument order."
 ```
 
-To compose a workflow for a task instead: `c`, type the task, pick the workspace and the profile, `Enter`. The planner session runs the `workflow-author` skill and answers with a document; it appears under **Planned** in the view (`W`) with its validation, where `Enter` runs it, `e` edits it, `s` saves it into the library and `x` discards it. `[workflows] dynamic_approval = "never"` runs a valid document as soon as the planner answers.
+To compose a workflow for a task instead: `c`, type the task, pick the workspace and the profile, `Enter`. The planner session runs the `workflow-author` skill and answers with a document; it appears under **Needs you** in the runs view (`W`) with its validation, where `Enter` runs it, `e` edits it, `s` saves it into the library and `d` discards it. `[workflows] dynamic_approval = "never"` runs a valid document as soon as the planner answers.
 
 ### Building a flow step by step
 
@@ -317,7 +317,7 @@ Mixed harnesses: a step's `harness = "codex"` runs it on Codex whatever the run'
 - **Budget.** A token ceiling from the document, the dialog or `--budget`; once spent, no new session starts and the run ends `budget-exhausted` with the partial result. A USD cap becomes `--max-budget-usd` on Claude Code and the hook guard elsewhere.
 - **Timeouts.** `session_timeout_s` (900) per session, `run_timeout_s` (7200) per run; a timed-out session answers `null`.
 - **Cancel.** `x` (stop) in the section or the view; running sessions are killed and settle as `null`.
-- **Resume.** Every session is journaled (`journal.jsonl` in the run directory). `r` on a stored run in the view, or `--resume <run>` on the CLI, replays the journaled sessions and launches only what is new: same document, same args, same session keys.
+- **Resume.** Every session is journaled (`journal.jsonl` in the run directory). `r` on a stored run in the runs view, or `--resume <run>` on the CLI, replays the journaled sessions and launches only what is new: same document, same args, same session keys.
 
 ## 5. Library and configuration
 

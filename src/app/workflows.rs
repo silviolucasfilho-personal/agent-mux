@@ -1623,6 +1623,29 @@ impl App {
     }
 
     /// Starts the run of a planned document.
+    /// `r` on a stored run in the runs view: the same document, resumed
+    /// from where the stored run stopped.
+    pub fn resume_workflow_run(
+        &mut self,
+        r: &crate::workflows::store::WorkflowRun,
+    ) -> Result<String, String> {
+        let req = WorkflowRunRequest {
+            name: r.workflow.clone(),
+            source: r.source.clone(),
+            document: r.document.clone(),
+            workspace: PathBuf::from(&r.workspace),
+            profile: Some(r.profile.clone()).filter(|p| !p.is_empty()),
+            harness: Harness::detect(&r.harness).unwrap_or(Harness::Claude),
+            args: r.args.clone(),
+            budget_tokens: r.budget_tokens.map(|b| b as u64),
+            usd_cap: None,
+            isolation: None,
+            resume_from: Some(r.id.clone()),
+            step_overrides: Vec::new(),
+        };
+        self.start_workflow_run(req)
+    }
+
     pub fn run_planned_workflow(&mut self, plan_id: &str) -> Result<String, String> {
         let Some(p) = self
             .planned_workflows
@@ -1747,8 +1770,7 @@ fn short_task(task: &str) -> String {
 
 use crate::app::dir_picker::PickerEvent;
 use crate::app::workflows_view::{
-    DialogField, DialogPurpose, RunRow, ViewFacts, ViewPane, ViewPending, WorkflowDialogState,
-    WorkflowsViewState,
+    DialogField, DialogPurpose, RunRow, ViewFacts, WorkflowDialogState,
 };
 use crate::app::{Action, Mode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -2009,15 +2031,14 @@ impl App {
         self.mode = Mode::WorkflowDialog(Box::new(d));
     }
 
-    /// `d` in the section: a plan is discarded after a y/n in the view; a
+    /// `d` in the section: a plan opens in the runs view, where `d`
+    /// discards it; a
     /// library document is removed from the Configuration view.
     pub fn delete_selected_workflow_row(&mut self) {
         match self.selected_workflow_row() {
             Some(WorkflowRow::Planned(id)) => {
                 self.open_workflows_view_on(RunRow::Planned(id.clone()));
-                if let Mode::WorkflowsView(v) = &mut self.mode {
-                    v.pending = crate::app::workflows_view::ViewPending::Discard(id);
-                }
+                self.notice = Some(Notice::info("d discards the plan, Enter runs it"));
             }
             Some(WorkflowRow::Live(_)) => {
                 self.notice = Some(Notice::info("x stops a running workflow"));
@@ -2356,7 +2377,7 @@ impl App {
                     Ok(_) => {
                         self.mode = Mode::Control;
                         self.notice = Some(Notice::info(
-                            "planning; the document appears in the Workflows view (W) when the planner answers",
+                            "planning; the document appears in the runs view (W) when the planner answers",
                         ));
                     }
                     Err(e) => fail(self, e),
@@ -2413,335 +2434,6 @@ impl App {
         }
     }
 
-    pub fn open_workflows_view(&mut self) {
-        let facts = self.view_facts();
-        let view = WorkflowsViewState::new(
-            self.trace_db_path.as_deref(),
-            self.runtime_dir.as_deref(),
-            &facts,
-        );
-        self.mode = Mode::WorkflowsView(Box::new(view));
-    }
-
-    /// Ticks the open view.
-    pub fn refresh_workflows_view(&mut self, now: Instant) {
-        let live = std::mem::take(&mut self.live_workflow_runs);
-        let recent = std::mem::take(&mut self.recent_workflow_runs);
-        let planned = std::mem::take(&mut self.planned_workflows);
-        let plans = self.live_workflow_plans.len();
-        if let Mode::WorkflowsView(view) = &mut self.mode {
-            let facts = ViewFacts {
-                live: &live,
-                recent: &recent,
-                planned: &planned,
-                plans_in_flight: plans,
-            };
-            view.refresh_if_due(now, &facts);
-        }
-        self.live_workflow_runs = live;
-        self.recent_workflow_runs = recent;
-        self.planned_workflows = planned;
-    }
-
-    /// Runs `f` on the view with the facts borrowed out of `self`.
-    pub(crate) fn with_view<R>(
-        &mut self,
-        f: impl FnOnce(&mut WorkflowsViewState, &ViewFacts<'_>) -> R,
-    ) -> Option<R> {
-        let live = std::mem::take(&mut self.live_workflow_runs);
-        let recent = std::mem::take(&mut self.recent_workflow_runs);
-        let planned = std::mem::take(&mut self.planned_workflows);
-        let plans = self.live_workflow_plans.len();
-        let out = if let Mode::WorkflowsView(view) = &mut self.mode {
-            let facts = ViewFacts {
-                live: &live,
-                recent: &recent,
-                planned: &planned,
-                plans_in_flight: plans,
-            };
-            Some(f(view, &facts))
-        } else {
-            None
-        };
-        self.live_workflow_runs = live;
-        self.recent_workflow_runs = recent;
-        self.planned_workflows = planned;
-        out
-    }
-
-    /// The wheel over the Workflows view: the focused pane moves, so the
-    /// runs list steps and the detail pane scrolls.
-    pub fn scroll_workflows_view(&mut self, delta: isize) {
-        self.with_view(|view, facts| match view.focus {
-            ViewPane::Runs => view.step(delta, facts),
-            ViewPane::Detail => view.scroll(delta),
-        });
-    }
-
-    pub fn handle_workflows_view_key(&mut self, key: &KeyEvent) {
-        let Mode::WorkflowsView(view) = &mut self.mode else {
-            return;
-        };
-        let page = view.viewport_rows.get().max(1) as isize;
-        // footer questions first
-        match view.pending.clone() {
-            ViewPending::Cancel => {
-                let yes = matches!(
-                    key.code,
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
-                );
-                let no = matches!(
-                    key.code,
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
-                );
-                if !yes && !no {
-                    return;
-                }
-                view.pending = ViewPending::None;
-                if yes && let Some(RunRow::Live(id)) = view.selected_row().cloned() {
-                    self.cancel_workflow_run(&id);
-                    self.notice = Some(Notice::info("cancelling the run"));
-                }
-                return;
-            }
-            ViewPending::Discard(id) => {
-                match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                        view.pending = ViewPending::None;
-                        self.planned_workflows.retain(|p| p.id != id);
-                        self.with_view(|v, f| v.reload(f));
-                        self.notice = Some(Notice::info("planned document discarded"));
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        view.pending = ViewPending::None
-                    }
-                    _ => {}
-                }
-                return;
-            }
-            ViewPending::SaveName(mut name) => {
-                match key.code {
-                    KeyCode::Esc => view.pending = ViewPending::None,
-                    KeyCode::Backspace => {
-                        name.pop();
-                        view.pending = ViewPending::SaveName(name);
-                    }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        name.push(c);
-                        view.pending = ViewPending::SaveName(name);
-                    }
-                    KeyCode::Enter => {
-                        view.pending = ViewPending::None;
-                        let row = view.selected_row().cloned();
-                        let result = match row {
-                            Some(RunRow::Planned(id)) => self.save_planned_workflow(&id, &name),
-                            Some(RunRow::Live(id)) => {
-                                let doc = self
-                                    .live_workflow_runs
-                                    .iter()
-                                    .find(|r| r.run_id == id)
-                                    .map(|r| r.document.clone())
-                                    .unwrap_or_default();
-                                save_document(&self.library_root(), &name, &doc)
-                            }
-                            Some(RunRow::Stored(id)) => {
-                                let doc = if let Mode::WorkflowsView(v) = &self.mode {
-                                    v.stored
-                                        .iter()
-                                        .find(|r| r.id == id)
-                                        .map(|r| r.document.clone())
-                                } else {
-                                    None
-                                };
-                                save_document(&self.library_root(), &name, &doc.unwrap_or_default())
-                            }
-                            _ => Err("select a run or a planned document".into()),
-                        };
-                        self.notice = Some(match result {
-                            Ok(p) => {
-                                self.reload_workflow_list();
-                                Notice::info(format!("saved {}", p.display()))
-                            }
-                            Err(e) => Notice::warn(e),
-                        });
-                    }
-                    _ => {}
-                }
-                return;
-            }
-            ViewPending::None => {}
-        }
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                if view.focus == ViewPane::Detail {
-                    view.focus = ViewPane::Runs;
-                } else {
-                    self.mode = Mode::Control;
-                }
-            }
-            KeyCode::Tab => {
-                self.with_view(|v, f| v.next_tab(f));
-            }
-            KeyCode::BackTab => {
-                self.with_view(|v, f| v.prev_tab(f));
-            }
-            KeyCode::Char(c @ '1'..='4') => {
-                let tab = super::workflows_view::ViewTab::ALL[c as usize - '1' as usize];
-                self.with_view(|v, f| v.set_tab(tab, f));
-            }
-            KeyCode::Right => view.focus = ViewPane::Detail,
-            KeyCode::Left => view.focus = ViewPane::Runs,
-            KeyCode::Down | KeyCode::Char('j') => match view.focus {
-                ViewPane::Runs => {
-                    self.with_view(|v, f| v.step(1, f));
-                }
-                ViewPane::Detail => view.scroll(1),
-            },
-            KeyCode::Up | KeyCode::Char('k') => match view.focus {
-                ViewPane::Runs => {
-                    self.with_view(|v, f| v.step(-1, f));
-                }
-                ViewPane::Detail => view.scroll(-1),
-            },
-            // Scrolling the detail pane never asks for focus first: a long
-            // result is the usual reason the view is open.
-            KeyCode::PageDown | KeyCode::Char(' ') => view.scroll(page),
-            KeyCode::PageUp => view.scroll(-page),
-            KeyCode::Home | KeyCode::Char('g') => view.scroll_to_top(),
-            KeyCode::End | KeyCode::Char('G') => view.scroll_to_bottom(),
-            KeyCode::Enter => {
-                let row = view.selected_row().cloned();
-                match row {
-                    Some(RunRow::Planned(id)) => match self.run_planned_workflow(&id) {
-                        Ok(rid) => {
-                            self.notice = Some(Notice::info(format!("run {} started", &rid[..8])));
-                            self.with_view(|v, f| v.reload(f));
-                        }
-                        Err(e) => self.notice = Some(Notice::warn(e)),
-                    },
-                    Some(RunRow::Live(id)) => {
-                        // attach to the first running session of the run
-                        let sid = self
-                            .live_workflow_runs
-                            .iter()
-                            .find(|r| r.run_id == id)
-                            .and_then(|r| r.sessions.iter().find(|s| s.exited_at.is_none()))
-                            .map(|s| s.session_id);
-                        match sid.and_then(|sid| self.sessions.iter().position(|s| s.id == sid)) {
-                            Some(idx) => self.attach_to_session(idx),
-                            None => {
-                                self.notice = Some(Notice::info("no session is running right now"))
-                            }
-                        }
-                    }
-                    Some(RunRow::Stored(_)) => {
-                        self.notice =
-                            Some(Notice::info("r resumes a stored run; s saves its document"));
-                    }
-                    _ => {}
-                }
-            }
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.with_view(|v, f| v.reload(f));
-            }
-            KeyCode::Char('r') => {
-                let row = view.selected_row().cloned();
-                if let Some(RunRow::Stored(id)) = row {
-                    let stored = if let Mode::WorkflowsView(v) = &self.mode {
-                        v.stored.iter().find(|r| r.id == id).cloned()
-                    } else {
-                        None
-                    };
-                    if let Some(r) = stored {
-                        let req = WorkflowRunRequest {
-                            name: r.workflow.clone(),
-                            source: r.source.clone(),
-                            document: r.document.clone(),
-                            workspace: PathBuf::from(&r.workspace),
-                            profile: Some(r.profile.clone()).filter(|p| !p.is_empty()),
-                            harness: Harness::detect(&r.harness).unwrap_or(Harness::Claude),
-                            args: r.args.clone(),
-                            budget_tokens: r.budget_tokens.map(|b| b as u64),
-                            usd_cap: None,
-                            isolation: None,
-                            resume_from: Some(r.id.clone()),
-                            step_overrides: Vec::new(),
-                        };
-                        self.notice = Some(match self.start_workflow_run(req) {
-                            Ok(rid) => Notice::info(format!("resumed as {}", &rid[..8])),
-                            Err(e) => Notice::warn(e),
-                        });
-                        self.with_view(|v, f| v.reload(f));
-                    }
-                } else {
-                    self.notice = Some(Notice::info(
-                        "r resumes a stored run; Ctrl+R reloads the list",
-                    ));
-                }
-            }
-            KeyCode::Char('s') => {
-                let default = match view.selected_row() {
-                    Some(RunRow::Planned(id)) => self
-                        .planned_workflows
-                        .iter()
-                        .find(|p| p.id == *id)
-                        .map(|p| p.name.clone()),
-                    Some(RunRow::Live(id)) => self
-                        .live_workflow_runs
-                        .iter()
-                        .find(|r| r.run_id == *id)
-                        .map(|r| r.name.clone()),
-                    Some(RunRow::Stored(id)) => view
-                        .stored
-                        .iter()
-                        .find(|r| r.id == *id)
-                        .map(|r| r.workflow.clone()),
-                    _ => None,
-                };
-                if let Some(d) = default {
-                    view.pending = ViewPending::SaveName(d);
-                }
-            }
-            // x stops a live run; d discards a plan, asking first
-            KeyCode::Char('x') => {
-                if let Some(RunRow::Live(_)) = view.selected_row() {
-                    view.pending = ViewPending::Cancel;
-                }
-            }
-            KeyCode::Char('d') => {
-                if let Some(RunRow::Planned(id)) = view.selected_row().cloned() {
-                    view.pending = ViewPending::Discard(id);
-                }
-            }
-            KeyCode::Char('e') => {
-                if let Some(RunRow::Planned(id)) = view.selected_row().cloned() {
-                    self.open_flow_builder_plan(&id);
-                }
-            }
-            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let row = view.selected_row().cloned();
-                if let Some(RunRow::Planned(id)) = row {
-                    let doc = self.planned_workflows.iter().find(|p| p.id == id).cloned();
-                    if let Some(p) = doc {
-                        let path = self
-                            .workflows_runtime_dir()
-                            .join("workflows")
-                            .join("plans")
-                            .join(format!("{}.toml", p.id));
-                        let _ = std::fs::write(&path, &p.document);
-                        let command = crate::assets::editor_command(self.editor.as_deref());
-                        self.editor_request = Some(crate::app::EditorRequest {
-                            path,
-                            asset_id: format!("plan:{}", p.id),
-                            command,
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// After the editor closed a planned document: re-read and re-check it.
     pub fn reload_planned_after_edit(&mut self, plan_id: &str) {
         let path = self
@@ -2767,7 +2459,6 @@ impl App {
             p.problems = checked.problems;
             p.raw = None;
         }
-        self.with_view(|v, f| v.reload(f));
     }
 
     /// The action for a key in the Workflows section (Control mode).

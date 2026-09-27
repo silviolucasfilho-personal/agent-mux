@@ -180,10 +180,10 @@ fn keys_of_the_loops_section_pause_run_and_toggle_the_kill_switch() {
     assert!(app.loop_registry.loops.is_empty());
     assert!(temp.path().join("proj").is_dir());
 
-    // E opens the Loops view from any section, Esc closes it
+    // E opens the runs view from any section, Esc closes it
     app.sidebar_section = SidebarSection::Active;
-    app.open_loops_view();
-    assert!(matches!(app.mode, Mode::LoopsView(_)));
+    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    assert!(matches!(app.mode, Mode::RunsView(_)));
     let screen = render(&app, 120, 40);
     assert!(screen.contains("History"), "{screen}");
     assert!(screen.contains("Setup"), "{screen}");
@@ -395,8 +395,8 @@ fn the_report_tab_shows_what_the_run_found_and_who_has_to_act() {
     agent_mux::loops::state::write_snapshot(&runtime, &loop_id, "2026-09-17T17:36:53Z", STATE)
         .unwrap();
 
-    app.open_loops_view();
-    let out = render(&app, 120, 40);
+    app.open_runs_view_on_loop(&loop_id);
+    let out = render(&app, 160, 40);
     assert!(out.contains("Report"), "the first tab is the report\n{out}");
     assert!(
         out.contains("NEEDS YOU"),
@@ -434,9 +434,9 @@ fn the_report_tab_shows_what_the_run_found_and_who_has_to_act() {
     // the view is the whole screen: no sidebar shows down its left edge,
     // and its own hints take the status bar's row
     let first = out.lines().next().unwrap();
-    assert!(first.starts_with("┌ Loops (1)"), "{first}");
-    let last = out.lines().last().unwrap();
-    assert!(last.contains("[Esc] close"), "{last}");
+    assert!(first.starts_with(" Runs "), "{first}");
+    let last = out.lines().rev().find(|l| !l.trim().is_empty()).unwrap();
+    assert!(last.contains("Esc back"), "{last}");
 }
 
 #[test]
@@ -476,9 +476,9 @@ fn the_runs_timeline_folds_quiet_runs_and_opens_the_selected_one() {
         );
     }
 
-    app.open_loops_view();
-    app.handle_key(&key(KeyCode::Char('2')), Instant::now()); // the Runs timeline
-    let out = render(&app, 120, 40);
+    app.open_runs_view_on_loop(&loop_id);
+    app.handle_key(&key(KeyCode::Char('2')), Instant::now()); // the History timeline
+    let out = render(&app, 160, 40);
     assert!(
         out.contains("quiet ×3"),
         "three quiet runs fold into one row\n{out}"
@@ -570,16 +570,17 @@ fn the_card_says_what_the_loop_may_do_and_setup_says_what_it_needs() {
         "{screen}"
     );
     assert!(
-        screen.contains("6 of 6 files missing") && screen.contains("[E] Setup tab"),
+        screen.contains("6 of 6 files missing") && screen.contains("[E] then 5: Setup"),
         "setup folds to one line\n{screen}"
     );
     for code in ["Breaker", "ceiling", " L0", "L1 (", "Readiness  "] {
         assert!(!screen.contains(code), "{code:?} left the card\n{screen}");
     }
 
-    app.open_loops_view();
-    app.handle_key(&key(KeyCode::Char('3')), Instant::now());
-    let setup = render(&app, 120, 100);
+    // E on the loop's row: its runs, tab 5 its setup
+    app.handle_key(&key(KeyCode::Char('E')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('5')), Instant::now());
+    let setup = render(&app, 160, 100);
     assert!(setup.contains("What this loop may do"), "{setup}");
     assert!(setup.contains("✗ report only  ← set"), "{setup}");
     assert!(setup.contains("needs a state file"), "{setup}");
@@ -684,24 +685,20 @@ fn the_inbox_gathers_loop_runs_plans_and_failed_runs() {
     };
     assert_eq!(state.items.len(), 1, "{:?}", app.notice);
 
-    // Enter on the plan opens the Workflows view on it
+    // Enter on the plan opens the runs view on it
     app.handle_key(&key(KeyCode::Enter), Instant::now());
-    let Mode::WorkflowsView(v) = &app.mode else {
+    let Mode::RunsView(v) = &app.mode else {
         panic!("not the view: {:?}", app.mode)
     };
     assert_eq!(
-        v.selected_row(),
-        Some(&agent_mux::app::workflows_view::RunRow::Planned(
-            "plan-1".into()
-        ))
+        v.selected_item().map(|i| i.run.key()).as_deref(),
+        Some("plan:plan-1")
     );
-
-    // the Loops view keeps three tabs
-    app.mode = Mode::Control;
-    app.open_loops_view();
     let screen = render(&app, 120, 34);
-    assert!(screen.contains("Report | History | Setup"), "{screen}");
-    assert!(!screen.contains("Inbox |"), "{screen}");
+    assert!(
+        screen.contains("Document"),
+        "a plan's tabs are a flow's\n{screen}"
+    );
 }
 
 /// Any level may be set whatever the readiness score: the card and the
@@ -788,7 +785,13 @@ fn the_runs_view_lists_every_run_and_decides_the_ones_that_need_you() {
     let Mode::RunsView(st) = &app.mode else {
         panic!("{:?}", app.mode)
     };
-    assert_eq!(st.items.len(), 2, "{:?}", st.items);
+    assert_eq!(st.items.len(), 3, "{:?}", st.items);
+    assert!(
+        st.items
+            .iter()
+            .any(|i| i.group == agent_mux::app::runs_view::Group::Next),
+        "the loop's next run is listed"
+    );
     assert_eq!(st.selected, 0, "it starts on what needs the user");
     let out = render(&app, 120, 34);
     assert!(out.contains("Needs you"), "{out}");
@@ -797,7 +800,7 @@ fn the_runs_view_lists_every_run_and_decides_the_ones_that_need_you() {
         out.contains("today 0 run(s)"),
         "the runs are days old: {out}"
     );
-    assert!(out.contains("It needs your decision"), "{out}");
+    assert!(out.contains("NEEDS YOU"), "the loop's own report\n{out}");
     assert!(out.contains("two PRs need a human"), "{out}");
 
     // 4 Result: what the run said
@@ -813,7 +816,7 @@ fn the_runs_view_lists_every_run_and_decides_the_ones_that_need_you() {
     assert!(
         st.items
             .iter()
-            .all(|i| i.group == agent_mux::app::runs_view::Group::Earlier),
+            .all(|i| i.group != agent_mux::app::runs_view::Group::NeedsYou),
         "{:?}",
         st.items
     );

@@ -71,7 +71,7 @@ Replaces the flow builder, the loop builder and the loop dialog. Tabs follow the
 
 ### One runs view
 
-Replaces the Loops view and the Workflows view: every run of every agent, its report, its sessions, its result. The inbox stays the one place for what needs the user: a change to apply, a plan to review, a run that failed.
+Replaces the Loops view and the Workflows view: every run of every agent, its report, its sessions, its result. Done (2026-09-27): the two views are gone; their detail builders make the runs view's tabs. The inbox stays the one place for what needs the user: a change to apply, a plan to review, a run that failed.
 
 ### Keys
 

@@ -56,7 +56,7 @@ alias (`sonnet`, `opus`, `haiku`, `inherit`), since Codex reads a config
 overlay with `model` and `developer_instructions` (codex-cli 0.155.1; see
 `src/loops/scaffold.rs`). The scaffolder never overwrites an existing agent file,
 so a loop whose verifier model changed after scaffolding shows the
-difference in the Loops view's **Setup** tab, where the line reads what the
+difference in its **Setup** tab of the runs view (`E`, tab `5`), where the line reads what the
 file declares against what the loop asks for. Edit the file with the
 Configuration view (`C`) or delete it and re-scaffold.
 
@@ -133,7 +133,7 @@ A run's session appears in **Active** under its loop's header — `▾ ⟳ <loop
 
 ## 7. After a run
 
-agent-mux reads tokens and cost from the trace store, which checker sub-agents ran (a name containing `verifier` or `reviewer`) and what each answered (`## Verdict: APPROVE | REJECT | ESCALATE_HUMAN`), the files the run's write tools touched, and the worktree's changes. The verdicts add up to one word: any `ESCALATE_HUMAN` wins, then any `REJECT`, and only unanimous `APPROVE`s approve; the run row keeps the list, the word and a label such as `APPROVE (2/2)` or `REJECT (1/2)` that the Loops view shows. The outcome is the `loop-result` block when present and consistent, else derived, with the checkers' rule first: a changed worktree (or a block claiming a fix) against a `REJECT` or `ESCALATE_HUMAN` → `escalated`, the branch stays for a human and nothing is proposed; otherwise worktree changed → `fix-proposed`; a checker said `ESCALATE_HUMAN` or the High Priority section grew → `escalated`; state file changed → `report-only`; nothing → `no-op`; non-zero exit or timeout → `failed`. A fix without a checker observation is flagged `verifier_missing`. A touched path on the denylist forces `escalated` and pauses the loop.
+agent-mux reads tokens and cost from the trace store, which checker sub-agents ran (a name containing `verifier` or `reviewer`) and what each answered (`## Verdict: APPROVE | REJECT | ESCALATE_HUMAN`), the files the run's write tools touched, and the worktree's changes. The verdicts add up to one word: any `ESCALATE_HUMAN` wins, then any `REJECT`, and only unanimous `APPROVE`s approve; the run row keeps the list, the word and a label such as `APPROVE (2/2)` or `REJECT (1/2)` that the runs view shows. The outcome is the `loop-result` block when present and consistent, else derived, with the checkers' rule first: a changed worktree (or a block claiming a fix) against a `REJECT` or `ESCALATE_HUMAN` → `escalated`, the branch stays for a human and nothing is proposed; otherwise worktree changed → `fix-proposed`; a checker said `ESCALATE_HUMAN` or the High Priority section grew → `escalated`; state file changed → `report-only`; nothing → `no-op`; non-zero exit or timeout → `failed`. A fix without a checker observation is flagged `verifier_missing`. A touched path on the denylist forces `escalated` and pauses the loop.
 
 Every run also pins the pattern text it executed: `Pattern::digest()`, a SHA-256 over the effective pattern, captured at launch and stored in `loop_run_patterns` beside the row (schema v14), the way `workflow_runs.document_hash` pins a workflow document. `loop_runs.pattern` is only the id, and `~/.agent-mux/loops/registry.toml` can replace that id's text between two runs, so without the digest two runs of one pattern cannot be told apart. Runs recorded before v14 carry none: their text was never captured, and backfilling it from today's registry would assert something untrue.
 
@@ -142,9 +142,9 @@ Then: the `loop_runs` row, the run-log line, the ledger attempt (fix patterns), 
 ## 8. Reading a run
 
 `E` (or `W`) opens the runs view: every run of every agent, what needs you
-first (`Enter` applies a change, `d` rejects it), then earlier runs, with
-each run's Report, Sessions, Change and Result. `Enter` on a loop run opens
-the Loops view on its **Report** tab: what the selected run found
+first (`Enter` applies a change, `d` rejects it), each scheduled agent's
+next run, then earlier runs. A loop run's tabs are Report, History, Change,
+Result and Setup. The **Report** tab says what the selected run found
 and who has to act. It is the state file the run wrote, parsed into the
 shape every loop skill already keeps.
 
@@ -206,7 +206,7 @@ The **Setup** tab (`3`) is everything about the loop that is not a run: what it 
 `I`, from anywhere, opens the inbox: everything waiting on a human, loops and workflows together. The status bar leads with the count (`● 3 need you [I]`) whenever it is not zero.
 
 - **Loops**: runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. For a run with a branch, `a` marks it **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed. A run that asked for a decision without a branch reads `a` done and `x` dismiss; both record the decision. `Enter` opens its loop's History, `T` its traces.
-- **Workflows**: plans the planner wrote that wait for you (`Enter` reviews one in the Workflows view, `d` discards it) and runs since startup that did not finish cleanly (`Enter` opens the run, `x` dismisses it from the inbox for this session).
+- **Workflows**: plans the planner wrote that wait for you (`Enter` opens one in the runs view, `d` discards it) and runs since startup that did not finish cleanly (`Enter` opens the run, `x` dismisses it from the inbox for this session).
 
 ## 10. Antigravity
 

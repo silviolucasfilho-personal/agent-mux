@@ -4,7 +4,7 @@
 //! in the Workflows view or discarded; a workflow run that did not finish
 //! cleanly is opened or dismissed.
 
-use super::workflows::WorkflowRow;
+use super::runs_view::RunTab;
 use super::workflows_view::RunRow;
 use super::{App, Mode, Notice};
 use crate::loops::store::{self as lstore, LoopRun};
@@ -209,28 +209,15 @@ impl App {
                 }
                 Some(item @ InboxItem::Run { .. }) if c == 'd' => {
                     self.inbox_dismissed.insert(item.key());
-                    self.notice = Some(Notice::info(
-                        "dismissed; the run stays in the Workflows view",
-                    ));
+                    self.notice = Some(Notice::info("dismissed; the run stays in the runs view"));
                     self.reload_inbox();
                 }
                 _ => {}
             },
+            // the runs view holds everything about a run
             KeyCode::Enter => match selected {
                 Some(InboxItem::Loop(r)) => {
-                    if let Some(i) = self
-                        .loop_registry
-                        .loops
-                        .iter()
-                        .position(|l| l.id == r.loop_id)
-                    {
-                        self.selected_loop = i;
-                    }
-                    self.open_loops_view();
-                    if let Mode::LoopsView(view) = &mut self.mode {
-                        view.tab = super::loops_view::LoopsTab::History;
-                        view.rebuild_detail();
-                    }
+                    self.open_runs_view_on(&format!("loop:{}", r.id), RunTab::Report)
                 }
                 Some(InboxItem::Plan { id, .. }) => {
                     self.open_workflows_view_on(RunRow::Planned(id))
@@ -255,17 +242,13 @@ impl App {
         }
     }
 
-    /// The Workflows view with `row` selected, as the section's `Enter` opens it.
+    /// The runs view on a flow's run or plan.
     pub fn open_workflows_view_on(&mut self, row: RunRow) {
-        if let Some(i) = self.workflow_rows().iter().position(|r| match (&row, r) {
-            (RunRow::Planned(a), WorkflowRow::Planned(b)) => a == b,
-            (RunRow::Stored(a), WorkflowRow::Recent(b)) => a == b,
-            (RunRow::Live(a), WorkflowRow::Live(b)) => a == b,
-            _ => false,
-        }) {
-            self.select_workflow_row(i);
-        }
-        self.open_workflows_view();
-        self.with_view(|view, facts| view.select(&row, facts));
+        let key = match row {
+            RunRow::Planned(id) => format!("plan:{id}"),
+            RunRow::Live(id) | RunRow::Stored(id) => format!("flow:{id}"),
+            RunRow::Header(_) => String::new(),
+        };
+        self.open_runs_view_on(&key, RunTab::Report);
     }
 }

@@ -5,11 +5,7 @@ mod loop_builder;
 mod runs;
 
 use crate::app::loops::LoopStatus;
-use crate::app::loops_view::{LoopRow, LoopsPane, LoopsTab, LoopsViewState};
-use crate::app::workflows_view::{
-    DialogField as WfField, DialogPurpose, RunRow, ViewPane, ViewPending, WorkflowDialogState,
-    WorkflowsViewState,
-};
+use crate::app::workflows_view::{DialogField as WfField, DialogPurpose, WorkflowDialogState};
 use crate::app::{
     App, BrowserPane, DialogContentMode, DialogField, DialogState, HistoryPane, HistoryState,
     InstallLabel, Mode, NoticeLevel, SidebarSection, SkillLauncherField, SkillRow, SkillsPane,
@@ -279,10 +275,8 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::SkillsView(view) => draw_skills_view(f, view, app),
         Mode::SkillLauncher(launcher) => draw_skill_launcher(f, launcher, app),
         Mode::About(state) => draw_about(f, state),
-        Mode::LoopsView(view) => draw_loops_view(f, view, app),
         Mode::ConfigView(view) => draw_config_view(f, view),
         Mode::WorkflowDialog(dialog) => draw_workflow_dialog(f, dialog),
-        Mode::WorkflowsView(view) => draw_workflows_view(f, view, app),
         Mode::Inbox(state) => draw_inbox(f, state),
         Mode::AgentEditor(state) => agent_editor::draw(f, state),
         Mode::RunsView(state) => runs::draw(f, state, app),
@@ -1772,8 +1766,8 @@ fn draw_help(f: &mut Frame) {
             "details · run now · pause · edit · remove · its pattern",
         ),
         row(
-            "Loops view",
-            "Tab or 1-3: Report · History · Setup · T traces",
+            "Runs view",
+            "1-5: Report · History/Steps · Change · Result · Setup/Document",
         ),
         Line::raw(""),
         Line::styled("Skills view", head),
@@ -3629,7 +3623,7 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" Loops ");
-        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [n] new loop (pattern, harness, cadence, what it may do)   [o] edit the patterns   [E] runs   [?] help\n\n  Start with report only for a week. Let it propose fixes when the Setup tab says it is ready.";
+        let text = "\n  No loops yet.\n\n  A loop is a scheduled, bounded agent run against one workspace: it reads a state\n  file, triages, at most proposes one fix in a worktree, updates the state file and stops.\n\n  [n] new loop (pattern, harness, cadence, what it may do)   [o] edit the patterns   [E] runs   [?] help\n\n  Start with report only for a week. Let it propose fixes when its Setup (E, tab 5) says it is ready.";
         f.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
@@ -3905,7 +3899,7 @@ fn draw_loop_preview(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(vec![
             Span::styled(format!(" {:<w$}", "Setup", w = KEY - 1), key),
             Span::styled(
-                format!("{} · [E] Setup tab", setup.join(" · ")),
+                format!("{} · [E] then 5: Setup", setup.join(" · ")),
                 Style::default().fg(Color::Yellow),
             ),
         ]));
@@ -4014,135 +4008,6 @@ fn dir_picker_lines(
         ));
     }
     lines
-}
-
-fn draw_loops_view(f: &mut Frame, view: &LoopsViewState, app: &App) {
-    // The whole screen, footer over the status bar: a box inset over the
-    // sidebar left fragments of it showing down both edges.
-    let area = f.area();
-    f.render_widget(Clear, area);
-    let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Min(0)]).areas(body);
-
-    let title = if view.pause_all {
-        format!(" Loops ({}) PAUSED ", view.loops.len())
-    } else {
-        format!(" Loops ({}) ", view.loops.len())
-    };
-    let left_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(pane_border(view.focus == LoopsPane::Loops))
-        .title(title);
-    if view.loops.is_empty() {
-        let p = Paragraph::new("\n  no loops yet\n\n  [a] in the Loops section")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(left_block);
-        f.render_widget(p, left);
-    } else {
-        let visible = usize::from(left.height.saturating_sub(2));
-        let start = sidebar_window(view.selected, view.rows.len(), visible);
-        let end = (start + visible.max(1)).min(view.rows.len());
-        let items: Vec<ListItem> = view.rows[start..end]
-            .iter()
-            .enumerate()
-            .map(|(offset, row)| {
-                let i = start + offset;
-                let is_sel = i == view.selected;
-                let marker = if is_sel { "> " } else { "  " };
-                let line = match row {
-                    LoopRow::Header(ws) => Line::styled(
-                        truncate_path_chars(ws, usize::from(left.width.saturating_sub(3))),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    LoopRow::Loop(idx) => {
-                        let Some(entry) = view.loops.get(*idx) else {
-                            return ListItem::new(Line::raw(""));
-                        };
-                        let (status, right) = app.loop_row(entry);
-                        Line::from(vec![
-                            Span::raw(marker),
-                            Span::styled(
-                                format!("{} ", status.glyph()),
-                                Style::default().fg(status.color()),
-                            ),
-                            Span::raw(format!("{} ", entry.pattern)),
-                            Span::styled(right.to_string(), Style::default().fg(Color::DarkGray)),
-                        ])
-                    }
-                };
-                let item = ListItem::new(line);
-                if is_sel && view.focus == LoopsPane::Loops {
-                    item.style(Style::default().add_modifier(Modifier::REVERSED))
-                } else if is_sel {
-                    item.style(Style::default().fg(Color::Cyan))
-                } else {
-                    item
-                }
-            })
-            .collect();
-        f.render_widget(List::new(items).block(left_block), left);
-    }
-
-    let mut title_spans = vec![Span::raw(" ")];
-    for (i, tab) in LoopsTab::ALL.into_iter().enumerate() {
-        if i > 0 {
-            title_spans.push(Span::raw(" | "));
-        }
-        let label = tab.label().to_string();
-        title_spans.push(if tab == view.tab {
-            Span::styled(
-                label,
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(label, Style::default().fg(Color::DarkGray))
-        });
-    }
-    if let Some(l) = view.selected_loop() {
-        title_spans.push(Span::raw(format!(
-            " · {} @ {} ",
-            l.pattern,
-            l.workspace_name()
-        )));
-    } else {
-        title_spans.push(Span::raw(" "));
-    }
-    let right_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(pane_border(view.focus == LoopsPane::Detail))
-        .title(Line::from(title_spans));
-    let inner = right_block.inner(right);
-    view.viewport_rows.set(usize::from(inner.height));
-    f.render_widget(right_block, right);
-    let lines: Vec<Line> = view
-        .detail_lines
-        .iter()
-        .skip(view.scroll_offset)
-        .cloned()
-        .collect();
-    f.render_widget(Paragraph::new(lines), inner);
-
-    let footer_hints = match view.tab {
-        LoopsTab::Report => {
-            " [Tab/1-3] tab  [↑/↓] earlier run  [2] history  [r] run now  [T] traces  [Esc] close"
-        }
-        LoopsTab::History => {
-            " [Tab/1-3] tab  [←/→] pane  [↑/↓] select  [1] its report  [Enter] attach/traces  [r] run now  [Esc] close"
-        }
-        _ => {
-            " [Tab/1-3] tab  [←/→] pane  [↑/↓] scroll  [r] run now  [p] pause  [⌃R] reload  [I] inbox  [Esc] close"
-        }
-    };
-    let footer_text = Line::styled(
-        fit_hints(footer_hints, usize::from(footer.width)),
-        Style::default().fg(Color::Black).bg(Color::Cyan),
-    );
-    f.render_widget(Paragraph::new(footer_text), footer);
 }
 
 /// The About overlay (`v`): the rows `app::about` gathered, one per line.
@@ -4870,7 +4735,7 @@ fn draw_inbox(f: &mut Frame, state: &crate::app::inbox::InboxState) {
             }
             detail.push(Line::raw(""));
             detail.push(Line::styled(
-                "  [Enter] review it in the Workflows view: run, edit, save or discard",
+                "  [Enter] review it in the runs view: run, edit, save or discard",
                 dim,
             ));
         }
@@ -4922,172 +4787,6 @@ fn draw_inbox(f: &mut Frame, state: &crate::app::inbox::InboxState) {
         Paragraph::new(Line::styled(
             fit_hints(hints, usize::from(footer.width)),
             Style::default().fg(Color::Black).bg(Color::Cyan),
-        )),
-        footer,
-    );
-}
-
-fn draw_workflows_view(f: &mut Frame, view: &WorkflowsViewState, app: &App) {
-    // The whole screen, footer over the status bar: a box inset over the
-    // sidebar left fragments of it showing down both edges.
-    let area = f.area();
-    f.render_widget(Clear, area);
-    let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(32), Constraint::Min(0)]).areas(body);
-    let facts = app.view_facts();
-    let left_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(pane_border(view.focus == ViewPane::Runs))
-        .title(format!(
-            " Workflow runs ({}) ",
-            view.rows
-                .iter()
-                .filter(|r| !matches!(r, RunRow::Header(_)))
-                .count()
-        ));
-    if view.rows.is_empty() {
-        let p = Paragraph::new("\n  no runs yet\n\n  Enter on a workflow, or c to compose one")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(left_block);
-        f.render_widget(p, left);
-    } else {
-        let visible = usize::from(left.height.saturating_sub(2));
-        let start = sidebar_window(view.selected, view.rows.len(), visible);
-        let end = (start + visible.max(1)).min(view.rows.len());
-        let items: Vec<ListItem> = view.rows[start..end]
-            .iter()
-            .enumerate()
-            .map(|(offset, row)| {
-                let i = start + offset;
-                let is_sel = i == view.selected;
-                let marker = if is_sel { "> " } else { "  " };
-                let line = match row {
-                    RunRow::Header(h) => Line::styled(
-                        h.to_string(),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    RunRow::Planned(id) => {
-                        let p = facts.planned.iter().find(|p| p.id == *id);
-                        Line::from(vec![
-                            Span::raw(marker),
-                            Span::styled("? ", Style::default().fg(Color::Yellow)),
-                            Span::raw(p.map(|p| p.name.clone()).unwrap_or_default()),
-                            Span::styled(
-                                p.map(|p| {
-                                    if p.valid() { " valid" } else { " problems" }.to_string()
-                                })
-                                .unwrap_or_default(),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ])
-                    }
-                    RunRow::Live(id) => {
-                        let r = facts.live.iter().find(|r| r.run_id == *id);
-                        Line::from(vec![
-                            Span::raw(marker),
-                            Span::styled("▶ ", Style::default().fg(Color::Cyan)),
-                            Span::raw(r.map(|r| r.name.clone()).unwrap_or_default()),
-                            Span::styled(
-                                r.map(|r| format!(" {}", r.progress())).unwrap_or_default(),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ])
-                    }
-                    RunRow::Stored(id) => {
-                        let r = view.stored.iter().find(|r| r.id == *id);
-                        let (g, c) = match r.map(|r| r.status.as_str()) {
-                            Some("finished") => ("✓", Color::Green),
-                            Some("running") => ("▶", Color::Cyan),
-                            _ => ("!", Color::Red),
-                        };
-                        Line::from(vec![
-                            Span::raw(marker),
-                            Span::styled(format!("{g} "), Style::default().fg(c)),
-                            Span::raw(r.map(|r| r.workflow.clone()).unwrap_or_default()),
-                            Span::styled(
-                                r.map(|r| format!(" {} · {}", &r.id[..8], r.harness))
-                                    .unwrap_or_default(),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ])
-                    }
-                };
-                let item = ListItem::new(line);
-                if is_sel && view.focus == ViewPane::Runs {
-                    item.style(Style::default().add_modifier(Modifier::REVERSED))
-                } else if is_sel {
-                    item.style(Style::default().fg(Color::Cyan))
-                } else {
-                    item
-                }
-            })
-            .collect();
-        f.render_widget(List::new(items).block(left_block), left);
-    }
-
-    // the detail pane's size, known before its block is built, so the title
-    // can carry an accurate scroll position on the very first frame
-    view.measure(
-        right.width.saturating_sub(2),
-        right.height.saturating_sub(2),
-    );
-    let mut title_spans = vec![Span::raw(" ")];
-    for (i, tab) in crate::app::workflows_view::ViewTab::ALL
-        .into_iter()
-        .enumerate()
-    {
-        if i > 0 {
-            title_spans.push(Span::raw(" | "));
-        }
-        title_spans.push(if tab == view.tab {
-            Span::styled(
-                tab.label(),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(tab.label(), Style::default().fg(Color::DarkGray))
-        });
-    }
-    // the scroll position comes before the run's name: the name is the part
-    // a narrow pane may cut off
-    if let Some(pos) = view.scroll_position() {
-        title_spans.push(Span::styled(
-            format!(" · {pos}"),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    let name = view.selected_title(&facts);
-    if !name.is_empty() {
-        title_spans.push(Span::raw(format!(" · {name} ")));
-    } else {
-        title_spans.push(Span::raw(" "));
-    }
-    let right_block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(pane_border(view.focus == ViewPane::Detail))
-        .title(Line::from(title_spans));
-    let inner = right_block.inner(right);
-    f.render_widget(right_block, right);
-    // Long result lines are wrapped, not cut off: `visible_rows` records the
-    // pane's size so the scroll counts the rows actually drawn.
-    f.render_widget(
-        Paragraph::new(view.visible_rows(inner.width, inner.height)),
-        inner,
-    );
-    let footer_style = if matches!(view.pending, ViewPending::None) {
-        Style::default().fg(Color::Black).bg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::Black).bg(Color::Yellow)
-    };
-    f.render_widget(
-        Paragraph::new(Line::styled(
-            fit_hints(&view.footer(), usize::from(footer.width)),
-            footer_style,
         )),
         footer,
     );

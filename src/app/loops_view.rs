@@ -1,8 +1,8 @@
-//! The Loops view (`E`): every registered loop grouped by workspace on
-//! the left; Report, History and Setup on the right. Reads the registry
-//! snapshot it was opened with, the store through a read-only connection,
-//! and the workspace files. Actions (`r`/`p`) are performed by `App`,
-//! never here; decisions on a run are the inbox's (`I`, `app::inbox`).
+//! The detail of a loop run in the runs view (`app::runs_view`): its
+//! Report, History and Setup tabs, built from the registry snapshot, the
+//! store through a read-only connection, and the workspace files. It has
+//! no screen of its own; actions are `App`'s, decisions on a run the
+//! runs view's and the inbox's (`I`, `app::inbox`).
 
 use crate::loops::registry::{LoopEntry, Registry};
 use crate::loops::store::{self as lstore, LoopRun};
@@ -10,7 +10,6 @@ use crate::loops::{Level, Outcome, format_tokens, patterns};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopsPane {
@@ -48,7 +47,6 @@ pub enum LoopRow {
     Loop(usize),
 }
 
-const LIVE_REFRESH: Duration = Duration::from_millis(1000);
 const RUN_LIMIT: usize = 100;
 
 pub struct LoopsViewState {
@@ -74,7 +72,6 @@ pub struct LoopsViewState {
     worktrees_dir: String,
     /// Where the per-run copies of the state file are kept.
     runtime: Option<std::path::PathBuf>,
-    last_refresh: Instant,
 }
 
 impl std::fmt::Debug for LoopsViewState {
@@ -123,7 +120,6 @@ impl LoopsViewState {
             cards: Default::default(),
             worktrees_dir: worktrees_dir.to_string(),
             runtime: runtime.map(Path::to_path_buf),
-            last_refresh: Instant::now(),
         };
         state.reload(registry);
         if let Some(id) = selected_id
@@ -140,7 +136,7 @@ impl LoopsViewState {
     }
 
     /// Takes a fresh registry snapshot, keeping the selection by id.
-    pub fn reload(&mut self, registry: &Registry) {
+    fn reload(&mut self, registry: &Registry) {
         let keep = self.selected_loop().map(|l| l.id.clone());
         self.pause_all = registry.pause_all;
         let mut loops = registry.loops.clone();
@@ -194,126 +190,11 @@ impl LoopsViewState {
         }
     }
 
-    pub fn selected_loop(&self) -> Option<&LoopEntry> {
+    fn selected_loop(&self) -> Option<&LoopEntry> {
         match self.rows.get(self.selected)? {
             LoopRow::Loop(i) => self.loops.get(*i),
             LoopRow::Header(_) => None,
         }
-    }
-
-    pub fn selected_run(&self) -> Option<&LoopRun> {
-        match self.tab {
-            LoopsTab::History => self.runs.get(self.selected_run),
-            _ => None,
-        }
-    }
-
-    /// The live session of the selected loop, if the App reported one.
-    pub fn live_session(&self, loop_id: &str) -> Option<usize> {
-        self.live
-            .iter()
-            .find(|(id, _)| id == loop_id)
-            .map(|(_, sid)| *sid)
-    }
-
-    pub fn step(&mut self, delta: isize) {
-        if self.rows.is_empty() || delta == 0 {
-            return;
-        }
-        let mut target = self.selected;
-        for _ in 0..delta.unsigned_abs() {
-            let mut i = target as isize;
-            let next = loop {
-                i += delta.signum();
-                if i < 0 || i as usize >= self.rows.len() {
-                    break None;
-                }
-                if matches!(self.rows[i as usize], LoopRow::Loop(_)) {
-                    break Some(i as usize);
-                }
-            };
-            match next {
-                Some(n) => target = n,
-                None => break,
-            }
-        }
-        if target != self.selected {
-            self.selected = target;
-            self.selected_run = 0;
-            self.scroll_offset = 0;
-            self.load_runs();
-            self.rebuild_detail();
-        }
-    }
-
-    pub fn step_detail(&mut self, delta: isize) {
-        match self.tab {
-            // The Report follows the run selected in the Runs tab; here the
-            // arrows move between runs so the reader can step back in time.
-            LoopsTab::Report | LoopsTab::History => {
-                if !self.runs.is_empty() {
-                    let max = self.runs.len() as isize - 1;
-                    self.selected_run = (self.selected_run as isize + delta).clamp(0, max) as usize;
-                    self.rebuild_detail();
-                    self.follow_anchor();
-                }
-            }
-            _ => {
-                self.scroll_offset = if delta < 0 {
-                    self.scroll_offset.saturating_sub(delta.unsigned_abs())
-                } else {
-                    self.scroll_offset
-                        .saturating_add(delta as usize)
-                        .min(self.max_scroll())
-                };
-            }
-        }
-    }
-
-    fn follow_anchor(&mut self) {
-        let visible = self.viewport_rows.get().max(1);
-        if self.anchor_line < self.scroll_offset {
-            self.scroll_offset = self.anchor_line;
-        } else if self.anchor_line >= self.scroll_offset + visible {
-            self.scroll_offset = self.anchor_line + 1 - visible;
-        }
-    }
-
-    pub fn next_tab(&mut self) {
-        let pos = LoopsTab::ALL
-            .iter()
-            .position(|t| *t == self.tab)
-            .unwrap_or(0);
-        self.tab = LoopsTab::ALL[(pos + 1) % LoopsTab::ALL.len()];
-        self.scroll_offset = 0;
-        self.rebuild_detail();
-    }
-
-    pub fn prev_tab(&mut self) {
-        let pos = LoopsTab::ALL
-            .iter()
-            .position(|t| *t == self.tab)
-            .unwrap_or(0);
-        self.tab = LoopsTab::ALL[(pos + LoopsTab::ALL.len() - 1) % LoopsTab::ALL.len()];
-        self.scroll_offset = 0;
-        self.rebuild_detail();
-    }
-
-    pub fn max_scroll(&self) -> usize {
-        let visible = self.viewport_rows.get().max(1);
-        self.detail_lines.len().saturating_sub(visible)
-    }
-
-    pub fn refresh_if_live(&mut self, now: Instant) {
-        if now.saturating_duration_since(self.last_refresh) < LIVE_REFRESH {
-            return;
-        }
-        self.last_refresh = now;
-        if self.conn.is_none() || !matches!(self.tab, LoopsTab::Report | LoopsTab::History) {
-            return;
-        }
-        self.load_runs();
-        self.rebuild_detail();
     }
 
     fn load_runs(&mut self) {

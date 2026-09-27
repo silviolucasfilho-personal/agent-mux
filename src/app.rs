@@ -49,8 +49,6 @@ pub enum Mode {
     Help,
     SkillsView(Box<SkillsViewState>),
     SkillLauncher(SkillLauncherState),
-    /// The Loops view (`E`): runs, inbox, readiness, budget, files.
-    LoopsView(Box<loops_view::LoopsViewState>),
     /// `x` on a loop: remove the registry entry (files stay).
     ConfirmRemoveLoop,
     /// The About overlay (`v`): version, build stamp, paths, this session.
@@ -59,8 +57,6 @@ pub enum Mode {
     ConfigView(Box<ConfigViewState>),
     /// The run / compose dialog of the Workflows section.
     WorkflowDialog(Box<workflows_view::WorkflowDialogState>),
-    /// The Workflows view (`W`): runs, planned documents, results.
-    WorkflowsView(Box<workflows_view::WorkflowsViewState>),
     /// The inbox (`I`): what waits on a human, across loops and workflows.
     Inbox(Box<inbox::InboxState>),
     /// The agent editor: a scheduled agent, a flow or a persona, in the
@@ -182,7 +178,6 @@ pub enum Action {
     /// SkillLauncher mode: App routes the key to the SkillLauncherState it owns.
     SkillLauncherKey,
     /// Loops section and view.
-    OpenLoopsView,
     LoopRunNow,
     LoopTogglePause,
     OpenNewLoop,
@@ -193,7 +188,6 @@ pub enum Action {
     /// About mode: App routes the key to the AboutState it owns.
     AboutKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
-    LoopsKey,
     /// `C`: the Configuration view.
     OpenConfigView,
     /// ConfigView mode: App routes the key to the ConfigViewState it owns.
@@ -216,12 +210,10 @@ pub enum Action {
     EditWorkflow,
     CancelWorkflow,
     /// `W`: the Workflows view.
-    OpenWorkflowsView,
     OpenRunsView,
     RunsKey,
     OpenInbox,
     InboxKey,
-    WorkflowsKey,
     WorkflowDialogKey,
 }
 
@@ -564,7 +556,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                                 Action::Attach
                             }
                             SidebarSection::Agents => Action::OpenSkillLauncher,
-                            SidebarSection::Loops => Action::OpenLoopsView,
+                            SidebarSection::Loops => Action::OpenRunsView,
                             SidebarSection::History => Action::RestartHistorySession,
                             _ => Action::None,
                         }
@@ -702,10 +694,8 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
             | KeyCode::Enter => Action::CancelToControl,
             _ => Action::AboutKey,
         },
-        Mode::LoopsView(_) => Action::LoopsKey,
         Mode::ConfigView(_) => Action::ConfigKey,
         Mode::WorkflowDialog(_) => Action::WorkflowDialogKey,
-        Mode::WorkflowsView(_) => Action::WorkflowsKey,
         Mode::Inbox(_) => Action::InboxKey,
         Mode::AgentEditor(_) => Action::AgentEditorKey,
         Mode::RunsView(_) => Action::RunsKey,
@@ -2479,9 +2469,6 @@ impl App {
         if let Mode::SkillsView(view) = &mut self.mode {
             view.refresh_if_live(now);
         }
-        if let Mode::LoopsView(view) = &mut self.mode {
-            view.refresh_if_live(now);
-        }
         self.resync_workflow_selection();
         self.publish_live_snapshot_if_needed(now);
         self.refresh_briefing_if_needed(now);
@@ -2489,7 +2476,7 @@ impl App {
         self.scheduler_pass(now);
         self.workflow_pass(now);
         self.workflow_plan_pass(now);
-        self.refresh_workflows_view(now);
+        self.refresh_runs_view(now);
     }
 
     /// Publishes live session snapshot bounded to 1MiB every second if needed.
@@ -3191,11 +3178,8 @@ impl App {
     fn list_keys_apply(&self) -> bool {
         match &self.mode {
             Mode::TraceBrowser(b) => b.search_input.is_none(),
-            Mode::SessionHistory(_) | Mode::SkillsView(_) | Mode::LoopsView(_) | Mode::Inbox(_) => {
-                true
-            }
+            Mode::SessionHistory(_) | Mode::SkillsView(_) | Mode::Inbox(_) => true,
             Mode::ConfigView(v) => v.pending == Pending::None,
-            Mode::WorkflowsView(v) => v.pending == crate::app::workflows_view::ViewPending::None,
             _ => false,
         }
     }
@@ -3404,13 +3388,12 @@ impl App {
             }
             return;
         }
-        if matches!(self.mode, Mode::WorkflowsView(_)) {
-            let delta = match ev.kind {
-                MouseEventKind::ScrollUp => -3,
-                MouseEventKind::ScrollDown => 3,
-                _ => return,
-            };
-            self.scroll_workflows_view(delta);
+        if let Mode::RunsView(ref mut view) = self.mode {
+            match ev.kind {
+                MouseEventKind::ScrollUp => view.scroll = view.scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown => view.scroll += 3,
+                _ => {}
+            }
             return;
         }
         if let Mode::ConfigView(ref mut view) = self.mode {
@@ -3794,8 +3777,6 @@ impl App {
                     }
                 }
             }
-            Action::OpenLoopsView => self.open_loops_view(),
-            Action::LoopsKey => self.handle_loops_view_key(key),
             Action::LoopRunNow => self.run_selected_loop_now(),
             Action::LoopTogglePause => self.toggle_selected_loop_pause(),
             Action::OpenNewLoop => self.open_scheduled_editor(None, None),
@@ -3840,10 +3821,14 @@ impl App {
             Action::LoopBuilderKey => self.handle_loop_builder_key(key),
             Action::EditWorkflow => self.edit_selected_workflow(),
             Action::CancelWorkflow => self.cancel_selected_workflow(),
-            Action::OpenWorkflowsView => self.open_workflows_view(),
-            Action::OpenRunsView => self.open_runs_view(),
+            // on a scheduled agent's row, its newest run
+            Action::OpenRunsView => match self.selected_loop().map(|l| l.id.clone()) {
+                Some(id) if self.sidebar_section == SidebarSection::Loops => {
+                    self.open_runs_view_on_loop(&id)
+                }
+                _ => self.open_runs_view(),
+            },
             Action::RunsKey => self.handle_runs_view_key(key),
-            Action::WorkflowsKey => self.handle_workflows_view_key(key),
             Action::OpenInbox => self.open_inbox(),
             Action::InboxKey => self.handle_inbox_key(key),
             Action::WorkflowDialogKey => self.handle_workflow_dialog_key(key),
