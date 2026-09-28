@@ -34,7 +34,7 @@ Five agents ship built in, ready for `agent = "…"`:
 Every built-in can be edited, the same way built-in workflows and loops are:
 - **Where:** `Enter` on it in the Agents list opens it in the agent editor (Who: purpose and a model per harness; What: the instructions; Limits: tools and MCP servers; `s` saves, `Ctrl+O` opens the whole file in `$EDITOR`). `Enter` on it in the Configuration view (`C`), or `e` on it in the flow builder's agent picker, opens the file in `$EDITOR`.
 - **What changes:** an edit makes your copy in `~/.agent-mux/agents/<name>.toml`, and that copy replaces the built-in everywhere.
-- **Undo:** `R` in the Configuration view restores the built-in.
+- **Undo:** `R` in the agent editor (its header reads "your copy of a built-in") or in the Configuration view restores the built-in.
 
 To start a new agent from one:
 

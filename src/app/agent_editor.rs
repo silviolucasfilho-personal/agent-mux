@@ -87,6 +87,9 @@ pub struct PersonaBody {
     pub task_field: Option<TaskField>,
     /// Tables of the file the form has no field for (`[limits]`), kept.
     pub keep: toml::Table,
+    /// The library holds the user's copy of a built-in agent of this
+    /// name, which shadows it.
+    pub copy_of_builtin: bool,
 }
 
 impl PersonaBody {
@@ -103,7 +106,15 @@ impl PersonaBody {
             profile_idx: 0,
             task_field: None,
             keep: toml::Table::new(),
+            copy_of_builtin: false,
         }
+    }
+
+    /// Its name is one of the built-in agents'.
+    pub fn builtin(&self) -> bool {
+        self.original
+            .as_deref()
+            .is_some_and(|n| crate::agents::builtin(n).is_some())
     }
 
     /// Fills the task and schedule fields from the agent file's text.
@@ -217,6 +228,8 @@ pub struct AgentEditorState {
     pub editing: bool,
     /// "Leave without saving?" is showing.
     pub confirm_discard: bool,
+    /// "Restore the built-in?" is showing (`R` on your copy of one).
+    pub confirm_restore: bool,
     pub dirty: bool,
     pub error: Option<String>,
 }
@@ -307,6 +320,7 @@ impl AgentEditorState {
             field: 0,
             editing: false,
             confirm_discard: false,
+            confirm_restore: false,
             dirty: false,
             error: None,
         };
@@ -343,6 +357,8 @@ impl AgentEditorState {
         match &self.body {
             Body::Scheduled(_) => "scheduled",
             Body::Flow(_) => "flow",
+            Body::Persona(p) if p.copy_of_builtin => "your copy of a built-in",
+            Body::Persona(p) if p.builtin() => "built-in persona",
             Body::Persona(p) => match (p.task, p.scheduled) {
                 (TaskKind::None, _) => "persona",
                 (_, false) => "on demand",
@@ -550,8 +566,26 @@ impl App {
         };
         let mut body = PersonaBody::new(form, Some(name.to_string()), self.schedule_profiles());
         body.load(&crate::agents::text_of(entry).unwrap_or_default());
+        body.copy_of_builtin = crate::agents::builtin(name).is_some()
+            && matches!(entry.source, crate::agents::Source::Library(_));
         let st = AgentEditorState::new(Body::Persona(Box::new(body)));
         self.mode = Mode::AgentEditor(Box::new(st));
+    }
+
+    /// `R`, then `y`: removes the library copy of built-in agent `name`
+    /// and shows the built-in again.
+    fn restore_builtin_persona(&mut self, name: &str) -> After {
+        let path = crate::agents::schedule::file_of(&self.library_root(), name);
+        if let Err(e) = std::fs::remove_file(&path) {
+            self.notice = Some(Notice::error(format!("{}: {e}", path.display())));
+            return After::Stay;
+        }
+        self.reload_personas();
+        self.open_persona_editor(name);
+        self.notice = Some(Notice::info(format!(
+            "the built-in {name} is back; your copy was removed"
+        )));
+        After::Into(Box::new(std::mem::replace(&mut self.mode, Mode::Control)))
     }
 
     /// A planner's agent draft (`PlannedWorkflow.agent`) in the editor,
@@ -697,6 +731,16 @@ impl App {
                 _ => After::Stay,
             };
         }
+        if st.confirm_restore {
+            st.confirm_restore = false;
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter)
+                && let Body::Persona(p) = &st.body
+                && let Some(name) = p.original.clone()
+            {
+                return self.restore_builtin_persona(&name);
+            }
+            return After::Stay;
+        }
         if st.editing {
             self.agent_editor_type(st, key);
             return After::Stay;
@@ -734,6 +778,27 @@ impl App {
                     Some(_) => self.agent_editor_cycle(st, 1, true),
                     None if st.tab == Tab::Review => return self.agent_editor_save(st, false),
                     None => {}
+                }
+                return After::Stay;
+            }
+            KeyCode::Char('R') if !ctrl => {
+                match &st.body {
+                    Body::Persona(p) if p.copy_of_builtin => st.confirm_restore = true,
+                    Body::Persona(p) if p.builtin() => {
+                        self.notice = Some(Notice::info(
+                            "this is the built-in; s saves your copy, which R then restores",
+                        ))
+                    }
+                    Body::Scheduled(_) => {
+                        self.notice = Some(Notice::info(
+                            "a task's pattern is restored in the task builder: e on What, then R",
+                        ))
+                    }
+                    _ => {
+                        self.notice = Some(Notice::info(
+                            "R restores a built-in agent you saved a copy of",
+                        ))
+                    }
                 }
                 return After::Stay;
             }
@@ -1011,6 +1076,7 @@ impl App {
             Body::Persona(p) => match self.save_persona(p) {
                 Ok(name) => {
                     p.original = Some(name.clone());
+                    p.copy_of_builtin = crate::agents::builtin(&name).is_some();
                     st.dirty = false;
                     st.error = None;
                     self.after_agent_saved(&name, p.scheduled);

@@ -108,5 +108,7 @@ A single agent file (identity, body, trigger and limits in one TOML) comes in ph
 
 ## 8. Open
 
-- Whether a scheduled agent's report-only findings keep a state file in the workspace (today's loops do) or live in agent-mux's store only.
-- How a template is shown when the user's copy of it exists (as with built-in workflows: "your copy of a built-in", `R` restores).
+Both questions were settled on 2026-09-28:
+
+- **A scheduled agent keeps its state file in the workspace**, as loops do. A run reads its last findings there, which is what lets a quiet run end early and cheap; agent-mux keeps a copy per run (`<runtime>/loops/state/`) for the report and the difference between runs.
+- **Your copy of a template says so**: the agent editor's header reads "your copy of a built-in" (a flow's reads "Your copy of a built-in", a pattern's in the task builder likewise), and `R` asks, removes the copy and shows the built-in again. On the built-in itself the header reads "built-in persona" and `s` makes your copy.

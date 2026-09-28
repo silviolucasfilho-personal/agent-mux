@@ -605,6 +605,18 @@ fn a_persona_is_written_and_edited_in_the_agent_editor() {
     }
     let copy = std::fs::read_to_string(dir.join("reviewer.toml")).unwrap();
     assert!(copy.contains("Mine."), "{copy}");
+    let text = render(&app);
+    assert!(text.contains("your copy of a built-in"), "{text}");
+
+    // R asks, then removes the copy: the built-in shows again
+    press(&mut app, KeyCode::Char('R'));
+    let text = render(&app);
+    assert!(text.contains("Restore the built-in reviewer?"), "{text}");
+    press(&mut app, KeyCode::Char('y'));
+    assert!(!dir.join("reviewer.toml").exists());
+    let p = persona(&app);
+    assert!(!p.copy_of_builtin && !p.form.purpose.text.contains("Mine."));
+    assert!(render(&app).contains("built-in persona"));
 }
 
 #[test]

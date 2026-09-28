@@ -52,6 +52,15 @@ pub fn draw(f: &mut Frame, st: &AgentEditorState) {
             f.render_widget(Paragraph::new(footer(st)), foot);
         }
     }
+    if st.confirm_restore {
+        draw_confirm(
+            f,
+            &format!(
+                "Restore the built-in {}? Your copy is removed. [y/n]",
+                st.name()
+            ),
+        );
+    }
     if st.confirm_discard {
         draw_confirm(
             f,
@@ -158,7 +167,12 @@ fn footer(st: &AgentEditorState) -> Line<'static> {
                 v.push((label(Verb::Edit), "edit the task"));
             }
         }
-        Body::Persona(p) if p.original.is_some() => v.push((&editor, "file in $EDITOR")),
+        Body::Persona(p) if p.original.is_some() => {
+            v.push((&editor, "file in $EDITOR"));
+            if p.copy_of_builtin {
+                v.push((label(Verb::Restore), "restore the built-in"));
+            }
+        }
         _ => {}
     }
     v.push(("Esc", "back"));
