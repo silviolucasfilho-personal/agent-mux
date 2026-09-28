@@ -634,6 +634,7 @@ fn the_inbox_gathers_loop_runs_plans_and_failed_runs() {
         raw: None,
         run_id: None,
         agents: Vec::new(),
+        agent: None,
     });
     app.recent_workflow_runs.push(RecentWorkflowRun {
         run_id: "run-00000007".into(),

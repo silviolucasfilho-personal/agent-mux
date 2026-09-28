@@ -716,3 +716,82 @@ fn a_task_agent_runs_on_demand_then_on_a_schedule() {
     );
     assert!(app.task_agents.contains(&"my-task".to_string()));
 }
+
+fn draft(app: &mut App, id: &str, text: &str, ws: &std::path::Path) {
+    app.planned_workflows
+        .push(agent_mux::app::workflows::PlannedWorkflow {
+            id: id.into(),
+            task: "summarize the TODOs every morning".into(),
+            workspace: ws.to_path_buf(),
+            harness: agent_mux::harness::Harness::Claude,
+            profile: None,
+            budget_tokens: None,
+            name: "todo-digest".into(),
+            document: String::new(),
+            problems: Vec::new(),
+            raw: None,
+            run_id: None,
+            agents: Vec::new(),
+            agent: Some(text.into()),
+        });
+}
+
+/// "Describe it" can answer with one agent: the draft waits under Needs
+/// you, opens in the agent editor unsaved, or is saved as is.
+#[test]
+fn a_described_agent_is_a_draft_reviewed_in_the_editor() {
+    let (mut app, temp) = app();
+    let ws = temp.path().join("ws");
+    let agents = temp.path().join("library/agents");
+    let text = format!(
+        "name = \"todo-digest\"\ndescription = \"Summarizes the open TODOs\"\ntools = [\"read\", \"shell\"]\n\n[task]\nprompt = \"List the TODOs.\"\n\n[schedule]\nevery = \"1d\"\nworkspace = \"{}\"\nprofile = \"Claude Code\"\nharness = \"claude\"\n",
+        ws.display()
+    );
+    draft(&mut app, "plan-a", &text, &ws);
+    app.open_runs_view();
+    let Mode::RunsView(v) = &app.mode else {
+        panic!("{:?}", app.mode)
+    };
+    let item = v.selected_item().unwrap();
+    assert_eq!(item.word, "agent draft");
+    let out = render(&app);
+    assert!(out.contains("A planner drafted an agent"), "{out}");
+    assert!(out.contains("List the TODOs."), "{out}");
+
+    // Enter: the draft in the editor, nothing written yet
+    press(&mut app, KeyCode::Enter);
+    let p = persona(&app);
+    assert_eq!(p.form.name.text, "todo-digest");
+    assert_eq!(p.task, agent_mux::app::agent_editor::TaskKind::Prompt);
+    assert!(p.scheduled);
+    assert!(!agents.join("todo-digest.toml").exists());
+    assert!(app.planned_workflows.is_empty(), "the draft left the list");
+    press(&mut app, KeyCode::Char('s'));
+    if let Mode::AgentEditor(e) = &app.mode {
+        assert!(e.error.is_none(), "{:?}", e.error);
+    }
+    assert!(agents.join("todo-digest.toml").exists());
+    assert!(
+        app.loop_registry
+            .loops
+            .iter()
+            .any(|l| l.agent.as_deref() == Some("todo-digest")),
+        "its schedule made a loop"
+    );
+    press(&mut app, KeyCode::Esc);
+
+    // s in the runs view saves another draft as is, under a typed name
+    let persona_text = "name = \"strict-reviewer\"\ndescription = \"Reviews strictly\"\ninstructions = \"You review strictly.\"\ntools = [\"read\"]\n";
+    draft(&mut app, "plan-b", persona_text, &ws);
+    app.open_runs_view();
+    press(&mut app, KeyCode::Char('s'));
+    for _ in 0.."strict-reviewer".len() {
+        press(&mut app, KeyCode::Backspace);
+    }
+    type_text(&mut app, "my-reviewer");
+    press(&mut app, KeyCode::Enter);
+    let saved = std::fs::read_to_string(agents.join("my-reviewer.toml")).unwrap();
+    assert!(saved.contains("name = \"my-reviewer\""), "{saved}");
+    assert!(app.personas.contains(&"my-reviewer".to_string()));
+    assert!(app.planned_workflows.is_empty());
+}

@@ -515,6 +515,7 @@ impl App {
                 RunRef::FlowLive(id) => RunRow::Live(id.clone()),
                 RunRef::Flow(r) => RunRow::Stored(r.id.clone()),
                 RunRef::Inbox(InboxItem::Run { run_id, .. }) => RunRow::Stored(run_id.clone()),
+                RunRef::Inbox(InboxItem::Plan { agent: true, .. }) => return,
                 RunRef::Inbox(InboxItem::Plan { id, .. }) => RunRow::Planned(id.clone()),
                 _ => return,
             };
@@ -725,6 +726,12 @@ impl App {
                 self.reload_runs_view(st);
                 true
             }
+            RunRef::Inbox(InboxItem::Plan {
+                id, agent: true, ..
+            }) => {
+                self.open_agent_draft(&id);
+                !matches!(self.mode, Mode::AgentEditor(_))
+            }
             RunRef::Inbox(InboxItem::Plan { id, .. }) => {
                 match self.run_planned_workflow(&id) {
                     Ok(rid) => {
@@ -812,6 +819,16 @@ impl App {
             return;
         }
         let doc = match st.selected_item().map(|i| &i.run) {
+            Some(RunRef::Inbox(InboxItem::Plan {
+                id, agent: true, ..
+            })) => {
+                let id = id.clone();
+                self.notice = Some(match self.save_agent_draft(&id, name) {
+                    Ok(p) => Notice::info(format!("saved {}", p.display())),
+                    Err(e) => Notice::warn(e),
+                });
+                return;
+            }
             Some(RunRef::Inbox(InboxItem::Plan { id, .. })) => {
                 let id = id.clone();
                 self.notice = Some(match self.save_planned_workflow(&id, name) {
@@ -932,11 +949,16 @@ impl App {
 
     /// `e`: the run's agent in the agent editor; `true` when it opened.
     fn runs_view_edit(&mut self, st: &RunsViewState) -> bool {
-        if let Some(RunRef::Inbox(InboxItem::Plan { id, .. })) = st.selected_item().map(|i| &i.run)
+        if let Some(RunRef::Inbox(InboxItem::Plan { id, agent, .. })) =
+            st.selected_item().map(|i| &i.run)
         {
-            let id = id.clone();
-            self.open_flow_builder_plan(&id);
-            return true;
+            let (id, agent) = (id.clone(), *agent);
+            if agent {
+                self.open_agent_draft(&id);
+            } else {
+                self.open_flow_builder_plan(&id);
+            }
+            return matches!(self.mode, Mode::AgentEditor(_));
         }
         let (loop_id, flow) = match st.selected_item().map(|i| &i.run) {
             Some(RunRef::Loop(r)) => (Some(r.loop_id.clone()), None),
@@ -980,6 +1002,36 @@ impl App {
         false
     }
 
+    /// Writes a planner's agent draft into the library as agent `name`.
+    fn save_agent_draft(
+        &mut self,
+        plan_id: &str,
+        name: &str,
+    ) -> Result<std::path::PathBuf, String> {
+        let text = self
+            .planned_workflows
+            .iter()
+            .find(|p| p.id == plan_id)
+            .and_then(|p| p.agent.clone())
+            .ok_or("no such draft")?;
+        let mut t: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+        t.insert("name".into(), toml::Value::String(name.to_string()));
+        let text = crate::agents::schedule::ordered(t)?;
+        let spec = crate::agents::AgentSpec::parse(&text).map_err(|p| p.join("; "))?;
+        let catalog = crate::agents::Catalog::load(&self.library_root(), None);
+        if catalog.entry(name).is_some() {
+            return Err(format!("an agent called {name} exists: pick another name"));
+        }
+        let path = crate::agents::schedule::file_of(&self.library_root(), name);
+        path.parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::write(&path, text))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        self.planned_workflows.retain(|p| p.id != plan_id);
+        self.after_agent_saved(name, spec.schedule.is_some());
+        Ok(path)
+    }
+
     /// `T`: the traces of a loop run's session.
     fn runs_view_traces(&mut self, st: &RunsViewState) {
         let launch = match st.selected_item().map(|i| &i.run) {
@@ -1014,6 +1066,35 @@ pub fn tab_lines(app: &App, st: &RunsViewState) -> Vec<String> {
         },
         (RunRef::Inbox(InboxItem::Loop(r)) | RunRef::Loop(r), tab) => loop_tab(r, tab),
         (RunRef::Flow(r), tab) => flow_tab(r, &st.steps, tab),
+        (
+            RunRef::Inbox(InboxItem::Plan {
+                id,
+                agent: true,
+                task,
+                problems,
+                ..
+            }),
+            _,
+        ) => {
+            let mut v = vec![
+                "A planner drafted an agent for this task:".into(),
+                String::new(),
+                format!("  {task}"),
+                String::new(),
+            ];
+            v.extend(problems.iter().map(|p| format!("! {p}")));
+            if let Some(text) = app
+                .planned_workflows
+                .iter()
+                .find(|p| &p.id == id)
+                .and_then(|p| p.agent.as_ref())
+            {
+                v.extend(text.lines().map(|l| format!("  {l}")));
+            }
+            v.push(String::new());
+            v.push("Enter opens it in the agent editor; s saves it as is; d discards it.".into());
+            v
+        }
         (RunRef::Inbox(InboxItem::Plan { task, problems, .. }), _) => {
             let mut v = vec![
                 "A planner wrote a flow for this task:".into(),

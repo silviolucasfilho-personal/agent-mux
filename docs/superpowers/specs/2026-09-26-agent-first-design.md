@@ -28,7 +28,7 @@ Everything that exists today maps onto it:
 | A loop pattern | an agent template |
 | A workflow | an agent whose body is a flow |
 | A built-in workflow | an agent template |
-| The planner ("compose for a task") | **Describe an agent**: a planner session drafts one for you to review |
+| The planner ("compose for a task") | **Describe an agent**: a planner session drafts one for you to review (done 2026-09-28: one agent, a persona or a flow) |
 
 Skills stay a separate thing: a skill is a capability an agent uses, not an agent. Harness profiles stay as configuration behind the built-in agents.
 

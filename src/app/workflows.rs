@@ -1348,11 +1348,14 @@ pub struct PlannedWorkflow {
     /// Agents the planner defined for the document (`agent-toml` blocks),
     /// written into the library when the plan runs or is saved.
     pub agents: Vec<String>,
+    /// The planner answered with one agent, not a flow: its file. It is
+    /// reviewed in the agent editor, never run as a document.
+    pub agent: Option<String>,
 }
 
 impl PlannedWorkflow {
     pub fn valid(&self) -> bool {
-        self.problems.is_empty() && !self.document.is_empty()
+        self.problems.is_empty() && (!self.document.is_empty() || self.agent.is_some())
     }
 }
 
@@ -1547,6 +1550,39 @@ impl App {
             .or(stored)
             .unwrap_or_else(|| screen.trim().to_string());
         let infos = self.all_skill_infos();
+        // one agent rather than a flow: a draft for the agent editor
+        if let Some(draft) = crate::workflows::planner::extract_agent_draft(&text) {
+            let catalog = crate::agents::Catalog::load(&self.library_root(), Some(&plan.workspace));
+            let (name, problems) = crate::workflows::planner::check_agent_draft(&draft, &catalog);
+            self.notice = Some(Notice::info(format!(
+                "drafted agent {name} for: {} · E, then Enter reviews it",
+                short_task(&plan.task)
+            )));
+            self.planned_workflows.insert(
+                0,
+                PlannedWorkflow {
+                    id: plan.id.clone(),
+                    task: plan.task.clone(),
+                    workspace: plan.workspace.clone(),
+                    harness: plan.harness,
+                    profile: plan.profile.clone(),
+                    budget_tokens: plan.budget_tokens,
+                    name,
+                    document: String::new(),
+                    // a taken name is fixed in the editor, not a reason to stop
+                    problems: problems
+                        .into_iter()
+                        .filter(|p| !p.starts_with("an agent called"))
+                        .collect(),
+                    raw: None,
+                    run_id: None,
+                    agents: Vec::new(),
+                    agent: Some(draft),
+                },
+            );
+            self.planned_workflows.truncate(20);
+            return;
+        }
         let new_agents = crate::workflows::planner::extract_agents(&text);
         let planned = match crate::workflows::planner::extract_document(&text) {
             Ok(doc) => {
@@ -1574,6 +1610,7 @@ impl App {
                     raw: None,
                     run_id: None,
                     agents: new_agents,
+                    agent: None,
                 }
             }
             Err(e) => PlannedWorkflow {
@@ -1589,6 +1626,7 @@ impl App {
                 raw: Some(text),
                 run_id: None,
                 agents: new_agents,
+                agent: None,
             },
         };
         let runtime = self.workflows_runtime_dir();
@@ -1655,6 +1693,9 @@ impl App {
         else {
             return Err(format!("no planned workflow {plan_id}"));
         };
+        if p.agent.is_some() {
+            return Err("an agent draft is reviewed in the agent editor: e opens it".into());
+        }
         if !p.valid() {
             return Err(p.problems.join("; "));
         }

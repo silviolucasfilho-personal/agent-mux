@@ -89,6 +89,16 @@ pub struct AgentSummary {
     pub source: String,
 }
 
+/// A task from the task library (a loop pattern) an agent may run.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskSummary {
+    pub pattern: String,
+    pub name: String,
+    pub goal: String,
+    /// Its usual interval, `1d`, `15m`.
+    pub every: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkflowSummary {
     pub name: String,
@@ -104,8 +114,12 @@ pub struct PlanContext {
     pub task: String,
     pub harness: String,
     pub workspace: Value,
+    /// The workspace's absolute path, for a scheduled agent's `workspace`.
+    pub workspace_path: String,
     pub skills: Vec<SkillSummary>,
     pub agents: Vec<AgentSummary>,
+    /// The task library: loop patterns a scheduled agent can run.
+    pub tasks: Vec<TaskSummary>,
     pub workflows: Vec<WorkflowSummary>,
     pub budget_tokens: Option<u64>,
     pub rules: Vec<String>,
@@ -121,10 +135,20 @@ pub fn plan_context(
     budget_tokens: Option<u64>,
 ) -> PlanContext {
     PlanContext {
-        schema_version: 2,
+        schema_version: 3,
         task: task.to_string(),
         harness: harness.to_string(),
         workspace: inventory(workspace),
+        workspace_path: workspace.display().to_string(),
+        tasks: crate::loops::patterns::all()
+            .iter()
+            .map(|p| TaskSummary {
+                pattern: p.id.clone(),
+                name: p.name.clone(),
+                goal: p.goal.clone(),
+                every: crate::loops::format_interval(p.default_interval_s),
+            })
+            .collect(),
         skills: skills
             .iter()
             .filter(|s| s.id.starts_with("wf-"))
@@ -167,7 +191,8 @@ pub fn plan_context(
         rules: vec![
             "Use only the step skills listed here; anything else is an inline prompt step.".into(),
             "A step whose skill has writes = true needs isolation = \"worktree\".".into(),
-            format!("Answer with exactly one fenced {FENCE} block and nothing after it."),
+            format!("Answer with exactly one of: a fenced {AGENT_FENCE} block alone (one agent that does the task in one session, when started or on a schedule), or a fenced {FENCE} block (a flow of several sessions), with the agents it defines before it. Nothing after it."),
+            "An agent that does the task has a [task] table with one of pattern (a task from `tasks`), skill (a skill it runs) or prompt (the task in words); a task to repeat (daily, every hour, whenever) adds [schedule] with every and workspace = workspace_path. A persona the user describes (a reviewer, a tester) has no [task].".to_string(),
             "Regular coding tasks do not need a panel of 5 reviewers.".into(),
             "A step, a verify block or a judge may run as an agent listed here: agent = \"<name>\". Refuters and judges do not inherit the step's agent.".into(),
             format!("When a role needs a persona no listed agent has, define it in a fenced {AGENT_FENCE} block before the {FENCE} block (name, description, instructions, tools from read, edit, shell, web, mcp:<server>); it is saved into the library when the plan runs or is saved. Every agent needs read; one on a step that edits needs edit."),
@@ -223,6 +248,40 @@ pub fn extract_agents(text: &str) -> Vec<String> {
         rest = &body[end + 3..];
     }
     out
+}
+
+/// The planner's answer when it is one agent rather than a flow: its only
+/// `agent-toml` block, with no `workflow-toml` block.
+pub fn extract_agent_draft(text: &str) -> Option<String> {
+    if text.contains(&format!("```{FENCE}")) {
+        return None;
+    }
+    let mut agents = extract_agents(text);
+    (agents.len() == 1).then(|| agents.remove(0))
+}
+
+/// What stops an agent draft from being saved: it does not load, its
+/// name is taken, or its pattern is not in the library.
+pub fn check_agent_draft(text: &str, catalog: &crate::agents::Catalog) -> (String, Vec<String>) {
+    match crate::agents::AgentSpec::parse(text) {
+        Err(p) => (String::from("agent"), p),
+        Ok(spec) => {
+            let mut problems = Vec::new();
+            if catalog.entry(&spec.name).is_some() {
+                problems.push(format!(
+                    "an agent called {} exists; the draft gets another name in the editor",
+                    spec.name
+                ));
+            }
+            if let Some(t) = &spec.task
+                && let crate::agents::TaskBody::Pattern(p) = t.body()
+                && crate::loops::patterns::find(&p).is_none()
+            {
+                problems.push(format!("[task] pattern {p:?} is not in the task library"));
+            }
+            (spec.name, problems)
+        }
+    }
 }
 
 /// A planned document with its validation.
@@ -350,6 +409,29 @@ mod tests {
         let bad = check("[workflow\n", &[]);
         assert_eq!(bad.name, "dynamic");
         assert!(!bad.problems.is_empty());
+    }
+
+    #[test]
+    fn one_agent_alone_is_a_draft_and_a_flow_is_not() {
+        let agent = "name = \"todo-digest\"\ndescription = \"d\"\ntools = [\"read\"]\n[task]\nprompt = \"List the TODOs.\"\n";
+        let alone = format!("Here it is.\n```agent-toml\n{agent}```\n");
+        assert_eq!(extract_agent_draft(&alone).as_deref(), Some(agent));
+        let flow = format!("{alone}```workflow-toml\n[workflow]\nname = \"x\"\n```\n");
+        assert!(
+            extract_agent_draft(&flow).is_none(),
+            "agents before a flow are the flow's"
+        );
+        let two = format!("{alone}{alone}");
+        assert!(extract_agent_draft(&two).is_none());
+
+        let catalog = crate::agents::Catalog::load(std::path::Path::new("/nonexistent"), None);
+        let (name, problems) = check_agent_draft(agent, &catalog);
+        assert_eq!(name, "todo-digest");
+        assert!(problems.is_empty(), "{problems:?}");
+        let bad = agent.replace("prompt = \"List the TODOs.\"", "pattern = \"no-such-task\"");
+        assert!(check_agent_draft(&bad, &catalog).1[0].contains("not in the task library"));
+        let taken = agent.replace("todo-digest", "reviewer");
+        assert!(check_agent_draft(&taken, &catalog).1[0].contains("exists"));
     }
 
     #[test]

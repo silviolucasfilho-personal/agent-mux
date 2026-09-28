@@ -1,12 +1,12 @@
 ---
 name: workflow-author
-description: Use when agent-mux asks for a workflow to be composed for a task, or the user asks to "compose a workflow", "plan a multi-agent run" or "write a workflow for this". Reads the planner context, picks the shapes that fit the task, and answers with one workflow-toml block that agent-mux validates and runs.
+description: Use when agent-mux asks for an agent to be described for a task (the n menu's "describe it"), or the user asks to "compose a workflow", "plan a multi-agent run" or "write an agent for this". Reads the planner context, decides whether one agent or a flow of several fits the task, and answers with one agent-toml block or one workflow-toml block that agent-mux validates.
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
-# workflow-author — compose a workflow for one task
+# workflow-author — describe an agent for one task
 
-You write the harness for one task: a workflow document that agent-mux runs as separate sessions, each with its own context window and one focused goal. You do not do the task yourself.
+You write the harness for one task: either one agent that does it in a single session, when started or on a schedule, or a workflow document that agent-mux runs as separate sessions, each with its own context window and one focused goal. You do not do the task yourself.
 
 ## Setup
 
@@ -14,7 +14,32 @@ You write the harness for one task: a workflow document that agent-mux runs as s
 2. `reference/document.md` is the document format; `reference/patterns.md` maps task shapes to step kinds. Read both once.
 3. When the inventory is not enough, look at the workspace: `ls`, the manifest, `git log --oneline -20`. Two or three commands, not an investigation.
 
-## Compose
+## Choose the shape
+
+- **One agent** when one session can do the task: a daily triage, a changelog draft, "summarize the open TODOs every morning". Most tasks are this.
+- **A persona** when the user describes someone rather than something to do: "a reviewer who only reports what the code proves".
+- **A flow** when the task needs several sessions: parallel reviewers, votes, a tournament, a pipeline with hand-offs. Then follow Compose below.
+
+An agent answer is a single fenced `agent-toml` block and no `workflow-toml` block:
+
+- `name`, `description`, `tools` from `read`, `edit`, `shell`, `web`, `mcp:<server>` (`edit` only when the agent must change files; its change then waits for the user in a worktree), and `instructions` for a persona.
+- `[task]` with exactly one of `pattern` (a task from `tasks` in the context, when one fits), `skill` (a skill the agent runs) or `prompt` (the task in words, in the second person). A persona has no `[task]`.
+- `[schedule]` only when the task repeats ("every morning", "daily", "hourly"): `every` (`15m`, `2h`, `1d`, at least `5m`) and `workspace` set to `workspace_path` from the context.
+
+```agent-toml
+name = "todo-digest"
+description = "Summarizes the open TODOs and who owns them"
+tools = ["read", "shell"]
+
+[task]
+prompt = "List the TODO and FIXME comments, group them by owner from git blame, and write a short digest."
+
+[schedule]
+every = "1d"
+workspace = "/path/from/workspace_path"
+```
+
+## Compose a flow
 
 - Prefer a built-in workflow when one fits the task; copy it and adjust `args`, `over`, phases and prompts. Compose a new one only when the shape differs.
 - Use only the step skills listed in the context. A step that needs something else is an inline `prompt` step; never invent a skill name.

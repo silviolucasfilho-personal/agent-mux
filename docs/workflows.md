@@ -91,7 +91,7 @@ agent-mux workflow run migrate --workspace . \
 Keep the argument order."
 ```
 
-To compose a workflow for a task instead: `c`, type the task, pick the workspace and the profile, `Enter`. The planner session runs the `workflow-author` skill and answers with a document; it appears under **Needs you** in the runs view (`W`) with its validation, where `Enter` runs it, `e` edits it, `s` saves it into the library and `d` discards it. `[workflows] dynamic_approval = "never"` runs a valid document as soon as the planner answers.
+To compose a workflow for a task instead: `c` (or "describe it" in the `n` menu), type the task, pick the workspace and the profile, `Enter`. The planner session runs the `workflow-author` skill and answers with one agent when one session can do the task (see docs/agents.md, "Describing an agent") or with a document; it appears under **Needs you** in the runs view (`W`) with its validation, where `Enter` runs it, `e` edits it, `s` saves it into the library and `d` discards it. `[workflows] dynamic_approval = "never"` runs a valid document as soon as the planner answers.
 
 ### Building a flow step by step
 

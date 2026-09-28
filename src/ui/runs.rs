@@ -242,6 +242,11 @@ fn footer(st: &RunsViewState) -> Line<'static> {
             ("e", "edit the agent"),
             ("T", "traces"),
         ],
+        Some(RunRef::Inbox(InboxItem::Plan { agent: true, .. })) => vec![
+            ("↩", "review in the editor"),
+            ("s", "save as is"),
+            ("d", "discard"),
+        ],
         Some(RunRef::Inbox(InboxItem::Plan { .. })) => vec![
             ("↩", "run it"),
             ("e", "edit"),

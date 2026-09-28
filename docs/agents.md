@@ -126,6 +126,15 @@ Only a task agent has a schedule for now; `[schedule]` without `[task]` is refus
 
 The agent editor writes the file: a new scheduled agent gets one from the start, `s` on an existing one rewrites its settings and keeps the rest of the file (instructions, `[backends]`, other tools), and `Ctrl+O` opens it in `$EDITOR`. A loop from an older build keeps its settings in `loops.json` until you run `agent-mux agent migrate`, which only says what it would write; `--write` writes one file per loop (named after its pattern, then pattern and workspace folder), links each entry to its file and copies `loops.json` to `loops.json.bak` first. Nothing is deleted. Workflows need no migration: a library workflow document is already the flow agent's one file.
 
+### Describing an agent
+
+"Describe it" in the `n` menu (the same planner as `c` in the Workflows section) turns a sentence into an agent. The planner (`skills/workflow-author`) reads the task, the workspace, the task library (`tasks`: every loop pattern with its goal and usual interval), the agents and the built-in workflows, and answers with one of:
+
+- one `agent-toml` block: an agent that does the task in one session (`[task]` with a pattern, a skill or a prompt; `[schedule]` when the task repeats), or a persona when you describe someone rather than something to do;
+- a `workflow-toml` block, with the agents it defines before it, when the task needs a flow.
+
+An agent answer is a draft (`PlannedWorkflow.agent`): it is listed under **Needs you** in the runs view as `agent draft`, nothing is written, and it never runs by itself. `Enter` (or `e`) opens it in the agent editor unsaved, where `s` saves it (a pattern task opens in the scheduled editor); `s` in the runs view saves it as is under a name you type; `d` discards it.
+
 ## 3. How a session becomes the agent
 
 | Harness | Command line | Files |

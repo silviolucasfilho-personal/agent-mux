@@ -21,6 +21,8 @@ pub enum InboxItem {
         name: String,
         task: String,
         problems: Vec<String>,
+        /// The planner drafted one agent rather than a flow.
+        agent: bool,
     },
     /// A workflow run since startup that did not finish cleanly, or that
     /// finished with a verdict its document does not accept.
@@ -47,6 +49,7 @@ impl InboxItem {
     pub fn word(&self) -> &'static str {
         match self {
             InboxItem::Loop(r) => r.outcome.word(),
+            InboxItem::Plan { agent: true, .. } => "agent draft",
             InboxItem::Plan { problems, .. } if problems.is_empty() => "plan ready",
             InboxItem::Plan { .. } => "plan has problems",
             InboxItem::Run {
@@ -122,6 +125,7 @@ impl App {
                     name: p.name.clone(),
                     task: p.task.clone(),
                     problems: p.problems.clone(),
+                    agent: p.agent.is_some(),
                 }),
         );
         items.extend(

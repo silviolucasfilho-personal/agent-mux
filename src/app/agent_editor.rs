@@ -554,6 +554,67 @@ impl App {
         self.mode = Mode::AgentEditor(Box::new(st));
     }
 
+    /// A planner's agent draft (`PlannedWorkflow.agent`) in the editor,
+    /// unsaved: a pattern task in the scheduled editor, anything else in
+    /// the persona form. The plan leaves the list; `s` saves the agent.
+    pub fn open_agent_draft(&mut self, plan_id: &str) {
+        let Some(at) = self.planned_workflows.iter().position(|p| p.id == plan_id) else {
+            return;
+        };
+        let Some(text) = self.planned_workflows[at].agent.clone() else {
+            return;
+        };
+        let spec = match crate::agents::AgentSpec::parse(&text) {
+            Ok(s) => s,
+            Err(p) => {
+                self.notice = Some(Notice::error(format!(
+                    "the draft does not load: {}",
+                    p.join("; ")
+                )));
+                return;
+            }
+        };
+        self.planned_workflows.remove(at);
+        if let Some(crate::agents::TaskBody::Pattern(p)) = spec.task.as_ref().map(|t| t.body()) {
+            self.open_scheduled_editor(None, Some(&p));
+            if let Mode::AgentEditor(st) = &mut self.mode
+                && let Body::Scheduled(d) = &mut st.body
+            {
+                if let Some(sch) = &spec.schedule {
+                    d.every = sch.every.clone();
+                    d.workspace = sch.workspace.clone();
+                    d.dir_picker.refresh(&d.workspace);
+                    if let Some(i) = d.profiles.iter().position(|(n, _)| *n == sch.profile) {
+                        d.profile_idx = i;
+                    }
+                }
+                d.level = crate::agents::schedule::level_of(&spec);
+                if let Some(m) = &spec.model {
+                    d.model = m.clone();
+                }
+                st.dirty = true;
+            }
+            self.notice = Some(Notice::info(format!(
+                "the drafted agent {}: s saves it",
+                spec.name
+            )));
+            return;
+        }
+        let Some(form) = form_from_text(&text) else {
+            return;
+        };
+        let mut body = PersonaBody::new(form, None, self.schedule_profiles());
+        body.load(&text);
+        let mut st = AgentEditorState::new(Body::Persona(Box::new(body)));
+        st.dirty = true;
+        st.set_tab(Tab::Review);
+        self.mode = Mode::AgentEditor(Box::new(st));
+        self.notice = Some(Notice::info(format!(
+            "the drafted agent {}: s saves it",
+            spec.name
+        )));
+    }
+
     /// A new persona from template `template`, under a free name.
     pub fn new_persona_editor(&mut self, template: &str, base: &str) {
         let dir = crate::agents::library_dir(&self.library_root());
@@ -990,7 +1051,7 @@ impl App {
 
     /// After an agent file changed: the lists, the patterns it may define,
     /// and the loops (a schedule it lost stops its loop).
-    fn after_agent_saved(&mut self, name: &str, scheduled: bool) {
+    pub(crate) fn after_agent_saved(&mut self, name: &str, scheduled: bool) {
         self.reload_personas();
         crate::loops::patterns::reload();
         if !scheduled {

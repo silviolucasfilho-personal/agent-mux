@@ -290,6 +290,7 @@ fn a_planned_document_is_listed_run_saved_or_discarded_from_the_view() {
         raw: None,
         run_id: None,
         agents: Vec::new(),
+        agent: None,
     });
     app.open_runs_view();
     let Mode::RunsView(v) = &app.mode else {
