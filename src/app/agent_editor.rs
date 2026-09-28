@@ -230,6 +230,9 @@ pub struct AgentEditorState {
     pub confirm_discard: bool,
     /// "Restore the built-in?" is showing (`R` on your copy of one).
     pub confirm_restore: bool,
+    /// A scheduled agent's What tab: the task library, where choosing a
+    /// pattern chooses its task and editing it edits the pattern.
+    pub tasks: Option<Box<super::loop_builder::LoopBuilderState>>,
     pub dirty: bool,
     pub error: Option<String>,
 }
@@ -321,6 +324,7 @@ impl AgentEditorState {
             editing: false,
             confirm_discard: false,
             confirm_restore: false,
+            tasks: None,
             dirty: false,
             error: None,
         };
@@ -374,7 +378,8 @@ impl AgentEditorState {
         match &self.body {
             Body::Scheduled(_) => match self.tab {
                 Tab::Who => vec![L::Profile, L::Model, L::VerifierModel],
-                Tab::What => vec![L::Pattern],
+                // the task library draws and edits itself (`tasks`)
+                Tab::What => vec![],
                 Tab::When => vec![L::Every, L::Workspace, L::Scaffold],
                 Tab::Limits => vec![L::Level, L::MaxRuns, L::MaxTokens, L::MaxCost],
                 Tab::Review => vec![],
@@ -533,6 +538,7 @@ impl App {
         self.refresh_dialog_audit(&mut dialog);
         let mut st = AgentEditorState::new(Body::Scheduled(Box::new(dialog)));
         st.set_tab(if id.is_some() { Tab::Who } else { Tab::What });
+        self.ensure_task_library(&mut st);
         self.mode = Mode::AgentEditor(Box::new(st));
     }
 
@@ -551,6 +557,27 @@ impl App {
                     .map(|h| (p.name.clone(), h.as_str().to_string()))
             })
             .collect()
+    }
+
+    /// `o` on a scheduled agent (or in the section with none): its task in
+    /// the library on the What tab; `f`: a new pattern started there.
+    pub fn open_task_library(&mut self, new_pattern: bool) {
+        let id = self.selected_loop().map(|l| l.id.clone());
+        self.open_scheduled_editor(id, None);
+        if let Mode::AgentEditor(st) = &mut self.mode {
+            st.set_tab(Tab::What);
+        }
+        if let Mode::AgentEditor(mut st) = std::mem::replace(&mut self.mode, Mode::Control) {
+            self.ensure_task_library(&mut st);
+            if new_pattern && let Some(t) = st.tasks.as_mut() {
+                t.selected = t.items.len();
+                t.overlay = Some(super::loop_builder::Overlay::NewName {
+                    text: TextArea::new("my-loop"),
+                    from: None,
+                });
+            }
+            self.mode = Mode::AgentEditor(st);
+        }
     }
 
     /// A persona in the editor: an existing one by name.
@@ -691,9 +718,98 @@ impl App {
             return;
         };
         match self.agent_editor_key(&mut st, key) {
-            After::Stay => self.mode = Mode::AgentEditor(st),
+            After::Stay => {
+                self.ensure_task_library(&mut st);
+                self.mode = Mode::AgentEditor(st)
+            }
             After::Close => {}
             After::Into(m) => self.mode = *m,
+        }
+    }
+
+    /// Loads the task library when a scheduled agent's What tab shows.
+    pub(crate) fn ensure_task_library(&mut self, st: &mut AgentEditorState) {
+        if st.tab != Tab::What || st.tasks.is_some() {
+            return;
+        }
+        let Body::Scheduled(d) = &st.body else {
+            return;
+        };
+        let id = d.pattern().map(|p| p.id.clone());
+        st.tasks = self.loop_builder_state(id.as_deref()).map(Box::new);
+    }
+
+    /// A key on a scheduled agent's What tab: the tabs, save and run are
+    /// the editor's while nothing is typed; the rest is the library's.
+    fn task_library_key(
+        &mut self,
+        st: &mut AgentEditorState,
+        tasks: &mut super::loop_builder::LoopBuilderState,
+        key: &KeyEvent,
+    ) -> After {
+        use super::loop_builder::After as LAfter;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let busy = tasks.overlay.is_some() || tasks.edit.is_some();
+        if !busy && !ctrl {
+            match key.code {
+                KeyCode::Char(c @ '1'..='5') => {
+                    st.set_tab(Tab::ALL[c as usize - '1' as usize]);
+                    return After::Stay;
+                }
+                KeyCode::Char(c @ ('s' | 'r')) => {
+                    // the pattern's edits, then the agent
+                    if tasks.dirty() {
+                        self.loop_save(tasks);
+                        self.sync_task(st, tasks);
+                    }
+                    return self.agent_editor_save(st, c == 'r');
+                }
+                _ => {}
+            }
+        }
+        match self.loop_key(tasks, key) {
+            LAfter::Stay => {
+                self.sync_task(st, tasks);
+                After::Stay
+            }
+            // leaving the list leaves the editor, asking when unsaved
+            LAfter::Close if st.dirty => {
+                st.confirm_discard = true;
+                After::Stay
+            }
+            LAfter::Close => After::Close,
+        }
+    }
+
+    /// The pattern under the library's cursor is the agent's task.
+    fn sync_task(
+        &mut self,
+        st: &mut AgentEditorState,
+        tasks: &super::loop_builder::LoopBuilderState,
+    ) {
+        let Some(id) = tasks
+            .current()
+            .and_then(|i| i.saved.as_ref())
+            .map(|p| p.id.clone())
+        else {
+            return;
+        };
+        let Body::Scheduled(d) = &mut st.body else {
+            return;
+        };
+        let Some(i) = crate::loops::patterns::all()
+            .iter()
+            .position(|p| p.id == id)
+        else {
+            return;
+        };
+        let changed = d.pattern().map(|p| p.id.as_str()) != Some(id.as_str());
+        d.pattern_idx = i;
+        if changed {
+            d.field = LoopField::Pattern;
+            d.cycle(0);
+            self.refresh_dialog_audit(d);
+            st.dirty = true;
         }
     }
 
@@ -722,6 +838,14 @@ impl App {
             }
             let after = self.flow_key(f, key);
             st.sync_flow_tab();
+            return after;
+        }
+        if st.tab == Tab::What
+            && !st.confirm_discard
+            && let Some(mut tasks) = st.tasks.take()
+        {
+            let after = self.task_library_key(st, &mut tasks, key);
+            st.tasks = Some(tasks);
             return after;
         }
         if st.confirm_discard {
@@ -804,28 +928,6 @@ impl App {
             }
             KeyCode::Char('s') if !ctrl => return self.agent_editor_save(st, false),
             KeyCode::Char('r') if !ctrl => return self.agent_editor_save(st, true),
-            KeyCode::Char('e') if !ctrl && st.tab == Tab::What => {
-                if let Body::Scheduled(d) = &st.body {
-                    // the task itself is a pattern: the task builder edits it
-                    let id = d.pattern().map(|p| p.id.clone());
-                    if let Some(bst) = self.loop_builder_state(id.as_deref()) {
-                        // the builder hands the editor back when it closes
-                        let back = std::mem::replace(
-                            st,
-                            AgentEditorState::new(Body::Scheduled(Box::new(LoopDialogState::new(
-                                &[],
-                                Vec::new(),
-                            )))),
-                        );
-                        self.loop_builder_return = Some((
-                            Box::new(Mode::AgentEditor(Box::new(back))),
-                            id.clone().unwrap_or_default(),
-                        ));
-                        return After::Into(Box::new(Mode::LoopBuilder(Box::new(bst))));
-                    }
-                }
-                return After::Stay;
-            }
             KeyCode::Char('o') if ctrl => {
                 if let Body::Scheduled(d) = &st.body
                     && let Some(name) = d

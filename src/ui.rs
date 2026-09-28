@@ -281,7 +281,6 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::AgentEditor(state) => agent_editor::draw(f, state),
         Mode::RunsView(state) => runs::draw(f, state, app),
         Mode::NewAgent(state) => draw_new_agent(f, state),
-        Mode::LoopBuilder(state) => loop_builder::draw(f, state),
         Mode::ConfirmRemoveLoop => draw_confirm(
             f,
             "Remove this loop from the registry? Its files in the workspace stay. [y/n]",
@@ -1588,7 +1587,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 }
             }
             // full-screen editors keep their own footer; this row is for notices
-            Mode::AgentEditor(_) | Mode::LoopBuilder(_) | Mode::RunsView(_) => Line::raw(""),
+            Mode::AgentEditor(_) | Mode::RunsView(_) => Line::raw(""),
             _ => Line::raw(fit(
                 "[b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
             )),

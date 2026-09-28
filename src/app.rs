@@ -62,8 +62,6 @@ pub enum Mode {
     /// The agent editor: a scheduled agent, a flow or a persona, in the
     /// tabs Who · What · When · Limits · Review.
     AgentEditor(Box<agent_editor::AgentEditorState>),
-    /// The loop builder (`o` / `f` in the Loops section).
-    LoopBuilder(Box<loop_builder::LoopBuilderState>),
     /// The runs view (`E` / `W`): every run of every agent.
     RunsView(Box<runs_view::RunsViewState>),
     /// `n` in the Agents list: how to start a new agent.
@@ -206,7 +204,6 @@ pub enum Action {
     AgentEditorKey,
     OpenLoopBuilder,
     OpenLoopBuilderNew,
-    LoopBuilderKey,
     EditWorkflow,
     CancelWorkflow,
     /// `W`: the Workflows view.
@@ -700,7 +697,6 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::AgentEditor(_) => Action::AgentEditorKey,
         Mode::RunsView(_) => Action::RunsKey,
         Mode::NewAgent(_) => Action::NewAgentKey,
-        Mode::LoopBuilder(_) => Action::LoopBuilderKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 Action::EnterConfirmRemoveLoop
@@ -2139,9 +2135,7 @@ pub struct App {
     pub personas: Vec<String>,
     /// Agents with a task and no schedule: run when you start them.
     pub task_agents: Vec<String>,
-    /// The agent editor the loop builder was opened from (`e` on What),
-    /// shown again when the builder closes.
-    pub loop_builder_return: Option<(Box<Mode>, String)>,
+
     /// A harness or persona row under the Agents cursor.
     pub agent_focus: Option<agents_list::AgentFocus>,
     /// The section the Agents cursor was in when Tab went to History.
@@ -2278,7 +2272,7 @@ impl App {
             selected_agent: 0,
             personas: Vec::new(),
             task_agents: Vec::new(),
-            loop_builder_return: None,
+
             agent_focus: None,
             list_section: SidebarSection::Active,
             skill_workbench: None,
@@ -3816,9 +3810,8 @@ impl App {
             Action::OpenFlowBuilderSelected => self.open_flow_builder_selected(),
             Action::DeleteWorkflowRow => self.delete_selected_workflow_row(),
             Action::AgentEditorKey => self.handle_agent_editor_key(key),
-            Action::OpenLoopBuilder => self.open_loop_builder_selected(),
-            Action::OpenLoopBuilderNew => self.open_loop_builder_new(),
-            Action::LoopBuilderKey => self.handle_loop_builder_key(key),
+            Action::OpenLoopBuilder => self.open_task_library(false),
+            Action::OpenLoopBuilderNew => self.open_task_library(true),
             Action::EditWorkflow => self.edit_selected_workflow(),
             Action::CancelWorkflow => self.cancel_selected_workflow(),
             // on a scheduled agent's row, its newest run

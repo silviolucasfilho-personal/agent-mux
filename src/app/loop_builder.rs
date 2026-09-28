@@ -1,6 +1,7 @@
-//! The loop builder (`o` / `f` in the Loops section): every loop pattern,
-//! built-in or the user's, edited field by field in the same look as the
-//! flow builder. The left pane lists the patterns with where each comes
+//! The task library (a scheduled agent's What tab in the agent editor;
+//! `o` / `f` on a scheduled row): every loop pattern, built-in or the
+//! user's, edited field by field in the same look as the flow builder;
+//! the pattern under the cursor is the agent's task. The left pane lists the patterns with where each comes
 //! from; the right pane draws the selected one's cycle (schedule → triage
 //! → fix → checkers → state file) and its fields in words. Saving writes
 //! the pattern into the library registry by id (`loops::builder::save`),
@@ -302,7 +303,7 @@ fn description_of(text: &str) -> String {
         .unwrap_or_default()
 }
 
-enum After {
+pub(crate) enum After {
     Stay,
     Close,
 }
@@ -351,66 +352,20 @@ impl App {
         })
     }
 
-    /// `o` in the Loops section: the selected loop's pattern in the builder.
-    pub fn open_loop_builder_selected(&mut self) {
-        let pattern = self.selected_loop().map(|e| e.pattern.clone());
-        if let Some(st) = self.loop_builder_state(pattern.as_deref()) {
-            self.mode = Mode::LoopBuilder(Box::new(st));
-        }
-    }
-
-    /// `f` in the Loops section: the builder with a new pattern started.
-    pub fn open_loop_builder_new(&mut self) {
-        if let Some(mut st) = self.loop_builder_state(None) {
-            st.selected = st.items.len();
-            st.overlay = Some(Overlay::NewName {
-                text: TextArea::new("my-loop"),
-                from: None,
-            });
-            self.mode = Mode::LoopBuilder(Box::new(st));
-        }
-    }
-
-    pub fn handle_loop_builder_key(&mut self, key: &KeyEvent) {
-        let Mode::LoopBuilder(mut st) = std::mem::replace(&mut self.mode, Mode::Control) else {
-            return;
-        };
-        match self.loop_key(&mut st, key) {
-            After::Stay => self.mode = Mode::LoopBuilder(st),
-            After::Close => {
-                crate::loops::patterns::reload();
-                self.loop_audits.clear();
-                self.mode = Mode::Control;
-                // back to the agent editor it was opened from, on the same
-                // task (the reload may have moved it in the list)
-                if let Some((mut back, id)) = self.loop_builder_return.take() {
-                    if let Mode::AgentEditor(ed) = &mut *back
-                        && let super::agent_editor::Body::Scheduled(d) = &mut ed.body
-                        && let Some(i) = crate::loops::patterns::all()
-                            .iter()
-                            .position(|p| p.id == id)
-                    {
-                        d.pattern_idx = i;
-                    }
-                    self.mode = *back;
-                }
-            }
-        }
-    }
-
     /// After `Ctrl+O` on the prompt: the text returns to it.
     pub fn loop_builder_editor_finished(&mut self, path: &std::path::Path) {
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
-        if let Mode::LoopBuilder(st) = &mut self.mode
+        if let Mode::AgentEditor(ed) = &mut self.mode
+            && let Some(st) = ed.tasks.as_mut()
             && let Some(Overlay::Prompt { text: t }) = &mut st.overlay
         {
             t.set(text.trim_end_matches('\n'));
         }
     }
 
-    fn loop_key(&mut self, st: &mut LoopBuilderState, key: &KeyEvent) -> After {
+    pub(crate) fn loop_key(&mut self, st: &mut LoopBuilderState, key: &KeyEvent) -> After {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if st.overlay.is_some() {
             return self.loop_overlay_key(st, key);
@@ -835,7 +790,7 @@ impl App {
         After::Stay
     }
 
-    fn loop_save(&mut self, st: &mut LoopBuilderState) {
+    pub(crate) fn loop_save(&mut self, st: &mut LoopBuilderState) {
         let Some(it) = st.current().cloned() else {
             return;
         };

@@ -45,6 +45,12 @@ pub fn draw(f: &mut Frame, st: &AgentEditorState) {
             f.render_widget(Paragraph::new(super::flow::footer(fl)), foot);
             super::flow::draw_overlay(f, fl);
         }
+        // a scheduled agent's What: the task library itself
+        Body::Scheduled(_) if st.tab == Tab::What && st.tasks.is_some() => {
+            if let Some(t) = &st.tasks {
+                super::loop_builder::draw_in(f, body, t);
+            }
+        }
         _ => {
             let [panes, foot] =
                 Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body);

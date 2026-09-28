@@ -47,12 +47,12 @@ For `Option` combinations, turn on "Use Option as Meta key" (Terminal.app) or "E
 | Place | Keys of its own |
 | --- | --- |
 | Main screen | `b` sidebar, `Tab` section, `l` session logs, `t`/`T` tracing / traces, `S` skills, `C` configuration, `E` or `W` runs view, `I` inbox, `v` about, `K` loops kill switch, `X` clear exited sessions |
-| Loops section | `p` pause, `o` the loop's pattern in the loop builder |
+| Loops section | `p` pause, `o` its task in the task library (the editor's What tab), `f` a new pattern there |
 | Workflows section | `c` compose a workflow for a task |
 | Trace browser | `/` search, `v` detail view, `Space` fold, `a` all projects, `+` verdict |
 | Skills view | `v` validate, `1`-`3` harness filter |
 | Configuration view | `u` push loop skills to workspaces |
-| Agent editor | `R` restores a built-in you saved a copy of (it asks); `1`-`5` Who · What · When · Limits · Review (`Tab` / `Shift+Tab` in a scheduled agent or a persona); `Enter` types a field, `←` `→` `Space` change the others; `e` on What edits a scheduled agent's task; a flow's fields: `Space` makes a field required, `[` `]` previous / next step, `Enter` on Answers with opens what passes |
-| Loop builder | `c` copies a pattern |
+| Agent editor | `R` restores a built-in you saved a copy of (it asks); `1`-`5` Who · What · When · Limits · Review (`Tab` / `Shift+Tab` in a scheduled agent or a persona); `Enter` types a field, `←` `→` `Space` change the others; a scheduled agent's What is the task library; a flow's fields: `Space` makes a field required, `[` `]` previous / next step, `Enter` on Answers with opens what passes |
+| Task library (What tab of a scheduled agent) | `↑↓` picks the task, `→` edits it, `n` new pattern, `c` copies one, `R` restores a built-in, `d` deletes yours; `1`-`5`, `s` and `r` are the editor's |
 | Runs view | `1`-`5` Report · History or Steps · Change · Result · Setup or Document; `p` pauses a loop; `s` saves a flow's document; `Enter` applies a change, runs a plan or attaches to a running run; `d` rejects or dismisses (a plan asks first); `r` runs a scheduled agent again or resumes a flow run; `x` stops; `e` edits the run's agent; `T` traces |
 | Attached to a session | `Ctrl+Q` detach; every other key goes to the harness |

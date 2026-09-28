@@ -222,7 +222,7 @@ fn the_dialog_lists_no_antigravity_profile_and_validates() {
     let screen = render(&app, 120, 40);
     assert!(screen.contains("1 Who"), "the editor's tabs: {screen}");
     assert!(
-        screen.contains("What it does"),
+        screen.contains("Its task, from the task library"),
         "a new one starts on What: {screen}"
     );
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
@@ -841,15 +841,36 @@ fn the_runs_view_lists_every_run_and_decides_the_ones_that_need_you() {
 /// `e` on a scheduled agent's What opens the task in the loop builder;
 /// leaving the builder comes back to the editor on the same task.
 #[test]
-fn the_loop_builder_hands_the_editor_back() {
+fn the_task_library_is_the_editors_what_tab() {
     let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
     app.open_scheduled_editor(None, Some("ci-sweeper"));
-    app.handle_key(&key(KeyCode::Char('e')), Instant::now());
-    assert!(matches!(app.mode, Mode::LoopBuilder(_)), "{:?}", app.mode);
-    app.handle_key(&key(KeyCode::Esc), Instant::now());
-    if matches!(app.mode, Mode::LoopBuilder(_)) {
-        app.handle_key(&key(KeyCode::Esc), Instant::now());
-    }
-    let d = dialog(&app);
-    assert_eq!(d.pattern().unwrap().id, "ci-sweeper");
+    let Mode::AgentEditor(e) = &app.mode else {
+        panic!("{:?}", app.mode)
+    };
+    let tasks = e
+        .tasks
+        .as_ref()
+        .expect("a new scheduled agent starts on What");
+    assert_eq!(tasks.current().unwrap().pattern.id, "ci-sweeper");
+    let screen = render(&app, 140, 40);
+    assert!(
+        screen.contains("Its task, from the task library"),
+        "{screen}"
+    );
+
+    // moving the cursor in the library picks the agent's task
+    let before = dialog(&app).pattern().unwrap().id.clone();
+    app.handle_key(&key(KeyCode::Down), Instant::now());
+    let after = dialog(&app).pattern().unwrap().id.clone();
+    assert_ne!(before, after, "the task follows the library's cursor");
+    // 1 leaves for Who; 2 comes back to the same task
+    app.handle_key(&key(KeyCode::Char('1')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('2')), Instant::now());
+    let Mode::AgentEditor(e) = &app.mode else {
+        panic!()
+    };
+    assert_eq!(
+        e.tasks.as_ref().unwrap().current().unwrap().pattern.id,
+        after
+    );
 }

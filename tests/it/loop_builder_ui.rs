@@ -1,4 +1,5 @@
-//! The loop builder as the user drives it: `o` in the Loops
+//! The task library (the loop builder, inside the agent editor's What
+//! tab) as the user drives it: `o` in the Loops
 //! section, a pattern of the user's own, an edited built-in saved as the
 //! user's copy, and `R` restoring it.
 
@@ -61,8 +62,11 @@ fn type_text(app: &mut App, text: &str) {
 
 fn st(app: &App) -> &LoopBuilderState {
     match &app.mode {
-        Mode::LoopBuilder(s) => s,
-        other => panic!("not in the loop builder: {other:?}"),
+        Mode::AgentEditor(e) => e
+            .tasks
+            .as_deref()
+            .expect("the What tab shows the task library"),
+        other => panic!("not in the agent editor: {other:?}"),
     }
 }
 
@@ -140,7 +144,7 @@ fn patterns_are_created_edited_as_copies_and_restored() {
     press(&mut app, KeyCode::Char(' '));
     press(&mut app, KeyCode::Enter);
     let text = render(&app);
-    assert!(text.contains("Loop patterns"), "{text}");
+    assert!(text.contains("Its task, from the task library"), "{text}");
     assert!(
         text.contains("every 2h ─▶ loop-triage ─▶ loop-rules ─▶ loop-fix"),
         "{text}"
@@ -196,9 +200,11 @@ fn patterns_are_created_edited_as_copies_and_restored() {
     assert!(!registry.exists());
     assert!(!st(&app).items.iter().any(|i| i.pattern.id == "docs-drift"));
 
-    // o opens on the first pattern when no loop is selected; Esc closes
+    // Esc leaves; the unsaved agent the cursor gave a task asks first
     press(&mut app, KeyCode::Esc);
-    assert!(matches!(app.mode, Mode::Control));
+    press(&mut app, KeyCode::Char('y'));
+    assert!(matches!(app.mode, Mode::Control), "{:?}", app.mode);
+    // o with no loop selected: a new scheduled agent on its default task
     press(&mut app, KeyCode::Char('o'));
-    assert_eq!(st(&app).selected, 0);
+    assert_eq!(st(&app).current().unwrap().pattern.id, "daily-triage");
 }

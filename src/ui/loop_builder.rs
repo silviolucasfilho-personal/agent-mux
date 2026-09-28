@@ -1,6 +1,6 @@
-//! Drawing the loop builder (`crate::app::loop_builder`): the patterns on
-//! the left, the selected one's cycle and fields on the right, in the
-//! flow builder's look.
+//! Drawing the task library (`crate::app::loop_builder`) inside a
+//! scheduled agent's What tab: the patterns on the left, the selected
+//! one's cycle and fields on the right, in the flow builder's look.
 
 use super::flow::{dim, head, hints, key_style, labeled, sel};
 use super::{centered, draw_confirm, pane_border, truncate_chars};
@@ -20,10 +20,10 @@ fn origin_style(o: Origin) -> Style {
     }
 }
 
-pub fn draw(f: &mut Frame, st: &LoopBuilderState) {
-    let full = f.area();
-    let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
-    f.render_widget(Clear, area);
+/// The task library inside the agent editor's What tab (a scheduled
+/// agent): the patterns on the left, the selected one's fields on the
+/// right, the footer, and an overlay over the whole frame.
+pub(super) fn draw_in(f: &mut Frame, area: Rect, st: &LoopBuilderState) {
     let [top, body, foot] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -161,7 +161,7 @@ pub fn draw(f: &mut Frame, st: &LoopBuilderState) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect, st: &LoopBuilderState) {
-    let mut spans = vec![Span::styled(" ⟳ Loop patterns", head())];
+    let mut spans = vec![Span::styled(" ⟳ Its task, from the task library", head())];
     if let Some(it) = st.current() {
         spans.push(Span::styled(format!("  {}", it.pattern.id), head()));
         spans.push(Span::styled(
@@ -193,14 +193,15 @@ fn footer(st: &LoopBuilderState) -> Line<'static> {
     }
     match st.focus {
         Focus::List => hints(&[
-            ("↑↓", "patterns"),
-            ("→", "fields"),
+            ("1-5", "tabs"),
+            ("↑↓", "the task"),
+            ("→", "edit it"),
             ("s", "save"),
             ("n", "new"),
             ("c", "copy"),
             ("R", "restore built-in"),
             ("d", "delete yours"),
-            ("Esc", "close"),
+            ("Esc", "back"),
         ]),
         Focus::Fields => {
             let what = match st.current_field().map(LField::edits) {
@@ -213,7 +214,7 @@ fn footer(st: &LoopBuilderState) -> Line<'static> {
                 what,
                 ("s", "save"),
                 ("R", "restore built-in"),
-                ("Esc", "patterns"),
+                ("Esc", "the list"),
             ])
         }
     }
