@@ -142,6 +142,9 @@ fn loose_sessions_keep_their_place_and_their_profile() {
     assert!(out.contains("p0"), "{out}");
     assert!(out.contains("p1"));
     assert!(!out.contains("▾"), "nothing to group, no headers: {out}");
+    // the harness row counts its sessions; each has a detail line
+    assert!(out.contains("2 idle"), "{out}");
+    assert!(out.contains("│   p1 · not traced"), "{out}");
 }
 
 // ---------------------------------------------------------------- store
@@ -327,7 +330,12 @@ fn clicking_a_run_selects_it_and_clicking_a_step_selects_the_session() {
     ]);
     app.set_pane_size(30, 100);
     let lines = app.agent_lines();
-    let at = |k: &AgentKind| lines.iter().position(|l| l.kind == *k).unwrap() as u16;
+    // the screen row a line starts on: a session under a harness takes two
+    let heights = agent_mux::ui::agent_row_heights(&lines);
+    let at = |k: &AgentKind| {
+        let i = lines.iter().position(|l| l.kind == *k).unwrap();
+        heights[..i].iter().sum::<usize>() as u16
+    };
     let (agents, _) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, 0);
     let click = |row: u16| MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),

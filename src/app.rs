@@ -3442,13 +3442,17 @@ impl App {
                 if ev.row > agents_rect.y
                     && ev.row < agents_rect.y + agents_rect.height.saturating_sub(1)
                 {
-                    // the list draws one row per line, scrolled around the cursor
+                    // the list draws a session under a harness on two rows
                     let lines = self.agent_lines();
                     let visible = usize::from(agents_rect.height.saturating_sub(2));
                     let cursor = self.agent_cursor(&lines).unwrap_or(0);
-                    let start = ui::sidebar_window(cursor, lines.len(), visible.saturating_sub(1));
-                    let at = start + usize::from(ev.row - agents_rect.y - 1);
-                    if lines.get(at).is_some_and(|l| l.kind.selectable()) {
+                    let heights = ui::agent_row_heights(&lines);
+                    let start = ui::agent_window(&heights, cursor, visible.saturating_sub(1));
+                    let at =
+                        ui::agent_line_at(&heights, start, usize::from(ev.row - agents_rect.y - 1));
+                    if let Some(at) = at
+                        && lines.get(at).is_some_and(|l| l.kind.selectable())
+                    {
                         self.select_agent_line(&lines, at);
                         if matches!(self.mode, Mode::Attached)
                             && let Some(s) = self.sessions.get_mut(self.selected)

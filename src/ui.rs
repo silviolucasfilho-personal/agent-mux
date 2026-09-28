@@ -64,6 +64,53 @@ pub fn sidebar_window(selected: usize, len: usize, visible: usize) -> usize {
     }
 }
 
+/// Screen rows each Agents-list line takes: a session under a harness has
+/// a second line with its model, turns and tokens (or the tool it runs).
+pub fn agent_row_heights(lines: &[crate::app::agents_list::AgentLine]) -> Vec<usize> {
+    use crate::app::agents_list::AgentKind;
+    let mut owner_is_harness = false;
+    lines
+        .iter()
+        .map(|l| {
+            if l.depth == 0 {
+                owner_is_harness = matches!(l.kind, AgentKind::Harness(_));
+                1
+            } else if owner_is_harness && matches!(l.kind, AgentKind::Session(_)) {
+                2
+            } else {
+                1
+            }
+        })
+        .collect()
+}
+
+/// The first line to draw so that line `cursor` fits in `rows` screen rows.
+pub fn agent_window(heights: &[usize], cursor: usize, rows: usize) -> usize {
+    let mut start = 0;
+    while start < cursor
+        && heights[start..=cursor.min(heights.len().saturating_sub(1))]
+            .iter()
+            .sum::<usize>()
+            > rows
+    {
+        start += 1;
+    }
+    start
+}
+
+/// The line drawn at screen row `row` (0 = the first row inside the
+/// border) when drawing starts at line `start`.
+pub fn agent_line_at(heights: &[usize], start: usize, row: usize) -> Option<usize> {
+    let mut y = 0;
+    for (i, h) in heights.iter().enumerate().skip(start) {
+        if row < y + h {
+            return Some(i);
+        }
+        y += h;
+    }
+    None
+}
+
 /// Splits the sidebar into the Agents list and a compact History: History
 /// keeps up to six rows (fewer when it has fewer sessions, and never more
 /// than a third of the height); the Agents list takes the rest.
@@ -338,8 +385,28 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         .title(Span::styled(format!(" {title} "), title_style));
     let inner = usize::from(area.width.saturating_sub(2));
     let visible = usize::from(area.height.saturating_sub(2));
-    let start = sidebar_window(cursor.unwrap_or(0), lines.len(), visible.saturating_sub(1));
-    let end = (start + visible.max(1)).min(lines.len());
+    let heights = agent_row_heights(&lines);
+    // the harness each line hangs under, for a session's detail line
+    let mut owner: Option<usize> = None;
+    let owners: Vec<Option<usize>> = lines
+        .iter()
+        .map(|l| {
+            if l.depth == 0 {
+                owner = match l.kind {
+                    AgentKind::Harness(p) => Some(p),
+                    _ => None,
+                };
+            }
+            owner
+        })
+        .collect();
+    let start = agent_window(&heights, cursor.unwrap_or(0), visible.saturating_sub(1));
+    let mut end = start;
+    let mut used_rows = 0;
+    while end < lines.len() && used_rows + heights[end] <= visible.max(1) {
+        used_rows += heights[end];
+        end += 1;
+    }
     let wf_rows = app.workflow_rows();
     // the digit beside a session is the digit that selects it
     let mut digit = 0usize;
@@ -362,23 +429,29 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
                     items.push(ListItem::new(Line::styled(format!(" {h}"), dim)));
                     continue;
                 }
-                AgentKind::Harness(p) => (
-                    String::new(),
-                    dim,
-                    app.profiles
-                        .get(*p)
-                        .map(|p| p.name.clone())
-                        .unwrap_or_default(),
-                    "harness".into(),
-                    dim,
-                ),
+                AgentKind::Harness(p) => {
+                    let (right, rstyle) = harness_summary(&lines, start + n, app, now);
+                    (
+                        String::new(),
+                        dim,
+                        app.profiles
+                            .get(*p)
+                            .map(|p| p.name.clone())
+                            .unwrap_or_default(),
+                        right,
+                        rstyle,
+                    )
+                }
                 AgentKind::Session(i) => {
                     let Some(s) = app.sessions.get(*i) else {
                         continue;
                     };
                     let (label, style) = status_label_style(s.status(now));
+                    let under_harness = heights[start + n] == 2;
                     let name = match &s.group {
                         Some(g) if !g.label.is_empty() => g.label.clone(),
+                        // under its harness the folder says more than the name
+                        _ if under_harness => folder_name(&s.dir),
                         _ => s.profile.name.clone(),
                     };
                     let d = digits.get(i).filter(|d| **d <= 9);
@@ -472,14 +545,33 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         } else {
             Style::default()
         };
-        let item = ListItem::new(Line::from(vec![
+        let mut rows = vec![Line::from(vec![
             Span::raw(marker),
             Span::raw(indent),
             Span::styled(glyph, gstyle),
             Span::styled(name, name_style),
             Span::raw(" ".repeat(pad + 1)),
             Span::styled(right, rstyle),
-        ]));
+        ])];
+        if heights[start + n] == 2
+            && let AgentKind::Session(i) = &line.kind
+            && let Some(s) = app.sessions.get(*i)
+        {
+            // what the session is: its model, its work so far, or its tool;
+            // a profile other than the harness row's is named first
+            let mut detail = session_detail(s, now);
+            if owners[start + n]
+                .and_then(|p| app.profiles.get(p))
+                .is_some_and(|p| p.name != s.profile.name)
+            {
+                detail = format!("{} · {detail}", s.profile.name);
+            }
+            rows.push(Line::from(vec![
+                Span::raw(format!("{marker} │   ").replace('>', " ")),
+                Span::styled(truncate_chars(&detail, inner.saturating_sub(8)), dim),
+            ]));
+        }
+        let item = ListItem::new(rows);
         items.push(if is_cursor && is_focused {
             item.style(Style::default().add_modifier(Modifier::REVERSED))
         } else if is_cursor {
@@ -494,6 +586,116 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         items.push(ListItem::new(Line::styled(" + new agent  n", dim)));
     }
     f.render_widget(List::new(items).block(block), area);
+}
+
+/// A harness row's right-hand label: what its sessions are doing.
+fn harness_summary(
+    lines: &[crate::app::agents_list::AgentLine],
+    at: usize,
+    app: &App,
+    now: Instant,
+) -> (String, Style) {
+    use crate::app::agents_list::AgentKind;
+    let (mut working, mut attention, mut idle, mut exited) = (0, 0, 0, 0);
+    for l in lines[at + 1..].iter().take_while(|l| l.depth > 0) {
+        if let AgentKind::Session(i) = l.kind
+            && let Some(s) = app.sessions.get(i)
+        {
+            match s.status(now) {
+                Status::Working => working += 1,
+                Status::NeedsAttention => attention += 1,
+                Status::Idle => idle += 1,
+                Status::Exited(_) => exited += 1,
+            }
+        }
+    }
+    let live = working + attention + idle;
+    if attention > 0 {
+        (
+            format!("{attention} need you"),
+            Style::default().fg(Color::Yellow),
+        )
+    } else if working > 0 {
+        (
+            format!("{working}/{live} working"),
+            Style::default().fg(Color::Green),
+        )
+    } else if idle > 0 {
+        (format!("{idle} idle"), Style::default().fg(Color::DarkGray))
+    } else if exited > 0 {
+        (
+            format!("{exited} exited"),
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        ("harness".into(), Style::default().fg(Color::DarkGray))
+    }
+}
+
+/// The last component of a session's folder (`~` for the home folder).
+fn folder_name(dir: &std::path::Path) -> String {
+    if dir == crate::skill::install::home_dir() {
+        return "~".into();
+    }
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| dir.display().to_string())
+}
+
+/// The model a session was launched with: `--model` / `-m` on its command
+/// line, else its profile's.
+fn session_model(s: &crate::session::Session) -> Option<String> {
+    let args = &s.profile.args;
+    for (i, a) in args.iter().enumerate() {
+        if let Some(m) = a.strip_prefix("--model=") {
+            return Some(m.to_string());
+        }
+        if (a == "--model" || a == "-m")
+            && let Some(m) = args.get(i + 1)
+        {
+            return Some(m.clone());
+        }
+    }
+    s.profile.model.clone().filter(|m| !m.trim().is_empty())
+}
+
+/// The second line of a session under its harness: the tool it runs now,
+/// else its model and its work so far (turns, tokens, cost), else how long
+/// it has been quiet.
+fn session_detail(s: &crate::session::Session, now: Instant) -> String {
+    let stats = s.trace_stats.as_ref();
+    if matches!(s.status(now), Status::Working)
+        && let Some(tool) = stats.and_then(|t| t.running_tool.as_deref())
+    {
+        return format!("⚙ {tool}");
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(m) = session_model(s) {
+        parts.push(short_model(&m));
+    }
+    if let Some(t) = stats.filter(|t| t.turns > 0) {
+        parts.push(format!("{}t", t.turns));
+        if let Some(tok) = t.total_tokens.filter(|n| *n > 0) {
+            parts.push(crate::loops::format_tokens(tok as u64));
+        }
+        if let Some(c) = t.cost_usd.filter(|c| *c >= 0.01) {
+            parts.push(format!("${c:.2}"));
+        }
+    }
+    if parts.is_empty() {
+        parts.push(match s.status(now) {
+            Status::Exited(_) => "ended".into(),
+            _ if s.trace.is_none() => "not traced".into(),
+            _ => "no turns yet".into(),
+        });
+    }
+    parts.join(" · ")
+}
+
+/// `claude-opus-5-5` → `opus-5-5`, `gpt-5.5-codex` stays: the vendor
+/// prefix is what the harness already says.
+fn short_model(m: &str) -> String {
+    m.strip_prefix("claude-").unwrap_or(m).to_string()
 }
 
 /// Glyph, colour, name and right-hand label of a workflow row.
@@ -5125,6 +5327,25 @@ mod tests {
             text.contains("new session"),
             "keybinding hint missing: {text}"
         );
+    }
+
+    #[test]
+    fn two_row_sessions_scroll_and_click_by_screen_rows() {
+        // header, harness, session (2 rows), session (2 rows), loop
+        let heights = [1, 1, 2, 2, 1];
+        assert_eq!(agent_window(&heights, 4, 10), 0, "all of it fits");
+        // 4 rows: the loop under the cursor and the second session fit
+        assert_eq!(agent_window(&heights, 4, 4), 3);
+        assert_eq!(agent_line_at(&heights, 0, 0), Some(0));
+        assert_eq!(
+            agent_line_at(&heights, 0, 3),
+            Some(2),
+            "a session's detail row"
+        );
+        assert_eq!(agent_line_at(&heights, 0, 4), Some(3));
+        assert_eq!(agent_line_at(&heights, 3, 2), Some(4));
+        assert_eq!(agent_line_at(&heights, 0, 9), None);
+        assert_eq!(short_model("claude-opus-5-5"), "opus-5-5");
     }
 
     #[test]
