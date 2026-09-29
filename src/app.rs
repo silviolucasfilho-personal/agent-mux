@@ -200,6 +200,7 @@ pub enum Action {
     NewSessionFromHarness,
     EditPersona,
     RunAgent,
+    ForkSession,
     DeleteWorkflowRow,
     AgentEditorKey,
     OpenLoopBuilder,
@@ -505,6 +506,10 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     if in_list && matches!(ctx.agent_row, RowTag::Task | RowTag::Persona) =>
                 {
                     Action::RunAgent
+                }
+                // f: continue this session in a new one, with its memory
+                KeyCode::Char('f') if in_list && ctx.agent_row == RowTag::Session => {
+                    Action::ForkSession
                 }
                 KeyCode::Char('e') if in_list && ctx.agent_row == RowTag::Task => {
                     Action::EditPersona
@@ -869,6 +874,9 @@ pub struct DialogState {
     /// persona flags join the command line and its task is the opening
     /// message.
     pub agent: Option<String>,
+    /// The session this one continues (`f` on a session): the same
+    /// harness forks its conversation, another reads its transcript.
+    pub handoff: Option<usize>,
 }
 
 impl DialogState {
@@ -913,6 +921,7 @@ impl DialogState {
             resume_last: false,
             one_shot: String::new(),
             agent: None,
+            handoff: None,
             langfuse_available: false,
             experiment: String::new(),
             variant: String::new(),
@@ -3924,6 +3933,7 @@ impl App {
                     self.open_persona_editor(&name);
                 }
             }
+            Action::ForkSession => self.open_handoff_dialog(self.selected),
             Action::RunAgent => {
                 if let Some(agents_list::AgentKind::Persona(name)) = self.agent_focus().cloned() {
                     self.open_agent_session(&name);
@@ -4089,10 +4099,27 @@ impl App {
                     },
                     None => None,
                 };
+                let handoff = match dialog.handoff {
+                    Some(from) => match self.session_handoff(from, dialog.harness, &dir) {
+                        Ok(h) => Some(h),
+                        Err(e) => {
+                            let Mode::NewSession(dialog) = &mut self.mode else {
+                                return;
+                            };
+                            dialog.error = Some(e);
+                            return;
+                        }
+                    },
+                    None => None,
+                };
                 if let Some(harness) = dialog.harness {
                     let mut options = dialog.launch_options();
                     if options.model.is_none() {
                         options.model = agent.as_ref().and_then(|a| a.0.model.clone());
+                    }
+                    // the same harness copies the conversation itself
+                    if let Some(crate::handoff::Continue::Fork(id)) = &handoff {
+                        options.resume = crate::harness::Resume::Fork(id.clone());
                     }
                     if !options.is_empty() {
                         profile.args =
@@ -4106,6 +4133,10 @@ impl App {
                         {
                             profile.args.append(&mut a);
                         }
+                        profile.args.extend(opening.iter().cloned());
+                    }
+                    // another harness reads the old conversation first
+                    if let Some(crate::handoff::Continue::Transcript(opening)) = &handoff {
                         profile.args.extend(opening.iter().cloned());
                     }
                 }

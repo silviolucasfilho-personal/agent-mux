@@ -107,6 +107,12 @@ pub enum Resume {
     Last,
     /// One named conversation, from the history viewer or trace browser.
     Id(String),
+    /// A copy of one named conversation under a new id, the original left
+    /// as it is: Claude Code `--resume <id> --fork-session`, Codex
+    /// `codex fork <id>` (probed on Claude Code 2.1.284, codex-cli
+    /// 0.158.0). Antigravity has none and renders nothing (`handoff`
+    /// hands its transcript over instead).
+    Fork(String),
 }
 
 /// The per-launch choices the dialog collects. Anything left unset
@@ -171,6 +177,12 @@ impl LaunchOptions {
                         });
                         out.trailing.push(id.clone());
                     }
+                    Resume::Fork(id) if harness == Harness::Claude => {
+                        out.trailing.push("--resume".into());
+                        out.trailing.push(id.clone());
+                        out.trailing.push("--fork-session".into());
+                    }
+                    Resume::Fork(_) => {}
                 }
                 if let Some(model) = self.model() {
                     out.trailing.push("--model".into());
@@ -200,6 +212,10 @@ impl LaunchOptions {
                         out.leading.push("resume".into());
                         out.leading.push(id.clone());
                     }
+                    Resume::Fork(id) => {
+                        out.leading.push("fork".into());
+                        out.leading.push(id.clone());
+                    }
                 }
                 if let Some(model) = self.model() {
                     out.trailing.push("--model".into());
@@ -218,6 +234,11 @@ impl LaunchOptions {
         }
         out
     }
+}
+
+/// Whether `harness` can fork a conversation itself (`Resume::Fork`).
+pub fn can_fork(harness: Harness) -> bool {
+    matches!(harness, Harness::Claude | Harness::Codex)
 }
 
 /// The arguments that resume one recorded conversation — the whole
@@ -396,6 +417,21 @@ mod tests {
             "agy's -c means --continue; by id is --conversation"
         );
         assert_eq!(rendered(&by_id, Harness::Codex), vec!["resume", "abc-123"]);
+    }
+
+    #[test]
+    fn a_fork_copies_the_conversation_where_the_harness_can() {
+        let fork = LaunchOptions {
+            resume: Resume::Fork("abc".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            fork.render(Harness::Claude).trailing,
+            ["--resume", "abc", "--fork-session"]
+        );
+        assert_eq!(fork.render(Harness::Codex).leading, ["fork", "abc"]);
+        assert_eq!(fork.render(Harness::Antigravity), Rendered::default());
+        assert!(can_fork(Harness::Codex) && !can_fork(Harness::Antigravity));
     }
 
     #[test]

@@ -1760,7 +1760,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                             "[Enter] new session  [n] new agent  [Tab] history  [S] skills  [C] config  [?] help  [q] quit",
                         )),
                         (_, Some(AgentKind::Session(_))) => Line::raw(fit(
-                            "[Enter] attach  [n] new agent  [x] stop  [d] remove  [X] clear exited  [t/T] trace  [Tab] history  [?] help  [q] quit",
+                            "[Enter] attach  [n] new agent  [f] fork  [x] stop  [d] remove  [X] clear exited  [t/T] trace  [Tab] history  [?] help  [q] quit",
                         )),
                         (_, Some(AgentKind::Loop(_))) if app.loop_registry.pause_all => {
                             Line::styled(
@@ -1933,6 +1933,10 @@ fn draw_help(f: &mut Frame) {
             "x / d / r",
             "stop (kill) a session / remove it / respawn or restart",
         ),
+        row(
+            "f",
+            "continue a session in a new one, with its memory (any harness)",
+        ),
         row("X · q", "clear all exited sessions · quit"),
         Line::raw(""),
         Line::styled("Attached mode", head),
@@ -2043,6 +2047,14 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
     f.render_widget(Clear, area);
     let title = match &dialog.agent {
         Some(a) => format!(" New session as {a} "),
+        None if dialog.handoff.is_some() => {
+            let from = dialog
+                .handoff
+                .and_then(|id| app.sessions.iter().find(|s| s.id == id))
+                .map(|s| s.profile.name.clone())
+                .unwrap_or_default();
+            format!(" Continue {from} in a new session ")
+        }
         None => " New session ".to_string(),
     };
     let block = Block::default().borders(Borders::ALL).title(title);

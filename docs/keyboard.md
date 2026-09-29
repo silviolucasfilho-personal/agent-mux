@@ -46,7 +46,7 @@ For `Option` combinations, turn on "Use Option as Meta key" (Terminal.app) or "E
 
 | Place | Keys of its own |
 | --- | --- |
-| Main screen | `b` sidebar, `Tab` section, `l` session logs, `t`/`T` tracing / traces, `S` skills, `C` configuration, `E` or `W` runs view, `I` inbox, `v` about, `K` loops kill switch, `X` clear exited sessions |
+| Main screen | `b` sidebar, `Tab` section, `l` session logs, `t`/`T` tracing / traces, `S` skills, `C` configuration, `E` or `W` runs view, `I` inbox, `v` about, `K` loops kill switch, `X` clear exited sessions, `f` on a session: continue it in a new session with its memory |
 | Loops section | `p` pause, `o` its task in the task library (the editor's What tab), `f` a new pattern there |
 | Workflows section | `c` compose a workflow for a task |
 | Trace browser | `/` search, `v` detail view, `Space` fold, `a` all projects, `+` verdict |

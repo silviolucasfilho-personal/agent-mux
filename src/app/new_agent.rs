@@ -291,6 +291,106 @@ impl App {
         Ok((plan, opening))
     }
 
+    /// `f` on a session: the New session dialog on the same profile and
+    /// folder, continuing that session (`DialogState::handoff`).
+    pub fn open_handoff_dialog(&mut self, idx: usize) {
+        let Some(s) = self.sessions.get(idx) else {
+            return;
+        };
+        let (from, dir) = (s.id, s.dir.to_string_lossy().into_owned());
+        let profile = self.profiles.iter().position(|p| p.name == s.profile.name);
+        self.open_new_session_dialog(profile);
+        if let Mode::NewSession(d) = &mut self.mode {
+            d.handoff = Some(from);
+            d.dir = dir;
+            d.dir_edited = true;
+            d.dir_picker.refresh(&d.dir);
+        }
+    }
+
+    /// How session `from` continues on `harness` in `dir`: a fork of its
+    /// conversation on the same Claude Code or Codex, else its whole
+    /// transcript written under `<runtime>/handoffs/` and a first message
+    /// that has the new session read it.
+    pub fn session_handoff(
+        &mut self,
+        from: usize,
+        harness: Option<crate::harness::Harness>,
+        dir: &std::path::Path,
+    ) -> Result<crate::handoff::Continue, String> {
+        use crate::handoff::{self, Continue};
+        use crate::harness::Harness;
+        let harness = harness.ok_or("continue on a Claude Code, Codex or Antigravity profile")?;
+        let s = self
+            .sessions
+            .iter()
+            .find(|s| s.id == from)
+            .ok_or("the session to continue is gone")?;
+        let from_harness = Harness::detect(&s.profile.command)
+            .ok_or("that session's CLI is not one agent-mux knows")?;
+        let conn = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|p| crate::tracing::store::open_ro(p).ok());
+        let from_provider = match from_harness {
+            Harness::Antigravity => "antigravity",
+            h => h.as_str(),
+        };
+        // the launch's conversation; else the one it resumed, by id
+        let stored = s
+            .trace
+            .as_ref()
+            .zip(conn.as_ref())
+            .and_then(|(t, c)| {
+                crate::tracing::store::query::launch_transcript(c, &t.launch_id)
+                    .ok()
+                    .flatten()
+            })
+            .or_else(|| {
+                let id = s.conversation.clone()?;
+                let path = conn.as_ref().and_then(|c| {
+                    crate::tracing::store::query::conversation_transcript(c, from_provider, &id)
+                        .ok()
+                        .flatten()
+                });
+                Some((from_provider.to_string(), id, path))
+            });
+        let conversation = stored
+            .as_ref()
+            .map(|(_, id, _)| id.clone())
+            .ok_or(
+                "agent-mux has not seen this session's conversation yet (is tracing on, and has it had a turn?)",
+            )?;
+        if harness == from_harness && crate::harness::can_fork(harness) {
+            return Ok(Continue::Fork(conversation));
+        }
+        let provider = stored
+            .as_ref()
+            .and_then(|(p, _, _)| handoff::provider_of(p))
+            .or_else(|| handoff::provider_of(from_provider))
+            .ok_or("unknown provider")?;
+        let path = stored
+            .and_then(|(_, _, p)| p)
+            .ok_or("the trace store has no transcript file for this session")?;
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+        let name = format!(
+            "{}-{}",
+            provider.as_str(),
+            conversation.chars().take(8).collect::<String>()
+        );
+        let file = handoff::write(
+            &self.workflows_runtime_dir().join("handoffs"),
+            &name,
+            &handoff::render(provider, &text),
+        )
+        .map_err(|e| format!("handoff: {e}"))?;
+        let message = handoff::opening_message(provider, dir, &file);
+        Ok(Continue::Transcript(match harness {
+            Harness::Antigravity => vec!["--prompt-interactive".into(), message],
+            _ => vec![message],
+        }))
+    }
+
     /// The New session dialog, on harness profile `profile` when given.
     pub fn open_new_session_dialog(&mut self, profile: Option<usize>) {
         let (default, available) = match &self.tracing {
