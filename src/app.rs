@@ -160,6 +160,7 @@ pub enum Action {
     /// Space in the Active section: fold or unfold the loop or workflow
     /// the selected session belongs to.
     ToggleSessionGroup,
+    ToggleAgentFold,
     RestartHistorySession,
     ToggleHistoryAllProjects,
     CancelToControl,
@@ -392,6 +393,7 @@ struct AgentLaunchPrep {
 pub enum RowTag {
     #[default]
     Other,
+    Header,
     Harness,
     Persona,
     /// An agent with a task it runs when you start it.
@@ -511,6 +513,12 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 KeyCode::Char('f') if in_list && ctx.agent_row == RowTag::Session => {
                     Action::ForkSession
                 }
+                KeyCode::Char(' ') if in_list => Action::ToggleAgentFold,
+                KeyCode::Enter | KeyCode::Char('x' | 'd' | 'r' | 't' | 'h')
+                    if in_list && ctx.agent_row == RowTag::Header =>
+                {
+                    Action::None
+                }
                 KeyCode::Char('e') if in_list && ctx.agent_row == RowTag::Task => {
                     Action::EditPersona
                 }
@@ -604,11 +612,6 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     Action::OpenLoopBuilder
                 }
 
-                KeyCode::Char(' ')
-                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Active =>
-                {
-                    Action::ToggleSessionGroup
-                }
                 KeyCode::Char('W') => Action::OpenRunsView,
                 KeyCode::Char('I') => Action::OpenInbox,
                 KeyCode::Char('v') | KeyCode::Char('V') => Action::OpenAbout,
@@ -2124,6 +2127,8 @@ pub struct App {
     /// `tree::GroupRef::key`. Keyed by the parent rather than by a session
     /// index, so a fold survives sessions coming and going.
     pub collapsed_groups: std::collections::HashSet<String>,
+    /// Folded headings and agent rows in the Agents list.
+    pub collapsed_agents: std::collections::HashSet<String>,
     /// Overall terminal dimensions (rows, cols).
     pub terminal_size: (u16, u16),
     /// Skill packages, loaded at startup and rescanned when the Skills
@@ -2145,7 +2150,7 @@ pub struct App {
     /// Agents with a task and no schedule: run when you start them.
     pub task_agents: Vec<String>,
 
-    /// A harness or persona row under the Agents cursor.
+    /// A heading, harness, persona, or run row under the Agents cursor.
     pub agent_focus: Option<agents_list::AgentFocus>,
     /// The section the Agents cursor was in when Tab went to History.
     pub list_section: SidebarSection,
@@ -2273,6 +2278,7 @@ impl App {
             sessions_file: None,
             sidebar_hidden: false,
             collapsed_groups: std::collections::HashSet::new(),
+            collapsed_agents: std::collections::HashSet::new(),
             terminal_size: (27, 112),
             skills,
             hidden_skills,
@@ -3147,6 +3153,7 @@ impl App {
             RowTag::Other
         } else {
             match self.agent_row() {
+                Some(agents_list::AgentKind::Header(_)) => RowTag::Header,
                 Some(agents_list::AgentKind::Harness(_)) => RowTag::Harness,
                 Some(agents_list::AgentKind::Persona(n)) if self.task_agents.contains(&n) => {
                     RowTag::Task
@@ -3471,7 +3478,14 @@ impl App {
                     if let Some(at) = at
                         && lines.get(at).is_some_and(|l| l.kind.selectable())
                     {
+                        let fold_click =
+                            matches!(lines[at].kind, agents_list::AgentKind::Header(_))
+                                || (lines[at].depth == 0 && ev.column == 3);
                         self.select_agent_line(&lines, at);
+                        if fold_click {
+                            self.toggle_agent_fold();
+                            return;
+                        }
                         if matches!(self.mode, Mode::Attached)
                             && let Some(s) = self.sessions.get_mut(self.selected)
                         {
@@ -3765,6 +3779,7 @@ impl App {
                 }
             }
             Action::ToggleSessionGroup => self.toggle_selected_group(),
+            Action::ToggleAgentFold => self.toggle_agent_fold(),
             Action::ToggleSidebarSection => {
                 if self.sidebar_hidden {
                     if !self.sessions.is_empty() {

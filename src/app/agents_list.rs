@@ -15,7 +15,7 @@ use crate::harness::Harness;
 /// What a row of the Agents list is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentKind {
-    /// A group heading; never selected.
+    /// A group heading; selectable so it can be folded.
     Header(&'static str),
     /// A harness profile: the plain agent (index into `profiles`).
     Harness(usize),
@@ -36,7 +36,7 @@ pub enum AgentKind {
 
 impl AgentKind {
     pub fn selectable(&self) -> bool {
-        !matches!(self, AgentKind::Header(_))
+        true
     }
 
     /// The sidebar section whose actions this row takes.
@@ -57,7 +57,7 @@ pub struct AgentLine {
     pub depth: u8,
 }
 
-/// A harness or persona row under the cursor, remembered with the
+/// A heading, harness, persona, or run row under the cursor, remembered with the
 /// session list it was chosen against: a new or removed session moves the
 /// cursor to the session rows, where the older sections put it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,8 +68,57 @@ pub struct AgentFocus {
 }
 
 impl App {
+    /// Stable fold identity, independent of a row's current position.
+    pub fn agent_fold_key(&self, kind: &AgentKind) -> Option<String> {
+        Some(match kind {
+            AgentKind::Header(name) => format!("section:{name}"),
+            AgentKind::Harness(i) => format!("harness:{}", self.profiles.get(*i)?.name),
+            AgentKind::Loop(i) => format!("loop:{}", self.loop_registry.loops.get(*i)?.id),
+            AgentKind::Flow(i) => match self.workflow_rows().get(*i)? {
+                WorkflowRow::Live(id) | WorkflowRow::Recent(id) => format!("flow:run:{id}"),
+                WorkflowRow::Planned(id) => format!("flow:plan:{id}"),
+                WorkflowRow::Doc(i) => format!("flow:doc:{}", self.workflow_list.get(*i)?.name),
+            },
+            AgentKind::Skill(i) => format!("skill:{}", self.skills.get(*i)?.id),
+            AgentKind::Persona(name) => format!("persona:{name}"),
+            AgentKind::Run(key) => format!("run:{key}"),
+            AgentKind::Session(_) => return None,
+        })
+    }
+
+    pub fn agent_is_folded(&self, kind: &AgentKind) -> bool {
+        self.agent_fold_key(kind)
+            .is_some_and(|key| self.collapsed_agents.contains(&key))
+    }
+
+    /// Fold a heading or agent. On a session, fold its parent and put the
+    /// cursor there before the session disappears from the list.
+    pub fn toggle_agent_fold(&mut self) {
+        let lines = self.agent_lines();
+        let Some(at) = self.agent_cursor(&lines) else {
+            return;
+        };
+        let kind = match &lines[at].kind {
+            AgentKind::Session(_) => lines[..at]
+                .iter()
+                .rfind(|l| l.depth == 0)
+                .map(|l| l.kind.clone()),
+            kind => Some(kind.clone()),
+        };
+        let Some(kind) = kind else { return };
+        let Some(key) = self.agent_fold_key(&kind) else {
+            return;
+        };
+        if let Some(parent) = lines.iter().position(|l| l.kind == kind) {
+            self.select_agent_line(&lines, parent);
+        }
+        if !self.collapsed_agents.insert(key.clone()) {
+            self.collapsed_agents.remove(&key);
+        }
+    }
+
     /// Which agent row a session belongs under.
-    fn owner_of(&self, idx: usize, workflow_rows: &[WorkflowRow]) -> AgentKind {
+    pub(crate) fn owner_of(&self, idx: usize, workflow_rows: &[WorkflowRow]) -> AgentKind {
         let s = &self.sessions[idx];
         if let Some(g) = &s.group {
             let known = match g.kind {
@@ -123,12 +172,15 @@ impl App {
                 .filter(|(_, o)| **o == kind)
                 .map(|(i, _)| i)
                 .collect();
+            let folded = self.agent_is_folded(&kind);
             out.push(AgentLine { kind, depth: 0 });
-            for i in children {
-                out.push(AgentLine {
-                    kind: AgentKind::Session(i),
-                    depth: 1,
-                });
+            if !folded {
+                for i in children {
+                    out.push(AgentLine {
+                        kind: AgentKind::Session(i),
+                        depth: 1,
+                    });
+                }
             }
         };
         for p in 0..self.profiles.len() {
@@ -139,8 +191,10 @@ impl App {
                 kind: AgentKind::Header("scheduled"),
                 depth: 0,
             });
-            for i in 0..self.loop_registry.loops.len() {
-                push(&mut out, AgentKind::Loop(i));
+            if !self.agent_is_folded(&AgentKind::Header("scheduled")) {
+                for i in 0..self.loop_registry.loops.len() {
+                    push(&mut out, AgentKind::Loop(i));
+                }
             }
         }
         let mut runs: Vec<AgentKind> = Vec::new();
@@ -154,11 +208,13 @@ impl App {
                 kind: AgentKind::Header("flows"),
                 depth: 0,
             });
-            for r in runs {
-                push(&mut out, r);
-            }
-            for i in 0..rows.len() {
-                push(&mut out, AgentKind::Flow(i));
+            if !self.agent_is_folded(&AgentKind::Header("flows")) {
+                for r in runs {
+                    push(&mut out, r);
+                }
+                for i in 0..rows.len() {
+                    push(&mut out, AgentKind::Flow(i));
+                }
             }
         }
         if !self.skills.is_empty() {
@@ -166,8 +222,10 @@ impl App {
                 kind: AgentKind::Header("skills"),
                 depth: 0,
             });
-            for i in 0..self.skills.len() {
-                push(&mut out, AgentKind::Skill(i));
+            if !self.agent_is_folded(&AgentKind::Header("skills")) {
+                for i in 0..self.skills.len() {
+                    push(&mut out, AgentKind::Skill(i));
+                }
             }
         }
         if !self.task_agents.is_empty() {
@@ -175,8 +233,10 @@ impl App {
                 kind: AgentKind::Header("on demand"),
                 depth: 0,
             });
-            for name in &self.task_agents {
-                push(&mut out, AgentKind::Persona(name.clone()));
+            if !self.agent_is_folded(&AgentKind::Header("on demand")) {
+                for name in &self.task_agents {
+                    push(&mut out, AgentKind::Persona(name.clone()));
+                }
             }
         }
         if !self.personas.is_empty() {
@@ -184,17 +244,16 @@ impl App {
                 kind: AgentKind::Header("personas"),
                 depth: 0,
             });
-            for name in &self.personas {
-                out.push(AgentLine {
-                    kind: AgentKind::Persona(name.clone()),
-                    depth: 0,
-                });
+            if !self.agent_is_folded(&AgentKind::Header("personas")) {
+                for name in &self.personas {
+                    push(&mut out, AgentKind::Persona(name.clone()));
+                }
             }
         }
         out
     }
 
-    /// The harness or persona row under the cursor, while it still holds.
+    /// A row without a cursor in one of the older sections, while it still holds.
     pub fn agent_focus(&self) -> Option<&AgentKind> {
         self.agent_focus
             .as_ref()
@@ -239,7 +298,14 @@ impl App {
         let Some(line) = lines.get(i) else { return };
         self.agent_focus = None;
         match &line.kind {
-            AgentKind::Header(_) => {}
+            kind @ AgentKind::Header(_) => {
+                self.sidebar_section = SidebarSection::Active;
+                self.agent_focus = Some(AgentFocus {
+                    kind: kind.clone(),
+                    selected: self.selected,
+                    sessions: self.sessions.len(),
+                });
+            }
             AgentKind::Session(s) => {
                 self.sidebar_section = SidebarSection::Active;
                 if *s != self.selected {

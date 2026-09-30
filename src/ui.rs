@@ -426,11 +426,23 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         let (glyph, gstyle, name, right, rstyle): (String, Style, String, String, Style) =
             match &line.kind {
                 AgentKind::Header(h) => {
-                    items.push(ListItem::new(Line::styled(format!(" {h}"), dim)));
+                    let arrow = if app.agent_is_folded(&line.kind) {
+                        "▸"
+                    } else {
+                        "▾"
+                    };
+                    let item = ListItem::new(Line::styled(format!("{marker}{arrow} {h}"), dim));
+                    items.push(if is_cursor && is_focused {
+                        item.style(Style::default().add_modifier(Modifier::REVERSED))
+                    } else if is_cursor {
+                        item.style(Style::default().fg(Color::Cyan))
+                    } else {
+                        item
+                    });
                     continue;
                 }
                 AgentKind::Harness(p) => {
-                    let (right, rstyle) = harness_summary(&lines, start + n, app, now);
+                    let (right, rstyle) = harness_summary(app, *p, now);
                     (
                         String::new(),
                         dim,
@@ -532,6 +544,20 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
                     dim,
                 ),
             };
+        let glyph = if line.depth == 0 {
+            let arrow = if app.agent_is_folded(&line.kind) {
+                "▸"
+            } else {
+                "▾"
+            };
+            if glyph.is_empty() {
+                format!("{arrow} ")
+            } else {
+                format!("{arrow}{glyph}")
+            }
+        } else {
+            glyph
+        };
         let indent = if line.depth > 0 { " " } else { "" };
         let right = truncate_chars(&right, 11);
         // display width, not characters: an icon may take two columns
@@ -593,24 +619,19 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
 }
 
 /// A harness row's right-hand label: what its sessions are doing.
-fn harness_summary(
-    lines: &[crate::app::agents_list::AgentLine],
-    at: usize,
-    app: &App,
-    now: Instant,
-) -> (String, Style) {
+fn harness_summary(app: &App, profile: usize, now: Instant) -> (String, Style) {
     use crate::app::agents_list::AgentKind;
     let (mut working, mut attention, mut idle, mut exited) = (0, 0, 0, 0);
-    for l in lines[at + 1..].iter().take_while(|l| l.depth > 0) {
-        if let AgentKind::Session(i) = l.kind
-            && let Some(s) = app.sessions.get(i)
-        {
-            match s.status(now) {
-                Status::Working => working += 1,
-                Status::NeedsAttention => attention += 1,
-                Status::Idle => idle += 1,
-                Status::Exited(_) => exited += 1,
-            }
+    let rows = app.workflow_rows();
+    for (i, s) in app.sessions.iter().enumerate() {
+        if app.owner_of(i, &rows) != AgentKind::Harness(profile) {
+            continue;
+        }
+        match s.status(now) {
+            Status::Working => working += 1,
+            Status::NeedsAttention => attention += 1,
+            Status::Idle => idle += 1,
+            Status::Exited(_) => exited += 1,
         }
     }
     let live = working + attention + idle;
@@ -1766,33 +1787,33 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                             "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
                         )),
                         (_, Some(AgentKind::Harness(_))) => Line::raw(fit(
-                            "[Enter] new session  [n] new agent  [Tab] history  [S] skills  [C] config  [?] help  [q] quit",
+                            "[Space] fold  [?] help  [Enter] new session  [n] new agent  [Tab] history  [S] skills  [C] config  [q] quit",
                         )),
                         (_, Some(AgentKind::Session(_))) => Line::raw(fit(
-                            "[Enter] attach  [n] new agent  [f] fork  [x] stop  [d] remove  [X] clear exited  [t/T] trace  [Tab] history  [?] help  [q] quit",
+                            "[Space] fold parent  [?] help  [Enter] attach  [n] new agent  [f] fork  [x] stop  [d] remove  [X] clear exited  [t/T] trace  [Tab] history  [q] quit",
                         )),
                         (_, Some(AgentKind::Loop(_))) if app.loop_registry.pause_all => {
                             Line::styled(
                                 fit(
-                                    "‖ LOOPS PAUSED  [K] resume all  [Enter] details  [n] new agent  [r] run now  [p] pause  [e] edit  [d] remove",
+                                    "‖ LOOPS PAUSED  [Space] fold  [?] help  [K] resume all  [Enter] details  [n] new agent  [r] run now  [p] pause  [e] edit  [d] remove",
                                 ),
                                 Style::default().fg(Color::Yellow),
                             )
                         }
                         (_, Some(AgentKind::Loop(_))) => Line::raw(fit(
-                            "[Enter] details  [r] run now  [p] pause  [n] new agent  [e] edit  [d] remove  [o] its pattern  [K] kill  [?] help",
+                            "[Space] fold  [n] new  [Enter] details  [r] run  [p] pause  [e] edit  [d] remove  [?] help",
                         )),
                         (_, Some(AgentKind::Flow(_))) => Line::raw(fit(
-                            "[Enter] run / view  [n] new agent  [e] edit  [c] compose  [x] stop  [d] discard plan  [⌃O] file  [W] view  [?] help",
+                            "[Space] fold  [?] help  [Enter] run / view  [n] new agent  [e] edit  [c] compose  [x] stop  [d] discard plan  [⌃O] file  [W] view",
                         )),
                         (_, Some(AgentKind::Skill(_))) => Line::raw(fit(
-                            "[Enter] launch  [n] new agent  [S] skills  [C] config  [Tab] history  [b] sidebar  [?] help  [q] quit",
+                            "[Space] fold  [?] help  [Enter] launch  [n] new agent  [S] skills  [C] config  [Tab] history  [b] sidebar  [q] quit",
                         )),
                         (_, Some(AgentKind::Persona(_))) => Line::raw(fit(
-                            "[Enter/e] edit  [n] new agent  [Tab] history  [C] config  [?] help  [q] quit",
+                            "[Space] fold  [?] help  [Enter/e] edit  [n] new agent  [Tab] history  [C] config  [q] quit",
                         )),
                         _ => Line::raw(fit(
-                            "[j/k] its sessions  [n] new agent  [Tab] history  [b] sidebar  [?] help  [q] quit",
+                            "[Space] fold  [?] help  [j/k] its sessions  [n] new agent  [Tab] history  [b] sidebar  [q] quit",
                         )),
                     }
                 }
@@ -1907,7 +1928,7 @@ fn draw_help(f: &mut Frame) {
         ]),
         Line::raw(""),
         Line::styled("Control mode", head),
-        row("b", "toggle sidebar (hide / full harness)"),
+        row("b · Space", "toggle sidebar · fold a heading or agent"),
         row(
             "j/k, ↑/↓",
             "walk the Agents list: sessions sit under their agent",
