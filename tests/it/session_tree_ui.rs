@@ -121,6 +121,96 @@ fn a_workflow_runs_steps_gather_under_one_header() {
 }
 
 #[test]
+fn space_folds_an_agent_without_losing_its_sessions() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _t) = app_with_sessions(&[None, None]);
+    let lines = app.agent_lines();
+    let harness = lines
+        .iter()
+        .position(|l| l.kind == AgentKind::Harness(0))
+        .unwrap();
+    app.select_agent_line(&lines, harness);
+    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+
+    assert_eq!(app.agent_row(), Some(AgentKind::Harness(0)));
+    assert!(
+        !app.agent_lines()
+            .iter()
+            .any(|l| matches!(l.kind, AgentKind::Session(_)))
+    );
+    assert_eq!(app.sessions.len(), 2);
+
+    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+    assert_eq!(
+        app.agent_lines()
+            .iter()
+            .filter(|l| matches!(l.kind, AgentKind::Session(_)))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn space_folds_a_section_and_keeps_its_heading_selected() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _t) = app_with_sessions(&[Some(wf("abcd1234ef", "read:src"))]);
+    let lines = app.agent_lines();
+    let flows = lines
+        .iter()
+        .position(|l| l.kind == AgentKind::Header("flows"))
+        .unwrap();
+    app.select_agent_line(&lines, flows);
+    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+
+    assert_eq!(app.agent_row(), Some(AgentKind::Header("flows")));
+    assert!(
+        app.agent_lines()
+            .iter()
+            .any(|l| l.kind == AgentKind::Header("flows"))
+    );
+    assert!(
+        !app.agent_lines()
+            .iter()
+            .any(|l| matches!(l.kind, AgentKind::Run(_)))
+    );
+
+    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+    assert!(
+        app.agent_lines()
+            .iter()
+            .any(|l| matches!(l.kind, AgentKind::Run(_)))
+    );
+}
+
+#[test]
+fn clicking_a_heading_folds_its_rows() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _t) = app_with_sessions(&[Some(wf("abcd1234ef", "read:src"))]);
+    let lines = app.agent_lines();
+    let heights = agent_mux::ui::agent_row_heights(&lines);
+    let flows = lines
+        .iter()
+        .position(|l| l.kind == AgentKind::Header("flows"))
+        .unwrap();
+    let (agents, _) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, 0);
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: agents.y + 1 + heights[..flows].iter().sum::<usize>() as u16,
+            modifiers: KeyModifiers::NONE,
+        },
+        Instant::now(),
+    );
+    assert_eq!(app.agent_row(), Some(AgentKind::Header("flows")));
+    assert!(
+        !app.agent_lines()
+            .iter()
+            .any(|l| matches!(l.kind, AgentKind::Run(_)))
+    );
+}
+
+#[test]
 fn the_digits_count_the_rows_the_tree_draws() {
     let (mut app, _t) = app_with_sessions(&[
         None,
@@ -141,7 +231,6 @@ fn loose_sessions_keep_their_place_and_their_profile() {
     let out = render(&app, 120, 40);
     assert!(out.contains("p0"), "{out}");
     assert!(out.contains("p1"));
-    assert!(!out.contains("▾"), "nothing to group, no headers: {out}");
     // the harness row counts its sessions; each has a detail line
     assert!(out.contains("2 idle"), "{out}");
     assert!(out.contains("│   p1 · not traced"), "{out}");

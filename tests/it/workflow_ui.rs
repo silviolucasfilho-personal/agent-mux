@@ -120,6 +120,12 @@ fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
     for _ in 0..9 {
         press(&mut app, KeyCode::Char('k'));
     }
+    assert_eq!(
+        app.agent_row(),
+        Some(agent_mux::app::agents_list::AgentKind::Header("flows")),
+        "the collapsible heading is a stop in the list"
+    );
+    press(&mut app, KeyCode::Char('k'));
     assert!(
         matches!(
             app.agent_row(),
