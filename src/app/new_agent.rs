@@ -312,13 +312,18 @@ impl App {
     /// conversation on the same Claude Code or Codex, else its whole
     /// transcript written under `<runtime>/handoffs/` and a first message
     /// that has the new session read it.
+    ///
+    /// The conversation is the one the trace store correlated to the
+    /// launch; else the one the session carries (a resume), with its file
+    /// from the store or the harness's own folders; else, tracing off, the
+    /// one transcript the harness wrote in its folder since it started.
     pub fn session_handoff(
         &mut self,
         from: usize,
         harness: Option<crate::harness::Harness>,
         dir: &std::path::Path,
     ) -> Result<crate::handoff::Continue, String> {
-        use crate::handoff::{self, Continue};
+        use crate::handoff::{self, Continue, Source};
         use crate::harness::Harness;
         let harness = harness.ok_or("continue on a Claude Code, Codex or Antigravity profile")?;
         let s = self
@@ -328,16 +333,12 @@ impl App {
             .ok_or("the session to continue is gone")?;
         let from_harness = Harness::detect(&s.profile.command)
             .ok_or("that session's CLI is not one agent-mux knows")?;
+        let provider = handoff::provider_of(from_harness.as_str()).ok_or("unknown provider")?;
         let conn = self
             .trace_db_path
             .as_deref()
             .and_then(|p| crate::tracing::store::open_ro(p).ok());
-        let from_provider = match from_harness {
-            Harness::Antigravity => "antigravity",
-            h => h.as_str(),
-        };
-        // the launch's conversation; else the one it resumed, by id
-        let stored = s
+        let traced = s
             .trace
             .as_ref()
             .zip(conn.as_ref())
@@ -346,45 +347,48 @@ impl App {
                     .ok()
                     .flatten()
             })
-            .or_else(|| {
-                let id = s.conversation.clone()?;
-                let path = conn.as_ref().and_then(|c| {
-                    crate::tracing::store::query::conversation_transcript(c, from_provider, &id)
+            .map(|(p, id, path)| Source {
+                provider: handoff::provider_of(&p).unwrap_or(provider),
+                conversation: id,
+                transcript: path.map(std::path::PathBuf::from),
+            });
+        let resumed = || {
+            let id = s.conversation.clone()?;
+            let path = conn
+                .as_ref()
+                .and_then(|c| {
+                    crate::tracing::store::query::conversation_transcript(c, provider.as_str(), &id)
                         .ok()
                         .flatten()
-                });
-                Some((from_provider.to_string(), id, path))
-            });
-        let conversation = stored
-            .as_ref()
-            .map(|(_, id, _)| id.clone())
-            .ok_or(
-                "agent-mux has not seen this session's conversation yet (is tracing on, and has it had a turn?)",
-            )?;
+                })
+                .map(std::path::PathBuf::from)
+                .or_else(|| handoff::transcript_by_id(provider, &id));
+            Some(Source {
+                provider,
+                conversation: id,
+                transcript: path,
+            })
+        };
+        let source = match traced.or_else(resumed) {
+            Some(src) => src,
+            None => handoff::find_on_disk(provider, &s.dir, s.started_at)?,
+        };
         if harness == from_harness && crate::harness::can_fork(harness) {
-            return Ok(Continue::Fork(conversation));
+            return Ok(Continue::Fork(source.conversation));
         }
-        let provider = stored
-            .as_ref()
-            .and_then(|(p, _, _)| handoff::provider_of(p))
-            .or_else(|| handoff::provider_of(from_provider))
-            .ok_or("unknown provider")?;
-        let path = stored
-            .and_then(|(_, _, p)| p)
-            .ok_or("the trace store has no transcript file for this session")?;
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+        let text = handoff::source_text(&source)?;
         let name = format!(
             "{}-{}",
-            provider.as_str(),
-            conversation.chars().take(8).collect::<String>()
+            source.provider.as_str(),
+            source.conversation.chars().take(8).collect::<String>()
         );
         let file = handoff::write(
             &self.workflows_runtime_dir().join("handoffs"),
             &name,
-            &handoff::render(provider, &text),
+            &handoff::render(source.provider, &text),
         )
         .map_err(|e| format!("handoff: {e}"))?;
-        let message = handoff::opening_message(provider, dir, &file);
+        let message = handoff::opening_message(source.provider, dir, &file);
         Ok(Continue::Transcript(match harness {
             Harness::Antigravity => vec!["--prompt-interactive".into(), message],
             _ => vec![message],

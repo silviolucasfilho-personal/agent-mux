@@ -16,6 +16,9 @@ pub struct SavedSession {
     /// was never known: tracing off, or the launch not yet correlated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
+    /// The session it continues (`f`), as the sidebar names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued_from: Option<String>,
 }
 
 pub fn sessions_file_path() -> Option<PathBuf> {
@@ -72,6 +75,7 @@ mod tests {
                 },
                 dir: PathBuf::from("/tmp/project1"),
                 skill_id: Some("heimdall".into()),
+                continued_from: None,
                 conversation: Some("uuid-123".into()),
             },
             SavedSession {
@@ -86,6 +90,7 @@ mod tests {
                 },
                 dir: PathBuf::from("/tmp/project2"),
                 skill_id: None,
+                continued_from: None,
                 conversation: None,
             },
         ];

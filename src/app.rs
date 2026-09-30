@@ -2692,7 +2692,15 @@ impl App {
             .iter()
             .filter(|s| !matches!(s.status(now), Status::Exited(_)))
             .map(|s| persistence::SavedSession {
-                profile: s.profile.clone(),
+                // the first message this launch sent is not sent again
+                profile: {
+                    let mut p = s.profile.clone();
+                    if !s.opening_args.is_empty() && p.args.ends_with(&s.opening_args) {
+                        p.args.truncate(p.args.len() - s.opening_args.len());
+                    }
+                    p
+                },
+                continued_from: s.continued_from.clone(),
                 dir: s.dir.clone(),
                 skill_id: s.skill_id.clone(),
                 conversation: conn
@@ -2746,6 +2754,7 @@ impl App {
                 Ok(mut session) => {
                     session.skill_id = s.skill_id;
                     session.conversation = conversation;
+                    session.continued_from = s.continued_from;
                     self.next_id += 1;
                     self.sessions.push(session);
                 }
@@ -4099,6 +4108,18 @@ impl App {
                     },
                     None => None,
                 };
+                // what this launch alone sends first, left out of a save
+                let mut opening_args: Vec<String> = Vec::new();
+                let continued_from = dialog.handoff.and_then(|from| {
+                    self.sessions.iter().find(|s| s.id == from).map(|s| {
+                        let folder = s
+                            .dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        format!("{} · {folder}", s.profile.name)
+                    })
+                });
                 let handoff = match dialog.handoff {
                     Some(from) => match self.session_handoff(from, dialog.harness, &dir) {
                         Ok(h) => Some(h),
@@ -4134,10 +4155,12 @@ impl App {
                             profile.args.append(&mut a);
                         }
                         profile.args.extend(opening.iter().cloned());
+                        opening_args.extend(opening.iter().cloned());
                     }
                     // another harness reads the old conversation first
                     if let Some(crate::handoff::Continue::Transcript(opening)) = &handoff {
                         profile.args.extend(opening.iter().cloned());
+                        opening_args.extend(opening.iter().cloned());
                     }
                 }
                 let link = dialog.experiment_link();
@@ -4146,6 +4169,8 @@ impl App {
                 match self.spawn_traced(id, profile, dir) {
                     Ok(mut session) => {
                         session.agent = agent_name;
+                        session.opening_args = opening_args;
+                        session.continued_from = continued_from;
                         self.next_id += 1;
                         self.sessions.push(session);
                         self.selected = self.sessions.len() - 1;

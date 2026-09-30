@@ -560,6 +560,10 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
             // what the session is: its model, its work so far, or its tool;
             // a profile other than the harness row's is named first
             let mut detail = session_detail(s, now);
+            // continued from another session: where its memory came from
+            if let Some(c) = &s.continued_from {
+                detail = format!("↳ {c} · {detail}");
+            }
             if owners[start + n]
                 .and_then(|p| app.profiles.get(p))
                 .is_some_and(|p| p.name != s.profile.name)
@@ -915,8 +919,13 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     } else {
         String::new()
     };
+    let continued = session
+        .continued_from
+        .as_deref()
+        .map(|c| format!("↳ continues {c} "))
+        .unwrap_or_default();
     let title = format!(
-        " {} — {} [{label}] {trace_tag}{scroll_tag}",
+        " {} — {} [{label}] {continued}{trace_tag}{scroll_tag}",
         session.profile.name,
         session.dir.display()
     );

@@ -133,17 +133,15 @@ fn the_same_harness_forks_and_another_reads_the_transcript() {
 }
 
 #[test]
-fn a_session_agent_mux_has_not_seen_cannot_be_continued() {
+fn a_session_with_no_conversation_yet_cannot_be_continued() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = app_with_a_claude_session(temp.path());
     app.sessions[0].conversation = None;
     let e = app
         .session_handoff(7, Some(Harness::Codex), temp.path())
         .unwrap_err();
-    assert!(
-        e.contains("has not seen this session's conversation"),
-        "{e}"
-    );
+    // tracing off and no transcript in its folder yet: nothing to continue
+    assert!(e.contains("has it had a turn"), "{e}");
 }
 
 #[test]
@@ -170,4 +168,39 @@ fn f_on_a_session_row_opens_the_dialog_that_continues_it() {
         text.contains("Continue Claude Code in a new session"),
         "{text}"
     );
+}
+
+/// A saved continued session comes back linked to where it came from, and
+/// without the first message it sent: a restart does not send it again.
+#[test]
+fn a_restart_keeps_the_link_and_does_not_resend_the_handover() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut app = app_with_a_claude_session(temp.path());
+    app.sessions_file = Some(temp.path().join("sessions.json"));
+    let s = &mut app.sessions[0];
+    s.profile.args = vec!["--model".into(), "m".into(), "read the handover".into()];
+    s.opening_args = vec!["read the handover".into()];
+    s.continued_from = Some("Codex · api".into());
+    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+    t.draw(|f| agent_mux::ui::draw(f, &app, std::time::Instant::now()))
+        .unwrap();
+    let text: String = t
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(
+        text.contains("↳ Codex · api"),
+        "the sidebar names it: {text}"
+    );
+    assert!(
+        text.contains("↳ continues Codex · api"),
+        "so does the title: {text}"
+    );
+    app.save_active_sessions().unwrap();
+    let saved = agent_mux::persistence::load_saved_sessions(&temp.path().join("sessions.json"));
+    assert_eq!(saved[0].profile.args, ["--model", "m"]);
+    assert_eq!(saved[0].continued_from.as_deref(), Some("Codex · api"));
 }

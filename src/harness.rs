@@ -273,8 +273,9 @@ pub fn restore_args(harness: Harness, saved: &[String], conversation: &str) -> V
 /// leading `resume` subcommand with `--last` or the id after it.
 fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
     if harness == Harness::Codex {
+        // a fork is a resume that copies: restoring one must not fork again
         return match args {
-            [sub, _target, rest @ ..] if sub == "resume" => rest.to_vec(),
+            [sub, _target, rest @ ..] if sub == "resume" || sub == "fork" => rest.to_vec(),
             _ => args.to_vec(),
         };
     }
@@ -285,7 +286,7 @@ fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
-        if arg == "--continue" || arg == "-c" {
+        if arg == "--continue" || arg == "-c" || arg == "--fork-session" {
             continue;
         }
         if valued.contains(&arg.as_str()) {
@@ -417,6 +418,22 @@ mod tests {
             "agy's -c means --continue; by id is --conversation"
         );
         assert_eq!(rendered(&by_id, Harness::Codex), vec!["resume", "abc-123"]);
+    }
+
+    #[test]
+    fn restoring_a_forked_session_resumes_it_and_does_not_fork_again() {
+        let claude: Vec<String> = ["--resume", "old", "--fork-session", "--model", "m"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            restore_args(Harness::Claude, &claude, "new"),
+            ["--model", "m", "--resume", "new"]
+        );
+        let codex: Vec<String> = ["fork", "old", "--yolo"].map(String::from).to_vec();
+        assert_eq!(
+            restore_args(Harness::Codex, &codex, "new"),
+            ["resume", "new", "--yolo"]
+        );
     }
 
     #[test]
