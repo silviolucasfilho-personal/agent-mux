@@ -173,7 +173,7 @@ fn keys_of_the_loops_section_pause_run_and_toggle_the_kill_switch() {
     app.handle_key(&key(KeyCode::Char('d')), Instant::now());
     assert!(matches!(app.mode, Mode::ConfirmRemoveLoop));
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
     assert_eq!(app.loop_registry.loops.len(), 1);
     app.handle_key(&key(KeyCode::Char('d')), Instant::now());
     app.handle_key(&key(KeyCode::Char('y')), Instant::now());
@@ -192,7 +192,7 @@ fn keys_of_the_loops_section_pause_run_and_toggle_the_kill_switch() {
         "three tabs merged into Setup\n{screen}"
     );
     app.handle_key(&key(KeyCode::Esc), Instant::now());
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
 }
 
 #[test]
@@ -261,7 +261,7 @@ fn the_dialog_lists_no_antigravity_profile_and_validates() {
         "s saves and stays"
     );
     app.handle_key(&key(KeyCode::Esc), Instant::now());
-    assert!(matches!(app.mode, Mode::Control), "{:?}", app.notice);
+    assert!(matches!(app.mode, Mode::Main), "{:?}", app.notice);
     assert_eq!(app.loop_registry.loops.len(), 1);
     let saved = app.loop_registry.loops[0].clone();
     assert_eq!(saved.pattern, "daily-triage");
@@ -837,7 +837,7 @@ fn the_runs_view_lists_every_run_and_decides_the_ones_that_need_you() {
     app.handle_key(&key(KeyCode::Char('W')), Instant::now());
     assert!(matches!(app.mode, Mode::RunsView(_)));
     app.handle_key(&key(KeyCode::Esc), Instant::now());
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
 }
 
 /// `e` on a scheduled agent's What opens the task in the loop builder;

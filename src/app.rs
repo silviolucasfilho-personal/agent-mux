@@ -39,8 +39,9 @@ pub use skills_view::*;
 
 #[derive(Debug)]
 pub enum Mode {
-    Control,
-    Attached,
+    /// The main screen: the list and the pane. `App::focus` says which
+    /// one the keys go to; there is no attached mode.
+    Main,
     NewSession(DialogState),
     SessionHistory(HistoryState),
     TraceBrowser(Box<TraceBrowserState>),
@@ -141,8 +142,8 @@ pub enum Action {
     MoveDown,
     /// Jump straight to session N (the `1`-`9` keys).
     SelectSession(usize),
-    Attach,
-    Detach,
+    /// Focus the pane: keys go to the selected session from here on.
+    FocusPane,
     OpenNewSession,
     OpenSessionHistory,
     OpenTraceBrowser,
@@ -165,9 +166,8 @@ pub enum Action {
     UnfoldAgent,
     RestartHistorySession,
     ToggleHistoryAllProjects,
-    CancelToControl,
+    BackToMain,
     ForwardBytes(Vec<u8>),
-    SendLiteralDetachKey,
     /// NewSession mode: App routes the key to the DialogState it owns.
     DialogKey,
     /// SessionHistory mode: App routes the key to the HistoryState it owns.
@@ -409,15 +409,20 @@ pub struct DispatchCtx {
     pub agent_row: RowTag,
     pub selected_status: Option<Status>,
     pub any_working: bool,
-    pub just_detached: bool,
+    pub focus: Focus,
     pub app_cursor: bool,
     pub sidebar_section: SidebarSection,
     pub sidebar_hidden: bool,
 }
 
-fn is_ctrl_q(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL)
-        && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+/// Where the keys go on the main screen: the list (the sidebar, where
+/// plain keys are verbs) or the pane (the selected session, where every
+/// key not in the chord layer is the harness's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    List,
+    Pane,
 }
 
 /// Bytes to write for a paste: wrapped in bracketed-paste markers when the
@@ -482,14 +487,13 @@ mod paste_tests {
 
 pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
     match mode {
-        Mode::Control => {
-            // Handle Ctrl+Q before the key.code match: matching on code alone
-            // would let Ctrl+Q fall into the Char('q') arm and quit the app.
-            if is_ctrl_q(key) {
-                return if ctx.just_detached {
-                    Action::SendLiteralDetachKey
-                } else {
-                    Action::None
+        Mode::Main => {
+            // the pane has the keyboard: everything not a chord (handled
+            // before dispatch) is the harness's, Ctrl+Q included
+            if ctx.focus == Focus::Pane {
+                return match encode_key_with_mode(key, ctx.app_cursor) {
+                    Some(bytes) => Action::ForwardBytes(bytes),
+                    None => Action::None,
                 };
             }
             let in_list = !ctx.sidebar_hidden && ctx.sidebar_section != SidebarSection::History;
@@ -558,17 +562,20 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::SelectSession(c as usize - '1' as usize)
                 }
+                // Esc in the list is back one level, and below the list
+                // is the pane
+                KeyCode::Esc if ctx.selected_status.is_some() => Action::FocusPane,
                 KeyCode::Enter => {
                     if ctx.sidebar_hidden {
                         if ctx.selected_status.is_some() {
-                            Action::Attach
+                            Action::FocusPane
                         } else {
                             Action::None
                         }
                     } else {
                         match ctx.sidebar_section {
                             SidebarSection::Active if ctx.selected_status.is_some() => {
-                                Action::Attach
+                                Action::FocusPane
                             }
                             SidebarSection::Agents => Action::OpenSkillLauncher,
                             SidebarSection::Loops => Action::OpenRunsView,
@@ -670,6 +677,9 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::RemoveExited
                 }
+                // Ctrl+Q and every other Ctrl chord are nothing in the
+                // list; with the pane focused they are the harness's
+                KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::CONTROL) => Action::None,
                 KeyCode::Char('q') => {
                     if ctx.any_working {
                         Action::EnterConfirmQuit
@@ -678,16 +688,6 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     }
                 }
                 _ => Action::None,
-            }
-        }
-        Mode::Attached => {
-            if is_ctrl_q(key) {
-                Action::Detach
-            } else {
-                match encode_key_with_mode(key, ctx.app_cursor) {
-                    Some(bytes) => Action::ForwardBytes(bytes),
-                    None => Action::None,
-                }
             }
         }
         Mode::NewSession(_) => Action::DialogKey,
@@ -701,7 +701,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
             | KeyCode::Char('q')
             | KeyCode::Char('v')
             | KeyCode::Char('V')
-            | KeyCode::Enter => Action::CancelToControl,
+            | KeyCode::Enter => Action::BackToMain,
             _ => Action::AboutKey,
         },
         Mode::ConfigView(_) => Action::ConfigKey,
@@ -714,17 +714,17 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 Action::EnterConfirmRemoveLoop
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
             _ => Action::None,
         },
         Mode::ConfirmKill => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::KillSelected,
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
             _ => Action::None,
         },
         Mode::ConfirmQuit => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::Quit,
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::CancelToControl,
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
             _ => Action::None,
         },
         Mode::Help => match key.code {
@@ -732,7 +732,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
             | KeyCode::Char('q')
             | KeyCode::Char('?')
             | KeyCode::Enter
-            | KeyCode::F(1) => Action::CancelToControl,
+            | KeyCode::F(1) => Action::BackToMain,
             _ => Action::None,
         },
     }
@@ -2108,7 +2108,7 @@ pub struct App {
     pub pane_size: (u16, u16), // (rows, cols)
     pub selection: Option<ActiveSelection>,
     pub search: Option<SearchState>,
-    /// When false, `copy_to_clipboard`/`paste_into_attached` are no-ops.
+    /// When false, `copy_to_clipboard`/`paste_into_pane` are no-ops.
     /// Tests that don't specifically exercise the clipboard round-trip set
     /// this to `false` so `cargo test` never touches the real system
     /// clipboard.
@@ -2118,7 +2118,12 @@ pub struct App {
     pub experiment_links:
         std::collections::HashMap<usize, crate::tracing::experiments::ExperimentLink>,
     drag_owner: Option<DragOwner>,
-    just_detached: bool,
+    /// Where the keys go on the main screen (`docs/keyboard.md`).
+    pub focus: Focus,
+    /// Whether the terminal reports modifiers (the kitty keyboard protocol
+    /// on Unix, always on Windows): decides whether the hints print the
+    /// `⌘`/`Ctrl+Shift` chords or their protocol-free forms.
+    pub keys_enhanced: bool,
     next_id: usize,
     tx: Sender<AppEvent>,
     tracing: Option<crate::tracing::TraceRuntime>,
@@ -2265,7 +2270,7 @@ impl App {
             history_sessions,
             selected_history: 0,
             history_all_projects: false,
-            mode: Mode::Control,
+            mode: Mode::Main,
             should_quit: false,
             notice: None,
             profiles,
@@ -2274,7 +2279,8 @@ impl App {
             search: None,
             clipboard_enabled: true,
             drag_owner: None,
-            just_detached: false,
+            focus: Focus::List,
+            keys_enhanced: cfg!(windows),
             next_id: 0,
             experiment_links: std::collections::HashMap::new(),
             tx,
@@ -2403,14 +2409,105 @@ impl App {
             .and_then(|s| crate::harness::Harness::detect(&s.profile.command))
     }
 
-    /// Selects and attaches to session `idx`.
+    /// Selects session `idx` and gives the pane the keyboard.
     fn attach_to_session(&mut self, idx: usize) {
         self.selected = idx;
         self.sidebar_section = SidebarSection::Active;
-        self.mode = Mode::Attached;
-        if let Some(s) = self.sessions.get_mut(idx) {
-            s.tracker.on_attach();
+        self.mode = Mode::Main;
+        self.focus_pane();
+    }
+
+    /// Gives the pane the keyboard. With no session to type into the
+    /// focus stays in the list.
+    pub fn focus_pane(&mut self) {
+        let Some(s) = self.sessions.get_mut(self.selected) else {
+            self.focus = Focus::List;
+            return;
+        };
+        s.tracker.on_attach();
+        self.focus = Focus::Pane;
+    }
+
+    /// Gives the list the keyboard.
+    pub fn focus_list(&mut self) {
+        self.focus = Focus::List;
+    }
+
+    /// `⌘E` / `Ctrl+Shift+E` / `F2`: list ⇄ pane.
+    pub fn toggle_focus(&mut self) {
+        match self.focus {
+            Focus::Pane => self.focus_list(),
+            Focus::List => self.focus_pane(),
         }
+    }
+
+    /// The keyboard is in the list of the main screen.
+    pub fn list_focused(&self) -> bool {
+        matches!(self.mode, Mode::Main) && self.focus == Focus::List
+    }
+
+    /// Where the keys go when agent-mux starts: the pane when there is a
+    /// session to type into, else the list.
+    pub fn focus_start(&mut self) {
+        if self.sessions.is_empty() {
+            self.focus = Focus::List;
+        } else {
+            self.selected = self.selected.min(self.sessions.len() - 1);
+            self.sidebar_section = SidebarSection::Active;
+            self.focus_pane();
+        }
+    }
+
+    /// The first start after the attach mode went away says so, once: a
+    /// marker file next to the saved sessions remembers it.
+    pub fn show_focus_notice_once(&mut self) {
+        let Some(marker) = crate::persistence::sessions_file_path()
+            .and_then(|p| p.parent().map(|d| d.join("focus-notice-shown")))
+        else {
+            return;
+        };
+        if marker.exists() {
+            return;
+        }
+        let e = self.keys_enhanced;
+        self.notice = Some(Notice::info(format!(
+            "No more attach: type straight into the session. {} reaches the list, {} the help.",
+            crate::keymap::chord_label(crate::keymap::Chord::ToggleFocus, e),
+            crate::keymap::chord_label(crate::keymap::Chord::Help, e),
+        )));
+        let _ = std::fs::write(marker, "");
+    }
+
+    /// The pane shows the selected session (not a card for the row under
+    /// the list cursor), so a click in it may take the keyboard.
+    fn pane_shows_session(&self) -> bool {
+        if self.sessions.get(self.selected).is_none() {
+            return false;
+        }
+        self.focus == Focus::Pane
+            || self.sidebar_hidden
+            || (self.sidebar_section == SidebarSection::Active
+                && matches!(self.agent_row(), Some(agents_list::AgentKind::Session(_))))
+    }
+
+    /// A paste from the host terminal (`⌘V`, `Ctrl+Shift+V`, middle click)
+    /// is typing: it lands in the pane and the pane takes the keyboard.
+    pub fn handle_paste(&mut self, text: &str) {
+        if !matches!(self.mode, Mode::Main) {
+            return;
+        }
+        if self.focus == Focus::List {
+            self.focus_pane();
+        }
+        if self.focus != Focus::Pane {
+            return;
+        }
+        let Some(s) = self.sessions.get(self.selected) else {
+            return;
+        };
+        let bytes = paste_bytes(text, s.parser.screen().bracketed_paste());
+        self.snap_selected_to_live();
+        self.forward_bytes(&bytes);
     }
 
     /// Toggles the sidebar visibility, expanding or contracting the harness.
@@ -2528,7 +2625,7 @@ impl App {
     pub fn refresh_briefing_if_needed(&mut self, now: Instant) {
         let is_trace_preview_visible = !self.sidebar_hidden
             && self.sidebar_section == SidebarSection::Agents
-            && matches!(self.mode, Mode::Control)
+            && self.list_focused()
             && self
                 .selected_agent()
                 .is_some_and(|a| a.capabilities.iter().any(|c| c == "trace.read"));
@@ -3063,8 +3160,12 @@ impl App {
         }
     }
 
-    pub fn attached(&self) -> Option<usize> {
-        matches!(self.mode, Mode::Attached).then_some(self.selected)
+    /// The session the pane's keyboard goes to, when the pane has it.
+    pub fn pane_session(&self) -> Option<usize> {
+        (matches!(self.mode, Mode::Main)
+            && self.focus == Focus::Pane
+            && self.selected < self.sessions.len())
+        .then_some(self.selected)
     }
 
     fn session_index(&self, id: usize) -> Option<usize> {
@@ -3083,10 +3184,10 @@ impl App {
     }
 
     /// The cursor style that should currently be applied to the terminal.
-    /// When attached, follows the active session's DECSCUSR requests (or
-    /// DefaultUserShape). When detached/in dialog/in browser, uses DefaultUserShape.
+    /// With the pane focused, follows the session's DECSCUSR requests (or
+    /// DefaultUserShape); in the list, a dialog or a browser, DefaultUserShape.
     pub fn active_cursor_style(&self) -> crossterm::cursor::SetCursorStyle {
-        if matches!(self.mode, Mode::Attached) {
+        if self.pane_session().is_some() {
             self.sessions
                 .get(self.selected)
                 .and_then(|s| s.cursor_style())
@@ -3117,8 +3218,14 @@ impl App {
         self.copy_to_clipboard(text);
     }
 
-    fn paste_into_attached(&mut self) {
-        if !matches!(self.mode, Mode::Attached) {
+    fn paste_into_pane(&mut self) {
+        if !matches!(self.mode, Mode::Main) {
+            return;
+        }
+        if self.focus == Focus::List {
+            self.focus_pane();
+        }
+        if self.focus != Focus::Pane {
             return;
         }
         if !self.clipboard_enabled {
@@ -3146,7 +3253,6 @@ impl App {
             return;
         }
         if self.handle_ux_key(key) {
-            self.just_detached = false;
             return;
         }
         let app_cursor = self
@@ -3176,7 +3282,7 @@ impl App {
                 .sessions
                 .iter()
                 .any(|s| matches!(s.status(now), Status::Working)),
-            just_detached: self.just_detached,
+            focus: self.focus,
             app_cursor,
             sidebar_section: self.sidebar_section,
             sidebar_hidden: self.sidebar_hidden,
@@ -3190,10 +3296,6 @@ impl App {
             key
         };
         let action = dispatch(&self.mode, key, &ctx);
-        // any Control-mode key other than the literal-send consumes the flag
-        if !matches!(action, Action::Detach | Action::SendLiteralDetachKey) {
-            self.just_detached = false;
-        }
         self.apply(action, key, now);
     }
 
@@ -3208,53 +3310,33 @@ impl App {
         }
     }
 
-    /// Terminal-emulator chords intercepted before v1 dispatch (Ghostty /
-    /// Windows Terminal convention: the app reserves Ctrl+Shift and
-    /// Shift+navigation for itself; everything else still reaches the
-    /// agent). Returns true if the key was consumed. Tasks: selection
-    /// (Ctrl+Shift+C/V) and search (Ctrl+Shift+F) add arms here.
+    /// The chord layer (`keymap::chord`): the keys that work with either
+    /// focus and never reach the harness. Returns true if the key was
+    /// consumed. Plain `Ctrl+F` opens the search too while the list has
+    /// the keyboard, since nothing is forwarded from there.
     fn handle_ux_key(&mut self, key: &KeyEvent) -> bool {
-        if !matches!(self.mode, Mode::Control | Mode::Attached) {
+        use crate::keymap::Chord;
+        if !matches!(self.mode, Mode::Main) {
             return false;
         }
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        enum Chord {
-            LineUp,
-            LineDown,
-            PageUp,
-            PageDown,
-            Top,
-            Bottom,
-            Copy,
-            Paste,
-            OpenSearch,
-            ToggleSidebar,
-        }
-        let chord = match (key.code, shift, ctrl) {
-            (KeyCode::Up, true, _) => Chord::LineUp,
-            (KeyCode::Down, true, _) => Chord::LineDown,
-            // macOS keyboards commonly report Fn+Up/Fn+Down as an
-            // unmodified PageUp/PageDown. These are documented app-level
-            // scroll shortcuts, so accept them with or without Shift.
-            (KeyCode::PageUp, _, _) => Chord::PageUp,
-            (KeyCode::PageDown, _, _) => Chord::PageDown,
-            (KeyCode::Home, true, _) => Chord::Top,
-            (KeyCode::End, true, _) => Chord::Bottom,
-            (KeyCode::Char('c') | KeyCode::Char('C'), true, true) => Chord::Copy,
-            (KeyCode::Char('v') | KeyCode::Char('V'), true, true) => Chord::Paste,
-            (KeyCode::Char('f') | KeyCode::Char('F'), true, true) => Chord::OpenSearch,
-            // plain Ctrl+F only when nothing is forwarded (Control mode)
-            (KeyCode::Char('f') | KeyCode::Char('F'), false, true)
-                if matches!(self.mode, Mode::Control) =>
-            {
-                Chord::OpenSearch
+        let plain_ctrl_f = self.focus == Focus::List
+            && key.modifiers == KeyModifiers::CONTROL
+            && matches!(key.code, KeyCode::Char('f') | KeyCode::Char('F'));
+        let chord = if plain_ctrl_f {
+            Chord::Find
+        } else {
+            match crate::keymap::chord(key) {
+                Some(c) => c,
+                None => return false,
             }
-            (KeyCode::Char('b') | KeyCode::Char('B'), true, true) => Chord::ToggleSidebar,
-            _ => return false,
         };
         let page = i32::from(self.pane_size.0.saturating_sub(1).max(1));
         match chord {
+            Chord::ToggleFocus => self.toggle_focus(),
+            Chord::ToggleSidebar => self.toggle_sidebar(),
+            Chord::PrevSession => self.select_adjacent_session(-1),
+            Chord::NextSession => self.select_adjacent_session(1),
+            Chord::Help => self.mode = Mode::Help,
             Chord::LineUp => self.scroll_selected(3),
             Chord::LineDown => self.scroll_selected(-3),
             Chord::PageUp => self.scroll_selected(page),
@@ -3270,13 +3352,38 @@ impl App {
                 }
             }
             Chord::Copy => self.copy_selection(),
-            Chord::Paste => self.paste_into_attached(),
-            Chord::OpenSearch => {
+            Chord::Paste => self.paste_into_pane(),
+            Chord::Find => {
                 self.search = Some(SearchState::new());
             }
-            Chord::ToggleSidebar => self.toggle_sidebar(),
         }
         true
+    }
+
+    /// `⌘↑` / `⌘↓`: the previous or next session in list order, without
+    /// moving the focus; with the pane focused the pane follows.
+    fn select_adjacent_session(&mut self, step: i32) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let last = self.sessions.len() - 1;
+        let next = if step < 0 {
+            self.selected.saturating_sub(1)
+        } else {
+            (self.selected + 1).min(last)
+        };
+        if next == self.selected {
+            return;
+        }
+        self.selection = None;
+        self.selected = next;
+        self.sidebar_section = SidebarSection::Active;
+        self.agent_focus = None;
+        if self.focus == Focus::Pane
+            && let Some(s) = self.sessions.get_mut(self.selected)
+        {
+            s.tracker.on_attach();
+        }
     }
 
     fn handle_search_key(&mut self, key: &KeyEvent) {
@@ -3447,7 +3554,7 @@ impl App {
         // Attached (the pane showing a live child): during the NewSession
         // dialog or a Confirm prompt the pane underneath must not react to
         // clicks/drags/wheel meant for the dialog.
-        if !matches!(self.mode, Mode::Control | Mode::Attached) {
+        if !matches!(self.mode, Mode::Main) {
             return;
         }
         // Click on the status bar sidebar toggle button "[b] sidebar"
@@ -3494,10 +3601,13 @@ impl App {
                             self.toggle_agent_fold();
                             return;
                         }
-                        if matches!(self.mode, Mode::Attached)
-                            && let Some(s) = self.sessions.get_mut(self.selected)
-                        {
-                            s.tracker.on_attach();
+                        // a session row takes the keyboard to its pane,
+                        // the way a tab click does; any other row keeps
+                        // it in the list
+                        if matches!(line.kind, agents_list::AgentKind::Session(_)) {
+                            self.focus_pane();
+                        } else {
+                            self.focus = Focus::List;
                         }
                     }
                 }
@@ -3587,7 +3697,14 @@ impl App {
             }
             None => return,
         };
-        let attached = matches!(self.mode, Mode::Attached);
+        // a click in the pane, when it shows a session, takes the keyboard
+        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.focus == Focus::List
+            && self.pane_shows_session()
+        {
+            self.focus_pane();
+        }
+        let attached = self.focus == Focus::Pane;
         let shift = ev.modifiers.contains(KeyModifiers::SHIFT);
         // read child terminal state up front so no borrow is held across
         // the mutating calls below
@@ -3841,7 +3958,7 @@ impl App {
             Action::EnterConfirmRemoveLoop => {
                 if matches!(self.mode, Mode::ConfirmRemoveLoop) {
                     self.remove_selected_loop();
-                    self.mode = Mode::Control;
+                    self.mode = Mode::Main;
                 } else if self.selected_loop().is_some() {
                     self.mode = Mode::ConfirmRemoveLoop;
                 }
@@ -3921,30 +4038,7 @@ impl App {
                     self.agent_focus = None;
                 }
             }
-            Action::Attach => {
-                if let Some(s) = self.sessions.get_mut(self.selected) {
-                    s.tracker.on_attach();
-                    self.mode = Mode::Attached;
-                }
-            }
-            Action::Detach => {
-                self.mode = Mode::Control;
-                self.just_detached = true;
-            }
-            Action::SendLiteralDetachKey => {
-                self.just_detached = false;
-                self.snap_selected_to_live();
-                // Only re-attach if the literal Ctrl+Q actually made it to
-                // the pty -- a failed write already dropped us to Control
-                // via forward_bytes (spec: write failure -> error + Exited
-                // + Control), and re-attaching here would override that.
-                if self.forward_bytes(&[0x11])
-                    && let Some(s) = self.sessions.get_mut(self.selected)
-                {
-                    s.tracker.on_attach();
-                    self.mode = Mode::Attached;
-                }
-            }
+            Action::FocusPane => self.focus_pane(),
             Action::ForwardBytes(bytes) => {
                 self.snap_selected_to_live();
                 self.forward_bytes(&bytes);
@@ -3981,7 +4075,7 @@ impl App {
                 if let Some(s) = self.sessions.get_mut(self.selected) {
                     s.kill();
                 }
-                self.mode = Mode::Control;
+                self.mode = Mode::Main;
                 let _ = self.save_active_sessions();
             }
             Action::RemoveSelected => {
@@ -4038,7 +4132,7 @@ impl App {
                 self.respawn_selected();
             }
             Action::ToggleTracing => self.toggle_selected_tracing(),
-            Action::CancelToControl => self.mode = Mode::Control,
+            Action::BackToMain => self.mode = Mode::Main,
             Action::DialogKey => self.handle_dialog_key(key),
         }
     }
@@ -4047,9 +4141,9 @@ impl App {
     /// succeeded (or there was no selected session to write to -- a no-op
     /// counts as success for callers deciding whether to proceed), `false`
     /// if the write failed. On failure this already applies the full spec
-    /// consequence (status-bar error, session marked Exited, drop to
-    /// Control) -- callers must not re-attach or otherwise treat the
-    /// session as still live when this returns `false`.
+    /// consequence (status-bar error, session marked Exited, the keyboard
+    /// back in the list) -- callers must not refocus the pane or otherwise
+    /// treat the session as still live when this returns `false`.
     fn forward_bytes(&mut self, bytes: &[u8]) -> bool {
         if let Some(s) = self.sessions.get_mut(self.selected)
             && let Err(e) = s.write_bytes(bytes)
@@ -4065,7 +4159,8 @@ impl App {
             if let Some(trace) = &s.trace {
                 trace.mark_exited(None);
             }
-            self.mode = Mode::Control;
+            self.mode = Mode::Main;
+            self.focus = Focus::List;
             return false;
         }
         true
@@ -4087,7 +4182,7 @@ impl App {
         };
         match dialog.handle_key(key, &self.profiles) {
             DialogResult::Consumed => {}
-            DialogResult::Cancel => self.mode = Mode::Control,
+            DialogResult::Cancel => self.mode = Mode::Main,
             DialogResult::Submit => {
                 // a copy: preparing an agent needs the App itself
                 let dialog = dialog.clone();
@@ -4200,7 +4295,8 @@ impl App {
                         self.sessions.push(session);
                         self.selected = self.sessions.len() - 1;
                         self.sidebar_section = SidebarSection::Active;
-                        self.mode = Mode::Control;
+                        self.mode = Mode::Main;
+                        self.focus_pane();
                         let _ = self.save_active_sessions();
                         if let Some(link) = link {
                             self.experiment_links.insert(id, link);
@@ -4263,7 +4359,7 @@ impl App {
                     browser.reload_sessions();
                     browser.focused = BrowserPane::Sessions;
                 } else {
-                    self.mode = Mode::Control;
+                    self.mode = Mode::Main;
                 }
             }
             KeyCode::Tab | KeyCode::Right => {
@@ -4380,7 +4476,7 @@ impl App {
         };
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::Control;
+                self.mode = Mode::Main;
             }
             KeyCode::Tab | KeyCode::BackTab => {
                 history.focused_pane = match history.focused_pane {
@@ -4475,7 +4571,7 @@ impl App {
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::Control;
+                self.mode = Mode::Main;
             }
             KeyCode::Tab | KeyCode::BackTab => {
                 state.field = match state.field {
@@ -4523,10 +4619,11 @@ impl App {
                 match launch_res {
                     Ok(_) => {
                         self.sidebar_section = SidebarSection::Active;
-                        self.mode = Mode::Attached;
+                        self.mode = Mode::Main;
+                        self.focus_pane();
                     }
                     Err(e) => {
-                        self.mode = Mode::Control;
+                        self.mode = Mode::Main;
                         self.notice = Some(Notice::error(format!("Skill launch failed: {e}")));
                     }
                 }
@@ -4557,6 +4654,7 @@ impl App {
                 .filter(|l| l.paused())
                 .count(),
             loops_kill_switch: self.loop_registry.pause_all,
+            keys_enhanced: self.keys_enhanced,
         };
         self.mode = Mode::About(Box::new(about::AboutState {
             rows: about::rows(&facts),
@@ -4874,7 +4972,7 @@ impl App {
                 if view.focus == ConfigPane::Detail {
                     view.focus = ConfigPane::List;
                 } else {
-                    self.mode = Mode::Control;
+                    self.mode = Mode::Main;
                 }
             }
             KeyCode::Right | KeyCode::Tab => view.focus = ConfigPane::Detail,
@@ -5018,7 +5116,7 @@ impl App {
                 if view.focus == SkillsPane::Detail {
                     view.focus = SkillsPane::Skills;
                 } else if !view.clear_filter() {
-                    self.mode = Mode::Control;
+                    self.mode = Mode::Main;
                 }
             }
             KeyCode::Tab => view.next_tab(),
@@ -5384,12 +5482,13 @@ impl App {
                 self.sessions.push(session);
                 self.selected = self.sessions.len() - 1;
                 self.sidebar_section = SidebarSection::Active;
-                self.mode = Mode::Control;
+                self.mode = Mode::Main;
+                self.focus_pane();
                 let _ = self.save_active_sessions();
             }
             Err(e) => {
                 self.notice = Some(Notice::error(format!("Failed to resume session: {e}")));
-                self.mode = Mode::Control;
+                self.mode = Mode::Main;
             }
         }
     }
@@ -5411,6 +5510,7 @@ impl App {
                 session.skill_id = skill_id;
                 self.next_id += 1;
                 self.sessions[self.selected] = session;
+                self.focus_pane();
                 let _ = self.save_active_sessions();
             }
             Err(e) => self.notice = Some(Notice::error(format!("respawn failed: {e}"))),
@@ -5457,7 +5557,7 @@ impl App {
 
     pub fn handle_pty_output(&mut self, id: usize, bytes: &[u8], now: Instant) {
         let focused = self
-            .attached()
+            .pane_session()
             .and_then(|i| self.sessions.get(i))
             .map(|s| s.id)
             == Some(id);
@@ -5494,9 +5594,10 @@ impl App {
             self.finish_loop_run_for_session(id);
             self.finish_workflow_session_for_session(id);
             self.finish_plan_for_session(id);
-            // if we were attached to it, drop back to Control
-            if self.attached() == Some(i) {
-                self.mode = Mode::Control;
+            // the pane's session is gone: the keyboard goes back to the
+            // list, where `r` respawns and `d` removes it
+            if self.pane_session() == Some(i) {
+                self.focus = Focus::List;
             }
             // A loop's or a workflow's headless session is not one the
             // History list waits for, and the rescan runs on this thread:
@@ -5591,7 +5692,7 @@ mod dispatch_tests {
             agent_row: RowTag::Other,
             selected_status: selected,
             any_working: false,
-            just_detached: false,
+            focus: Focus::List,
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
             sidebar_hidden: false,
@@ -5602,19 +5703,19 @@ mod dispatch_tests {
     fn control_navigation() {
         let c = ctx(Some(Status::Idle));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('j')), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Char('j')), &c),
             Action::MoveDown
         ));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Down), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Down), &c),
             Action::MoveDown
         ));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('k')), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Char('k')), &c),
             Action::MoveUp
         ));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Up), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Up), &c),
             Action::MoveUp
         ));
     }
@@ -5623,18 +5724,18 @@ mod dispatch_tests {
     fn control_attach_and_new() {
         let c = ctx(Some(Status::Idle));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Enter), &c),
-            Action::Attach
+            dispatch(&Mode::Main, &key(KeyCode::Enter), &c),
+            Action::FocusPane
         ));
         // n makes a new agent: the chooser, which starts on a session here
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('n')), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Char('n')), &c),
             Action::OpenNewAgent
         ));
         let mut hidden = ctx(Some(Status::Idle));
         hidden.sidebar_hidden = true;
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('n')), &hidden),
+            dispatch(&Mode::Main, &key(KeyCode::Char('n')), &hidden),
             Action::OpenNewSession
         ));
     }
@@ -5674,19 +5775,19 @@ mod dispatch_tests {
     fn digits_select_sessions_and_question_mark_opens_help() {
         let c = ctx(Some(Status::Idle));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('1')), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Char('1')), &c),
             Action::SelectSession(0)
         ));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('9')), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Char('9')), &c),
             Action::SelectSession(8)
         ));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('?')), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Char('?')), &c),
             Action::OpenHelp
         ));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::F(1)), &c),
+            dispatch(&Mode::Main, &key(KeyCode::F(1)), &c),
             Action::OpenHelp
         ));
         // any close key leaves Help
@@ -5698,7 +5799,7 @@ mod dispatch_tests {
         ] {
             assert!(matches!(
                 dispatch(&Mode::Help, &key(code), &c),
-                Action::CancelToControl
+                Action::BackToMain
             ));
         }
         assert!(matches!(
@@ -5711,12 +5812,12 @@ mod dispatch_tests {
     fn control_toggle_tracing() {
         let c = ctx(Some(Status::Idle));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('t')), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Char('t')), &c),
             Action::ToggleTracing
         ));
         // Shift+T is the trace browser, not a second toggle
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('T')), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Char('T')), &c),
             Action::OpenTraceBrowser
         ));
     }
@@ -5725,7 +5826,7 @@ mod dispatch_tests {
     fn enter_with_no_sessions_is_noop() {
         let c = ctx(None);
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Enter), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Enter), &c),
             Action::None
         ));
     }
@@ -5734,21 +5835,21 @@ mod dispatch_tests {
     fn x_confirms_kill_when_running_removes_when_exited() {
         let running = ctx(Some(Status::Working));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('x')), &running),
+            dispatch(&Mode::Main, &key(KeyCode::Char('x')), &running),
             Action::EnterConfirmKill
         ));
         // x stops; there is nothing to stop in an exited session: d removes it
         let exited = ctx(Some(Status::Exited(Some(0))));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('x')), &exited),
+            dispatch(&Mode::Main, &key(KeyCode::Char('x')), &exited),
             Action::None
         ));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('d')), &exited),
+            dispatch(&Mode::Main, &key(KeyCode::Char('d')), &exited),
             Action::RemoveSelected
         ));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('d')), &running),
+            dispatch(&Mode::Main, &key(KeyCode::Char('d')), &running),
             Action::EnterConfirmKill
         ));
     }
@@ -5757,7 +5858,7 @@ mod dispatch_tests {
     fn uppercase_x_clears_all_exited_sessions_from_active() {
         let running = ctx(Some(Status::Working));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('X')), &running),
+            dispatch(&Mode::Main, &key(KeyCode::Char('X')), &running),
             Action::RemoveExited
         ));
 
@@ -5765,7 +5866,7 @@ mod dispatch_tests {
         hidden.sidebar_hidden = true;
         hidden.sidebar_section = SidebarSection::Agents;
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('X')), &hidden),
+            dispatch(&Mode::Main, &key(KeyCode::Char('X')), &hidden),
             Action::RemoveExited
         ));
 
@@ -5778,7 +5879,7 @@ mod dispatch_tests {
             let mut visible = ctx(Some(Status::Working));
             visible.sidebar_section = section;
             assert!(matches!(
-                dispatch(&Mode::Control, &key(KeyCode::Char('X')), &visible),
+                dispatch(&Mode::Main, &key(KeyCode::Char('X')), &visible),
                 Action::None
             ));
         }
@@ -5788,12 +5889,12 @@ mod dispatch_tests {
     fn r_respawns_only_exited() {
         let exited = ctx(Some(Status::Exited(Some(1))));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('r')), &exited),
+            dispatch(&Mode::Main, &key(KeyCode::Char('r')), &exited),
             Action::RespawnSelected
         ));
         let running = ctx(Some(Status::Working));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('r')), &running),
+            dispatch(&Mode::Main, &key(KeyCode::Char('r')), &running),
             Action::None
         ));
     }
@@ -5802,47 +5903,53 @@ mod dispatch_tests {
     fn q_quits_directly_unless_something_is_working() {
         let quiet = ctx(Some(Status::Idle));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('q')), &quiet),
+            dispatch(&Mode::Main, &key(KeyCode::Char('q')), &quiet),
             Action::Quit
         ));
         let mut busy = ctx(Some(Status::Idle));
         busy.any_working = true;
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('q')), &busy),
+            dispatch(&Mode::Main, &key(KeyCode::Char('q')), &busy),
             Action::EnterConfirmQuit
         ));
     }
 
     #[test]
-    fn attached_ctrl_q_detaches_everything_else_forwards() {
-        let c = ctx(Some(Status::Working));
-        assert!(matches!(
-            dispatch(&Mode::Attached, &ctrl_q(), &c),
-            Action::Detach
-        ));
-        match dispatch(&Mode::Attached, &key(KeyCode::Char('a')), &c) {
+    fn pane_focus_forwards_everything_including_ctrl_q() {
+        let mut c = ctx(Some(Status::Working));
+        c.focus = Focus::Pane;
+        match dispatch(&Mode::Main, &ctrl_q(), &c) {
+            Action::ForwardBytes(b) => assert_eq!(b, vec![0x11]),
+            other => panic!("expected ForwardBytes, got {other:?}"),
+        }
+        match dispatch(&Mode::Main, &key(KeyCode::Char('a')), &c) {
             Action::ForwardBytes(b) => assert_eq!(b, b"a".to_vec()),
+            other => panic!("expected ForwardBytes, got {other:?}"),
+        }
+        // the list's verbs are text here
+        match dispatch(&Mode::Main, &key(KeyCode::Char('q')), &c) {
+            Action::ForwardBytes(b) => assert_eq!(b, b"q".to_vec()),
             other => panic!("expected ForwardBytes, got {other:?}"),
         }
         // unencodable keys are swallowed, not errors
         assert!(matches!(
-            dispatch(&Mode::Attached, &key(KeyCode::CapsLock), &c),
+            dispatch(&Mode::Main, &key(KeyCode::CapsLock), &c),
             Action::None
         ));
     }
 
     #[test]
-    fn double_ctrl_q_sends_literal() {
-        let mut c = ctx(Some(Status::Working));
-        c.just_detached = true;
+    fn list_focus_esc_goes_to_the_pane_and_ctrl_q_does_nothing() {
+        let c = ctx(Some(Status::Working));
         assert!(matches!(
-            dispatch(&Mode::Control, &ctrl_q(), &c),
-            Action::SendLiteralDetachKey
+            dispatch(&Mode::Main, &key(KeyCode::Esc), &c),
+            Action::FocusPane
         ));
-        // without the flag, Ctrl+Q in Control does nothing
-        c.just_detached = false;
+        assert!(matches!(dispatch(&Mode::Main, &ctrl_q(), &c), Action::None));
+        // nothing to type into: Esc is nothing
+        let none = ctx(None);
         assert!(matches!(
-            dispatch(&Mode::Control, &ctrl_q(), &c),
+            dispatch(&Mode::Main, &key(KeyCode::Esc), &none),
             Action::None
         ));
     }
@@ -5862,7 +5969,7 @@ mod confirm_modes {
             agent_row: RowTag::Other,
             selected_status: selected,
             any_working: false,
-            just_detached: false,
+            focus: Focus::List,
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
             sidebar_hidden: false,
@@ -5882,11 +5989,11 @@ mod confirm_modes {
         ));
         assert!(matches!(
             dispatch(&Mode::ConfirmKill, &key(KeyCode::Esc), &c),
-            Action::CancelToControl
+            Action::BackToMain
         ));
         assert!(matches!(
             dispatch(&Mode::ConfirmKill, &key(KeyCode::Char('n')), &c),
-            Action::CancelToControl
+            Action::BackToMain
         ));
         assert!(matches!(
             dispatch(&Mode::ConfirmQuit, &key(KeyCode::Char('y')), &c),
@@ -5894,7 +6001,7 @@ mod confirm_modes {
         ));
         assert!(matches!(
             dispatch(&Mode::ConfirmQuit, &key(KeyCode::Esc), &c),
-            Action::CancelToControl
+            Action::BackToMain
         ));
     }
 
@@ -6438,7 +6545,7 @@ mod history_tests {
             agent_row: RowTag::Other,
             selected_status: None,
             any_working: false,
-            just_detached: false,
+            focus: Focus::List,
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
             sidebar_hidden: false,
@@ -6448,11 +6555,11 @@ mod history_tests {
     #[test]
     fn l_in_control_opens_history() {
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('l')), &ctx()),
+            dispatch(&Mode::Main, &key(KeyCode::Char('l')), &ctx()),
             Action::OpenSessionHistory
         ));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('L')), &ctx()),
+            dispatch(&Mode::Main, &key(KeyCode::Char('L')), &ctx()),
             Action::OpenSessionHistory
         ));
     }
@@ -6637,11 +6744,11 @@ mod history_tests {
     #[test]
     fn shift_t_opens_the_trace_browser_and_t_toggles_tracing() {
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('T')), &ctx()),
+            dispatch(&Mode::Main, &key(KeyCode::Char('T')), &ctx()),
             Action::OpenTraceBrowser
         ));
         assert!(matches!(
-            dispatch(&Mode::Control, &key(KeyCode::Char('t')), &ctx()),
+            dispatch(&Mode::Main, &key(KeyCode::Char('t')), &ctx()),
             Action::ToggleTracing
         ));
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
@@ -6657,7 +6764,7 @@ mod history_tests {
             Action::BrowserKey
         ));
         app.handle_key(&key(KeyCode::Esc), Instant::now());
-        assert!(matches!(app.mode, Mode::Control));
+        assert!(matches!(app.mode, Mode::Main));
     }
 
     #[test]
@@ -6701,7 +6808,7 @@ mod history_tests {
 
         // Esc returns to Control
         app.handle_key(&key(KeyCode::Esc), Instant::now());
-        assert!(matches!(app.mode, Mode::Control));
+        assert!(matches!(app.mode, Mode::Main));
     }
 
     #[test]

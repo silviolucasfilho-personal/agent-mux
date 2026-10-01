@@ -240,7 +240,7 @@ fn enter_opens_the_run_dialog_with_the_documents_args() {
         d.error
     );
     press(&mut app, KeyCode::Esc);
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
 }
 
 #[test]
@@ -275,7 +275,7 @@ fn c_opens_the_compose_dialog_and_w_the_view() {
     };
     assert_eq!(v.tab, agent_mux::app::runs_view::RunTab::Sessions);
     press(&mut app, KeyCode::Esc);
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
 }
 
 #[test]

@@ -444,7 +444,7 @@ impl App {
     /// selected, on `tab`.
     pub fn open_runs_view_on(&mut self, key: &str, tab: RunTab) {
         self.open_runs_view();
-        if let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Control) {
+        if let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Main) {
             if let Some(i) = st.items.iter().position(|i| i.run.key() == key) {
                 st.selected = i;
             }
@@ -457,7 +457,7 @@ impl App {
     /// The runs view on the newest run of loop `loop_id`.
     pub fn open_runs_view_on_loop(&mut self, loop_id: &str) {
         self.open_runs_view();
-        if let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Control) {
+        if let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Main) {
             // its newest run, else its next one
             let of = |i: &RunItem| i.run.loop_id() == Some(loop_id);
             let at = st
@@ -494,7 +494,7 @@ impl App {
         if !due {
             return;
         }
-        if let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Control) {
+        if let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Main) {
             self.reload_runs_view(&mut st);
             self.mode = Mode::RunsView(st);
         }
@@ -596,7 +596,7 @@ impl App {
     }
 
     pub fn handle_runs_view_key(&mut self, key: &KeyEvent) {
-        let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Control) else {
+        let Mode::RunsView(mut st) = std::mem::replace(&mut self.mode, Mode::Main) else {
             return;
         };
         let n = st.items.len();
@@ -706,7 +706,7 @@ impl App {
             self.load_run_steps(&mut st);
         }
         // an action that opened another screen keeps it
-        if stay && matches!(self.mode, Mode::Control) {
+        if stay && matches!(self.mode, Mode::Main) {
             self.mode = Mode::RunsView(st);
         }
     }
@@ -784,10 +784,8 @@ impl App {
             Some(i) => {
                 self.selected = i;
                 self.selection = None;
-                self.mode = Mode::Attached;
-                if let Some(s) = self.sessions.get_mut(i) {
-                    s.tracker.on_attach();
-                }
+                self.mode = Mode::Main;
+                self.focus_pane();
                 false
             }
             None => {

@@ -1017,7 +1017,7 @@ impl App {
                 return;
             }
         };
-        let Mode::AgentEditor(mut ed) = std::mem::replace(&mut self.mode, Mode::Control) else {
+        let Mode::AgentEditor(mut ed) = std::mem::replace(&mut self.mode, Mode::Main) else {
             return;
         };
         let super::agent_editor::Body::Flow(st) = &mut ed.body else {

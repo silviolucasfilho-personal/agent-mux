@@ -630,7 +630,7 @@ exit 0
     assert_eq!(dialog.backend, config::Backend::Both, "the global default");
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(
-        matches!(app.mode, Mode::Control),
+        matches!(app.mode, Mode::Main),
         "spawn failed: {:?}",
         app.notice
     );
@@ -653,7 +653,7 @@ exit 0
     );
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(
-        matches!(app.mode, Mode::Control),
+        matches!(app.mode, Mode::Main),
         "spawn failed: {:?}",
         app.notice
     );

@@ -389,7 +389,7 @@ fn leaving_with_changes_asks_first_and_a_document_opens_in_the_builder() {
     assert!(matches!(app.mode, Mode::AgentEditor(_)), "n stays");
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('y'));
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
 
     // o on a built-in: every step is there, and nothing changed yet
     let pos = app
@@ -417,7 +417,7 @@ fn leaving_with_changes_asks_first_and_a_document_opens_in_the_builder() {
     assert_eq!(s.problems(), 0, "{:?}", s.checks);
     press(&mut app, KeyCode::Esc);
     assert!(
-        matches!(app.mode, Mode::Control),
+        matches!(app.mode, Mode::Main),
         "unchanged: closes without asking"
     );
 }
@@ -586,10 +586,7 @@ fn a_persona_is_written_and_edited_in_the_agent_editor() {
     assert!(saved.contains("\"edit\""), "{saved}");
     assert_eq!(persona(&app).original.as_deref(), Some("my-agent"));
     press(&mut app, KeyCode::Esc);
-    assert!(
-        matches!(app.mode, Mode::Control),
-        "saved: nothing to confirm"
-    );
+    assert!(matches!(app.mode, Mode::Main), "saved: nothing to confirm");
     assert!(app.personas.contains(&"my-agent".to_string()));
 
     // a built-in one: the change is written as the library copy

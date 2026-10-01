@@ -145,7 +145,7 @@ async fn heimdall_is_listed_in_the_agents_section_and_the_picker_defaults_to_its
         assert_eq!(state.selected_harness(), Harness::Claude);
     }
     app.handle_key(&key(KeyCode::Esc), Instant::now());
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
 
     // h also opens it while Agents is focused
     app.handle_key(&key(KeyCode::Char('h')), Instant::now());
@@ -163,7 +163,7 @@ async fn a_running_agent_is_attached_to_instead_of_relaunched() {
     assert_eq!(app.running_skill_session("heimdall"), Some(session_idx));
     assert_eq!(app.running_skill_harness("heimdall"), Some(Harness::Codex));
 
-    app.mode = Mode::Control;
+    app.mode = Mode::Main;
     app.sidebar_section = SidebarSection::Agents;
     app.selected_agent = heimdall;
     let text = screen(&app);
@@ -174,7 +174,7 @@ async fn a_running_agent_is_attached_to_instead_of_relaunched() {
     );
 
     app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Attached));
+    assert!(app.pane_session().is_some());
     assert_eq!(app.selected, session_idx);
 
     // Any harness asked for while it runs attaches; no second process.
@@ -187,7 +187,8 @@ async fn a_running_agent_is_attached_to_instead_of_relaunched() {
     // Once it exits, the picker is available again.
     app.sessions[session_idx].mark_exited();
     assert_eq!(app.running_skill_session("heimdall"), None);
-    app.mode = Mode::Control;
+    app.mode = Mode::Main;
+    app.focus_list();
     app.sidebar_section = SidebarSection::Agents;
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(matches!(app.mode, Mode::SkillLauncher(_)));
@@ -215,7 +216,7 @@ async fn the_picker_installs_and_launches_on_the_chosen_harness() {
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
+    assert!(app.pane_session().is_some(), "{:?}", app.notice);
 
     let session = &app.sessions[app.selected];
     assert_eq!(session.skill_id.as_deref(), Some("heimdall"));
@@ -241,7 +242,8 @@ async fn the_picker_installs_and_launches_on_the_chosen_harness() {
     assert!(installed.join(".agent-mux.json").is_file());
 
     // the Skills view reports the same launch on the Claude row only
-    app.mode = Mode::Control;
+    app.mode = Mode::Main;
+    app.focus_list();
     app.handle_key(&key(KeyCode::Char('S')), Instant::now());
     let text = screen(&app);
     assert!(text.contains("running [claude]"), "{text}");
@@ -287,7 +289,7 @@ async fn the_skill_launcher_selects_a_workspace_before_launch() {
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now());
 
-    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
+    assert!(app.pane_session().is_some(), "{:?}", app.notice);
     assert_eq!(app.sessions[app.selected].dir, selected);
     app.kill_all();
 }
@@ -457,7 +459,7 @@ async fn l_launches_the_selected_harness_and_reopening_s_restores_executions() {
     assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
 
     app.handle_key(&key(KeyCode::Char('r')), Instant::now());
-    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
+    assert!(app.pane_session().is_some(), "{:?}", app.notice);
     assert_eq!(
         app.sessions[app.selected].skill_id.as_deref(),
         Some("heimdall")
@@ -468,7 +470,8 @@ async fn l_launches_the_selected_harness_and_reopening_s_restores_executions() {
             .is_file()
     );
 
-    app.mode = Mode::Control;
+    app.mode = Mode::Main;
+    app.focus_list();
     app.handle_key(&key(KeyCode::Char('S')), Instant::now());
     assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
     let Mode::SkillsView(view) = &app.mode else {
@@ -540,7 +543,7 @@ async fn s_opens_the_workbench_grouped_by_harness() {
     );
     assert_eq!(shape(&app).len(), 6);
     app.handle_key(&key(KeyCode::Esc), Instant::now());
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
     app.kill_all();
 }
 

@@ -449,7 +449,7 @@ fn clicking_a_run_selects_it_and_clicking_a_step_selects_the_session() {
     );
     // a run row has no session keys: Enter does not attach
     app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
 }
 
 /// A run that starts while the browser is open has to find its header:

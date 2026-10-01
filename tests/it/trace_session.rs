@@ -117,7 +117,7 @@ exit 0
     assert!(matches!(app.mode, Mode::NewSession(_)));
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(
-        matches!(app.mode, Mode::Control),
+        matches!(app.mode, Mode::Main),
         "spawn failed: {:?}",
         app.notice
     );
@@ -260,6 +260,7 @@ async fn toggle_tracing_attaches_and_stops_on_demand() {
             .map(|n| n.text.clone())
             .unwrap_or_default()
     };
+    app.focus_list();
     app.handle_key(&key(KeyCode::Char('t')), Instant::now());
     assert!(
         app.sessions[0].trace.is_some(),
@@ -391,7 +392,7 @@ exit 0
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now()); // the chooser starts on a session
     app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Control), "spawn: {:?}", app.notice);
+    assert!(matches!(app.mode, Mode::Main), "spawn: {:?}", app.notice);
 
     let exited = pump_until(&mut rx, &mut app, Duration::from_secs(20), |a| {
         matches!(a.sessions[0].status(Instant::now()), Status::Exited(_))

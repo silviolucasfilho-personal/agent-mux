@@ -77,6 +77,8 @@ pub struct AboutFacts<'a> {
     pub loops: usize,
     pub loops_paused: usize,
     pub loops_kill_switch: bool,
+    /// The terminal reports modifier keys (`App::keys_enhanced`).
+    pub keys_enhanced: bool,
 }
 
 /// Builds the overlay's rows. Pure given `facts`, except for the store
@@ -147,6 +149,16 @@ pub fn rows(facts: &AboutFacts<'_>) -> Vec<AboutRow> {
         },
     ));
     rows.push(AboutRow::Field("runtime".into(), tilde(&facts.runtime_dir)));
+    let keyboard = if cfg!(windows) || facts.keys_enhanced {
+        format!(
+            "modifiers reported: {} focuses the list, {} the sidebar",
+            crate::keymap::chord_label(crate::keymap::Chord::ToggleFocus, true),
+            crate::keymap::chord_label(crate::keymap::Chord::ToggleSidebar, true),
+        )
+    } else {
+        "no modifier reporting: ⌘ and Ctrl+Shift chords cannot reach agent-mux; F2 focuses the list, F1 help (Ghostty, iTerm2, kitty, WezTerm report them)".into()
+    };
+    rows.push(AboutRow::Field("keyboard".into(), keyboard));
     rows.push(AboutRow::Field("run id".into(), facts.run_id.to_string()));
     rows.push(AboutRow::Field(
         "sessions".into(),
@@ -210,6 +222,7 @@ mod tests {
             loops: 3,
             loops_paused: 1,
             loops_kill_switch: true,
+            keys_enhanced: true,
         }
     }
 

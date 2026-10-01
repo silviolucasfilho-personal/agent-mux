@@ -450,7 +450,7 @@ exit 0
     assert!(matches!(app.mode, Mode::NewSession(_)));
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(
-        matches!(app.mode, Mode::Control),
+        matches!(app.mode, Mode::Main),
         "spawn failed: {:?}",
         app.notice
     );

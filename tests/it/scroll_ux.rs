@@ -292,7 +292,8 @@ async fn codex_wheel_uses_the_enclosing_scrollback_even_with_mouse_capture() {
         app.sessions[0].parser.screen().mouse_protocol_mode(),
         vt100::MouseProtocolMode::None
     );
-    app.mode = Mode::Attached;
+    app.mode = Mode::Main;
+    app.focus_pane();
 
     app.handle_mouse(
         wheel(MouseEventKind::ScrollUp, KeyModifiers::NONE),
@@ -385,7 +386,7 @@ async fn forwarded_key_snaps_to_live_when_attached() {
     .await;
     assert!(ok);
     app.handle_key(&key(KeyCode::Enter), Instant::now()); // attach
-    assert!(matches!(app.mode, Mode::Attached));
+    assert!(app.pane_session().is_some());
     app.sessions[0].scroll_by(5);
     assert!(
         app.sessions[0].scrolled() > 0,
@@ -510,6 +511,7 @@ async fn selection_does_not_leak_across_sessions() {
     );
     assert!(app.displayed_selection().is_some());
     // respawn replaces the session (fresh id) -> selection no longer displayed
+    app.focus_list();
     app.handle_key(&key(KeyCode::Char('r')), Instant::now());
     assert!(app.displayed_selection().is_none());
     app.kill_all();
@@ -593,7 +595,7 @@ async fn local_drag_survives_shift_release() {
     // agent.
     app.handle_pty_output(900, b"\x1b[?1000h", Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now()); // attach (session is Exited; Enter still attaches)
-    assert!(matches!(app.mode, Mode::Attached));
+    assert!(app.pane_session().is_some());
 
     // Shift+Down forces local selection (iTerm2 rule) even though the
     // child asked for mouse events.
@@ -730,7 +732,7 @@ async fn plain_ctrl_f_opens_only_in_control_mode() {
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     // Attached: plain Ctrl+F is the agent's key (forwarded), bar stays shut
     app.handle_key(&key(KeyCode::Enter), Instant::now()); // attach (session is Exited; Enter still attaches)
-    assert!(matches!(app.mode, Mode::Attached));
+    assert!(app.pane_session().is_some());
     app.handle_key(&ctrl('f'), Instant::now());
     assert!(app.search.is_none());
 }

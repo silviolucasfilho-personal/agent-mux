@@ -3,7 +3,7 @@
 //! observed through a fake `claude` that records its arguments and
 //! environment. Everything lives under a temporary home and runtime dir.
 
-use agent_mux::app::{App, Mode, SidebarSection};
+use agent_mux::app::{App, SidebarSection};
 use agent_mux::config::{self, AgentsSettings, Profile};
 use agent_mux::skill::McpMode;
 use agent_mux::skill::launch::{HYDRATION_HINT, briefings_dir, sweep_briefings};
@@ -128,7 +128,7 @@ fn launch_heimdall(app: &mut App) {
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
+    assert!(app.pane_session().is_some(), "{:?}", app.notice);
 }
 
 #[cfg(unix)]
@@ -310,7 +310,7 @@ async fn custom_package_with_briefing_hydration_gets_schema_1_snapshot() {
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Attached), "{:?}", app.notice);
+    assert!(app.pane_session().is_some(), "{:?}", app.notice);
 
     wait_for(&f.bin.join("env.txt"));
     let env = env_map(&f.bin.join("env.txt"));

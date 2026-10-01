@@ -6,6 +6,9 @@ pub enum AppEvent {
     /// A captured terminal mouse event (wheel, click, drag). Routed by
     /// App::handle_mouse; events outside the main pane are dropped there.
     Mouse(MouseEvent),
+    /// A bracketed paste from the host terminal (`⌘V`, `Ctrl+Shift+V`,
+    /// middle click): one event, typed into the pane.
+    Paste(String),
     /// (cols, rows) as crossterm reports them.
     Resize(u16, u16),
     PtyOutput {

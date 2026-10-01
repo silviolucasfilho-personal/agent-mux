@@ -182,7 +182,7 @@ fn c_opens_the_view_grouped_by_kind_and_esc_unwinds() {
     press(&mut f.app, KeyCode::Esc);
     assert_eq!(view(&f.app).focus, ConfigPane::List);
     press(&mut f.app, KeyCode::Esc);
-    assert!(matches!(f.app.mode, Mode::Control));
+    assert!(matches!(f.app.mode, Mode::Main));
 }
 
 #[test]

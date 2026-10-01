@@ -137,7 +137,7 @@ mod overlay {
 
         app.handle_key(&key(KeyCode::Char('v')), Instant::now());
         app.handle_key(&key(KeyCode::Esc), Instant::now());
-        assert!(matches!(app.mode, Mode::Control), "Esc closes About");
+        assert!(matches!(app.mode, Mode::Main), "Esc closes About");
     }
 
     /// Prints the overlay for documentation and eyeballing:

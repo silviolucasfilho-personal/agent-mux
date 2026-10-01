@@ -71,7 +71,7 @@ The branch and commit describe the checkout the binary was **compiled** from, no
 ### Suggested first exploration
 
 1. Start agent-mux, press `n`, pick a profile, launch it in a disposable workspace.
-2. Send a short prompt, press `Ctrl+Q` to detach, and watch the trace badge on the Active row update.
+2. Send a short prompt, press `⌘E` (`Ctrl+Shift+E`, or `F2`) to reach the list, and watch the trace badge on the Active row update.
 3. Press `T` to open the Trace Browser; press `v` to cycle the Detail pane views.
 4. Run `agent-mux trace ls --all`, `agent-mux trace show <session-id> --full`, `agent-mux trace show <trace-id> --tree`.
 5. Run `agent-mux trace sql 'SELECT * FROM trace_stats ORDER BY start_ns DESC LIMIT 5'`.
@@ -296,18 +296,18 @@ Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secr
 
 ## 4. Terminal user interface: every screen and panel
 
-The TUI is a Ratatui application. `App` (`src/app.rs`) owns `Vec<Session>`, the sidebar focus, history rows, skill packages, the mode, and the trace runtime. `Mode` is:
+The TUI is a Ratatui application. `App` (`src/app.rs`) owns `Vec<Session>`, the sidebar focus, history rows, skill packages, the mode, the focus, and the trace runtime. `Mode` is:
 
 ```rust
 pub enum Mode {
-    Control, Attached,
+    Main,
     NewSession(DialogState), SessionHistory(HistoryState),
     TraceBrowser(Box<TraceBrowserState>), SkillsView(Box<SkillsViewState>),
     SkillLauncher(SkillLauncherState), ConfirmKill, ConfirmQuit, Help,
 }
 ```
 
-`SidebarSection::{Active, Agents, History}` is orthogonal to `Mode` and decides both what the main pane shows and which keys are live. `dispatch()` is a pure function from `(mode, key, context)` to an `Action`; `App::apply()` performs it. Rendering lives in `src/ui.rs`: `draw` splits the frame into body and a one-line status bar, draws the sidebar (30 columns) and main pane, then the modal overlay for the current mode.
+`Main` is the one screen with the list and the pane; `App::focus` (`Focus::List` or `Focus::Pane`) says which of the two has the keyboard, and there is no attached mode: `docs/keyboard.md`, "Where the focus is". `SidebarSection::{Active, Agents, History}` is orthogonal to `Mode` and decides both what the main pane shows and which keys are live. `dispatch()` is a pure function from `(mode, key, context)` to an `Action`; `App::apply()` performs it. The chord layer (`keymap::chord`) is matched before dispatch in `App::handle_ux_key`. Rendering lives in `src/ui.rs`: `draw` splits the frame into body and a one-line status bar, draws the sidebar (30 columns) and main pane, then the modal overlay for the current mode.
 
 ```text
 Main screen (sidebar visible)                          30 cols │ rest
@@ -322,7 +322,7 @@ Main screen (sidebar visible)                          30 cols │ rest
 ├─ History [3/12] ────────┤                                                      │
 │ [C] Fix flaky test…     │                                                      │
 └─────────────────────────┴──────────────────────────────────────────────────────┘
- [b] sidebar  [Enter] attach  [n] new  [l] logs  [S] skills  [t/T] trace  [?] help  [q] quit
+ [b] sidebar  [Enter] pane  [n] new  [l] logs  [S] skills  [t/T] trace  [?] help  [q] quit
 ```
 
 There are three separate notions of "history": terminal scrollback (memory owned by a `Session`, lost on exit), the Session Logs dialog (provider transcript files), and the Trace Browser (normalized SQLite rows).
@@ -333,7 +333,7 @@ There are three separate notions of "history": terminal scrollback (memory owned
 
 Since the agent-first redesign (`docs/superpowers/specs/2026-09-26-agent-first-design.md`) the sidebar has two sections. **Agents** lists everything runnable, one row each, under dim headings: the harness profiles (Claude Code, Codex, Antigravity) first, then `scheduled` agents (loops, `⟳ <next>`), `flows` (live runs, plans, recent runs and the workflow library, `⚙`), `skills` and `personas`. Every session is a row under the agent that started it: a plain session under its harness, a loop run under its loop, a workflow step under its run, a skill session under its skill; a run no other row stands for gets a row of its own. **History** keeps its few rows below.
 
-The list is a tree: headings in capitals with their count (`SCHEDULED 1`, `FLOWS 10`), agents under them indented, sessions under their agent on `├`/`└` branches with a `│` stem down to the last; a fold arrow (`▾`/`▸`) sits only where something folds, on a heading or an agent with sessions, and `←`/`→` fold and unfold (`←` on a session climbs to its parent, `→` on an open row steps into it), as do `Space` and a click on the arrow; a folded row stays and keeps its count or summary. A scheduled row shows its pattern with a dim second line naming its workspace and what it may change (`api · reports only`). A harness row says what its sessions are doing (`2/3 working`, `1 need you`, `2 idle`); each session under it is named by its folder and has a second, dim line: the tool it is running, else its model, turns, tokens and cost from the trace store (or `not traced`), with its profile first when it is not the harness row's. `j`/`k` walk the list (and on into History), `Tab` switches Agents ⇄ History, `1`-`9` select sessions in list order. The row under the cursor decides what the keys do, the way the old sections did: a session attaches, stops (`x`), is removed (`d`) or continues in a new session with its memory (`f`: the same Claude Code or Codex forks its conversation, `--resume <id> --fork-session` / `codex fork <id>`; any other harness, and Antigravity always, gets its whole transcript as a Markdown file under `<runtime>/handoffs/` and a first message to read it: every prompt and answer whole, tool arguments cut past 2 kB and outputs past 4 kB, and past about 200 kB the older tool calls one line each; a Codex conversation brings the rollouts it was forked from. The conversation comes from the trace store, else the one a resumed session carries, else, tracing off, the one transcript the harness wrote in the session's folder since it started. The new session's title and its sidebar line say `↳ continues <profile · folder>`, which a restart keeps; a restart never forks again or resends the handover message; `src/handoff.rs`); a harness starts a session (`Enter`); a scheduled row runs now (`r`), pauses (`p`), is edited (`e`) or removed (`d`); a flow row runs (`Enter`), opens in the agent editor (`e`) or is stopped (`x`); a skill launches (`Enter`); a persona opens in the agent editor (`Enter`/`e`) and runs as a session (`r`); an on-demand task agent runs (`Enter`, `r`) and is edited (`e`). `n` anywhere opens the new-agent chooser (describe it, blank, or a template), which starts on the kind of row the cursor is on. The status bar and the help overlay follow the row.
+The list is a tree: headings in capitals with their count (`SCHEDULED 1`, `FLOWS 10`), agents under them indented, sessions under their agent on `├`/`└` branches with a `│` stem down to the last; a fold arrow (`▾`/`▸`) sits only where something folds, on a heading or an agent with sessions, and `←`/`→` fold and unfold (`←` on a session climbs to its parent, `→` on an open row steps into it), as do `Space` and a click on the arrow; a folded row stays and keeps its count or summary. A scheduled row shows its pattern with a dim second line naming its workspace and what it may change (`api · reports only`). A harness row says what its sessions are doing (`2/3 working`, `1 need you`, `2 idle`); each session under it is named by its folder and has a second, dim line: the tool it is running, else its model, turns, tokens and cost from the trace store (or `not traced`), with its profile first when it is not the harness row's. `j`/`k` walk the list (and on into History), `Tab` switches Agents ⇄ History, `1`-`9` select sessions in list order. The row under the cursor decides what the keys do, the way the old sections did: a session takes the keyboard (`Enter`), stops (`x`), is removed (`d`) or continues in a new session with its memory (`f`: the same Claude Code or Codex forks its conversation, `--resume <id> --fork-session` / `codex fork <id>`; any other harness, and Antigravity always, gets its whole transcript as a Markdown file under `<runtime>/handoffs/` and a first message to read it: every prompt and answer whole, tool arguments cut past 2 kB and outputs past 4 kB, and past about 200 kB the older tool calls one line each; a Codex conversation brings the rollouts it was forked from. The conversation comes from the trace store, else the one a resumed session carries, else, tracing off, the one transcript the harness wrote in the session's folder since it started. The new session's title and its sidebar line say `↳ continues <profile · folder>`, which a restart keeps; a restart never forks again or resends the handover message; `src/handoff.rs`); a harness starts a session (`Enter`); a scheduled row runs now (`r`), pauses (`p`), is edited (`e`) or removed (`d`); a flow row runs (`Enter`), opens in the agent editor (`e`) or is stopped (`x`); a skill launches (`Enter`); a persona opens in the agent editor (`Enter`/`e`) and runs as a session (`r`); an on-demand task agent runs (`Enter`, `r`) and is edited (`e`). `n` anywhere opens the new-agent chooser (describe it, blank, or a template), which starts on the kind of row the cursor is on. The status bar and the help overlay follow the row.
 
 The subsections below describe the older per-section model the rows reuse.
 
@@ -373,7 +373,7 @@ Title `History [<sel>/<count>]`; rows show `[C]` (Claude, magenta) or `[A]` (Ant
 
 Selection order: with the sidebar visible and Agents focused in Control mode, the agent preview; Loops focused, the loop preview; History focused (or no sessions at all), the history preview; otherwise the selected session's terminal.
 
-- **Terminal:** title `<profile> — <dir> [<status>] <badge> [SCROLL ↑ n/len]`. Rendered with `tui_term::PseudoTerminal` from the session's `vt100` screen. The child cursor is shown only when attached, visible and at the live bottom. Selection highlight is reversed video; search matches get a yellow background, the current match white bold.
+- **Terminal:** title `<profile> — <dir> [<status>] <badge> [SCROLL ↑ n/len]`. Rendered with `tui_term::PseudoTerminal` from the session's `vt100` screen. The child cursor is shown only when the pane has the keyboard, visible and at the live bottom. Selection highlight is reversed video; search matches get a yellow background, the current match white bold.
 - **History preview:** `Title`, `Provider`, `Session ID`, `Directory`, `Turns`, `Modified`, `Transcript` path, and the `[Enter]/[r]`, `[Tab]`, `[a]` actions.
 - **Generic agent preview** (`draw_generic_agent_preview`): id, origin (built-in, package directory, or custom), harnesses and default, description, then the `SKILL.md` body with light Markdown styling, and a footer whose `[Enter]` label says Launch or Attach.
 - **Telemetry briefing** (`draw_trace_briefing_preview`), the agent preview for a package that declares `trace.read` (Heimdall does): line 1 `Trace Store | Scope | Sessions | Turns | Tools | Tokens | Cost`; line 2 `Cache Status: Refreshed Ns ago` plus any refresh warning; then one card per session: `Session [launch or key] (provider) [RuntimeState] — cwd`, optional `⚡ Right Now`, `🎯 Goal`, `📝 Files`, `💻 Commands`, `💬 Last Out`, and always `📊 Metrics: turns | tools | tokens | cost`.
@@ -383,7 +383,7 @@ Selection order: with the sidebar visible and Agents focused in Control mode, th
 
 #### Status bar and search (`draw_status_bar`)
 
-Priority: search prompt, then a transient `Notice` (cleared by the next keypress; cyan/yellow/red by level), then a mode hint. Hints: Attached mode lists `Ctrl+Q detach`, `Ctrl+Shift+B`, `Shift+↑/↓`, `Ctrl+Shift+C/V`, `Ctrl+Shift+F`; Control mode hints vary by focused section and always fit 100 columns, so they name `[S] skills` and `[t/T] trace` but not every key. A left click on the bottom row at column 12 or less toggles the sidebar.
+Priority: search prompt, then a transient `Notice` (cleared by the next keypress; cyan/yellow/red by level), then a focus hint. With the pane focused the hint is the chord layer in the labels of this platform and terminal (`⌘E list · ⌘↑/⌘↓ session · ⌘B sidebar · ⌘F find · ⌘/ help`, or the `Ctrl+Shift` forms, or `F2`/`F1` when the terminal reports no modifiers: `keymap::chord_label`); with the list focused the hints vary by row and always fit 100 columns, so they name `[S] skills` and `[t/T] trace` but not every key. A left click on the bottom row at column 12 or less toggles the sidebar.
 
 Search (`src/search.rs`) turns the status bar into `Search: <query>  <n/m>`; it is a case-insensitive substring scan over scrollback plus the live screen, re-run on every keystroke and on new output for the selected session. `Enter` steps to the next **older** match, `Shift+Enter` to the next newer, `Esc` closes.
 
@@ -398,8 +398,9 @@ Every screen shares one keymap (`src/keymap.rs`, `docs/keyboard.md`): `n` new, `
 | `j`/`k`, `↓`/`↑` | Move within the focused section; at the edges continue into the adjacent section (Active ↔ Agents ↔ Loops ↔ History). |
 | `Tab`, `BackTab` | Both advance Active → Agents → Loops → History → Active (BackTab does **not** reverse). Entering Agents rescans packages. With the sidebar hidden, cycle active sessions. |
 | `1`-`9` | Select active session; only when Active is focused or the sidebar is hidden. |
-| `Enter` | Active: attach. Agents: open the harness picker, or attach to the running agent session. Loops: the runs view on the loop's newest run. History: resume. |
-| `r` | Active: respawn, only when the selected session has exited (new PTY, same profile and directory, tracing replanned; an agent session keeps its skill id). Agents: picker/attach. Loops: run now (pre-flight still applies). History: resume. |
+| `Enter` | Active: the pane takes the keyboard. Agents: open the harness picker, or focus the running agent session. Loops: the runs view on the loop's newest run. History: resume. |
+| `Esc` | The pane takes the keyboard (back one level from the list). |
+| `r` | Active: respawn, only when the selected session has exited (new PTY, same profile and directory, tracing replanned; an agent session keeps its skill id). Agents: picker, or focus the running session. Loops: run now (pre-flight still applies). History: resume. |
 | `p`, `n`, `e`, `d`, `o` (Loops focused) | Pause / resume, new loop, edit, remove (confirmation) the selected loop; `o` opens its task in the task library (the agent editor's What tab). |
 | `E` | Runs view (section 4.10): every run of every agent, from any section. |
 | `v` | About overlay (section 4.7): version, build date and time, branch and commit, the config, store and runtime paths, this session's counts, and the harnesses on `PATH`. |
@@ -418,20 +419,19 @@ Every screen shares one keymap (`src/keymap.rs`, `docs/keyboard.md`): `n` new, `
 | `a` | History focused: toggle current-project / all-projects scope. |
 | `b`, `Ctrl+Shift+B` | Toggle the sidebar. |
 | `?`, `F1` | Help overlay (closes with `Esc`, `q`, `?`, `Enter`, `F1`). |
-| `q` | Quit immediately, or open the quit confirmation if any session is `working`. |
-| `Ctrl+Q` | Immediately after a detach: send a literal Ctrl+Q to the child and reattach. Any other key consumes the pending chord. |
+| `q` | Quit immediately, or open the quit confirmation if any session is `working`. Any `Ctrl` chord in the list does nothing. |
 
 Kill, quit and remove-loop confirmations accept `y`, `Y`, `Enter`; `n`, `N`, `Esc` cancel.
 
-#### Attached mode
+#### Pane focused
 
-`Enter` on an active row attaches. Every ordinary key is encoded by `keys::encode_key_with_mode` and written to the PTY: UTF-8 text, `Ctrl+letter` control bytes, `Alt` as an ESC prefix, `Enter` as `\r` (`Ctrl+Enter`/`Shift+Enter` as `\n`), `Backspace` as `0x7f`, arrows honouring application cursor mode, modified arrows as `CSI 1;<mod> X`, `Alt/Ctrl+←/→` as `ESC b`/`ESC f`, `F1`-`F12`. Any forwarded key first snaps a scrolled view back to the live bottom. A failed write marks the session exited and returns to Control. `Ctrl+Q` detaches.
+`Enter` on a session row, `Esc` in the list, a click in the pane or on a session row, a new, respawned, forked or resumed session and a paste all give the pane the keyboard; agent-mux starts there when a session exists (`App::focus_start`). Every key not in the chord layer is encoded by `keys::encode_key_with_mode` and written to the PTY: UTF-8 text, `Ctrl+letter` control bytes (`Ctrl+Q` included), `Alt` as an ESC prefix, `Enter` as `\r` (`Ctrl+Enter`/`Shift+Enter` as `\n`), `Backspace` as `0x7f`, arrows honouring application cursor mode, modified arrows as `CSI 1;<mod> X`, `Alt/Ctrl+←/→` as `ESC b`/`ESC f`, `F3`-`F12`. Any forwarded key first snaps a scrolled view back to the live bottom. A failed write marks the session exited and hands the keyboard back to the list, as does the session exiting.
 
-Reserved in both Control and Attached mode: `Shift+↑/↓` scroll three lines; `PageUp`/`PageDown` one page; `Shift+Home`/`Shift+End` oldest/newest; `Ctrl+Shift+F` search (`Ctrl+F` also works in Control mode); `Ctrl+Shift+C` copy the selection; `Ctrl+Shift+V` paste (bracketed paste when the child enabled it, otherwise newlines become `\r`); `Ctrl+Shift+B` sidebar.
+The chord layer (`keymap::CHORDS`, matched by `keymap::chord` with either focus): `⌘E` / `Ctrl+Shift+E` / `F2` focus list ⇄ pane; `⌘B` / `Ctrl+Shift+B` sidebar; `⌘↑`/`⌘↓` / `Ctrl+Shift+↑/↓` previous / next session (the focus stays); `⌘F` / `Ctrl+Shift+F` search (`Ctrl+F` also works in the list); `⌘/` / `Ctrl+Shift+/` / `F1` help; `Ctrl+Shift+C` copy the selection; `Ctrl+Shift+V` paste (bracketed paste when the child enabled it, otherwise newlines become `\r`); `Shift+↑/↓` scroll three lines; `PageUp`/`PageDown` one page; `Shift+Home`/`Shift+End` oldest/newest. `⌘` arrives as `KeyModifiers::SUPER` from terminals that pass unbound `⌘` chords through the kitty keyboard protocol; `Ctrl+Shift` needs the same protocol on Unix and is native on Windows; a terminal without it (Terminal.app) gets the `F2`/`F1` forms, and the status bar, the welcome card and the About view say so (`App::keys_enhanced`). A paste from the host (`Event::Paste`, bracketed paste is enabled) lands in the pane and focuses it. `agent-mux keys` (`src/keys_cli.rs`) prints what the terminal delivers.
 
 #### Mouse
 
-Clicks select sidebar rows. Wheel over the Agents, Loops or History sidebar moves that selection; elsewhere in Control mode it scrolls the selected terminal. In the main pane, dragging selects and button release copies to the clipboard. While attached, `mouse::route_wheel` decides: Shift or not attached → local scroll; Codex inline transcript → local; the child asked for mouse reports → forwarded in SGR or legacy encoding; alternate screen without mouse capture → three arrow keys; otherwise local. `Alt`+click on the live screen moves the child cursor with arrow keys. Drag ownership is latched on button-down so a modifier change mid-drag cannot retarget it. See `src/mouse.rs` and `src/selection.rs`.
+Clicks select sidebar rows; a click on a session row or in the pane gives the pane the keyboard, a click on any other row keeps it in the list. Wheel over the Agents, Loops or History sidebar moves that selection; elsewhere with the list focused it scrolls the selected terminal. In the main pane, dragging selects and button release copies to the clipboard. With the pane focused, `mouse::route_wheel` decides: Shift or list focused → local scroll; Codex inline transcript → local; the child asked for mouse reports → forwarded in SGR or legacy encoding; alternate screen without mouse capture → three arrow keys; otherwise local. `Alt`+click on the live screen moves the child cursor with arrow keys. Drag ownership is latched on button-down so a modifier change mid-drag cannot retarget it. See `src/mouse.rs` and `src/selection.rs`.
 
 ### 4.3 New session dialog (`draw_new_session_dialog`)
 

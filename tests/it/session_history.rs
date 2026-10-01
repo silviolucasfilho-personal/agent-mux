@@ -87,7 +87,7 @@ async fn test_app_history_flow_and_navigation() {
     );
 
     // Initial state: Control mode
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
 
     // Press 'l' -> opens SessionHistory
     app.handle_key(&key(KeyCode::Char('l')), Instant::now());
@@ -143,7 +143,7 @@ async fn test_app_history_flow_and_navigation() {
 
     // Press 'Esc' -> returns to Control mode
     app.handle_key(&key(KeyCode::Esc), Instant::now());
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
 }
 
 #[tokio::test]
@@ -185,7 +185,7 @@ async fn test_app_history_resume_spawns_session() {
     };
 
     app.handle_key(&key(KeyCode::Char('r')), Instant::now());
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
     assert_eq!(app.sessions.len(), 1);
     let spawned = &app.sessions[0];
     assert_eq!(spawned.profile.args, vec!["--resume", &selected_id]);
@@ -254,7 +254,7 @@ async fn test_antigravity_discovery_and_resume() {
 
     // Press 'r' to launch Antigravity session
     app.handle_key(&key(KeyCode::Char('r')), Instant::now());
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
     assert_eq!(app.sessions.len(), 1);
     assert_eq!(app.sessions[0].profile.command, "agy");
 }

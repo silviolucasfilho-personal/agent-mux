@@ -316,7 +316,7 @@ async fn a_dialog_launch_naming_an_experiment_is_recorded_when_it_ends() {
     dialog.variant = "by-hand".into();
     app.handle_key(&key(KeyCode::Enter), Instant::now());
     assert!(
-        matches!(app.mode, Mode::Control),
+        matches!(app.mode, Mode::Main),
         "spawn failed: {:?}",
         app.notice
     );

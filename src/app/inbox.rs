@@ -190,7 +190,7 @@ impl App {
         };
         let selected = state.selected_item().cloned();
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('I') => self.mode = Mode::Control,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('I') => self.mode = Mode::Main,
             KeyCode::Down | KeyCode::Char('j') => {
                 state.selected = (state.selected + 1).min(state.items.len().saturating_sub(1));
             }

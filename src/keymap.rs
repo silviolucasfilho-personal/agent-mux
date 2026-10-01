@@ -25,6 +25,29 @@
 //! Text fields: `Ctrl+J` new line (and `⌥↩` / `⇧↩` where the terminal sends
 //! them), `Ctrl+A` / `Ctrl+E` start / end, `Ctrl+W` or `⌥⌫` delete word,
 //! `Ctrl+U` clear, `Ctrl+V` paste, `Ctrl+O` compose in `$EDITOR`.
+//!
+//! # The chord layer
+//!
+//! The main screen has no modes: focus is in the list or in the pane, and
+//! with the pane focused every plain key, `Ctrl+letter`, `Alt`, `Esc` and
+//! `Tab` goes to the harness. agent-mux's own keys that must work while
+//! typing into a harness live in the layer GUI terminals reserve for the
+//! application: `⌘` on macOS, `Ctrl+Shift` on Windows and Linux (and on
+//! macOS too, for terminals that keep `⌘`). Terminals that report no
+//! modifiers at all (Terminal.app, plain xterm) deliver `Ctrl+Shift+B` as
+//! `Ctrl+B`, so the two chords that matter also have a protocol-free form:
+//! `F2` switches focus and `F1` opens help. `CHORDS` is the whole set; the
+//! status bar, the help overlay and the welcome card print from it with
+//! `chord_label`. `agent-mux keys` shows what a terminal delivers.
+//!
+//! Probed 2026-10-01 (`agent-mux keys`, see `src/keys_cli.rs`): the
+//! `Ctrl+Shift` forms need the kitty keyboard protocol on Unix (Ghostty,
+//! kitty, WezTerm, foot, iTerm2 ≥ 3.5, Alacritty ≥ 0.13, VTE ≥ 0.78) and
+//! arrive natively on Windows; `⌘` arrives as `SUPER` only from terminals
+//! that pass unbound `⌘` chords through. A chord the host terminal binds
+//! itself (`⌘F` find in Terminal.app, iTerm2 and Ghostty; `Ctrl+Shift+F`
+//! in GNOME Terminal and kitty; `⌘↑`/`⌘↓` marks in Terminal.app and iTerm2)
+//! never reaches agent-mux: its twin, or `F2`, still works.
 
 use crate::app::text_area::TextArea;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -80,6 +103,165 @@ pub const VERBS: &[(Verb, &str, &str, &str)] = &[
     (Verb::Editor, "Ctrl+O", "⌃O", "open in $EDITOR"),
     (Verb::Help, "?", "?", "help"),
 ];
+
+/// A key of the chord layer: works with either focus, never reaches the
+/// harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chord {
+    /// `⌘E` / `Ctrl+Shift+E` / `F2`: focus list ⇄ pane.
+    ToggleFocus,
+    /// `⌘B` / `Ctrl+Shift+B`: show or hide the sidebar.
+    ToggleSidebar,
+    /// `⌘↑` / `Ctrl+Shift+↑`: select the previous session.
+    PrevSession,
+    /// `⌘↓` / `Ctrl+Shift+↓`: select the next session.
+    NextSession,
+    /// `⌘F` / `Ctrl+Shift+F`: search the pane's scrollback.
+    Find,
+    /// `Ctrl+Shift+C`: copy the selection (`⌘C` is the host's).
+    Copy,
+    /// `Ctrl+Shift+V`: paste into the pane (`⌘V` is the host's).
+    Paste,
+    /// `⌘/` / `Ctrl+Shift+/` / `F1`: help.
+    Help,
+    /// `Shift+↑`: scroll three lines back.
+    LineUp,
+    /// `Shift+↓`: scroll three lines forward.
+    LineDown,
+    /// `PgUp` (`Fn+↑`): one page back.
+    PageUp,
+    /// `PgDn` (`Fn+↓`): one page forward.
+    PageDown,
+    /// `Shift+Home`: the oldest line.
+    Top,
+    /// `Shift+End`: back to live.
+    Bottom,
+}
+
+/// `(chord, macOS label, label elsewhere, protocol-free label, meaning)`.
+/// The protocol-free label is empty when the chord has no such form.
+pub const CHORDS: &[(Chord, &str, &str, &str, &str)] = &[
+    (
+        Chord::ToggleFocus,
+        "⌘E",
+        "Ctrl+Shift+E",
+        "F2",
+        "focus list ⇄ pane",
+    ),
+    (Chord::ToggleSidebar, "⌘B", "Ctrl+Shift+B", "", "sidebar"),
+    (
+        Chord::PrevSession,
+        "⌘↑",
+        "Ctrl+Shift+↑",
+        "",
+        "previous session",
+    ),
+    (Chord::NextSession, "⌘↓", "Ctrl+Shift+↓", "", "next session"),
+    (Chord::Find, "⌘F", "Ctrl+Shift+F", "", "find in the pane"),
+    (Chord::Copy, "⌃⇧C", "Ctrl+Shift+C", "", "copy the selection"),
+    (
+        Chord::Paste,
+        "⌃⇧V",
+        "Ctrl+Shift+V",
+        "",
+        "paste into the pane",
+    ),
+    (Chord::Help, "⌘/", "Ctrl+Shift+/", "F1", "help"),
+    (
+        Chord::LineUp,
+        "⇧↑",
+        "Shift+↑",
+        "Shift+↑",
+        "scroll three lines back",
+    ),
+    (
+        Chord::LineDown,
+        "⇧↓",
+        "Shift+↓",
+        "Shift+↓",
+        "scroll three lines forward",
+    ),
+    (Chord::PageUp, "Fn+↑", "PgUp", "PgUp", "one page back"),
+    (Chord::PageDown, "Fn+↓", "PgDn", "PgDn", "one page forward"),
+    (
+        Chord::Top,
+        "⇧Fn+←",
+        "Shift+Home",
+        "Shift+Home",
+        "the oldest line",
+    ),
+    (
+        Chord::Bottom,
+        "⇧Fn+→",
+        "Shift+End",
+        "Shift+End",
+        "back to live",
+    ),
+];
+
+/// The chord a key is, if any. `⌘` is `KeyModifiers::SUPER`, which only a
+/// terminal with the kitty keyboard protocol reports; the `Ctrl+Shift`
+/// forms are matched wherever the event carries both modifiers, since a
+/// terminal that delivers them meant them. Plain `Ctrl+letter` is never a
+/// chord: it is the harness's.
+pub fn chord(key: &KeyEvent) -> Option<Chord> {
+    let m = key.modifiers;
+    let shift = m.contains(KeyModifiers::SHIFT);
+    let ctrl = m.contains(KeyModifiers::CONTROL);
+    let sup = m.contains(KeyModifiers::SUPER);
+    let app = sup || (ctrl && shift);
+    let letter = |c: char, want: char| c.eq_ignore_ascii_case(&want);
+    Some(match key.code {
+        KeyCode::F(2) => Chord::ToggleFocus,
+        KeyCode::F(1) => Chord::Help,
+        KeyCode::Char(c) if app && letter(c, 'e') => Chord::ToggleFocus,
+        KeyCode::Char(c) if app && letter(c, 'b') => Chord::ToggleSidebar,
+        KeyCode::Char(c) if app && letter(c, 'f') => Chord::Find,
+        KeyCode::Char(c) if ctrl && shift && letter(c, 'c') => Chord::Copy,
+        KeyCode::Char(c) if ctrl && shift && letter(c, 'v') => Chord::Paste,
+        KeyCode::Char('/') | KeyCode::Char('?') if app => Chord::Help,
+        KeyCode::Up if app => Chord::PrevSession,
+        KeyCode::Down if app => Chord::NextSession,
+        KeyCode::Up if shift => Chord::LineUp,
+        KeyCode::Down if shift => Chord::LineDown,
+        // macOS keyboards report Fn+↑/Fn+↓ as a bare PageUp/PageDown
+        KeyCode::PageUp => Chord::PageUp,
+        KeyCode::PageDown => Chord::PageDown,
+        KeyCode::Home if shift => Chord::Top,
+        KeyCode::End if shift => Chord::Bottom,
+        _ => return None,
+    })
+}
+
+/// The label of a chord for this platform and terminal: the `⌘` form on
+/// macOS, the `Ctrl+Shift` form elsewhere, and the protocol-free form
+/// (`F2`, `F1`) when the terminal reports no modifiers (`enhanced` false
+/// on Unix).
+pub fn chord_label(c: Chord, enhanced: bool) -> &'static str {
+    chord_label_for(c, MACOS, cfg!(windows) || enhanced)
+}
+
+pub fn chord_label_for(c: Chord, macos: bool, modifiers_reported: bool) -> &'static str {
+    let Some((_, mac, other, bare, _)) = CHORDS.iter().find(|(x, ..)| *x == c) else {
+        return "";
+    };
+    if !modifiers_reported && !bare.is_empty() {
+        bare
+    } else if macos {
+        mac
+    } else {
+        other
+    }
+}
+
+/// The meaning of a chord, for the help overlay.
+pub fn chord_meaning(c: Chord) -> &'static str {
+    CHORDS
+        .iter()
+        .find(|(x, ..)| *x == c)
+        .map(|(.., m)| *m)
+        .unwrap_or("")
+}
 
 /// The label of a verb's key on this platform.
 pub fn label(v: Verb) -> &'static str {
@@ -324,5 +506,63 @@ mod tests {
         );
         apply_text(&mut t, &k(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert!(t.text.is_empty());
+    }
+
+    #[test]
+    fn chords_are_the_os_layer_and_never_a_plain_ctrl_key() {
+        let cs = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert_eq!(chord(&k(KeyCode::Char('E'), cs)), Some(Chord::ToggleFocus));
+        assert_eq!(
+            chord(&k(KeyCode::Char('e'), KeyModifiers::SUPER)),
+            Some(Chord::ToggleFocus)
+        );
+        assert_eq!(
+            chord(&k(KeyCode::F(2), KeyModifiers::NONE)),
+            Some(Chord::ToggleFocus)
+        );
+        assert_eq!(
+            chord(&k(KeyCode::Char('b'), KeyModifiers::SUPER)),
+            Some(Chord::ToggleSidebar)
+        );
+        assert_eq!(
+            chord(&k(KeyCode::Up, KeyModifiers::SUPER)),
+            Some(Chord::PrevSession)
+        );
+        assert_eq!(chord(&k(KeyCode::Down, cs)), Some(Chord::NextSession));
+        assert_eq!(
+            chord(&k(KeyCode::Up, KeyModifiers::SHIFT)),
+            Some(Chord::LineUp)
+        );
+        assert_eq!(
+            chord(&k(KeyCode::Char('/'), KeyModifiers::SUPER)),
+            Some(Chord::Help)
+        );
+        assert_eq!(
+            chord(&k(KeyCode::F(1), KeyModifiers::NONE)),
+            Some(Chord::Help)
+        );
+        // the harness's keys
+        assert_eq!(chord(&k(KeyCode::Char('b'), KeyModifiers::CONTROL)), None);
+        assert_eq!(chord(&k(KeyCode::Char('q'), KeyModifiers::CONTROL)), None);
+        assert_eq!(chord(&k(KeyCode::Char('e'), KeyModifiers::NONE)), None);
+        assert_eq!(chord(&k(KeyCode::Esc, KeyModifiers::NONE)), None);
+        assert_eq!(chord(&k(KeyCode::Up, KeyModifiers::NONE)), None);
+        // ⌘C/⌘V are the host's; only Ctrl+Shift copies and pastes here
+        assert_eq!(chord(&k(KeyCode::Char('c'), KeyModifiers::SUPER)), None);
+        assert_eq!(chord(&k(KeyCode::Char('C'), cs)), Some(Chord::Copy));
+    }
+
+    #[test]
+    fn chord_labels_follow_the_platform_and_the_terminal() {
+        assert_eq!(chord_label_for(Chord::ToggleFocus, true, true), "⌘E");
+        assert_eq!(
+            chord_label_for(Chord::ToggleFocus, false, true),
+            "Ctrl+Shift+E"
+        );
+        assert_eq!(chord_label_for(Chord::ToggleFocus, true, false), "F2");
+        assert_eq!(chord_label_for(Chord::Help, false, false), "F1");
+        // no protocol-free form: the OS label stands
+        assert_eq!(chord_label_for(Chord::ToggleSidebar, true, false), "⌘B");
+        assert_eq!(chord_meaning(Chord::Find), "find in the pane");
     }
 }

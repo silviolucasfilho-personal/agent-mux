@@ -136,14 +136,14 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => st.selected = st.selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => st.selected = (st.selected + 1).min(n - 1),
             _ => match verb(&crate::keymap::list_alias(key)) {
-                Some(Verb::Back) => self.mode = Mode::Control,
+                Some(Verb::Back) => self.mode = Mode::Main,
                 Some(Verb::Top) => st.selected = 0,
                 Some(Verb::Bottom) => st.selected = n - 1,
                 Some(Verb::PageDown) => st.selected = (st.selected + 10).min(n - 1),
                 Some(Verb::PageUp) => st.selected = st.selected.saturating_sub(10),
                 Some(Verb::Open) => {
                     let start = st.choices[st.selected].start.clone();
-                    self.mode = Mode::Control;
+                    self.mode = Mode::Main;
                     self.start_new_agent(start);
                 }
                 _ => {}

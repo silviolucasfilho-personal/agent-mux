@@ -188,6 +188,7 @@ async fn uppercase_x_removes_every_exited_session_and_keeps_running_sessions() {
         app.sessions[index].tracker.on_exit(Some(0));
     }
     app.selected = 2;
+    app.focus_list();
 
     app.handle_key(&key(KeyCode::Char('X')), Instant::now());
 
@@ -243,6 +244,7 @@ async fn test_sidebar_split_navigation() {
     ];
 
     // The cursor starts on the session, under its harness
+    app.focus_list();
     assert_eq!(app.sidebar_section, SidebarSection::Active);
     assert!(matches!(
         app.agent_row(),
@@ -438,7 +440,8 @@ async fn test_toggle_sidebar_and_fullscreen_harness() {
     let dialog_key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     app.mode = Mode::NewSession(agent_mux::app::DialogState::new(&app.profiles));
     app.handle_key(&dialog_key, Instant::now());
-    app.mode = Mode::Attached;
+    app.mode = Mode::Main;
+    app.focus_pane();
 
     let toggle_chord = KeyEvent::new(
         KeyCode::Char('b'),
@@ -474,6 +477,8 @@ async fn test_sidebar_hidden_navigation_and_mouse_click() {
     app.handle_key(&key(KeyCode::Enter), Instant::now());
 
     assert_eq!(app.sessions.len(), 2);
+    // a new session takes the keyboard; the list keys need the list
+    app.focus_list();
 
     // Hide sidebar
     app.toggle_sidebar();

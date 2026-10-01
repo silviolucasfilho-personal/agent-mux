@@ -3,7 +3,10 @@ use agent_mux::events::AppEvent;
 use agent_mux::{config, ui};
 use anyhow::Result;
 use crossterm::cursor::SetCursorStyle;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    KeyEventKind,
+};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -31,6 +34,7 @@ fn restore_terminal() {
     let _ = crossterm::execute!(
         std::io::stdout(),
         SetCursorStyle::DefaultUserShape,
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     );
@@ -61,6 +65,7 @@ async fn main() -> Result<()> {
             Some("config") => return agent_mux::config_cli::run(&args[2..]),
             Some("workflow") => return agent_mux::workflows::cli::run(&args[2..]).await,
             Some("agent") => return agent_mux::agents::cli::run(&args[2..]),
+            Some("keys") => return agent_mux::keys_cli::run(),
             Some("langfuse") => {
                 eprintln!(
                     "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\
@@ -98,6 +103,7 @@ async fn main() -> Result<()> {
         stdout(),
         EnterAlternateScreen,
         EnableMouseCapture,
+        EnableBracketedPaste,
         SetCursorStyle::DefaultUserShape
     )?;
     if matches!(
@@ -152,6 +158,11 @@ async fn main() -> Result<()> {
                     }
                     Ok(Event::Mouse(m)) => {
                         if tx.blocking_send(AppEvent::Mouse(m)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Event::Paste(text)) => {
+                        if tx.blocking_send(AppEvent::Paste(text)).is_err() {
                             break;
                         }
                     }
@@ -242,6 +253,13 @@ async fn main() -> Result<()> {
     app.loops = config::resolve_loops(cfg.loops.as_ref());
     app.workflows = config::resolve_workflows(cfg.workflows.as_ref());
     app.load_loop_registry();
+    app.keys_enhanced = KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::SeqCst);
+    // no attached mode: the keyboard starts in the pane when there is a
+    // session to type into
+    app.focus_start();
+    if app.notice.is_none() {
+        app.show_focus_notice_once();
+    }
 
     let mut draw_err = None;
     let mut current_cursor_style = crossterm::cursor::SetCursorStyle::DefaultUserShape;
@@ -322,6 +340,7 @@ fn run_editor(
             stdout(),
             EnterAlternateScreen,
             EnableMouseCapture,
+            EnableBracketedPaste,
             SetCursorStyle::DefaultUserShape
         )?;
         if enhanced
@@ -358,6 +377,7 @@ fn handle_event(app: &mut App, event: AppEvent) {
         AppEvent::PtyOutput { id, bytes } => app.handle_pty_output(id, &bytes, Instant::now()),
         AppEvent::PtyExit { id } => app.handle_pty_exit(id),
         AppEvent::Mouse(m) => app.handle_mouse(m, Instant::now()),
+        AppEvent::Paste(text) => app.handle_paste(&text),
         AppEvent::TraceStatus(message) => app.notice = Some(agent_mux::app::Notice::warn(message)),
         AppEvent::TraceStats { launch_id, stats } => app.handle_trace_stats(&launch_id, stats),
         AppEvent::AnalysisUpdated { revision, result } => {

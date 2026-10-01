@@ -65,7 +65,7 @@ async fn dialog_submit_spawns_session_and_returns_to_control() {
     let (tx, mut rx) = mpsc::channel(256);
     let mut app = App::new(shell_profiles(), None, tx);
     create_session_via_dialog(&mut app);
-    assert!(matches!(app.mode, Mode::Control));
+    assert!(matches!(app.mode, Mode::Main));
     assert_eq!(app.sessions.len(), 1);
     assert_eq!(app.selected, 0);
     // it's alive: output arrives
@@ -100,24 +100,48 @@ async fn dialog_submit_with_bad_directory_stays_open_with_error() {
 }
 
 #[tokio::test]
-async fn attach_detach_and_literal_ctrl_q() {
+async fn focus_moves_between_list_and_pane_and_ctrl_q_is_forwarded() {
+    use agent_mux::app::Focus;
     let (tx, mut rx) = mpsc::channel(256);
     let mut app = App::new(shell_profiles(), None, tx);
     create_session_via_dialog(&mut app);
     let now = Instant::now();
-    app.handle_key(&key(KeyCode::Enter), now); // attach
-    assert!(matches!(app.mode, Mode::Attached));
-    assert_eq!(app.attached(), Some(0));
+    assert!(matches!(app.mode, Mode::Main));
+    // a new session takes the keyboard; nothing to attach
+    assert_eq!(app.focus, Focus::Pane);
+    assert_eq!(app.pane_session(), Some(0));
+    // Ctrl+Q is the harness's: it is forwarded and the focus stays
     let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
-    app.handle_key(&ctrl_q, now); // detach
-    assert!(matches!(app.mode, Mode::Control));
-    app.handle_key(&ctrl_q, now); // literal Ctrl+Q -> re-attached
-    assert!(matches!(app.mode, Mode::Attached));
+    app.handle_key(&ctrl_q, now);
+    assert_eq!(app.focus, Focus::Pane);
+    // the chord layer moves the focus: Ctrl+Shift+E, F2, Esc, Enter
+    let toggle = KeyEvent::new(
+        KeyCode::Char('E'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    app.handle_key(&toggle, now);
+    assert_eq!(app.focus, Focus::List);
+    assert_eq!(app.pane_session(), None);
+    app.handle_key(&key(KeyCode::F(2)), now);
+    assert_eq!(app.focus, Focus::Pane);
+    app.handle_key(&KeyEvent::new(KeyCode::Char('e'), KeyModifiers::SUPER), now);
+    assert_eq!(app.focus, Focus::List);
+    app.handle_key(&key(KeyCode::Esc), now);
+    assert_eq!(app.focus, Focus::Pane);
+    app.handle_key(&toggle, now);
+    app.handle_key(&key(KeyCode::Enter), now);
+    assert_eq!(app.focus, Focus::Pane);
+    // a paste from the host is typing: it lands in the pane
+    app.handle_key(&toggle, now);
+    app.handle_paste("echo pasted\n");
+    assert_eq!(app.focus, Focus::Pane);
     app.kill_all();
     let _ = pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {
         matches!(a.sessions[0].status(Instant::now()), Status::Exited(_))
     })
     .await;
+    // the pane's session is gone: the keyboard goes back to the list
+    assert_eq!(app.focus, Focus::List);
 }
 
 #[tokio::test]
@@ -125,6 +149,7 @@ async fn kill_confirm_respawn_and_remove() {
     let (tx, mut rx) = mpsc::channel(256);
     let mut app = App::new(shell_profiles(), None, tx);
     create_session_via_dialog(&mut app);
+    app.focus_list();
     let now = Instant::now();
     // x on a running session -> confirm -> y kills it
     app.handle_key(&key(KeyCode::Char('x')), now);
@@ -195,6 +220,7 @@ async fn quit_asks_for_confirmation_while_working() {
     })
     .await;
     assert!(ok);
+    app.focus_list();
     let now = Instant::now();
     app.handle_key(&key(KeyCode::Char('q')), now);
     assert!(matches!(app.mode, Mode::ConfirmQuit));

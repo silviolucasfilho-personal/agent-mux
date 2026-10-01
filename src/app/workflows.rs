@@ -2191,7 +2191,7 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => {
-                self.mode = Mode::Control;
+                self.mode = Mode::Main;
             }
             KeyCode::Enter => {
                 let d = (**dialog).clone();
@@ -2416,7 +2416,7 @@ impl App {
                 };
                 match self.start_workflow_plan(req) {
                     Ok(_) => {
-                        self.mode = Mode::Control;
+                        self.mode = Mode::Main;
                         self.notice = Some(Notice::info(
                             "planning; the document appears in the runs view (W) when the planner answers",
                         ));
@@ -2454,7 +2454,7 @@ impl App {
                 };
                 match self.start_workflow_run(req) {
                     Ok(id) => {
-                        self.mode = Mode::Control;
+                        self.mode = Mode::Main;
                         self.notice = Some(Notice::info(format!(
                             "workflow {name} started ({}); W follows it",
                             &id[..8]

@@ -567,7 +567,7 @@ impl App {
         if let Mode::AgentEditor(st) = &mut self.mode {
             st.set_tab(Tab::What);
         }
-        if let Mode::AgentEditor(mut st) = std::mem::replace(&mut self.mode, Mode::Control) {
+        if let Mode::AgentEditor(mut st) = std::mem::replace(&mut self.mode, Mode::Main) {
             self.ensure_task_library(&mut st);
             if new_pattern && let Some(t) = st.tasks.as_mut() {
                 t.selected = t.items.len();
@@ -612,7 +612,7 @@ impl App {
         self.notice = Some(Notice::info(format!(
             "the built-in {name} is back; your copy was removed"
         )));
-        After::Into(Box::new(std::mem::replace(&mut self.mode, Mode::Control)))
+        After::Into(Box::new(std::mem::replace(&mut self.mode, Mode::Main)))
     }
 
     /// A planner's agent draft (`PlannedWorkflow.agent`) in the editor,
@@ -714,7 +714,7 @@ impl App {
     }
 
     pub fn handle_agent_editor_key(&mut self, key: &KeyEvent) {
-        let Mode::AgentEditor(mut st) = std::mem::replace(&mut self.mode, Mode::Control) else {
+        let Mode::AgentEditor(mut st) = std::mem::replace(&mut self.mode, Mode::Main) else {
             return;
         };
         match self.agent_editor_key(&mut st, key) {
@@ -1200,7 +1200,7 @@ impl App {
                             self.open_agent_session(&name);
                             return After::Into(Box::new(std::mem::replace(
                                 &mut self.mode,
-                                Mode::Control,
+                                Mode::Main,
                             )));
                         }
                         self.notice = Some(Notice::info(format!(

@@ -34,7 +34,7 @@ The sidebar is Agents + History (agent-first spec, 2026-09-26). `App::agent_line
 
 ## Keyboard (`src/keymap.rs`)
 
-One keymap for every screen, macOS-friendly: `n` new, `e` edit, `d` delete (asks), `x` stop, `s` save, `r` run, `Ctrl+R` reload, `R` restore built-in, `J`/`K` move, `g`/`G`, `Ctrl+D`/`Ctrl+U`, `1`-`9` tabs, `Ctrl+O` `$EDITOR`; text fields share `keymap::apply_text` (`Ctrl+J` new line, `Ctrl+A`/`Ctrl+E`, `Ctrl+W`, `Ctrl+U`). A new screen uses these keys and never gives one another meaning; the help overlay prints `keymap::VERBS`. Guide: `docs/keyboard.md`.
+One keymap for every screen, macOS-friendly: `n` new, `e` edit, `d` delete (asks), `x` stop, `s` save, `r` run, `Ctrl+R` reload, `R` restore built-in, `J`/`K` move, `g`/`G`, `Ctrl+D`/`Ctrl+U`, `1`-`9` tabs, `Ctrl+O` `$EDITOR`; text fields share `keymap::apply_text` (`Ctrl+J` new line, `Ctrl+A`/`Ctrl+E`, `Ctrl+W`, `Ctrl+U`). A new screen uses these keys and never gives one another meaning; the help overlay prints `keymap::VERBS`. The main screen has no attached mode: `App::focus` is the list or the pane (`Mode::Main`), agent-mux starts in the pane, every key not in the chord layer goes to the harness there, and the chord layer (`keymap::CHORDS`, `⌘` on macOS / `Ctrl+Shift` elsewhere / `F2`, `F1` without modifier reporting) is the only thing agent-mux keeps for itself; never bind a plain `Ctrl+letter`, `Alt`, `Esc` or `Tab` on the main screen, and probe a new chord with `agent-mux keys` (design: `docs/superpowers/specs/2026-10-01-keyboard-focus-design.md`). Guide: `docs/keyboard.md`.
 
 ## Working in this repository
 

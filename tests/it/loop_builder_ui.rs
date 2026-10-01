@@ -203,7 +203,7 @@ fn patterns_are_created_edited_as_copies_and_restored() {
     // Esc leaves; the unsaved agent the cursor gave a task asks first
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('y'));
-    assert!(matches!(app.mode, Mode::Control), "{:?}", app.mode);
+    assert!(matches!(app.mode, Mode::Main), "{:?}", app.mode);
     // o with no loop selected: a new scheduled agent on its default task
     press(&mut app, KeyCode::Char('o'));
     assert_eq!(st(&app).current().unwrap().pattern.id, "daily-triage");
