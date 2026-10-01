@@ -160,6 +160,9 @@ pub enum Action {
     /// Space in the Active section: fold or unfold the loop or workflow
     /// the selected session belongs to.
     ToggleSessionGroup,
+    ToggleAgentFold,
+    FoldAgent,
+    UnfoldAgent,
     RestartHistorySession,
     ToggleHistoryAllProjects,
     CancelToControl,
@@ -200,6 +203,7 @@ pub enum Action {
     NewSessionFromHarness,
     EditPersona,
     RunAgent,
+    ForkSession,
     DeleteWorkflowRow,
     AgentEditorKey,
     OpenLoopBuilder,
@@ -391,6 +395,7 @@ struct AgentLaunchPrep {
 pub enum RowTag {
     #[default]
     Other,
+    Header,
     Harness,
     Persona,
     /// An agent with a task it runs when you start it.
@@ -506,6 +511,19 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::RunAgent
                 }
+                // f: continue this session in a new one, with its memory
+                KeyCode::Char('f') if in_list && ctx.agent_row == RowTag::Session => {
+                    Action::ForkSession
+                }
+                KeyCode::Char(' ') if in_list => Action::ToggleAgentFold,
+                // ← folds (or climbs to the parent), → unfolds (or descends)
+                KeyCode::Left if in_list => Action::FoldAgent,
+                KeyCode::Right if in_list => Action::UnfoldAgent,
+                KeyCode::Enter | KeyCode::Char('x' | 'd' | 'r' | 't' | 'h')
+                    if in_list && ctx.agent_row == RowTag::Header =>
+                {
+                    Action::None
+                }
                 KeyCode::Char('e') if in_list && ctx.agent_row == RowTag::Task => {
                     Action::EditPersona
                 }
@@ -599,11 +617,6 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     Action::OpenLoopBuilder
                 }
 
-                KeyCode::Char(' ')
-                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Active =>
-                {
-                    Action::ToggleSessionGroup
-                }
                 KeyCode::Char('W') => Action::OpenRunsView,
                 KeyCode::Char('I') => Action::OpenInbox,
                 KeyCode::Char('v') | KeyCode::Char('V') => Action::OpenAbout,
@@ -869,6 +882,9 @@ pub struct DialogState {
     /// persona flags join the command line and its task is the opening
     /// message.
     pub agent: Option<String>,
+    /// The session this one continues (`f` on a session): the same
+    /// harness forks its conversation, another reads its transcript.
+    pub handoff: Option<usize>,
 }
 
 impl DialogState {
@@ -913,6 +929,7 @@ impl DialogState {
             resume_last: false,
             one_shot: String::new(),
             agent: None,
+            handoff: None,
             langfuse_available: false,
             experiment: String::new(),
             variant: String::new(),
@@ -2115,6 +2132,8 @@ pub struct App {
     /// `tree::GroupRef::key`. Keyed by the parent rather than by a session
     /// index, so a fold survives sessions coming and going.
     pub collapsed_groups: std::collections::HashSet<String>,
+    /// Folded headings and agent rows in the Agents list.
+    pub collapsed_agents: std::collections::HashSet<String>,
     /// Overall terminal dimensions (rows, cols).
     pub terminal_size: (u16, u16),
     /// Skill packages, loaded at startup and rescanned when the Skills
@@ -2136,7 +2155,7 @@ pub struct App {
     /// Agents with a task and no schedule: run when you start them.
     pub task_agents: Vec<String>,
 
-    /// A harness or persona row under the Agents cursor.
+    /// A heading, harness, persona, or run row under the Agents cursor.
     pub agent_focus: Option<agents_list::AgentFocus>,
     /// The section the Agents cursor was in when Tab went to History.
     pub list_section: SidebarSection,
@@ -2264,6 +2283,7 @@ impl App {
             sessions_file: None,
             sidebar_hidden: false,
             collapsed_groups: std::collections::HashSet::new(),
+            collapsed_agents: std::collections::HashSet::new(),
             terminal_size: (27, 112),
             skills,
             hidden_skills,
@@ -2683,7 +2703,15 @@ impl App {
             .iter()
             .filter(|s| !matches!(s.status(now), Status::Exited(_)))
             .map(|s| persistence::SavedSession {
-                profile: s.profile.clone(),
+                // the first message this launch sent is not sent again
+                profile: {
+                    let mut p = s.profile.clone();
+                    if !s.opening_args.is_empty() && p.args.ends_with(&s.opening_args) {
+                        p.args.truncate(p.args.len() - s.opening_args.len());
+                    }
+                    p
+                },
+                continued_from: s.continued_from.clone(),
                 dir: s.dir.clone(),
                 skill_id: s.skill_id.clone(),
                 conversation: conn
@@ -2737,6 +2765,7 @@ impl App {
                 Ok(mut session) => {
                     session.skill_id = s.skill_id;
                     session.conversation = conversation;
+                    session.continued_from = s.continued_from;
                     self.next_id += 1;
                     self.sessions.push(session);
                 }
@@ -3129,6 +3158,7 @@ impl App {
             RowTag::Other
         } else {
             match self.agent_row() {
+                Some(agents_list::AgentKind::Header(_)) => RowTag::Header,
                 Some(agents_list::AgentKind::Harness(_)) => RowTag::Harness,
                 Some(agents_list::AgentKind::Persona(n)) if self.task_agents.contains(&n) => {
                     RowTag::Task
@@ -3453,7 +3483,17 @@ impl App {
                     if let Some(at) = at
                         && lines.get(at).is_some_and(|l| l.kind.selectable())
                     {
+                        // a heading anywhere, an agent on its arrow column
+                        let line = &lines[at];
+                        let fold_click = matches!(line.kind, agents_list::AgentKind::Header(_))
+                            || (line.is_owner()
+                                && line.children > 0
+                                && ev.column == ui::agent_arrow_column(line));
                         self.select_agent_line(&lines, at);
+                        if fold_click {
+                            self.toggle_agent_fold();
+                            return;
+                        }
                         if matches!(self.mode, Mode::Attached)
                             && let Some(s) = self.sessions.get_mut(self.selected)
                         {
@@ -3747,6 +3787,9 @@ impl App {
                 }
             }
             Action::ToggleSessionGroup => self.toggle_selected_group(),
+            Action::ToggleAgentFold => self.toggle_agent_fold(),
+            Action::FoldAgent => self.fold_agent(),
+            Action::UnfoldAgent => self.unfold_agent(),
             Action::ToggleSidebarSection => {
                 if self.sidebar_hidden {
                     if !self.sessions.is_empty() {
@@ -3924,6 +3967,7 @@ impl App {
                     self.open_persona_editor(&name);
                 }
             }
+            Action::ForkSession => self.open_handoff_dialog(self.selected),
             Action::RunAgent => {
                 if let Some(agents_list::AgentKind::Persona(name)) = self.agent_focus().cloned() {
                     self.open_agent_session(&name);
@@ -4089,10 +4133,39 @@ impl App {
                     },
                     None => None,
                 };
+                // what this launch alone sends first, left out of a save
+                let mut opening_args: Vec<String> = Vec::new();
+                let continued_from = dialog.handoff.and_then(|from| {
+                    self.sessions.iter().find(|s| s.id == from).map(|s| {
+                        let folder = s
+                            .dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        format!("{} · {folder}", s.profile.name)
+                    })
+                });
+                let handoff = match dialog.handoff {
+                    Some(from) => match self.session_handoff(from, dialog.harness, &dir) {
+                        Ok(h) => Some(h),
+                        Err(e) => {
+                            let Mode::NewSession(dialog) = &mut self.mode else {
+                                return;
+                            };
+                            dialog.error = Some(e);
+                            return;
+                        }
+                    },
+                    None => None,
+                };
                 if let Some(harness) = dialog.harness {
                     let mut options = dialog.launch_options();
                     if options.model.is_none() {
                         options.model = agent.as_ref().and_then(|a| a.0.model.clone());
+                    }
+                    // the same harness copies the conversation itself
+                    if let Some(crate::handoff::Continue::Fork(id)) = &handoff {
+                        options.resume = crate::harness::Resume::Fork(id.clone());
                     }
                     if !options.is_empty() {
                         profile.args =
@@ -4107,6 +4180,12 @@ impl App {
                             profile.args.append(&mut a);
                         }
                         profile.args.extend(opening.iter().cloned());
+                        opening_args.extend(opening.iter().cloned());
+                    }
+                    // another harness reads the old conversation first
+                    if let Some(crate::handoff::Continue::Transcript(opening)) = &handoff {
+                        profile.args.extend(opening.iter().cloned());
+                        opening_args.extend(opening.iter().cloned());
                     }
                 }
                 let link = dialog.experiment_link();
@@ -4115,6 +4194,8 @@ impl App {
                 match self.spawn_traced(id, profile, dir) {
                     Ok(mut session) => {
                         session.agent = agent_name;
+                        session.opening_args = opening_args;
+                        session.continued_from = continued_from;
                         self.next_id += 1;
                         self.sessions.push(session);
                         self.selected = self.sessions.len() - 1;

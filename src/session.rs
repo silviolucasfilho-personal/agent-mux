@@ -140,6 +140,16 @@ pub struct Session {
     /// resume (History, trace browser, restart). What a save records
     /// while the trace store has not yet correlated the new launch.
     pub conversation: Option<String>,
+    /// When it was spawned: a conversation found on disk for it must be
+    /// newer (`handoff::find_on_disk`).
+    pub started_at: std::time::SystemTime,
+    /// The arguments appended for this launch only (a task agent's or a
+    /// handover's first message): a save leaves them out, so a restart
+    /// does not send them again.
+    pub opening_args: Vec<String>,
+    /// The session this one continues (`f`), as the sidebar names it:
+    /// `Claude Code · agent-mux`.
+    pub continued_from: Option<String>,
 }
 
 /// How often the exit-watcher thread polls `Child::try_wait()`.
@@ -287,6 +297,9 @@ impl Session {
             child,
             skill_id: None,
             agent: None,
+            started_at: std::time::SystemTime::now(),
+            opening_args: Vec::new(),
+            continued_from: None,
             group: None,
             briefing_path: None,
             conversation: None,

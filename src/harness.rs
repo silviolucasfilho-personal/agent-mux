@@ -107,6 +107,12 @@ pub enum Resume {
     Last,
     /// One named conversation, from the history viewer or trace browser.
     Id(String),
+    /// A copy of one named conversation under a new id, the original left
+    /// as it is: Claude Code `--resume <id> --fork-session`, Codex
+    /// `codex fork <id>` (probed on Claude Code 2.1.284, codex-cli
+    /// 0.158.0). Antigravity has none and renders nothing (`handoff`
+    /// hands its transcript over instead).
+    Fork(String),
 }
 
 /// The per-launch choices the dialog collects. Anything left unset
@@ -171,6 +177,12 @@ impl LaunchOptions {
                         });
                         out.trailing.push(id.clone());
                     }
+                    Resume::Fork(id) if harness == Harness::Claude => {
+                        out.trailing.push("--resume".into());
+                        out.trailing.push(id.clone());
+                        out.trailing.push("--fork-session".into());
+                    }
+                    Resume::Fork(_) => {}
                 }
                 if let Some(model) = self.model() {
                     out.trailing.push("--model".into());
@@ -200,6 +212,10 @@ impl LaunchOptions {
                         out.leading.push("resume".into());
                         out.leading.push(id.clone());
                     }
+                    Resume::Fork(id) => {
+                        out.leading.push("fork".into());
+                        out.leading.push(id.clone());
+                    }
                 }
                 if let Some(model) = self.model() {
                     out.trailing.push("--model".into());
@@ -218,6 +234,11 @@ impl LaunchOptions {
         }
         out
     }
+}
+
+/// Whether `harness` can fork a conversation itself (`Resume::Fork`).
+pub fn can_fork(harness: Harness) -> bool {
+    matches!(harness, Harness::Claude | Harness::Codex)
 }
 
 /// The arguments that resume one recorded conversation — the whole
@@ -252,8 +273,9 @@ pub fn restore_args(harness: Harness, saved: &[String], conversation: &str) -> V
 /// leading `resume` subcommand with `--last` or the id after it.
 fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
     if harness == Harness::Codex {
+        // a fork is a resume that copies: restoring one must not fork again
         return match args {
-            [sub, _target, rest @ ..] if sub == "resume" => rest.to_vec(),
+            [sub, _target, rest @ ..] if sub == "resume" || sub == "fork" => rest.to_vec(),
             _ => args.to_vec(),
         };
     }
@@ -264,7 +286,7 @@ fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
-        if arg == "--continue" || arg == "-c" {
+        if arg == "--continue" || arg == "-c" || arg == "--fork-session" {
             continue;
         }
         if valued.contains(&arg.as_str()) {
@@ -396,6 +418,37 @@ mod tests {
             "agy's -c means --continue; by id is --conversation"
         );
         assert_eq!(rendered(&by_id, Harness::Codex), vec!["resume", "abc-123"]);
+    }
+
+    #[test]
+    fn restoring_a_forked_session_resumes_it_and_does_not_fork_again() {
+        let claude: Vec<String> = ["--resume", "old", "--fork-session", "--model", "m"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            restore_args(Harness::Claude, &claude, "new"),
+            ["--model", "m", "--resume", "new"]
+        );
+        let codex: Vec<String> = ["fork", "old", "--yolo"].map(String::from).to_vec();
+        assert_eq!(
+            restore_args(Harness::Codex, &codex, "new"),
+            ["resume", "new", "--yolo"]
+        );
+    }
+
+    #[test]
+    fn a_fork_copies_the_conversation_where_the_harness_can() {
+        let fork = LaunchOptions {
+            resume: Resume::Fork("abc".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            fork.render(Harness::Claude).trailing,
+            ["--resume", "abc", "--fork-session"]
+        );
+        assert_eq!(fork.render(Harness::Codex).leading, ["fork", "abc"]);
+        assert_eq!(fork.render(Harness::Antigravity), Rendered::default());
+        assert!(can_fork(Harness::Codex) && !can_fork(Harness::Antigravity));
     }
 
     #[test]

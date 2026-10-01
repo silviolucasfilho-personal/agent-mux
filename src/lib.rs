@@ -5,6 +5,7 @@ pub mod build_info;
 pub mod config;
 pub mod config_cli;
 pub mod events;
+pub mod handoff;
 pub mod harness;
 pub mod history;
 pub mod keymap;

@@ -616,6 +616,38 @@ pub fn launch_conversation(conn: &Connection, launch_id: &str) -> rusqlite::Resu
     }))
 }
 
+/// The conversation a launch was correlated to: its provider, its id and
+/// the harness's transcript file, when the store knows them.
+pub fn launch_transcript(
+    conn: &Connection,
+    launch_id: &str,
+) -> rusqlite::Result<Option<(String, String, Option<String>)>> {
+    conn.query_row(
+        "SELECT s.provider, s.session_id, s.transcript_path
+         FROM launches l JOIN sessions s ON s.key = l.session_key
+         WHERE l.id = ?1",
+        params![launch_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()
+}
+
+/// The transcript file of one conversation, by provider and id.
+pub fn conversation_transcript(
+    conn: &Connection,
+    provider: &str,
+    session_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT transcript_path FROM sessions WHERE provider = ?1 AND session_id = ?2",
+            params![provider, session_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 /// Live per-launch rollup for the TUI badges.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LaunchStats {

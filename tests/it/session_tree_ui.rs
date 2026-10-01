@@ -98,7 +98,7 @@ fn a_workflow_runs_steps_gather_under_one_header() {
     ]);
     let out = render(&app, 120, 40);
     assert!(out.contains("⚙"), "a workflow run carries its glyph");
-    assert!(out.contains("map-codeba"), "the row names the workflow");
+    assert!(out.contains("map-cod"), "the row names the workflow");
     assert!(out.contains("├"), "its steps hang off it");
     assert!(
         out.contains("read:src"),
@@ -117,6 +117,96 @@ fn a_workflow_runs_steps_gather_under_one_header() {
     assert_eq!(
         lines[run + 2].kind,
         agent_mux::app::agents_list::AgentKind::Session(2)
+    );
+}
+
+#[test]
+fn space_folds_an_agent_without_losing_its_sessions() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _t) = app_with_sessions(&[None, None]);
+    let lines = app.agent_lines();
+    let harness = lines
+        .iter()
+        .position(|l| l.kind == AgentKind::Harness(0))
+        .unwrap();
+    app.select_agent_line(&lines, harness);
+    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+
+    assert_eq!(app.agent_row(), Some(AgentKind::Harness(0)));
+    assert!(
+        !app.agent_lines()
+            .iter()
+            .any(|l| matches!(l.kind, AgentKind::Session(_)))
+    );
+    assert_eq!(app.sessions.len(), 2);
+
+    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+    assert_eq!(
+        app.agent_lines()
+            .iter()
+            .filter(|l| matches!(l.kind, AgentKind::Session(_)))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn space_folds_a_section_and_keeps_its_heading_selected() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _t) = app_with_sessions(&[Some(wf("abcd1234ef", "read:src"))]);
+    let lines = app.agent_lines();
+    let flows = lines
+        .iter()
+        .position(|l| l.kind == AgentKind::Header("flows"))
+        .unwrap();
+    app.select_agent_line(&lines, flows);
+    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+
+    assert_eq!(app.agent_row(), Some(AgentKind::Header("flows")));
+    assert!(
+        app.agent_lines()
+            .iter()
+            .any(|l| l.kind == AgentKind::Header("flows"))
+    );
+    assert!(
+        !app.agent_lines()
+            .iter()
+            .any(|l| matches!(l.kind, AgentKind::Run(_)))
+    );
+
+    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
+    assert!(
+        app.agent_lines()
+            .iter()
+            .any(|l| matches!(l.kind, AgentKind::Run(_)))
+    );
+}
+
+#[test]
+fn clicking_a_heading_folds_its_rows() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _t) = app_with_sessions(&[Some(wf("abcd1234ef", "read:src"))]);
+    let lines = app.agent_lines();
+    let heights = agent_mux::ui::agent_row_heights(&lines);
+    let flows = lines
+        .iter()
+        .position(|l| l.kind == AgentKind::Header("flows"))
+        .unwrap();
+    let (agents, _) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, 0);
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: agents.y + 1 + heights[..flows].iter().sum::<usize>() as u16,
+            modifiers: KeyModifiers::NONE,
+        },
+        Instant::now(),
+    );
+    assert_eq!(app.agent_row(), Some(AgentKind::Header("flows")));
+    assert!(
+        !app.agent_lines()
+            .iter()
+            .any(|l| matches!(l.kind, AgentKind::Run(_)))
     );
 }
 
@@ -141,10 +231,14 @@ fn loose_sessions_keep_their_place_and_their_profile() {
     let out = render(&app, 120, 40);
     assert!(out.contains("p0"), "{out}");
     assert!(out.contains("p1"));
-    assert!(!out.contains("▾"), "nothing to group, no headers: {out}");
     // the harness row counts its sessions; each has a detail line
     assert!(out.contains("2 idle"), "{out}");
-    assert!(out.contains("│   p1 · not traced"), "{out}");
+    assert!(out.contains("├ 1") && out.contains("└ 2"), "{out}");
+    assert!(out.contains("│   p0 · not traced"), "{out}");
+    assert!(
+        out.contains("    p1 · not traced"),
+        "the last stem stops: {out}"
+    );
 }
 
 // ---------------------------------------------------------------- store
@@ -396,5 +490,113 @@ fn the_live_refresh_groups_a_run_that_started_after_the_browser_opened() {
         browser.session_rows().len(),
         7,
         "and joined the existing header rather than adding one"
+    );
+}
+
+/// The list is a tree: a fold arrow only where there is something to
+/// fold, headings in capitals with their count, `├`/`└` on sessions.
+#[test]
+fn the_tree_shows_arrows_only_where_something_folds() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _t) = app_with_sessions(&[None, Some(wf("abcd1234ef", "read:src"))]);
+    app.profiles.push(profile("Codex"));
+    let out = render(&app, 120, 40);
+    let row = |needle: &str| {
+        out.lines()
+            .find(|l| l.contains(needle))
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("no row {needle:?}: {out}"))
+    };
+    assert!(row("Claude Code").contains("▾ ❯ Claude Code"), "{out}");
+    assert!(
+        row("Codex").contains("  ❯ Codex") && !row("Codex").contains('▾'),
+        "nothing to fold under an empty harness: {out}"
+    );
+    assert!(row("FLOWS").contains("▾ FLOWS"), "{out}");
+    assert!(
+        row("map-cod").contains("▾ ⚙"),
+        "a run with sessions folds: {out}"
+    );
+    assert!(
+        row("understand").contains("  · understand") && !row("understand").contains('▾'),
+        "a library flow has nothing to fold: {out}"
+    );
+    assert!(
+        row("read:src").contains("└ 2 read:src"),
+        "the only step is the last: {out}"
+    );
+    // the heading counts what is under it, folded or not
+    let lines = app.agent_lines();
+    let flows = lines
+        .iter()
+        .find(|l| l.kind == AgentKind::Header("flows"))
+        .unwrap();
+    // the library's flows and the orphan run
+    assert_eq!(flows.children, app.workflow_rows().len() + 1);
+    let run = lines
+        .iter()
+        .find(|l| matches!(l.kind, AgentKind::Run(_)))
+        .unwrap();
+    assert_eq!((run.depth, run.children), (1, 1));
+}
+
+/// `←` folds the row, or climbs to the parent; `→` unfolds, or descends.
+#[test]
+fn left_and_right_fold_and_walk_the_tree() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _t) = app_with_sessions(&[None, None]);
+    let lines = app.agent_lines();
+    let second = lines
+        .iter()
+        .position(|l| l.kind == AgentKind::Session(1))
+        .unwrap();
+    app.select_agent_line(&lines, second);
+    // ← on a session: up to its harness
+    app.handle_key(&key(KeyCode::Left), Instant::now());
+    assert_eq!(app.agent_row(), Some(AgentKind::Harness(0)));
+    // ← on the harness: folded
+    app.handle_key(&key(KeyCode::Left), Instant::now());
+    assert!(app.agent_is_folded(&AgentKind::Harness(0)));
+    assert_eq!(app.agent_row(), Some(AgentKind::Harness(0)));
+    // → unfolds; → again steps onto the first session
+    app.handle_key(&key(KeyCode::Right), Instant::now());
+    assert!(!app.agent_is_folded(&AgentKind::Harness(0)));
+    assert_eq!(app.agent_row(), Some(AgentKind::Harness(0)));
+    app.handle_key(&key(KeyCode::Right), Instant::now());
+    assert_eq!(app.agent_row(), Some(AgentKind::Session(0)));
+    let out = render(&app, 120, 40);
+    assert!(out.contains("├ 1") && out.contains("└ 2"), "{out}");
+}
+
+/// A click on an agent's arrow folds it; a click on its name only selects.
+#[test]
+fn clicking_the_arrow_folds_an_agent() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _t) = app_with_sessions(&[None]);
+    let lines = app.agent_lines();
+    let heights = agent_mux::ui::agent_row_heights(&lines);
+    let harness = lines
+        .iter()
+        .position(|l| l.kind == AgentKind::Harness(0))
+        .unwrap();
+    let (agents, _) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, 0);
+    let click = |column: u16| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row: agents.y + 1 + heights[..harness].iter().sum::<usize>() as u16,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse(click(10), Instant::now());
+    assert!(
+        !app.agent_is_folded(&AgentKind::Harness(0)),
+        "the name selects"
+    );
+    app.handle_mouse(
+        click(agent_mux::ui::agent_arrow_column(&lines[harness])),
+        Instant::now(),
+    );
+    assert!(
+        app.agent_is_folded(&AgentKind::Harness(0)),
+        "the arrow folds"
     );
 }

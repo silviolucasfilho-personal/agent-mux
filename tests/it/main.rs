@@ -19,6 +19,7 @@ mod mcp_protocol;
 mod persistent_sessions;
 mod pty_session;
 mod scroll_ux;
+mod session_handoff;
 mod session_history;
 mod session_tree_ui;
 mod skill_hydrate;

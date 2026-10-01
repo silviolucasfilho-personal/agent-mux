@@ -98,7 +98,7 @@ fn the_sidebar_is_agents_and_history_and_a_loop_is_an_agent() {
     app.select_first_row_of(SidebarSection::Loops);
     assert_eq!(app.sidebar_section, SidebarSection::Loops);
     let screen = render(&app, 120, 34);
-    assert!(screen.contains(" scheduled"), "{screen}");
+    assert!(screen.contains("SCHEDULED"), "{screen}");
     assert!(screen.contains("daily-triage"), "{screen}");
     // Tab goes to History and back to the same row
     app.handle_key(&key(KeyCode::Tab), Instant::now());
@@ -504,13 +504,15 @@ fn a_loop_is_named_by_its_workspace_and_its_hints_fit() {
     app.loop_registry.add(entry(&temp, "daily-triage"));
     app.sidebar_section = SidebarSection::Loops;
     let screen = render(&app, 100, 34);
-    let row = screen
-        .lines()
-        .find(|l| l.contains("daily-triage") && l.starts_with('│'))
+    let rows: Vec<&str> = screen.lines().collect();
+    let at = rows
+        .iter()
+        .position(|l| l.contains("daily-triage") && l.starts_with('│'))
         .unwrap();
     assert!(
-        row.contains("daily-triage proj"),
-        "the row names the workspace: {row}"
+        rows[at + 1].contains("proj · reports only"),
+        "the line under the row names the workspace: {}",
+        rows[at + 1]
     );
     let title = screen.lines().next().unwrap();
     assert!(

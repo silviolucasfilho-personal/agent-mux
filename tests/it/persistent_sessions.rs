@@ -93,6 +93,7 @@ async fn restoring_a_saved_antigravity_session_resumes_its_conversation() {
             dir: temp_dir.path().to_path_buf(),
             skill_id: None,
             conversation: Some("8fcec510-6f3b-44c9-aca5-830f7a9eeeb5".into()),
+            continued_from: None,
         }],
     )
     .unwrap();
