@@ -7,9 +7,9 @@ vendor/*/target/
 
 # Loop runtime state: written by agent-mux and the loop skills on every run,
 # recreated by the scaffolder when missing.
-loop-ledger.json
-loop-run-log.md
-*-state.md
-STATE.md
+/loop-ledger.json
+/loop-run-log.md
+/*-state.md
+/STATE.md
 .claude/agents/
 .codex/agents/
