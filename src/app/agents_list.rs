@@ -53,8 +53,19 @@ impl AgentKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentLine {
     pub kind: AgentKind,
-    /// 1 for a session under its agent.
+    /// How deep the row sits: a heading or a harness 0, an agent under a
+    /// heading 1, a session one more than its owner.
     pub depth: u8,
+    /// What folds under the row, listed or not: a heading's agents, an
+    /// agent's sessions. A row with none shows no fold arrow.
+    pub children: usize,
+}
+
+impl AgentLine {
+    /// A row that owns sessions (anything but a session).
+    pub fn is_owner(&self) -> bool {
+        !matches!(self.kind, AgentKind::Session(_))
+    }
 }
 
 /// A heading, harness, persona, or run row under the cursor, remembered with the
@@ -101,7 +112,7 @@ impl App {
         let kind = match &lines[at].kind {
             AgentKind::Session(_) => lines[..at]
                 .iter()
-                .rfind(|l| l.depth == 0)
+                .rfind(|l| l.is_owner())
                 .map(|l| l.kind.clone()),
             kind => Some(kind.clone()),
         };
@@ -114,6 +125,42 @@ impl App {
         }
         if !self.collapsed_agents.insert(key.clone()) {
             self.collapsed_agents.remove(&key);
+        }
+    }
+
+    /// `←`: folds the row under the cursor; on a session, or on a row
+    /// with nothing to fold, the cursor goes to the parent instead.
+    pub fn fold_agent(&mut self) {
+        let lines = self.agent_lines();
+        let Some(at) = self.agent_cursor(&lines) else {
+            return;
+        };
+        let line = &lines[at];
+        let foldable = line.is_owner() && line.children > 0 && !self.agent_is_folded(&line.kind);
+        if foldable {
+            self.toggle_agent_fold();
+            return;
+        }
+        // the nearest row above that is shallower
+        if let Some(parent) = lines[..at].iter().rposition(|l| l.depth < line.depth) {
+            self.select_agent_line(&lines, parent);
+        }
+    }
+
+    /// `→`: unfolds the row under the cursor; an unfolded one moves the
+    /// cursor onto its first child.
+    pub fn unfold_agent(&mut self) {
+        let lines = self.agent_lines();
+        let Some(at) = self.agent_cursor(&lines) else {
+            return;
+        };
+        let line = &lines[at];
+        if line.is_owner() && line.children > 0 {
+            if self.agent_is_folded(&line.kind) {
+                self.toggle_agent_fold();
+            } else if lines.get(at + 1).is_some_and(|l| l.depth > line.depth) {
+                self.select_agent_line(&lines, at + 1);
+            }
         }
     }
 
@@ -165,7 +212,8 @@ impl App {
             .map(|i| self.owner_of(i, &rows))
             .collect();
         let mut out = Vec::new();
-        let push = |out: &mut Vec<AgentLine>, kind: AgentKind| {
+        // an agent at `depth`, its sessions one deeper unless folded
+        let push = |out: &mut Vec<AgentLine>, kind: AgentKind, depth: u8| {
             let children: Vec<usize> = owners
                 .iter()
                 .enumerate()
@@ -173,28 +221,40 @@ impl App {
                 .map(|(i, _)| i)
                 .collect();
             let folded = self.agent_is_folded(&kind);
-            out.push(AgentLine { kind, depth: 0 });
+            out.push(AgentLine {
+                kind,
+                depth,
+                children: children.len(),
+            });
             if !folded {
                 for i in children {
                     out.push(AgentLine {
                         kind: AgentKind::Session(i),
-                        depth: 1,
+                        depth: depth + 1,
+                        children: 0,
                     });
                 }
             }
         };
-        for p in 0..self.profiles.len() {
-            push(&mut out, AgentKind::Harness(p));
-        }
-        if !self.loop_registry.loops.is_empty() {
+        // a heading with `count` agents under it, listed unless folded
+        let heading = |out: &mut Vec<AgentLine>, name: &'static str, count: usize| -> bool {
+            let kind = AgentKind::Header(name);
+            let folded = self.agent_is_folded(&kind);
             out.push(AgentLine {
-                kind: AgentKind::Header("scheduled"),
+                kind,
                 depth: 0,
+                children: count,
             });
-            if !self.agent_is_folded(&AgentKind::Header("scheduled")) {
-                for i in 0..self.loop_registry.loops.len() {
-                    push(&mut out, AgentKind::Loop(i));
-                }
+            !folded
+        };
+        for p in 0..self.profiles.len() {
+            push(&mut out, AgentKind::Harness(p), 0);
+        }
+        if !self.loop_registry.loops.is_empty()
+            && heading(&mut out, "scheduled", self.loop_registry.loops.len())
+        {
+            for i in 0..self.loop_registry.loops.len() {
+                push(&mut out, AgentKind::Loop(i), 1);
             }
         }
         let mut runs: Vec<AgentKind> = Vec::new();
@@ -203,51 +263,29 @@ impl App {
                 runs.push(o.clone());
             }
         }
-        if !rows.is_empty() || !runs.is_empty() {
-            out.push(AgentLine {
-                kind: AgentKind::Header("flows"),
-                depth: 0,
-            });
-            if !self.agent_is_folded(&AgentKind::Header("flows")) {
-                for r in runs {
-                    push(&mut out, r);
-                }
-                for i in 0..rows.len() {
-                    push(&mut out, AgentKind::Flow(i));
-                }
+        if (!rows.is_empty() || !runs.is_empty())
+            && heading(&mut out, "flows", rows.len() + runs.len())
+        {
+            for r in runs {
+                push(&mut out, r, 1);
+            }
+            for i in 0..rows.len() {
+                push(&mut out, AgentKind::Flow(i), 1);
             }
         }
-        if !self.skills.is_empty() {
-            out.push(AgentLine {
-                kind: AgentKind::Header("skills"),
-                depth: 0,
-            });
-            if !self.agent_is_folded(&AgentKind::Header("skills")) {
-                for i in 0..self.skills.len() {
-                    push(&mut out, AgentKind::Skill(i));
-                }
+        if !self.skills.is_empty() && heading(&mut out, "skills", self.skills.len()) {
+            for i in 0..self.skills.len() {
+                push(&mut out, AgentKind::Skill(i), 1);
             }
         }
-        if !self.task_agents.is_empty() {
-            out.push(AgentLine {
-                kind: AgentKind::Header("on demand"),
-                depth: 0,
-            });
-            if !self.agent_is_folded(&AgentKind::Header("on demand")) {
-                for name in &self.task_agents {
-                    push(&mut out, AgentKind::Persona(name.clone()));
-                }
+        if !self.task_agents.is_empty() && heading(&mut out, "on demand", self.task_agents.len()) {
+            for name in &self.task_agents {
+                push(&mut out, AgentKind::Persona(name.clone()), 1);
             }
         }
-        if !self.personas.is_empty() {
-            out.push(AgentLine {
-                kind: AgentKind::Header("personas"),
-                depth: 0,
-            });
-            if !self.agent_is_folded(&AgentKind::Header("personas")) {
-                for name in &self.personas {
-                    push(&mut out, AgentKind::Persona(name.clone()));
-                }
+        if !self.personas.is_empty() && heading(&mut out, "personas", self.personas.len()) {
+            for name in &self.personas {
+                push(&mut out, AgentKind::Persona(name.clone()), 1);
             }
         }
         out

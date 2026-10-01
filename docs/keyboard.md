@@ -46,7 +46,7 @@ For `Option` combinations, turn on "Use Option as Meta key" (Terminal.app) or "E
 
 | Place | Keys of its own |
 | --- | --- |
-| Main screen | `b` sidebar, `Tab` section, `Space` fold a heading or agent (on a session, fold its parent); click a heading or its arrow to fold with the mouse. `l` session logs, `t`/`T` tracing / traces, `S` skills, `C` configuration, `E` or `W` runs view, `I` inbox, `v` about, `K` loops kill switch, `X` clear exited sessions, `f` on a session: continue it in a new session with its memory |
+| Main screen | `b` sidebar, `Tab` section, `Space` fold a heading or agent (on a session, fold its parent); click a heading or its arrow to fold with the mouse. `l` session logs, `t`/`T` tracing / traces, `S` skills, `C` configuration, `E` or `W` runs view, `I` inbox, `v` about, `K` loops kill switch, `X` clear exited sessions, `f` on a session: continue it in a new session with its memory; `←` folds the row under the cursor (on a session, or a row with nothing to fold, it climbs to the parent), `→` unfolds (or steps onto the first child), `Space` toggles a fold, a click on the arrow folds too |
 | Loops section | `p` pause, `o` its task in the task library (the editor's What tab), `f` a new pattern there |
 | Workflows section | `c` compose a workflow for a task |
 | Trace browser | `/` search, `v` detail view, `Space` fold, `a` all projects, `+` verdict |

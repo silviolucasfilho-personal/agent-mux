@@ -77,7 +77,7 @@ fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
     // flows are rows of the Agents list, under their own heading
     let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
     let text = render(&app, 120, 40);
-    assert!(text.contains(" flows"), "{text}");
+    assert!(text.contains("FLOWS"), "{text}");
     assert_eq!(app.sidebar_section, SidebarSection::Active);
     assert_eq!(
         app.workflow_list.len(),
@@ -998,7 +998,7 @@ fn a_recent_run_is_listed_above_the_library_and_opens_in_the_view() {
     );
 
     let text = render(&app, 120, 40);
-    assert!(text.contains(" flows"), "{text}");
+    assert!(text.contains("FLOWS"), "{text}");
     assert!(
         text.lines()
             .any(|l| l.contains("✓ understand") && l.contains("done")),

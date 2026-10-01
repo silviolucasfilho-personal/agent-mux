@@ -161,6 +161,8 @@ pub enum Action {
     /// the selected session belongs to.
     ToggleSessionGroup,
     ToggleAgentFold,
+    FoldAgent,
+    UnfoldAgent,
     RestartHistorySession,
     ToggleHistoryAllProjects,
     CancelToControl,
@@ -514,6 +516,9 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     Action::ForkSession
                 }
                 KeyCode::Char(' ') if in_list => Action::ToggleAgentFold,
+                // ← folds (or climbs to the parent), → unfolds (or descends)
+                KeyCode::Left if in_list => Action::FoldAgent,
+                KeyCode::Right if in_list => Action::UnfoldAgent,
                 KeyCode::Enter | KeyCode::Char('x' | 'd' | 'r' | 't' | 'h')
                     if in_list && ctx.agent_row == RowTag::Header =>
                 {
@@ -3478,9 +3483,12 @@ impl App {
                     if let Some(at) = at
                         && lines.get(at).is_some_and(|l| l.kind.selectable())
                     {
-                        let fold_click =
-                            matches!(lines[at].kind, agents_list::AgentKind::Header(_))
-                                || (lines[at].depth == 0 && ev.column == 3);
+                        // a heading anywhere, an agent on its arrow column
+                        let line = &lines[at];
+                        let fold_click = matches!(line.kind, agents_list::AgentKind::Header(_))
+                            || (line.is_owner()
+                                && line.children > 0
+                                && ev.column == ui::agent_arrow_column(line));
                         self.select_agent_line(&lines, at);
                         if fold_click {
                             self.toggle_agent_fold();
@@ -3780,6 +3788,8 @@ impl App {
             }
             Action::ToggleSessionGroup => self.toggle_selected_group(),
             Action::ToggleAgentFold => self.toggle_agent_fold(),
+            Action::FoldAgent => self.fold_agent(),
+            Action::UnfoldAgent => self.unfold_agent(),
             Action::ToggleSidebarSection => {
                 if self.sidebar_hidden {
                     if !self.sessions.is_empty() {
