@@ -48,6 +48,14 @@
 //! itself (`⌘F` find in Terminal.app, iTerm2 and Ghostty; `Ctrl+Shift+F`
 //! in GNOME Terminal and kitty; `⌘↑`/`⌘↓` marks in Terminal.app and iTerm2)
 //! never reaches agent-mux: its twin, or `F2`, still works.
+//!
+//! Ghostty 1.3.1 on macOS (`ghostty +list-keybinds --default`, 2026-10-02):
+//! the kitty protocol is supported; `⌘E` (search_selection), `⌘F`
+//! (start_search) and `⌘J` (scroll_to_selection) are the terminal's, while
+//! `⌘B`, `⌘/`, `⌘↑`, `⌘↓` and the letters h i l m o p r s u x y are unbound
+//! and no `Ctrl+Shift` chord is bound. Whether unbound `⌘` chords arrive
+//! as `SUPER` is still to be seen with `agent-mux keys`; if they do, the
+//! focus chord moves off `⌘E` (`⌘L` is the candidate).
 
 use crate::app::text_area::TextArea;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

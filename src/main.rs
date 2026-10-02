@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
             Some("config") => return agent_mux::config_cli::run(&args[2..]),
             Some("workflow") => return agent_mux::workflows::cli::run(&args[2..]).await,
             Some("agent") => return agent_mux::agents::cli::run(&args[2..]),
-            Some("keys") => return agent_mux::keys_cli::run(),
+            Some("keys") => return agent_mux::keys_cli::run(&args[2..]),
             Some("langfuse") => {
                 eprintln!(
                     "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\
