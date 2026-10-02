@@ -600,3 +600,69 @@ fn clicking_the_arrow_folds_an_agent() {
         "the arrow folds"
     );
 }
+
+/// A new session starts on the harness the sidebar cursor is on: the
+/// harness row itself, or the harness a session under it runs on; `n`
+/// and the blank-session choice follow it as `Enter` on the row does.
+#[tokio::test]
+async fn a_new_session_starts_on_the_harness_under_the_cursor() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![profile("Claude Code"), profile("Codex")], None, tx);
+    app.set_pane_size(24, 80);
+    let lines = app.agent_lines();
+    let codex = lines
+        .iter()
+        .position(|l| l.kind == AgentKind::Harness(1))
+        .expect("a row for the second harness");
+    app.select_agent_line(&lines, codex);
+    assert_eq!(app.harness_under_cursor(), Some(1));
+
+    // Enter on the row
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    let Mode::NewSession(d) = &app.mode else {
+        panic!("expected the new-session dialog, got {:?}", app.mode);
+    };
+    assert_eq!(d.profile_idx, 1);
+    app.mode = Mode::Main;
+
+    // n, then the blank session of the chooser
+    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    assert!(matches!(app.mode, Mode::NewAgent(_)));
+    app.handle_key(&key(KeyCode::Char('2')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    let Mode::NewSession(d) = &app.mode else {
+        panic!("expected the new-session dialog, got {:?}", app.mode);
+    };
+    assert_eq!(d.profile_idx, 1, "the blank session follows the cursor");
+    app.mode = Mode::Main;
+
+    // a session under that harness keeps it, even once the cursor is on
+    // the session rather than the row
+    let (session_tx, _session_rx) = mpsc::channel(8);
+    let session = Session::spawn(
+        0,
+        profile("Codex"),
+        std::env::temp_dir(),
+        10,
+        80,
+        session_tx,
+        &[],
+        &[],
+    )
+    .unwrap();
+    app.sessions.push(session);
+    app.selected = 0;
+    app.sidebar_section = SidebarSection::Active;
+    app.focus_list();
+    assert!(matches!(app.agent_row(), Some(AgentKind::Session(0))));
+    assert_eq!(app.harness_under_cursor(), Some(1));
+    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Char('2')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    let Mode::NewSession(d) = &app.mode else {
+        panic!("expected the new-session dialog, got {:?}", app.mode);
+    };
+    assert_eq!(d.profile_idx, 1);
+    app.kill_all();
+}

@@ -325,6 +325,33 @@ impl App {
         .or_else(|| lines.iter().position(|l| l.kind.selectable()))
     }
 
+    /// The harness profile a new session should start on: the harness row
+    /// under the cursor, the one the session under the cursor runs on, or,
+    /// with the sidebar hidden or the cursor elsewhere, the selected
+    /// session's. `None` when nothing says (the dialog takes the first).
+    pub fn harness_under_cursor(&self) -> Option<usize> {
+        let of_session = |i: usize| {
+            let s = self.sessions.get(i)?;
+            self.profiles
+                .iter()
+                .position(|p| p.name == s.profile.name)
+                .or_else(|| {
+                    let h = Harness::detect(&s.profile.command)?;
+                    self.profiles
+                        .iter()
+                        .position(|p| Harness::detect(&p.command) == Some(h))
+                })
+        };
+        if !self.sidebar_hidden && self.sidebar_section != SidebarSection::History {
+            match self.agent_row() {
+                Some(AgentKind::Harness(p)) => return Some(p),
+                Some(AgentKind::Session(i)) => return of_session(i),
+                _ => {}
+            }
+        }
+        of_session(self.selected)
+    }
+
     /// The row under the cursor.
     pub fn agent_row(&self) -> Option<AgentKind> {
         let lines = self.agent_lines();

@@ -4043,17 +4043,8 @@ impl App {
                 self.snap_selected_to_live();
                 self.forward_bytes(&bytes);
             }
-            Action::OpenNewSession => self.open_new_session_dialog(None),
-            Action::NewSessionFromHarness => {
-                // the harness under the cursor, or the one a session runs on
-                let p = match self.agent_row() {
-                    Some(agents_list::AgentKind::Harness(p)) => Some(p),
-                    Some(agents_list::AgentKind::Session(i)) => self
-                        .sessions
-                        .get(i)
-                        .and_then(|s| self.profiles.iter().position(|p| p.name == s.profile.name)),
-                    _ => None,
-                };
+            Action::OpenNewSession | Action::NewSessionFromHarness => {
+                let p = self.harness_under_cursor();
                 self.open_new_session_dialog(p);
             }
             Action::EditPersona => {

@@ -410,7 +410,7 @@ Every screen shares one keymap (`src/keymap.rs`, `docs/keyboard.md`): `n` new, `
 | `C` | Configuration view (section 16), from any section: edit every prompt, skill, loop pattern, loop skill, agent and template in your editor. |
 | `W` | Runs view, as `E` (section 4.10): a flow run's report, steps, result and document are its tabs. |
 | `Enter`, `n`, `e`, `c`, `x`, `d`, `Ctrl+O` (Workflows section) | Run the selected workflow (or open the view when a run is live), build a new flow, edit the selected one in the flow builder, compose one for a task with the planner, stop the live run, discard a plan, open the document in `$EDITOR`. |
-| `n` | New, in the focused section: a session (Active, Agents, History), a loop (Loops), a flow (Workflows). |
+| `n` | New, in the focused section: a session (Active, Agents, History), a loop (Loops), a flow (Workflows). A new session, from `n`, the chooser's blank session or `Enter` on a harness row, starts on the harness under the cursor: the harness row, the harness the session under the cursor runs on, or the selected session's (`App::harness_under_cursor`). |
 | `l` | Session Logs dialog. |
 | `t` | Toggle tracing on the selected session (Active focused or sidebar hidden). Starting requires a live supported session and an available runtime; `plan_attach` back-dates the correlation window by one hour and injects nothing. |
 | `T` | Trace Browser (any section). |

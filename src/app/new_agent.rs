@@ -37,6 +37,12 @@ pub struct NewAgentState {
 
 impl App {
     pub fn open_new_agent(&mut self) {
+        // a blank session starts on the harness under the cursor
+        let on = self
+            .harness_under_cursor()
+            .and_then(|p| self.profiles.get(p))
+            .map(|p| format!("on {}, in a folder, driven by you", p.name))
+            .unwrap_or_else(|| "a harness in a folder, driven by you".into());
         let mut choices = vec![
             Choice {
                 group: "Describe it",
@@ -49,7 +55,7 @@ impl App {
                 group: "Blank",
                 start: Start::Session,
                 label: "a session".into(),
-                detail: "a harness in a folder, driven by you".into(),
+                detail: on,
             },
             Choice {
                 group: "Blank",
@@ -154,7 +160,10 @@ impl App {
     fn start_new_agent(&mut self, start: Start) {
         match start {
             Start::Describe => self.open_workflow_plan(),
-            Start::Session => self.open_new_session_dialog(None),
+            Start::Session => {
+                let p = self.harness_under_cursor();
+                self.open_new_session_dialog(p);
+            }
             Start::Scheduled => self.open_scheduled_editor(None, None),
             Start::Flow => self.open_flow_builder_new(),
             Start::Persona => self.new_persona_editor("blank", "my-agent"),

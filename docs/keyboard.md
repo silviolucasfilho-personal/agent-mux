@@ -35,7 +35,7 @@ Not in the layer, on purpose: `⌘N`, `⌘W`, `⌘T`, `⌘Q`, `⌘1`-`9` and `�
 | --- | --- |
 | `Enter` | open, choose, confirm |
 | `Esc` / `q` | back one level; close at the top (`q` outside text fields) |
-| `n` | new, in the place you are: a session, a loop, a flow, a step, a field, a pattern, an agent |
+| `n` | new, in the place you are: a session, a loop, a flow, a step, a field, a pattern, an agent; a new session starts on the harness under the cursor (Claude Code, Codex or Antigravity) |
 | `e` | edit the selected item |
 | `d` | delete, remove or dismiss, always with a `y`/`n` question |
 | `x` | stop something running: kill a session, cancel a workflow run |
