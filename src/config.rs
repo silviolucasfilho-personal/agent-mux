@@ -343,9 +343,9 @@ pub struct Config {
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
-    /// `--clean`: the sidebar lists only the harnesses (Claude Code, Codex,
-    /// Antigravity) and their sessions; no scheduled agents, flows,
-    /// skills, personas or History.
+    /// `--clean`: the Agents list holds only the harnesses (Claude Code,
+    /// Codex, Antigravity) and their sessions; no scheduled agents, flows,
+    /// skills or personas. History stays.
     #[serde(default)]
     pub clean: bool,
     /// Whether a new session starts with the harness's approval prompts

@@ -667,9 +667,8 @@ async fn a_new_session_starts_on_the_harness_under_the_cursor() {
     app.kill_all();
 }
 
-/// `--clean`: the harness rows and their sessions, nothing else: no
-/// headings, no History, `n` is a new session, and the sidebar is the
-/// Agents list alone.
+/// `--clean`: the harness rows and their sessions, nothing else in the
+/// Agents list: no headings; History stays, and `n` is a new session.
 #[tokio::test]
 async fn clean_lists_only_the_harnesses_and_their_sessions() {
     use agent_mux::app::agents_list::AgentKind;
@@ -707,22 +706,18 @@ async fn clean_lists_only_the_harnesses_and_their_sessions() {
         2,
         "every session sits under a harness"
     );
-    // History is out of reach: Tab and j past the end stay in the list
+    // History stays: Tab reaches it and comes back
     app.focus_list();
     app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(app.sidebar_section, SidebarSection::History);
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_ne!(app.sidebar_section, SidebarSection::History);
-    for _ in 0..10 {
-        app.handle_key(&key(KeyCode::Char('j')), Instant::now());
-    }
-    assert_ne!(app.sidebar_section, SidebarSection::History);
-    let (_, history) = agent_mux::ui::sidebar_areas_with(33, 5, false);
-    assert_eq!(history.height, 0);
     // n is a new session, not the chooser
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
     assert!(matches!(app.mode, Mode::NewSession(_)), "{:?}", app.mode);
     app.mode = Mode::Main;
     let screen = render(&app, 120, 40);
-    assert!(!screen.contains("History"), "{screen}");
+    assert!(screen.contains("History"), "{screen}");
     assert!(!screen.contains("SKILLS"), "{screen}");
     app.kill_all();
 }

@@ -122,23 +122,9 @@ pub fn agent_line_at(heights: &[usize], start: usize, row: usize) -> Option<usiz
 /// keeps up to six rows (fewer when it has fewer sessions, and never more
 /// than a third of the height); the Agents list takes the rest.
 pub fn sidebar_areas(total_height: u16, history_count: usize) -> (Rect, Rect) {
-    sidebar_areas_with(total_height, history_count, true)
-}
-
-/// `sidebar_areas`, or with `--clean` the Agents list alone: History gets
-/// no rows at all.
-pub fn sidebar_areas_with(
-    total_height: u16,
-    history_count: usize,
-    with_history: bool,
-) -> (Rect, Rect) {
     let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
     let wanted = (history_count as u16 + 2).clamp(3, 6);
-    let history_rows = if with_history {
-        wanted.min(side_area.height / 3)
-    } else {
-        0
-    };
+    let history_rows = wanted.min(side_area.height / 3);
     let [agents, history] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(history_rows)]).areas(side_area);
     (agents, history)
@@ -358,12 +344,9 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let (agents_area, history_area) =
-        sidebar_areas_with(area.height, app.history_sessions.len(), !app.clean);
+    let (agents_area, history_area) = sidebar_areas(area.height, app.history_sessions.len());
     draw_agents_list(f, agents_area, app, now);
-    if !app.clean {
-        draw_history_sidebar(f, history_area, app);
-    }
+    draw_history_sidebar(f, history_area, app);
 }
 
 /// The Agents list (`app::agents_list`): harnesses, scheduled agents,
@@ -1954,10 +1937,10 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                             "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
                         )),
                         (_, Some(AgentKind::Harness(_))) if app.clean => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter] new session  [n] new session  [b] sidebar  [q] quit",
+                            "[←→] fold  [?] help  [Enter] new session  [n] new session  [Tab] history  [b] sidebar  [q] quit",
                         )),
                         (_, Some(AgentKind::Session(_))) if app.clean => Line::raw(fit(
-                            "[←] fold  [?] help  [Enter] pane  [n] new session  [f] fork  [x] stop  [d] remove  [X] clear exited  [q] quit",
+                            "[←] fold  [?] help  [Enter] pane  [n] new session  [f] fork  [x] stop  [d] remove  [X] clear exited  [Tab] history  [q] quit",
                         )),
                         (_, Some(AgentKind::Harness(_))) => Line::raw(fit(
                             "[←→] fold  [?] help  [Enter] new session  [n] new agent  [Tab] history  [S] skills  [C] config  [q] quit",

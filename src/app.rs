@@ -2135,9 +2135,9 @@ pub struct App {
     pub sessions_file: Option<std::path::PathBuf>,
     /// Whether the sidebar is currently hidden (full-screen harness).
     pub sidebar_hidden: bool,
-    /// `--clean`: the sidebar lists only the harnesses and their sessions
-    /// (no scheduled agents, flows, skills, personas or History), `n` is a
-    /// new session, and the hints say no more than that.
+    /// `--clean`: the Agents list holds only the harnesses and their
+    /// sessions (no scheduled agents, flows, skills or personas; History
+    /// stays), `n` is a new session, and the hints say no more than that.
     pub clean: bool,
     /// Loop and workflow headers folded away in the Active sidebar, by
     /// `tree::GroupRef::key`. Keyed by the parent rather than by a session
@@ -3581,11 +3581,8 @@ impl App {
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
-            let (agents_rect, history_rect) = ui::sidebar_areas_with(
-                self.pane_size.0 + 3,
-                self.history_sessions.len(),
-                !self.clean,
-            );
+            let (agents_rect, history_rect) =
+                ui::sidebar_areas(self.pane_size.0 + 3, self.history_sessions.len());
             if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height {
                 if ev.row > agents_rect.y
                     && ev.row < agents_rect.y + agents_rect.height.saturating_sub(1)
@@ -3681,11 +3678,8 @@ impl App {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
                     // over the Agents list a wheel scrolls the selected
                     // session (a trackpad often rests there); History scrolls
-                    let (_, history_rect) = ui::sidebar_areas_with(
-                        self.pane_size.0 + 3,
-                        self.history_sessions.len(),
-                        !self.clean,
-                    );
+                    let (_, history_rect) =
+                        ui::sidebar_areas(self.pane_size.0 + 3, self.history_sessions.len());
                     if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
                         let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
                             -1
@@ -3893,10 +3887,7 @@ impl App {
                         self.selected_history =
                             (self.selected_history + 1).min(self.history_sessions.len() - 1);
                     }
-                } else if !self.move_agent_cursor(1)
-                    && !self.history_sessions.is_empty()
-                    && !self.clean
-                {
+                } else if !self.move_agent_cursor(1) && !self.history_sessions.is_empty() {
                     // past the last agent: into History
                     self.sidebar_section = SidebarSection::History;
                     self.selected_history = 0;
@@ -3932,7 +3923,7 @@ impl App {
                 } else if self.sidebar_section == SidebarSection::History {
                     // back to the Agents list, on the row it left
                     self.sidebar_section = self.list_section;
-                } else if !self.clean {
+                } else {
                     self.list_section = self.sidebar_section;
                     self.sidebar_section = SidebarSection::History;
                 }
