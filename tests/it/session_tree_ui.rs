@@ -666,3 +666,63 @@ async fn a_new_session_starts_on_the_harness_under_the_cursor() {
     assert_eq!(d.profile_idx, 1);
     app.kill_all();
 }
+
+/// `--clean`: the harness rows and their sessions, nothing else: no
+/// headings, no History, `n` is a new session, and the sidebar is the
+/// Agents list alone.
+#[tokio::test]
+async fn clean_lists_only_the_harnesses_and_their_sessions() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _temp) = app_with_sessions(&[None, Some(wf("run-1", "read"))]);
+    app.history_sessions = vec![agent_mux::history::SessionSummary {
+        session_id: "h1".into(),
+        title: "an older session".into(),
+        modified: std::time::SystemTime::UNIX_EPOCH,
+        file_path: std::path::PathBuf::from("/tmp/h1.jsonl"),
+        turn_count: 3,
+        project_slug: "-test".into(),
+        timestamp_str: "2026-09-01 10:00".into(),
+        provider: agent_mux::history::AgentProvider::Claude,
+        cwd: Some(std::path::PathBuf::from("/tmp")),
+    }];
+    // the full list has a flows heading for the workflow session, and
+    // the built-in skills
+    let full = app.agent_lines();
+    assert!(full.iter().any(|l| l.kind == AgentKind::Header("flows")));
+    assert!(full.iter().any(|l| l.kind == AgentKind::Header("skills")));
+
+    app.clean = true;
+    let lines = app.agent_lines();
+    assert!(
+        lines
+            .iter()
+            .all(|l| matches!(l.kind, AgentKind::Harness(_) | AgentKind::Session(_))),
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| matches!(l.kind, AgentKind::Session(_)))
+            .count(),
+        2,
+        "every session sits under a harness"
+    );
+    // History is out of reach: Tab and j past the end stay in the list
+    app.focus_list();
+    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_ne!(app.sidebar_section, SidebarSection::History);
+    for _ in 0..10 {
+        app.handle_key(&key(KeyCode::Char('j')), Instant::now());
+    }
+    assert_ne!(app.sidebar_section, SidebarSection::History);
+    let (_, history) = agent_mux::ui::sidebar_areas_with(33, 5, false);
+    assert_eq!(history.height, 0);
+    // n is a new session, not the chooser
+    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    assert!(matches!(app.mode, Mode::NewSession(_)), "{:?}", app.mode);
+    app.mode = Mode::Main;
+    let screen = render(&app, 120, 40);
+    assert!(!screen.contains("History"), "{screen}");
+    assert!(!screen.contains("SKILLS"), "{screen}");
+    app.kill_all();
+}

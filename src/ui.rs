@@ -122,9 +122,23 @@ pub fn agent_line_at(heights: &[usize], start: usize, row: usize) -> Option<usiz
 /// keeps up to six rows (fewer when it has fewer sessions, and never more
 /// than a third of the height); the Agents list takes the rest.
 pub fn sidebar_areas(total_height: u16, history_count: usize) -> (Rect, Rect) {
+    sidebar_areas_with(total_height, history_count, true)
+}
+
+/// `sidebar_areas`, or with `--clean` the Agents list alone: History gets
+/// no rows at all.
+pub fn sidebar_areas_with(
+    total_height: u16,
+    history_count: usize,
+    with_history: bool,
+) -> (Rect, Rect) {
     let side_area = Rect::new(0, 0, SIDEBAR_WIDTH, total_height.saturating_sub(1));
     let wanted = (history_count as u16 + 2).clamp(3, 6);
-    let history_rows = wanted.min(side_area.height / 3);
+    let history_rows = if with_history {
+        wanted.min(side_area.height / 3)
+    } else {
+        0
+    };
     let [agents, history] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(history_rows)]).areas(side_area);
     (agents, history)
@@ -344,9 +358,12 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let (agents_area, history_area) = sidebar_areas(area.height, app.history_sessions.len());
+    let (agents_area, history_area) =
+        sidebar_areas_with(area.height, app.history_sessions.len(), !app.clean);
     draw_agents_list(f, agents_area, app, now);
-    draw_history_sidebar(f, history_area, app);
+    if !app.clean {
+        draw_history_sidebar(f, history_area, app);
+    }
 }
 
 /// The Agents list (`app::agents_list`): harnesses, scheduled agents,
@@ -1850,15 +1867,24 @@ fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
         ),
         Line::raw(""),
         line("Enter", "on a harness: a new session there"),
-        line("n", "a new agent: describe it, blank, or from a template"),
-        line("Enter", "on a skill: launch it"),
+    ];
+    if app.clean {
+        lines.push(line("n", "a new session on the harness under the cursor"));
+    } else {
+        lines.push(line(
+            "n",
+            "a new agent: describe it, blank, or from a template",
+        ));
+        lines.push(line("Enter", "on a skill: launch it"));
+    }
+    lines.extend([
         Line::raw(""),
         Line::styled(
             "Once a session runs you type straight into it; these keys stay yours:",
             dim,
         ),
         Line::raw(""),
-    ];
+    ]);
     for c in [
         Chord::ToggleFocus,
         Chord::PrevSession,
@@ -1927,6 +1953,12 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                         (SidebarSection::History, _) => Line::raw(fit(
                             "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
                         )),
+                        (_, Some(AgentKind::Harness(_))) if app.clean => Line::raw(fit(
+                            "[←→] fold  [?] help  [Enter] new session  [n] new session  [b] sidebar  [q] quit",
+                        )),
+                        (_, Some(AgentKind::Session(_))) if app.clean => Line::raw(fit(
+                            "[←] fold  [?] help  [Enter] pane  [n] new session  [f] fork  [x] stop  [d] remove  [X] clear exited  [q] quit",
+                        )),
                         (_, Some(AgentKind::Harness(_))) => Line::raw(fit(
                             "[←→] fold  [?] help  [Enter] new session  [n] new agent  [Tab] history  [S] skills  [C] config  [q] quit",
                         )),
@@ -1968,7 +2000,10 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     };
     // What waits on a human leads the control-mode hints, so the inbox is
     // seen without opening it.
-    let pending = if matches!(app.mode, Mode::Main) && app.search.is_none() && app.notice.is_none()
+    let pending = if matches!(app.mode, Mode::Main)
+        && app.search.is_none()
+        && app.notice.is_none()
+        && !app.clean
     {
         app.inbox_count()
     } else {

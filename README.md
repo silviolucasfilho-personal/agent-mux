@@ -40,6 +40,8 @@ cargo install --path .
 agent-mux
 # Start with the sidebar hidden:
 agent-mux --hide-sidebar      # --full-screen and -b do the same
+# Only the harnesses (Claude Code, Codex, Antigravity) and their sessions in the sidebar:
+agent-mux --clean             # or clean = true in profiles.toml
 ```
 
 One-shot commands are dispatched in [src/main.rs](src/main.rs) before any terminal setup:
@@ -53,7 +55,7 @@ agent-mux skill list
 agent-mux run --help
 ```
 
-There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `run`, `loop`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI.
+There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `run`, `loop`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI; `--hide-sidebar` starts it full-screen and `--clean` (or `clean = true` in `profiles.toml`) keeps the sidebar to the harness rows and their sessions: no scheduled agents, flows, skills, personas or History, `n` opens the New session dialog straight away, `Tab` and `j`/`k` never reach History, and the inbox badge stays off (`App::clean`).
 
 `--version` prints the stamp [build.rs](build.rs) bakes in at compile time and [src/build_info.rs](src/build_info.rs) formats:
 

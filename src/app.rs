@@ -413,6 +413,8 @@ pub struct DispatchCtx {
     pub app_cursor: bool,
     pub sidebar_section: SidebarSection,
     pub sidebar_hidden: bool,
+    /// `--clean`: the list holds only the harnesses and their sessions.
+    pub clean: bool,
 }
 
 /// Where the keys go on the main screen: the list (the sidebar, where
@@ -500,7 +502,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
             match key.code {
                 // n makes a new agent; the chooser starts on the kind of
                 // row the cursor is on (a session, a scheduled agent, a flow)
-                KeyCode::Char('n') if in_list => Action::OpenNewAgent,
+                KeyCode::Char('n') if in_list && !ctx.clean => Action::OpenNewAgent,
                 KeyCode::Enter if in_list && ctx.agent_row == RowTag::Harness => {
                     Action::NewSessionFromHarness
                 }
@@ -2133,6 +2135,10 @@ pub struct App {
     pub sessions_file: Option<std::path::PathBuf>,
     /// Whether the sidebar is currently hidden (full-screen harness).
     pub sidebar_hidden: bool,
+    /// `--clean`: the sidebar lists only the harnesses and their sessions
+    /// (no scheduled agents, flows, skills, personas or History), `n` is a
+    /// new session, and the hints say no more than that.
+    pub clean: bool,
     /// Loop and workflow headers folded away in the Active sidebar, by
     /// `tree::GroupRef::key`. Keyed by the parent rather than by a session
     /// index, so a fold survives sessions coming and going.
@@ -2288,6 +2294,7 @@ impl App {
             trace_db_path,
             sessions_file: None,
             sidebar_hidden: false,
+            clean: false,
             collapsed_groups: std::collections::HashSet::new(),
             collapsed_agents: std::collections::HashSet::new(),
             terminal_size: (27, 112),
@@ -3286,6 +3293,7 @@ impl App {
             app_cursor,
             sidebar_section: self.sidebar_section,
             sidebar_hidden: self.sidebar_hidden,
+            clean: self.clean,
         };
         // g/G and Ctrl+D/Ctrl+U in the list views, where nothing is typed
         let aliased;
@@ -3573,8 +3581,11 @@ impl App {
             && ev.column > 0
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
-            let (agents_rect, history_rect) =
-                ui::sidebar_areas(self.pane_size.0 + 3, self.history_sessions.len());
+            let (agents_rect, history_rect) = ui::sidebar_areas_with(
+                self.pane_size.0 + 3,
+                self.history_sessions.len(),
+                !self.clean,
+            );
             if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height {
                 if ev.row > agents_rect.y
                     && ev.row < agents_rect.y + agents_rect.height.saturating_sub(1)
@@ -3670,8 +3681,11 @@ impl App {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
                     // over the Agents list a wheel scrolls the selected
                     // session (a trackpad often rests there); History scrolls
-                    let (_, history_rect) =
-                        ui::sidebar_areas(self.pane_size.0 + 3, self.history_sessions.len());
+                    let (_, history_rect) = ui::sidebar_areas_with(
+                        self.pane_size.0 + 3,
+                        self.history_sessions.len(),
+                        !self.clean,
+                    );
                     if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
                         let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
                             -1
@@ -3879,7 +3893,10 @@ impl App {
                         self.selected_history =
                             (self.selected_history + 1).min(self.history_sessions.len() - 1);
                     }
-                } else if !self.move_agent_cursor(1) && !self.history_sessions.is_empty() {
+                } else if !self.move_agent_cursor(1)
+                    && !self.history_sessions.is_empty()
+                    && !self.clean
+                {
                     // past the last agent: into History
                     self.sidebar_section = SidebarSection::History;
                     self.selected_history = 0;
@@ -3915,7 +3932,7 @@ impl App {
                 } else if self.sidebar_section == SidebarSection::History {
                     // back to the Agents list, on the row it left
                     self.sidebar_section = self.list_section;
-                } else {
+                } else if !self.clean {
                     self.list_section = self.sidebar_section;
                     self.sidebar_section = SidebarSection::History;
                 }
@@ -5687,6 +5704,7 @@ mod dispatch_tests {
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
             sidebar_hidden: false,
+            clean: false,
         }
     }
 
@@ -5964,6 +5982,7 @@ mod confirm_modes {
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
             sidebar_hidden: false,
+            clean: false,
         }
     }
 
@@ -6540,6 +6559,7 @@ mod history_tests {
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
             sidebar_hidden: false,
+            clean: false,
         }
     }
 

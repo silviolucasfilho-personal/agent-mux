@@ -343,6 +343,11 @@ pub struct Config {
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
+    /// `--clean`: the sidebar lists only the harnesses (Claude Code, Codex,
+    /// Antigravity) and their sessions; no scheduled agents, flows,
+    /// skills, personas or History.
+    #[serde(default)]
+    pub clean: bool,
     /// Whether a new session starts with the harness's approval prompts
     /// bypassed (`--dangerously-skip-permissions` on Claude Code and
     /// Antigravity, `--yolo` on Codex). Default true: agent-mux runs the
@@ -732,6 +737,7 @@ pub fn load() -> anyhow::Result<Config> {
         loops: None,
         workflows: None,
         hide_sidebar: false,
+        clean: false,
         bypass_approvals: None,
         editor: None,
         loaded_from: None,
@@ -760,6 +766,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
         loops: None,
         workflows: None,
         hide_sidebar: false,
+        clean: false,
         bypass_approvals: None,
         editor: None,
         loaded_from: None,

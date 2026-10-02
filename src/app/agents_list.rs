@@ -204,12 +204,32 @@ impl App {
         AgentKind::Harness(by_name.or(by_harness).unwrap_or(0))
     }
 
+    /// The harness row a session sits under in a clean list: by profile
+    /// name, else by harness, else the first.
+    fn harness_of(&self, idx: usize) -> AgentKind {
+        let s = &self.sessions[idx];
+        let by_name = self.profiles.iter().position(|p| p.name == s.profile.name);
+        let by_harness = Harness::detect(&s.profile.command).and_then(|h| {
+            self.profiles
+                .iter()
+                .position(|p| Harness::detect(&p.command) == Some(h))
+        });
+        AgentKind::Harness(by_name.or(by_harness).unwrap_or(0))
+    }
+
     /// Every row of the Agents list, in order: harnesses, scheduled
-    /// agents, flows, skills, personas; sessions under their owner.
+    /// agents, flows, skills, personas; sessions under their owner. With
+    /// `--clean`, the harnesses alone, every session under its harness.
     pub fn agent_lines(&self) -> Vec<AgentLine> {
         let rows = self.workflow_rows();
         let owners: Vec<AgentKind> = (0..self.sessions.len())
-            .map(|i| self.owner_of(i, &rows))
+            .map(|i| {
+                if self.clean {
+                    self.harness_of(i)
+                } else {
+                    self.owner_of(i, &rows)
+                }
+            })
             .collect();
         let mut out = Vec::new();
         // an agent at `depth`, its sessions one deeper unless folded
@@ -249,6 +269,9 @@ impl App {
         };
         for p in 0..self.profiles.len() {
             push(&mut out, AgentKind::Harness(p), 0);
+        }
+        if self.clean {
+            return out;
         }
         if !self.loop_registry.loops.is_empty()
             && heading(&mut out, "scheduled", self.loop_registry.loops.len())
