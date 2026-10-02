@@ -16,8 +16,16 @@ fn version_output(flag: &str) -> String {
 #[test]
 fn every_spelling_of_version_prints_the_same_stamp() {
     let long = version_output("--version");
-    assert_eq!(long, version_output("-V"));
-    assert_eq!(long, version_output("version"));
+    // the `built` line carries an age in seconds that may tick between
+    // two invocations; the three spellings are compared without it
+    let without_age = |s: &str| -> Vec<String> {
+        s.lines()
+            .filter(|l| !l.starts_with("built "))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(without_age(&long), without_age(&version_output("-V")));
+    assert_eq!(without_age(&long), without_age(&version_output("version")));
 
     let lines: Vec<&str> = long.lines().collect();
     assert_eq!(
