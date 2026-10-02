@@ -8,6 +8,13 @@
 //! file changes. A branch switch that touches no file keeps the previous
 //! stamp until the next rebuild; `--version` says `stale?` when the branch
 //! recorded here no longer matches the checkout.
+//!
+//! The version the binary reports is `<major>.<minor>.<build>`: the crate's
+//! major and minor from `Cargo.toml`, and a build number that goes up by
+//! one every time this script runs, kept in `.build-number` next to
+//! `Cargo.toml`. The file is ignored by git (so Cargo's rescan does not
+//! see it and the tree stays clean), which makes the counter per checkout:
+//! it survives `cargo clean` and starts at 1 in a fresh clone.
 
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,7 +28,28 @@ fn git(args: &[&str]) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// Reads, increments and writes back the build counter; 1 on the first
+/// build of a checkout, or when the file cannot be read.
+fn next_build_number() -> u64 {
+    let path = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
+        .join(".build-number");
+    let previous: u64 = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    let next = previous + 1;
+    // a read-only checkout still builds; the number is then 1 each time
+    let _ = std::fs::write(&path, format!("{next}\n"));
+    next
+}
+
 fn main() {
+    let build = next_build_number();
+    let major = std::env::var("CARGO_PKG_VERSION_MAJOR").unwrap_or_else(|_| "0".into());
+    let minor = std::env::var("CARGO_PKG_VERSION_MINOR").unwrap_or_else(|_| "0".into());
+    println!("cargo:rustc-env=AGENT_MUX_BUILD_NUMBER={build}");
+    println!("cargo:rustc-env=AGENT_MUX_VERSION={major}.{minor}.{build}");
+
     let unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

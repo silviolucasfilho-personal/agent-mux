@@ -1,5 +1,7 @@
 /target
 profiles.toml
+# The per-checkout build counter build.rs keeps (see its module doc).
+/.build-number
 .worktrees/
 
 # Cargo artifacts from running tests inside the vendored crate.

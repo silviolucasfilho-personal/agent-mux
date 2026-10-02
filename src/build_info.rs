@@ -6,7 +6,14 @@ use std::path::PathBuf;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// `<major>.<minor>.<build>`: the crate's major and minor, and the build
+/// number (`build.rs`), which goes up by one on every build.
+pub const VERSION: &str = env!("AGENT_MUX_VERSION");
+/// The crate version in `Cargo.toml`, whose patch number the build number
+/// replaces.
+pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// How many times this checkout has been built, counting this one.
+pub const BUILD_NUMBER: &str = env!("AGENT_MUX_BUILD_NUMBER");
 pub const BRANCH: &str = env!("AGENT_MUX_GIT_BRANCH");
 pub const COMMIT: &str = env!("AGENT_MUX_GIT_COMMIT");
 pub const PROFILE: &str = env!("AGENT_MUX_PROFILE");
@@ -117,6 +124,7 @@ pub fn short() -> String {
 pub fn lines() -> Vec<String> {
     let mut out = vec![
         format!("agent-mux {VERSION}"),
+        format!("build     {BUILD_NUMBER} of this checkout (crate {PKG_VERSION})"),
         format!(
             "built     {} ({}, {PROFILE})",
             built_at_local_string(),

@@ -22,9 +22,10 @@ fn every_spelling_of_version_prints_the_same_stamp() {
     let lines: Vec<&str> = long.lines().collect();
     assert_eq!(
         lines[0],
-        format!("agent-mux {}", env!("CARGO_PKG_VERSION")),
+        format!("agent-mux {}", agent_mux::build_info::VERSION),
         "{long}"
     );
+    assert!(lines.iter().any(|l| l.starts_with("build ")), "{long}");
     assert!(lines.iter().any(|l| l.starts_with("built ")), "{long}");
     assert!(lines.iter().any(|l| l.contains("ago,")), "{long}");
     assert!(lines.iter().any(|l| l.ends_with("UTC")), "{long}");
@@ -45,7 +46,15 @@ fn every_spelling_of_version_prints_the_same_stamp() {
 #[test]
 fn the_library_exposes_the_same_stamp() {
     use agent_mux::build_info;
-    assert_eq!(build_info::VERSION, env!("CARGO_PKG_VERSION"));
+    // major.minor from Cargo.toml, the build number as the patch
+    let build: u64 = build_info::BUILD_NUMBER.parse().expect("a build number");
+    assert!(build >= 1, "{}", build_info::BUILD_NUMBER);
+    let (major, minor) = (
+        env!("CARGO_PKG_VERSION_MAJOR"),
+        env!("CARGO_PKG_VERSION_MINOR"),
+    );
+    assert_eq!(build_info::VERSION, format!("{major}.{minor}.{build}"));
+    assert_eq!(build_info::PKG_VERSION, env!("CARGO_PKG_VERSION"));
     let built = build_info::built_at().expect("a build timestamp");
     let now = time::OffsetDateTime::now_utc();
     assert!(built <= now, "the build is not in the future");

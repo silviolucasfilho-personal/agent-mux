@@ -58,7 +58,8 @@ There is no general-purpose argument parser: `main` matches only `trace`, `mcp`,
 `--version` prints the stamp [build.rs](build.rs) bakes in at compile time and [src/build_info.rs](src/build_info.rs) formats:
 
 ```text
-agent-mux 0.1.0
+agent-mux 0.1.58
+build     58 of this checkout (crate 0.1.0)
 built     2026-09-16T11:29:38-03:00 (4 s ago, debug)
           2026-09-16T14:29:38Z UTC
 branch    feat/loops @ 72f7f2a1 (uncommitted changes at build time)
@@ -66,7 +67,7 @@ target    aarch64-apple-darwin
 binary    /Users/me/.cargo/bin/agent-mux
 ```
 
-The branch and commit describe the checkout the binary was **compiled** from, not the directory it runs in; when the current directory sits on another branch, a line says so, which is how you catch a stale `cargo install`. The build script emits no `rerun-if-changed` directive, so Cargo rescans the package and refreshes the stamp whenever a source file changes; a branch switch that touches no file keeps the previous stamp until the next rebuild. The same one-line form (`build_info::short()`) closes the help overlay (`?`), and the full stamp opens `trace doctor`. A plain launch uses built-in Claude Code, Codex and Antigravity profiles when no usable configuration exists. Local tracing is on by default and needs no credentials. The database is created by a writer (TUI startup, `trace import`, `agent-mux run`); read commands do not create one.
+The version is `<major>.<minor>.<build>`: the crate's major and minor from `Cargo.toml`, and a build number that goes up by one on every build, kept in `.build-number` next to `Cargo.toml` (ignored by git, so it counts per checkout, survives `cargo clean` and starts at 1 in a fresh clone). The branch and commit describe the checkout the binary was **compiled** from, not the directory it runs in; when the current directory sits on another branch, a line says so, which is how you catch a stale `cargo install`. The build script emits no `rerun-if-changed` directive, so Cargo rescans the package and refreshes the stamp whenever a source file changes; a branch switch that touches no file keeps the previous stamp until the next rebuild. The same one-line form (`build_info::short()`) closes the help overlay (`?`), and the full stamp opens `trace doctor`. A plain launch uses built-in Claude Code, Codex and Antigravity profiles when no usable configuration exists. Local tracing is on by default and needs no credentials. The database is created by a writer (TUI startup, `trace import`, `agent-mux run`); read commands do not create one.
 
 ### Suggested first exploration
 
