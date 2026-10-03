@@ -672,7 +672,12 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     if lines.is_empty() {
         items.push(ListItem::new(Line::styled(" no agents: n makes one", dim)));
     } else if end == lines.len() && items.len() < visible {
-        items.push(ListItem::new(Line::styled(" + new agent  n", dim)));
+        let footer = if app.clean {
+            " + new session  n"
+        } else {
+            " + new agent  n"
+        };
+        items.push(ListItem::new(Line::styled(footer, dim)));
     }
     f.render_widget(List::new(items).block(block), area);
 }
@@ -1933,6 +1938,9 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                         app.agent_row()
                     };
                     match (app.sidebar_section, row) {
+                        (SidebarSection::History, _) if app.clean => Line::raw(fit(
+                            "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [?] help  [q] quit",
+                        )),
                         (SidebarSection::History, _) => Line::raw(fit(
                             "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
                         )),
@@ -1976,6 +1984,9 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
             }
             // full-screen editors keep their own footer; this row is for notices
             Mode::AgentEditor(_) | Mode::RunsView(_) => Line::raw(""),
+            _ if app.clean => Line::raw(fit(
+                "[b] sidebar  [Enter] pane  [n] new session  [l] logs  [?] help  [q] quit",
+            )),
             _ => Line::raw(fit(
                 "[b] sidebar  [Enter] pane  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
             )),
