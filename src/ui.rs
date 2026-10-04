@@ -344,7 +344,10 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    let (agents_area, history_area) = sidebar_areas(area.height, app.history_sessions.len());
+    // `area` is the body, without the status bar; `sidebar_areas` takes the
+    // terminal height and leaves the bar out itself, as the mouse code
+    // (`pane_size.0 + 3`) does, so drawing and clicks agree
+    let (agents_area, history_area) = sidebar_areas(area.height + 1, app.history_sessions.len());
     draw_agents_list(f, agents_area, app, now);
     draw_history_sidebar(f, history_area, app);
 }

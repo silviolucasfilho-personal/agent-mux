@@ -721,3 +721,38 @@ async fn clean_lists_only_the_harnesses_and_their_sessions() {
     assert!(!screen.contains("SKILLS"), "{screen}");
     app.kill_all();
 }
+
+/// The sidebar reaches the status bar: History's bottom border sits on
+/// the row above it, level with the pane's, with the sidebar hidden or not.
+#[test]
+fn the_sidebar_ends_level_with_the_pane_above_the_status_bar() {
+    let (mut app, _temp) = app_with_sessions(&[None]);
+    app.history_sessions = vec![agent_mux::history::SessionSummary {
+        session_id: "h1".into(),
+        title: "an older session".into(),
+        modified: std::time::SystemTime::UNIX_EPOCH,
+        file_path: std::path::PathBuf::from("/tmp/h1.jsonl"),
+        turn_count: 3,
+        project_slug: "-test".into(),
+        timestamp_str: "2026-09-01 10:00".into(),
+        provider: agent_mux::history::AgentProvider::Claude,
+        cwd: Some(std::path::PathBuf::from("/tmp")),
+    }];
+    let screen = render(&app, 120, 40);
+    let rows: Vec<&str> = screen.lines().collect();
+    let above_bar = rows[38];
+    assert!(
+        above_bar.starts_with('└') && above_bar.chars().nth(29) == Some('┘'),
+        "History's bottom border on the row above the status bar: {above_bar:?}"
+    );
+    assert!(
+        above_bar.chars().nth(30) == Some('└'),
+        "level with the pane's bottom border: {above_bar:?}"
+    );
+    assert!(
+        !rows[37].starts_with('└'),
+        "no empty row between History and the status bar: {:?}",
+        rows[37]
+    );
+    app.kill_all();
+}
