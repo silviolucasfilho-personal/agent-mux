@@ -72,6 +72,18 @@ pub struct SessionTraceHandle {
 }
 
 impl SessionTraceHandle {
+    /// A handle with no pipeline behind it: the launch id is known (a
+    /// restored session, a test) so the strip and the badge can look it
+    /// up, and the phase it reports goes nowhere.
+    pub fn detached(launch_id: impl Into<String>, backend: Backend) -> Self {
+        let (phase, _rx) = watch::channel(Phase::Running);
+        SessionTraceHandle {
+            phase,
+            launch_id: launch_id.into(),
+            backend,
+        }
+    }
+
     pub fn mark_exited(&self, exit_code: Option<u32>) {
         let _ = self.phase.send(Phase::Exited(exit_code));
     }

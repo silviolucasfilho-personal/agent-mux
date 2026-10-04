@@ -724,6 +724,95 @@ pub fn launch_stats(conn: &Connection, launch_id: &str) -> rusqlite::Result<Laun
     })
 }
 
+/// What the trace strip under a session shows: the launch's latest turn
+/// and its calls, with how the launch was matched to its transcript.
+#[derive(Debug, Clone)]
+pub struct StripView {
+    pub trace_id: String,
+    pub turn_ordinal: i64,
+    pub turn_status: String,
+    pub turn_start_ns: i64,
+    pub turn_end_ns: Option<i64>,
+    pub turn_tokens: Option<i64>,
+    /// `$`, `≈$`, `?` as `LaunchStats::cost_label` makes it.
+    pub cost_label: Option<String>,
+    /// `launches.correlation`: deterministic, announced, watched,
+    /// heuristic, none, or unknown while unmatched.
+    pub correlation: Option<String>,
+    /// Tool and agent calls of the turn, oldest first.
+    pub calls: Vec<ObservationView>,
+    pub generations: i64,
+}
+
+impl StripView {
+    /// How the launch was matched, in the strip's words.
+    pub fn match_label(&self) -> &'static str {
+        match self.correlation.as_deref() {
+            Some("deterministic") | Some("announced") => "matched by id",
+            Some("watched") => "matched by folder",
+            Some("heuristic") => "matched heuristically",
+            Some("none") => "not matched",
+            _ => "matching…",
+        }
+    }
+}
+
+/// The strip for `launch_id`: its newest turn with that turn's calls, or
+/// `None` before the first turn. One indexed read of `traces` and one of
+/// `observations`; cheap enough for a 500 ms tick.
+pub fn launch_strip(conn: &Connection, launch_id: &str) -> rusqlite::Result<Option<StripView>> {
+    let Some((trace_id, ordinal, status, start_ns, end_ns)) = conn
+        .query_row(
+            "SELECT id, ordinal, status, start_ns, end_ns FROM traces
+             WHERE launch_id = ?1 ORDER BY ordinal DESC LIMIT 1",
+            params![launch_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let correlation: Option<String> = conn
+        .query_row(
+            "SELECT correlation FROM launches WHERE id = ?1",
+            params![launch_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let stats = launch_stats(conn, launch_id)?;
+    let all = list_observations(conn, &trace_id)?;
+    let generations = all.iter().filter(|o| o.obs_type == "generation").count() as i64;
+    let turn_tokens: Option<i64> = {
+        let sum: i64 = all.iter().filter_map(|o| o.total_tokens).sum();
+        (sum > 0).then_some(sum)
+    };
+    let calls = all
+        .into_iter()
+        .filter(|o| o.obs_type == "tool" || o.obs_type == "agent")
+        .collect();
+    Ok(Some(StripView {
+        trace_id,
+        turn_ordinal: ordinal,
+        turn_status: status,
+        turn_start_ns: start_ns,
+        turn_end_ns: end_ns,
+        turn_tokens,
+        cost_label: stats.cost_label(),
+        correlation,
+        calls,
+        generations,
+    }))
+}
+
 /// Distinct project slugs known to the store (browser scope toggle).
 pub fn session_project_slugs(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut stmt =

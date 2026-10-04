@@ -756,3 +756,129 @@ fn the_sidebar_ends_level_with_the_pane_above_the_status_bar() {
     );
     app.kill_all();
 }
+
+/// `T` cycles the trace strip under the selected session: off, the header
+/// line, the header with the turn's calls, then the browser. The strip
+/// takes its rows from the pty, reads the launch's newest turn from the
+/// store, and says how the launch was matched and how good the cost is.
+#[test]
+fn shift_t_cycles_the_trace_strip_and_the_strip_shows_the_turn() {
+    use agent_mux::app::TraceStrip;
+    use agent_mux::tracing::store::model::{Level, ObservationRow, ObservationType};
+    let (mut app, temp) = app_with_sessions(&[None]);
+    seed_store(temp.path());
+    // a running tool and a finished one in session p1's turn
+    {
+        let mut store = open_rw(
+            &temp.path().join("traces.db"),
+            OpenOptions {
+                prices: agent_mux::tracing::pricing::PriceTable::builtin(),
+                run_id: "run-1".into(),
+                retention_days: 0,
+                agent_mux_version: "test".into(),
+            },
+        )
+        .unwrap();
+        let call = |id: &str, name: &str, input: &str, start: i64, end: Option<i64>| {
+            StoreOp::Observation(ObservationRow {
+                id: id.into(),
+                trace_id: "t-p1".into(),
+                parent_id: None,
+                obs_type: ObservationType::Tool,
+                name: name.into(),
+                kind: None,
+                start_ns: start,
+                end_ns: end,
+                level: Level::Default,
+                status_message: None,
+                model: None,
+                input: Some(input.into()),
+                output: None,
+                thinking: None,
+                usage_raw: None,
+                usage: None,
+                tool_id: Some(id.into()),
+                tool_name: Some(name.into()),
+                skill: None,
+                mcp_server: None,
+                path: None,
+                ts_approx: false,
+                metadata: serde_json::Map::new(),
+            })
+        };
+        store
+            .apply(&[
+                call(
+                    "o-1",
+                    "Bash",
+                    r#"{"command":"cargo test --lib keymap"}"#,
+                    1_003,
+                    Some(1_003 + 2_300_000_000),
+                ),
+                call(
+                    "o-2",
+                    "Edit",
+                    r#"{"file_path":"src/keymap.rs"}"#,
+                    1_004,
+                    None,
+                ),
+            ])
+            .unwrap();
+        // the pipeline records how it matched the launch once it has
+        store
+            .conn()
+            .execute(
+                "UPDATE launches SET correlation = 'deterministic' WHERE id = 'l-p1'",
+                [],
+            )
+            .unwrap();
+    }
+    app.trace_db_path = Some(temp.path().join("traces.db"));
+    app.sessions[0].trace = Some(agent_mux::tracing::SessionTraceHandle::detached(
+        "l-p1",
+        agent_mux::config::Backend::Local,
+    ));
+    app.selected = 0;
+    app.sidebar_section = SidebarSection::Active;
+    app.focus_list();
+    let pane_rows = app.pane_size.0;
+    assert_eq!(app.trace_strip, TraceStrip::Off);
+
+    // one T: the header line takes one row from the pty
+    app.handle_key(&key(KeyCode::Char('T')), Instant::now());
+    assert_eq!(app.trace_strip, TraceStrip::Line);
+    assert_eq!(app.pane_size.0, pane_rows - 1);
+    app.on_tick(Instant::now());
+    let screen = render(&app, 150, 36);
+    assert!(screen.contains("turn 1"), "{screen}");
+    assert!(screen.contains("2 calls"), "{screen}");
+    assert!(screen.contains("matched by id"), "{screen}");
+
+    // two: the calls, the running one last, the pty eight rows shorter
+    app.handle_key(&key(KeyCode::Char('T')), Instant::now());
+    assert_eq!(app.trace_strip, TraceStrip::Rows);
+    assert_eq!(app.pane_size.0, pane_rows - 8);
+    let screen = render(&app, 150, 36);
+    assert!(
+        screen.contains("✓ ▸ Bash cargo test --lib keymap"),
+        "{screen}"
+    );
+    assert!(screen.contains("● ▸ Edit src/keymap.rs"), "{screen}");
+    assert!(screen.contains("2.3s"), "{screen}");
+
+    // three: the browser, and the strip is off again
+    app.handle_key(&key(KeyCode::Char('T')), Instant::now());
+    assert!(matches!(app.mode, Mode::TraceBrowser(_)), "{:?}", app.mode);
+    assert_eq!(app.trace_strip, TraceStrip::Off);
+    assert_eq!(app.pane_size.0, pane_rows);
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    assert!(matches!(app.mode, Mode::Main));
+
+    // an untraced session says so instead of showing a turn
+    app.sessions[0].trace = None;
+    app.handle_key(&key(KeyCode::Char('T')), Instant::now());
+    app.on_tick(Instant::now());
+    let screen = render(&app, 150, 36);
+    assert!(screen.contains("not traced · t starts tracing"), "{screen}");
+    app.kill_all();
+}

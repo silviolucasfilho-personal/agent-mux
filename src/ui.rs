@@ -1003,14 +1003,28 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         .as_deref()
         .map(|c| format!("↳ continues {c} "))
         .unwrap_or_default();
+    // with the strip open its header carries what the badge said
+    let trace_tag = if app.strip_rows() > 0 {
+        String::new()
+    } else {
+        trace_tag
+    };
     let title = format!(
         " {} — {} [{label}] {continued}{trace_tag}{scroll_tag}",
         session.profile.name,
         session.dir.display()
     );
     let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(area);
+    let whole = block.inner(area);
     f.render_widget(block, area);
+    // the strip takes its rows from the bottom of the pane; the pty was
+    // resized to the rest (`App::recompute_pane_size`)
+    let strip_rows = app.strip_rows().min(whole.height.saturating_sub(1));
+    let inner = Rect::new(whole.x, whole.y, whole.width, whole.height - strip_rows);
+    if strip_rows > 0 {
+        let strip_area = Rect::new(whole.x, whole.y + inner.height, whole.width, strip_rows);
+        draw_trace_strip(f, strip_area, app, session, now);
+    }
     let cursor = {
         let screen = session.parser.screen();
         f.render_widget(PseudoTerminal::new(screen), inner);
@@ -1035,6 +1049,164 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         let (len, offset) = session.scroll_view();
         apply_search_highlight(f.buffer_mut(), inner, &st.matches, st.current, len, offset);
     }
+}
+
+/// The first thing a call is about: its path, else the first string among
+/// the arguments a harness names a command, path, pattern, query or prompt
+/// by, else the start of its input.
+fn call_detail(o: &crate::tracing::store::query::ObservationView) -> String {
+    if let Some(p) = o.path.as_deref().filter(|p| !p.is_empty()) {
+        return p.to_string();
+    }
+    let Some(input) = o.input.as_deref() else {
+        return String::new();
+    };
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(input) {
+        for key in [
+            "command",
+            "file_path",
+            "path",
+            "pattern",
+            "query",
+            "prompt",
+            "description",
+            "url",
+            "notebook_path",
+        ] {
+            if let Some(serde_json::Value::String(v)) = map.get(key) {
+                return v.lines().next().unwrap_or("").to_string();
+            }
+        }
+        if let Some(serde_json::Value::String(v)) = map.values().find(|v| v.is_string()) {
+            return v.lines().next().unwrap_or("").to_string();
+        }
+        return String::new();
+    }
+    input.lines().next().unwrap_or("").to_string()
+}
+
+/// `2.3s`, `475ms`, or `running` for an open call.
+fn call_duration(o: &crate::tracing::store::query::ObservationView, now_ns: i64) -> String {
+    match o.end_ns {
+        Some(end) => fmt_ms((end - o.start_ns).max(0) / 1_000_000),
+        None => format!("{} …", fmt_ms((now_ns - o.start_ns).max(0) / 1_000_000)),
+    }
+}
+
+/// The trace strip under a session: a header with the turn's numbers and
+/// how the launch was matched, then its last calls, oldest first, the
+/// running one last. Empty states say why there is nothing.
+fn draw_trace_strip(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    session: &crate::session::Session,
+    now: Instant,
+) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let accent = Style::default().fg(Color::Cyan);
+    let width = usize::from(area.width);
+    let rule = |text: String| -> Line<'static> {
+        let text = truncate_chars(&text, width.saturating_sub(2));
+        let fill = "─".repeat(width.saturating_sub(text.chars().count() + 2));
+        Line::from(vec![
+            Span::styled("─ ".to_string(), dim),
+            Span::styled(text, accent),
+            Span::styled(fill, dim),
+        ])
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    let strip = match (&session.trace, &app.strip) {
+        (None, _) if matches!(session.status(now), Status::Exited(_)) => {
+            lines.push(rule("ended · not traced".into()));
+            None
+        }
+        (None, _) => {
+            lines.push(rule("not traced · t starts tracing".into()));
+            None
+        }
+        (Some(_), None) => {
+            lines.push(rule("no turn yet".into()));
+            None
+        }
+        (Some(_), Some(strip)) => Some(strip),
+    };
+    if let Some(strip) = strip {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(strip.turn_start_ns);
+        let end = strip.turn_end_ns.unwrap_or(now_ns);
+        let mut head = vec![
+            format!("turn {}", strip.turn_ordinal),
+            fmt_ms((end - strip.turn_start_ns).max(0) / 1_000_000),
+            format!("{} calls", strip.calls.len()),
+        ];
+        if let Some(t) = strip.turn_tokens {
+            head.push(format!("{} tok", fmt_tokens(Some(t))));
+        }
+        if let Some(c) = &strip.cost_label {
+            head.push(c.clone());
+        }
+        head.push(strip.match_label().to_string());
+        lines.push(rule(head.join(" · ")));
+        // the newest calls fit; the running one is the last row
+        let rows = usize::from(area.height.saturating_sub(1));
+        let skip = strip.calls.len().saturating_sub(rows);
+        for o in strip.calls.iter().skip(skip) {
+            let glyph = if o.obs_type == "agent" { "⧉" } else { "▸" };
+            let (state, state_style) = match (o.end_ns, o.level.as_str()) {
+                (None, _) => ("●", Style::default().fg(Color::Green)),
+                (Some(_), "ERROR") => ("✗", Style::default().fg(Color::Red)),
+                (Some(_), "WARNING") => ("!", Style::default().fg(Color::Yellow)),
+                _ => ("✓", dim),
+            };
+            let name = o.tool_name.clone().unwrap_or_else(|| o.name.clone());
+            let detail = call_detail(o);
+            let right = format!(
+                "{:>7} {:>6}",
+                call_duration(o, now_ns),
+                o.total_tokens
+                    .map(|t| fmt_tokens(Some(t)))
+                    .unwrap_or_else(|| "-".into())
+            );
+            let indent = "  ".repeat(o.depth.min(3));
+            let left_width = width.saturating_sub(right.chars().count() + 4);
+            let left = truncate_chars(&format!("{indent}{glyph} {name} {detail}"), left_width);
+            let pad = " ".repeat(left_width.saturating_sub(left.chars().count()));
+            let error = o
+                .status_message
+                .as_deref()
+                .filter(|_| o.level == "ERROR")
+                .map(|m| m.lines().next().unwrap_or("").to_string());
+            lines.push(Line::from(vec![
+                Span::styled(format!("{state} "), state_style),
+                Span::raw(left),
+                Span::raw(pad),
+                Span::styled(right, dim),
+            ]));
+            if let Some(e) = error
+                && lines.len() < rows + 1
+            {
+                lines.push(Line::styled(
+                    truncate_chars(&format!("    {e}"), width),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+        }
+        if strip.calls.is_empty() && area.height > 1 {
+            lines.push(Line::styled(
+                format!(
+                    "  no calls yet · {} assistant message{}",
+                    strip.generations,
+                    if strip.generations == 1 { "" } else { "s" }
+                ),
+                dim,
+            ));
+        }
+    }
+    lines.truncate(usize::from(area.height));
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_history_preview(
@@ -2139,7 +2311,10 @@ fn draw_help(f: &mut Frame) {
             "new agent: describe it, blank (session, scheduled, flow, persona) or a template",
         ),
         row("l", "browse past session logs"),
-        row("t / T", "toggle tracing / browse local traces"),
+        row(
+            "t / T",
+            "toggle tracing / trace strip: off → line → rows → browser",
+        ),
         row(
             "● ◆ ◈",
             "badge glyphs: traced locally, to Langfuse, to both",

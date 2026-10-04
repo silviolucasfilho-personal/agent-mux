@@ -147,6 +147,8 @@ pub enum Action {
     OpenNewSession,
     OpenSessionHistory,
     OpenTraceBrowser,
+    /// `T`: the trace strip off → line → rows → the browser.
+    CycleTraceStrip,
     OpenHelp,
     OpenSkillsView,
     OpenSkillLauncher,
@@ -417,6 +419,37 @@ pub struct DispatchCtx {
     pub clean: bool,
 }
 
+/// The trace strip under the selected session: `T` cycles it, and from
+/// `Rows` a fourth `T` opens the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TraceStrip {
+    #[default]
+    Off,
+    /// The header line alone: turn, elapsed, calls, tokens, cost, match.
+    Line,
+    /// The header and the turn's last calls.
+    Rows,
+}
+
+impl TraceStrip {
+    /// Rows the strip takes from the pane.
+    pub fn rows(self) -> u16 {
+        match self {
+            TraceStrip::Off => 0,
+            TraceStrip::Line => 1,
+            TraceStrip::Rows => 8,
+        }
+    }
+
+    pub fn next(self) -> TraceStrip {
+        match self {
+            TraceStrip::Off => TraceStrip::Line,
+            TraceStrip::Line => TraceStrip::Rows,
+            TraceStrip::Rows => TraceStrip::Off,
+        }
+    }
+}
+
 /// Where the keys go on the main screen: the list (the sidebar, where
 /// plain keys are verbs) or the pane (the selected session, where every
 /// key not in the chord layer is the harness's).
@@ -653,7 +686,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::ToggleTracing
                 }
-                KeyCode::Char('T') => Action::OpenTraceBrowser,
+                KeyCode::Char('T') => Action::CycleTraceStrip,
                 KeyCode::Char('S') => Action::OpenSkillsView,
                 KeyCode::Char('C') => Action::OpenConfigView,
                 KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
@@ -2126,6 +2159,18 @@ pub struct App {
     /// on Unix, always on Windows): decides whether the hints print the
     /// `⌘`/`Ctrl+Shift` chords or their protocol-free forms.
     pub keys_enhanced: bool,
+    /// The trace strip under the selected session (`T`).
+    pub trace_strip: TraceStrip,
+    /// What the strip shows: the selected session's latest turn, read
+    /// from the store on the tick when the change feed moved.
+    pub strip: Option<crate::tracing::store::query::StripView>,
+    /// The launch the strip was last read for.
+    strip_launch: Option<String>,
+    /// The change-feed sequence the strip was last read at.
+    strip_seq: i64,
+    strip_refreshed: Option<Instant>,
+    /// A read-only connection for the strip, opened on first use.
+    strip_conn: Option<rusqlite::Connection>,
     next_id: usize,
     tx: Sender<AppEvent>,
     tracing: Option<crate::tracing::TraceRuntime>,
@@ -2287,6 +2332,12 @@ impl App {
             drag_owner: None,
             focus: Focus::List,
             keys_enhanced: cfg!(windows),
+            trace_strip: TraceStrip::Off,
+            strip: None,
+            strip_launch: None,
+            strip_seq: 0,
+            strip_refreshed: None,
+            strip_conn: None,
             next_id: 0,
             experiment_links: std::collections::HashMap::new(),
             tx,
@@ -2523,22 +2574,115 @@ impl App {
         if self.sidebar_hidden {
             self.sidebar_section = SidebarSection::Active;
         }
-        let (rows, cols) = self.terminal_size;
-        let (pane_rows, pane_cols) = ui::main_pane_inner_dims(
-            ratatui::layout::Rect::new(0, 0, cols, rows),
-            self.sidebar_hidden,
-        );
-        self.set_pane_size(pane_rows, pane_cols);
+        self.recompute_pane_size();
     }
 
     /// Sets the terminal dimensions and updates the pane size accordingly.
     pub fn set_terminal_size(&mut self, rows: u16, cols: u16) {
         self.terminal_size = (rows, cols);
+        self.recompute_pane_size();
+    }
+
+    /// The pane's inner size from the terminal size, the sidebar and the
+    /// trace strip, which takes its rows from the bottom of the pane.
+    fn recompute_pane_size(&mut self) {
+        let (rows, cols) = self.terminal_size;
         let (pane_rows, pane_cols) = ui::main_pane_inner_dims(
             ratatui::layout::Rect::new(0, 0, cols, rows),
             self.sidebar_hidden,
         );
+        let pane_rows = pane_rows.saturating_sub(self.strip_rows()).max(1);
         self.set_pane_size(pane_rows, pane_cols);
+    }
+
+    /// Rows the trace strip takes from the pane: none without a session
+    /// to describe.
+    pub fn strip_rows(&self) -> u16 {
+        if self.sessions.get(self.selected).is_none() {
+            return 0;
+        }
+        self.trace_strip.rows()
+    }
+
+    /// The Trace Browser on the selected session's folder.
+    pub fn open_trace_browser(&mut self) {
+        let cur_dir = self
+            .sessions
+            .get(self.selected)
+            .map(|s| s.dir.clone())
+            .or_else(|| std::env::current_dir().ok());
+        let langfuse = self.tracing.as_ref().and_then(|rt| rt.langfuse().cloned());
+        self.mode = Mode::TraceBrowser(Box::new(
+            TraceBrowserState::new(self.trace_db_path.as_deref(), cur_dir.as_deref())
+                .with_langfuse(langfuse),
+        ));
+    }
+
+    /// `T`: off → line → rows → the browser (which leaves the strip off).
+    /// With no session under the cursor there is nothing to strip, and
+    /// `T` opens the browser at once.
+    pub fn cycle_trace_strip(&mut self) {
+        if self.sessions.get(self.selected).is_none() {
+            self.open_trace_browser();
+            return;
+        }
+        match self.trace_strip {
+            TraceStrip::Rows => {
+                self.trace_strip = TraceStrip::Off;
+                self.recompute_pane_size();
+                self.open_trace_browser();
+            }
+            other => {
+                self.trace_strip = other.next();
+                self.recompute_pane_size();
+                self.strip_refreshed = None;
+            }
+        }
+    }
+
+    /// Reads the strip for the selected session when something changed:
+    /// the launch, or the store's change feed; at most twice a second.
+    pub fn refresh_strip_if_needed(&mut self, now: Instant) {
+        if self.trace_strip == TraceStrip::Off || !matches!(self.mode, Mode::Main) {
+            return;
+        }
+        let launch = self
+            .sessions
+            .get(self.selected)
+            .and_then(|s| s.trace.as_ref())
+            .map(|t| t.launch_id.clone());
+        if launch != self.strip_launch {
+            self.strip = None;
+            self.strip_seq = 0;
+            self.strip_launch = launch.clone();
+        }
+        let Some(launch) = launch else {
+            return;
+        };
+        if self
+            .strip_refreshed
+            .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(500))
+        {
+            return;
+        }
+        self.strip_refreshed = Some(now);
+        if self.strip_conn.is_none() {
+            self.strip_conn = self
+                .trace_db_path
+                .as_deref()
+                .and_then(|p| crate::tracing::store::open_ro(p).ok());
+        }
+        let Some(conn) = self.strip_conn.as_ref() else {
+            return;
+        };
+        let seq = crate::tracing::store::latest_change_seq(conn).unwrap_or(0);
+        if seq != 0 && seq == self.strip_seq && self.strip.is_some() {
+            return;
+        }
+        self.strip_seq = seq;
+        if let Ok(view) = crate::tracing::store::query::launch_strip(conn, &launch) {
+            self.strip = view;
+        }
     }
 
     /// The Active sidebar's tree: every session as a row, with the loop
@@ -2588,6 +2732,7 @@ impl App {
             view.refresh_if_live(now);
         }
         self.resync_workflow_selection();
+        self.refresh_strip_if_needed(now);
         self.publish_live_snapshot_if_needed(now);
         self.refresh_briefing_if_needed(now);
         self.refresh_loop_cards_if_needed(now);
@@ -3582,7 +3727,7 @@ impl App {
             && ev.column < ui::SIDEBAR_WIDTH.saturating_sub(1)
         {
             let (agents_rect, history_rect) =
-                ui::sidebar_areas(self.pane_size.0 + 3, self.history_sessions.len());
+                ui::sidebar_areas(self.terminal_size.0, self.history_sessions.len());
             if ev.row >= agents_rect.y && ev.row < agents_rect.y + agents_rect.height {
                 if ev.row > agents_rect.y
                     && ev.row < agents_rect.y + agents_rect.height.saturating_sub(1)
@@ -3679,7 +3824,7 @@ impl App {
                     // over the Agents list a wheel scrolls the selected
                     // session (a trackpad often rests there); History scrolls
                     let (_, history_rect) =
-                        ui::sidebar_areas(self.pane_size.0 + 3, self.history_sessions.len());
+                        ui::sidebar_areas(self.terminal_size.0, self.history_sessions.len());
                     if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
                         let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
                             -1
@@ -4113,18 +4258,8 @@ impl App {
                 self.mode = Mode::SessionHistory(HistoryState::new(cur_dir.as_deref()));
             }
             Action::HistoryKey => self.handle_history_key(key),
-            Action::OpenTraceBrowser => {
-                let cur_dir = self
-                    .sessions
-                    .get(self.selected)
-                    .map(|s| s.dir.clone())
-                    .or_else(|| std::env::current_dir().ok());
-                let langfuse = self.tracing.as_ref().and_then(|rt| rt.langfuse().cloned());
-                self.mode = Mode::TraceBrowser(Box::new(
-                    TraceBrowserState::new(self.trace_db_path.as_deref(), cur_dir.as_deref())
-                        .with_langfuse(langfuse),
-                ));
-            }
+            Action::OpenTraceBrowser => self.open_trace_browser(),
+            Action::CycleTraceStrip => self.cycle_trace_strip(),
             Action::BrowserKey => self.handle_browser_key(key),
             Action::RespawnSelected => {
                 self.selection = None;
@@ -5619,7 +5754,7 @@ impl App {
         } else {
             ui::SIDEBAR_WIDTH
         };
-        self.terminal_size = (rows + 3, cols + side_w + 2);
+        self.terminal_size = (rows + 3 + self.strip_rows(), cols + side_w + 2);
         for s in &mut self.sessions {
             s.resize(rows, cols);
         }
@@ -5815,10 +5950,11 @@ mod dispatch_tests {
             dispatch(&Mode::Main, &key(KeyCode::Char('t')), &c),
             Action::ToggleTracing
         ));
-        // Shift+T is the trace browser, not a second toggle
+        // Shift+T is the trace strip (and, from its rows, the browser),
+        // not a second toggle
         assert!(matches!(
             dispatch(&Mode::Main, &key(KeyCode::Char('T')), &c),
-            Action::OpenTraceBrowser
+            Action::CycleTraceStrip
         ));
     }
 
@@ -6744,10 +6880,10 @@ mod history_tests {
     }
 
     #[test]
-    fn shift_t_opens_the_trace_browser_and_t_toggles_tracing() {
+    fn shift_t_cycles_the_strip_then_opens_the_browser_and_t_toggles_tracing() {
         assert!(matches!(
             dispatch(&Mode::Main, &key(KeyCode::Char('T')), &ctx()),
-            Action::OpenTraceBrowser
+            Action::CycleTraceStrip
         ));
         assert!(matches!(
             dispatch(&Mode::Main, &key(KeyCode::Char('t')), &ctx()),
@@ -6755,7 +6891,8 @@ mod history_tests {
         ));
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut app = App::new(vec![], None, tx);
-        // tracing off: opening still works and explains itself
+        // no session under the cursor: nothing to strip, the browser opens
+        // at once; tracing off: it still opens and explains itself
         app.handle_key(&key(KeyCode::Char('T')), Instant::now());
         match &app.mode {
             Mode::TraceBrowser(b) => assert!(b.error.is_some()),
