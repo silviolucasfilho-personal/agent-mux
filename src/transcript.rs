@@ -963,6 +963,26 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
     let mut events = Vec::new();
 
     match line_type {
+        // Codex ≥ 0.159 writes one of these per model response, right
+        // after the response's items, with the exact usage of that
+        // response and its ids. The `token_count` event that follows the
+        // tool output carries a delta that can be zero for a response
+        // whose usage it rolled elsewhere (seen on 2026-10-04: a 1,152
+        // output-token response reported as 0), so the record wins.
+        "token_usage_record" => {
+            let usage = integer_usage(payload.get("usage"));
+            if !usage.is_empty() {
+                events.push(TranscriptEvent::TokenCount {
+                    usage,
+                    msg_id: payload
+                        .get("response_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    model: None,
+                    ts,
+                });
+            }
+        }
         "session_meta" => {
             let mut extra = serde_json::Map::new();
             for key in [
@@ -1670,6 +1690,18 @@ mod tests {
         // unknown event types are skipped
         let unknown = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"something_new"}}"#;
         assert!(parse_codex_line(unknown).is_empty());
+        // a usage record: the response's exact usage, keyed by its id
+        let record = r#"{"timestamp":"t","type":"token_usage_record","payload":{"thread_id":"th","turn_id":"tu","session_id":"th","root_turn_id":"tu","response_id":"resp_1","usage":{"input_tokens":34838,"cached_input_tokens":18176,"cache_write_input_tokens":0,"output_tokens":1152,"reasoning_output_tokens":900,"total_tokens":35990}}}"#;
+        match &parse_codex_line(record)[0] {
+            TranscriptEvent::TokenCount { usage, msg_id, .. } => {
+                let get = |k: &str| usage.iter().find(|(key, _)| key == k).map(|(_, v)| *v);
+                assert_eq!(get("input_tokens"), Some(34838));
+                assert_eq!(get("cached_input_tokens"), Some(18176));
+                assert_eq!(get("output_tokens"), Some(1152));
+                assert_eq!(msg_id.as_deref(), Some("resp_1"));
+            }
+            other => panic!("expected TokenCount, got {other:?}"),
+        }
         let unknown_line = r#"{"timestamp":"t","type":"world_state","payload":{}}"#;
         assert!(parse_codex_line(unknown_line).is_empty());
     }

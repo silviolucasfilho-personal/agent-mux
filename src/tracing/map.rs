@@ -280,6 +280,10 @@ pub struct TurnAssembler {
     last_event_nanos: i128,
     session_extra: Vec<(String, String)>,
     last_known_model: Option<String>,
+    /// Codex: a `token_usage_record` arrived, so the per-response usage
+    /// is exact and keyed by response id; the `token_count` deltas that
+    /// follow are the same usage again (or less) and are ignored.
+    codex_usage_records: bool,
     cost: Option<CostSnapshot>,
     /// Emitted generations by transcript step index (Antigravity).
     step_gens: std::collections::HashMap<u64, StepGen>,
@@ -358,6 +362,7 @@ impl TurnAssembler {
             last_event_nanos: 0,
             session_extra: Vec::new(),
             last_known_model: None,
+            codex_usage_records: false,
             cost: None,
             step_gens: std::collections::HashMap::new(),
             pending_step_usage: std::collections::HashMap::new(),
@@ -2166,11 +2171,23 @@ impl TurnAssembler {
                 let (nanos, approx) = self.event_nanos(&ts, recv_nanos);
                 self.ensure_live_turn(nanos, &mut ops);
                 if self.settings.provider == Provider::Codex {
-                    if self.turn.as_ref().is_some_and(|turn| {
-                        turn.pending_generations.is_empty()
-                            && turn.last_gen.is_some()
-                            && turn.pending_thinking.is_empty()
-                    }) {
+                    let from_record = msg_id.is_some();
+                    if from_record {
+                        self.codex_usage_records = true;
+                    } else if self.codex_usage_records {
+                        // the record already charged this response
+                        return ops;
+                    }
+                    // a delta with nothing pending and a generation already
+                    // closed is a repeat; a record is never one, it is
+                    // exactly one response (tool-only ones included)
+                    if !from_record
+                        && self.turn.as_ref().is_some_and(|turn| {
+                            turn.pending_generations.is_empty()
+                                && turn.last_gen.is_some()
+                                && turn.pending_thinking.is_empty()
+                        })
+                    {
                         return ops;
                     }
                     if let Some(turn) = self.turn.as_mut() {
@@ -2188,6 +2205,9 @@ impl TurnAssembler {
                             ts_approx: true,
                         });
                         generation.usage = usage;
+                        if generation.msg_id.is_none() {
+                            generation.msg_id = msg_id.clone();
+                        }
                         generation.end_nanos = generation.end_nanos.max(nanos);
                         generation.tool_calls = std::mem::take(&mut turn.tools_since_gen);
                         if generation.thinking.is_none() && !turn.pending_thinking.is_empty() {
@@ -4709,6 +4729,62 @@ mod tests {
         );
         assert_eq!(rows[0].name, "assistant (tool use)");
         assert_eq!(rows[0].usage.as_ref().unwrap().input, Some(900));
+    }
+
+    /// Codex ≥ 0.159: a `token_usage_record` per response is exact and
+    /// keyed by response id; a tool-only response with nothing pending
+    /// still gets its generation, and the `token_count` delta that
+    /// follows is not charged again.
+    #[test]
+    fn codex_usage_records_charge_each_response_once() {
+        let mut s = settings(ContentMode::Metadata);
+        s.provider = Provider::Codex;
+        s.profile_name = "Codex".into();
+        let mut asm = TurnAssembler::new(s, Some("th".into()), "deterministic");
+        let _ = asm.feed(user("go", "2026-10-04T10:00:00Z"), 0);
+        let count = |id: Option<&str>, out: i64| TranscriptEvent::TokenCount {
+            usage: vec![
+                ("input_tokens".into(), 1_000),
+                ("cached_input_tokens".into(), 600),
+                ("output_tokens".into(), out),
+            ],
+            msg_id: id.map(str::to_string),
+            model: None,
+            ts: Some("2026-10-04T10:00:01Z".into()),
+        };
+        // first response: a tool call, then its record, then the delta
+        let _ = asm.feed(
+            tool_use("c1", "shell", Value::Null, "2026-10-04T10:00:01Z"),
+            0,
+        );
+        let ops = asm.feed(count(Some("resp_1"), 715), 0);
+        let rows = observations(&ops);
+        assert_eq!(rows.len(), 1, "the record mints the generation");
+        assert_eq!(rows[0].usage.as_ref().unwrap().output, Some(715));
+        let ops = asm.feed(count(None, 715), 0);
+        assert!(
+            observations(&ops).is_empty(),
+            "the delta for the same response charges nothing"
+        );
+        // second response: tool-only with nothing pending, the case the
+        // delta path used to drop; the record still lands, with its id
+        let _ = asm.feed(
+            tool_use("c2", "shell", Value::Null, "2026-10-04T10:00:02Z"),
+            0,
+        );
+        let ops = asm.feed(count(Some("resp_2"), 1_152), 0);
+        let rows = observations(&ops);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].usage.as_ref().unwrap().output, Some(1_152));
+        assert_eq!(
+            rows[0]
+                .metadata
+                .get("native_message_id")
+                .and_then(|v| v.as_str()),
+            Some("resp_2")
+        );
+        let ops = asm.feed(count(None, 0), 0);
+        assert!(observations(&ops).is_empty(), "a zero delta is nothing");
     }
 
     #[test]

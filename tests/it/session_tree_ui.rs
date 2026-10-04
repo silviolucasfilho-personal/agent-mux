@@ -895,7 +895,10 @@ fn the_trace_browser_is_a_drawer_beside_the_sidebar() {
     assert!(matches!(app.mode, Mode::TraceBrowser(_)));
     let screen = render(&app, 150, 36);
     assert!(screen.contains("Agents"), "the sidebar stays: {screen}");
-    assert!(screen.contains("Sessions ("), "the browser is in the pane: {screen}");
+    assert!(
+        screen.contains("Sessions ("),
+        "the browser is in the pane: {screen}"
+    );
     assert!(screen.contains("History"), "and History too: {screen}");
     // the browser's own key hides the sidebar: full screen
     app.handle_key(&key(KeyCode::Char('b')), Instant::now());
@@ -905,7 +908,10 @@ fn the_trace_browser_is_a_drawer_beside_the_sidebar() {
     assert!(screen.contains("Sessions ("), "{screen}");
     // the chord layer works in the browser too
     app.handle_key(
-        &KeyEvent::new(KeyCode::Char('B'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        &KeyEvent::new(
+            KeyCode::Char('B'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
         Instant::now(),
     );
     assert!(!app.sidebar_hidden);

@@ -754,7 +754,8 @@ A root line (`parentUuid` null) also emits `SessionMeta` with `git_branch` and `
 | `response_item` / `reasoning` | `Thinking`. |
 | `response_item` / `function_call`, `custom_tool_call`, `local_shell_call`, `web_search_call` | `ToolUse` (`call_id`; names `local_shell` and `web_search` for the last two). |
 | `response_item` / `*_output` | `ToolResult`. |
-| `event_msg` / `token_count` | `TokenCount` from `info.last_token_usage`. |
+| `token_usage_record` | `TokenCount` from `usage`, with `response_id` as the message id: Codex ≥ 0.159 writes one per model response, right after its items, and it is exact; the assembler then ignores the `token_count` deltas, which can report 0 for a response (seen 2026-10-04: 1,152 output tokens lost, one generation of 148). |
+| `event_msg` / `token_count` | `TokenCount` from `info.last_token_usage`, used only by rollouts without usage records. |
 | `event_msg` / `task_started`, `task_complete`, `turn_aborted` | `TurnBoundary` (`task_started` also emits `SourceTurn { turn_id }`). Every `event_msg` is also emitted as an `Activity`. |
 
 **Antigravity transcript** (`parse_antigravity_line`), by step `type`: `USER_INPUT` → `User` (the `<USER_REQUEST>` body) plus a model `SessionMeta` when the text announces a model selection; `PLANNER_RESPONSE` → `Assistant { model, thinking, step_index }` (emitted even when text-less so usage can attach) plus one `ToolUse { id: "" }` per `tool_calls` entry; `GENERIC` → `ToolResult { id: "" }` with `is_error` only when the body carries an explicit non-zero exit line. Antigravity supplies no tool ids, so results pair positionally.
