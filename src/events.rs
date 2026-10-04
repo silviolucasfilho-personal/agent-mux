@@ -49,4 +49,7 @@ pub enum AppEvent {
         result: Result<crate::tracing::analysis::Briefing, String>,
     },
     Tick,
+    /// The History list, rescanned off the main thread after a session
+    /// exited (`App::reload_history_sessions_async`).
+    HistoryLoaded(Vec<crate::history::SessionSummary>),
 }

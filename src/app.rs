@@ -2916,11 +2916,42 @@ impl App {
             .get(self.selected)
             .map(|s| s.dir.clone())
             .or_else(|| std::env::current_dir().ok());
-        let mut sessions =
-            history::discover_sessions(None, None, cur_dir.as_deref(), self.history_all_projects);
-        if sessions.is_empty() && !self.history_all_projects {
-            sessions = history::discover_sessions(None, None, cur_dir.as_deref(), true);
+        let sessions = Self::discover_history(cur_dir.as_deref(), self.history_all_projects);
+        self.apply_history_sessions(sessions);
+    }
+
+    /// The History list for `cur_dir`, falling back to every project when
+    /// the folder has none of its own.
+    fn discover_history(
+        cur_dir: Option<&std::path::Path>,
+        all: bool,
+    ) -> Vec<history::SessionSummary> {
+        let mut sessions = history::discover_sessions(None, None, cur_dir, all);
+        if sessions.is_empty() && !all {
+            sessions = history::discover_sessions(None, None, cur_dir, true);
         }
+        sessions
+    }
+
+    /// The rescan that follows a session's exit, off the main thread: it
+    /// reads every project's transcripts, seconds in a big home, and the
+    /// result comes back as `AppEvent::HistoryLoaded`.
+    pub fn reload_history_sessions_async(&self) {
+        let cur_dir = self
+            .sessions
+            .get(self.selected)
+            .map(|s| s.dir.clone())
+            .or_else(|| std::env::current_dir().ok());
+        let all = self.history_all_projects;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let sessions = Self::discover_history(cur_dir.as_deref(), all);
+            let _ = tx.blocking_send(AppEvent::HistoryLoaded(sessions));
+        });
+    }
+
+    /// Takes a rescanned History list, keeping the cursor in range.
+    pub fn apply_history_sessions(&mut self, sessions: Vec<history::SessionSummary>) {
         self.history_sessions = sessions;
         if self.selected_history >= self.history_sessions.len() {
             self.selected_history = self.history_sessions.len().saturating_sub(1);
@@ -5738,7 +5769,7 @@ impl App {
             // in a workspace with no history of its own it reads every
             // project's transcripts, seconds per exit, twice per session.
             if self.sessions[i].group.is_none() {
-                self.reload_history_sessions();
+                self.reload_history_sessions_async();
             }
             let _ = self.save_active_sessions();
         }

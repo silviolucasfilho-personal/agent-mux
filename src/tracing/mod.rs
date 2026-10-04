@@ -200,6 +200,10 @@ pub struct TraceRuntime {
     /// Once-per-run latch for the dropped-ops warning, shared between the
     /// writer's status sink and the pipelines' queue-full paths.
     drop_warned: Arc<std::sync::atomic::AtomicBool>,
+    /// Woken by a hook process (`<db>.wake`); every pipeline waits on it.
+    wake: Arc<tokio::sync::Notify>,
+    /// The socket file to remove at shutdown, when one was bound.
+    wake_socket: Option<PathBuf>,
 }
 
 /// Which sinks an op reaches under `backend`: (local store, Langfuse).
@@ -348,6 +352,8 @@ impl TraceRuntime {
                 }),
             )
         });
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let db_path_for_wake = settings.db_path.clone();
         Ok(TraceRuntime {
             settings,
             claims: Arc::new(Mutex::new(HashSet::new())),
@@ -360,6 +366,8 @@ impl TraceRuntime {
             injection_disabled: Arc::new(Mutex::new(HashSet::new())),
             fast_failures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             drop_warned,
+            wake_socket: spawn_wake_listener(&db_path_for_wake, Arc::clone(&wake)),
+            wake,
         })
     }
 
@@ -994,6 +1002,7 @@ impl TraceRuntime {
             provider: plan.provider,
             poll_interval: Duration::from_millis(self.settings.poll_interval_ms.max(50)),
             backfill_max_bytes: self.settings.backfill_max_bytes,
+            wake: Arc::clone(&self.wake),
         };
         let shutdown_rx = self.shutdown_tx.subscribe();
         self.pipelines
@@ -1022,8 +1031,12 @@ impl TraceRuntime {
             exporter,
             shutdown_tx,
             pipelines,
+            wake_socket,
             ..
         } = self;
+        if let Some(path) = wake_socket {
+            let _ = std::fs::remove_file(path);
+        }
         let _ = shutdown_tx.send(true);
         let started = Instant::now();
         let half = deadline / 2;
@@ -1074,6 +1087,39 @@ struct PipelineCtx {
     provider: Provider,
     poll_interval: Duration,
     backfill_max_bytes: u64,
+    /// Woken by a hook process through `<db>.wake` (`wake_listener`): the
+    /// pipeline ticks at once instead of on its next poll.
+    wake: Arc<tokio::sync::Notify>,
+}
+
+/// Binds `<db>.wake` and turns every datagram on it into a wake of every
+/// waiting pipeline. Unix only. A path too long for a socket, or a bind
+/// error, leaves the pipelines on polling alone.
+#[cfg(unix)]
+fn spawn_wake_listener(db_path: &Path, wake: Arc<tokio::sync::Notify>) -> Option<PathBuf> {
+    // a runtime built outside tokio (the plan tests, a one-shot command)
+    // has no reactor to listen with: polling alone, as before
+    if tokio::runtime::Handle::try_current().is_err() {
+        return None;
+    }
+    let path = store::wake_socket_path(db_path);
+    let _ = std::fs::remove_file(&path);
+    let sock = match tokio::net::UnixDatagram::bind(&path) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    tokio::spawn(async move {
+        let mut buf = [0u8; 16];
+        while sock.recv(&mut buf).await.is_ok() {
+            wake.notify_waiters();
+        }
+    });
+    Some(path)
+}
+
+#[cfg(not(unix))]
+fn spawn_wake_listener(_db_path: &Path, _wake: Arc<tokio::sync::Notify>) -> Option<PathBuf> {
+    None
 }
 
 struct Pipeline {
@@ -1650,9 +1696,39 @@ async fn run_pipeline(
         }
         tokio::select! {
             _ = tokio::time::sleep(poll_interval) => {}
+            _ = pipeline.ctx.wake.notified() => {}
             _ = phase_rx.changed() => {}
             _ = shutdown_rx.changed() => {}
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod wake_tests {
+    use super::*;
+
+    /// A hook process pokes `<db>.wake`; every pipeline waiting on the
+    /// runtime's `Notify` wakes at once.
+    #[tokio::test]
+    async fn a_poke_on_the_socket_wakes_a_waiting_pipeline() {
+        // a short path: a Unix socket path has about a hundred bytes
+        let db = std::env::temp_dir().join(format!("amx-wake-{}.db", std::process::id()));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let bound = spawn_wake_listener(&db, Arc::clone(&wake));
+        assert!(bound.is_some(), "the socket binds under temp_dir");
+        let waiter = {
+            let wake = Arc::clone(&wake);
+            tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(5), wake.notified())
+                    .await
+                    .is_ok()
+            })
+        };
+        // let the waiter register before the poke
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        store::poke_wake(&db);
+        assert!(waiter.await.unwrap(), "the poke woke the waiter");
+        let _ = std::fs::remove_file(bound.unwrap());
     }
 }
 

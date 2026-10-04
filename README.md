@@ -225,7 +225,7 @@ content_mode = "full"
 hooks = "auto"
 backend = "local"
 retention_days = 0
-poll_interval_ms = 500
+poll_interval_ms = 250
 flush_interval_ms = 250
 shutdown_flush_ms = 1000
 content_max_bytes = 65536
@@ -256,7 +256,7 @@ mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 | `release`, `environment`, `tags` | Optional labels stored on every launch; tags default to `[]`. |
 | `content_max_bytes`, `redact_literals` | 65,536-byte per-field cap; literal substrings masked before storage and export. |
 | `backfill_max_bytes` | 4 MiB cap when priming a resumed transcript. |
-| `poll_interval_ms` | 500 ms provider polling (floored to 50 ms in the pipeline). |
+| `poll_interval_ms` | 250 ms provider polling (floored to 50 ms in the pipeline); a hook arriving wakes the pipelines at once through `<db>.wake` (section 6.4). |
 | `flush_interval_ms` | 250 ms store batch cadence, floored to 20 ms. |
 | `shutdown_flush_ms` | 1,000 ms resolver default; the TUI floors its use at 1,500 ms. |
 | `retention_days` | `0` keeps forever. Positive values prune at TUI store open. CLI writers pass `0`. |
@@ -643,7 +643,7 @@ sequenceDiagram
     RT->>P: spawn run_pipeline
     PTY->>Hook: SessionStart / UserPromptSubmit / PreToolUse / … (per event)
     Hook->>DB: INSERT OR IGNORE INTO hook_events
-    loop every poll_interval (500 ms)
+    loop every poll_interval (250 ms), or at once on a hook's poke
         P->>DB: HookFeed.announcement() / poll()
         P->>P: correlate (announced > deterministic > watched > heuristic)
         P->>P: Tailer.poll() → complete JSONL lines
@@ -689,7 +689,7 @@ A skill launch also sets `plan.skill = (id, harness)`, which `start_session` rec
 5. `poll_hooks()`: attach new `hook_events` rows.
 6. `assembler.poll_children()`: subagent sidecars.
 
-Then it sleeps `poll_interval` (config, floored to 50 ms) or wakes early on a phase change or shutdown. Phases come from `SessionTraceHandle` through a watch channel: `Running`, `Exited(code)`, `Stopped`. On exit the loop runs three grace ticks (each after `min(poll_interval, 350 ms)`) and then `finalize("exit", code)`. On shutdown it runs up to three ticks of at most 50 ms each, one more tick, then finalizes with `exit`, `stopped` or `app_quit`. Dropping the `Session` closes the channel and counts as an exit.
+Then it sleeps `poll_interval` (config, floored to 50 ms) or wakes early on a phase change, on shutdown, or on a poke from a hook process: the runtime binds a Unix datagram socket next to the store (`<db>.wake`, `store::wake_socket_path`, removed at shutdown; Unix only, and a path too long for a socket falls back to polling), `trace hook` sends one byte on it after its row is in (`store::poke_wake`), and every pipeline waiting on the runtime's `Notify` ticks at once, so a Claude Code tool event is in the store within the writer's batch (≤ 250 ms) of the hook firing rather than a poll later. Phases come from `SessionTraceHandle` through a watch channel: `Running`, `Exited(code)`, `Stopped`. On exit the loop runs three grace ticks (each after `min(poll_interval, 350 ms)`) and then `finalize("exit", code)`. On shutdown it runs up to three ticks of at most 50 ms each, one more tick, then finalizes with `exit`, `stopped` or `app_quit`. Dropping the `Session` closes the channel and counts as an exit.
 
 `finalize` feeds the tailer's held partial line, polls Antigravity usage and hooks once more, closes the assembler (unpaired tools get `no result observed`), emits the ended launch row with termination, exit code, correlation, parse errors, dropped ops, reported cost and the hook-event count, and releases the claim.
 

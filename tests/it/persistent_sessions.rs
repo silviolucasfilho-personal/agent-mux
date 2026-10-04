@@ -515,3 +515,27 @@ async fn test_sidebar_hidden_navigation_and_mouse_click() {
 
     app.kill_all();
 }
+
+/// A session's exit rescans History off the main thread: the list comes
+/// back as an event and is applied with the cursor kept in range.
+#[tokio::test]
+async fn the_history_rescan_after_an_exit_comes_back_as_an_event() {
+    let (tx, mut rx) = mpsc::channel(32);
+    let mut app = App::new(vec![make_echo_profile("test-agent")], None, tx);
+    app.selected_history = 99;
+    app.reload_history_sessions_async();
+    let event = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+        .await
+        .expect("the rescan answers")
+        .expect("the channel is open");
+    let agent_mux::events::AppEvent::HistoryLoaded(sessions) = event else {
+        panic!("expected HistoryLoaded");
+    };
+    let n = sessions.len();
+    app.apply_history_sessions(sessions);
+    assert_eq!(app.history_sessions.len(), n);
+    assert!(
+        app.selected_history < n.max(1),
+        "the cursor is back in range"
+    );
+}

@@ -1,6 +1,6 @@
 # Tracing: review and a better UX — design
 
-Status: review and proposal, 2026-10-04. Covers capture for the three harnesses (Claude Code 2.1.289, Codex CLI 0.159.2, Antigravity 1.2.16, the versions installed when this was written), the pipeline's speed, and every surface where the user meets a trace. Facts cite `file:line` at commit c4c884f; the store numbers come from this machine's `~/.agent-mux/traces.db` (355 MB, schema 14, 567 sessions, 969 traces, 41,222 observations, 708 launches, 6,498 hook rows). Nothing here is implemented yet.
+Status: review and proposal, 2026-10-04. Done since: phase 1 (prices from LiteLLM, provenance marks, the unpriced notice, the trailing stats push), phase 2 (the trace strip, `T` cycling off → line → rows → browser), and of phase 3 the hook wake socket, a 250 ms poll default, the change-feed trim, the FTS trigger guard (schema v15) and the history rescan off the main thread; still open from phase 3: filesystem watchers, flush on wake, the agy lock adoption and the snapshot gating; phases 4 and 5 untouched. Covers capture for the three harnesses (Claude Code 2.1.289, Codex CLI 0.159.2, Antigravity 1.2.16, the versions installed when this was written), the pipeline's speed, and every surface where the user meets a trace. Facts cite `file:line` at commit c4c884f; the store numbers come from this machine's `~/.agent-mux/traces.db` (355 MB, schema 14, 567 sessions, 969 traces, 41,222 observations, 708 launches, 6,498 hook rows). Nothing here is implemented yet.
 
 ## 1. The verdict in five lines
 

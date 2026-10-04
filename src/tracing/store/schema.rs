@@ -1,9 +1,11 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
-pub const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14];
+pub const MIGRATIONS: &[&str] = &[
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
+];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
 // uses a separate database rather than silently replacing its history.
@@ -760,4 +762,26 @@ CREATE TABLE IF NOT EXISTS loop_run_patterns (
   run_id        TEXT PRIMARY KEY REFERENCES loop_runs (id) ON DELETE CASCADE,
   pattern_hash  TEXT NOT NULL
 );
+"#;
+
+// v15: the FTS update triggers fire only when the text changed. The
+// observation upsert always names `input` and `output` in its SET clause
+// (`COALESCE(excluded.input, input)`), so `AFTER UPDATE OF input, output`
+// fired on every re-upsert: an in-flight tool closing, a hook pin, an
+// Antigravity usage row — each deleted and re-inserted the FTS entry for
+// text that had not changed. `WHEN` keeps the index work to real edits.
+// Replay-safe: the triggers are dropped and recreated.
+const V15: &str = r#"
+DROP TRIGGER IF EXISTS observations_fts_au;
+CREATE TRIGGER observations_fts_au AFTER UPDATE OF input, output ON observations
+WHEN old.input IS NOT new.input OR old.output IS NOT new.output BEGIN
+  INSERT INTO observations_fts (observations_fts, rowid, input, output) VALUES ('delete', old.rid, old.input, old.output);
+  INSERT INTO observations_fts (rowid, input, output) VALUES (new.rid, new.input, new.output);
+END;
+DROP TRIGGER IF EXISTS traces_fts_au;
+CREATE TRIGGER traces_fts_au AFTER UPDATE OF input, output ON traces
+WHEN old.input IS NOT new.input OR old.output IS NOT new.output BEGIN
+  INSERT INTO traces_fts (traces_fts, rowid, input, output) VALUES ('delete', old.rid, old.input, old.output);
+  INSERT INTO traces_fts (rowid, input, output) VALUES (new.rid, new.input, new.output);
+END;
 "#;

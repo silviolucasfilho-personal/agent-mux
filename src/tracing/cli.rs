@@ -2668,7 +2668,14 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
     }
     match store::open_hook_sink(&resolved.db_path, HOOK_BUSY_CAP) {
         Ok(conn) => match store::insert_hook_event(&conn, &ev) {
-            Ok(inserted) => outcome.inserted = inserted,
+            Ok(inserted) => {
+                outcome.inserted = inserted;
+                // the row is in; the TUI's pipelines read it now, not on
+                // their next poll
+                if inserted {
+                    store::poke_wake(&resolved.db_path);
+                }
+            }
             Err(e) => outcome.error = Some(format!("insert: {e}")),
         },
         Err(e) => outcome.error = Some(e),

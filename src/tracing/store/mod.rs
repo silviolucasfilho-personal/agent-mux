@@ -87,6 +87,48 @@ pub fn read_changes(
     Ok(out)
 }
 
+/// The Unix datagram socket next to the store on which a hook process
+/// pokes the running TUI (`<db>.wake`): the pipelines wake and read the
+/// new row at once instead of on their next poll. Unix only; elsewhere,
+/// and when the path is too long for a socket, polling alone applies.
+pub fn wake_socket_path(db_path: &Path) -> std::path::PathBuf {
+    let mut name = db_path.as_os_str().to_os_string();
+    name.push(".wake");
+    std::path::PathBuf::from(name)
+}
+
+/// Pokes the TUI's wake socket, if one is listening. Never fails: a
+/// missing or dead socket means polling, as before.
+pub fn poke_wake(db_path: &Path) {
+    #[cfg(unix)]
+    {
+        let path = wake_socket_path(db_path);
+        if !path.exists() {
+            return;
+        }
+        if let Ok(sock) = std::os::unix::net::UnixDatagram::unbound() {
+            let _ = sock.send_to(b"1", &path);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = db_path;
+    }
+}
+
+/// Keeps the change feed to its last `keep` rows: it is a cursor for live
+/// readers, not history, and nothing else prunes it.
+pub fn trim_change_feed(conn: &Connection, keep: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM trace_changes
+         WHERE seq <= (SELECT COALESCE(MAX(seq), 0) FROM trace_changes) - ?1",
+        params![keep],
+    )
+}
+
+/// Rows of the change feed a store keeps after a trim.
+pub const CHANGE_FEED_KEEP: i64 = 50_000;
+
 /// Returns the highest committed change sequence number in the store.
 pub fn latest_change_seq(conn: &Connection) -> rusqlite::Result<i64> {
     let exists: bool = conn
@@ -257,6 +299,9 @@ pub fn open_rw(path: &Path, opts: OpenOptions) -> Result<Store, String> {
     )
     .map_err(|e| format!("pragmas on {}: {e}", path.display()))?;
     let fresh_schema = migrate(&conn)?;
+    // the feed is a cursor, not history: a store that has run for weeks
+    // carries it trimmed rather than growing without bound
+    let _ = trim_change_feed(&conn, CHANGE_FEED_KEEP);
     let now = now_ns();
     let store = Store {
         conn,
@@ -556,6 +601,7 @@ impl Store {
             params![cutoff_ns],
         )?;
         tx.commit()?;
+        let _ = trim_change_feed(&self.conn, CHANGE_FEED_KEEP);
         let _ = self.conn.execute_batch("PRAGMA incremental_vacuum;");
         Ok(counts)
     }
@@ -1775,5 +1821,61 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn the_fts_update_triggers_fire_only_when_the_text_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_temp(dir.path());
+        for name in ["observations_fts_au", "traces_fts_au"] {
+            let sql: String = store
+                .conn()
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                    params![name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                sql.contains("WHEN old.input IS NOT new.input"),
+                "{name}: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_change_feed_is_trimmed_to_its_last_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_temp(dir.path());
+        for i in 0..40 {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO trace_changes (entity_kind, entity_id, operation) VALUES ('session', ?1, 'insert')",
+                    params![format!("s{i}")],
+                )
+                .unwrap();
+        }
+        let removed = trim_change_feed(store.conn(), 10).unwrap();
+        assert_eq!(removed, 30);
+        let (left, max): (i64, i64) = store
+            .conn()
+            .query_row("SELECT COUNT(*), MAX(seq) FROM trace_changes", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(left, 10, "the newest rows stay");
+        assert_eq!(max, 40, "the sequence keeps counting");
+    }
+
+    #[test]
+    fn the_wake_socket_sits_next_to_the_store_and_a_poke_without_it_is_nothing() {
+        let db = std::path::Path::new("/tmp/x/traces.db");
+        assert_eq!(
+            wake_socket_path(db),
+            std::path::PathBuf::from("/tmp/x/traces.db.wake")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        poke_wake(&dir.path().join("traces.db"));
     }
 }

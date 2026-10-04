@@ -619,7 +619,9 @@ pub fn resolve_tracing(
         content_max_bytes: lf.content_max_bytes.unwrap_or(65536),
         redact_literals: lf.redact_literals.clone(),
         backfill_max_bytes: lf.backfill_max_bytes.unwrap_or(4 * 1024 * 1024),
-        poll_interval_ms: lf.poll_interval_ms.unwrap_or(500),
+        // 250: a stat per session per quarter second costs nothing, and the
+        // harnesses without hooks (Codex, Antigravity) have only this
+        poll_interval_ms: lf.poll_interval_ms.unwrap_or(250),
         // floored: 0 would hot-spin the writer thread
         flush_interval_ms: lf.flush_interval_ms.unwrap_or(250).max(20),
         shutdown_flush_ms: lf.shutdown_flush_ms.unwrap_or(1000),
@@ -944,7 +946,7 @@ mod tests {
         );
         assert_eq!(resolved.content_mode, ContentMode::Full);
         assert_eq!(resolved.content_max_bytes, 65536);
-        assert_eq!(resolved.poll_interval_ms, 500);
+        assert_eq!(resolved.poll_interval_ms, 250);
         assert_eq!(resolved.flush_interval_ms, 250);
         assert_eq!(resolved.shutdown_flush_ms, 1000);
         assert_eq!(resolved.retention_days, 0);
