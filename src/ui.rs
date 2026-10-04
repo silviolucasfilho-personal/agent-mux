@@ -771,8 +771,14 @@ fn session_detail(s: &crate::session::Session, now: Instant) -> String {
         if let Some(tok) = t.total_tokens.filter(|n| *n > 0) {
             parts.push(crate::loops::format_tokens(tok as u64));
         }
-        if let Some(c) = t.cost_usd.filter(|c| *c >= 0.01) {
-            parts.push(format!("${c:.2}"));
+        // `$` reported by the harness, `≈$` estimated, `?` unpriced
+        if let Some(label) = t.cost_label()
+            && (label == "?"
+                || label.ends_with('?')
+                || t.reported_cost_usd.is_some_and(|c| c >= 0.01)
+                || t.cost_usd.is_some_and(|c| c >= 0.01))
+        {
+            parts.push(label);
         }
     }
     if parts.is_empty() {
@@ -2202,7 +2208,7 @@ fn draw_help(f: &mut Frame) {
         Line::styled("Trace browser", head),
         row("Tab, ←/→", "sessions → turns → detail"),
         row("Enter", "drill in / expand an observation"),
-        row("v", "detail view: list → tree → timeline → loop"),
+        row("v", "detail view: list → tree → timeline → loop → summary"),
         row(
             "Space",
             "fold a loop or workflow run (sessions) / a subtree (tree view)",
@@ -2704,6 +2710,19 @@ fn session_backend(session: &crate::session::Session) -> crate::config::Backend 
         .unwrap_or_default()
 }
 
+/// A session's cost with its mark: `$1.23` reported by the harness, `≈$1.23`
+/// estimated from the price table, `≈$1.23?` or `?` when generations are
+/// unpriced, `-` when there is nothing.
+pub fn session_cost_label(reported: Option<f64>, estimated: Option<f64>, unpriced: i64) -> String {
+    match (reported, estimated, unpriced > 0) {
+        (Some(c), _, _) if c > 0.0 => fmt_cost(Some(c)),
+        (_, Some(c), false) if c > 0.0 => format!("≈{}", fmt_cost(Some(c))),
+        (_, Some(c), true) if c > 0.0 => format!("≈{}?", fmt_cost(Some(c))),
+        (_, _, true) => "?".into(),
+        _ => fmt_cost(None),
+    }
+}
+
 pub fn trace_badge(
     stats: Option<&LaunchStats>,
     verbose: bool,
@@ -2717,9 +2736,13 @@ pub fn trace_badge(
     let Some(stats) = stats else {
         return format!("[{glyph} TRACE]");
     };
-    let money = match (stats.cost_usd, stats.total_tokens) {
-        (Some(c), _) if c > 0.0 => fmt_cost(Some(c)),
-        (_, Some(t)) if t > 0 => format!("{} tok", fmt_tokens(Some(t))),
+    // `$` reported, `≈$` estimated, `?` unpriced; tokens when nothing is priced
+    let money = match (stats.cost_label(), stats.total_tokens) {
+        (Some(label), Some(t)) if label == "?" && t > 0 => {
+            format!("{} tok ?", fmt_tokens(Some(t)))
+        }
+        (Some(label), _) => label,
+        (None, Some(t)) if t > 0 => format!("{} tok", fmt_tokens(Some(t))),
         _ => String::new(),
     };
     let mut badge = format!("[{glyph} {}t", stats.turns);
@@ -2829,7 +2852,11 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                     " Turns ({})  {} tok  {}{} ",
                     browser.turns.len(),
                     fmt_tokens(s.total_tokens),
-                    fmt_cost(s.total_cost_usd),
+                    session_cost_label(
+                        s.reported_cost_usd,
+                        s.total_cost_usd,
+                        s.unpriced_generations
+                    ),
                     directory
                 )
             }
@@ -3151,8 +3178,13 @@ fn traced_session_row<'a>(
                     Style::default().fg(Color::DarkGray),
                 ));
             }
+            let cost = session_cost_label(
+                s.reported_cost_usd,
+                s.total_cost_usd,
+                s.unpriced_generations,
+            );
             spans.push(Span::styled(
-                format!("{}t {} ", s.turn_count, fmt_cost(s.total_cost_usd)),
+                format!("{}t {} ", s.turn_count, cost),
                 Style::default().fg(Color::Yellow),
             ));
             spans.push(Span::styled(
@@ -5920,24 +5952,55 @@ mod tests {
             turns: 3,
             total_tokens: Some(12_000),
             cost_usd: Some(0.42),
+            reported_cost_usd: None,
+            unpriced_generations: 0,
             running_tool: Some("Bash".into()),
         };
         assert_eq!(
             trace_badge(Some(&stats), false, Backend::Local),
-            "[● 3t $0.42]"
+            "[● 3t ≈$0.42]",
+            "an estimate says so"
         );
         assert_eq!(
             trace_badge(Some(&stats), true, Backend::Both),
-            "[◈ 3t $0.42 ▸ Bash]"
+            "[◈ 3t ≈$0.42 ▸ Bash]"
+        );
+        let reported = LaunchStats {
+            reported_cost_usd: Some(0.50),
+            ..stats.clone()
+        };
+        assert_eq!(
+            trace_badge(Some(&reported), false, Backend::Local),
+            "[● 3t $0.50]",
+            "the harness's own total wins, unmarked"
+        );
+        let partly = LaunchStats {
+            unpriced_generations: 2,
+            ..stats.clone()
+        };
+        assert_eq!(
+            trace_badge(Some(&partly), false, Backend::Local),
+            "[● 3t ≈$0.42?]",
+            "unpriced generations mark the estimate"
         );
         let unpriced = LaunchStats {
             turns: 1,
             total_tokens: Some(12_000),
             cost_usd: None,
+            reported_cost_usd: None,
+            unpriced_generations: 1,
             running_tool: None,
         };
         assert_eq!(
             trace_badge(Some(&unpriced), true, Backend::Local),
+            "[● 1t 12k tok ?]"
+        );
+        let untraced_cost = LaunchStats {
+            unpriced_generations: 0,
+            ..unpriced.clone()
+        };
+        assert_eq!(
+            trace_badge(Some(&untraced_cost), true, Backend::Local),
             "[● 1t 12k tok]"
         );
     }

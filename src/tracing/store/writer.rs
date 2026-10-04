@@ -38,7 +38,7 @@ impl WriterConfig {
 /// Bounded queue capacity: beyond this, ops drop (counted).
 pub const QUEUE_CAPACITY: usize = 8192;
 
-pub type StatusSink = Box<dyn Fn(&'static str, String) + Send>;
+pub type StatusSink = Box<dyn Fn(&str, String) + Send>;
 /// Called after every committed batch with the launch ids it touched.
 pub type CommitHook = Box<dyn FnMut(&Store, &[String]) + Send>;
 
@@ -136,12 +136,12 @@ struct WriterState {
     status: StatusSink,
     on_commit: Option<CommitHook>,
     dropped: Arc<AtomicU64>,
-    warned: std::collections::HashSet<&'static str>,
+    warned: std::collections::HashSet<String>,
 }
 
 impl WriterState {
-    fn note(&mut self, class: &'static str, message: String) {
-        if self.warned.insert(class) {
+    fn note(&mut self, class: &str, message: String) {
+        if self.warned.insert(class.to_string()) {
             (self.status)(class, message);
         }
     }
@@ -174,6 +174,17 @@ impl WriterState {
                         );
                     }
                     self.breaker.record_success();
+                    // a model with usage and no price row: say so once, so a
+                    // `?` on the screen is never a mystery
+                    let unpriced = std::mem::take(&mut self.store.unpriced_models);
+                    for model in unpriced {
+                        self.note(
+                            &format!("unpriced:{model}"),
+                            format!(
+                                "tracing: {model} is unpriced — cost shows ? until [[tracing.models]] has a row (agent-mux trace doctor)"
+                            ),
+                        );
+                    }
                     if let Some(hook) = self.on_commit.as_mut() {
                         let mut launches: Vec<String> = batch
                             .iter()
@@ -233,7 +244,9 @@ pub fn spawn_writer(
                     .flush_interval
                     .saturating_sub(t0.elapsed())
                     .max(Duration::from_millis(1)),
-                None => state.cfg.heartbeat_interval.min(Duration::from_secs(5)),
+                // idle: wake every second so the commit hook can send the
+                // stats it deferred under its throttle
+                None => state.cfg.heartbeat_interval.min(Duration::from_secs(1)),
             };
             match rx.recv_timeout(wait) {
                 Ok(op) => {
@@ -252,9 +265,15 @@ pub fn spawn_writer(
                         state.flush(std::mem::take(&mut batch));
                         first_queued = None;
                         last_heartbeat = Instant::now();
-                    } else if last_heartbeat.elapsed() >= state.cfg.heartbeat_interval {
-                        let _ = state.store.heartbeat();
-                        last_heartbeat = Instant::now();
+                    } else {
+                        if last_heartbeat.elapsed() >= state.cfg.heartbeat_interval {
+                            let _ = state.store.heartbeat();
+                            last_heartbeat = Instant::now();
+                        }
+                        // nothing committed: the hook flushes deferred stats
+                        if let Some(hook) = state.on_commit.as_mut() {
+                            hook(&state.store, &[]);
+                        }
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {

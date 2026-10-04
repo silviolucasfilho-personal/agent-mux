@@ -653,8 +653,35 @@ pub fn conversation_transcript(
 pub struct LaunchStats {
     pub turns: i64,
     pub total_tokens: Option<i64>,
+    /// Cost estimated from the price table.
     pub cost_usd: Option<f64>,
+    /// The harness's own running total (Claude's `cost-state`), when it
+    /// reports one: shown as `$`, the estimate as `≈$`.
+    pub reported_cost_usd: Option<f64>,
+    /// Generations with usage but no price row: the estimate is short by
+    /// them, shown as `?`.
+    pub unpriced_generations: i64,
     pub running_tool: Option<String>,
+}
+
+impl LaunchStats {
+    /// The cost to show, with its mark: `$1.23` reported by the harness,
+    /// `≈$1.23` estimated, `≈$1.23?` estimated with unpriced generations,
+    /// `?` nothing priced at all, and `None` when there is nothing to say.
+    pub fn cost_label(&self) -> Option<String> {
+        if let Some(c) = self.reported_cost_usd.filter(|c| *c > 0.0) {
+            return Some(crate::tracing::cli::fmt_cost(Some(c)));
+        }
+        match (
+            self.cost_usd.filter(|c| *c > 0.0),
+            self.unpriced_generations > 0,
+        ) {
+            (Some(c), false) => Some(format!("≈{}", crate::tracing::cli::fmt_cost(Some(c)))),
+            (Some(c), true) => Some(format!("≈{}?", crate::tracing::cli::fmt_cost(Some(c)))),
+            (None, true) => Some("?".into()),
+            (None, false) => None,
+        }
+    }
 }
 
 pub fn launch_stats(conn: &Connection, launch_id: &str) -> rusqlite::Result<LaunchStats> {
@@ -662,6 +689,21 @@ pub fn launch_stats(conn: &Connection, launch_id: &str) -> rusqlite::Result<Laun
         "SELECT COUNT(*), SUM(total_tokens), SUM(total_cost_usd) FROM trace_stats WHERE launch_id = ?1",
         params![launch_id],
         |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<f64>>(2)?)),
+    )?;
+    let reported_cost_usd: Option<f64> = conn
+        .query_row(
+            "SELECT reported_cost_usd FROM launches WHERE id = ?1",
+            params![launch_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let unpriced_generations: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM observations o JOIN traces t ON t.id = o.trace_id
+         WHERE t.launch_id = ?1 AND o.type = 'generation'
+           AND o.usage_details IS NOT NULL AND o.total_cost_usd IS NULL",
+        params![launch_id],
+        |r| r.get(0),
     )?;
     let running_tool = conn
         .query_row(
@@ -676,6 +718,8 @@ pub fn launch_stats(conn: &Connection, launch_id: &str) -> rusqlite::Result<Laun
         turns,
         total_tokens,
         cost_usd,
+        reported_cost_usd,
+        unpriced_generations,
         running_tool,
     })
 }

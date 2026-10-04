@@ -1902,7 +1902,7 @@ impl TraceBrowserState {
         self.select_observation(rows[next]);
     }
 
-    /// Cycles list → tree → timeline → loop. Leaving the tree keeps the fold set
+    /// Cycles list → tree → timeline → loop → summary. Leaving the tree keeps the fold set
     /// so coming back looks the way it was left; the selection is pulled
     /// back onto a visible row.
     pub fn cycle_detail_view(&mut self) {

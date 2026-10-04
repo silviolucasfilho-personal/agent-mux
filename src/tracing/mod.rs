@@ -276,6 +276,9 @@ impl TraceRuntime {
         let stats_tx = status_tx.clone();
         let mut last_stats: std::collections::HashMap<String, Instant> =
             std::collections::HashMap::new();
+        // launches whose stats were throttled: sent on a later call, so a
+        // turn's final numbers never wait for the next commit
+        let mut deferred: std::collections::HashSet<String> = std::collections::HashSet::new();
         let writer = spawn_writer(
             store,
             WriterConfig::new(settings.flush_interval_ms),
@@ -286,20 +289,24 @@ impl TraceRuntime {
                 let _ = status_for_writer.try_send(AppEvent::TraceStatus(message));
             }),
             Some(Box::new(move |store, launches| {
-                // live badges: at most one stats event per launch per second
-                for launch_id in launches {
+                // live badges: at most one stats event per launch per second,
+                // a skipped one deferred to the next call (the writer calls
+                // with no launches when idle)
+                let mut wanted: Vec<String> = launches.to_vec();
+                wanted.extend(deferred.drain());
+                wanted.sort();
+                wanted.dedup();
+                for launch_id in wanted {
                     let due = last_stats
-                        .get(launch_id)
+                        .get(&launch_id)
                         .is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
                     if !due {
+                        deferred.insert(launch_id);
                         continue;
                     }
-                    if let Ok(stats) = store::query::launch_stats(store.conn(), launch_id) {
+                    if let Ok(stats) = store::query::launch_stats(store.conn(), &launch_id) {
                         last_stats.insert(launch_id.clone(), Instant::now());
-                        let _ = stats_tx.try_send(AppEvent::TraceStats {
-                            launch_id: launch_id.clone(),
-                            stats,
-                        });
+                        let _ = stats_tx.try_send(AppEvent::TraceStats { launch_id, stats });
                     }
                 }
             })),

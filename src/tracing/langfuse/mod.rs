@@ -340,6 +340,8 @@ impl LaunchAgg {
             turns: self.closed_turns.len() as i64,
             total_tokens: (total_tokens > 0).then_some(total_tokens),
             cost_usd: (cost_usd > 0.0).then_some(cost_usd),
+            reported_cost_usd: None,
+            unpriced_generations: 0,
             running_tool: self.running_tools.last().map(|(_, n)| n.clone()),
         }
     }

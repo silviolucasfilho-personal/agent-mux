@@ -7,7 +7,7 @@ use crate::config::ResolvedLangfuse;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
 
-/// The default score name: `s` in the browser and `trace score` without
+/// The default score name: `+` in the browser and `trace score` without
 /// `--name` write it.
 pub const VERDICT: &str = "verdict";
 

@@ -134,6 +134,9 @@ pub struct Store {
     /// Rows the store rejected inside otherwise-committed batches.
     pub op_failures: u64,
     pub last_error: Option<String>,
+    /// Models seen with usage but no price row since the writer last
+    /// drained this (`Writer` warns once per model).
+    pub unpriced_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -260,6 +263,7 @@ pub fn open_rw(path: &Path, opts: OpenOptions) -> Result<Store, String> {
         prices: opts.prices,
         run_id: opts.run_id.clone(),
         op_failures: 0,
+        unpriced_models: Vec::new(),
         last_error: None,
     };
     let version = opts.agent_mux_version.as_str();
@@ -382,10 +386,15 @@ impl Store {
         let mut last_error = None;
         let tx = self.conn.transaction()?;
         let mut failures = 0usize;
+        let mut unpriced: Vec<String> = Vec::new();
         for op in ops {
-            if let Err(e) = apply_op(&tx, op, prices) {
-                failures += 1;
-                last_error = Some(e.to_string());
+            match apply_op(&tx, op, prices) {
+                Ok(Some(model)) if !unpriced.contains(&model) => unpriced.push(model),
+                Ok(_) => {}
+                Err(e) => {
+                    failures += 1;
+                    last_error = Some(e.to_string());
+                }
             }
         }
         tx.execute(
@@ -396,6 +405,11 @@ impl Store {
         self.op_failures += failures as u64;
         if last_error.is_some() {
             self.last_error = last_error;
+        }
+        for model in unpriced {
+            if !self.unpriced_models.contains(&model) {
+                self.unpriced_models.push(model);
+            }
         }
         Ok(failures)
     }
@@ -695,11 +709,17 @@ fn provided_cost(metadata: &serde_json::Map<String, serde_json::Value>) -> Optio
     })
 }
 
-fn apply_op(tx: &Transaction, op: &StoreOp, prices: &PriceTable) -> rusqlite::Result<()> {
+/// Applies one op; `Some(model)` names a model that had usage but no
+/// price row, so the caller can say so once.
+fn apply_op(
+    tx: &Transaction,
+    op: &StoreOp,
+    prices: &PriceTable,
+) -> rusqlite::Result<Option<String>> {
     match op {
-        StoreOp::Launch(l) => upsert_launch(tx, l),
-        StoreOp::Session(s) => upsert_session(tx, s),
-        StoreOp::Trace(t) => upsert_trace(tx, t),
+        StoreOp::Launch(l) => upsert_launch(tx, l).map(|()| None),
+        StoreOp::Session(s) => upsert_session(tx, s).map(|()| None),
+        StoreOp::Trace(t) => upsert_trace(tx, t).map(|()| None),
         StoreOp::Observation(o) => upsert_observation(tx, o, prices),
     }
 }
@@ -869,7 +889,7 @@ fn upsert_observation(
     tx: &Transaction,
     o: &ObservationRow,
     prices: &PriceTable,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<Option<String>> {
     let invalid: bool = tx.query_row(
         "WITH RECURSIVE ancestors(id) AS (
            SELECT ?2 WHERE ?2 IS NOT NULL UNION
@@ -892,6 +912,11 @@ fn upsert_observation(
     } else {
         price(prices, o.model.as_deref(), &usage)
     };
+    // usage, a model name, no reported cost and no price row: unpriced
+    let unpriced = (provided_cost.is_none() && !usage.is_empty() && model_id.is_none())
+        .then(|| o.model.clone())
+        .flatten()
+        .filter(|m| !m.is_empty() && m != "<synthetic>");
     let usage_json = o.usage_raw.as_ref().map(|raw| usage_raw_json(raw));
     let usage_details = (!usage.is_empty()).then(|| usage_details_json(&usage));
     let provided_cost_json = provided_cost.as_ref().map(cost_details_json);
@@ -988,7 +1013,7 @@ fn upsert_observation(
         usage_details,
         cost_details,
     ])?;
-    Ok(())
+    Ok(unpriced)
 }
 
 /// The hook command's writer: read-write, no creation, no migration, no

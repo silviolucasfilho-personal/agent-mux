@@ -191,3 +191,43 @@ Each phase ships on its own and leaves the store schema compatible; phase 3 adds
 - **agy tool ids**: does the plugin payload of `PostToolUse` carry any id in 1.2.16? The handler drops it today; capture one payload with `AGENT_MUX_HOOK_DEBUG`.
 - **`launch_stats` plan**: `EXPLAIN QUERY PLAN` on the commit-hook query with a 40k-observation store; if it scans, add a per-launch rollup table maintained by the writer.
 - **Reported cost semantics**: Claude's `cost-state` is cumulative; the per-turn delta is the reported turn cost only if no other client wrote to the session in between. Check against a resumed session.
+
+## 7. Regenerating the price table
+
+`src/tracing/pricing.toml` is generated from LiteLLM's `model_prices_and_context_window.json`, the table ccusage prices from, converted per-token → per-million. Rows LiteLLM does not carry under a bare name are kept from the previous table and marked. Done on 2026-10-04 (phase 1); to refresh:
+
+```sh
+curl -sL -o /tmp/litellm.json \
+  https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+python3 - /tmp/litellm.json src/tracing/pricing.toml > /tmp/rows.toml <<'EOF2'
+import json, re, sys
+d = json.load(open(sys.argv[1])); old = open(sys.argv[2]).read(); M = 1e6
+oldrows = {re.search(r'id = "([^"]+)"', b).group(1): dict(re.findall(r'^(\w+) = ([0-9.]+)$', b, re.M))
+           for b in old.split("[[models]]")[1:]}
+def find(k):
+    if k in d: return d[k]
+    for x in sorted(d):
+        if x.startswith(k + "-20") or x.startswith(k + "@"): return d[x]
+    for p in ["anthropic.", "vertex_ai/", "azure/", "gemini/", "openai/"]:
+        if p + k in d: return d[p + k]
+def row(id, provider, match, key=None):
+    r = find(key or id); out = ["[[models]]"]
+    if r is None:
+        v = oldrows[id]; out.append("# kept from the previous table (not in LiteLLM)")
+        f = {k: float(v[k]) for k in ["input","output","cache_read","cache_write","cache_write_1h","reasoning"] if k in v}
+    else:
+        g = lambda n: (r.get(n) or 0) * M
+        f = {"input": g("input_cost_per_token"), "output": g("output_cost_per_token")}
+        if g("cache_read_input_token_cost") > 0: f["cache_read"] = g("cache_read_input_token_cost")
+        if g("cache_creation_input_token_cost") > 0: f["cache_write"] = g("cache_creation_input_token_cost")
+        if g("cache_creation_input_token_cost_above_1hr") > 0: f["cache_write_1h"] = g("cache_creation_input_token_cost_above_1hr")
+        if g("output_cost_per_reasoning_token") > 0 and abs(g("output_cost_per_reasoning_token") - f["output"]) > 1e-9:
+            f["reasoning"] = g("output_cost_per_reasoning_token")
+    out += [f'id = "{id}"', f'provider = "{provider}"', "match = [" + ", ".join(f'"{m}"' for m in match) + "]"]
+    out += [f"{k} = {f[k]:g}" for k in ["input","output","cache_read","cache_write","cache_write_1h","reasoning"] if k in f]
+    return "\n".join(out) + "\n"
+# … one row(...) call per model, as in the current file …
+EOF2
+```
+
+Then fix integers to floats (`sed -E 's/^(\w+) = ([0-9]+)$/\1 = \2.0/'`), paste the rows under the header, bump `updated_at`, and run `cargo test --lib pricing`: the overlap test refuses two rows that match one name.
