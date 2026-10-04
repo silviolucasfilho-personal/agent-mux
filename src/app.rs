@@ -1844,10 +1844,65 @@ impl TraceBrowserState {
                     crate::tracing::cli::fmt_time(o.start_ns),
                     duration,
                     crate::tracing::cli::fmt_tokens(o.total_tokens),
-                    crate::tracing::cli::fmt_cost(o.total_cost_usd)
+                    match o.total_cost_usd {
+                        Some(c) if c > 0.0 =>
+                            format!("≈{}", crate::tracing::cli::fmt_cost(Some(c))),
+                        _ if o.obs_type == "generation" && o.usage.is_some() =>
+                            "? (unpriced)".into(),
+                        _ => "-".into(),
+                    }
                 ),
                 dim,
             ));
+            // what the store knows beyond the body: token kinds, the tool's
+            // identity and where it points, the skill and server behind it
+            let tokens: Vec<String> = [
+                ("in", o.input_tokens),
+                ("out", o.output_tokens),
+                ("cache read", o.cache_read_tokens),
+                ("cache write", o.cache_write_tokens),
+                ("reasoning", o.reasoning_tokens),
+            ]
+            .into_iter()
+            .filter_map(|(k, v)| {
+                v.filter(|n| *n > 0)
+                    .map(|n| format!("{k} {}", crate::tracing::cli::fmt_tokens(Some(n))))
+            })
+            .collect();
+            if !tokens.is_empty() {
+                lines.push(Line::styled(format!("tokens: {}", tokens.join(" · ")), dim));
+            }
+            let mut facts: Vec<String> = Vec::new();
+            if let Some(k) = &o.kind {
+                facts.push(format!("kind {k}"));
+            }
+            if let Some(t) = &o.tool_name {
+                facts.push(format!("tool {t}"));
+            }
+            if o.obs_type == "tool" {
+                facts.push(match o.tool_id.as_deref() {
+                    Some(id) if !id.is_empty() => format!("id {id}"),
+                    _ => "result paired by order (no id from the harness)".into(),
+                });
+            }
+            if let Some(p) = &o.path {
+                facts.push(format!("path {p}"));
+            }
+            if let Some(s) = &o.skill {
+                facts.push(format!("skill {s}"));
+            }
+            if let Some(m) = &o.mcp_server {
+                facts.push(format!("mcp {m}"));
+            }
+            if o.level != "DEFAULT" {
+                facts.push(format!("level {}", o.level));
+            }
+            if let Some(m) = &o.status_message {
+                facts.push(format!("status {m}"));
+            }
+            if !facts.is_empty() {
+                lines.push(Line::styled(facts.join(" · "), dim));
+            }
             for (label, body) in [
                 ("input", &o.input),
                 ("output", &o.output),
@@ -2009,9 +2064,6 @@ impl TraceBrowserState {
         if now.duration_since(self.last_refresh) < std::time::Duration::from_millis(500) {
             return;
         }
-        if self.search_query.is_some() {
-            return;
-        }
         self.last_refresh = now;
         let filter = self.filter();
         let quiet = {
@@ -2037,6 +2089,27 @@ impl TraceBrowserState {
             // does not record, so the group sweep still runs on its own
             // interval over a store that is otherwise unchanged.
             self.refresh_groups(false);
+            return;
+        }
+        // a search is a filter on a live list: rerun it, keeping the place
+        if let Some(query) = self.search_query.clone() {
+            let turn_id = self.turns.get(self.selected_turn).map(|t| t.id.clone());
+            let focused = self.focused;
+            let obs = self.selected_observation;
+            let (view, expanded, scroll) = (self.detail_view, self.expanded, self.scroll_offset);
+            self.run_search(&query);
+            if let Some(id) = turn_id
+                && let Some(i) = self.turns.iter().position(|t| t.id == id)
+            {
+                self.selected_turn = i;
+                self.load_observations();
+            }
+            self.focused = focused;
+            self.selected_observation = obs.min(self.observations.len().saturating_sub(1));
+            self.detail_view = view;
+            self.expanded = expanded;
+            self.scroll_offset = scroll;
+            self.rebuild_detail();
             return;
         }
         let Some(conn) = &self.conn else {
@@ -3500,6 +3573,14 @@ impl App {
     /// the keyboard, since nothing is forwarded from there.
     fn handle_ux_key(&mut self, key: &KeyEvent) -> bool {
         use crate::keymap::Chord;
+        // the browser sits in the pane: the sidebar chord still works there
+        if matches!(self.mode, Mode::TraceBrowser(_)) {
+            if crate::keymap::chord(key) == Some(Chord::ToggleSidebar) {
+                self.toggle_sidebar();
+                return true;
+            }
+            return false;
+        }
         if !matches!(self.mode, Mode::Main) {
             return false;
         }
@@ -4517,6 +4598,8 @@ impl App {
         }
         let page = browser.viewport_rows.get().max(1);
         match key.code {
+            // the browser lives in the pane: the sidebar toggles as everywhere
+            KeyCode::Char('b') | KeyCode::Char('B') => self.toggle_sidebar(),
             KeyCode::Esc | KeyCode::Char('q') => {
                 if browser.expanded {
                     browser.toggle_expanded();

@@ -2772,6 +2772,7 @@ mod tests {
             total_tokens: None,
             total_cost_usd: None,
             unpriced_generations: 0,
+            timing_approx: false,
             models: None,
             metadata: "{}".into(),
             retries: 0,

@@ -882,3 +882,33 @@ fn shift_t_cycles_the_trace_strip_and_the_strip_shows_the_turn() {
     assert!(screen.contains("not traced · t starts tracing"), "{screen}");
     app.kill_all();
 }
+
+/// The Trace Browser is a drawer in the pane: the sidebar stays beside
+/// it, `b` makes it full screen and brings the sidebar back.
+#[test]
+fn the_trace_browser_is_a_drawer_beside_the_sidebar() {
+    let (mut app, temp) = app_with_sessions(&[]);
+    seed_store(temp.path());
+    app.trace_db_path = Some(temp.path().join("traces.db"));
+    app.focus_list();
+    app.handle_key(&key(KeyCode::Char('T')), Instant::now());
+    assert!(matches!(app.mode, Mode::TraceBrowser(_)));
+    let screen = render(&app, 150, 36);
+    assert!(screen.contains("Agents"), "the sidebar stays: {screen}");
+    assert!(screen.contains("Sessions ("), "the browser is in the pane: {screen}");
+    assert!(screen.contains("History"), "and History too: {screen}");
+    // the browser's own key hides the sidebar: full screen
+    app.handle_key(&key(KeyCode::Char('b')), Instant::now());
+    assert!(app.sidebar_hidden);
+    let screen = render(&app, 150, 36);
+    assert!(!screen.contains("┌ Agents"), "{screen}");
+    assert!(screen.contains("Sessions ("), "{screen}");
+    // the chord layer works in the browser too
+    app.handle_key(
+        &KeyEvent::new(KeyCode::Char('B'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        Instant::now(),
+    );
+    assert!(!app.sidebar_hidden);
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    assert!(matches!(app.mode, Mode::Main));
+}

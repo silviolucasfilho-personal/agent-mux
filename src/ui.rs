@@ -322,7 +322,6 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
     match &app.mode {
         Mode::NewSession(dialog) => draw_new_session_dialog(f, dialog, app),
         Mode::SessionHistory(history) => draw_session_history(f, history, app),
-        Mode::TraceBrowser(browser) => draw_trace_browser(f, browser),
         Mode::ConfirmKill => draw_confirm(f, "Kill this session? [y/n]"),
         Mode::ConfirmQuit => draw_confirm(f, "Sessions are still working. Quit anyway? [y/n]"),
         Mode::Help => draw_help(f),
@@ -937,6 +936,12 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
+    // the Trace Browser is a drawer in the pane: the sidebar stays, and
+    // hiding it (`b`, ⌘B) makes the browser full screen
+    if let Mode::TraceBrowser(browser) = &app.mode {
+        draw_trace_browser(f, area, browser);
+        return;
+    }
     // a harness or persona row: its card
     if !app.sidebar_hidden && app.list_focused() && app.sidebar_section != SidebarSection::History {
         match app.agent_row() {
@@ -2950,11 +2955,7 @@ fn provider_badge(provider: &str) -> Span<'static> {
     }
 }
 
-fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
-    let width = (f.area().width * 96 / 100).clamp(60, 200);
-    let height = (f.area().height * 92 / 100).clamp(18, 60);
-    let area = centered(f.area(), width, height);
-    f.render_widget(Clear, area);
+fn draw_trace_browser(f: &mut Frame, area: Rect, browser: &TraceBrowserState) {
     let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let [left, middle, right] = Layout::horizontal([
         Constraint::Percentage(26),
@@ -3024,7 +3025,7 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                     .map(|cwd| format!(" · cwd {}", truncate_path_chars(cwd, 28)))
                     .unwrap_or_default();
                 format!(
-                    " Turns ({})  {} tok  {}{} ",
+                    " Turns ({})  {} tok  {} · {}{} ",
                     browser.turns.len(),
                     fmt_tokens(s.total_tokens),
                     session_cost_label(
@@ -3032,6 +3033,7 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                         s.total_cost_usd,
                         s.unpriced_generations
                     ),
+                    crate::tracing::store::query::match_label(s.correlation.as_deref()),
                     directory
                 )
             }
@@ -3087,7 +3089,7 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                     Span::styled(
                         format!(
                             "{:>6} {:>7} {:>2}🔧",
-                            fmt_ms(t.latency_ms),
+                            approx_latency(t),
                             fmt_cost(t.total_cost_usd),
                             t.tool_count
                         ),
@@ -3147,7 +3149,7 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             t.ordinal,
             browser.detail_view.label(),
             browser.observations.len(),
-            fmt_ms(t.latency_ms),
+            approx_latency(t),
             fmt_tokens(t.total_tokens),
             fmt_cost(t.total_cost_usd)
         ),
@@ -3221,6 +3223,29 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                     "WARNING" => Style::default().fg(Color::Yellow),
                     _ => Style::default().fg(Color::DarkGray),
                 };
+                // the name takes what the fixed columns leave; a tool
+                // row says what it is about, and when its result was
+                // paired by order rather than by id
+                let right = format!(
+                    " {:>7} {:>6} {:>7}",
+                    duration,
+                    fmt_tokens(o.total_tokens),
+                    fmt_cost(o.total_cost_usd)
+                );
+                let mut name = obs_display_name(o);
+                if o.obs_type == "tool" || o.obs_type == "agent" {
+                    let detail = call_detail(o);
+                    if !detail.is_empty() {
+                        name.push(' ');
+                        name.push_str(&detail);
+                    }
+                }
+                if o.obs_type == "tool" && o.tool_id.as_deref().unwrap_or("").is_empty() {
+                    name.push_str(" ·order");
+                }
+                let name_width = usize::from(inner_right.width)
+                    .saturating_sub(2 + 9 + 3 + right.chars().count())
+                    .max(8);
                 let line = Line::from(vec![
                     Span::raw(if is_sel { "> " } else { "  " }),
                     Span::styled(
@@ -3228,16 +3253,8 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::raw(format!("{glyph} ")),
-                    Span::raw(truncate_chars(&obs_display_name(o), 28)),
-                    Span::styled(
-                        format!(
-                            " {:>7} {:>6} {:>7}",
-                            duration,
-                            fmt_tokens(o.total_tokens),
-                            fmt_cost(o.total_cost_usd)
-                        ),
-                        level_style,
-                    ),
+                    Span::raw(truncate_chars(&name, name_width)),
+                    Span::styled(right, level_style),
                 ]);
                 let item = ListItem::new(line);
                 if is_sel && browser.focused == BrowserPane::Detail {
@@ -3256,7 +3273,10 @@ fn draw_trace_browser(f: &mut Frame, browser: &TraceBrowserState) {
             Style::default().fg(Color::Black).bg(Color::Yellow),
         ),
         None => Line::styled(
-            " [Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold run/subtree  [/] search  [+] score  [a] all  [r] resume  [Esc] close",
+            fit_hints(
+                "[Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold run/subtree  [/] search  [+] score  [a] all  [r] resume  [b] sidebar  [Esc] close",
+                usize::from(footer.width),
+            ),
             Style::default().fg(Color::Black).bg(Color::Cyan),
         ),
     };
@@ -3623,6 +3643,16 @@ fn obs_glyph(o: &crate::tracing::store::query::ObservationView) -> &'static str 
 /// A Task/Agent invocation and the transcript produced by that subagent are
 /// separate observations. Name them distinctly so they do not look like a
 /// duplicate event in the browser.
+/// A turn's latency, `~` when its timestamps are reconstructed rather
+/// than reported.
+fn approx_latency(t: &crate::tracing::store::query::TraceStat) -> String {
+    if t.timing_approx {
+        format!("~{}", fmt_ms(t.latency_ms))
+    } else {
+        fmt_ms(t.latency_ms)
+    }
+}
+
 fn obs_display_name(o: &crate::tracing::store::query::ObservationView) -> String {
     if o.obs_type != "agent" {
         return o.name.clone();
@@ -6271,6 +6301,8 @@ mod tests {
         assert_eq!(browser.turns.len(), 1);
         assert_eq!(browser.observations.len(), 1);
         app.mode = crate::app::Mode::TraceBrowser(Box::new(browser));
+        // the browser is a drawer in the pane; full width with the sidebar hidden
+        app.sidebar_hidden = true;
         let mut terminal = Terminal::new(TestBackend::new(180, 36)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
@@ -6378,6 +6410,7 @@ mod tests {
             total_tokens: Some(4_000),
             total_cost_usd: Some(0.04),
             unpriced_generations: 0,
+            timing_approx: false,
             models: None,
             metadata: "{}".into(),
             retries: 0,

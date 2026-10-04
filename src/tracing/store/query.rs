@@ -77,6 +77,9 @@ pub struct SessionStat {
     pub total_cost_usd: Option<f64>,
     pub reported_cost_usd: Option<f64>,
     pub unpriced_generations: i64,
+    /// How the newest launch of this session was matched to its
+    /// transcript (`launches.correlation`), for the provenance tag.
+    pub correlation: Option<String>,
 }
 
 fn session_from_row(r: &Row) -> rusqlite::Result<SessionStat> {
@@ -104,7 +107,25 @@ fn session_from_row(r: &Row) -> rusqlite::Result<SessionStat> {
         total_cost_usd: r.get("total_cost_usd")?,
         reported_cost_usd: r.get("reported_cost_usd")?,
         unpriced_generations: r.get("unpriced_generations")?,
+        // only `list_sessions` joins the launch; the `session_stats` view
+        // has no column for it
+        correlation: match r.get::<_, Option<String>>("correlation") {
+            Ok(c) => c,
+            Err(rusqlite::Error::InvalidColumnName(_)) => None,
+            Err(e) => return Err(e),
+        },
     })
+}
+
+/// How a launch was matched to its transcript, in the screen's words.
+pub fn match_label(correlation: Option<&str>) -> &'static str {
+    match correlation {
+        Some("deterministic") | Some("announced") => "matched by id",
+        Some("watched") => "matched by folder",
+        Some("heuristic") => "matched heuristically",
+        Some("none") => "not matched",
+        _ => "matching…",
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -166,7 +187,8 @@ pub fn list_sessions(
                 SUM(ts.total_tokens)                      AS total_tokens,
                 SUM(ts.total_cost_usd)                    AS total_cost_usd,
                 COALESCE(SUM(ts.unpriced_generations), 0) AS unpriced_generations,
-                (SELECT MAX(reported_cost_usd) FROM launches l WHERE l.session_key = s.key) AS reported_cost_usd
+                (SELECT MAX(reported_cost_usd) FROM launches l WHERE l.session_key = s.key) AS reported_cost_usd,
+                (SELECT correlation FROM launches l WHERE l.session_key = s.key ORDER BY started_ns DESC LIMIT 1) AS correlation
          FROM picked s LEFT JOIN turns ts ON ts.session_key = s.key
          GROUP BY s.key
          ORDER BY s.last_seen_ns DESC",
@@ -296,6 +318,8 @@ pub struct TraceStat {
     pub total_tokens: Option<i64>,
     pub total_cost_usd: Option<f64>,
     pub unpriced_generations: i64,
+    /// The turn's timestamps are reconstructed, not reported (`~` on screen).
+    pub timing_approx: bool,
     pub models: Option<String>,
     /// The turn's own metadata JSON (compaction, interruption, hook facts).
     pub metadata: String,
@@ -335,6 +359,7 @@ fn trace_from_row(r: &Row) -> rusqlite::Result<TraceStat> {
         total_tokens: r.get("total_tokens")?,
         total_cost_usd: r.get("total_cost_usd")?,
         unpriced_generations: r.get("unpriced_generations")?,
+        timing_approx: r.get::<_, i64>("timing_approx")? != 0,
         models: r.get("models")?,
         metadata: r.get("metadata")?,
         retries: r.get("retries")?,
@@ -443,7 +468,25 @@ pub fn list_observations(
     let mut stmt =
         conn.prepare("SELECT * FROM observations WHERE trace_id = ?1 ORDER BY start_ns, rid")?;
     let rows = stmt.query_map(params![trace_id], observation_from_row)?;
-    rows.collect()
+    let mut rows: Vec<ObservationView> = rows.collect::<rusqlite::Result<_>>()?;
+    // depth from the parent chain, so time-ordered renderers can indent
+    let ids: std::collections::HashMap<String, Option<String>> = rows
+        .iter()
+        .map(|o| (o.id.clone(), o.parent_id.clone()))
+        .collect();
+    for o in rows.iter_mut() {
+        let mut depth = 0usize;
+        let mut cur = o.parent_id.clone();
+        while let Some(p) = cur {
+            if depth > 16 {
+                break;
+            }
+            depth += 1;
+            cur = ids.get(&p).cloned().flatten();
+        }
+        o.depth = depth;
+    }
+    Ok(rows)
 }
 
 /// A turn's observations in parent-first depth-first order, for hierarchy
@@ -747,13 +790,7 @@ pub struct StripView {
 impl StripView {
     /// How the launch was matched, in the strip's words.
     pub fn match_label(&self) -> &'static str {
-        match self.correlation.as_deref() {
-            Some("deterministic") | Some("announced") => "matched by id",
-            Some("watched") => "matched by folder",
-            Some("heuristic") => "matched heuristically",
-            Some("none") => "not matched",
-            _ => "matching…",
-        }
+        match_label(self.correlation.as_deref())
     }
 }
 
