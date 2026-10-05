@@ -214,6 +214,13 @@ impl Session {
         for a in extra_args {
             cmd.arg(a);
         }
+        // agent-mux reads OSC 8 hyperlinks and opens them on a click
+        // (`crate::links`); Claude Code and agy write them only to a
+        // terminal they believe supports them (probed: both read
+        // FORCE_HYPERLINK). A value the user set wins.
+        if std::env::var_os("FORCE_HYPERLINK").is_none() {
+            cmd.env("FORCE_HYPERLINK", "1");
+        }
         for (key, value) in extra_env {
             cmd.env(key, value);
         }

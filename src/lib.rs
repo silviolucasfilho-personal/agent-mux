@@ -11,6 +11,7 @@ pub mod history;
 pub mod keymap;
 pub mod keys;
 pub mod keys_cli;
+pub mod links;
 pub mod loops;
 pub mod mcp;
 pub mod mouse;

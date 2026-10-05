@@ -207,6 +207,13 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             [b"2", s] => {
                 self.callbacks.set_window_title(&mut self.screen, s);
             }
+            // Local patch (agent-mux): OSC 8 ; params ; URI -- a URI may
+            // itself hold `;`, which the parser split on.
+            [b"8", _params, uri @ ..] => {
+                let uri = uri.join(&b';');
+                self.screen
+                    .set_hyperlink(&String::from_utf8_lossy(&uri));
+            }
             [b"52", ty, data] => {
                 match (
                     ty.iter().all(|c| CLIPBOARD_SELECTOR.contains(c)),

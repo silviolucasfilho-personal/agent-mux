@@ -62,6 +62,12 @@ pub struct Screen {
     modes: u8,
     mouse_protocol_mode: MouseProtocolMode,
     mouse_protocol_encoding: MouseProtocolEncoding,
+
+    // Local patch (agent-mux): OSC 8 hyperlinks. `link` is the one text is
+    // written under now (0: none); `links[id - 1]` is the target of id.
+    link: u16,
+    links: Vec<String>,
+    link_ids: std::collections::HashMap<String, u16>,
 }
 
 impl Screen {
@@ -81,6 +87,10 @@ impl Screen {
             modes: 0,
             mouse_protocol_mode: MouseProtocolMode::default(),
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
+
+            link: 0,
+            links: Vec::new(),
+            link_ids: std::collections::HashMap::new(),
         }
     }
 
@@ -535,6 +545,42 @@ impl Screen {
         self.grid().visible_cell(crate::grid::Pos { row, col })
     }
 
+    /// Local patch (agent-mux): the OSC 8 hyperlink target of the cell at
+    /// the given location (either half of a wide character), if the text
+    /// there was written inside one.
+    #[must_use]
+    pub fn hyperlink(&self, row: u16, col: u16) -> Option<&str> {
+        let mut cell = self.cell(row, col)?;
+        if cell.is_wide_continuation() && col > 0 {
+            cell = self.cell(row, col - 1)?;
+        }
+        match cell.link() {
+            0 => None,
+            id => self.links.get(usize::from(id) - 1).map(String::as_str),
+        }
+    }
+
+    /// Local patch (agent-mux): OSC 8 -- text written from here on links
+    /// to `uri`, or to nothing when it is empty. Ids are handed out per
+    /// distinct target; past `u16::MAX` targets new ones go unlinked.
+    pub(crate) fn set_hyperlink(&mut self, uri: &str) {
+        if uri.is_empty() {
+            self.link = 0;
+            return;
+        }
+        if let Some(&id) = self.link_ids.get(uri) {
+            self.link = id;
+            return;
+        }
+        let Ok(id) = u16::try_from(self.links.len() + 1) else {
+            self.link = 0;
+            return;
+        };
+        self.links.push(uri.to_string());
+        self.link_ids.insert(uri.to_string(), id);
+        self.link = id;
+    }
+
     /// Returns whether the text in row `row` should wrap to the next line.
     #[must_use]
     pub fn row_wrapped(&self, row: u16) -> bool {
@@ -706,6 +752,7 @@ impl Screen {
         let pos = self.grid().pos();
         let size = self.grid().size();
         let attrs = self.attrs;
+        let link = self.link;
 
         // Local patch (agent-mux): a grid with no columns has nowhere to
         // put a character, and every cell lookup below would find nothing
@@ -891,6 +938,7 @@ impl Screen {
                 // that self.grid().pos().col has a valid value.
                 .unwrap();
             cell.set(c, attrs);
+            cell.set_link(link);
             self.grid_mut().col_inc(1);
             // Local patch (agent-mux): the invariant below -- that col_wrap
             // has made room for a wide glyph -- does not hold when the grid

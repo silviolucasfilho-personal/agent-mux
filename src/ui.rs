@@ -1033,6 +1033,7 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     let cursor = {
         let screen = session.parser.screen();
         f.render_widget(PseudoTerminal::new(screen), inner);
+        underline_hyperlinks(f.buffer_mut(), inner, screen);
         // real cursor while the pane has the keyboard AND is live: a
         // scrolled view is history, the cursor belongs to the bottom
         (app.pane_session().is_some() && !screen.hide_cursor() && scroll_offset == 0)
@@ -1053,6 +1054,21 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     if let Some(st) = &app.search {
         let (len, offset) = session.scroll_view();
         apply_search_highlight(f.buffer_mut(), inner, &st.matches, st.current, len, offset);
+    }
+}
+
+/// OSC 8 hyperlinks the child wrote are underlined, so a link whose text
+/// does not look like one still reads as clickable (`crate::links`).
+fn underline_hyperlinks(buf: &mut ratatui::buffer::Buffer, area: Rect, screen: &vt100::Screen) {
+    for row in 0..area.height {
+        for col in 0..area.width {
+            if screen.hyperlink(row, col).is_some()
+                && screen.cell(row, col).is_some_and(|c| c.has_contents())
+                && let Some(cell) = buf.cell_mut((area.x + col, area.y + row))
+            {
+                cell.modifier.insert(Modifier::UNDERLINED);
+            }
+        }
     }
 }
 

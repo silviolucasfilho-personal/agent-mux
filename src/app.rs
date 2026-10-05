@@ -2221,11 +2221,17 @@ pub struct App {
     /// this to `false` so `cargo test` never touches the real system
     /// clipboard.
     pub clipboard_enabled: bool,
+    /// Opens a link clicked in the pane; tests swap in a recorder so
+    /// `cargo test` never launches a browser.
+    pub link_opener: fn(&str) -> std::io::Result<()>,
     /// Launches the dialog linked to an experiment, by session id, until
     /// the session ends and the run is recorded.
     pub experiment_links:
         std::collections::HashMap<usize, crate::tracing::experiments::ExperimentLink>,
     drag_owner: Option<DragOwner>,
+    /// A press on a link in the pane (session id, where, target): the
+    /// release on the same cell opens it (`crate::links`).
+    link_click: Option<(usize, Pos, String)>,
     /// Where the keys go on the main screen (`docs/keyboard.md`).
     pub focus: Focus,
     /// Whether the terminal reports modifiers (the kitty keyboard protocol
@@ -2403,6 +2409,8 @@ impl App {
             search: None,
             clipboard_enabled: true,
             drag_owner: None,
+            link_click: None,
+            link_opener: crate::links::open,
             focus: Focus::List,
             keys_enhanced: cfg!(windows),
             trace_strip: TraceStrip::Off,
@@ -3728,6 +3736,13 @@ impl App {
         }
     }
 
+    fn open_link(&mut self, url: &str) {
+        self.notice = Some(match (self.link_opener)(url) {
+            Ok(()) => Notice::info(format!("opened {url}")),
+            Err(e) => Notice::warn(format!("could not open {url}: {e}")),
+        });
+    }
+
     pub fn handle_mouse(&mut self, ev: MouseEvent, _now: Instant) {
         if let Mode::TraceBrowser(ref mut browser) = self.mode {
             let delta = match ev.kind {
@@ -4036,10 +4051,29 @@ impl App {
                 // then clamp and finalize that stale selection). Latching
                 // at Down means Drag/Up always follow where the drag
                 // started, regardless of the shift flag on those events.
+                // A press on a link is agent-mux's whoever owns the mouse
+                // (the outer terminal never sees it): the release on the
+                // same cell opens it. Alt keeps its click-to-move meaning.
+                if matches!(ev.kind, MouseEventKind::Down(_)) {
+                    self.link_click = None;
+                    if !ev.modifiers.contains(KeyModifiers::ALT)
+                        && let Some(s) = self.sessions.get_mut(self.selected)
+                    {
+                        let (len, offset) = s.scroll_view();
+                        let pos = Pos {
+                            row: selection::abs_row(len, offset, lrow),
+                            col: lcol,
+                        };
+                        self.link_click = crate::links::link_at(&mut s.parser, len, pos)
+                            .map(|url| (s.id, pos, url));
+                    }
+                }
                 let agent_owns = match ev.kind {
                     MouseEventKind::Down(_) => {
-                        let owns =
-                            attached && !shift && mouse_mode != vt100::MouseProtocolMode::None;
+                        let owns = attached
+                            && !shift
+                            && mouse_mode != vt100::MouseProtocolMode::None
+                            && self.link_click.is_none();
                         self.drag_owner = Some(if owns {
                             DragOwner::Agent
                         } else {
@@ -4102,7 +4136,15 @@ impl App {
                                 a.sel.head = pos;
                                 a.dragging = false;
                                 if a.sel.is_empty() {
-                                    // plain click: selection stays cleared
+                                    // plain click: selection stays cleared,
+                                    // and a link pressed here opens
+                                    if let Some((_, _, url)) = self
+                                        .link_click
+                                        .take()
+                                        .filter(|(id, at, _)| *id == session_id && *at == pos)
+                                    {
+                                        self.open_link(&url);
+                                    }
                                 } else {
                                     self.selection = Some(a);
                                     self.copy_selection();
@@ -4113,6 +4155,7 @@ impl App {
                 }
                 if is_up {
                     self.drag_owner = None;
+                    self.link_click = None;
                 }
             }
             _ => {

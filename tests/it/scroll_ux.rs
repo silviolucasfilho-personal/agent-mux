@@ -760,3 +760,56 @@ async fn copy_on_select_reaches_clipboard() {
     let text = arboard::Clipboard::new().unwrap().get_text().unwrap();
     assert!(text.contains("line-9"), "clipboard got: {text:?}");
 }
+
+static OPENED_LINKS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn record_link(url: &str) -> std::io::Result<()> {
+    OPENED_LINKS.lock().unwrap().push(url.to_string());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_click_on_a_link_in_the_pane_opens_it() {
+    let (mut app, _rx) = app_with_history(1).await;
+    app.link_opener = record_link;
+    // an OSC 8 link on row 0, a plain URL on row 1; the child asked for
+    // the mouse, which a click on a link still does not reach
+    app.sessions[0].process_output(
+        b"\x1b[?1000h\x1b[?1006h\x1b[2J\x1b[Hsee \x1b]8;;https://example.com/docs\x1b\\the docs\x1b]8;;\x1b\\\r\n\
+          or https://example.org/plain.",
+        Instant::now(),
+        false,
+    );
+    let click = |app: &mut App, column: u16, row: u16| {
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_mouse(mouse(kind, column, row), Instant::now());
+        }
+    };
+    // pane interior starts at (31, 1)
+    click(&mut app, 31 + 6, 1);
+    click(&mut app, 31 + 10, 2);
+    click(&mut app, 31 + 1, 2); // "or": not a link
+    assert_eq!(
+        *OPENED_LINKS.lock().unwrap(),
+        vec!["https://example.com/docs", "https://example.org/plain"]
+    );
+
+    // a drag that starts on a link selects instead of opening
+    app.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 31 + 4, 1),
+        Instant::now(),
+    );
+    app.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 31 + 11, 1),
+        Instant::now(),
+    );
+    app.handle_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 31 + 11, 1),
+        Instant::now(),
+    );
+    assert_eq!(OPENED_LINKS.lock().unwrap().len(), 2);
+    assert!(app.selection.is_some());
+}
