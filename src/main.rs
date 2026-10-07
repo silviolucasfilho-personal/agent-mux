@@ -5,7 +5,6 @@ use anyhow::Result;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyEventKind,
 };
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -22,9 +21,44 @@ static KEYBOARD_ENHANCED: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 static INPUT_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The input thread's acknowledgement that it is parked.
 static INPUT_IDLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set while the link key mode is pushed over the base one (the pointer
+/// rests on a link: `App::wants_link_keys`).
+static LINK_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set while agent-mux has given the pointer a shape (OSC 22).
+static POINTER_SET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The keyboard mode pushed while the pointer rests on a link: every key,
+/// modifiers alone included, as an escape code with its press and release,
+/// so ⌘ held over the link can be seen. Shifted keys arrive as the
+/// character the layout gives (`REPORT_ALTERNATE_KEYS`).
+fn link_key_flags() -> crossterm::event::KeyboardEnhancementFlags {
+    use crossterm::event::KeyboardEnhancementFlags as F;
+    F::DISAMBIGUATE_ESCAPE_CODES
+        | F::REPORT_EVENT_TYPES
+        | F::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        | F::REPORT_ALTERNATE_KEYS
+}
+
+/// OSC 22: the pointer shape over the terminal. `text` is the shape a
+/// terminal shows over its text when nothing asked for another.
+fn set_pointer(shape: &str) {
+    use std::io::Write as _;
+    let mut out = stdout();
+    let _ = write!(out, "\x1b]22;{shape}\x1b\\");
+    let _ = out.flush();
+}
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
+    if POINTER_SET.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        set_pointer("text");
+    }
+    if LINK_KEYS.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::PopKeyboardEnhancementFlags
+        );
+    }
     if KEYBOARD_ENHANCED.swap(false, std::sync::atomic::Ordering::SeqCst) {
         let _ = crossterm::execute!(
             std::io::stdout(),
@@ -146,8 +180,10 @@ async fn main() -> Result<()> {
                     Err(_) => break,
                 }
                 match crossterm::event::read() {
-                    Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
-                        if tx.blocking_send(AppEvent::Key(k)).is_err() {
+                    Ok(Event::Key(k)) => {
+                        if let Some(k) = agent_mux::keys::normalize_event(k)
+                            && tx.blocking_send(AppEvent::Key(k)).is_err()
+                        {
                             break;
                         }
                     }
@@ -282,6 +318,33 @@ async fn main() -> Result<()> {
         if let Some(request) = app.take_editor_request() {
             let result = run_editor(&mut terminal, &request);
             app.editor_finished(request, result);
+        }
+        // the pointer on a link: every key reported, so ⌘ is seen; ⌘ held
+        // there: a hand pointer (`App::wants_link_keys`, `link_pointer`)
+        {
+            use std::sync::atomic::Ordering;
+            let want = KEYBOARD_ENHANCED.load(Ordering::SeqCst) && app.wants_link_keys();
+            if want != LINK_KEYS.load(Ordering::SeqCst) {
+                let done = if want {
+                    crossterm::execute!(
+                        stdout(),
+                        crossterm::event::PushKeyboardEnhancementFlags(link_key_flags())
+                    )
+                } else {
+                    crossterm::execute!(stdout(), crossterm::event::PopKeyboardEnhancementFlags)
+                };
+                if done.is_ok() {
+                    LINK_KEYS.store(want, Ordering::SeqCst);
+                }
+                if !want {
+                    app.link_keys_left();
+                }
+            }
+            let pointer = app.link_pointer();
+            if pointer != POINTER_SET.load(Ordering::SeqCst) {
+                set_pointer(if pointer { "pointer" } else { "text" });
+                POINTER_SET.store(pointer, Ordering::SeqCst);
+            }
         }
         if let Err(e) = terminal.draw(|f| ui::draw(f, &app, Instant::now())) {
             draw_err = Some(e);

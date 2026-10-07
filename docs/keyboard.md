@@ -29,6 +29,8 @@ Not in the layer, on purpose: `⌘N`, `⌘W`, `⌘T`, `⌘Q`, `⌘1`-`9` and `�
 
 **What the terminal lets through.** A chord reaches agent-mux only if the terminal does not bind it itself and reports its modifiers. Windows always reports them; on macOS and Linux it takes the kitty keyboard protocol (Ghostty, kitty, WezTerm, foot, iTerm2 3.5+, Alacritty 0.13+, VTE 0.78+). Terminal.app and plain xterm report none, so there `Ctrl+Shift+B` is Claude Code's `Ctrl+B` and is forwarded: use `F2` and `F1`, the mouse, or another terminal; the status bar and the About view (`v`) say which applies. A chord the host binds (`⌘F` find in Terminal.app, iTerm2 and Ghostty; `Ctrl+Shift+F` in GNOME Terminal and kitty; `⌘↑`/`⌘↓` marks in Terminal.app and iTerm2) never arrives; its twin does. `agent-mux keys` prints what your terminal delivers.
 
+**Links.** A click on a link in the pane opens it (`src/links.rs`). While the pointer rests on a link, and only then, agent-mux pushes a second kitty keyboard mode that reports every key with its press and release, modifiers alone included, so it can see `⌘` held: the pointer becomes a hand (OSC 22: Ghostty, kitty, foot) and goes back when `⌘` is released or the pointer leaves the link. `keys::normalize_event` makes keys typed in that mode read like ordinary ones (a repeat is a press, Caps Lock applies, `Ctrl+Shift+B` keeps its Shift), and the first key typed leaves the mode until the pointer moves again. A `⌘` already held when the pointer reaches the link is not seen; press it there. A terminal without the protocol shows no hand; the click still opens.
+
 ## Everywhere
 
 | Key | Means |

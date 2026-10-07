@@ -813,3 +813,47 @@ async fn a_click_on_a_link_in_the_pane_opens_it() {
     assert_eq!(OPENED_LINKS.lock().unwrap().len(), 2);
     assert!(app.selection.is_some());
 }
+
+#[tokio::test]
+async fn cmd_over_a_link_turns_the_pointer_into_a_hand() {
+    use crossterm::event::{KeyEventKind, ModifierKeyCode};
+    let (mut app, _rx) = app_with_history(1).await;
+    app.sessions[0].process_output(
+        b"\x1b[2J\x1b[Hsee https://example.com/docs here",
+        Instant::now(),
+        false,
+    );
+    let cmd = |kind| {
+        KeyEvent::new_with_kind(
+            KeyCode::Modifier(ModifierKeyCode::LeftSuper),
+            KeyModifiers::SUPER,
+            kind,
+        )
+    };
+    let moved = |column| mouse(MouseEventKind::Moved, column, 1);
+
+    // off a link: no key mode, ⌘ means nothing
+    app.handle_mouse(moved(31 + 1), Instant::now());
+    assert!(!app.wants_link_keys());
+    // on a link: every key reported, ⌘ held makes the hand
+    app.handle_mouse(moved(31 + 8), Instant::now());
+    assert!(app.wants_link_keys());
+    assert!(!app.link_pointer());
+    app.handle_key(&cmd(KeyEventKind::Press), Instant::now());
+    assert!(app.link_pointer());
+    app.handle_key(&cmd(KeyEventKind::Release), Instant::now());
+    assert!(!app.link_pointer());
+    // moving off the link with ⌘ held drops the hand
+    app.handle_key(&cmd(KeyEventKind::Press), Instant::now());
+    app.handle_mouse(moved(31 + 30), Instant::now());
+    assert!(!app.link_pointer() && !app.wants_link_keys());
+    app.link_keys_left();
+
+    // typing over a link leaves the key mode until the pointer moves
+    app.handle_mouse(moved(31 + 8), Instant::now());
+    assert!(app.wants_link_keys());
+    app.handle_key(&key(KeyCode::Char('x')), Instant::now());
+    assert!(!app.wants_link_keys());
+    app.handle_mouse(moved(31 + 9), Instant::now());
+    assert!(app.wants_link_keys());
+}

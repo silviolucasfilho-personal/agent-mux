@@ -1,5 +1,42 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+/// A key event the app should see, in the shape it expects: a repeat is a
+/// press, a release only for ⌘ (whose press and release say whether it is
+/// held), and Caps Lock applied to a letter the link key mode reports
+/// unshifted.
+pub fn normalize_event(mut k: KeyEvent) -> Option<KeyEvent> {
+    use crossterm::event::{KeyEventKind, KeyEventState, ModifierKeyCode};
+    let is_super = matches!(
+        k.code,
+        KeyCode::Modifier(ModifierKeyCode::LeftSuper | ModifierKeyCode::RightSuper)
+    );
+    match k.kind {
+        KeyEventKind::Press => {}
+        KeyEventKind::Repeat => k.kind = KeyEventKind::Press,
+        KeyEventKind::Release if is_super => {}
+        KeyEventKind::Release => return None,
+    }
+    if let KeyCode::Char(c) = k.code
+        && k.state.contains(KeyEventState::CAPS_LOCK)
+        && c.is_lowercase()
+        && !k
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        k.code = KeyCode::Char(c.to_uppercase().next().unwrap_or(c));
+    }
+    // the shifted character replaces Shift; a chord (`Ctrl+Shift+B`)
+    // still needs it
+    if let KeyCode::Char(c) = k.code
+        && c.is_ascii_uppercase()
+        && k.modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        k.modifiers.insert(KeyModifiers::SHIFT);
+    }
+    Some(k)
+}
+
 /// Encode a key press as the bytes a terminal would send. `None` = no
 /// encoding (key is dropped). Caller must filter to KeyEventKind::Press.
 pub fn encode_key(key: &KeyEvent) -> Option<Vec<u8>> {
@@ -188,6 +225,38 @@ mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn event(
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        kind: crossterm::event::KeyEventKind,
+    ) -> KeyEvent {
+        KeyEvent::new_with_kind(code, modifiers, kind)
+    }
+
+    #[test]
+    fn the_link_key_mode_reads_like_the_ordinary_one() {
+        use crossterm::event::{KeyEventKind::*, KeyEventState, ModifierKeyCode::*};
+        let none = KeyModifiers::NONE;
+        // a repeat is a press; a release only for ⌘
+        let held = normalize_event(event(KeyCode::Backspace, none, Repeat)).unwrap();
+        assert_eq!(held.kind, Press);
+        assert!(normalize_event(event(KeyCode::Char('a'), none, Release)).is_none());
+        let up = event(KeyCode::Modifier(LeftSuper), KeyModifiers::SUPER, Release);
+        assert_eq!(normalize_event(up), Some(up));
+        // Caps Lock on a letter reported unshifted
+        let mut caps = event(KeyCode::Char('a'), none, Press);
+        caps.state = KeyEventState::CAPS_LOCK;
+        assert_eq!(normalize_event(caps).unwrap().code, KeyCode::Char('A'));
+        // Ctrl+Shift+B arrives as `B` with Ctrl: still the chord
+        let chord =
+            normalize_event(event(KeyCode::Char('B'), KeyModifiers::CONTROL, Press)).unwrap();
+        assert_eq!(chord.modifiers, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert!(crate::keymap::chord(&chord).is_some());
+        // a plain shifted letter stays a plain letter
+        let shifted = normalize_event(event(KeyCode::Char('A'), none, Press)).unwrap();
+        assert_eq!(encode_key(&shifted), Some(b"A".to_vec()));
     }
 
     #[test]

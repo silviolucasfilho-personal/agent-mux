@@ -2232,6 +2232,15 @@ pub struct App {
     /// A press on a link in the pane (session id, where, target): the
     /// release on the same cell opens it (`crate::links`).
     link_click: Option<(usize, Pos, String)>,
+    /// The pane cell under the pointer (terminal coordinates) and whether
+    /// a link is there; recomputed when the pointer moves to another cell.
+    hover: Option<((u16, u16), bool)>,
+    /// ⌘ is held: seen only while the link key mode is on (`main.rs`).
+    cmd_held: bool,
+    /// A key other than a modifier was typed over a link: the link key
+    /// mode is left until the pointer moves, so typing goes through the
+    /// ordinary mode.
+    link_keys_suspended: bool,
     /// Where the keys go on the main screen (`docs/keyboard.md`).
     pub focus: Focus,
     /// Whether the terminal reports modifiers (the kitty keyboard protocol
@@ -2410,6 +2419,9 @@ impl App {
             clipboard_enabled: true,
             drag_owner: None,
             link_click: None,
+            hover: None,
+            cmd_held: false,
+            link_keys_suspended: false,
             link_opener: crate::links::open,
             focus: Focus::List,
             keys_enhanced: cfg!(windows),
@@ -3511,6 +3523,22 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) {
+        // a modifier alone (the link key mode reports them) is only ever
+        // ⌘'s state; it reaches no screen and no child
+        if let KeyCode::Modifier(m) = key.code {
+            use crossterm::event::ModifierKeyCode::{LeftSuper, RightSuper};
+            if matches!(m, LeftSuper | RightSuper) {
+                self.cmd_held = key.kind != crossterm::event::KeyEventKind::Release;
+            }
+            return;
+        }
+        if key.kind == crossterm::event::KeyEventKind::Release {
+            return;
+        }
+        if self.wants_link_keys() {
+            self.link_keys_suspended = true;
+            self.cmd_held = false;
+        }
         self.notice = None;
         if self.search.is_some() {
             self.handle_search_key(key);
@@ -3736,6 +3764,44 @@ impl App {
         }
     }
 
+    /// Whether the pointer rests on a link in the pane: `main.rs` then
+    /// reports every key, modifiers alone included, so ⌘ can be seen.
+    pub fn wants_link_keys(&self) -> bool {
+        matches!(self.mode, Mode::Main)
+            && !self.link_keys_suspended
+            && self.hover.is_some_and(|(_, link)| link)
+    }
+
+    /// Whether the pointer should be a hand: ⌘ held over a link.
+    pub fn link_pointer(&self) -> bool {
+        self.cmd_held && self.wants_link_keys()
+    }
+
+    /// The link key mode was left: ⌘'s release can no longer be seen.
+    pub fn link_keys_left(&mut self) {
+        self.cmd_held = false;
+    }
+
+    /// The pointer moved to terminal cell (column, row): is a link there?
+    fn hover_at(&mut self, column: u16, row: u16) {
+        if self.hover.is_some_and(|(cell, _)| cell == (column, row)) {
+            return;
+        }
+        self.link_keys_suspended = false;
+        let link = ui::pane_local_with_sidebar(column, row, self.pane_size, self.sidebar_hidden)
+            .and_then(|(lcol, lrow)| {
+                let s = self.sessions.get_mut(self.selected)?;
+                let (len, offset) = s.scroll_view();
+                let pos = Pos {
+                    row: selection::abs_row(len, offset, lrow),
+                    col: lcol,
+                };
+                crate::links::link_at(&mut s.parser, len, pos)
+            })
+            .is_some();
+        self.hover = Some(((column, row), link));
+    }
+
     fn open_link(&mut self, url: &str) {
         self.notice = Some(match (self.link_opener)(url) {
             Ok(()) => Notice::info(format!("opened {url}")),
@@ -3836,6 +3902,12 @@ impl App {
         // clicks/drags/wheel meant for the dialog.
         if !matches!(self.mode, Mode::Main) {
             return;
+        }
+        match ev.kind {
+            MouseEventKind::Moved => self.hover_at(ev.column, ev.row),
+            // the text under the pointer moves: look again on the next move
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => self.hover = None,
+            _ => {}
         }
         // Click on the status bar sidebar toggle button "[b] sidebar"
         if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
