@@ -36,6 +36,10 @@ The sidebar is Agents + History (agent-first spec, 2026-09-26). `App::agent_line
 
 One keymap for every screen, macOS-friendly: `n` new, `e` edit, `d` delete (asks), `x` stop, `s` save, `r` run, `Ctrl+R` reload, `R` restore built-in, `J`/`K` move, `g`/`G`, `Ctrl+D`/`Ctrl+U`, `1`-`9` tabs, `Ctrl+O` `$EDITOR`; text fields share `keymap::apply_text` (`Ctrl+J` new line, `Ctrl+A`/`Ctrl+E`, `Ctrl+W`, `Ctrl+U`). A new screen uses these keys and never gives one another meaning; the help overlay prints `keymap::VERBS`. The main screen has no attached mode: `App::focus` is the list or the pane (`Mode::Main`), agent-mux starts in the pane, every key not in the chord layer goes to the harness there, and the chord layer (`keymap::CHORDS`, `⌘` on macOS / `Ctrl+Shift` elsewhere / `F2`, `F1` without modifier reporting) is the only thing agent-mux keeps for itself; never bind a plain `Ctrl+letter`, `Alt`, `Esc` or `Tab` on the main screen, and probe a new chord with `agent-mux keys` (design: `docs/superpowers/specs/2026-10-01-keyboard-focus-design.md`). Guide: `docs/keyboard.md`.
 
+## Markdown (`src/markdown/`, `src/app/markdown_view.rs`, `src/ui/markdown.rs`)
+
+A Markdown viewer and editor: `agent-mux md <file> [--edit|--print]` (`markdown::cli`, its own terminal loop, no sessions) and `Mode::Markdown`, opened by a click on a Markdown file in the pane (`App::open_link`, `links::markdown_path_at` for plain-text paths). `markdown::render` turns a document into styled lines (pulldown-cmark) and reports links, headings and a source-line map; `markdown::mermaid` draws ```` ```mermaid ```` blocks as Unicode text (flowchart/graph, state, sequence, pie; other types show their source). `MarkdownView` holds the text (`TextArea`), undo, and the back stack of followed links, and answers keys with an `Outcome` its owner acts on. Guide: `docs/markdown.md`.
+
 ## Working in this repository
 
 - `cargo build`, `cargo test`, `cargo clippy --all-targets`, `cargo fmt`.

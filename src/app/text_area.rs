@@ -62,6 +62,16 @@ impl TextArea {
         self.text = text;
     }
 
+    /// Moves the cursor to byte `at`, clamped to the text and moved back
+    /// to a character boundary.
+    pub fn set_cursor(&mut self, at: usize) {
+        let mut at = at.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        self.cursor = at;
+    }
+
     pub fn insert(&mut self, c: char) {
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();

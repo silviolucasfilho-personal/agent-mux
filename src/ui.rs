@@ -2,6 +2,7 @@ use crate::app::about::{AboutRow, AboutState};
 mod agent_editor;
 mod flow;
 mod loop_builder;
+pub mod markdown;
 mod runs;
 
 use crate::app::loops::LoopStatus;
@@ -334,6 +335,11 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::AgentEditor(state) => agent_editor::draw(f, state),
         Mode::RunsView(state) => runs::draw(f, state, app),
         Mode::NewAgent(state) => draw_new_agent(f, state),
+        Mode::Markdown(view) => {
+            let full = f.area();
+            let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
+            markdown::draw(f, area, view);
+        }
         Mode::ConfirmRemoveLoop => draw_confirm(
             f,
             "Remove this loop from the registry? Its files in the workspace stay. [y/n]",
@@ -2185,7 +2191,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 }
             }
             // full-screen editors keep their own footer; this row is for notices
-            Mode::AgentEditor(_) | Mode::RunsView(_) => Line::raw(""),
+            Mode::AgentEditor(_) | Mode::RunsView(_) | Mode::Markdown(_) => Line::raw(""),
             _ if app.clean => Line::raw(fit(
                 "[b] sidebar  [Enter] pane  [n] new session  [l] logs  [?] help  [q] quit",
             )),

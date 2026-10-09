@@ -13,6 +13,7 @@ pub mod keys;
 pub mod keys_cli;
 pub mod links;
 pub mod loops;
+pub mod markdown;
 pub mod mcp;
 pub mod mouse;
 pub mod persistence;

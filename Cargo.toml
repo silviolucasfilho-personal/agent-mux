@@ -34,6 +34,8 @@ ureq = { version = "3.4.0", default-features = false, features = ["rustls"] }
 uuid = { version = "1.26.0", features = ["v4", "v5"] }
 vt100 = "0.16.2"
 schemars = "1.2.2"
+pulldown-cmark = { version = "0.13.4", default-features = false }
+unicode-width = "0.2"
 
 [dev-dependencies]
 time = { version = "0.3.55", default-features = false, features = ["std"] }

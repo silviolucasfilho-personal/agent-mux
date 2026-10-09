@@ -857,3 +857,45 @@ async fn cmd_over_a_link_turns_the_pointer_into_a_hand() {
     app.handle_mouse(moved(31 + 9), Instant::now());
     assert!(app.wants_link_keys());
 }
+
+#[tokio::test]
+async fn a_click_on_a_markdown_file_in_the_pane_opens_the_viewer() {
+    let (mut app, _rx) = app_with_history(1).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.md"), "# Notes\n").unwrap();
+    std::fs::write(dir.path().join("other.md"), "# Other\n").unwrap();
+    app.sessions[0].dir = dir.path().to_path_buf();
+    // a plain relative path on row 0 (Codex), an OSC 8 file link on row 1
+    let other = format!("file://{}", dir.path().join("other.md").display());
+    app.sessions[0].process_output(
+        format!(
+            "\x1b[2J\x1b[Hwrote notes.md:3 ok\r\nsee \x1b]8;;{other}\x1b\\the other\x1b]8;;\x1b\\"
+        )
+        .as_bytes(),
+        Instant::now(),
+        false,
+    );
+    let click = |app: &mut App, column: u16, row: u16| {
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            app.handle_mouse(mouse(kind, column, row), Instant::now());
+        }
+    };
+    let opened = |app: &App| match &app.mode {
+        Mode::Markdown(v) => Some(v.path.clone()),
+        _ => None,
+    };
+    click(&mut app, 31 + 8, 1);
+    assert_eq!(opened(&app), Some(dir.path().join("notes.md")));
+    app.handle_key(&key(KeyCode::Char('q')), Instant::now());
+    assert!(opened(&app).is_none(), "q closes the viewer");
+    click(&mut app, 31 + 6, 2);
+    assert_eq!(opened(&app), Some(dir.path().join("other.md")));
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    // a path to a file that is not there stays plain text
+    app.sessions[0].dir = dir.path().join("elsewhere");
+    click(&mut app, 31 + 8, 1);
+    assert!(opened(&app).is_none());
+}

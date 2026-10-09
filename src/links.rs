@@ -109,6 +109,72 @@ fn text_link_at<CB: vt100::Callbacks>(
     scrollback_len: usize,
     pos: Pos,
 ) -> Option<String> {
+    let (text, at) = logical_line_at(parser, scrollback_len, pos)?;
+    let (start, end) = url_span(&text, at)?;
+    Some(text[start..end].iter().collect())
+}
+
+/// A Markdown file's path written as plain text under `pos` (`docs/a.md`,
+/// `README.md:12`), as written: the caller resolves it against the
+/// session's directory and checks that it exists. Codex and agy print
+/// paths without OSC 8.
+pub fn markdown_path_at<CB: vt100::Callbacks>(
+    parser: &mut vt100::Parser<CB>,
+    scrollback_len: usize,
+    pos: Pos,
+) -> Option<String> {
+    let (text, at) = logical_line_at(parser, scrollback_len, pos)?;
+    path_span(&text, at)
+}
+
+/// The Markdown path in `text` covering index `at`, without a trailing
+/// `:line[:col]`.
+fn path_span(text: &[char], at: usize) -> Option<String> {
+    let stop = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '<' | '>' | '`' | '│' | '(' | ')' | '[' | ']' | ','
+            )
+    };
+    if text.get(at).is_none_or(|&c| stop(c)) {
+        return None;
+    }
+    let mut start = at;
+    while start > 0 && !stop(text[start - 1]) {
+        start -= 1;
+    }
+    let mut end = at + 1;
+    while end < text.len() && !stop(text[end]) {
+        end += 1;
+    }
+    let end = trim_end(&text[start..end]) + start;
+    if at >= end {
+        return None;
+    }
+    let token: String = text[start..end].iter().collect();
+    let mut path = token.as_str();
+    // `file.md:12` or `file.md:12:3`
+    while let Some((head, tail)) = path.rsplit_once(':')
+        && !tail.is_empty()
+        && tail.chars().all(|c| c.is_ascii_digit())
+    {
+        path = head;
+    }
+    let lower = path.to_ascii_lowercase();
+    let is_md = [".md", ".markdown", ".mdown", ".mkd"]
+        .iter()
+        .any(|ext| lower.len() > ext.len() && lower.ends_with(ext));
+    (is_md && !lower.contains("://")).then(|| path.to_string())
+}
+
+/// The logical (soft-wrapped) line around `pos` as characters, and the
+/// index of the character under `pos`.
+fn logical_line_at<CB: vt100::Callbacks>(
+    parser: &mut vt100::Parser<CB>,
+    scrollback_len: usize,
+    pos: Pos,
+) -> Option<(Vec<char>, usize)> {
     // a logical line never reaches further than this either way
     const MAX_ROWS: usize = 16;
     let mut first = pos.row;
@@ -139,9 +205,7 @@ fn text_link_at<CB: vt100::Callbacks>(
             at = text.len().checked_sub(1);
         }
     }
-    let at = at?;
-    let (start, end) = url_span(&text, at)?;
-    Some(text[start..end].iter().collect())
+    Some((text, at?))
 }
 
 /// The URL in `text` covering index `at`: [start, end).
@@ -197,6 +261,26 @@ fn trim_end(url: &[char]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_paths_in_plain_text() {
+        let span = |line: &str, at: usize| {
+            let chars: Vec<char> = line.chars().collect();
+            path_span(&chars, at)
+        };
+        let line = "Wrote docs/guide.md, see (README.md:12:3).";
+        assert_eq!(span(line, 8).as_deref(), Some("docs/guide.md"));
+        assert_eq!(span(line, 28).as_deref(), Some("README.md"));
+        assert_eq!(span(line, 2), None, "not a path");
+        assert_eq!(span("`a.md`", 2).as_deref(), Some("a.md"));
+        assert_eq!(span("main.rs", 2), None);
+        assert_eq!(span(".md", 1), None);
+        assert_eq!(
+            span("https://x.org/a.md", 12),
+            None,
+            "a URL is a link, not a path"
+        );
+    }
 
     fn parser(bytes: &[u8]) -> vt100::Parser {
         let mut p = vt100::Parser::new(5, 20, 100);

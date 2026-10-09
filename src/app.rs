@@ -31,6 +31,7 @@ pub mod runs_view;
 pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
+pub mod markdown_view;
 mod skills_view;
 pub mod text_area;
 pub mod workflows;
@@ -67,6 +68,8 @@ pub enum Mode {
     RunsView(Box<runs_view::RunsViewState>),
     /// `n` in the Agents list: how to start a new agent.
     NewAgent(Box<new_agent::NewAgentState>),
+    /// The Markdown viewer and editor: a `.md` link clicked in the pane.
+    Markdown(Box<markdown_view::MarkdownView>),
 }
 
 /// An external editor the main loop must run for the App: it leaves the
@@ -96,6 +99,15 @@ pub enum SidebarSection {
     Loops,
     Workflows,
     History,
+}
+
+/// The link under a grid position of a session's pane: a URL, or the path
+/// of a Markdown file that exists, written as plain text.
+fn pane_link(s: &mut Session, len: usize, pos: Pos) -> Option<String> {
+    crate::links::link_at(&mut s.parser, len, pos).or_else(|| {
+        let path = crate::links::markdown_path_at(&mut s.parser, len, pos)?;
+        markdown_view::markdown_target(&path, Some(&s.dir)).map(|_| path)
+    })
 }
 
 /// The first eight characters of a run id: enough to tell two runs apart
@@ -190,6 +202,7 @@ pub enum Action {
     OpenAbout,
     /// About mode: App routes the key to the AboutState it owns.
     AboutKey,
+    MarkdownKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
     /// `C`: the Configuration view.
     OpenConfigView,
@@ -745,6 +758,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::AgentEditor(_) => Action::AgentEditorKey,
         Mode::RunsView(_) => Action::RunsKey,
         Mode::NewAgent(_) => Action::NewAgentKey,
+        Mode::Markdown(_) => Action::MarkdownKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 Action::EnterConfirmRemoveLoop
@@ -2644,6 +2658,10 @@ impl App {
     /// A paste from the host terminal (`⌘V`, `Ctrl+Shift+V`, middle click)
     /// is typing: it lands in the pane and the pane takes the keyboard.
     pub fn handle_paste(&mut self, text: &str) {
+        if let Mode::Markdown(view) = &mut self.mode {
+            view.paste(text);
+            return;
+        }
         if !matches!(self.mode, Mode::Main) {
             return;
         }
@@ -3796,20 +3814,54 @@ impl App {
                     row: selection::abs_row(len, offset, lrow),
                     col: lcol,
                 };
-                crate::links::link_at(&mut s.parser, len, pos)
+                pane_link(s, len, pos)
             })
             .is_some();
         self.hover = Some(((column, row), link));
     }
 
     fn open_link(&mut self, url: &str) {
+        let dir = self.sessions.get(self.selected).map(|s| s.dir.clone());
+        if let Some(path) = markdown_view::markdown_target(url, dir.as_deref()) {
+            self.open_markdown(&path);
+            return;
+        }
+        self.open_url(url);
+    }
+
+    /// Opens `url` with the platform's handler.
+    fn open_url(&mut self, url: &str) {
         self.notice = Some(match (self.link_opener)(url) {
             Ok(()) => Notice::info(format!("opened {url}")),
             Err(e) => Notice::warn(format!("could not open {url}: {e}")),
         });
     }
 
+    /// Opens a Markdown file in the viewer, over the main screen.
+    pub fn open_markdown(&mut self, path: &std::path::Path) {
+        match markdown_view::MarkdownView::open(path) {
+            Ok(view) => self.mode = Mode::Markdown(Box::new(view)),
+            Err(e) => self.notice = Some(Notice::error(e)),
+        }
+    }
+
+    fn markdown_outcome(&mut self, outcome: markdown_view::Outcome) {
+        match outcome {
+            markdown_view::Outcome::None => {}
+            markdown_view::Outcome::Close => self.mode = Mode::Main,
+            markdown_view::Outcome::OpenUrl(url) => self.open_url(&url),
+            markdown_view::Outcome::OpenEditor(path) => {
+                self.request_editor(path, "markdown:view".into())
+            }
+        }
+    }
+
     pub fn handle_mouse(&mut self, ev: MouseEvent, _now: Instant) {
+        if let Mode::Markdown(ref mut view) = self.mode {
+            let outcome = view.handle_mouse(&ev);
+            self.markdown_outcome(outcome);
+            return;
+        }
         if let Mode::TraceBrowser(ref mut browser) = self.mode {
             let delta = match ev.kind {
                 MouseEventKind::ScrollUp => -3,
@@ -4136,8 +4188,7 @@ impl App {
                             row: selection::abs_row(len, offset, lrow),
                             col: lcol,
                         };
-                        self.link_click = crate::links::link_at(&mut s.parser, len, pos)
-                            .map(|url| (s.id, pos, url));
+                        self.link_click = pane_link(s, len, pos).map(|url| (s.id, pos, url));
                     }
                 }
                 let agent_owns = match ev.kind {
@@ -4301,6 +4352,12 @@ impl App {
                 }
             }
             Action::OpenAbout => self.open_about(),
+            Action::MarkdownKey => {
+                if let Mode::Markdown(view) = &mut self.mode {
+                    let outcome = view.handle_key(key);
+                    self.markdown_outcome(outcome);
+                }
+            }
             Action::AboutKey => {
                 if let Mode::About(state) = &mut self.mode {
                     let page = state.viewport_rows.get().max(1) as isize;
@@ -5066,6 +5123,12 @@ impl App {
         }
         if request.asset_id == "agent-editor:text" {
             self.agent_editor_text_finished(&request.path);
+            return;
+        }
+        if request.asset_id == "markdown:view" {
+            if let Mode::Markdown(view) = &mut self.mode {
+                view.reload();
+            }
             return;
         }
         if request.asset_id == "dialog:text" {
