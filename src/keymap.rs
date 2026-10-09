@@ -36,7 +36,7 @@
 //! macOS too, for terminals that keep `⌘`). Terminals that report no
 //! modifiers at all (Terminal.app, plain xterm) deliver `Ctrl+Shift+B` as
 //! `Ctrl+B`, so the two chords that matter also have a protocol-free form:
-//! `F2` switches focus and `F1` opens help. `CHORDS` is the whole set; the
+//! `F2` switches focus, `F3` opens the traces and `F1` opens help. `CHORDS` is the whole set; the
 //! status bar, the help overlay and the welcome card print from it with
 //! `chord_label`. `agent-mux keys` shows what a terminal delivers.
 //!
@@ -54,8 +54,10 @@
 //! (start_search) and `⌘J` (scroll_to_selection) are the terminal's, while
 //! `⌘B`, `⌘/`, `⌘↑`, `⌘↓` and the letters h i l m o p r s u x y are unbound
 //! and no `Ctrl+Shift` chord is bound. Whether unbound `⌘` chords arrive
-//! as `SUPER` is still to be seen with `agent-mux keys`; if they do, the
-//! focus chord moves off `⌘E` (`⌘L` is the candidate).
+//! as `SUPER` was probed on 2026-10-09 (`agent-mux keys`, Ghostty 1.3.1,
+//! default config): `⌘E`, `⌘B`, `⌘I` and `⌘L` arrive as `SUPER`, so its
+//! `search_selection` on `⌘E` takes the key only over a selection, and
+//! `Ctrl+Shift+I` and `F3` arrive as well.
 
 use crate::app::text_area::TextArea;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -132,6 +134,9 @@ pub enum Chord {
     Paste,
     /// `⌘/` / `Ctrl+Shift+/` / `F1`: help.
     Help,
+    /// `⌘I` / `Ctrl+Shift+I` / `F3`: the Trace Browser on this session,
+    /// and back.
+    Traces,
     /// `Shift+↑`: scroll three lines back.
     LineUp,
     /// `Shift+↓`: scroll three lines forward.
@@ -175,6 +180,13 @@ pub const CHORDS: &[(Chord, &str, &str, &str, &str)] = &[
         "paste into the pane",
     ),
     (Chord::Help, "⌘/", "Ctrl+Shift+/", "F1", "help"),
+    (
+        Chord::Traces,
+        "⌘I",
+        "Ctrl+Shift+I",
+        "F3",
+        "traces of this session",
+    ),
     (
         Chord::LineUp,
         "⇧↑",
@@ -222,9 +234,11 @@ pub fn chord(key: &KeyEvent) -> Option<Chord> {
     Some(match key.code {
         KeyCode::F(2) => Chord::ToggleFocus,
         KeyCode::F(1) => Chord::Help,
+        KeyCode::F(3) => Chord::Traces,
         KeyCode::Char(c) if app && letter(c, 'e') => Chord::ToggleFocus,
         KeyCode::Char(c) if app && letter(c, 'b') => Chord::ToggleSidebar,
         KeyCode::Char(c) if app && letter(c, 'f') => Chord::Find,
+        KeyCode::Char(c) if app && letter(c, 'i') => Chord::Traces,
         KeyCode::Char(c) if ctrl && shift && letter(c, 'c') => Chord::Copy,
         KeyCode::Char(c) if ctrl && shift && letter(c, 'v') => Chord::Paste,
         KeyCode::Char('/') | KeyCode::Char('?') if app => Chord::Help,
@@ -537,6 +551,18 @@ mod tests {
             Some(Chord::PrevSession)
         );
         assert_eq!(chord(&k(KeyCode::Down, cs)), Some(Chord::NextSession));
+        for traces in [
+            k(KeyCode::Char('i'), KeyModifiers::SUPER),
+            k(KeyCode::Char('I'), cs),
+            k(KeyCode::F(3), KeyModifiers::NONE),
+        ] {
+            assert_eq!(chord(&traces), Some(Chord::Traces), "{traces:?}");
+        }
+        assert_eq!(
+            chord(&k(KeyCode::Char('i'), KeyModifiers::CONTROL)),
+            None,
+            "plain Ctrl+I is the harness's"
+        );
         assert_eq!(
             chord(&k(KeyCode::Up, KeyModifiers::SHIFT)),
             Some(Chord::LineUp)

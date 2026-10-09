@@ -3629,11 +3629,13 @@ impl App {
         use crate::keymap::Chord;
         // the browser sits in the pane: the sidebar chord still works there
         if matches!(self.mode, Mode::TraceBrowser(_)) {
-            if crate::keymap::chord(key) == Some(Chord::ToggleSidebar) {
-                self.toggle_sidebar();
-                return true;
+            match crate::keymap::chord(key) {
+                Some(Chord::ToggleSidebar) => self.toggle_sidebar(),
+                // the traces chord closes what it opened
+                Some(Chord::Traces) => self.mode = Mode::Main,
+                _ => return false,
             }
-            return false;
+            return true;
         }
         if !matches!(self.mode, Mode::Main) {
             return false;
@@ -3656,6 +3658,7 @@ impl App {
             Chord::PrevSession => self.select_adjacent_session(-1),
             Chord::NextSession => self.select_adjacent_session(1),
             Chord::Help => self.mode = Mode::Help,
+            Chord::Traces => self.open_trace_browser(),
             Chord::LineUp => self.scroll_selected(3),
             Chord::LineDown => self.scroll_selected(-3),
             Chord::PageUp => self.scroll_selected(page),

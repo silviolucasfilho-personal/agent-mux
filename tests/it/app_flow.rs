@@ -145,6 +145,41 @@ async fn focus_moves_between_list_and_pane_and_ctrl_q_is_forwarded() {
 }
 
 #[tokio::test]
+async fn the_traces_chord_opens_the_browser_from_the_pane_and_back() {
+    use agent_mux::app::Focus;
+    let (tx, _rx) = mpsc::channel(256);
+    let mut app = App::new(shell_profiles(), None, tx);
+    create_session_via_dialog(&mut app);
+    let now = Instant::now();
+    assert_eq!(app.focus, Focus::Pane);
+    let cmd_i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::SUPER);
+    let ctrl_shift_i = KeyEvent::new(
+        KeyCode::Char('I'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    // ⌘I opens it while typing into the harness, and closes it again
+    app.handle_key(&cmd_i, now);
+    assert!(matches!(app.mode, Mode::TraceBrowser(_)));
+    app.handle_key(&cmd_i, now);
+    assert!(matches!(app.mode, Mode::Main));
+    assert_eq!(app.focus, Focus::Pane, "back to typing");
+    // the other forms, and Esc back to the session
+    for open in [ctrl_shift_i, key(KeyCode::F(3))] {
+        app.handle_key(&open, now);
+        assert!(matches!(app.mode, Mode::TraceBrowser(_)), "{open:?}");
+        app.handle_key(&key(KeyCode::Esc), now);
+        assert!(matches!(app.mode, Mode::Main));
+        assert_eq!(app.focus, Focus::Pane);
+    }
+    // from the list as well
+    app.handle_key(&key(KeyCode::F(2)), now);
+    assert_eq!(app.focus, Focus::List);
+    app.handle_key(&cmd_i, now);
+    assert!(matches!(app.mode, Mode::TraceBrowser(_)));
+    app.kill_all();
+}
+
+#[tokio::test]
 async fn kill_confirm_respawn_and_remove() {
     let (tx, mut rx) = mpsc::channel(256);
     let mut app = App::new(shell_profiles(), None, tx);

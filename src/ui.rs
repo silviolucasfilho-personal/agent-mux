@@ -2005,10 +2005,11 @@ fn pane_hints(app: &App) -> String {
     use crate::keymap::{Chord, chord_label};
     let e = app.keys_enhanced;
     format!(
-        "{} list · {}/{} session · {} sidebar · {} find · {} help",
+        "{} list · {}/{} session · {} traces · {} sidebar · {} find · {} help",
         chord_label(Chord::ToggleFocus, e),
         chord_label(Chord::PrevSession, e),
         chord_label(Chord::NextSession, e),
+        chord_label(Chord::Traces, e),
         chord_label(Chord::ToggleSidebar, e),
         chord_label(Chord::Find, e),
         chord_label(Chord::Help, e),
@@ -2085,6 +2086,7 @@ fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
         Chord::ToggleFocus,
         Chord::PrevSession,
         Chord::NextSession,
+        Chord::Traces,
         Chord::ToggleSidebar,
         Chord::Find,
         Chord::Help,
@@ -2094,7 +2096,7 @@ fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
     if !cfg!(windows) && !e {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            "This terminal does not report modifier keys, so ⌘ and Ctrl+Shift chords cannot reach agent-mux; F2 and F1 do. Ghostty, iTerm2, kitty and WezTerm report them.",
+            "This terminal does not report modifier keys, so ⌘ and Ctrl+Shift chords cannot reach agent-mux; F2, F3 and F1 do. Ghostty, iTerm2, kitty and WezTerm report them.",
             dim,
         ));
     }
@@ -2365,6 +2367,7 @@ fn draw_help(f: &mut Frame) {
             "⌘↑/↓ · Ctrl+Shift+↑/↓",
             "previous / next session (⌘B / Ctrl+Shift+B sidebar)",
         ),
+        chord_row(crate::keymap::Chord::Traces),
         chord_row(crate::keymap::Chord::Help),
         Line::raw(""),
         Line::styled("Scrollback, selection & search", head),
@@ -2379,9 +2382,12 @@ fn draw_help(f: &mut Frame) {
             "search scrollback (plain Ctrl+F in the list)",
         ),
         Line::raw(""),
-        Line::styled("Session logs", head),
-        row("Tab, ←/→ · a", "switch pane · this project / all projects"),
-        row("r or Enter", "resume the selected session"),
+        Line::from(vec![
+            Span::styled("Session logs", head),
+            Span::raw(
+                "   Tab, ←/→ switch pane · a all projects · r or Enter resume the selected session",
+            ),
+        ]),
         Line::raw(""),
         Line::styled("A flow row", head),
         row(
@@ -2420,12 +2426,13 @@ fn draw_help(f: &mut Frame) {
             "+ · r",
             "verdict good → bad → cleared (also sent to Langfuse) · resume",
         ),
-        Line::raw(""),
-        Line::styled("  [Esc] or [?] to close", dim),
-        Line::styled(
-            format!("  {}", crate::build_info::short()),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Line::from(vec![
+            Span::styled("  [Esc] or [?] to close · ", dim),
+            Span::styled(
+                crate::build_info::short(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
     ];
     lines.shrink_to_fit();
     let height = (lines.len() as u16 + 2).min(f.area().height.saturating_sub(2));
@@ -5906,6 +5913,8 @@ mod tests {
             "also sent to Langfuse",
             "resume the selected session",
             "clear all exited sessions",
+            "traces of this session",
+            "to close",
         ] {
             assert!(
                 text.contains(needle),

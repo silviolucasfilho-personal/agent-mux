@@ -76,7 +76,7 @@ The version is `<major>.<minor>.<build>`: the crate's major and minor from `Carg
 
 1. Start agent-mux, press `n`, pick a profile, launch it in a disposable workspace.
 2. Send a short prompt, press `⌘E` (`Ctrl+Shift+E`, or `F2`) to reach the list, and watch the trace badge on the Active row update.
-3. Press `T` to open the Trace Browser; press `v` to cycle the Detail pane views.
+3. Press `⌘I` (`Ctrl+Shift+I`, or `F3`) to open the Trace Browser on the session, from the pane or the list (in the list, `T` steps through the trace strip under the session, then the browser); press `v` to cycle the Detail pane views and `Esc` to return to the session.
 4. Run `agent-mux trace ls --all`, `agent-mux trace show <session-id> --full`, `agent-mux trace show <trace-id> --tree`.
 5. Run `agent-mux trace sql 'SELECT * FROM trace_stats ORDER BY start_ns DESC LIMIT 5'`.
 6. Read section 5 (capture) and section 7 (store) before touching `src/tracing/`.
