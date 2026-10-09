@@ -503,7 +503,10 @@ mod tests {
         let digits = "0123456789".repeat(8);
         let (_d, mut v) = open(&format!("Some prose.\n\n```\n{digits}\nshort\n```\n"));
         let s = screen(&v, 40, 10);
-        assert!(s[3].starts_with(" ╭─ code · ←/→ scroll ─"), "the frame says so: {s:?}");
+        assert!(
+            s[3].starts_with(" ╭─ code · ←/→ scroll ─"),
+            "the frame says so: {s:?}"
+        );
         assert!(s[4].starts_with(" │ 0123") && s[4].ends_with('›'), "{s:?}");
         v.hscroll = 10;
         let s = screen(&v, 40, 10);

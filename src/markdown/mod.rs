@@ -705,11 +705,7 @@ impl Renderer {
             .map(|r| r.iter().map(|s| s.text.width()).sum::<usize>() + 2)
             .max()
             .unwrap_or(0);
-        let hint = if widest > w {
-            " · ←/→ scroll"
-        } else {
-            ""
-        };
+        let hint = if widest > w { " · ←/→ scroll" } else { "" };
         let head = format!("╭─ {label}{hint} ");
         let fill = w.saturating_sub(head.width());
         self.emit(

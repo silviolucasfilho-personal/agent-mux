@@ -51,7 +51,7 @@ CommonMark plus GitHub tables, task lists and strikethrough, and YAML front matt
 
 A ```` ```mermaid ```` block is drawn as a diagram (`src/markdown/mermaid.rs`):
 
-- `flowchart` / `graph`, every direction (`TD`, `TB`, `BT`, `LR`, `RL`): node shapes, solid, dotted and thick links, arrow, circle and cross heads, labels, chains and `&`. Subgraphs draw their nodes without the frame; styling statements are ignored.
+- `flowchart` / `graph`, every direction (`TD`, `TB`, `BT`, `LR`, `RL`): node shapes, solid, dotted and thick links, arrow, circle and cross heads, labels, chains and `&`. A `subgraph` is a frame with its title around its nodes, nested ones inside; a link to a subgraph leaves its last node and enters its first. Styling statements and `direction` inside a subgraph are ignored.
 - `stateDiagram` / `stateDiagram-v2`: on the flowchart engine; `[*]` as `●` and `◉`.
 - `sequenceDiagram`: participants and actors, every arrow, self-messages, `autonumber`, notes, and `loop` / `alt` / `opt` / `par` / `critical` / `break` blocks as dashed frames.
 - `pie`: a bar chart with percentages.

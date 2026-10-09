@@ -8,8 +8,11 @@
 //!   subroutine, diamond, hexagon, the slanted ones as rectangles), every
 //!   link style (`-->`, `---`, `-.->`, `==>`, `--o`, `--x`, `<-->` and the
 //!   longer forms), labels (`-->|yes|`, `-- yes -->`), chains and `&`
-//!   groups. `~~~` shapes the layout and is not drawn. `subgraph` grouping,
-//!   `classDef`, `style`, `click` and the like are read and ignored.
+//!   groups. `~~~` shapes the layout and is not drawn. A `subgraph` is a
+//!   titled frame around its nodes, nested ones inside; a link to a
+//!   subgraph leaves from its last node and enters its first. `direction`
+//!   inside one, `classDef`, `style`, `click` and the like are read and
+//!   ignored.
 //! - `stateDiagram` / `stateDiagram-v2`, on the same engine: `[*]` is a
 //!   `●` where a transition leaves it and a `◉` where one ends in it,
 //!   composite states are flattened, notes are skipped.
@@ -41,6 +44,16 @@
 //! to jog sideways (a fan-out shares one, a fan-in shares one, tracks are
 //! ordered to avoid crossings), the label rows, the arrowhead cell. `BT`
 //! and `RL` are `TD` and `LR` with every edge reversed.
+//!
+//! Subgraphs: a node belongs to the first subgraph that names it, a dummy
+//! to the innermost one holding both ends of its edge. Each rank keeps a
+//! subgraph's nodes together, sibling subgraphs in one order in every rank;
+//! nodes sit further apart across a frame side, and a last pass moves
+//! nodes right until no frame overlaps a sibling node or frame. Rows open
+//! above a subgraph's first rank and close below its last. Frames are
+//! drawn into the cells nothing else took, so a line crossing one keeps
+//! its course; the title sits in the top side clear of those lines (top
+//! to bottom, the frame is widened for it; left to right, it is cut).
 
 use std::collections::{HashMap, VecDeque};
 
@@ -458,6 +471,61 @@ impl Canvas {
         }
     }
 
+    /// A subgraph's frame from `(x0, y0)` to `(x1, y1)`, drawn only into
+    /// empty cells, with `title` in its top side where it fits.
+    fn frame(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, title: &str) {
+        let border = |x: i64, y: i64| match (x == x0, x == x1, y == y0, y == y1) {
+            (true, _, true, _) => '┌',
+            (_, true, true, _) => '┐',
+            (true, _, _, true) => '└',
+            (_, true, _, true) => '┘',
+            (_, _, true, _) | (_, _, _, true) => '─',
+            _ => '│',
+        };
+        for x in x0..=x1 {
+            for y in [y0, y1] {
+                if self.get(x, y) == Cell::Empty {
+                    self.put(x, y, border(x, y), CellKind::Frame);
+                }
+            }
+        }
+        for y in y0 + 1..y1 {
+            for x in [x0, x1] {
+                if self.get(x, y) == Cell::Empty {
+                    self.put(x, y, border(x, y), CellKind::Frame);
+                }
+            }
+        }
+        let room = x1 - x0 + 1 - 6;
+        if title.is_empty() || room < 1 {
+            return;
+        }
+        let mut text = String::new();
+        let mut w = 0;
+        for c in title.chars() {
+            let cw = char_width(c) as i64;
+            if w + cw > room {
+                while w + 1 > room {
+                    w -= text.pop().map_or(1, |c| char_width(c) as i64);
+                }
+                text.push('…');
+                w += 1;
+                break;
+            }
+            text.push(c);
+            w += cw;
+        }
+        // `─ title ─`, clear of the lines crossing this side
+        let side = |c: Cell| matches!(c, Cell::Ch(_, CellKind::Frame));
+        if let Some(x) =
+            (x0 + 3..=x1 - 2 - w).find(|&x| (x - 2..=x + w + 1).all(|c| side(self.get(c, y0))))
+        {
+            self.put(x - 1, y0, ' ', CellKind::Frame);
+            self.text(x, y0, &text, CellKind::Frame);
+            self.put(x + w, y0, ' ', CellKind::Frame);
+        }
+    }
+
     /// Replaces a border character at `(x, y)` with `to` if it is `from`.
     fn swap_border(&mut self, x: i64, y: i64, from: char, to: char) {
         if self.get(x, y) == Cell::Ch(from, CellKind::Border) {
@@ -588,12 +656,24 @@ struct FEdge {
     invisible: bool,
 }
 
+/// A `subgraph`: a frame around its nodes, inside its parent's.
+struct FGroup {
+    id: String,
+    title: String,
+    parent: Option<usize>,
+}
+
 struct Graph {
     dir: Dir,
     default_shape: Shape,
     nodes: Vec<FNode>,
     edges: Vec<FEdge>,
     index: HashMap<String, usize>,
+    groups: Vec<FGroup>,
+    /// The innermost group each node belongs to.
+    member: Vec<Option<usize>>,
+    /// The groups open while parsing, innermost last.
+    open: Vec<usize>,
 }
 
 impl Graph {
@@ -604,11 +684,15 @@ impl Graph {
             nodes: Vec::new(),
             edges: Vec::new(),
             index: HashMap::new(),
+            groups: Vec::new(),
+            member: Vec::new(),
+            open: Vec::new(),
         }
     }
 
     /// The node `id`, created on first use; its label and shape are set by
-    /// its first definition that has them.
+    /// its first definition that has them. The first group open when it is
+    /// named claims it.
     fn define(&mut self, id: &str, def: Option<(Vec<String>, Shape)>) -> usize {
         let v = match self.index.get(id) {
             Some(&v) => v,
@@ -618,10 +702,14 @@ impl Graph {
                     shape: self.default_shape,
                     labeled: false,
                 });
+                self.member.push(None);
                 self.index.insert(id.to_string(), self.nodes.len() - 1);
                 self.nodes.len() - 1
             }
         };
+        if self.member[v].is_none() {
+            self.member[v] = self.open.last().copied();
+        }
         if let Some((lines, shape)) = def
             && !self.nodes[v].labeled
         {
@@ -630,6 +718,74 @@ impl Graph {
             self.nodes[v].labeled = true;
         }
         v
+    }
+
+    /// Opens a group inside the innermost open one.
+    fn open_group(&mut self, id: String, title: String) -> Result<(), String> {
+        if self.groups.len() >= MAX_NODES {
+            return Err(TOO_LARGE.into());
+        }
+        self.groups.push(FGroup {
+            id,
+            title,
+            parent: self.open.last().copied(),
+        });
+        self.open.push(self.groups.len() - 1);
+        Ok(())
+    }
+
+    /// Whether group `k` is `x` or one of its ancestors.
+    fn holds(&self, x: Option<usize>, k: usize) -> bool {
+        let mut x = x;
+        while let Some(c) = x {
+            if c == k {
+                return true;
+            }
+            x = self.groups[c].parent;
+        }
+        false
+    }
+
+    /// A link to a group goes to one of its nodes instead: out of its last
+    /// node, into its first. A node named like a group that holds no other
+    /// node stays a node, and the empty group is dropped.
+    fn resolve_groups(&mut self) {
+        for k in 0..self.groups.len() {
+            let Some(&gv) = self.index.get(&self.groups[k].id) else {
+                continue;
+            };
+            let inside: Vec<usize> = (0..self.nodes.len())
+                .filter(|&v| v != gv && self.holds(self.member[v], k))
+                .collect();
+            let (Some(&first), Some(&last)) = (inside.first(), inside.last()) else {
+                continue;
+            };
+            for e in &mut self.edges {
+                if e.from == gv {
+                    e.from = last;
+                }
+                if e.to == gv {
+                    e.to = first;
+                }
+            }
+            self.edges.retain(|e| e.from != e.to || e.from == gv);
+            self.nodes.remove(gv);
+            self.member.remove(gv);
+            self.index.retain(|_, v| *v != gv);
+            for v in self.index.values_mut() {
+                if *v > gv {
+                    *v -= 1;
+                }
+            }
+            for e in &mut self.edges {
+                if e.from > gv {
+                    e.from -= 1;
+                }
+                if e.to > gv {
+                    e.to -= 1;
+                }
+            }
+        }
     }
 
     fn edge(&mut self, edge: FEdge) -> Result<(), String> {
@@ -735,6 +891,7 @@ fn parse_flowchart(lines: &[String]) -> Result<Graph, String> {
     for s in stmts.iter().skip(1) {
         flow_statement(&mut g, s)?;
     }
+    g.resolve_groups();
     if g.nodes.len() > MAX_NODES {
         return Err(TOO_LARGE.into());
     }
@@ -742,8 +899,6 @@ fn parse_flowchart(lines: &[String]) -> Result<Graph, String> {
 }
 
 const IGNORED: &[&str] = &[
-    "subgraph",
-    "end",
     "classDef",
     "class",
     "style",
@@ -758,6 +913,14 @@ const IGNORED: &[&str] = &[
 
 fn flow_statement(g: &mut Graph, s: &str) -> Result<(), String> {
     let first = s.split_whitespace().next().unwrap_or("");
+    if first == "subgraph" {
+        let (id, title) = subgraph_header(s["subgraph".len()..].trim(), g.groups.len());
+        return g.open_group(id, title);
+    }
+    if first == "end" && s == "end" {
+        g.open.pop();
+        return Ok(());
+    }
     if IGNORED.contains(&first) || first.starts_with("accTitle") || first.starts_with("accDescr") {
         return Ok(());
     }
@@ -786,6 +949,30 @@ fn flow_statement(g: &mut Graph, s: &str) -> Result<(), String> {
             }
         }
         left = right;
+    }
+}
+
+/// `subgraph id [Title]`, `subgraph id["Title"]`, `subgraph "Title"`,
+/// `subgraph Title words`: the id and the title.
+fn subgraph_header(rest: &str, n: usize) -> (String, String) {
+    let title = |t: &str| label_lines(t, 200).join(" ").trim().to_string();
+    if let Some(open) = rest.find('[')
+        && rest.ends_with(']')
+    {
+        let id = rest[..open].trim();
+        let t = title(&rest[open + 1..rest.len() - 1]);
+        return (
+            if id.is_empty() {
+                t.clone()
+            } else {
+                id.to_string()
+            },
+            t,
+        );
+    }
+    match title(rest) {
+        t if t.is_empty() => (format!("subgraph {n}"), t),
+        t => (rest.trim().to_string(), t),
     }
 }
 
@@ -1423,7 +1610,20 @@ fn draw_flow(g: &Graph) -> Result<Canvas, String> {
         succs[e.u].push(e.v);
     }
 
-    // Order within ranks: barycenter sweeps down and up.
+    // Subgraphs: the group each layout node is drawn in (a dummy in the
+    // innermost one holding both ends of its edge).
+    let gs = Groups::new(g);
+    let grp: Vec<Option<usize>> = ln
+        .iter()
+        .map(|l| match l.real {
+            Some(v) => g.member[v],
+            None => gs.lca(g.member[le[l.edge].u], g.member[le[l.edge].v]),
+        })
+        .collect();
+    let framed = !g.groups.is_empty() && grp.iter().any(Option::is_some);
+
+    // Order within ranks: barycenter sweeps down and up; a group's nodes
+    // stay together.
     let mut pos = vec![0usize; ln.len()];
     let reindex = |order: &[usize], pos: &mut [usize]| {
         for (k, &v) in order.iter().enumerate() {
@@ -1451,8 +1651,32 @@ fn draw_flow(g: &Graph) -> Result<Canvas, String> {
                 })
                 .collect();
             keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-            order[r] = keyed.into_iter().map(|k| k.2).collect();
+            order[r] = if framed {
+                let items: Vec<(f64, usize)> = keyed.iter().map(|k| (k.0, k.2)).collect();
+                gs.arrange(&items, None, &grp, None)
+            } else {
+                keyed.into_iter().map(|k| k.2).collect()
+            };
             reindex(&order[r], &mut pos);
+        }
+    }
+    if framed {
+        // One side-by-side order of sibling groups in every rank, so their
+        // frames can be rectangles.
+        let mut sum = vec![(0.0f64, 0usize); g.groups.len()];
+        for (v, x) in grp.iter().enumerate() {
+            let mut x = *x;
+            while let Some(k) = x {
+                sum[k].0 += pos[v] as f64;
+                sum[k].1 += 1;
+                x = g.groups[k].parent;
+            }
+        }
+        let key: Vec<f64> = sum.iter().map(|(s, c)| s / (*c).max(1) as f64).collect();
+        for o in order.iter_mut() {
+            let items: Vec<(f64, usize)> = o.iter().map(|&v| (pos[v] as f64, v)).collect();
+            *o = gs.arrange(&items, None, &grp, Some(&key));
+            reindex(o, &mut pos);
         }
     }
 
@@ -1473,11 +1697,14 @@ fn draw_flow(g: &Graph) -> Result<Canvas, String> {
 
     // Cross positions.
     let gap = if horizontal { 1 } else { 3 };
+    // A frame's side is `pad` cells out from what it holds.
+    let pad = if horizontal { 1 } else { 2 };
+    let pair_gap = |a: usize, b: usize| gap + pad * gs.frames_between(grp[a], grp[b]) as i64;
     for o in &order {
         let mut acc = 0;
-        for &v in o {
+        for (k, &v) in o.iter().enumerate() {
             ln[v].cross = acc;
-            acc += ln[v].size + gap;
+            acc += ln[v].size + o.get(k + 1).map_or(0, |&b| pair_gap(v, b));
         }
     }
     for down in [true, false, true] {
@@ -1501,16 +1728,40 @@ fn draw_flow(g: &Graph) -> Result<Canvas, String> {
                 })
                 .collect();
             let widths: Vec<i64> = order[r].iter().map(|&v| ln[v].size).collect();
-            let xs = fit_in_order(&desired, &widths, gap);
+            let gaps: Vec<i64> = order[r].windows(2).map(|w| pair_gap(w[0], w[1])).collect();
+            let xs = fit_in_order(&desired, &widths, &gaps);
             for (k, &v) in order[r].iter().enumerate() {
                 ln[v].cross = xs[k];
             }
         }
     }
-    let min = ln.iter().map(|l| l.cross).min().unwrap_or(0);
+    let title_w: Vec<i64> = g
+        .groups
+        .iter()
+        .map(|k| str_width(&k.title) as i64)
+        .collect();
+    let fit_w = |k: usize| (!horizontal).then_some(title_w[k]);
+    let entered: Vec<bool> = preds.iter().map(|p| !p.is_empty()).collect();
+    if framed {
+        gs.separate(
+            &mut ln, &order, &pos, &grp, pad, &fit_w, &entered, &pair_gap,
+        );
+    }
+    let min = ln
+        .iter()
+        .map(|l| l.cross)
+        .chain(
+            gs.extents(&ln, &grp, pad, &fit_w, &entered)
+                .iter()
+                .flatten()
+                .map(|e| e.0),
+        )
+        .min()
+        .unwrap_or(0);
     for l in ln.iter_mut() {
         l.cross -= min;
     }
+    let ext = gs.extents(&ln, &grp, pad, &fit_w, &entered);
     if ln.iter().any(|l| l.cross + l.size > MAX_COLS.max(MAX_ROWS)) {
         return Err(TOO_LARGE.into());
     }
@@ -1601,12 +1852,54 @@ fn draw_flow(g: &Graph) -> Result<Canvas, String> {
         }
         gap_tracks[r] = tr.iter().map(|t| t + 1).max().unwrap_or(0);
     }
+    // Frames along the main axis: the ranks each spans, and how many
+    // frames open above a rank and close below it, nested ones inside.
+    let ng = g.groups.len();
+    let mut span: Vec<Option<(usize, usize)>> = vec![None; ng];
+    for (v, x) in grp.iter().enumerate() {
+        let mut x = *x;
+        while let Some(k) = x {
+            let r = ln[v].rank;
+            span[k] = Some(span[k].map_or((r, r), |(a, b)| (a.min(r), b.max(r))));
+            x = g.groups[k].parent;
+        }
+    }
+    let mut above = vec![0i64; ng];
+    let mut below = vec![0i64; ng];
+    for &k in gs.deepest_first.iter() {
+        let (Some((a, b)), Some(p)) = (span[k], g.groups[k].parent) else {
+            continue;
+        };
+        if let Some((pa, pb)) = span[p] {
+            if pa == a {
+                above[p] = above[p].max(above[k] + 1);
+            }
+            if pb == b {
+                below[p] = below[p].max(below[k] + 1);
+            }
+        }
+    }
+    let mut open = vec![0i64; nr];
+    let mut close = vec![0i64; nr];
+    for k in 0..ng {
+        if let Some((a, b)) = span[k] {
+            open[a] = open[a].max(above[k] + 1);
+            close[b] = close[b].max(below[k] + 1);
+        }
+    }
     let mut rank_start = vec![0i64; nr];
     let mut gap_start = vec![0i64; nr];
+    if open[0] > 0 {
+        rank_start[0] = open[0] + 1;
+    }
     for r in 0..nr {
         gap_start[r] = rank_start[r] + rank_main[r];
         if r + 1 < nr {
-            rank_start[r + 1] = gap_start[r] + 2 + gap_tracks[r] + gap_label[r];
+            // a frame that closes and one that opens here, a cell apart
+            let apart =
+                (close[r] > 0 && open[r + 1] > 0 && gap_tracks[r] + gap_label[r] == 0) as i64;
+            rank_start[r + 1] =
+                gap_start[r] + 2 + gap_tracks[r] + gap_label[r] + close[r] + open[r + 1] + apart;
         }
     }
     if rank_start[nr - 1] + rank_main[nr - 1] > MAX_COLS.max(MAX_ROWS) {
@@ -1637,7 +1930,7 @@ fn draw_flow(g: &Graph) -> Result<Canvas, String> {
         let (cs, ct) = ports[si];
         let mut pts = vec![at(m0, cs)];
         if cs != ct {
-            let tm = gap_start[r] + 1 + track[si];
+            let tm = gap_start[r] + 1 + close[r] + track[si];
             pts.push(at(tm, cs));
             pts.push(at(tm, ct));
         }
@@ -1700,12 +1993,25 @@ fn draw_flow(g: &Graph) -> Result<Canvas, String> {
         }
     }
 
+    // Frames, into the cells nothing else took: a line crossing one keeps
+    // its course.
+    for k in 0..ng {
+        let (Some((a, b)), Some((lo, hi))) = (span[k], ext[k]) else {
+            continue;
+        };
+        let m0 = rank_start[a] - 2 - above[k];
+        let m1 = gap_start[b] + 1 + below[k];
+        let (x0, y0) = at(m0, lo);
+        let (x1, y1) = at(m1, hi);
+        cv.frame(x0, y0, x1, y1, &g.groups[k].title);
+    }
+
     // Edge labels.
     for (si, s) in segs.iter().enumerate() {
         let Some(label) = seg_label(s) else { continue };
         let r = ln[s.a].rank;
         let mut ct = ports[si].1;
-        let mut region = gap_start[r] + 1 + gap_tracks[r];
+        let mut region = gap_start[r] + 1 + close[r] + gap_tracks[r];
         if !horizontal && le[s.edge].label_at_start() {
             // Beside the arrowhead under the source.
             ct = ports[si].0;
@@ -1750,6 +2056,298 @@ fn draw_flow(g: &Graph) -> Result<Canvas, String> {
         }
     }
     Ok(cv)
+}
+
+/// The subgraph tree, for the layout.
+struct Groups {
+    parent: Vec<Option<usize>>,
+    /// How many groups hold group `k`, itself included.
+    depth: Vec<usize>,
+    /// Every group, the most deeply nested first.
+    deepest_first: Vec<usize>,
+}
+
+impl Groups {
+    fn new(g: &Graph) -> Groups {
+        let parent: Vec<Option<usize>> = g.groups.iter().map(|k| k.parent).collect();
+        // a parent is always opened before its children
+        let mut depth = vec![1usize; parent.len()];
+        for k in 0..parent.len() {
+            if let Some(p) = parent[k] {
+                depth[k] = depth[p] + 1;
+            }
+        }
+        let mut deepest_first: Vec<usize> = (0..parent.len()).collect();
+        deepest_first.sort_by_key(|&k| std::cmp::Reverse(depth[k]));
+        Groups {
+            parent,
+            depth,
+            deepest_first,
+        }
+    }
+
+    fn depth_of(&self, x: Option<usize>) -> usize {
+        x.map_or(0, |k| self.depth[k])
+    }
+
+    /// The innermost group holding both.
+    fn lca(&self, mut a: Option<usize>, mut b: Option<usize>) -> Option<usize> {
+        while self.depth_of(a) > self.depth_of(b) {
+            a = a.and_then(|k| self.parent[k]);
+        }
+        while self.depth_of(b) > self.depth_of(a) {
+            b = b.and_then(|k| self.parent[k]);
+        }
+        while a != b {
+            a = a.and_then(|k| self.parent[k]);
+            b = b.and_then(|k| self.parent[k]);
+        }
+        a
+    }
+
+    /// How many frame sides lie between nodes in groups `a` and `b`.
+    fn frames_between(&self, a: Option<usize>, b: Option<usize>) -> usize {
+        self.depth_of(a) + self.depth_of(b) - 2 * self.depth_of(self.lca(a, b))
+    }
+
+    /// The child of `p` that holds `x`; `None` when `x` is `p`.
+    fn child_under(&self, x: Option<usize>, p: Option<usize>) -> Option<usize> {
+        let mut c = x?;
+        while self.parent[c] != p {
+            c = self.parent[c]?;
+        }
+        (x != p).then_some(c)
+    }
+
+    /// `items` (key, layout node) of one rank, all inside `p`, ordered by
+    /// key with each child group's nodes together: a group sorts by `key`
+    /// when given, else by the mean of its nodes' keys. Ties keep the
+    /// given order.
+    fn arrange(
+        &self,
+        items: &[(f64, usize)],
+        p: Option<usize>,
+        grp: &[Option<usize>],
+        key: Option<&[f64]>,
+    ) -> Vec<usize> {
+        struct Unit {
+            key: f64,
+            first: usize,
+            group: Option<usize>,
+            items: Vec<(f64, usize)>,
+        }
+        let mut units: Vec<Unit> = Vec::new();
+        for (i, &(k, v)) in items.iter().enumerate() {
+            let group = self.child_under(grp[v], p);
+            match units
+                .iter_mut()
+                .find(|u| group.is_some() && u.group == group)
+            {
+                Some(u) => u.items.push((k, v)),
+                None => units.push(Unit {
+                    key: k,
+                    first: i,
+                    group,
+                    items: vec![(k, v)],
+                }),
+            }
+        }
+        for u in units.iter_mut() {
+            if let Some(c) = u.group {
+                u.key = match key {
+                    Some(key) => key[c],
+                    None => u.items.iter().map(|x| x.0).sum::<f64>() / u.items.len() as f64,
+                };
+            }
+        }
+        units.sort_by(|a, b| a.key.total_cmp(&b.key).then(a.first.cmp(&b.first)));
+        let mut out = Vec::with_capacity(items.len());
+        for u in units {
+            match u.group {
+                None => out.push(u.items[0].1),
+                Some(c) => out.extend(self.arrange(&u.items, Some(c), grp, key)),
+            }
+        }
+        out
+    }
+
+    /// Each group's frame sides on the cross axis, `None` for an empty
+    /// one: `pad` out from what it holds. With a `title` width (top to
+    /// bottom only), wide enough for the title in the top side, before the
+    /// first line that enters there (into a node of the group's first
+    /// rank, `entered`) or after the last.
+    fn extents(
+        &self,
+        ln: &[LNode],
+        grp: &[Option<usize>],
+        pad: i64,
+        title: &dyn Fn(usize) -> Option<i64>,
+        entered: &[bool],
+    ) -> Vec<Option<(i64, i64)>> {
+        let n = self.parent.len();
+        let mut inner: Vec<Option<(i64, i64)>> = vec![None; n];
+        let mut first_rank: Vec<Option<usize>> = vec![None; n];
+        let widen = |e: &mut Option<(i64, i64)>, lo: i64, hi: i64| {
+            *e = Some(e.map_or((lo, hi), |(a, b)| (a.min(lo), b.max(hi))));
+        };
+        for (l, x) in ln.iter().zip(grp) {
+            let mut x = *x;
+            while let Some(k) = x {
+                first_rank[k] = Some(first_rank[k].map_or(l.rank, |r| r.min(l.rank)));
+                x = self.parent[k];
+            }
+        }
+        let mut crossed: Vec<Option<(i64, i64)>> = vec![None; n];
+        for (v, (l, x)) in ln.iter().zip(grp).enumerate() {
+            if let Some(k) = *x {
+                widen(&mut inner[k], l.cross, l.cross + l.size - 1);
+            }
+            let mut x = *x;
+            while let Some(k) = x {
+                if entered[v] && first_rank[k] == Some(l.rank) {
+                    widen(&mut crossed[k], l.port(), l.port());
+                }
+                x = self.parent[k];
+            }
+        }
+        let mut ext: Vec<Option<(i64, i64)>> = vec![None; n];
+        for &k in &self.deepest_first {
+            let Some((lo, hi)) = inner[k] else { continue };
+            let (lo, mut hi) = (lo - pad, hi + pad);
+            if let Some(w) = title(k).filter(|&w| w > 0) {
+                // `┌─ title ─┐`, the title from lo + 3
+                hi = hi.max(lo + w + 5);
+                // `─ title ─` needs lo + 1 ..= lo + w + 4 clear
+                if let Some((first, last)) = crossed[k]
+                    && first <= lo + w + 4
+                {
+                    hi = hi.max(last + w + 5);
+                }
+            }
+            ext[k] = Some((lo, hi));
+            if let Some(p) = self.parent[k] {
+                widen(&mut inner[p], lo, hi);
+            }
+        }
+        ext
+    }
+
+    /// Moves nodes along the cross axis until no frame overlaps a node or
+    /// a frame beside it: of two siblings (nodes or groups) that share a
+    /// rank, the one on the right moves right. Rightward moves only, in a
+    /// consistent left-to-right order, so it settles; the pass count is
+    /// capped all the same.
+    #[allow(clippy::too_many_arguments)]
+    fn separate(
+        &self,
+        ln: &mut [LNode],
+        order: &[Vec<usize>],
+        pos: &[usize],
+        grp: &[Option<usize>],
+        pad: i64,
+        fit: &dyn Fn(usize) -> Option<i64>,
+        entered: &[bool],
+        pair_gap: &dyn Fn(usize, usize) -> i64,
+    ) {
+        let n = self.parent.len();
+        // every layout node inside each group; the direct contents of the
+        // top level (slot 0) and of each group (slot k + 1)
+        let mut inside: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut nodes_in: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
+        let mut groups_in: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
+        for (v, x) in grp.iter().enumerate() {
+            nodes_in[x.map_or(0, |k| k + 1)].push(v);
+            let mut x = *x;
+            while let Some(k) = x {
+                inside[k].push(v);
+                x = self.parent[k];
+            }
+        }
+        for k in 0..n {
+            if !inside[k].is_empty() {
+                groups_in[self.parent[k].map_or(0, |p| p + 1)].push(k);
+            }
+        }
+        let span = |k: usize| {
+            let rs = inside[k].iter().map(|&v| ln[v].rank);
+            (rs.clone().min().unwrap_or(0), rs.max().unwrap_or(0))
+        };
+        let spans: Vec<(usize, usize)> = (0..n).map(span).collect();
+        #[derive(Clone, Copy)]
+        enum Unit {
+            Node(usize),
+            Group(usize),
+        }
+        for _ in 0..300 {
+            let mut moved = false;
+            for o in order {
+                for w in o.windows(2) {
+                    let need = ln[w[0]].cross + ln[w[0]].size + pair_gap(w[0], w[1]);
+                    if ln[w[1]].cross < need {
+                        ln[w[1]].cross = need;
+                        moved = true;
+                    }
+                }
+            }
+            let ext = self.extents(ln, grp, pad, fit, entered);
+            for slot in 0..=n {
+                let units: Vec<Unit> = nodes_in[slot]
+                    .iter()
+                    .map(|&v| Unit::Node(v))
+                    .chain(groups_in[slot].iter().map(|&k| Unit::Group(k)))
+                    .collect();
+                for i in 0..units.len() {
+                    for j in i + 1..units.len() {
+                        let (a, b) = (units[i], units[j]);
+                        if let (Unit::Node(_), Unit::Node(_)) = (a, b) {
+                            continue; // the ranks keep nodes apart
+                        }
+                        let span_of = |u: Unit| match u {
+                            Unit::Node(v) => (ln[v].rank, ln[v].rank),
+                            Unit::Group(k) => spans[k],
+                        };
+                        let extent = |u: Unit| match u {
+                            Unit::Node(v) => (ln[v].cross, ln[v].cross + ln[v].size - 1),
+                            Unit::Group(k) => ext[k].unwrap_or((0, 0)),
+                        };
+                        let pos_in = |u: Unit, r: usize| match u {
+                            Unit::Node(v) => (ln[v].rank == r).then_some(pos[v]),
+                            Unit::Group(k) => inside[k]
+                                .iter()
+                                .filter(|&&v| ln[v].rank == r)
+                                .map(|&v| pos[v])
+                                .min(),
+                        };
+                        let ((a0, a1), (b0, b1)) = (span_of(a), span_of(b));
+                        if a1 < b0 || b1 < a0 {
+                            continue;
+                        }
+                        let (ea, eb) = (extent(a), extent(b));
+                        let a_left = (a0.max(b0)..=a1.min(b1))
+                            .find_map(|r| Some(pos_in(a, r)? < pos_in(b, r)?))
+                            .unwrap_or(ea.0 + ea.1 <= eb.0 + eb.1);
+                        let ((_, lhi), (rlo, _), right) =
+                            if a_left { (ea, eb, b) } else { (eb, ea, a) };
+                        let d = lhi + 2 - rlo;
+                        if d > 0 {
+                            match right {
+                                Unit::Node(v) => ln[v].cross += d,
+                                Unit::Group(k) => {
+                                    for &v in &inside[k] {
+                                        ln[v].cross += d;
+                                    }
+                                }
+                            }
+                            moved = true;
+                        }
+                    }
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
 }
 
 /// Groups the jogging segments of one gap: a fan-out from one node shares
@@ -1838,12 +2436,12 @@ fn order_bundles(bundles: &[Bundle]) -> Vec<usize> {
 /// Positions for boxes of `widths`, in this order, `gap` apart, as close
 /// as possible to `desired` (least squares; pool-adjacent-violators on the
 /// positions less their minimum offsets).
-fn fit_in_order(desired: &[f64], widths: &[i64], gap: i64) -> Vec<i64> {
+fn fit_in_order(desired: &[f64], widths: &[i64], gaps: &[i64]) -> Vec<i64> {
     let mut offsets = Vec::with_capacity(widths.len());
     let mut acc = 0;
-    for w in widths {
+    for (k, w) in widths.iter().enumerate() {
         offsets.push(acc);
-        acc += w + gap;
+        acc += w + gaps.get(k).copied().unwrap_or(0);
     }
     // Blocks of (sum, count).
     let mut blocks: Vec<(f64, usize)> = Vec::new();
@@ -2659,6 +3257,125 @@ mod tests {
     }
 
     #[test]
+    fn a_subgraph_is_framed_with_its_title() {
+        assert_draws(
+            "graph TD\n  x --> a1\n  subgraph one [Group]\n    a1 --> a2\n  end",
+            r"
+   ┌───┐
+   │ x │
+   └─┬─┘
+     │
+┌────│─ Group ─┐
+│    ▼         │
+│ ┌────┐       │
+│ │ a1 │       │
+│ └──┬─┘       │
+│    │         │
+│    ▼         │
+│ ┌────┐       │
+│ │ a2 │       │
+│ └────┘       │
+│              │
+└──────────────┘",
+        );
+    }
+
+    #[test]
+    fn subgraphs_nest_and_a_link_to_one_reaches_its_nodes() {
+        assert_draws(
+            "graph TD\n  subgraph one\n    a1 --> a2\n    subgraph inner\n      a3\n    end\n  end\n  subgraph two\n    b1 --> b2\n  end\n  one --> two",
+            r"
+┌─ one ──────────────────┐
+│            ┌─ inner ─┐ │
+│            │         │ │
+│ ┌────┐     │ ┌────┐  │ │
+│ │ a1 │     │ │ a3 │  │ │
+│ └──┬─┘     │ └──┬─┘  │ │
+│    │       │    │    │ │
+│    │       └────│────┘ │
+│    │            └─────────────┐
+│    │                   │ ┌────│─ two ─┐
+│    ▼                   │ │    ▼       │
+│ ┌────┐                 │ │ ┌────┐     │
+│ │ a2 │                 │ │ │ b1 │     │
+│ └────┘                 │ │ └──┬─┘     │
+│                        │ │    │       │
+└────────────────────────┘ │    │       │
+                           │    ▼       │
+                           │ ┌────┐     │
+                           │ │ b2 │     │
+                           │ └────┘     │
+                           │            │
+                           └────────────┘",
+        );
+    }
+
+    #[test]
+    fn a_left_to_right_frame_shortens_its_title() {
+        assert_draws(
+            "graph LR\n  subgraph g1 [A very long title for a small group]\n    a --> b\n  end\n  b --> c",
+            r"
+┌─ A very lo… ─┐
+│ ┌───┐  ┌───┐ │ ┌───┐
+│ │ a ├─▶│ b ├──▶│ c │
+│ └───┘  └───┘ │ └───┘
+└──────────────┘",
+        );
+    }
+
+    #[test]
+    fn subgraph_headers() {
+        let h = |s: &str| subgraph_header(s, 7);
+        assert_eq!(h("one"), ("one".into(), "one".into()));
+        assert_eq!(h("id [Title here]"), ("id".into(), "Title here".into()));
+        assert_eq!(
+            h("id[\"Quoted <br> title\"]"),
+            ("id".into(), "Quoted title".into())
+        );
+        assert_eq!(h("Two words"), ("Two words".into(), "Two words".into()));
+        assert_eq!(h(""), ("subgraph 7".into(), String::new()));
+    }
+
+    #[test]
+    fn frames_draw_around_every_node_intact() {
+        let cases: [(&str, &[&str]); 5] = [
+            (
+                "graph TD\n r --> p & q & z\n subgraph s [Same rank]\n p\n q\n end",
+                &["r", "p", "q", "z"],
+            ),
+            (
+                "flowchart TB\n c1-->a2\n subgraph one\n a1-->a2\n end\n subgraph two\n b1-->b2\n end\n subgraph three\n c1-->c2\n end",
+                &["a1", "a2", "b1", "b2", "c1", "c2"],
+            ),
+            (
+                "flowchart TB\n subgraph A\n a1 --> a2\n subgraph B\n b1 --> b2\n end\n a2 --> b1\n end\n subgraph C\n c1 --> c2\n end\n b2 --> c2\n a1 --> c1",
+                &["a1", "a2", "b1", "b2", "c1", "c2"],
+            ),
+            (
+                "flowchart LR\n subgraph client [Client]\n UI --> API\n end\n subgraph server [Server]\n API --> DB & Cache\n end\n User --> UI",
+                &["UI", "API", "DB", "Cache", "User"],
+            ),
+            (
+                "graph BT\n subgraph x\n a --> b\n end\n subgraph y\n c --> d\n end\n b --> c\n a --> d\n e --> a",
+                &["a", "b", "c", "d", "e"],
+            ),
+        ];
+        for (src, ids) in cases {
+            let out = draw(src);
+            for id in ids {
+                assert!(out.contains(&format!("│ {id} ")), "{id} in\n{out}");
+            }
+            let titles = src
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("subgraph "));
+            for t in titles {
+                let t = t.split('[').next_back().unwrap_or(t).trim_end_matches(']');
+                assert!(out.contains(&format!("─ {t} ─")), "{t} in\n{out}");
+            }
+        }
+    }
+
+    #[test]
     fn state_diagram() {
         assert_draws(
             "stateDiagram-v2
@@ -2849,6 +3566,12 @@ Rats  █                                3.1%",
             "graph TD\n A --- B --- A",
             "graph TD\n A & B & C --> D & E & F --> A",
             "graph TD\n A ~~~ B ~~~ A",
+            "graph TD\n subgraph\n end\n end\n subgraph a\n subgraph b\n subgraph c\n x\n end",
+            "graph TD\n subgraph a\n a --> b\n end\n a --> a",
+            "graph LR\n subgraph s\n end\n s --> s\n x --> s",
+            "graph TD\n subgraph s [🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉]\n x\n end",
+            "graph LR\n subgraph s [🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉]\n x\n end",
+            "graph RL\n subgraph s\n a --> b --> c --> a\n end\n subgraph t\n d --> a\n end",
             "graph LR\n 🎉 --> 日本",
             "graph LR\n A[🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉🎉] --> B",
             "graph TD\n A[a\u{301}e\u{200b}\tz] --> B",
@@ -2933,6 +3656,10 @@ Rats  █                                3.1%",
             "@{",
             "%%",
             "|",
+            "\nsubgraph G\n",
+            "\nsubgraph A [t]\n",
+            "\nend\n",
+            " G ",
         ];
         let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
         for i in 0..1500 {
