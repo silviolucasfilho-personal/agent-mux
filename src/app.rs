@@ -3930,6 +3930,7 @@ impl App {
             Chord::NextSession => self.select_adjacent_session(1),
             Chord::Help => self.mode = Mode::Help,
             Chord::Traces => self.open_trace_browser(),
+            Chord::Quit => self.quit_from_chord(),
             Chord::LineUp => self.scroll_selected(3),
             Chord::LineDown => self.scroll_selected(-3),
             Chord::PageUp => self.scroll_selected(page),
@@ -5124,6 +5125,23 @@ impl App {
         match std::fs::write(&path, text) {
             Ok(()) => self.request_editor(path, "trace:reader".into()),
             Err(e) => self.notice = Some(Notice::error(format!("editor: {e}"))),
+        }
+    }
+
+    /// The quit chord: quits at once with nothing running, and asks first
+    /// while any session does. A key that can be hit while typing into a
+    /// harness asks more readily than the list's `q`, which asks only
+    /// while a session is working.
+    fn quit_from_chord(&mut self) {
+        let now = Instant::now();
+        if self
+            .sessions
+            .iter()
+            .any(|s| !matches!(s.status(now), Status::Exited(_)))
+        {
+            self.mode = Mode::ConfirmQuit;
+        } else {
+            self.should_quit = true;
         }
     }
 

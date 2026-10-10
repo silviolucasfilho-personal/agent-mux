@@ -137,6 +137,10 @@ pub enum Chord {
     /// `⌘I` / `Ctrl+Shift+I` / `F3`: the Trace Browser on this session,
     /// and back.
     Traces,
+    /// `⌃⇧Q` / `Ctrl+Shift+Q` / `F10`: quit agent-mux from the pane. Not
+    /// `⌘Q`, which every macOS terminal keeps to quit itself; asks first
+    /// while a session runs.
+    Quit,
     /// `Shift+↑`: scroll three lines back.
     LineUp,
     /// `Shift+↓`: scroll three lines forward.
@@ -188,6 +192,13 @@ pub const CHORDS: &[(Chord, &str, &str, &str, &str)] = &[
         "traces of this session",
     ),
     (
+        Chord::Quit,
+        "⌃⇧Q",
+        "Ctrl+Shift+Q",
+        "F10",
+        "quit agent-mux (asks while a session runs)",
+    ),
+    (
         Chord::LineUp,
         "⇧↑",
         "Shift+↑",
@@ -235,12 +246,14 @@ pub fn chord(key: &KeyEvent) -> Option<Chord> {
         KeyCode::F(2) => Chord::ToggleFocus,
         KeyCode::F(1) => Chord::Help,
         KeyCode::F(3) => Chord::Traces,
+        KeyCode::F(10) => Chord::Quit,
         KeyCode::Char(c) if app && letter(c, 'e') => Chord::ToggleFocus,
         KeyCode::Char(c) if app && letter(c, 'b') => Chord::ToggleSidebar,
         KeyCode::Char(c) if app && letter(c, 'f') => Chord::Find,
         KeyCode::Char(c) if app && letter(c, 'i') => Chord::Traces,
         KeyCode::Char(c) if ctrl && shift && letter(c, 'c') => Chord::Copy,
         KeyCode::Char(c) if ctrl && shift && letter(c, 'v') => Chord::Paste,
+        KeyCode::Char(c) if ctrl && shift && letter(c, 'q') => Chord::Quit,
         KeyCode::Char('/') | KeyCode::Char('?') if app => Chord::Help,
         KeyCode::Up if app => Chord::PrevSession,
         KeyCode::Down if app => Chord::NextSession,
@@ -563,6 +576,18 @@ mod tests {
             None,
             "plain Ctrl+I is the harness's"
         );
+        for quit in [
+            k(KeyCode::Char('Q'), cs),
+            k(KeyCode::F(10), KeyModifiers::NONE),
+        ] {
+            assert_eq!(chord(&quit), Some(Chord::Quit), "{quit:?}");
+        }
+        for harness in [
+            k(KeyCode::Char('q'), KeyModifiers::CONTROL),
+            k(KeyCode::Char('q'), KeyModifiers::SUPER),
+        ] {
+            assert_eq!(chord(&harness), None, "{harness:?} is not a quit");
+        }
         assert_eq!(
             chord(&k(KeyCode::Up, KeyModifiers::SHIFT)),
             Some(Chord::LineUp)

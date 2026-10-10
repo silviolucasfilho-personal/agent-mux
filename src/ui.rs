@@ -326,7 +326,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::NewSession(dialog) => draw_new_session_dialog(f, dialog, app),
         Mode::SessionHistory(history) => draw_session_history(f, history, app),
         Mode::ConfirmKill => draw_confirm(f, "Kill this session? [y/n]"),
-        Mode::ConfirmQuit => draw_confirm(f, "Sessions are still working. Quit anyway? [y/n]"),
+        Mode::ConfirmQuit => draw_confirm(f, &quit_question(app, now)),
         Mode::Help => draw_help(f),
         Mode::SkillsView(view) => draw_skills_view(f, view, app),
         Mode::SkillLauncher(launcher) => draw_skill_launcher(f, launcher, app),
@@ -2007,7 +2007,7 @@ fn pane_hints(app: &App) -> String {
     use crate::keymap::{Chord, chord_label};
     let e = app.keys_enhanced;
     format!(
-        "{} list · {}/{} session · {} traces · {} sidebar · {} find · {} help",
+        "{} list · {}/{} session · {} traces · {} sidebar · {} find · {} help · {} quit",
         chord_label(Chord::ToggleFocus, e),
         chord_label(Chord::PrevSession, e),
         chord_label(Chord::NextSession, e),
@@ -2015,6 +2015,7 @@ fn pane_hints(app: &App) -> String {
         chord_label(Chord::ToggleSidebar, e),
         chord_label(Chord::Find, e),
         chord_label(Chord::Help, e),
+        chord_label(Chord::Quit, e),
     )
 }
 
@@ -2092,13 +2093,14 @@ fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
         Chord::ToggleSidebar,
         Chord::Find,
         Chord::Help,
+        Chord::Quit,
     ] {
         lines.push(line(chord_label(c, e), crate::keymap::chord_meaning(c)));
     }
     if !cfg!(windows) && !e {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            "This terminal does not report modifier keys, so ⌘ and Ctrl+Shift chords cannot reach agent-mux; F2, F3 and F1 do. Ghostty, iTerm2, kitty and WezTerm report them.",
+            "This terminal does not report modifier keys, so ⌘ and Ctrl+Shift chords cannot reach agent-mux; F2, F3, F1 and F10 do. Ghostty, iTerm2, kitty and WezTerm report them.",
             dim,
         ));
     }
@@ -2368,10 +2370,13 @@ fn draw_help(f: &mut Frame) {
         ),
         chord_row(crate::keymap::Chord::Traces),
         chord_row(crate::keymap::Chord::Help),
+        chord_row(crate::keymap::Chord::Quit),
         Line::raw(""),
         Line::styled("Scrollback, selection & search", head),
-        row("Shift+↑/↓", "scroll three lines"),
-        row(platform_keys.page_scroll, "scroll one page"),
+        row(
+            &format!("Shift+↑/↓ · {}", platform_keys.page_scroll),
+            "scroll three lines · one page",
+        ),
         row(platform_keys.word_navigation, "move by word in text fields"),
         row("Shift+Home/End", "jump to top / back to live"),
         row("mouse", "wheel to scroll, drag to select text"),
@@ -5184,6 +5189,26 @@ fn draw_about(f: &mut Frame, state: &AboutState) {
         )),
         footer,
     );
+}
+
+/// What quitting stops: working sessions, else running ones.
+fn quit_question(app: &App, now: Instant) -> String {
+    let working = app
+        .sessions
+        .iter()
+        .filter(|s| matches!(s.status(now), Status::Working))
+        .count();
+    let running = app
+        .sessions
+        .iter()
+        .filter(|s| !matches!(s.status(now), Status::Exited(_)))
+        .count();
+    match (working, running) {
+        (0, 0) => "Quit agent-mux? [y/n]".to_string(),
+        (0, 1) => "Quit agent-mux? 1 running session stops. [y/n]".to_string(),
+        (0, n) => format!("Quit agent-mux? {n} running sessions stop. [y/n]"),
+        _ => "Sessions are still working. Quit anyway? [y/n]".to_string(),
+    }
 }
 
 fn draw_confirm(f: &mut Frame, message: &str) {

@@ -180,6 +180,47 @@ async fn the_traces_chord_opens_the_browser_from_the_pane_and_back() {
 }
 
 #[tokio::test]
+async fn the_quit_chord_asks_from_the_pane_while_a_session_runs() {
+    use agent_mux::app::Focus;
+    let (tx, _rx) = mpsc::channel(256);
+    let mut app = App::new(shell_profiles(), None, tx);
+    create_session_via_dialog(&mut app);
+    let now = Instant::now();
+    assert_eq!(app.focus, Focus::Pane);
+    // plain Ctrl+Q is still the harness's
+    app.handle_key(
+        &KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        now,
+    );
+    assert!(matches!(app.mode, Mode::Main));
+    // Ctrl+Shift+Q and F10 ask, since quitting stops the session
+    let ctrl_shift_q = KeyEvent::new(
+        KeyCode::Char('Q'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    for quit in [ctrl_shift_q, key(KeyCode::F(10))] {
+        app.handle_key(&quit, now);
+        assert!(matches!(app.mode, Mode::ConfirmQuit), "{quit:?}");
+        assert!(!app.should_quit);
+        app.handle_key(&key(KeyCode::Char('n')), now);
+        assert!(matches!(app.mode, Mode::Main));
+        assert_eq!(app.focus, Focus::Pane, "back to typing");
+    }
+    app.handle_key(&key(KeyCode::F(10)), now);
+    app.handle_key(&key(KeyCode::Char('y')), now);
+    assert!(app.should_quit);
+    app.kill_all();
+}
+
+#[tokio::test]
+async fn the_quit_chord_quits_at_once_with_nothing_running() {
+    let (tx, _rx) = mpsc::channel(256);
+    let mut app = App::new(shell_profiles(), None, tx);
+    app.handle_key(&key(KeyCode::F(10)), Instant::now());
+    assert!(app.should_quit);
+}
+
+#[tokio::test]
 async fn kill_confirm_respawn_and_remove() {
     let (tx, mut rx) = mpsc::channel(256);
     let mut app = App::new(shell_profiles(), None, tx);
