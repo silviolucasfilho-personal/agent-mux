@@ -413,3 +413,163 @@ fn other_events_and_sessions_without_memory_get_no_answer() {
         assert!(out.response.is_none());
     }
 }
+
+// ------------------------------------------------------------ the CLI
+
+fn cli(f: &Fixture, args: &[&str], stdin: Option<&str>) -> (bool, String) {
+    use std::io::Write;
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_agent-mux"));
+    cmd.arg("memory")
+        .args(args)
+        .current_dir(&f.ws)
+        .env("HOME", &f.home)
+        .env("USERPROFILE", &f.home)
+        .env("AGENT_MUX_LIBRARY_DIR", &f.library)
+        .env_remove(memory::ENV_DIR)
+        .env_remove(memory::ENV_USER)
+        .env_remove("AGENT_MUX_SESSION_ID")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    if let Some(text) = stdin {
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+    } else {
+        drop(child.stdin.take());
+    }
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+#[test]
+fn the_cli_adds_lists_checks_and_removes_notes() {
+    let f = fixture();
+    std::fs::create_dir_all(&f.home).unwrap();
+    let (ok, out) = cli(
+        &f,
+        &[
+            "add",
+            "commit-on-master",
+            "--description",
+            "we commit on master: no branches",
+            "--kind",
+            "decision",
+        ],
+        Some("Commit on master.\n\n**Why:** the user said so.\n"),
+    );
+    assert!(ok, "{out}");
+    let dir = paths::dir_for(&f.library, &memory::Settings::default(), &f.ws);
+    assert_eq!(
+        out.trim(),
+        paths::note_path(&dir, "commit-on-master").to_string_lossy()
+    );
+    let index = std::fs::read_to_string(paths::index_path(&dir)).unwrap();
+    assert!(
+        index.contains("[commit-on-master](notes/commit-on-master.md)"),
+        "{index}"
+    );
+
+    let (ok, out) = cli(&f, &["ls"], None);
+    assert!(
+        ok && out.contains("decision") && out.contains("commit-on-master"),
+        "{out}"
+    );
+    let (ok, out) = cli(&f, &["show", "commit-on-master"], None);
+    assert!(ok && out.contains("**Why:** the user said so."), "{out}");
+    let (ok, out) = cli(
+        &f,
+        &[
+            "add",
+            "commit-on-master",
+            "--description",
+            "d",
+            "--body",
+            "b",
+        ],
+        None,
+    );
+    assert!(!ok && out.contains("--force"), "{out}");
+
+    // a note written by hand, as a session's skill would, then checked
+    std::fs::write(
+        paths::note_path(&dir, "by-hand"),
+        "---\nname: by-hand\ndescription: written without the CLI\nkind: reference\n---\nx\n",
+    )
+    .unwrap();
+    let (ok, out) = cli(&f, &["check"], None);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("2 notes, 2 in the index, 0 expired, no problems"),
+        "{out}"
+    );
+    assert!(
+        std::fs::read_to_string(paths::index_path(&dir))
+            .unwrap()
+            .contains("[by-hand]")
+    );
+    std::fs::write(paths::note_path(&dir, "broken"), "no frontmatter").unwrap();
+    let (ok, out) = cli(&f, &["check"], None);
+    assert!(
+        !ok && out.contains("broken.md: no `---` frontmatter block"),
+        "{out}"
+    );
+    std::fs::remove_file(paths::note_path(&dir, "broken")).unwrap();
+
+    let (ok, out) = cli(&f, &["rm", "by-hand"], None);
+    assert!(ok && out.contains(".removed"), "{out}");
+    assert!(
+        !std::fs::read_to_string(paths::index_path(&dir))
+            .unwrap()
+            .contains("by-hand")
+    );
+    let (ok, out) = cli(&f, &["ls", "--json"], None);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(v["notes"][0]["source"]["harness"], "user");
+
+    let (ok, out) = cli(&f, &["path"], None);
+    assert!(
+        ok && out.contains(&*dir.to_string_lossy()) && out.contains("location = library"),
+        "{out}"
+    );
+    std::fs::create_dir_all(f.home.join(".agent-mux")).unwrap();
+    std::fs::write(
+        f.home.join(".agent-mux/profiles.toml"),
+        "[memory]\nlocation = \"workspace\"\n",
+    )
+    .unwrap();
+    let (ok, out) = cli(&f, &["path"], None);
+    assert!(
+        ok && out.contains(".agent-mux/memory") && out.contains("location = workspace"),
+        "{out}"
+    );
+    let (ok, out) = cli(
+        &f,
+        &[
+            "add",
+            "u",
+            "--user",
+            "--description",
+            "likes tables",
+            "--kind",
+            "user",
+            "--body",
+            "tables",
+        ],
+        None,
+    );
+    assert!(ok && out.contains("/memory/_user/notes/u.md"), "{out}");
+}

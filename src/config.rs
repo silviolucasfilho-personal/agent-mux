@@ -744,7 +744,7 @@ fn mentions_langfuse_section(text: &str) -> bool {
 }
 
 /// Search order: ./profiles.toml, then ~/.agent-mux/profiles.toml.
-/// First file with profiles — or with a `[tracing]` section (default
+/// First file with profiles — or with a `[tracing]` or `[memory]` section (default
 /// profiles are filled in for a tracing-only file; deliberately, such a cwd
 /// file shadows home-dir profiles, see the spec) — wins. Nothing usable ->
 /// built-in defaults.
@@ -757,7 +757,9 @@ pub fn load() -> anyhow::Result<Config> {
         if path.is_file() {
             let text = std::fs::read_to_string(&path)?;
             let mut cfg = parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-            if !cfg.profiles.is_empty() || cfg.tracing.is_some() {
+            // a file that only sets `[memory]` counts too: its profiles
+            // are the defaults
+            if !cfg.profiles.is_empty() || cfg.tracing.is_some() || cfg.memory.is_some() {
                 if cfg.profiles.is_empty() {
                     cfg.profiles = Config::default_profiles();
                 }
