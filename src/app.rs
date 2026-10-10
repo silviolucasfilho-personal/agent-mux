@@ -1416,10 +1416,13 @@ impl HistoryState {
     }
 }
 
+/// The Trace Browser's level: what its left column lists. The right
+/// column reads what is selected there: a session's turns, a turn, a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserPane {
     Sessions,
     Turns,
+    /// The turn's steps (its observations), in one of the `DetailView`s.
     Detail,
 }
 
@@ -1459,6 +1462,64 @@ impl DetailView {
             DetailView::Summary => "summary",
         }
     }
+
+    /// The views in tab order: `1`-`5` pick them.
+    pub const ALL: [DetailView; 5] = [
+        DetailView::List,
+        DetailView::Tree,
+        DetailView::Timeline,
+        DetailView::Loop,
+        DetailView::Summary,
+    ];
+
+    /// The tab's name.
+    pub fn tab(self) -> &'static str {
+        match self {
+            DetailView::List => "steps",
+            DetailView::Tree => "tree",
+            DetailView::Timeline => "timeline",
+            DetailView::Loop => "loop",
+            DetailView::Summary => "summary",
+        }
+    }
+
+    /// Whether the view lists the steps one per row, with the selected
+    /// step read beside it; the loop and summary views are the whole turn.
+    pub fn lists_steps(self) -> bool {
+        matches!(
+            self,
+            DetailView::List | DetailView::Tree | DetailView::Timeline
+        )
+    }
+}
+
+/// A section heading in the browser's reader: `▾ output · 214 lines`.
+pub(crate) fn reader_section(label: &str, lines: usize) -> ratatui::text::Line<'static> {
+    use ratatui::style::{Color, Modifier, Style};
+    let count = if lines == 1 {
+        "1 line".to_string()
+    } else {
+        format!("{lines} lines")
+    };
+    ratatui::text::Line::styled(
+        format!("▾ {label} · {count}"),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// A body for the reader: JSON pretty-printed, so a tool's input reads as
+/// its fields rather than one long line; anything else as it is.
+pub(crate) fn readable(text: &str) -> String {
+    let t = text.trim_start();
+    if (t.starts_with('{') || t.starts_with('['))
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(text)
+        && let Ok(pretty) = serde_json::to_string_pretty(&v)
+    {
+        return pretty;
+    }
+    text.replace('\t', "    ").replace('\r', "")
 }
 
 /// How many launch rows the browser reads to work out the parents of the
@@ -1497,9 +1558,24 @@ pub struct TraceBrowserState {
     pub selected_turn: usize,
     pub observations: Vec<crate::tracing::store::query::ObservationView>,
     pub selected_observation: usize,
-    /// Detail pane shows the selected observation's body instead of the
-    /// observation list.
-    pub expanded: bool,
+    /// The reader fills the browser (`z`, `Enter` on a step): for long
+    /// outputs. `scroll_offset` is its scroll.
+    pub zoomed: bool,
+    /// The sidebar beside the browser (`b`, ⌘B). Off by default: the
+    /// browser takes the whole screen, and the app's sidebar setting is
+    /// left alone, so no harness is resized by opening it.
+    pub with_sidebar: bool,
+    /// Where `detail_lines`' sections start, for `[` and `]`.
+    pub detail_sections: Vec<usize>,
+    /// What the reader last drew, written back by the renderer: its rows
+    /// once wrapped, and where each section starts among them. Scrolling,
+    /// `[`/`]` and finding work on these.
+    pub reader_rows: std::cell::RefCell<Vec<String>>,
+    pub reader_sections: std::cell::RefCell<Vec<usize>>,
+    /// The reader's left edge, so the wheel scrolls what it is over.
+    pub reader_x: std::cell::Cell<u16>,
+    /// The text `/` looks for in the zoomed reader; `n`/`N` step through.
+    pub find: Option<String>,
     /// Which shape the Detail pane draws.
     pub detail_view: DetailView,
     /// Observation ids whose subtree is folded away in the tree view.
@@ -1571,7 +1647,13 @@ impl TraceBrowserState {
             selected_observation: 0,
             detail_view: DetailView::default(),
             collapsed: std::collections::HashSet::new(),
-            expanded: false,
+            zoomed: false,
+            with_sidebar: false,
+            detail_sections: Vec::new(),
+            reader_rows: std::cell::RefCell::new(Vec::new()),
+            reader_sections: std::cell::RefCell::new(Vec::new()),
+            reader_x: std::cell::Cell::new(u16::MAX),
+            find: None,
             detail_lines: Vec::new(),
             scroll_offset: 0,
             focused: BrowserPane::Sessions,
@@ -1789,7 +1871,7 @@ impl TraceBrowserState {
         self.selected_observation = self
             .selected_observation
             .min(self.observations.len().saturating_sub(1));
-        self.expanded = false;
+        self.zoomed = false;
         self.scroll_offset = 0;
         self.collapsed.clear();
         self.refresh_scores();
@@ -1828,13 +1910,10 @@ impl TraceBrowserState {
         use ratatui::style::{Color, Style};
         use ratatui::text::Line;
         let mut lines = Vec::new();
-        if let Some(o) = self.observations.get(self.selected_observation)
-            && self.expanded
-        {
+        let mut sections = Vec::new();
+        // the reader beside the steps always reads the selected one
+        if let Some(o) = self.observations.get(self.selected_observation) {
             let dim = Style::default().fg(Color::DarkGray);
-            let head = |label: &str| {
-                Line::styled(format!("── {label} ──"), Style::default().fg(Color::Yellow))
-            };
             lines.push(Line::styled(
                 format!(
                     "{} {}  {}{}",
@@ -1921,17 +2000,27 @@ impl TraceBrowserState {
                 ("input", &o.input),
                 ("output", &o.output),
                 ("thinking", &o.thinking),
+                (
+                    "metadata",
+                    &(o.metadata != "{}").then(|| o.metadata.clone()),
+                ),
             ] {
                 if let Some(text) = body {
-                    lines.push(head(label));
+                    let text = readable(text);
+                    let total = text.lines().count();
+                    sections.push(lines.len());
+                    lines.push(reader_section(label, total));
                     for l in text.lines().take(2_000) {
                         lines.push(Line::raw(l.to_string()));
                     }
+                    if total > 2_000 {
+                        lines.push(Line::styled(
+                            format!("… {} more lines (Ctrl+O reads them all)", total - 2_000),
+                            dim,
+                        ));
+                    }
+                    lines.push(Line::raw(""));
                 }
-            }
-            if o.metadata != "{}" {
-                lines.push(head("metadata"));
-                lines.push(Line::raw(o.metadata.clone()));
             }
             if o.input.is_none() && o.output.is_none() {
                 lines.push(Line::styled(
@@ -1941,21 +2030,197 @@ impl TraceBrowserState {
             }
         }
         self.detail_lines = lines;
+        self.detail_sections = sections;
     }
 
+    /// The reader's last scroll position: its rows past one screen.
     pub fn max_scroll(&self) -> usize {
-        self.detail_lines
+        self.reader_rows
+            .borrow()
             .len()
             .saturating_sub(self.viewport_rows.get().max(1))
     }
 
-    pub fn toggle_expanded(&mut self) {
+    /// `z`: the reader fills the browser, or goes back beside its list.
+    /// There is a reader at the turn and the step levels.
+    pub fn toggle_zoom(&mut self) {
+        if self.focused == BrowserPane::Sessions || self.turns.is_empty() {
+            return;
+        }
+        self.zoomed = !self.zoomed;
+        if !self.zoomed {
+            self.find = None;
+        }
+    }
+
+    /// `→` / `Enter`: one level deeper. A turn with no steps opens its own
+    /// reader instead; on a step, the reader fills the browser.
+    pub fn drill(&mut self) {
+        match self.focused {
+            BrowserPane::Sessions if !self.turns.is_empty() => {
+                self.focused = BrowserPane::Turns;
+                self.scroll_offset = 0;
+            }
+            BrowserPane::Turns if !self.observations.is_empty() => {
+                self.focused = BrowserPane::Detail;
+                self.scroll_offset = 0;
+                self.rebuild_detail();
+            }
+            BrowserPane::Turns | BrowserPane::Detail => self.toggle_zoom(),
+            BrowserPane::Sessions => {}
+        }
+    }
+
+    /// `←` / `Esc`: one level back. False at the top, where `Esc` closes
+    /// the browser. A search answers at the turn level, so leaving it
+    /// clears the search.
+    pub fn back(&mut self) -> bool {
+        if self.zoomed {
+            self.zoomed = false;
+            self.find = None;
+            return true;
+        }
+        match self.focused {
+            BrowserPane::Detail => {
+                self.focused = BrowserPane::Turns;
+                self.scroll_offset = 0;
+                true
+            }
+            BrowserPane::Turns if self.search_query.is_some() => {
+                self.reload_sessions();
+                self.focused = BrowserPane::Sessions;
+                true
+            }
+            BrowserPane::Turns => {
+                self.focused = BrowserPane::Sessions;
+                true
+            }
+            BrowserPane::Sessions => false,
+        }
+    }
+
+    /// `1`-`5`: a view of the turn's steps, from the turn level too.
+    pub fn set_view(&mut self, view: DetailView) {
         if self.observations.is_empty() {
             return;
         }
-        self.expanded = !self.expanded;
-        self.scroll_offset = 0;
-        self.rebuild_detail();
+        if self.detail_view != view {
+            while self.detail_view != view {
+                self.cycle_detail_view();
+            }
+        }
+        if self.focused != BrowserPane::Detail {
+            self.focused = BrowserPane::Detail;
+            self.scroll_offset = 0;
+            self.rebuild_detail();
+        }
+    }
+
+    /// Moves the cursor of the current level's list.
+    pub fn step_level(&mut self, delta: isize) {
+        match self.focused {
+            BrowserPane::Sessions => self.step_session(delta),
+            BrowserPane::Turns => {
+                if self.turns.is_empty() {
+                    return;
+                }
+                let max = self.turns.len() as isize - 1;
+                let next = (self.selected_turn as isize + delta).clamp(0, max) as usize;
+                if next != self.selected_turn {
+                    self.selected_turn = next;
+                    self.load_observations();
+                }
+            }
+            BrowserPane::Detail => self.step_observation(delta),
+        }
+    }
+
+    /// Scrolls the reader `delta` rows, within what it drew.
+    pub fn scroll_reader(&mut self, delta: isize) {
+        let at = self.scroll_offset as isize + delta;
+        self.scroll_offset = (at.max(0) as usize).min(self.max_scroll());
+    }
+
+    /// `]` / `[`: the reader's next or previous section heading.
+    pub fn jump_section(&mut self, forward: bool) {
+        let sections = self.reader_sections.borrow().clone();
+        let at = self.scroll_offset;
+        let target = if forward {
+            sections.iter().copied().find(|&r| r > at)
+        } else {
+            sections.iter().rev().copied().find(|&r| r < at)
+        };
+        if let Some(row) = target {
+            self.scroll_offset = row.min(self.max_scroll());
+        }
+    }
+
+    /// `n` / `N` (and `Enter` after `/`): scrolls to the next or previous
+    /// reader row holding the find text, ignoring case. False when no row
+    /// holds it.
+    pub fn find_next(&mut self, forward: bool) -> bool {
+        let Some(query) = self.find.as_ref().map(|q| q.to_lowercase()) else {
+            return false;
+        };
+        let rows = self.reader_rows.borrow();
+        let hits: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.to_lowercase().contains(&query))
+            .map(|(i, _)| i)
+            .collect();
+        drop(rows);
+        let at = self.scroll_offset;
+        let target = if forward {
+            hits.iter()
+                .copied()
+                .find(|&r| r > at)
+                .or(hits.first().copied())
+        } else {
+            hits.iter()
+                .rev()
+                .copied()
+                .find(|&r| r < at)
+                .or(hits.last().copied())
+        };
+        match target {
+            Some(row) => {
+                self.scroll_offset = row.min(self.max_scroll());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The reader's whole text, nothing cut, for `Ctrl+O`: the selected
+    /// step's bodies, or the selected turn's prompt and answer.
+    pub fn reader_export(&self) -> Option<String> {
+        let mut out = String::new();
+        let mut section = |label: &str, body: &Option<String>| {
+            if let Some(text) = body {
+                out.push_str(&format!("── {label} ──\n{}\n\n", readable(text)));
+            }
+        };
+        match self.focused {
+            BrowserPane::Detail => {
+                let o = self.observations.get(self.selected_observation)?;
+                section("input", &o.input);
+                section("output", &o.output);
+                section("thinking", &o.thinking);
+                section(
+                    "metadata",
+                    &(o.metadata != "{}").then(|| o.metadata.clone()),
+                );
+            }
+            BrowserPane::Turns => {
+                let t = self.turns.get(self.selected_turn)?;
+                section("prompt", &t.input);
+                section("answer", &t.output);
+                section("thinking", &t.thinking);
+            }
+            BrowserPane::Sessions => return None,
+        }
+        Some(out)
     }
 
     pub fn select_observation(&mut self, idx: usize) {
@@ -2009,7 +2274,7 @@ impl TraceBrowserState {
     /// back onto a visible row.
     pub fn cycle_detail_view(&mut self) {
         self.detail_view = self.detail_view.next();
-        self.expanded = false;
+        self.zoomed = false;
         self.scroll_offset = 0;
         let rows = self.visible_rows();
         if !rows.is_empty() && !rows.contains(&self.selected_observation) {
@@ -2110,7 +2375,7 @@ impl TraceBrowserState {
             let turn_id = self.turns.get(self.selected_turn).map(|t| t.id.clone());
             let focused = self.focused;
             let obs = self.selected_observation;
-            let (view, expanded, scroll) = (self.detail_view, self.expanded, self.scroll_offset);
+            let (view, zoomed, scroll) = (self.detail_view, self.zoomed, self.scroll_offset);
             self.run_search(&query);
             if let Some(id) = turn_id
                 && let Some(i) = self.turns.iter().position(|t| t.id == id)
@@ -2121,7 +2386,7 @@ impl TraceBrowserState {
             self.focused = focused;
             self.selected_observation = obs.min(self.observations.len().saturating_sub(1));
             self.detail_view = view;
-            self.expanded = expanded;
+            self.zoomed = zoomed;
             self.scroll_offset = scroll;
             self.rebuild_detail();
             return;
@@ -2168,7 +2433,9 @@ impl TraceBrowserState {
             self.turns.reverse();
             // If the user was viewing the newest turn (0), keep newest turn (0) so live
             // execution streams in real time. Otherwise preserve selected turn id.
-            let target_turn = if self.selected_turn == 0 {
+            // Reading a turn's steps, or zoomed in, the turn stays put.
+            let following = self.focused != BrowserPane::Detail && !self.zoomed;
+            let target_turn = if self.selected_turn == 0 && following {
                 0
             } else {
                 selected_turn_id
@@ -3630,7 +3897,11 @@ impl App {
         // the browser sits in the pane: the sidebar chord still works there
         if matches!(self.mode, Mode::TraceBrowser(_)) {
             match crate::keymap::chord(key) {
-                Some(Chord::ToggleSidebar) => self.toggle_sidebar(),
+                Some(Chord::ToggleSidebar) => {
+                    if let Mode::TraceBrowser(b) = &mut self.mode {
+                        b.with_sidebar = !b.with_sidebar;
+                    }
+                }
                 // the traces chord closes what it opened
                 Some(Chord::Traces) => self.mode = Mode::Main,
                 _ => return false,
@@ -3871,33 +4142,12 @@ impl App {
                 MouseEventKind::ScrollDown => 3,
                 _ => return,
             };
-            if browser.expanded {
-                if delta < 0 {
-                    browser.scroll_offset = browser.scroll_offset.saturating_sub(3);
-                } else {
-                    browser.scroll_offset = browser
-                        .scroll_offset
-                        .saturating_add(3)
-                        .min(browser.max_scroll());
-                }
-                return;
-            }
-            // List views are selection-driven (sidebar_window follows the
-            // selected row), so moving detail_lines' scroll_offset had no
-            // visible effect. Scroll the focused list instead.
-            match browser.focused {
-                BrowserPane::Sessions => browser.step_session(delta),
-                BrowserPane::Turns => {
-                    if !browser.turns.is_empty() {
-                        let max = browser.turns.len() as isize - 1;
-                        let next = (browser.selected_turn as isize + delta).clamp(0, max) as usize;
-                        if next != browser.selected_turn {
-                            browser.selected_turn = next;
-                            browser.load_observations();
-                        }
-                    }
-                }
-                BrowserPane::Detail => browser.step_observation(delta),
+            // the wheel scrolls what it is over: the reader, or the list,
+            // whose rows follow its cursor
+            if browser.zoomed || ev.column >= browser.reader_x.get() {
+                browser.scroll_reader(delta);
+            } else {
+                browser.step_level(delta);
             }
             return;
         }
@@ -4735,29 +4985,23 @@ impl App {
     }
 
     fn handle_browser_key(&mut self, key: &KeyEvent) {
-        // `+` scores the selected turn; the outcome is a status-bar notice
-        if key.code == KeyCode::Char('+')
-            && let Mode::TraceBrowser(browser) = &mut self.mode
-            && browser.search_input.is_none()
-        {
-            let outcome = browser.cycle_score();
-            self.notice = Some(match outcome {
-                Ok(message) => Notice::info(message),
-                Err(e) => Notice::error(format!("score: {e}")),
-            });
-            return;
-        }
         let Mode::TraceBrowser(browser) = &mut self.mode else {
             return;
         };
-        // the search prompt captures every key until Enter/Esc
+        // the prompt captures every key until Enter/Esc: a full-text search
+        // of the turns, or, in the zoomed reader, a find in what it shows
         if let Some(input) = browser.search_input.as_mut() {
             match key.code {
                 KeyCode::Esc => browser.search_input = None,
                 KeyCode::Enter => {
                     let query = input.trim().to_string();
                     browser.search_input = None;
-                    if query.is_empty() {
+                    if browser.zoomed {
+                        browser.find = (!query.is_empty()).then_some(query.clone());
+                        if browser.find.is_some() && !browser.find_next(true) {
+                            self.notice = Some(Notice::warn(format!("not found: {query}")));
+                        }
+                    } else if query.is_empty() {
                         browser.reload_sessions();
                     } else {
                         browser.run_search(&query);
@@ -4771,38 +5015,79 @@ impl App {
             }
             return;
         }
-        let page = browser.viewport_rows.get().max(1);
+        let page = browser.viewport_rows.get().max(1) as isize;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // the same everywhere in the browser
         match key.code {
-            // the browser lives in the pane: the sidebar toggles as everywhere
-            KeyCode::Char('b') | KeyCode::Char('B') => self.toggle_sidebar(),
-            KeyCode::Esc | KeyCode::Char('q') => {
-                if browser.expanded {
-                    browser.toggle_expanded();
-                } else if browser.search_query.is_some() {
-                    browser.reload_sessions();
-                    browser.focused = BrowserPane::Sessions;
-                } else {
+            KeyCode::Char('b') | KeyCode::Char('B') => {
+                browser.with_sidebar = !browser.with_sidebar;
+                return;
+            }
+            KeyCode::Char('o') if ctrl => {
+                if let Some(text) = browser.reader_export() {
+                    self.open_reader_in_editor(&text);
+                }
+                return;
+            }
+            KeyCode::Char('/') => {
+                browser.search_input = Some(String::new());
+                return;
+            }
+            KeyCode::Char('s') | KeyCode::Char('+') => {
+                let outcome = browser.cycle_score();
+                self.notice = Some(match outcome {
+                    Ok(message) => Notice::info(message),
+                    Err(e) => Notice::error(format!("score: {e}")),
+                });
+                return;
+            }
+            _ => {}
+        }
+        // the zoomed reader: the keys scroll it
+        if browser.zoomed {
+            match key.code {
+                KeyCode::Esc
+                | KeyCode::Char('q')
+                | KeyCode::Char('z')
+                | KeyCode::Left
+                | KeyCode::BackTab => {
+                    browser.back();
+                }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter => browser.scroll_reader(1),
+                KeyCode::Up | KeyCode::Char('k') => browser.scroll_reader(-1),
+                KeyCode::PageDown | KeyCode::Char(' ') => browser.scroll_reader(page),
+                KeyCode::PageUp => browser.scroll_reader(-page),
+                KeyCode::Home => browser.scroll_offset = 0,
+                KeyCode::End => browser.scroll_offset = browser.max_scroll(),
+                KeyCode::Char(']') => browser.jump_section(true),
+                KeyCode::Char('[') => browser.jump_section(false),
+                KeyCode::Char('n') => {
+                    browser.find_next(true);
+                }
+                KeyCode::Char('N') => {
+                    browser.find_next(false);
+                }
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::BackTab => {
+                if !browser.back() && key.code != KeyCode::Left && key.code != KeyCode::BackTab {
                     self.mode = Mode::Main;
                 }
             }
-            KeyCode::Tab | KeyCode::Right => {
-                browser.focused = match browser.focused {
-                    BrowserPane::Sessions => BrowserPane::Turns,
-                    BrowserPane::Turns => BrowserPane::Detail,
-                    BrowserPane::Detail => BrowserPane::Sessions,
-                };
+            KeyCode::Right | KeyCode::Tab | KeyCode::Enter => browser.drill(),
+            KeyCode::Char('z') => browser.toggle_zoom(),
+            KeyCode::Char(c @ '1'..='5') => {
+                browser.set_view(DetailView::ALL[c as usize - '1' as usize]);
             }
-            KeyCode::BackTab | KeyCode::Left => {
-                browser.focused = match browser.focused {
-                    BrowserPane::Sessions => BrowserPane::Detail,
-                    BrowserPane::Turns => BrowserPane::Sessions,
-                    BrowserPane::Detail => BrowserPane::Turns,
-                };
+            KeyCode::Char('v') | KeyCode::Char('V') => {
+                let next = browser.detail_view.next();
+                browser.set_view(next);
             }
-            KeyCode::Char('/') => browser.search_input = Some(String::new()),
-            KeyCode::Char('v') | KeyCode::Char('V') => browser.cycle_detail_view(),
-            // Folding is what the focused pane holds: a run in the
-            // Sessions tree, an observation's subtree in the Detail tree.
+            // Folding is what the level holds: a run in the Sessions tree,
+            // a step's subtree in the tree view.
             KeyCode::Char(' ') => match browser.focused {
                 BrowserPane::Sessions => browser.toggle_session_group(),
                 _ => browser.toggle_collapsed(),
@@ -4810,65 +5095,35 @@ impl App {
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 browser.all_projects = !browser.all_projects;
                 browser.reload_sessions();
+                browser.focused = BrowserPane::Sessions;
             }
             KeyCode::Char('r') => {
                 if let Some(session) = browser.sessions.get(browser.selected_session).cloned() {
                     self.resume_traced_session(&session);
                 }
             }
-            KeyCode::Enter => match browser.focused {
-                BrowserPane::Sessions => browser.focused = BrowserPane::Turns,
-                BrowserPane::Turns => browser.focused = BrowserPane::Detail,
-                BrowserPane::Detail => browser.toggle_expanded(),
-            },
-            KeyCode::Down | KeyCode::Char('j') => match browser.focused {
-                BrowserPane::Sessions => browser.step_session(1),
-                BrowserPane::Turns => {
-                    if !browser.turns.is_empty() {
-                        let next = (browser.selected_turn + 1).min(browser.turns.len() - 1);
-                        if next != browser.selected_turn {
-                            browser.selected_turn = next;
-                            browser.load_observations();
-                        }
-                    }
-                }
-                BrowserPane::Detail => {
-                    if browser.expanded {
-                        browser.scroll_offset = browser
-                            .scroll_offset
-                            .saturating_add(1)
-                            .min(browser.max_scroll());
-                    } else {
-                        browser.step_observation(1);
-                    }
-                }
-            },
-            KeyCode::Up | KeyCode::Char('k') => match browser.focused {
-                BrowserPane::Sessions => browser.step_session(-1),
-                BrowserPane::Turns => {
-                    if browser.selected_turn > 0 {
-                        browser.selected_turn -= 1;
-                        browser.load_observations();
-                    }
-                }
-                BrowserPane::Detail => {
-                    if browser.expanded {
-                        browser.scroll_offset = browser.scroll_offset.saturating_sub(1);
-                    } else {
-                        browser.step_observation(-1);
-                    }
-                }
-            },
-            KeyCode::PageDown => {
-                browser.scroll_offset = browser
-                    .scroll_offset
-                    .saturating_add(page)
-                    .min(browser.max_scroll());
-            }
-            KeyCode::PageUp => browser.scroll_offset = browser.scroll_offset.saturating_sub(page),
-            KeyCode::Home => browser.scroll_offset = 0,
-            KeyCode::End => browser.scroll_offset = browser.max_scroll(),
+            KeyCode::Down | KeyCode::Char('j') => browser.step_level(1),
+            KeyCode::Up | KeyCode::Char('k') => browser.step_level(-1),
+            // the list moves with the arrows; the paging keys read on
+            KeyCode::PageDown => browser.scroll_reader(page),
+            KeyCode::PageUp => browser.scroll_reader(-page),
+            KeyCode::Home => browser.step_level(isize::MIN / 2),
+            KeyCode::End => browser.step_level(isize::MAX / 2),
             _ => {}
+        }
+    }
+
+    /// `Ctrl+O` in the Trace Browser: the reader's whole text in the
+    /// external editor, from a scratch file removed when it returns.
+    fn open_reader_in_editor(&mut self, text: &str) {
+        let path = std::env::temp_dir().join(format!(
+            "agent-mux-trace-{}-{}.txt",
+            std::process::id(),
+            self.next_id
+        ));
+        match std::fs::write(&path, text) {
+            Ok(()) => self.request_editor(path, "trace:reader".into()),
+            Err(e) => self.notice = Some(Notice::error(format!("editor: {e}"))),
         }
     }
 
@@ -5126,6 +5381,10 @@ impl App {
         }
         if request.asset_id == "agent-editor:text" {
             self.agent_editor_text_finished(&request.path);
+            return;
+        }
+        if request.asset_id == "trace:reader" {
+            let _ = std::fs::remove_file(&request.path);
             return;
         }
         if request.asset_id == "markdown:view" {

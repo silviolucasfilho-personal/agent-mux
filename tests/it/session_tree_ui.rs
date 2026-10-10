@@ -886,7 +886,7 @@ fn shift_t_cycles_the_trace_strip_and_the_strip_shows_the_turn() {
 /// The Trace Browser is a drawer in the pane: the sidebar stays beside
 /// it, `b` makes it full screen and brings the sidebar back.
 #[test]
-fn the_trace_browser_is_a_drawer_beside_the_sidebar() {
+fn the_trace_browser_takes_the_screen_and_b_brings_the_sidebar() {
     let (mut app, temp) = app_with_sessions(&[]);
     seed_store(temp.path());
     app.trace_db_path = Some(temp.path().join("traces.db"));
@@ -894,17 +894,16 @@ fn the_trace_browser_is_a_drawer_beside_the_sidebar() {
     app.handle_key(&key(KeyCode::Char('T')), Instant::now());
     assert!(matches!(app.mode, Mode::TraceBrowser(_)));
     let screen = render(&app, 150, 36);
-    assert!(screen.contains("Agents"), "the sidebar stays: {screen}");
-    assert!(
-        screen.contains("Sessions ("),
-        "the browser is in the pane: {screen}"
-    );
-    assert!(screen.contains("History"), "and History too: {screen}");
-    // the browser's own key hides the sidebar: full screen
+    assert!(!screen.contains("┌ Agents"), "full screen: {screen}");
+    assert!(screen.contains("Sessions ("), "{screen}");
+    assert!(screen.contains(" Traces ›"), "the breadcrumb: {screen}");
+    // the browser's own key brings the sidebar, without touching the
+    // app's setting (no harness is resized)
     app.handle_key(&key(KeyCode::Char('b')), Instant::now());
-    assert!(app.sidebar_hidden);
+    assert!(!app.sidebar_hidden);
     let screen = render(&app, 150, 36);
-    assert!(!screen.contains("┌ Agents"), "{screen}");
+    assert!(screen.contains("Agents"), "the sidebar beside it: {screen}");
+    assert!(screen.contains("History"), "and History too: {screen}");
     assert!(screen.contains("Sessions ("), "{screen}");
     // the chord layer works in the browser too
     app.handle_key(
@@ -914,6 +913,8 @@ fn the_trace_browser_is_a_drawer_beside_the_sidebar() {
         ),
         Instant::now(),
     );
+    let screen = render(&app, 150, 36);
+    assert!(!screen.contains("┌ Agents"), "{screen}");
     assert!(!app.sidebar_hidden);
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(matches!(app.mode, Mode::Main));

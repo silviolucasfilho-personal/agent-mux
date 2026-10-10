@@ -310,7 +310,9 @@ pub fn apply_search_highlight(
 
 pub fn draw(f: &mut Frame, app: &App, now: Instant) {
     let [body, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
-    if app.sidebar_hidden {
+    // the Trace Browser takes the whole screen unless asked for the sidebar
+    let browser_alone = matches!(&app.mode, Mode::TraceBrowser(b) if !b.with_sidebar);
+    if app.sidebar_hidden || browser_alone {
         draw_main(f, body, app, now);
     } else {
         let [side, main] =
@@ -942,8 +944,8 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
-    // the Trace Browser is a drawer in the pane: the sidebar stays, and
-    // hiding it (`b`, ⌘B) makes the browser full screen
+    // the Trace Browser: the whole body, or the pane's part of it when
+    // its sidebar is asked for (`b`, ⌘B)
     if let Mode::TraceBrowser(browser) = &app.mode {
         draw_trace_browser(f, area, browser);
         return;
@@ -2411,16 +2413,22 @@ fn draw_help(f: &mut Frame) {
         row("T", "open the selected execution's traces"),
         Line::raw(""),
         Line::styled("Trace browser", head),
-        row("Tab, ←/→", "sessions → turns → detail"),
-        row("Enter", "drill in / expand an observation"),
-        row("v", "detail view: list → tree → timeline → loop → summary"),
+        row(
+            "→/Enter · ←/Esc",
+            "sessions → turns → steps, and back (Esc at the top closes)",
+        ),
+        row(
+            "z · Ctrl+O",
+            "the reader fills the screen ([ ] sections, / find) · $EDITOR",
+        ),
+        row("1-5", "steps view: list → tree → timeline → loop → summary"),
         row(
             "Space",
             "fold a loop or workflow run (sessions) / a subtree (tree view)",
         ),
         row("/ · a", "full-text search · this project / all projects"),
         row(
-            "+ · r",
+            "s · r",
             "verdict good → bad → cleared (also sent to Langfuse) · resume",
         ),
         Line::from(vec![
@@ -2981,27 +2989,145 @@ fn provider_badge(provider: &str) -> Span<'static> {
     }
 }
 
+/// The Trace Browser: one level at a time. The left column lists the
+/// level (sessions, a session's turns, a turn's steps); the right reads
+/// what is selected there, wrapped to its width. `z` gives the reader the
+/// whole browser. A breadcrumb on top says where the cursor is; the keys
+/// are in the app's footer row (`browser_hints`).
 fn draw_trace_browser(f: &mut Frame, area: Rect, browser: &TraceBrowserState) {
-    let [left, middle, right] = Layout::horizontal([
-        Constraint::Percentage(26),
-        Constraint::Percentage(40),
-        Constraint::Min(0),
-    ])
-    .areas(area);
-
-    // Sessions
-    let scope = if browser.all_projects {
-        "all projects"
-    } else {
-        "this project"
+    let [crumb, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    f.render_widget(
+        Paragraph::new(browser_crumb(browser, usize::from(crumb.width))),
+        crumb,
+    );
+    // no reader on screen until one is drawn
+    browser.reader_x.set(u16::MAX);
+    if browser.zoomed {
+        let (title, lines, sections) = reader_content(browser);
+        draw_reader(f, body, title, &lines, &sections, browser, true);
+        return;
+    }
+    let split = |percent: u16| {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(percent), Constraint::Min(0)]).areas(body);
+        (left, right)
     };
-    let left_block = Block::default()
+    match browser.focused {
+        BrowserPane::Sessions => {
+            let (left, right) = split(40);
+            draw_sessions_pane(f, left, browser);
+            draw_turns_pane(f, right, browser, false);
+        }
+        BrowserPane::Turns => {
+            let (left, right) = split(40);
+            draw_turns_pane(f, left, browser, true);
+            let (title, lines, sections) = reader_content(browser);
+            draw_reader(f, right, title, &lines, &sections, browser, false);
+        }
+        BrowserPane::Detail if browser.detail_view.lists_steps() => {
+            let (left, right) = split(45);
+            draw_steps_pane(f, left, browser);
+            let (title, lines, sections) = reader_content(browser);
+            draw_reader(f, right, title, &lines, &sections, browser, false);
+        }
+        // the loop and summary views are about the whole turn: no reader
+        BrowserPane::Detail => draw_steps_pane(f, body, browser),
+    }
+}
+
+/// `Traces › <session> › Turn #7 › <step>`: the path to the cursor, the
+/// deepest part bold.
+fn browser_crumb(browser: &TraceBrowserState, width: usize) -> Line<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut parts: Vec<String> = Vec::new();
+    match &browser.search_query {
+        Some(q) => parts.push(format!(
+            "search “{}” · {} turns",
+            truncate_chars(q, 30),
+            browser.turns.len()
+        )),
+        None => {
+            let scope = if browser.all_projects {
+                "all projects"
+            } else {
+                "this project"
+            };
+            parts.push(format!("{scope} · {} sessions", browser.sessions.len()));
+            if browser.focused != BrowserPane::Sessions
+                && let Some(s) = browser.sessions.get(browser.selected_session)
+            {
+                let title = s
+                    .title
+                    .clone()
+                    .or_else(|| s.cwd.clone())
+                    .unwrap_or_else(|| s.session_id.clone());
+                parts.push(format!(
+                    "{}{} · {}",
+                    provider_badge(&s.provider).content,
+                    truncate_chars(&title, 40),
+                    &fmt_time(s.last_seen_ns)[5..16]
+                ));
+            }
+        }
+    }
+    if browser.focused != BrowserPane::Sessions
+        && let Some(t) = browser.turns.get(browser.selected_turn)
+    {
+        parts.push(format!("Turn #{}", t.ordinal));
+        if browser.focused == BrowserPane::Detail {
+            match browser.observations.get(browser.selected_observation) {
+                Some(o) if browser.detail_view.lists_steps() => parts.push(format!(
+                    "{} {}",
+                    obs_glyph(o),
+                    truncate_chars(&obs_display_name(o), 40)
+                )),
+                _ => parts.push(browser.detail_view.tab().to_string()),
+            }
+        }
+    }
+    let mut spans = vec![Span::styled(
+        " Traces",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+    let last = parts.len().saturating_sub(1);
+    for (i, part) in parts.into_iter().enumerate() {
+        spans.push(Span::styled(" › ", dim));
+        spans.push(if i == last {
+            Span::styled(part, Style::default().add_modifier(Modifier::BOLD))
+        } else {
+            Span::raw(part)
+        });
+    }
+    if browser.zoomed {
+        spans.push(Span::styled("  (zoomed)", dim));
+    }
+    // cut from the left, so the deepest part stays in view
+    let total: usize = spans.iter().map(|s| s.width()).sum();
+    if total > width {
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        let keep: String = text
+            .chars()
+            .rev()
+            .take(width.saturating_sub(2))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        return Line::from(vec![Span::styled(" …", dim), Span::raw(keep)]);
+    }
+    Line::from(spans)
+}
+
+/// The Sessions level's list: the loop and workflow runs as parents over
+/// the sessions they launched, as the Active sidebar draws them.
+fn draw_sessions_pane(f: &mut Frame, area: Rect, browser: &TraceBrowserState) {
+    let focused = browser.focused == BrowserPane::Sessions;
+    let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(pane_border(browser.focused == BrowserPane::Sessions))
-        .title(format!(
-            " Sessions ({}) [a: {scope}] ",
-            browser.sessions.len()
-        ));
+        .border_style(pane_border(focused))
+        .title(format!(" Sessions ({}) ", browser.sessions.len()));
     if let Some(err) = &browser.error {
         let p = Paragraph::new(vec![
             Line::raw(""),
@@ -3012,31 +3138,36 @@ fn draw_trace_browser(f: &mut Frame, area: Rect, browser: &TraceBrowserState) {
                 Style::default().fg(Color::DarkGray),
             ),
         ])
-        .block(left_block);
-        f.render_widget(p, left);
-    } else if browser.sessions.is_empty() {
+        .wrap(Wrap { trim: false })
+        .block(block);
+        f.render_widget(p, area);
+        return;
+    }
+    if browser.sessions.is_empty() {
         let p = Paragraph::new("\n  No traced sessions yet.\n\n  Press [a] to show all projects, or\n  `agent-mux trace import --discover`\n  to backfill past transcripts.")
             .style(Style::default().fg(Color::DarkGray))
-            .block(left_block);
-        f.render_widget(p, left);
-    } else {
-        // The same tree the Active sidebar draws, over traced sessions:
-        // each loop and each workflow run is a parent over its calls.
-        let rows = browser.session_rows();
-        let cursor = crate::tree::row_of(&rows, browser.selected_session).unwrap_or(0);
-        let visible = usize::from(left.height.saturating_sub(2));
-        let start = sidebar_window(cursor, rows.len(), visible);
-        let end = (start + visible.max(1)).min(rows.len());
-        let items: Vec<ListItem> = rows[start..end]
-            .iter()
-            .enumerate()
-            .map(|(offset, row)| traced_session_row(browser, row, start + offset == cursor))
-            .collect();
-        f.render_widget(List::new(items).block(left_block), left);
+            .block(block);
+        f.render_widget(p, area);
+        return;
     }
+    let rows = browser.session_rows();
+    let cursor = crate::tree::row_of(&rows, browser.selected_session).unwrap_or(0);
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = sidebar_window(cursor, rows.len(), visible);
+    let end = (start + visible.max(1)).min(rows.len());
+    let items: Vec<ListItem> = rows[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, row)| traced_session_row(browser, row, start + offset == cursor))
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
 
-    // Turns
-    let middle_title = match &browser.search_query {
+/// A session's turns, newest first, two rows each: the numbers, then the
+/// prompt. `active` when the turns are the level being moved through; at
+/// the Sessions level they preview the selected session.
+fn draw_turns_pane(f: &mut Frame, area: Rect, browser: &TraceBrowserState, active: bool) {
+    let title = match &browser.search_query {
         Some(q) => format!(
             " Search: {} ({}) ",
             truncate_chars(q, 24),
@@ -3065,248 +3196,527 @@ fn draw_trace_browser(f: &mut Frame, area: Rect, browser: &TraceBrowserState) {
             None => " Turns ".to_string(),
         },
     };
-    let middle_block = Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(pane_border(browser.focused == BrowserPane::Turns))
-        .title(middle_title);
+        .border_style(pane_border(active))
+        .title(title);
     if browser.turns.is_empty() {
         let p = Paragraph::new(Line::styled(
             "  (no turns)",
             Style::default().fg(Color::DarkGray),
         ))
-        .block(middle_block);
-        f.render_widget(p, middle);
-    } else {
-        let visible = usize::from(middle.height.saturating_sub(2));
-        let start = sidebar_window(browser.selected_turn, browser.turns.len(), visible);
-        let end = (start + visible.max(1)).min(browser.turns.len());
-        let items: Vec<ListItem> = browser.turns[start..end]
-            .iter()
-            .enumerate()
-            .map(|(offset, t)| {
-                let i = start + offset;
-                let is_sel = i == browser.selected_turn;
-                let status_style = match t.status.as_str() {
-                    "open" => Style::default().fg(Color::Green),
-                    "aborted" => Style::default().fg(Color::Red),
-                    _ => Style::default().fg(Color::DarkGray),
-                };
-                let errors = if t.error_count > 0 {
-                    Span::styled(
-                        format!(" {}!", t.error_count),
-                        Style::default().fg(Color::Red),
-                    )
-                } else {
-                    Span::raw("")
-                };
-                let name = t
-                    .name
-                    .split_once(": ")
-                    .map(|(_, rest)| rest.to_string())
-                    .unwrap_or_else(|| t.name.clone());
-                let line = Line::from(vec![
-                    Span::raw(if is_sel { "> " } else { "  " }),
-                    Span::styled(
-                        format!("#{:<3}", t.ordinal),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(format!("{:<7} ", t.status), status_style),
-                    Span::styled(
-                        format!(
-                            "{:>6} {:>7} {:>2}🔧",
-                            approx_latency(t),
-                            fmt_cost(t.total_cost_usd),
-                            t.tool_count
-                        ),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    // the loop line: retries, only when there were any
-                    Span::styled(
-                        if t.retries > 0 {
-                            format!(" {}↻", t.retries)
-                        } else {
-                            String::new()
-                        },
-                        Style::default().fg(Color::Magenta),
-                    ),
-                    // loop warnings and the guard, then the verdict
-                    Span::styled(
-                        if crate::tracing::loops::warning_kinds(&t.metadata).is_empty() {
-                            String::new()
-                        } else {
-                            " ⚠".to_string()
-                        },
-                        Style::default().fg(Color::Magenta),
-                    ),
-                    match browser.scores.get(&t.id) {
-                        Some(v) if *v >= 0.5 => {
-                            Span::styled(" ✓", Style::default().fg(Color::Green))
-                        }
-                        Some(_) => Span::styled(" ✗", Style::default().fg(Color::Red)),
-                        None => Span::raw(""),
-                    },
-                    errors,
-                    Span::raw(format!(" {}", truncate_chars(&name, 48))),
-                ]);
-                let item = ListItem::new(line);
-                if is_sel && browser.focused == BrowserPane::Turns {
-                    item.style(Style::default().add_modifier(Modifier::REVERSED))
-                } else if is_sel {
-                    item.style(Style::default().fg(Color::Yellow))
-                } else {
-                    item
-                }
-            })
-            .collect();
-        f.render_widget(List::new(items).block(middle_block), middle);
+        .block(block);
+        f.render_widget(p, area);
+        return;
     }
+    let width = usize::from(area.width.saturating_sub(2));
+    let visible = usize::from(area.height.saturating_sub(2)) / 2;
+    let start = sidebar_window(browser.selected_turn, browser.turns.len(), visible);
+    let end = (start + visible.max(1)).min(browser.turns.len());
+    let items: Vec<ListItem> = browser.turns[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, t)| {
+            let is_sel = start + offset == browser.selected_turn;
+            let item = ListItem::new(turn_rows(browser, t, is_sel, width));
+            if is_sel && active {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else if is_sel {
+                item.style(Style::default().fg(Color::Yellow))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
 
-    // Detail
-    let right_title = match browser.turns.get(browser.selected_turn) {
-        Some(t) if browser.expanded => format!(
-            " Turn #{} · observation {}/{} [Esc] back ",
-            t.ordinal,
-            browser.selected_observation + 1,
-            browser.observations.len()
+/// A turn's two rows: number, status, time, cost, calls and marks; then
+/// what was asked, cut to the width.
+fn turn_rows(
+    browser: &TraceBrowserState,
+    t: &crate::tracing::store::query::TraceStat,
+    is_sel: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let status_style = match t.status.as_str() {
+        "open" => Style::default().fg(Color::Green),
+        "aborted" => Style::default().fg(Color::Red),
+        _ => Style::default().fg(Color::DarkGray),
+    };
+    let mut first = vec![
+        Span::raw(if is_sel { "> " } else { "  " }),
+        Span::styled(
+            format!("#{:<3}", t.ordinal),
+            Style::default().fg(Color::DarkGray),
         ),
-        Some(t) => format!(
-            " Turn #{} · {} · {} obs · {} · {} tok · {} ",
-            t.ordinal,
-            browser.detail_view.label(),
+        Span::styled(format!("{:<7} ", t.status), status_style),
+        Span::styled(
+            format!(
+                "{:>6} {:>7} {:>2}🔧",
+                approx_latency(t),
+                fmt_cost(t.total_cost_usd),
+                t.tool_count
+            ),
+            Style::default().fg(Color::Yellow),
+        ),
+    ];
+    // the loop line: retries, only when there were any
+    if t.retries > 0 {
+        first.push(Span::styled(
+            format!(" {}↻", t.retries),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+    // loop warnings and the guard, then the verdict
+    if !crate::tracing::loops::warning_kinds(&t.metadata).is_empty() {
+        first.push(Span::styled(" ⚠", Style::default().fg(Color::Magenta)));
+    }
+    match browser.scores.get(&t.id) {
+        Some(v) if *v >= 0.5 => first.push(Span::styled(" ✓", Style::default().fg(Color::Green))),
+        Some(_) => first.push(Span::styled(" ✗", Style::default().fg(Color::Red))),
+        None => {}
+    }
+    if t.error_count > 0 {
+        first.push(Span::styled(
+            format!(" {}!", t.error_count),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    let asked = t
+        .input
+        .as_deref()
+        .and_then(|i| i.lines().map(str::trim).find(|l| !l.is_empty()))
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            t.name
+                .split_once(": ")
+                .map(|(_, rest)| rest.to_string())
+                .unwrap_or_else(|| t.name.clone())
+        });
+    let second = Line::from(vec![
+        Span::raw("    "),
+        Span::raw(truncate_chars(&asked, width.saturating_sub(5).max(8))),
+    ]);
+    vec![Line::from(first), second]
+}
+
+/// The Steps level: a turn's observations in the chosen view, with the
+/// views as tabs in the title (`1`-`5`).
+fn draw_steps_pane(f: &mut Frame, area: Rect, browser: &TraceBrowserState) {
+    let mut title = vec![Span::raw(" ")];
+    for (i, view) in crate::app::DetailView::ALL.iter().enumerate() {
+        let tab = format!("{} {}", i + 1, view.tab());
+        title.push(if *view == browser.detail_view {
+            Span::styled(
+                format!("[{tab}]"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!(" {tab} "), Style::default().fg(Color::DarkGray))
+        });
+    }
+    if let Some(t) = browser.turns.get(browser.selected_turn) {
+        title.push(Span::raw(format!(
+            "  {} steps · {} tok · {} ",
             browser.observations.len(),
-            approx_latency(t),
             fmt_tokens(t.total_tokens),
             fmt_cost(t.total_cost_usd)
-        ),
-        None => " Detail ".to_string(),
-    };
-    let right_block = Block::default()
+        )));
+    }
+    let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(pane_border(browser.focused == BrowserPane::Detail))
-        .title(right_title);
-    let inner_right = right_block.inner(right);
-    f.render_widget(right_block, right);
-    browser.viewport_rows.set(usize::from(inner_right.height));
-    if browser.expanded {
-        let start = browser
-            .scroll_offset
-            .min(browser.detail_lines.len().saturating_sub(1));
-        let visible: Vec<Line> = browser.detail_lines[start..].to_vec();
-        f.render_widget(Paragraph::new(visible), inner_right);
-    } else if browser.observations.is_empty() {
-        let hint = match browser.turns.get(browser.selected_turn) {
-            Some(t) if t.input.is_some() => {
-                let mut lines = vec![Line::styled(
-                    "── input ──",
-                    Style::default().fg(Color::Yellow),
-                )];
-                for l in t.input.as_deref().unwrap_or("").lines().take(50) {
-                    lines.push(Line::raw(l.to_string()));
-                }
-                lines
-            }
-            _ => vec![Line::styled(
-                "  (no observations)",
+        .border_style(pane_border(true))
+        .title(Line::from(title));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if browser.observations.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                "  (no steps)",
                 Style::default().fg(Color::DarkGray),
-            )],
-        };
-        f.render_widget(Paragraph::new(hint), inner_right);
-    } else if browser.detail_view == crate::app::DetailView::Tree {
-        draw_observation_tree(f, browser, inner_right);
-    } else if browser.detail_view == crate::app::DetailView::Timeline {
-        draw_observation_timeline(f, browser, inner_right);
-    } else if browser.detail_view == crate::app::DetailView::Loop {
-        draw_loop_view(f, browser, inner_right);
-    } else if browser.detail_view == crate::app::DetailView::Summary {
-        draw_turn_summary(f, browser, inner_right);
-    } else {
-        let visible = usize::from(inner_right.height);
-        let start = sidebar_window(
-            browser.selected_observation,
-            browser.observations.len(),
-            visible,
+            )),
+            inner,
         );
-        let end = (start + visible.max(1)).min(browser.observations.len());
-        let items: Vec<ListItem> = browser.observations[start..end]
-            .iter()
-            .enumerate()
-            .map(|(offset, o)| {
-                let i = start + offset;
-                let is_sel = i == browser.selected_observation;
-                let glyph = match (o.obs_type.as_str(), o.end_ns.is_some()) {
-                    ("generation", _) => "💬",
-                    ("agent", _) => "🤖",
-                    (_, false) => "⏳",
-                    _ => "🔧",
-                };
-                let duration = o
-                    .end_ns
-                    .map(|e| fmt_ms((e - o.start_ns) / 1_000_000))
-                    .unwrap_or_else(|| "running".into());
-                let level_style = match o.level.as_str() {
-                    "ERROR" => Style::default().fg(Color::Red),
-                    "WARNING" => Style::default().fg(Color::Yellow),
-                    _ => Style::default().fg(Color::DarkGray),
-                };
-                // the name takes what the fixed columns leave; a tool
-                // row says what it is about, and when its result was
-                // paired by order rather than by id
-                let right = format!(
-                    " {:>7} {:>6} {:>7}",
-                    duration,
-                    fmt_tokens(o.total_tokens),
-                    fmt_cost(o.total_cost_usd)
-                );
-                let mut name = obs_display_name(o);
-                if o.obs_type == "tool" || o.obs_type == "agent" {
-                    let detail = call_detail(o);
-                    if !detail.is_empty() {
-                        name.push(' ');
-                        name.push_str(&detail);
-                    }
-                }
-                if o.obs_type == "tool" && o.tool_id.as_deref().unwrap_or("").is_empty() {
-                    name.push_str(" ·order");
-                }
-                let name_width = usize::from(inner_right.width)
-                    .saturating_sub(2 + 9 + 3 + right.chars().count())
-                    .max(8);
-                let line = Line::from(vec![
-                    Span::raw(if is_sel { "> " } else { "  " }),
-                    Span::styled(
-                        format!("{} ", &fmt_time(o.start_ns)[11..]),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::raw(format!("{glyph} ")),
-                    Span::raw(truncate_chars(&name, name_width)),
-                    Span::styled(right, level_style),
-                ]);
-                let item = ListItem::new(line);
-                if is_sel && browser.focused == BrowserPane::Detail {
-                    item.style(Style::default().add_modifier(Modifier::REVERSED))
-                } else {
-                    item
-                }
-            })
-            .collect();
-        f.render_widget(List::new(items), inner_right);
+        return;
+    }
+    match browser.detail_view {
+        crate::app::DetailView::List => draw_observation_list(f, browser, inner),
+        crate::app::DetailView::Tree => draw_observation_tree(f, browser, inner),
+        crate::app::DetailView::Timeline => draw_observation_timeline(f, browser, inner),
+        crate::app::DetailView::Loop => draw_loop_view(f, browser, inner),
+        crate::app::DetailView::Summary => draw_turn_summary(f, browser, inner),
     }
 }
 
-/// The Trace Browser's keys, in the app's one footer row: the browser has
-/// no hint line of its own, so the row never shows two screens' keys.
+/// The steps one per row, oldest first: time, kind, what it is about,
+/// then duration, tokens and cost in fixed columns.
+fn draw_observation_list(f: &mut Frame, browser: &TraceBrowserState, area: Rect) {
+    let visible = usize::from(area.height);
+    let start = sidebar_window(
+        browser.selected_observation,
+        browser.observations.len(),
+        visible,
+    );
+    let end = (start + visible.max(1)).min(browser.observations.len());
+    let items: Vec<ListItem> = browser.observations[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, o)| {
+            let is_sel = start + offset == browser.selected_observation;
+            let level_style = match o.level.as_str() {
+                "ERROR" => Style::default().fg(Color::Red),
+                "WARNING" => Style::default().fg(Color::Yellow),
+                _ => Style::default().fg(Color::DarkGray),
+            };
+            let right = format!(
+                " {:>7} {:>6} {:>7}",
+                obs_duration(o),
+                fmt_tokens(o.total_tokens),
+                fmt_cost(o.total_cost_usd)
+            );
+            let name_width = usize::from(area.width)
+                .saturating_sub(2 + 9 + 3 + right.chars().count())
+                .max(8);
+            let line = Line::from(vec![
+                Span::raw(if is_sel { "> " } else { "  " }),
+                Span::styled(
+                    format!("{} ", &fmt_time(o.start_ns)[11..]),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(format!("{} ", step_glyph(o))),
+                Span::raw(format!(
+                    "{:<name_width$}",
+                    truncate_chars(&step_name(o), name_width)
+                )),
+                Span::styled(right, level_style),
+            ]);
+            let item = ListItem::new(line);
+            if is_sel {
+                item.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                item
+            }
+        })
+        .collect();
+    f.render_widget(List::new(items), area);
+}
+
+/// A step's glyph in the list and the turn reader.
+fn step_glyph(o: &crate::tracing::store::query::ObservationView) -> &'static str {
+    match (o.obs_type.as_str(), o.end_ns.is_some()) {
+        ("generation", _) => "💬",
+        ("agent", _) => "🤖",
+        (_, false) => "⏳",
+        _ => "🔧",
+    }
+}
+
+/// A step's name: a tool or agent call says what it is about, and when
+/// its result was paired by order rather than by id.
+fn step_name(o: &crate::tracing::store::query::ObservationView) -> String {
+    let mut name = obs_display_name(o);
+    if o.obs_type == "tool" || o.obs_type == "agent" {
+        let detail = call_detail(o);
+        if !detail.is_empty() {
+            name.push(' ');
+            name.push_str(&detail);
+        }
+    }
+    if o.obs_type == "tool" && o.tool_id.as_deref().unwrap_or("").is_empty() {
+        name.push_str(" ·order");
+    }
+    name
+}
+
+fn obs_duration(o: &crate::tracing::store::query::ObservationView) -> String {
+    o.end_ns
+        .map(|e| fmt_ms((e - o.start_ns) / 1_000_000))
+        .unwrap_or_else(|| "running".into())
+}
+
+/// What the reader shows at this level: a turn (prompt, answer, the steps
+/// in brief) or a step (its facts and bodies), with its title and where
+/// its sections start.
+fn reader_content(browser: &TraceBrowserState) -> (Line<'static>, Vec<Line<'static>>, Vec<usize>) {
+    if browser.focused == BrowserPane::Detail {
+        let title = match browser.observations.get(browser.selected_observation) {
+            Some(o) => format!(
+                " Step {}/{} · {} {} ",
+                browser.selected_observation + 1,
+                browser.observations.len(),
+                step_glyph(o),
+                truncate_chars(&obs_display_name(o), 40)
+            ),
+            None => " Step ".to_string(),
+        };
+        return (
+            Line::raw(title),
+            browser.detail_lines.clone(),
+            browser.detail_sections.clone(),
+        );
+    }
+    let Some(t) = browser.turns.get(browser.selected_turn) else {
+        return (Line::raw(" Turn "), Vec::new(), Vec::new());
+    };
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines = vec![
+        Line::styled(
+            format!(
+                "{} · {} · {} · {} tok · {} · {} steps",
+                fmt_time(t.start_ns),
+                t.status,
+                approx_latency(t),
+                fmt_tokens(t.total_tokens),
+                fmt_cost(t.total_cost_usd),
+                browser.observations.len()
+            ),
+            dim,
+        ),
+        Line::raw(""),
+    ];
+    let mut sections = Vec::new();
+    for (label, body) in [
+        ("prompt", &t.input),
+        ("answer", &t.output),
+        ("thinking", &t.thinking),
+    ] {
+        if let Some(text) = body {
+            let text = crate::app::readable(text);
+            let total = text.lines().count();
+            sections.push(lines.len());
+            lines.push(crate::app::reader_section(label, total));
+            for l in text.lines().take(2_000) {
+                lines.push(Line::raw(l.to_string()));
+            }
+            if total > 2_000 {
+                lines.push(Line::styled(
+                    format!("… {} more lines (Ctrl+O reads them all)", total - 2_000),
+                    dim,
+                ));
+            }
+            lines.push(Line::raw(""));
+        }
+    }
+    if !browser.observations.is_empty() {
+        sections.push(lines.len());
+        lines.push(Line::styled(
+            format!("▾ steps · {}  (→ to read one)", browser.observations.len()),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for o in &browser.observations {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", &fmt_time(o.start_ns)[11..19]), dim),
+                Span::raw(format!("{} ", step_glyph(o))),
+                Span::raw(step_name(o)),
+                Span::styled(format!("  {}", obs_duration(o)), dim),
+            ]));
+        }
+    }
+    (Line::raw(format!(" Turn #{} ", t.ordinal)), lines, sections)
+}
+
+/// The reader: `lines` wrapped to the width, scrolled by the browser's
+/// `scroll_offset`, with where it is in the bottom border. What it drew
+/// goes back to the browser so the keys scroll, jump and find in it.
+fn draw_reader(
+    f: &mut Frame,
+    area: Rect,
+    title: Line<'static>,
+    lines: &[Line<'static>],
+    sections: &[usize],
+    browser: &TraceBrowserState,
+    zoomed: bool,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border(zoomed))
+        .title(title);
+    let inner = block.inner(area);
+    let width = usize::from(inner.width).max(1);
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let mut first_row = Vec::with_capacity(lines.len());
+    for line in lines {
+        first_row.push(rows.len());
+        rows.extend(wrap_line(line, width));
+    }
+    let height = usize::from(inner.height);
+    let plain: Vec<String> = rows
+        .iter()
+        .map(|r| r.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    browser.viewport_rows.set(height);
+    browser.reader_x.set(area.x);
+    *browser.reader_sections.borrow_mut() = sections
+        .iter()
+        .filter_map(|&i| first_row.get(i).copied())
+        .collect();
+    let top = browser
+        .scroll_offset
+        .min(rows.len().saturating_sub(height.max(1)));
+    let bottom = (top + height).min(rows.len());
+    let block = if rows.len() > height {
+        block.title_bottom(
+            Line::styled(
+                format!(" {}-{} of {} ", top + 1, bottom, rows.len()),
+                Style::default().fg(Color::DarkGray),
+            )
+            .right_aligned(),
+        )
+    } else {
+        block
+    };
+    let find = browser
+        .find
+        .as_deref()
+        .filter(|_| zoomed)
+        .map(str::to_lowercase);
+    let visible: Vec<Line> = rows[top..bottom]
+        .iter()
+        .zip(&plain[top..bottom])
+        .map(|(row, text)| match &find {
+            Some(q) if text.to_lowercase().contains(q.as_str()) => highlight(text, q),
+            _ => row.clone(),
+        })
+        .collect();
+    *browser.reader_rows.borrow_mut() = plain;
+    f.render_widget(block, area);
+    f.render_widget(Paragraph::new(visible), inner);
+}
+
+/// A row with every match of `query` (lowercase) marked. Where lowercasing
+/// changes the text's length, the whole row is marked instead.
+fn highlight(text: &str, query: &str) -> Line<'static> {
+    let mark = Style::default().fg(Color::Black).bg(Color::Yellow);
+    let lower = text.to_lowercase();
+    if lower.len() != text.len() || query.is_empty() {
+        return Line::styled(text.to_string(), mark);
+    }
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while let Some(i) = lower[at..].find(query) {
+        let start = at + i;
+        if !text.is_char_boundary(start) || !text.is_char_boundary(start + query.len()) {
+            break;
+        }
+        spans.push(Span::raw(text[at..start].to_string()));
+        spans.push(Span::styled(
+            text[start..start + query.len()].to_string(),
+            mark,
+        ));
+        at = start + query.len();
+    }
+    spans.push(Span::raw(text[at..].to_string()));
+    Line::from(spans)
+}
+
+/// One line as rows of at most `width` columns, keeping its styles. A row
+/// breaks after the last space when one falls in its second half, else
+/// at the width; a wide character is never split.
+fn wrap_line(line: &Line, width: usize) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthChar;
+    let width = width.max(1);
+    let mut cells: Vec<(char, usize, Style)> = Vec::new();
+    for span in &line.spans {
+        let style = line.style.patch(span.style);
+        for c in span.content.chars() {
+            match c {
+                '\t' => cells.extend(std::iter::repeat_n((' ', 1, style), 4)),
+                c if c.is_control() => {}
+                c => cells.push((c, c.width().unwrap_or(0), style)),
+            }
+        }
+    }
+    let to_line = |cells: &[(char, usize, Style)]| {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut text = String::new();
+        let mut style = None;
+        for &(c, _, s) in cells {
+            if style.is_some_and(|x| x != s) {
+                spans.push(Span::styled(std::mem::take(&mut text), style.unwrap()));
+            }
+            style = Some(s);
+            text.push(c);
+        }
+        if let Some(s) = style {
+            spans.push(Span::styled(text, s));
+        }
+        Line::from(spans)
+    };
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while start < cells.len() {
+        let (mut end, mut used, mut space) = (start, 0, None);
+        while end < cells.len() && used + cells[end].1 <= width {
+            used += cells[end].1;
+            if cells[end].0 == ' ' {
+                space = Some(end);
+            }
+            end += 1;
+        }
+        if end == start {
+            end = start + 1;
+        }
+        if end < cells.len()
+            && let Some(sp) = space
+            && (sp + 1 - start) * 2 >= end - start
+        {
+            end = sp + 1;
+        }
+        rows.push(to_line(&cells[start..end]));
+        start = end;
+    }
+    if rows.is_empty() {
+        rows.push(Line::raw(""));
+    }
+    rows
+}
+
+/// The Trace Browser's keys, in the app's one footer row: what works at
+/// this level, and nothing from the screen behind.
 fn browser_hints(browser: &TraceBrowserState, app: &App, width: usize) -> Line<'static> {
     use crate::keymap::{Chord, chord_label};
     if let Some(input) = &browser.search_input {
+        let (what, run) = if browser.zoomed {
+            ("Find", "find")
+        } else {
+            ("Search", "search turns")
+        };
         return Line::styled(
-            format!(" Search: {input}▏  [Enter] run  [Esc] cancel"),
+            format!(" {what}: {input}▏  [Enter] {run}  [Esc] cancel"),
             Style::default().fg(Color::Black).bg(Color::Yellow),
         );
     }
-    let hints = format!(
-        "[Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold run/subtree  [/] search  [+] score  [a] all  [r] resume  [b] sidebar  [Esc/{}] close",
-        chord_label(Chord::Traces, app.keys_enhanced)
-    );
+    let close = chord_label(Chord::Traces, app.keys_enhanced);
+    let hints = if browser.zoomed {
+        format!(
+            "[↑/↓] scroll  [⌃D/⌃U] page  [g/G] top/end  [[/]] section  [/] find  [n/N] next/prev  [⌃O] editor  [Esc] back  [{close}] close"
+        )
+    } else {
+        match browser.focused {
+            BrowserPane::Sessions => format!(
+                "[↑/↓] session  [→/Enter] turns  [space] fold run  [/] search  [a] all projects  [r] resume  [b] sidebar  [Esc/{close}] close"
+            ),
+            BrowserPane::Turns => format!(
+                "[↑/↓] turn  [→/Enter] steps  [z] zoom  [⌃D/⌃U] scroll  [1-5] view  [s] score  [/] search  [⌃O] editor  [←/Esc] sessions  [{close}] close"
+            ),
+            BrowserPane::Detail if browser.detail_view.lists_steps() => {
+                let fold = if browser.detail_view == crate::app::DetailView::Tree {
+                    "[space] fold  "
+                } else {
+                    ""
+                };
+                format!(
+                    "[↑/↓] step  [Enter/z] zoom  [⌃D/⌃U] scroll  [1-5] view  {fold}[⌃O] editor  [s] score  [←/Esc] turns  [{close}] close"
+                )
+            }
+            BrowserPane::Detail => format!("[1-5] view  [s] score  [←/Esc] turns  [{close}] close"),
+        }
+    };
     Line::styled(
         fit_hints(&hints, width),
         Style::default().fg(Color::Black).bg(Color::Cyan),
@@ -5890,6 +6300,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_reader_wraps_at_spaces_and_never_splits_a_wide_character() {
+        let rows = |line: Line, width| -> Vec<String> {
+            wrap_line(&line, width)
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+        assert_eq!(
+            rows(Line::raw("the quick brown fox jumps"), 10),
+            ["the quick ", "brown fox ", "jumps"]
+        );
+        // a word longer than the row breaks at the width
+        assert_eq!(rows(Line::raw("abcdefghijkl"), 5), ["abcde", "fghij", "kl"]);
+        // 世 is two columns: three fit in six, never half of one
+        assert_eq!(rows(Line::raw("世界世界"), 5), ["世界", "世界"]);
+        assert_eq!(rows(Line::raw(""), 5), [""]);
+        // styles survive the break
+        let styled = Line::from(vec![
+            Span::raw("ab "),
+            Span::styled("cdef", Style::default().fg(Color::Red)),
+        ]);
+        let wrapped = wrap_line(&styled, 4);
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[1].spans[0].style.fg, Some(Color::Red));
+    }
+
     /// The footer row belongs to the screen in front: an overlay never
     /// shows the keys of the main screen behind it.
     #[test]
@@ -6391,16 +6828,93 @@ mod tests {
             text.contains("cwd …/silvio/workspace/agent-mux"),
             "got: {text}"
         );
-        assert!(text.contains("Bash"), "got: {text}");
-        assert!(text.contains("[Tab] pane"), "got: {text}");
-        // expanding shows the observation body
+        assert!(text.contains("[→/Enter] turns"), "got: {text}");
+        // the turn level reads the turn: its prompt and answer, its steps
         if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
-            b.focused = BrowserPane::Detail;
-            b.toggle_expanded();
+            b.drill();
+            assert_eq!(b.focused, BrowserPane::Turns);
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Traces › all projects · 1 sessions › [C] fix the widget"),
+            "got: {text}"
+        );
+        assert!(text.contains("▾ prompt · 1 line"), "got: {text}");
+        assert!(text.contains("▾ answer · 1 line"), "got: {text}");
+        assert!(text.contains("Bash ls"), "got: {text}");
+        // the step level reads the step beside the list, JSON laid out
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.drill();
+            assert_eq!(b.focused, BrowserPane::Detail);
         }
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Cargo.toml"), "got: {text}");
+        assert!(text.contains("\"command\": \"ls\""), "got: {text}");
+        assert!(text.contains("[1 steps]"), "got: {text}");
+        assert!(text.contains("› Turn #1 › 🔧"), "got: {text}");
+        // the keys: Enter zooms the step, / finds in it, Esc climbs back
+        // one level at a time and closes at the top
+        use crossterm::event::KeyCode;
+        let press = |app: &mut App, code: KeyCode| {
+            app.handle_key(
+                &crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
+                Instant::now(),
+            )
+        };
+        press(&mut app, KeyCode::Enter);
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("(zoomed)"), "got: {text}");
+        assert!(text.contains("[[/]] section"), "got: {text}");
+        assert!(!text.contains("Sessions (1)"), "the reader alone: {text}");
+        for code in [
+            KeyCode::Char('/'),
+            KeyCode::Char('c'),
+            KeyCode::Char('a'),
+            KeyCode::Char('r'),
+            KeyCode::Char('g'),
+            KeyCode::Char('o'),
+        ] {
+            press(&mut app, code);
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        assert!(buffer_text(&terminal).contains("Find: cargo▏"));
+        press(&mut app, KeyCode::Enter);
+        if let crate::app::Mode::TraceBrowser(b) = &app.mode {
+            assert_eq!(b.find.as_deref(), Some("cargo"));
+            assert!(b.zoomed);
+        }
+        // Ctrl+O hands the whole step to the editor
+        app.handle_key(
+            &crossterm::event::KeyEvent::new(
+                KeyCode::Char('o'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+            Instant::now(),
+        );
+        let request = app.take_editor_request().expect("an editor request");
+        let written = std::fs::read_to_string(&request.path).unwrap();
+        assert!(written.contains("Cargo.toml"), "{written}");
+        app.editor_finished(request.clone(), Ok(()));
+        assert!(!request.path.exists(), "the scratch file is removed");
+        for expected in [
+            BrowserPane::Detail,
+            BrowserPane::Turns,
+            BrowserPane::Sessions,
+        ] {
+            press(&mut app, KeyCode::Esc);
+            match &app.mode {
+                crate::app::Mode::TraceBrowser(b) => {
+                    assert!(!b.zoomed);
+                    assert_eq!(b.focused, expected);
+                }
+                m => panic!("closed too early: {m:?}"),
+            }
+        }
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, crate::app::Mode::Main));
         // tracing off: the browser explains instead of panicking
         let off = crate::app::TraceBrowserState::new(None, None);
         assert!(off.error.as_deref().unwrap_or("").contains("off"));
@@ -6522,7 +7036,7 @@ mod tests {
             text.contains("▾"),
             "an expanded parent shows a fold mark: {text}"
         );
-        assert!(text.contains("[v] view"), "footer: {text}");
+        assert!(text.contains("[1-5] view"), "footer: {text}");
 
         // folded: the children go away and the parent reports the subtree
         if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {

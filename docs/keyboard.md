@@ -22,7 +22,7 @@ The keys that work with either focus live in the layer GUI terminals reserve for
 | previous / next session | `⌘↑` / `⌘↓` | `Ctrl+Shift+↑` / `Ctrl+Shift+↓` |
 | find in the pane | `⌘F` | `Ctrl+Shift+F` (`Ctrl+F` in the list) |
 | copy the selection / paste | the host's `⌘C` / `⌘V` | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
-| traces of this session (the Trace Browser in the pane; again or `Esc` back) | `⌘I` | `Ctrl+Shift+I` (`F3` everywhere; `T` in the list) |
+| traces of this session (the Trace Browser; again, or `Esc` from its top level, back) | `⌘I` | `Ctrl+Shift+I` (`F3` everywhere; `T` in the list) |
 | help | `⌘/` | `Ctrl+Shift+/` (`F1` everywhere; `?` in the list) |
 | scroll three lines, a page, to the oldest / newest | `Shift+↑/↓`, `Fn+↑/↓`, `Shift+Fn+←/→` | `Shift+↑/↓`, `PgUp/PgDn`, `Shift+Home/End` |
 
@@ -77,7 +77,7 @@ For `Option` combinations, turn on "Use Option as Meta key" (Terminal.app) or "E
 | Main screen, list focused | `Enter` on a session or `Esc`: the pane takes the keyboard. `b` sidebar, `Tab` section, `Space` fold a heading or agent (on a session, fold its parent); click a heading or its arrow to fold with the mouse. `l` session logs, `t` tracing on / off, `T` the trace strip under the session (off → one line → eight rows → the Trace Browser; `⌘I` / `Ctrl+Shift+I` / `F3` opens the browser at once, from either side), `S` skills, `C` configuration, `E` or `W` runs view, `I` inbox, `v` about, `K` loops kill switch, `X` clear exited sessions, `f` on a session: continue it in a new session with its memory; `←` folds the row under the cursor (on a session, or a row with nothing to fold, it climbs to the parent), `→` unfolds (or steps onto the first child), `Space` toggles a fold, a click on the arrow folds too |
 | Loops section | `p` pause, `o` its task in the task library (the editor's What tab), `f` a new pattern there |
 | Workflows section | `c` compose a workflow for a task |
-| Trace browser (a drawer in the pane) | `/` search, `v` detail view (list → tree → timeline → loop → summary), `Space` fold, `a` all projects, `+` verdict, `b` sidebar, `Esc` back to the session |
+| Trace browser (full screen; `b` brings the sidebar) | One level at a time, sessions → turns → steps: `↑↓` moves in the list on the left, `→`/`Enter` goes deeper, `←`/`Esc` back (`Esc` at the sessions closes); the right column reads what is selected, wrapped. `z` (or `Enter` on a step) gives the reader the whole screen: `↑↓` scroll, `Ctrl+D`/`Ctrl+U` page, `g`/`G`, `[`/`]` sections, `/` find and `n`/`N`; `Ctrl+O` opens the whole text in your editor. `1`-`5` steps views (list · tree · timeline · loop · summary), `Space` fold, `/` search turns, `a` all projects, `s` verdict, `r` resume |
 | Skills view | `v` validate, `1`-`3` harness filter |
 | Configuration view | `u` push loop skills to workspaces |
 | Agent editor | `R` restores a built-in you saved a copy of (it asks); `1`-`5` Who · What · When · Limits · Review (`Tab` / `Shift+Tab` in a scheduled agent or a persona); `Enter` types a field, `←` `→` `Space` change the others; a scheduled agent's What is the task library; a flow's fields: `Space` makes a field required, `[` `]` previous / next step, `Enter` on Answers with opens what passes |
