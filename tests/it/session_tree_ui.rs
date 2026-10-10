@@ -667,8 +667,9 @@ async fn a_new_session_starts_on_the_harness_under_the_cursor() {
     app.kill_all();
 }
 
-/// `--clean`: the harness rows and their sessions, nothing else in the
-/// Agents list: no headings; History stays, and `n` is a new session.
+/// Harnesses only (`App::clean`, how agent-mux starts): the harness rows
+/// and their sessions, nothing else in the Agents list: no headings;
+/// History stays, and `n` is a new session.
 #[tokio::test]
 async fn clean_lists_only_the_harnesses_and_their_sessions() {
     use agent_mux::app::agents_list::AgentKind;
@@ -719,6 +720,53 @@ async fn clean_lists_only_the_harnesses_and_their_sessions() {
     let screen = render(&app, 120, 40);
     assert!(screen.contains("History"), "{screen}");
     assert!(!screen.contains("SKILLS"), "{screen}");
+    app.kill_all();
+}
+
+/// `m` in the list shows the scheduled, flows, skills and personas
+/// sections and hides them again; a cursor on a row that goes away comes
+/// back to the sessions.
+#[tokio::test]
+async fn m_shows_and_hides_the_sections_beyond_the_harnesses() {
+    use agent_mux::app::agents_list::AgentKind;
+    let (mut app, _temp) = app_with_sessions(&[None, Some(wf("run-1", "read"))]);
+    app.clean = true;
+    app.focus_list();
+    let headed = |app: &agent_mux::app::App| {
+        app.agent_lines()
+            .iter()
+            .any(|l| matches!(l.kind, AgentKind::Header(_)))
+    };
+    assert!(!headed(&app));
+    let screen = render(&app, 120, 40);
+    assert!(screen.contains("⋯ more agents  m"), "{screen}");
+    app.handle_key(&key(KeyCode::Char('m')), Instant::now());
+    assert!(!app.clean);
+    assert!(headed(&app));
+    assert!(
+        app.agent_lines()
+            .iter()
+            .any(|l| l.kind == AgentKind::Header("skills"))
+    );
+    // n is the agent chooser again with the sections shown
+    app.select_first_row_of(SidebarSection::Agents);
+    assert!(matches!(app.agent_row(), Some(AgentKind::Skill(_))));
+    app.handle_key(&key(KeyCode::Char('m')), Instant::now());
+    assert!(app.clean);
+    assert!(!headed(&app));
+    assert_eq!(app.sidebar_section, SidebarSection::Active);
+    assert!(
+        matches!(
+            app.agent_row(),
+            Some(AgentKind::Harness(_) | AgentKind::Session(_))
+        ),
+        "{:?}",
+        app.agent_row()
+    );
+    // with the pane focused, m is typed into the harness
+    app.focus_pane();
+    app.handle_key(&key(KeyCode::Char('m')), Instant::now());
+    assert!(app.clean);
     app.kill_all();
 }
 

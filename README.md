@@ -40,9 +40,9 @@ cargo install --path .
 agent-mux
 # Start with the sidebar hidden:
 agent-mux --hide-sidebar      # --full-screen and -b do the same
-# Only the harnesses (Claude Code, Codex, Antigravity), their sessions and History in the sidebar:
-agent-mux --clean             # or clean = true in profiles.toml
 ```
+
+The sidebar starts with the harnesses (Claude Code, Codex, Antigravity), their sessions and History; press `m` in the list to show scheduled agents, flows, skills and personas, and `m` again to hide them.
 
 One-shot commands are dispatched in [src/main.rs](src/main.rs) before any terminal setup:
 
@@ -56,7 +56,7 @@ agent-mux md README.md        # Markdown viewer and editor, Mermaid drawn as tex
 agent-mux run --help
 ```
 
-There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `run`, `loop`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI; `--hide-sidebar` starts it full-screen and `--clean` (or `clean = true` in `profiles.toml`) keeps the Agents list to the harness rows and their sessions: no scheduled agents, flows, skills or personas (History stays), `n` opens the New session dialog straight away, and the inbox badge stays off (`App::clean`).
+There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `run`, `loop`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI; `--hide-sidebar` starts it full-screen. The Agents list starts with the harness rows and their sessions alone: no scheduled agents, flows, skills or personas (History stays), `n` opens the New session dialog straight away, and the inbox badge stays off (`App::clean`); `m` in the list shows those sections and hides them again (`App::toggle_agent_sections`). The older `--clean` flag and `clean = true` in `profiles.toml` are no longer needed and are ignored.
 
 `--version` prints the stamp [build.rs](build.rs) bakes in at compile time and [src/build_info.rs](src/build_info.rs) formats:
 

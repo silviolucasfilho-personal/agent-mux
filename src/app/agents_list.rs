@@ -219,7 +219,8 @@ impl App {
 
     /// Every row of the Agents list, in order: harnesses, scheduled
     /// agents, flows, skills, personas; sessions under their owner. With
-    /// `--clean`, the harnesses alone, every session under its harness.
+    /// `App::clean` (how agent-mux starts; `m` toggles it), the
+    /// harnesses alone, every session under its harness.
     pub fn agent_lines(&self) -> Vec<AgentLine> {
         let rows = self.workflow_rows();
         let owners: Vec<AgentKind> = (0..self.sessions.len())

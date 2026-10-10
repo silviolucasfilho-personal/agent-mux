@@ -688,6 +688,17 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
             " + new agent  n"
         };
         items.push(ListItem::new(Line::styled(footer, dim)));
+        // the sections `m` brings back, named so they can be found
+        if items.len() < visible {
+            items.push(ListItem::new(Line::styled(
+                if app.clean {
+                    " ⋯ more agents  m"
+                } else {
+                    " ⋯ harnesses only  m"
+                },
+                dim,
+            )));
+        }
     }
     f.render_widget(List::new(items).block(block), area);
 }
@@ -2070,6 +2081,10 @@ fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
     ];
     if app.clean {
         lines.push(line("n", "a new session on the harness under the cursor"));
+        lines.push(line(
+            "m",
+            "show scheduled agents, flows, skills and personas",
+        ));
     } else {
         lines.push(line(
             "n",
@@ -2153,22 +2168,22 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                     };
                     match (app.sidebar_section, row) {
                         (SidebarSection::History, _) if app.clean => Line::raw(fit(
-                            "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [?] help  [q] quit",
+                            "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [m] more agents  [?] help  [q] quit",
                         )),
                         (SidebarSection::History, _) => Line::raw(fit(
-                            "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [S] skills  [C] config  [?] help  [q] quit",
+                            "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [S] skills  [C] config  [m] harnesses only  [?] help  [q] quit",
                         )),
                         (_, Some(AgentKind::Harness(_))) if app.clean => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter] new session  [n] new session  [Tab] history  [b] sidebar  [q] quit",
+                            "[←→] fold  [?] help  [Enter] new session  [n] new session  [m] more agents  [Tab] history  [b] sidebar  [q] quit",
                         )),
                         (_, Some(AgentKind::Session(_))) if app.clean => Line::raw(fit(
-                            "[←] fold  [?] help  [Enter] pane  [n] new session  [f] fork  [x] stop  [d] remove  [X] clear exited  [Tab] history  [q] quit",
+                            "[←] fold  [?] help  [Enter] pane  [n] new session  [f] fork  [x] stop  [d] remove  [X] clear exited  [m] more agents  [Tab] history  [q] quit",
                         )),
                         (_, Some(AgentKind::Harness(_))) => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter] new session  [n] new agent  [Tab] history  [S] skills  [C] config  [q] quit",
+                            "[←→] fold  [?] help  [Enter] new session  [n] new agent  [Tab] history  [S] skills  [C] config  [m] harnesses only  [q] quit",
                         )),
                         (_, Some(AgentKind::Session(_))) => Line::raw(fit(
-                            "[←] fold  [?] help  [Enter] pane  [n] new agent  [f] fork  [x] stop  [d] remove  [X] clear exited  [t/T] trace  [Tab] history  [q] quit",
+                            "[←] fold  [?] help  [Enter] pane  [n] new agent  [f] fork  [x] stop  [d] remove  [X] clear exited  [t/T] trace  [Tab] history  [m] harnesses only  [q] quit",
                         )),
                         (_, Some(AgentKind::Loop(_))) if app.loop_registry.pause_all => {
                             Line::styled(
@@ -2179,19 +2194,19 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                             )
                         }
                         (_, Some(AgentKind::Loop(_))) => Line::raw(fit(
-                            "[←→] fold  [n] new  [Enter] details  [r] run  [p] pause  [e] edit  [d] remove  [?] help",
+                            "[←→] fold  [n] new  [Enter] details  [r] run  [p] pause  [e] edit  [d] remove  [m] harnesses only  [?] help",
                         )),
                         (_, Some(AgentKind::Flow(_))) => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter] run / view  [n] new agent  [e] edit  [c] compose  [x] stop  [d] discard plan  [⌃O] file  [W] view",
+                            "[←→] fold  [?] help  [Enter] run / view  [n] new agent  [e] edit  [c] compose  [x] stop  [d] discard plan  [⌃O] file  [m] harnesses only  [W] view",
                         )),
                         (_, Some(AgentKind::Skill(_))) => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter] launch  [n] new agent  [S] skills  [C] config  [Tab] history  [b] sidebar  [q] quit",
+                            "[←→] fold  [?] help  [Enter] launch  [n] new agent  [S] skills  [C] config  [Tab] history  [b] sidebar  [m] harnesses only  [q] quit",
                         )),
                         (_, Some(AgentKind::Persona(_))) => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter/e] edit  [n] new agent  [Tab] history  [C] config  [q] quit",
+                            "[←→] fold  [?] help  [Enter/e] edit  [n] new agent  [Tab] history  [C] config  [m] harnesses only  [q] quit",
                         )),
                         _ => Line::raw(fit(
-                            "[←→] fold  [?] help  [j/k] its sessions  [n] new agent  [Tab] history  [b] sidebar  [q] quit",
+                            "[←→] fold  [?] help  [j/k] its sessions  [n] new agent  [Tab] history  [b] sidebar  [m] more / fewer agents  [q] quit",
                         )),
                     }
                 }
@@ -2357,7 +2372,10 @@ fn draw_help(f: &mut Frame) {
             "f",
             "continue a session in a new one, with its memory (any harness)",
         ),
-        row("X · q", "clear all exited sessions · quit"),
+        row(
+            "X · m · q",
+            "clear all exited sessions · more agents (scheduled, flows…) · quit",
+        ),
         Line::raw(""),
         Line::styled(
             "With the pane focused every other key is the agent's, Ctrl+Q included",

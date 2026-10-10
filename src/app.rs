@@ -168,6 +168,9 @@ pub enum Action {
     EnterConfirmKill,
     RemoveSelected,
     RemoveExited,
+    /// `m` in the list: the scheduled, flows, skills, on demand and
+    /// personas sections, shown or hidden.
+    ToggleAgentSections,
     RespawnSelected,
     ToggleTracing,
     ToggleSidebar,
@@ -428,7 +431,7 @@ pub struct DispatchCtx {
     pub app_cursor: bool,
     pub sidebar_section: SidebarSection,
     pub sidebar_hidden: bool,
-    /// `--clean`: the list holds only the harnesses and their sessions.
+    /// Only the harnesses and their sessions are listed (`App::clean`).
     pub clean: bool,
 }
 
@@ -549,6 +552,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 // n makes a new agent; the chooser starts on the kind of
                 // row the cursor is on (a session, a scheduled agent, a flow)
                 KeyCode::Char('n') if in_list && !ctx.clean => Action::OpenNewAgent,
+                KeyCode::Char('m') if !ctx.sidebar_hidden => Action::ToggleAgentSections,
                 KeyCode::Enter if in_list && ctx.agent_row == RowTag::Harness => {
                     Action::NewSessionFromHarness
                 }
@@ -2549,9 +2553,10 @@ pub struct App {
     pub sessions_file: Option<std::path::PathBuf>,
     /// Whether the sidebar is currently hidden (full-screen harness).
     pub sidebar_hidden: bool,
-    /// `--clean`: the Agents list holds only the harnesses and their
-    /// sessions (no scheduled agents, flows, skills or personas; History
-    /// stays), `n` is a new session, and the hints say no more than that.
+    /// The Agents list holds only the harnesses and their sessions (no
+    /// scheduled agents, flows, skills or personas; History stays), `n` is
+    /// a new session, and the hints say no more than that. agent-mux starts
+    /// this way; `m` in the list toggles it (`toggle_agent_sections`).
     pub clean: bool,
     /// Loop and workflow headers folded away in the Active sidebar, by
     /// `tree::GroupRef::key`. Keyed by the parent rather than by a session
@@ -4773,6 +4778,7 @@ impl App {
                     let _ = self.save_active_sessions();
                 }
             }
+            Action::ToggleAgentSections => self.toggle_agent_sections(),
             Action::RemoveExited => {
                 let before = self.sessions.len();
                 let now = Instant::now();
@@ -5126,6 +5132,32 @@ impl App {
             Ok(()) => self.request_editor(path, "trace:reader".into()),
             Err(e) => self.notice = Some(Notice::error(format!("editor: {e}"))),
         }
+    }
+
+    /// `m`: shows or hides the sections beyond the harnesses (scheduled,
+    /// flows, skills, on demand, personas). A cursor left on a hidden row
+    /// goes back to the session it had, or the first harness.
+    pub fn toggle_agent_sections(&mut self) {
+        self.clean = !self.clean;
+        if self.clean
+            && matches!(
+                self.sidebar_section,
+                SidebarSection::Loops | SidebarSection::Workflows | SidebarSection::Agents
+            )
+        {
+            self.sidebar_section = SidebarSection::Active;
+        }
+        if self.clean
+            && let Some(kind) = self.agent_focus().cloned()
+            && !self.agent_lines().iter().any(|l| l.kind == kind)
+        {
+            self.agent_focus = None;
+        }
+        self.notice = Some(Notice::info(if self.clean {
+            "harnesses only · m shows scheduled, flows, skills and personas"
+        } else {
+            "scheduled, flows, skills and personas shown · m hides them"
+        }));
     }
 
     /// The quit chord: quits at once with nothing running, and asks first
