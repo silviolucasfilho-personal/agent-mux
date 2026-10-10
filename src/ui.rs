@@ -2192,14 +2192,11 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                     }
                 }
             }
-            // full-screen editors keep their own footer; this row is for notices
-            Mode::AgentEditor(_) | Mode::RunsView(_) | Mode::Markdown(_) => Line::raw(""),
-            _ if app.clean => Line::raw(fit(
-                "[b] sidebar  [Enter] pane  [n] new session  [l] logs  [?] help  [q] quit",
-            )),
-            _ => Line::raw(fit(
-                "[b] sidebar  [Enter] pane  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
-            )),
+            Mode::TraceBrowser(ref browser) => browser_hints(browser, app, usize::from(area.width)),
+            // Every other screen is a dialog or a full-screen view that
+            // prints its own keys; this row is for notices. Never the keys
+            // of the main screen behind it: none of them works here.
+            _ => Line::raw(""),
         }
     };
     // What waits on a human leads the control-mode hints, so the inbox is
@@ -2985,13 +2982,12 @@ fn provider_badge(provider: &str) -> Span<'static> {
 }
 
 fn draw_trace_browser(f: &mut Frame, area: Rect, browser: &TraceBrowserState) {
-    let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let [left, middle, right] = Layout::horizontal([
         Constraint::Percentage(26),
         Constraint::Percentage(40),
         Constraint::Min(0),
     ])
-    .areas(body);
+    .areas(area);
 
     // Sessions
     let scope = if browser.all_projects {
@@ -3295,21 +3291,26 @@ fn draw_trace_browser(f: &mut Frame, area: Rect, browser: &TraceBrowserState) {
             .collect();
         f.render_widget(List::new(items), inner_right);
     }
+}
 
-    let footer_text = match &browser.search_input {
-        Some(input) => Line::styled(
+/// The Trace Browser's keys, in the app's one footer row: the browser has
+/// no hint line of its own, so the row never shows two screens' keys.
+fn browser_hints(browser: &TraceBrowserState, app: &App, width: usize) -> Line<'static> {
+    use crate::keymap::{Chord, chord_label};
+    if let Some(input) = &browser.search_input {
+        return Line::styled(
             format!(" Search: {input}▏  [Enter] run  [Esc] cancel"),
             Style::default().fg(Color::Black).bg(Color::Yellow),
-        ),
-        None => Line::styled(
-            fit_hints(
-                "[Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold run/subtree  [/] search  [+] score  [a] all  [r] resume  [b] sidebar  [Esc] close",
-                usize::from(footer.width),
-            ),
-            Style::default().fg(Color::Black).bg(Color::Cyan),
-        ),
-    };
-    f.render_widget(Paragraph::new(footer_text), footer);
+        );
+    }
+    let hints = format!(
+        "[Tab] pane  [↑/↓] select  [Enter] drill  [v] view  [space] fold run/subtree  [/] search  [+] score  [a] all  [r] resume  [b] sidebar  [Esc/{}] close",
+        chord_label(Chord::Traces, app.keys_enhanced)
+    );
+    Line::styled(
+        fit_hints(&hints, width),
+        Style::default().fg(Color::Black).bg(Color::Cyan),
+    )
 }
 
 /// One row of the trace browser's Sessions tree: a loop or workflow
@@ -5887,6 +5888,53 @@ mod tests {
             truncate_path_chars("/home/silvio/workspace/agent-mux", 20),
             "…workspace/agent-mux"
         );
+    }
+
+    /// The footer row belongs to the screen in front: an overlay never
+    /// shows the keys of the main screen behind it.
+    #[test]
+    fn the_footer_never_shows_the_keys_of_the_screen_behind() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut app = App::new(Config::default_profiles(), None, tx);
+        let bottom = |app: &App| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|f| draw(f, app, Instant::now())).unwrap();
+            let text = buffer_text(&terminal);
+            text.lines().last().unwrap_or("").to_string()
+        };
+        // the main screen's own hints, as a baseline
+        app.focus_list();
+        assert!(bottom(&app).contains("[n] new"), "{}", bottom(&app));
+        for mode in [
+            crate::app::Mode::Help,
+            crate::app::Mode::ConfirmKill,
+            crate::app::Mode::ConfirmQuit,
+            crate::app::Mode::ConfirmRemoveLoop,
+            crate::app::Mode::TraceBrowser(Box::new(crate::app::TraceBrowserState::new(
+                None, None,
+            ))),
+        ] {
+            let name = format!("{mode:?}");
+            app.mode = mode;
+            let row = bottom(&app);
+            for main_key in [
+                "[n] new",
+                "[l] logs",
+                "[S] skills",
+                "[q] quit",
+                "[t/T] trace",
+            ] {
+                assert!(!row.contains(main_key), "{name}: {row}");
+            }
+        }
+        // the browser's keys are there instead, once
+        let text = {
+            let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+            terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+            buffer_text(&terminal)
+        };
+        assert_eq!(text.matches("[/] search").count(), 1, "{text}");
+        assert!(text.lines().last().unwrap().contains("close"), "{text}");
     }
 
     #[test]
