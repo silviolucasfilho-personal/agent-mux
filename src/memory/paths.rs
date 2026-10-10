@@ -15,20 +15,21 @@ pub const EXPIRED: &str = ".expired";
 /// The folder of facts about the user that hold in every workspace.
 pub const USER: &str = "_user";
 
-/// `<library>/memory/`.
-pub fn library_root() -> PathBuf {
-    crate::assets::root().join("memory")
+/// `<library>/memory/`, for a configuration library root
+/// (`assets::root()`, `~/.agent-mux`).
+pub fn memory_root(library: &Path) -> PathBuf {
+    library.join("memory")
 }
 
 /// The user-level memory folder.
-pub fn user_dir() -> PathBuf {
-    library_root().join(USER)
+pub fn user_dir(library: &Path) -> PathBuf {
+    memory_root(library).join(USER)
 }
 
 /// A workspace's memory folder under the settings.
-pub fn dir_for(settings: &Settings, workspace: &Path) -> PathBuf {
+pub fn dir_for(library: &Path, settings: &Settings, workspace: &Path) -> PathBuf {
     match settings.location {
-        Location::Library => library_root().join(crate::history::project_slug(workspace)),
+        Location::Library => memory_root(library).join(crate::history::project_slug(workspace)),
         Location::Workspace => workspace.join(".agent-mux").join("memory"),
     }
 }
@@ -75,9 +76,10 @@ mod tests {
             location: Location::Workspace,
             ..Settings::default()
         };
-        assert_eq!(dir_for(&s, ws), ws.join(".agent-mux/memory"));
-        let lib = dir_for(&Settings::default(), ws);
-        assert!(lib.starts_with(library_root()));
+        let root = Path::new("/lib");
+        assert_eq!(dir_for(root, &s, ws), ws.join(".agent-mux/memory"));
+        let lib = dir_for(root, &Settings::default(), ws);
+        assert!(lib.starts_with("/lib/memory/"), "{}", lib.display());
     }
 
     #[test]

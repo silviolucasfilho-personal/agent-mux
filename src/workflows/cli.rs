@@ -338,6 +338,7 @@ fn headless() -> anyhow::Result<Headless> {
     app.clipboard_enabled = false;
     app.set_pane_size(40, 120);
     app.workflows = crate::config::resolve_workflows(cfg.workflows.as_ref());
+    app.memory = Some(cfg.memory.clone().unwrap_or_default());
     app.loops = crate::config::resolve_loops(cfg.loops.as_ref());
     app.config_path = cfg.loaded_from.clone();
     app.load_loop_registry();

@@ -1,0 +1,8 @@
+# agent-mux metadata: the shared memory skill (docs/memory.md). hidden = true
+# keeps it out of the Agents sidebar; agent-mux installs it for every harness
+# a session with memory runs on.
+name = "Memory"
+icon = "✎"
+hidden = true
+writes = true
+harnesses = ["claude", "codex", "agy"]

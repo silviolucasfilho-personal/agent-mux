@@ -278,6 +278,8 @@ async fn main() -> Result<()> {
         .unwrap_or(agent_mux::app::DEFAULT_BYPASS_APPROVALS);
     app.config_path = cfg.loaded_from.clone();
     app.editor = cfg.editor.clone();
+    // before the restore: a restored session gets its memory too
+    app.memory = Some(cfg.memory.clone().unwrap_or_default());
     if hide_sidebar {
         app.sidebar_hidden = true;
     }

@@ -17,9 +17,17 @@
 //!   `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":…}}`.
 //!   The hooks reference (2026-10-10) says an async hook's context arrives
 //!   on the next turn, so the hook is registered synchronously when the
-//!   launch has memory; `SessionStart` fires with `source` `startup`,
-//!   `resume`, `clear`, `compact` and `fork`; `additionalContext` is taken
-//!   up to 10,000 characters (`context::LIMIT` stays under it). Without a
+//!   launch has memory (timeout 10 s: macOS scans a freshly installed
+//!   binary for about 20 s on its first run, and a 3 s timeout lost the
+//!   answer). Probed 2026-10-10 with `claude -p --settings '<inline>'`: an
+//!   8,600-character `additionalContext` reached the first turn whole;
+//!   `--resume <id>` and `--resume <id> --fork-session` each ran the hook
+//!   again with `source` `resume` and `fork` and the model saw the new
+//!   answer, not the first one; `agent-mux trace hook claude --memory
+//!   <dir>` as the command delivered a note the model then quoted. The
+//!   reference documents `source` `startup`, `resume`, `clear`, `compact`
+//!   and `fork`, and 10,000 characters before the text spills to a file
+//!   (`context::LIMIT` stays under it). Without a
 //!   registered hook the session gets the hint alone through
 //!   `--append-system-prompt`: the system prompt is snapshotted per
 //!   session (`--system-prompt-snapshot`), so only pointers go there.
@@ -34,6 +42,7 @@ pub mod cli;
 pub mod context;
 pub mod fence;
 pub mod index;
+pub mod launch;
 pub mod log;
 pub mod note;
 pub mod paths;
@@ -44,6 +53,8 @@ use crate::config::{MemoryConfig, ProfileMemory};
 pub const ENV_DIR: &str = "AGENT_MUX_MEMORY";
 pub const ENV_INDEX: &str = "AGENT_MUX_MEMORY_INDEX";
 pub const ENV_BRIEF: &str = "AGENT_MUX_MEMORY_BRIEF";
+/// The user-level folder, listed after the workspace's notes.
+pub const ENV_USER: &str = "AGENT_MUX_MEMORY_USER";
 
 /// The skill package that saves, recalls and forgets notes.
 pub const SKILL_ID: &str = "memory";

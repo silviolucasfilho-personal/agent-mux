@@ -2560,6 +2560,50 @@ pub const HOOK_BUSY_CAP: std::time::Duration = std::time::Duration::from_millis(
 
 /// `trace hook <source> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [--guard] [payload]`.
 /// `stdin_override` lets tests supply the payload without a pipe.
+/// The memory start text for a Claude `SessionStart`: the folder from
+/// `--memory` or `$AGENT_MUX_MEMORY` (the session's environment, which the
+/// hook inherits), the user folder and an addressed brief from theirs.
+/// `None` when the session has no memory.
+fn memory_start_text(args: &Args, home: &Path, payload: &serde_json::Value) -> Option<String> {
+    use crate::memory;
+    let var = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let dir = args
+        .value("memory")
+        .map(PathBuf::from)
+        .or_else(|| var(memory::ENV_DIR))
+        .filter(|d| d.is_dir())?;
+    let user_dir = var(memory::ENV_USER).filter(|d| d.is_dir());
+    let brief = var(memory::ENV_BRIEF).filter(|b| b.is_file());
+    let cfg = config::load_from_home(home).ok();
+    let settings = memory::Settings::from_config(cfg.as_ref().and_then(|c| c.memory.as_ref()));
+    let prompts = crate::prompts::Prompts::current();
+    memory::context::refresh(&dir, user_dir.as_deref(), settings.index_lines, &prompts);
+    let invocation = memory::invocation(Some(crate::harness::Harness::Claude));
+    let text = memory::context::session_context(
+        &memory::context::Inputs {
+            dir: &dir,
+            user_dir: user_dir.as_deref(),
+            brief: brief.as_deref(),
+            invocation: &invocation,
+        },
+        &prompts,
+    );
+    let launch = args
+        .value("launch")
+        .map(str::to_string)
+        .or_else(|| std::env::var("AGENT_MUX_SESSION_ID").ok());
+    let start = payload
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("startup");
+    memory::log::append(&dir, "claude", launch.as_deref(), "start", start);
+    Some(text)
+}
+
 pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
     use crate::tracing::hooks::{self, ContentPolicy, HookSource};
     let mut outcome = HookOutcome::default();
@@ -2603,6 +2647,23 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
+    // the shared memory's start text, answered before anything touches
+    // the store: a locked store or tracing off never costs the session
+    // its memory
+    if source == HookSource::Claude
+        && payload.get("hook_event_name").and_then(|v| v.as_str()) == Some("SessionStart")
+        && let Some(text) = memory_start_text(&args, &home, &payload)
+    {
+        outcome.response = Some(
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": text,
+                }
+            })
+            .to_string(),
+        );
+    }
     let cfg = match config::load_from_home(&home) {
         Ok(c) => c,
         Err(e) => {
