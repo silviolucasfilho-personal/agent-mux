@@ -179,6 +179,7 @@ fn fixture(pattern: &str, level: Level, spec: &FakeSpec) -> Fixture {
         tracing: None,
         model: None,
         bypass_approvals: Some(true),
+        memory: None,
     };
     let mut app = App::new(vec![profile], Some(runtime), tx);
     app.clipboard_enabled = false;

@@ -1975,6 +1975,7 @@ mod plan_tests {
             tracing: None,
             model: None,
             bypass_approvals: None,
+            memory: None,
         }
     }
 

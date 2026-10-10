@@ -254,6 +254,7 @@ fn a_test_app_never_installs_the_global_antigravity_entry() {
             tracing: None,
             model: None,
             bypass_approvals: None,
+            memory: None,
         }],
         None,
         tx,

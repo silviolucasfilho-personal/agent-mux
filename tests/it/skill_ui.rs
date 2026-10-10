@@ -27,6 +27,7 @@ fn shell_profile(name: &str) -> Profile {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     }
 }
 
@@ -208,6 +209,7 @@ async fn the_picker_installs_and_launches_on_the_chosen_harness() {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     };
     let mut app = app_in(temp.path(), vec![profile]);
     app.sidebar_section = SidebarSection::Agents;
@@ -271,6 +273,7 @@ async fn the_skill_launcher_selects_a_workspace_before_launch() {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     };
     let mut app = app_in(temp.path(), vec![profile]);
     app.sidebar_section = SidebarSection::Agents;
@@ -453,6 +456,7 @@ async fn l_launches_the_selected_harness_and_reopening_s_restores_executions() {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     };
     let mut app = app_in(temp.path(), vec![profile]);
     app.handle_key(&key(KeyCode::Char('S')), Instant::now());
@@ -628,6 +632,7 @@ async fn the_workspace_field_accepts_the_harness_shortcut_letters() {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     };
     let mut app = app_in(temp.path(), vec![profile]);
     app.sidebar_section = SidebarSection::Agents;

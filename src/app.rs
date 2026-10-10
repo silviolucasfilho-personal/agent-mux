@@ -6197,6 +6197,7 @@ impl App {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             });
         // A profile that says nothing takes the configured default, the
         // same rule the New session dialog shows.
@@ -6271,6 +6272,7 @@ impl App {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             });
         // a resume replaces the profile's arguments: resuming an id and
         // whatever the profile said about starting fresh cannot both hold
@@ -6881,6 +6883,7 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
             Profile {
                 name: "B".into(),
@@ -6890,6 +6893,7 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
         ]
     }
@@ -6985,6 +6989,7 @@ mod dialog_tests {
                 tracing: None,
                 model: Some("claude-opus-5".into()),
                 bypass_approvals: Some(true),
+                memory: None,
             },
             Profile {
                 name: "Codex".into(),
@@ -6994,6 +6999,7 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
             Profile {
                 name: "Shell".into(),
@@ -7003,6 +7009,7 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
         ]
     }
@@ -7302,6 +7309,7 @@ mod dialog_tests {
             tracing: None,
             model: None,
             bypass_approvals: None,
+            memory: None,
         }];
         let d = DialogState::new(&profiles);
         assert_eq!(d.profile_idx, 0);
@@ -7341,6 +7349,7 @@ mod dialog_tests {
             tracing: None,
             model: None,
             bypass_approvals: None,
+            memory: None,
         }];
 
         let mut d = DialogState::new(&profiles);

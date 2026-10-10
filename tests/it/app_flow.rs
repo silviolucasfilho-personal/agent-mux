@@ -23,6 +23,7 @@ fn shell_profiles() -> Vec<Profile> {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     }]
 }
 

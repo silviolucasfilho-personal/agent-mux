@@ -21,6 +21,7 @@ fn shell_profile(args: &[&str]) -> Profile {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     }
 }
 
@@ -110,6 +111,7 @@ async fn spawn_with_nonexistent_command_fails_without_creating_session() {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     };
     let result = Session::spawn(1, profile, std::env::temp_dir(), 24, 80, tx, &[], &[]);
     assert!(result.is_err());

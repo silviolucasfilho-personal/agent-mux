@@ -19,6 +19,34 @@ pub struct Profile {
     /// Skip the CLI's approval prompts by default
     /// (`--dangerously-skip-permissions`, or `--yolo` on Codex).
     pub bypass_approvals: Option<bool>,
+    /// Per-profile memory switch (`[profiles.memory]`): `enabled = false`
+    /// keeps this profile's sessions away from the shared memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<ProfileMemory>,
+}
+
+/// `[profiles.memory]`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct ProfileMemory {
+    pub enabled: Option<bool>,
+}
+
+/// Global `[memory]` table: the memory every harness in a workspace
+/// shares (`docs/memory.md`). All-optional; `crate::memory::Settings`
+/// holds the defaults. Phase 1 reads `enabled`, `location` and
+/// `index_lines`; the rest is parsed so a later file already loads.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct MemoryConfig {
+    pub enabled: Option<bool>,
+    /// `"library"` (default): `~/.agent-mux/memory/<slug>/`;
+    /// `"workspace"`: `<workspace>/.agent-mux/memory/`.
+    pub location: Option<String>,
+    pub index_lines: Option<usize>,
+    #[serde(default)]
+    pub imports: Vec<String>,
+    pub handoff: Option<String>,
+    pub brief_timeout_s: Option<u64>,
+    pub keeper: Option<bool>,
 }
 
 /// Global `[tracing]` table (alias: `[langfuse]`). All-optional so a
@@ -340,6 +368,9 @@ pub struct Config {
     /// The workflow runtime (`[workflows]`).
     #[serde(default)]
     pub workflows: Option<WorkflowsConfig>,
+    /// The shared memory (`[memory]`).
+    #[serde(default)]
+    pub memory: Option<MemoryConfig>,
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
@@ -673,6 +704,7 @@ impl Config {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
             Profile {
                 name: "Codex".into(),
@@ -682,6 +714,7 @@ impl Config {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
             Profile {
                 name: "Antigravity".into(),
@@ -691,6 +724,7 @@ impl Config {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
         ]
     }
@@ -738,6 +772,7 @@ pub fn load() -> anyhow::Result<Config> {
         agents: None,
         loops: None,
         workflows: None,
+        memory: None,
         hide_sidebar: false,
         clean: false,
         bypass_approvals: None,
@@ -767,6 +802,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
         agents: None,
         loops: None,
         workflows: None,
+        memory: None,
         hide_sidebar: false,
         clean: false,
         bypass_approvals: None,

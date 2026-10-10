@@ -24,6 +24,7 @@ fn app() -> (App, tempfile::TempDir) {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     };
     let mut app = App::new(vec![profile], None, tx);
     app.clipboard_enabled = false;
