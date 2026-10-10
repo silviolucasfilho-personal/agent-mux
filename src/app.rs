@@ -278,6 +278,34 @@ impl Notice {
 /// agent-mux the containing terminal is our vt100 buffer, so interactive
 /// Codex sessions must use inline mode. `codex exec` is non-interactive and
 /// does not accept or need this TUI flag.
+/// `claude agents --json`, asked at most once per Claude command for a
+/// whole restore: which saved conversations are running in Claude Code's
+/// background and must be attached to rather than resumed.
+#[derive(Default)]
+struct ClaudeBackgroundCache {
+    by_command: std::collections::HashMap<String, Vec<crate::harness::ClaudeBackground>>,
+}
+
+impl ClaudeBackgroundCache {
+    fn find(
+        &mut self,
+        profile: &Profile,
+        conversation: &str,
+    ) -> Option<crate::harness::ClaudeBackground> {
+        if crate::harness::Harness::detect(&profile.command)
+            != Some(crate::harness::Harness::Claude)
+        {
+            return None;
+        }
+        self.by_command
+            .entry(profile.command.clone())
+            .or_insert_with(|| crate::harness::claude_background_sessions(&profile.command))
+            .iter()
+            .find(|b| b.session_id == conversation)
+            .cloned()
+    }
+}
+
 fn prepare_nested_tui(profile: &mut Profile) {
     let configured_provider = profile.tracing.as_ref().and_then(|t| t.provider.as_deref());
     let is_codex = configured_provider == Some("codex")
@@ -3364,32 +3392,67 @@ impl App {
         let saved: Vec<persistence::SavedSession> = self
             .sessions
             .iter()
-            .filter(|s| !matches!(s.status(now), Status::Exited(_)))
-            .map(|s| persistence::SavedSession {
-                // the first message this launch sent is not sent again
-                profile: {
-                    let mut p = s.profile.clone();
-                    if !s.opening_args.is_empty() && p.args.ends_with(&s.opening_args) {
-                        p.args.truncate(p.args.len() - s.opening_args.len());
-                    }
-                    p
-                },
-                continued_from: s.continued_from.clone(),
-                dir: s.dir.clone(),
-                skill_id: s.skill_id.clone(),
-                conversation: conn
-                    .as_ref()
-                    .zip(s.trace.as_ref())
-                    .and_then(|(c, t)| {
-                        crate::tracing::store::query::launch_conversation(c, &t.launch_id)
-                            .ok()
-                            .flatten()
-                    })
-                    .or_else(|| s.conversation.clone()),
+            .filter_map(|s| {
+                if matches!(s.status(now), Status::Exited(_)) {
+                    // a restore that failed stays saved (`handle_pty_exit`)
+                    return s.restored_from.clone();
+                }
+                Some(persistence::SavedSession {
+                    // the first message this launch sent is not sent again
+                    profile: {
+                        let mut p = s.profile.clone();
+                        if !s.opening_args.is_empty() && p.args.ends_with(&s.opening_args) {
+                            p.args.truncate(p.args.len() - s.opening_args.len());
+                        }
+                        p
+                    },
+                    continued_from: s.continued_from.clone(),
+                    dir: s.dir.clone(),
+                    skill_id: s.skill_id.clone(),
+                    conversation: conn
+                        .as_ref()
+                        .zip(s.trace.as_ref())
+                        .and_then(|(c, t)| {
+                            crate::tracing::store::query::launch_conversation(c, &t.launch_id)
+                                .ok()
+                                .flatten()
+                        })
+                        .or_else(|| s.conversation.clone()),
+                })
             })
             .collect();
         persistence::save_sessions(&path, &saved)?;
         Ok(())
+    }
+
+    /// Opens a Claude Code background session in a pane with `claude
+    /// attach <id>`, standing in for a `--resume` Claude would refuse.
+    /// Untraced: the conversation runs in Claude's background process,
+    /// whose own launch is the one traced, and `attach` takes none of
+    /// the options tracing adds. The session keeps `profile`, the resume
+    /// it stands in for, so a save records the conversation as before.
+    fn spawn_attached(
+        &mut self,
+        id: usize,
+        profile: &Profile,
+        background: &crate::harness::ClaudeBackground,
+        dir: std::path::PathBuf,
+    ) -> anyhow::Result<Session> {
+        let attach = Profile {
+            args: crate::harness::attach_args(background),
+            tracing: Some(crate::config::ProfileTracing {
+                provider: Some("none".into()),
+                ..Default::default()
+            }),
+            ..profile.clone()
+        };
+        let mut session = self.spawn_traced_with_env(id, attach, dir, &[], None)?;
+        session.profile = profile.clone();
+        self.notice = Some(Notice::info(format!(
+            "'{}' is running in Claude Code's background: attached to it ({})",
+            profile.name, background.id
+        )));
+        Ok(session)
     }
 
     /// Restores saved sessions from disk upon application startup.
@@ -3405,7 +3468,9 @@ impl App {
         if saved.is_empty() {
             return;
         }
+        let mut background = ClaudeBackgroundCache::default();
         for s in saved {
+            let entry = s.clone();
             let dir = if s.dir.is_dir() {
                 s.dir
             } else if let Ok(cwd) = std::env::current_dir() {
@@ -3423,12 +3488,20 @@ impl App {
             ) {
                 profile.args = crate::harness::restore_args(harness, &profile.args, conv);
             }
+            let attach = conversation
+                .as_deref()
+                .and_then(|conv| background.find(&profile, conv));
             let id = self.next_id;
-            match self.spawn_traced_with_env(id, profile, dir, &[], s.skill_id.as_deref()) {
+            let spawned = match &attach {
+                Some(bg) => self.spawn_attached(id, &profile, bg, dir),
+                None => self.spawn_traced_with_env(id, profile, dir, &[], s.skill_id.as_deref()),
+            };
+            match spawned {
                 Ok(mut session) => {
                     session.skill_id = s.skill_id;
                     session.conversation = conversation;
                     session.continued_from = s.continued_from;
+                    session.restored_from = Some(entry);
                     self.next_id += 1;
                     self.sessions.push(session);
                 }
@@ -6238,14 +6311,27 @@ impl App {
         let profile = old.profile.clone();
         let dir = old.dir.clone();
         let skill_id = old.skill_id.clone();
+        // a failed restore retried: still the conversation it restores,
+        // attached to when Claude has it running in the background
+        let restored_from = old.restored_from.clone();
+        let conversation = restored_from.as_ref().and(old.conversation.clone());
+        let attach = conversation
+            .as_deref()
+            .and_then(|conv| ClaudeBackgroundCache::default().find(&profile, conv));
         // Fresh id: a stale reader thread from the dead session may still
         // send PtyExit for the old id; it must not find the new session.
         // Launch extras are re-planned fresh too (never stored in the
         // profile), so a respawned Claude tab gets a NEW session uuid.
         let id = self.next_id;
-        match self.spawn_traced_with_env(id, profile, dir, &[], skill_id.as_deref()) {
+        let spawned = match &attach {
+            Some(bg) => self.spawn_attached(id, &profile, bg, dir),
+            None => self.spawn_traced_with_env(id, profile, dir, &[], skill_id.as_deref()),
+        };
+        match spawned {
             Ok(mut session) => {
                 session.skill_id = skill_id;
+                session.restored_from = restored_from;
+                session.conversation = conversation;
                 self.next_id += 1;
                 self.sessions[self.selected] = session;
                 self.focus_pane();
@@ -6316,6 +6402,24 @@ impl App {
     pub fn handle_pty_exit(&mut self, id: usize) {
         if let Some(i) = self.session_index(id) {
             self.sessions[i].mark_exited();
+            // A restored session that dies at once did not come back: keep
+            // its saved entry for the next start instead of forgetting it.
+            // One that lived past the grace ended normally.
+            let session = &mut self.sessions[i];
+            if session.restored_from.is_some() {
+                let failed = session
+                    .started_at
+                    .elapsed()
+                    .is_ok_and(|d| d < crate::session::RESTORE_GRACE);
+                if !failed {
+                    session.restored_from = None;
+                } else {
+                    self.notice = Some(Notice::warn(format!(
+                        "'{}' exited right after it was restored; it stays saved for the next start (r retries, d forgets it)",
+                        session.profile.name
+                    )));
+                }
+            }
             if let Some(path) = self.sessions[i].briefing_path.take() {
                 let _ = std::fs::remove_file(path);
             }

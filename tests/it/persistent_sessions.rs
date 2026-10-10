@@ -139,6 +139,130 @@ async fn restoring_a_saved_antigravity_session_resumes_its_conversation() {
     again.kill_all();
 }
 
+/// A stand-in `claude` that has conversation `ee2525b2-…` running in the
+/// background, as `claude agents --json` reports it, and writes the
+/// command line it was launched with to `argv`.
+#[cfg(unix)]
+fn fake_claude(dir: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("claude");
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = agents ]; then
+  echo '[{{"pid":6080,"id":"ee2525b2","kind":"background","sessionId":"ee2525b2-7f7e"}}]'
+  exit 0
+fi
+echo "$@" > {argv}
+sleep 30
+"#,
+        argv = dir.join("argv").display()
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.display().to_string()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_conversation_running_in_claudes_background_is_attached_not_resumed() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sessions_path = temp_dir.path().join("saved_sessions.json");
+    let claude = Profile {
+        name: "Claude Code".into(),
+        command: fake_claude(temp_dir.path()),
+        args: vec!["--dangerously-skip-permissions".into()],
+        default_dir: None,
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    let saved = |conversation: &str| agent_mux::persistence::SavedSession {
+        profile: claude.clone(),
+        dir: temp_dir.path().to_path_buf(),
+        skill_id: None,
+        conversation: Some(conversation.into()),
+        continued_from: None,
+    };
+    agent_mux::persistence::save_sessions(&sessions_path, &[saved("ee2525b2-7f7e")]).unwrap();
+
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![claude.clone()], None, tx);
+    app.set_pane_size(24, 80);
+    app.set_sessions_file(&sessions_path);
+    app.restore_saved_sessions();
+
+    assert_eq!(app.sessions.len(), 1);
+    let argv = temp_dir.path().join("argv");
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    while !argv.is_file() && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&argv).unwrap().trim(),
+        "attach ee2525b2",
+        "Claude refuses --resume of a background session"
+    );
+    // the save still names the conversation, as a resume
+    let back = agent_mux::persistence::load_saved_sessions(&sessions_path);
+    assert_eq!(back[0].conversation.as_deref(), Some("ee2525b2-7f7e"));
+    assert_eq!(
+        back[0].profile.args,
+        vec![
+            "--dangerously-skip-permissions",
+            "--resume",
+            "ee2525b2-7f7e"
+        ]
+    );
+    app.kill_all();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_restored_session_that_exits_at_once_stays_saved() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let sessions_path = temp_dir.path().join("saved_sessions.json");
+    let agy = temp_dir.path().join("agy");
+    std::fs::write(&agy, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let entry = agent_mux::persistence::SavedSession {
+        profile: Profile {
+            name: "Antigravity".into(),
+            command: agy.display().to_string(),
+            args: vec!["--conversation".into(), "c-1".into()],
+            default_dir: None,
+            tracing: None,
+            model: None,
+            bypass_approvals: None,
+        },
+        dir: temp_dir.path().to_path_buf(),
+        skill_id: None,
+        conversation: Some("c-1".into()),
+        continued_from: None,
+    };
+    agent_mux::persistence::save_sessions(&sessions_path, std::slice::from_ref(&entry)).unwrap();
+
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![], None, tx);
+    app.set_pane_size(24, 80);
+    app.set_sessions_file(&sessions_path);
+    app.restore_saved_sessions();
+    assert_eq!(app.sessions.len(), 1);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let id = app.sessions[0].id;
+    app.handle_pty_exit(id);
+
+    assert_eq!(
+        agent_mux::persistence::load_saved_sessions(&sessions_path),
+        vec![entry],
+        "a failed restore is not forgotten"
+    );
+    // removing it is the user's word that it is gone
+    app.sessions.clear();
+    app.save_active_sessions().unwrap();
+    assert!(agent_mux::persistence::load_saved_sessions(&sessions_path).is_empty());
+}
+
 #[tokio::test]
 async fn a_session_resumed_from_history_is_saved_with_its_conversation() {
     let temp_dir = tempfile::tempdir().unwrap();

@@ -9,6 +9,8 @@
 //!
 //! Every mapping below was checked against `--help` on the installed
 //! CLIs (codex-cli 0.153.2) rather than taken from documentation.
+//! Claude Code's background sessions (`claude agents --json`, `claude
+//! attach <id>`) were probed on 2.1.296.
 
 use std::path::Path;
 
@@ -305,6 +307,94 @@ fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
     out
 }
 
+/// A Claude Code session running in the background (`claude --bg`, or a
+/// `/resume` from inside a session, which in 2.1.296 forks the picked
+/// conversation into one). Claude will not `--resume` it: it prints
+/// "… is running in the background. Run `claude attach <id>` to open it,
+/// or `claude stop <id>` first to resume it here" and exits 1, so a
+/// restart has to attach to it instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeBackground {
+    /// The short id `claude attach` takes (`ee2525b2`).
+    pub id: String,
+    /// The conversation it holds, as `--resume` names it.
+    pub session_id: String,
+}
+
+/// The background sessions `command` (a Claude Code binary) has running
+/// now, from `claude agents --json` (probed on 2.1.296: an array of
+/// `{id, sessionId, kind, pid?, …}`; `kind` is `background` or
+/// `interactive`, and an entry without a `pid` is not running). A CLI
+/// without the subcommand, or one that does not answer within a few
+/// seconds, has none.
+pub fn claude_background_sessions(command: &str) -> Vec<ClaudeBackground> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let Ok(mut child) = Command::new(command)
+        .args(["agents", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    // read on a thread: a full pipe would otherwise stall the child
+    let reader = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = out.read_to_string(&mut buf);
+            buf
+        })
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
+        }
+    }
+    reader
+        .and_then(|r| r.join().ok())
+        .map(|json| parse_claude_background(&json))
+        .unwrap_or_default()
+}
+
+/// The running background sessions in `claude agents --json` output.
+pub fn parse_claude_background(json: &str) -> Vec<ClaudeBackground> {
+    let Ok(serde_json::Value::Array(rows)) = serde_json::from_str(json) else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter(|r| r.get("kind").and_then(|k| k.as_str()) == Some("background"))
+        .filter(|r| r.get("pid").is_some_and(|p| p.is_number()))
+        .filter_map(|r| {
+            let session_id = r.get("sessionId")?.as_str()?.to_string();
+            let id = r
+                .get("id")
+                .and_then(|i| i.as_str())
+                .unwrap_or(&session_id)
+                .to_string();
+            Some(ClaudeBackground { id, session_id })
+        })
+        .collect()
+}
+
+/// The whole command line that opens a background session in a pane:
+/// `claude attach <id>`, which takes no other options (probed on
+/// 2.1.296).
+pub fn attach_args(background: &ClaudeBackground) -> Vec<String> {
+    vec!["attach".into(), background.id.clone()]
+}
+
 /// The full argument list for a launch: the harness's subcommand, then
 /// the profile's own arguments, then the options' flags.
 pub fn compose(profile_args: &[String], rendered: &Rendered) -> Vec<String> {
@@ -491,6 +581,26 @@ mod tests {
             rendered(&o, Harness::Codex),
             vec!["exec", "resume", "--last", "summarize"]
         );
+    }
+
+    #[test]
+    fn only_running_background_sessions_are_attachable() {
+        // the shape `claude agents --json` printed on 2.1.296
+        let json = r#"[
+          {"id":"5170ae0a","cwd":"/w","kind":"background","sessionId":"5170ae0a-97b3","state":"blocked"},
+          {"pid":6080,"id":"ee2525b2","cwd":"/w","kind":"background","sessionId":"ee2525b2-7f7e","status":"idle"},
+          {"pid":53385,"cwd":"/w","kind":"interactive","sessionId":"546af05a-30b1","status":"busy"}
+        ]"#;
+        let running = parse_claude_background(json);
+        assert_eq!(
+            running,
+            vec![ClaudeBackground {
+                id: "ee2525b2".into(),
+                session_id: "ee2525b2-7f7e".into()
+            }]
+        );
+        assert_eq!(attach_args(&running[0]), vec!["attach", "ee2525b2"]);
+        assert!(parse_claude_background("error: unknown command").is_empty());
     }
 
     #[test]

@@ -150,7 +150,17 @@ pub struct Session {
     /// The session this one continues (`f`), as the sidebar names it:
     /// `Claude Code · agent-mux`.
     pub continued_from: Option<String>,
+    /// The saved entry this session was restored from at startup, kept
+    /// while a failed restore (one that exited within
+    /// `RESTORE_GRACE`) should stay saved for the next start rather
+    /// than vanish with the exited session.
+    pub restored_from: Option<crate::persistence::SavedSession>,
 }
+
+/// A restored session that exits sooner than this failed to come back
+/// (a refused resume, a missing directory's CLI error): its saved entry
+/// is kept.
+pub const RESTORE_GRACE: Duration = Duration::from_secs(15);
 
 /// How often the exit-watcher thread polls `Child::try_wait()`.
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -307,6 +317,7 @@ impl Session {
             started_at: std::time::SystemTime::now(),
             opening_args: Vec::new(),
             continued_from: None,
+            restored_from: None,
             group: None,
             briefing_path: None,
             conversation: None,
