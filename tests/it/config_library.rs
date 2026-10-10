@@ -576,3 +576,40 @@ fn the_catalog_reads_the_settings_file_it_is_given() {
     assert!(created.is_file());
     assert!(agent_mux::config::parse(&std::fs::read_to_string(&created).unwrap()).is_ok());
 }
+
+#[test]
+fn memory_notes_are_configuration_items_with_their_problems() {
+    let f = fixture();
+    let notes = f.library.join("memory/_user/notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::write(
+        notes.join("good.md"),
+        "---\nname: good\ndescription: a fine note\nkind: user\n---\nx\n",
+    )
+    .unwrap();
+    std::fs::write(
+        notes.join("odd.md"),
+        "---\nname: odd\ndescription: a note of an unknown kind\nkind: gossip\n---\nx\n",
+    )
+    .unwrap();
+    let (ok, out, _) = run(&f, &["config", "ls", "--json"]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let kinds: Vec<&str> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "memory note")
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["user · good", "user · odd"]);
+    let (ok, out, _) = run(&f, &["config", "check"]);
+    assert!(!ok);
+    assert!(
+        out.contains("memory/_user/notes/odd.md: kind \"gossip\""),
+        "{out}"
+    );
+    let (ok, out, _) = run(&f, &["config", "new", "memory-note", "likes-tables"]);
+    assert!(ok, "{out}");
+    assert!(notes.join("likes-tables.md").is_file());
+}

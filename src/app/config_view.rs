@@ -235,6 +235,9 @@ impl ConfigViewState {
                             Kind::Agent => {
                                 "  An agent is who runs a workflow step: agent = \"<name>\" on a step, a verify block or a judge. docs/agents.md"
                             }
+                            Kind::MemoryNote => {
+                                "  A note is one fact the sessions of a workspace share. n writes one about you, for every workspace; sessions save their own with /memory. docs/memory.md"
+                            }
                             _ => "",
                         },
                         dim,
@@ -362,6 +365,34 @@ impl ConfigViewState {
                     "workflow steps that name it (`agent = \"…\"`); see `agent-mux agent show`"
                         .into(),
                     Style::default(),
+                ));
+            }
+            Kind::MemoryNote => {
+                if let Ok(n) = crate::memory::note::parse(&asset.effective(), "") {
+                    lines.push(row("Note", n.kind.as_str().to_string(), Style::default()));
+                    let mut from = n.source.harness.clone();
+                    if let Some(w) = &n.source.when {
+                        from.push_str(&format!(" · {w}"));
+                    }
+                    if let Some(l) = &n.source.launch {
+                        from.push_str(&format!(" · launch {l}"));
+                    }
+                    lines.push(row("From", from, Style::default()));
+                    let mut flags = n.confidence.as_str().to_string();
+                    if n.pinned {
+                        flags.push_str(" · pinned");
+                    }
+                    if let Some(d) = &n.expires_at {
+                        flags.push_str(&format!(" · expires {d}"));
+                    }
+                    lines.push(row("Confidence", flags, Style::default()));
+                    lines.push(row("About", n.description, Style::default()));
+                }
+                lines.push(row(
+                    "Used by",
+                    "every session in its workspace reads the index line; R moves the note to notes/.removed/"
+                        .into(),
+                    dim,
                 ));
             }
             Kind::Settings => {

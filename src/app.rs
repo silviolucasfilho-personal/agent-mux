@@ -5757,7 +5757,11 @@ impl App {
                 self.loop_audits.clear();
             }
             Some(Kind::Settings) => self.reload_settings(),
-            Some(Kind::Workflow) | Some(Kind::Agent) | Some(Kind::Prompts) | None => {}
+            Some(Kind::Workflow)
+            | Some(Kind::Agent)
+            | Some(Kind::Prompts)
+            | Some(Kind::MemoryNote)
+            | None => {}
         }
     }
 
@@ -5783,6 +5787,11 @@ impl App {
                 }
                 self.agents = crate::config::resolve_agents(cfg.agents.as_ref());
                 self.loops = crate::config::resolve_loops(cfg.loops.as_ref());
+                // a memory that is on follows the file; one left off (an App
+                // built by a test) stays off
+                if self.memory.is_some() {
+                    self.memory = Some(cfg.memory.unwrap_or_default());
+                }
                 self.editor = cfg.editor;
                 self.config_path = Some(path);
             }
