@@ -1216,7 +1216,7 @@ mod tests {
         assert_eq!(
             count(Kind::Skill),
             51,
-            "Heimdall, the planner, memory and the step skills (SKILL.md and skill.toml each)"
+            "Heimdall, the planner, mux-memory and the step skills (SKILL.md and skill.toml each)"
         );
         assert_eq!(count(Kind::LoopPattern), 1);
         assert_eq!(count(Kind::LoopSkill), 11);

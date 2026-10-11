@@ -1,5 +1,5 @@
 //! `agent-mux memory …`: the workspace's memory from the shell, and the
-//! command the `memory` skill runs after it saves a note.
+//! command the `mux-memory` skill runs after it saves a note.
 
 use super::{Settings, context, index, log, note, paths};
 use crate::prompts::Prompts;
@@ -377,7 +377,7 @@ fn check(t: &Target, prompts: &Prompts) -> anyhow::Result<()> {
             dir: &t.dir,
             user_dir: (!t.is_user).then_some(t.user_dir.as_path()),
             brief: None,
-            invocation: "/memory",
+            invocation: "/mux-memory",
         },
         prompts,
     );

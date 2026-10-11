@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(env[0].0, ENV_DIR);
         assert_eq!(env.len(), 3);
         assert!(
-            l.start_text("/memory", &Prompts::builtin())
+            l.start_text("/mux-memory", &Prompts::builtin())
                 .contains("No notes yet.")
         );
     }

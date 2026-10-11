@@ -6,8 +6,8 @@
 //! (`note`), with an index Rust rebuilds from their frontmatter (`index`).
 //! A session is given the folder in its environment and, at start, one
 //! text (`context`): the hint, then the index inside the trust fence
-//! (`fence`). Sessions write notes through the `memory` skill
-//! (`skills/memory`); `agent-mux memory …` (`cli`) and the Configuration
+//! (`fence`). Sessions write notes through the `mux-memory` skill
+//! (`skills/mux-memory`); `agent-mux memory …` (`cli`) and the Configuration
 //! view do the rest.
 //!
 //! How the start text reaches each harness, as probed:
@@ -57,7 +57,7 @@ pub const ENV_BRIEF: &str = "AGENT_MUX_MEMORY_BRIEF";
 pub const ENV_USER: &str = "AGENT_MUX_MEMORY_USER";
 
 /// The skill package that saves, recalls and forgets notes.
-pub const SKILL_ID: &str = "memory";
+pub const SKILL_ID: &str = "mux-memory";
 
 /// Index lines when `[memory] index_lines` is unset.
 pub const DEFAULT_INDEX_LINES: usize = 60;

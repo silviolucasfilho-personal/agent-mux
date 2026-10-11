@@ -402,9 +402,9 @@ mod tests {
                 "{memory} {index} {invocation}",
                 "/m",
                 "/m/MEMORY.md",
-                "/memory"
+                "/mux-memory"
             ),
-            "/m /m/MEMORY.md /memory"
+            "/m /m/MEMORY.md /mux-memory"
         );
     }
 }

@@ -1,9 +1,9 @@
 ---
-name: memory
+name: mux-memory
 description: Use to save, recall or forget a fact in the memory this workspace shares with every coding agent agent-mux runs here, and to write a hand-off brief. Use when the user says remember, recall, forget, or asks what earlier sessions knew, and when you learn something the next session in this folder will need.
 ---
 
-# memory — the workspace's shared memory
+# mux-memory — the workspace's shared memory
 
 agent-mux gives every session in this workspace the same memory, whatever harness runs it. It is a folder of Markdown notes, one fact per file:
 

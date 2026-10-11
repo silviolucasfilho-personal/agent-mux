@@ -153,12 +153,12 @@ async fn a_claude_launch_without_a_hook_gets_a_pointer_the_environment_and_the_s
         .after("--append-system-prompt")
         .expect("the fallback pointer");
     assert!(hint.contains(&dir.to_string_lossy().into_owned()), "{hint}");
-    assert!(hint.contains("/memory"));
+    assert!(hint.contains("/mux-memory"));
     assert!(
         !hint.contains(fence::START),
         "the index never goes into the system prompt"
     );
-    assert!(f.home.join(".claude/skills/memory/SKILL.md").is_file());
+    assert!(f.home.join(".claude/skills/mux-memory/SKILL.md").is_file());
     app.kill_all();
 }
 
@@ -231,8 +231,8 @@ async fn a_codex_persona_gets_one_developer_instructions_with_both_texts() {
     assert!(text.starts_with("You review code.\n\n"), "{text}");
     assert!(text.contains(CODEX_MARK));
     assert!(text.contains("[commit-on-master](notes/commit-on-master.md) — we commit on master"));
-    assert!(text.contains("$memory"));
-    assert!(f.home.join(".codex/skills/memory/SKILL.md").is_file());
+    assert!(text.contains("$mux-memory"));
+    assert!(f.home.join(".codex/skills/mux-memory/SKILL.md").is_file());
 
     // a save keeps the persona and leaves the memory part out
     app.save_active_sessions().unwrap();
@@ -354,7 +354,7 @@ fn session_start_is_answered_with_the_memory_even_without_a_store() {
             "{text}"
         );
     }
-    assert!(text.contains("/memory"));
+    assert!(text.contains("/mux-memory"));
     // the index was built by the hook, and the start is logged
     assert!(paths::index_path(&dir).is_file());
     let log = std::fs::read_to_string(dir.join(paths::LOG)).unwrap();

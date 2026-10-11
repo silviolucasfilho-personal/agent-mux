@@ -236,7 +236,7 @@ impl ConfigViewState {
                                 "  An agent is who runs a workflow step: agent = \"<name>\" on a step, a verify block or a judge. docs/agents.md"
                             }
                             Kind::MemoryNote => {
-                                "  A note is one fact the sessions of a workspace share. n writes one about you, for every workspace; sessions save their own with /memory. docs/memory.md"
+                                "  A note is one fact the sessions of a workspace share. n writes one about you, for every workspace; sessions save their own with /mux-memory. docs/memory.md"
                             }
                             _ => "",
                         },

@@ -22,7 +22,7 @@ pub struct Inputs<'a> {
     pub user_dir: Option<&'a Path>,
     /// A brief addressed to this session.
     pub brief: Option<&'a Path>,
-    /// `/memory` or `$memory`.
+    /// `/mux-memory` or `$mux-memory`.
     pub invocation: &'a str,
 }
 
@@ -150,7 +150,7 @@ mod tests {
                 dir: &ws,
                 user_dir: Some(&user),
                 brief: Some(&brief),
-                invocation: "/memory",
+                invocation: "/mux-memory",
             },
             &p,
         );
@@ -158,7 +158,7 @@ mod tests {
             text.starts_with("You have a memory for this workspace at "),
             "{text}"
         );
-        assert!(text.contains("/memory"));
+        assert!(text.contains("/mux-memory"));
         assert_eq!(text.matches(fence::START).count(), 2);
         assert!(text.contains("[one](notes/one.md) — first fact"));
         assert!(text.contains("[me](notes/me.md) — the user likes tables"));
@@ -184,7 +184,7 @@ mod tests {
                 dir: d.path(),
                 user_dir: None,
                 brief: None,
-                invocation: "$memory",
+                invocation: "$mux-memory",
             },
             &p,
         );

@@ -4,7 +4,7 @@ Every harness keeps a memory of its own, and none of them meet. agent-mux gives 
 
 The memory is plain Markdown under `~/.agent-mux/`. You can open, edit and grep it. Nothing under `~/.claude`, `~/.codex` or `~/.gemini` is written, and each harness's own memory keeps working as before.
 
-Design: `docs/superpowers/specs/2026-10-10-shared-memory-and-handoff-design.md`. Plan: `docs/superpowers/plans/2026-10-10-shared-memory.md`. Code: `src/memory/`, `skills/memory/`.
+Design: `docs/superpowers/specs/2026-10-10-shared-memory-and-handoff-design.md`. Plan: `docs/superpowers/plans/2026-10-10-shared-memory.md`. Code: `src/memory/`, `skills/mux-memory/`.
 
 ---
 
@@ -88,7 +88,9 @@ It also gets one **start text**: the hint (`[memory] hint` in `prompts.toml`), t
 | Codex | `-c developer_instructions=…` with the whole start text. | Merged into a persona's own instructions and into `developer_instructions` from your `config.toml`; a `-c` would otherwise replace them. Left out of the saved session and composed again at every launch. |
 | Antigravity | The variables and the skill. | agy has no instruction flag; its start hook is a later phase. |
 
-The **`memory` skill** is installed for each harness a session runs on, once per run: `/memory` on Claude Code and Antigravity, `$memory` on Codex. It saves a note (checking the index for one that already covers the fact), recalls notes with their sources, forgets one only on your word, and writes a hand-off brief. After a save it runs `agent-mux memory check` when the binary is on the `PATH`, so the index is rebuilt at once.
+The skill is named `mux-memory` to avoid replacing Claude Code’s built-in `/memory` command. Installing it archives an older agent-mux-managed `memory` skill under the harness configuration’s `agent-mux-retired-skills/` directory; unrelated skills are left alone.
+
+The **`mux-memory` skill** is installed for each harness a session runs on, once per run: `/mux-memory` on Claude Code and Antigravity, `$mux-memory` on Codex. It saves a note (checking the index for one that already covers the fact), recalls notes with their sources, forgets one only on your word, and writes a hand-off brief. After a save it runs `agent-mux memory check` when the binary is on the `PATH`, so the index is rebuilt at once.
 
 ## 5. Command line
 
@@ -134,7 +136,7 @@ command = "claude"
 enabled = false           # this profile's sessions get no memory
 ```
 
-The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/memory/` like Heimdall. `imports`, `handoff`, `brief_timeout_s` and `keeper` are read but not used yet.
+The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/mux-memory/` like Heimdall. `imports`, `handoff`, `brief_timeout_s` and `keeper` are read but not used yet.
 
 ## 8. Not yet
 

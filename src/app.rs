@@ -2682,7 +2682,7 @@ pub struct App {
     /// The shared memory's `[memory]` table; `None` keeps memory off (the
     /// default for an App built in a test). `main` sets it from the config.
     pub memory: Option<crate::config::MemoryConfig>,
-    /// Harnesses the `memory` skill was installed for in this run.
+    /// Harnesses the `mux-memory` skill was installed for in this run.
     pub memory_skill_installed: std::collections::HashSet<crate::harness::Harness>,
     pub last_workflow_pass: Option<Instant>,
     /// Planner sessions in flight and the documents they produced.
@@ -2875,7 +2875,7 @@ impl App {
     }
 
     /// The memory's environment, the fallback channel for a launch whose
-    /// start hook does not deliver the start text, and the `memory` skill.
+    /// start hook does not deliver the start text, and the `mux-memory` skill.
     fn apply_memory(
         &mut self,
         m: &crate::memory::launch::Launch,
@@ -2917,7 +2917,7 @@ impl App {
         }
     }
 
-    /// Installs the `memory` skill for a harness once per run; a failure
+    /// Installs the `mux-memory` skill for a harness once per run; a failure
     /// is a notice, the launch goes on.
     fn ensure_memory_skill(&mut self, harness: crate::harness::Harness) {
         if self.memory_skill_installed.contains(&harness) {

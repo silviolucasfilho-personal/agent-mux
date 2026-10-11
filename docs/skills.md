@@ -99,4 +99,4 @@ Heimdall declares `auto_approve = true`: it only reads, and it is usually launch
 
 ## 8. Memory
 
-The `memory` package (`skills/memory/`, `hidden = true`, `writes = true`) is compiled in and installed user-level for each harness a session with shared memory runs on, once per run, so it never appears in the Agents sidebar. It saves, recalls and forgets notes in `$AGENT_MUX_MEMORY` and writes hand-off briefs: `/memory` on Claude Code and Antigravity, `$memory` on Codex. A package at `~/.agent-mux/skills/memory/` shadows it like Heimdall. See `docs/memory.md`.
+The `mux-memory` package (`skills/mux-memory/`, `hidden = true`, `writes = true`) is compiled in and installed user-level for each harness a session with shared memory runs on, once per run, so it never appears in the Agents sidebar. It saves, recalls and forgets notes in `$AGENT_MUX_MEMORY` and writes hand-off briefs: `/mux-memory` on Claude Code and Antigravity, `$mux-memory` on Codex. A package at `~/.agent-mux/skills/mux-memory/` shadows it like Heimdall. See `docs/memory.md`.
