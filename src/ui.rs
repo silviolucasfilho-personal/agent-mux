@@ -5777,21 +5777,37 @@ fn card_row(key: &str, value: String) -> Line<'static> {
     ])
 }
 
-/// A harness profile as an agent: what it runs and its sessions.
+/// A harness profile as an agent: what it runs, then a recap of each of
+/// its sessions from the trace store (`App::harness_recap`).
 fn draw_harness_card(f: &mut Frame, area: Rect, app: &App, p: usize, now: Instant) {
     let Some(profile) = app.profiles.get(p) else {
         return;
     };
     let dim = Style::default().fg(Color::DarkGray);
-    let mine: Vec<&crate::session::Session> = app
-        .sessions
+    let label = Style::default().fg(Color::Yellow);
+    let recap = app.harness_recap(p, now);
+    let running = recap
         .iter()
-        .filter(|s| s.profile.name == profile.name && s.group.is_none() && s.skill_id.is_none())
-        .collect();
-    let running = mine
-        .iter()
-        .filter(|s| !matches!(s.status(now), Status::Exited(_)))
+        .filter(|(i, _)| !matches!(app.sessions[*i].status(now), Status::Exited(_)))
         .count();
+    // the room a value has on one line, inside the borders and its label
+    let room = usize::from(area.width.saturating_sub(2 + 10));
+    let cut = |text: &str| -> String {
+        let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one_line.chars().count() <= room {
+            one_line
+        } else {
+            let mut s: String = one_line.chars().take(room.saturating_sub(1)).collect();
+            s.push('…');
+            s
+        }
+    };
+    let field = |key: &str, value: String| {
+        Line::from(vec![
+            Span::styled(format!("    {key:<6}"), label),
+            Span::raw(cut(&value)),
+        ])
+    };
     let mut lines = vec![
         Line::styled(
             format!(" {}", profile.name),
@@ -5800,36 +5816,138 @@ fn draw_harness_card(f: &mut Frame, area: Rect, app: &App, p: usize, now: Instan
                 .add_modifier(Modifier::BOLD),
         ),
         Line::styled(
-            " A built-in agent: the harness as it is, in a folder you pick.",
+            format!(
+                " {} {} · model {}",
+                profile.command,
+                profile.args.join(" "),
+                profile.model.as_deref().unwrap_or("the CLI's default")
+            ),
             dim,
         ),
         Line::raw(""),
-        card_row(
-            "Runs",
-            format!("{} {}", profile.command, profile.args.join(" ")),
+        Line::styled(
+            format!(" {} sessions · {running} running", recap.len()),
+            Style::default().add_modifier(Modifier::BOLD),
         ),
-        card_row(
-            "Model",
-            profile
-                .model
-                .clone()
-                .unwrap_or_else(|| "the CLI's default".into()),
-        ),
-        card_row("Sessions", format!("{} · {running} running", mine.len())),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("  ↩ n", Style::default().fg(Color::Cyan)),
-            Span::raw(" new session   "),
-            Span::styled("j k", Style::default().fg(Color::Cyan)),
-            Span::raw(" its sessions are the rows under it"),
-        ]),
-        Line::styled("  Profiles are edited in profiles.toml (C, Settings).", dim),
     ];
-    lines.shrink_to_fit();
+    if recap.is_empty() {
+        lines.push(Line::styled(
+            "   None yet: ↩ or n starts one in a folder you pick.",
+            dim,
+        ));
+    }
+    for (i, card) in &recap {
+        let s = &app.sessions[*i];
+        let status = s.status(now);
+        let (state, style) = status_label_style(status);
+        let mut facts = vec![state];
+        if let Some(c) = card {
+            let turns = c.completed_turns + c.open_turns;
+            facts.push(format!("{turns} turn{}", if turns == 1 { "" } else { "s" }));
+            if c.duration_ms > 0 {
+                facts.push(recap_duration(c.duration_ms));
+            }
+        }
+        if let Some(cost) = s
+            .trace_stats
+            .as_ref()
+            .and_then(|t| t.cost_label())
+            .or_else(|| {
+                card.as_ref()
+                    .and_then(|c| c.total_cost_usd)
+                    .filter(|c| *c > 0.0)
+                    .map(|c| crate::tracing::cli::fmt_cost(Some(c)))
+            })
+        {
+            facts.push(cost);
+        }
+        let mark = if matches!(status, Status::Exited(_)) {
+            "○"
+        } else {
+            "●"
+        };
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {mark} "), style),
+            Span::styled(
+                folder_name(&s.dir),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(facts.join(" · "), style),
+        ]));
+        let Some(c) = card else {
+            lines.push(Line::styled(
+                if s.trace.is_some() {
+                    "    No turn recorded yet."
+                } else {
+                    "    Not traced: no recap (t turns tracing on for a new session)."
+                },
+                dim,
+            ));
+            continue;
+        };
+        if let Some(goal) = &c.initial_goal.value {
+            lines.push(field("Goal", goal.clone()));
+        }
+        // the last tool, which says what it is doing only while it works
+        if status == Status::Working
+            && let Some(now_doing) = c.current_activity.value.as_ref().filter(|v| !v.is_empty())
+        {
+            lines.push(field("Now", now_doing.clone()));
+        }
+        let files: Vec<String> = c
+            .files_modified
+            .iter()
+            .filter_map(|e| e.value.as_ref())
+            .map(|f| {
+                std::path::Path::new(f)
+                    .strip_prefix(&s.dir)
+                    .map(|r| r.display().to_string())
+                    .unwrap_or_else(|_| f.clone())
+            })
+            .collect();
+        if !files.is_empty() {
+            let shown = files.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+            let more = files.len().saturating_sub(3);
+            lines.push(field(
+                "Files",
+                if more > 0 {
+                    format!("{shown} +{more}")
+                } else {
+                    shown
+                },
+            ));
+        }
+        if let Some(last) = c
+            .last_assistant_output
+            .as_ref()
+            .and_then(|e| e.value.as_ref())
+        {
+            lines.push(field("Last", last.clone()));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("  ↩ n", Style::default().fg(Color::Cyan)),
+        Span::raw(" new session   "),
+        Span::styled("j k", Style::default().fg(Color::Cyan)),
+        Span::raw(" its sessions are the rows under it"),
+    ]));
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {} ", profile.name));
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// `42 s`, `12 min`, `1 h 5 min`.
+fn recap_duration(ms: u64) -> String {
+    let s = ms / 1000;
+    match s {
+        0..60 => format!("{s} s"),
+        60..3600 => format!("{} min", s / 60),
+        _ => format!("{} h {} min", s / 3600, (s % 3600) / 60),
+    }
 }
 
 /// A persona agent: who it is, its tools and models.

@@ -25,6 +25,7 @@ pub mod commands;
 mod config_view;
 pub mod dir_picker;
 pub mod flow_builder;
+pub mod harness_recap;
 pub mod inbox;
 pub mod loop_builder;
 mod memory_save;
@@ -2634,6 +2635,8 @@ pub struct App {
     pub runtime_dir: Option<std::path::PathBuf>,
     /// Cached briefing for the active Agents preview (if capable of trace.read).
     pub cached_briefing: Option<crate::tracing::analysis::Briefing>,
+    /// The recap the selected harness row shows (`harness_recap`).
+    pub harness_recap: std::cell::RefCell<Option<harness_recap::HarnessRecap>>,
     /// Instant when the briefing was last successfully refreshed.
     pub cached_briefing_as_of: Option<Instant>,
     /// Most recent warning / error from briefing refresh, if any.
@@ -2785,6 +2788,7 @@ impl App {
             bypass_approvals_default: DEFAULT_BYPASS_APPROVALS,
             runtime_dir: None,
             cached_briefing: None,
+            harness_recap: Default::default(),
             cached_briefing_as_of: None,
             cached_briefing_warning: None,
             briefing_revision: 0,
