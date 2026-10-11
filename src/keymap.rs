@@ -625,3 +625,42 @@ mod tests {
         assert_eq!(chord_meaning(Chord::Find), "find in the pane");
     }
 }
+
+/// Stable actions shared by dispatch, Commands and help.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ActionId {
+    Commands, Help, FocusAgents, ReturnToSession, ToggleSidebar, Quit,
+    Traces, Runs, New, Edit, Delete, Run, Stop, Save, Reload, Restore,
+    Editor, SetVerdict, TestShortcuts, PrevSession, NextSession,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ActionDef {
+    pub id: ActionId,
+    pub label: &'static str,
+    pub keywords: &'static str,
+    pub key: Option<char>,
+}
+
+pub const ACTIONS: &[ActionDef] = &[
+    ActionDef { id: ActionId::Help, label: "Help for this screen", keywords: "keyboard shortcuts", key: None },
+    ActionDef { id: ActionId::FocusAgents, label: "Focus Agents", keywords: "sidebar list navigation", key: None },
+    ActionDef { id: ActionId::ReturnToSession, label: "Return to session", keywords: "pane harness terminal", key: None },
+    ActionDef { id: ActionId::ToggleSidebar, label: "Show/hide sidebar", keywords: "layout", key: None },
+    ActionDef { id: ActionId::Traces, label: "Open traces", keywords: "trace browser", key: None },
+    ActionDef { id: ActionId::Runs, label: "Open runs", keywords: "history workflow loop", key: None },
+    ActionDef { id: ActionId::PrevSession, label: "Previous session", keywords: "switch", key: None },
+    ActionDef { id: ActionId::NextSession, label: "Next session", keywords: "switch", key: None },
+    ActionDef { id: ActionId::New, label: "New", keywords: "create", key: Some('n') },
+    ActionDef { id: ActionId::Edit, label: "Edit selected item", keywords: "change", key: Some('e') },
+    ActionDef { id: ActionId::Delete, label: "Delete/remove selected item", keywords: "dismiss", key: Some('d') },
+    ActionDef { id: ActionId::Run, label: "Run/resume", keywords: "launch", key: Some('r') },
+    ActionDef { id: ActionId::Stop, label: "Stop selected run", keywords: "kill cancel", key: Some('x') },
+    ActionDef { id: ActionId::Save, label: "Save", keywords: "write", key: Some('s') },
+    ActionDef { id: ActionId::Reload, label: "Reload", keywords: "rescan refresh", key: Some('r') },
+    ActionDef { id: ActionId::Restore, label: "Restore built-in", keywords: "reset", key: Some('R') },
+    ActionDef { id: ActionId::Editor, label: "Open in editor", keywords: "compose external", key: Some('o') },
+    ActionDef { id: ActionId::SetVerdict, label: "Change verdict", keywords: "score trace", key: None },
+    ActionDef { id: ActionId::TestShortcuts, label: "Test shortcuts", keywords: "keyboard terminal verify", key: None },
+    ActionDef { id: ActionId::Quit, label: "Quit agent-mux", keywords: "exit", key: None },
+];

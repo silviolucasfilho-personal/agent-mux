@@ -1,5 +1,6 @@
 use crate::app::about::{AboutRow, AboutState};
 mod agent_editor;
+mod commands;
 mod flow;
 mod loop_builder;
 pub mod markdown;
@@ -348,6 +349,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         ),
         _ => {}
     }
+    commands::draw(f, app);
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {

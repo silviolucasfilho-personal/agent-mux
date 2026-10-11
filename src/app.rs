@@ -19,6 +19,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
 pub mod about;
+pub mod commands;
 pub mod agent_editor;
 pub mod agents_list;
 mod config_view;
@@ -2560,6 +2561,8 @@ pub struct App {
     /// on Unix, always on Windows): decides whether the hints print the
     /// `⌘`/`Ctrl+Shift` chords or their protocol-free forms.
     pub keys_enhanced: bool,
+    pub command_overlay: Option<commands::Overlay>,
+    pub command_origin: Option<usize>,
     /// The trace strip under the selected session (`T`).
     pub trace_strip: TraceStrip,
     /// What the strip shows: the selected session's latest turn, read
@@ -2744,6 +2747,8 @@ impl App {
             link_opener: crate::links::open,
             focus: Focus::List,
             keys_enhanced: cfg!(windows),
+            command_overlay: None,
+            command_origin: None,
             trace_strip: TraceStrip::Off,
             strip: None,
             strip_launch: None,
@@ -3079,6 +3084,7 @@ impl App {
         self.sidebar_hidden = !self.sidebar_hidden;
         if self.sidebar_hidden {
             self.sidebar_section = SidebarSection::Active;
+            self.focus = Focus::Pane;
         }
         self.recompute_pane_size();
     }
@@ -4019,6 +4025,10 @@ impl App {
             self.link_keys_suspended = true;
             self.cmd_held = false;
         }
+        if matches!(self.mode, Mode::Main) {
+            self.command_origin = self.sessions.get(self.selected).map(|s| s.id);
+        }
+        if self.handle_command_overlay(key, now) { return; }
         self.notice = None;
         if self.search.is_some() {
             self.handle_search_key(key);
@@ -4327,6 +4337,7 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent, _now: Instant) {
+        if self.command_overlay.is_some() { return; }
         if let Mode::Markdown(ref mut view) = self.mode {
             let outcome = view.handle_mouse(&ev);
             self.markdown_outcome(outcome);
@@ -4946,7 +4957,7 @@ impl App {
             }
             Action::OpenNewAgent => self.open_new_agent(),
             Action::NewAgentKey => self.handle_new_agent_key(key),
-            Action::OpenHelp => self.mode = Mode::Help,
+            Action::OpenHelp => self.command_overlay = Some(commands::Overlay::Help),
             Action::EnterConfirmKill => self.mode = Mode::ConfirmKill,
             Action::KillSelected => {
                 if let Some(s) = self.sessions.get_mut(self.selected) {
