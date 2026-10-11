@@ -971,3 +971,51 @@ fn the_trace_browser_takes_the_screen_and_b_brings_the_sidebar() {
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(matches!(app.mode, Mode::Main));
 }
+
+/// Selecting a harness row (a click on its name, or the cursor) shows a
+/// recap of each of its sessions instead of the pane.
+#[test]
+fn a_harness_row_shows_a_recap_of_each_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let (tx, _rx) = mpsc::channel(256);
+    let mut app = App::new(vec![profile("Claude Code")], None, tx.clone());
+    app.clipboard_enabled = false;
+    app.set_pane_size(30, 120);
+    app.library_root = Some(temp.path().join("library"));
+    app.loops_file = Some(temp.path().join("loops.json"));
+    app.runtime_dir = Some(temp.path().join("runtime"));
+    app.history_sessions.clear();
+    for (i, name) in ["alpha", "beta"].iter().enumerate() {
+        let dir = temp.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = Session::spawn(
+            900 + i,
+            profile("Claude Code"),
+            dir,
+            10,
+            80,
+            tx.clone(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        app.sessions.push(s);
+    }
+    let lines = app.agent_lines();
+    let at = lines
+        .iter()
+        .position(|l| matches!(l.kind, agent_mux::app::agents_list::AgentKind::Harness(_)))
+        .expect("a harness row");
+    app.select_agent_line(&lines, at);
+    app.focus = agent_mux::app::Focus::List;
+    assert_eq!(app.harness_recap(0, Instant::now()).len(), 2);
+    let screen = render(&app, 140, 40);
+    assert!(screen.contains("2 sessions · 2 running"), "{screen}");
+    assert!(
+        screen.contains("alpha") && screen.contains("beta"),
+        "{screen}"
+    );
+    // without a trace store there are no facts, and the card says why
+    assert!(screen.contains("Not traced: no recap"), "{screen}");
+    app.kill_all();
+}

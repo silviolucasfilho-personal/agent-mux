@@ -362,3 +362,33 @@ fn briefing_caps_the_cards_but_not_the_totals() {
     assert_eq!(one.cards[0].session_key.as_deref(), Some("s4"));
     assert_eq!(one.total_sessions, 1);
 }
+
+#[test]
+fn a_launch_card_covers_its_whole_conversation() {
+    use agent_mux::tracing::analysis::query::launch_card;
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE launches(id TEXT, session_key TEXT);
+         CREATE TABLE traces(id TEXT, session_key TEXT, launch_id TEXT, input TEXT, output TEXT, start_ns INTEGER, end_ns INTEGER);
+         INSERT INTO launches VALUES('first','claude:c1');
+         INSERT INTO launches VALUES('resumed','claude:c1');
+         INSERT INTO launches VALUES('fresh',NULL);
+         INSERT INTO traces VALUES('t1','claude:c1','first','add save on close','planned it',1,2);
+         INSERT INTO traces VALUES('t2','claude:c1','resumed','now the tests','all pass',3,NULL);
+         INSERT INTO traces VALUES('t3',NULL,'fresh','hello','hi',5,6);",
+    )
+    .unwrap();
+    let cwd = std::path::Path::new("/ws");
+    // a resumed launch: the goal is the conversation's first prompt
+    let c = launch_card(&db, "resumed", Some("claude"), cwd, RuntimeState::Working).unwrap();
+    assert_eq!(c.initial_goal.value.as_deref(), Some("add save on close"));
+    assert_eq!((c.completed_turns, c.open_turns), (1, 1));
+    assert_eq!(
+        c.last_assistant_output.and_then(|e| e.value).as_deref(),
+        Some("all pass")
+    );
+    // a launch the store has not tied to a conversation: itself alone
+    let c = launch_card(&db, "fresh", Some("claude"), cwd, RuntimeState::Idle).unwrap();
+    assert_eq!(c.initial_goal.value.as_deref(), Some("hello"));
+    assert_eq!(c.completed_turns, 1);
+}

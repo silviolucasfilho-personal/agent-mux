@@ -299,6 +299,38 @@ fn session_in_store(
     .unwrap_or(false)
 }
 
+/// The card of one agent-mux launch: its whole conversation when the
+/// store has tied the launch to one (a resumed conversation counts its
+/// earlier launches too), else the launch alone. For the harness recap.
+pub fn launch_card(
+    conn: &Connection,
+    launch_id: &str,
+    provider: Option<&str>,
+    cwd: &Path,
+    state: RuntimeState,
+) -> Result<SessionCard, AnalysisError> {
+    let key: Option<String> = conn
+        .query_row(
+            "SELECT session_key FROM launches WHERE id = ?1",
+            params![launch_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .flatten();
+    build_session_card(
+        conn,
+        key.as_deref(),
+        Some(launch_id),
+        provider,
+        cwd,
+        state,
+        TaskOutcome::Unknown,
+        &[],
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_session_card(
     conn: &Connection,
