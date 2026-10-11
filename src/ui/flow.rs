@@ -195,7 +195,8 @@ pub(super) fn footer(st: &FlowBuilderState) -> Line<'static> {
     let editor = ctrl_label('o');
     if st.edit.is_some() {
         return hints(&[
-            (label(Verb::Open), "done"),
+            (label(Verb::Open), "line / submit"),
+            ("Ctrl+S", "save"),
             ("Esc", "cancel"),
             (newline_label(), "new line"),
             (&editor, "editor"),
@@ -1218,8 +1219,8 @@ fn draw_prompt(f: &mut Frame, st: &FlowBuilderState, text: &crate::app::text_are
     f.render_widget(Paragraph::new(lines), body);
     f.render_widget(
         Paragraph::new(hints(&[
-            ("Enter", "done"),
-            ("⌃J", "new line"),
+            ("Enter / ⌃J", "new line"),
+            ("⌃S", "save"),
             ("⌃O", "editor"),
             ("Esc", "cancel"),
         ])),

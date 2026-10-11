@@ -183,7 +183,7 @@ fn a_flow_is_built_step_by_step_and_saved() {
     to_field(&mut app, Field::FlowDescription);
     press(&mut app, KeyCode::Enter);
     type_text(&mut app, "Review a change and check every finding");
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
     to_field(&mut app, Field::FlowWorkspace);
     press(&mut app, KeyCode::Enter);
     ctrl(&mut app, 'u');
@@ -204,6 +204,8 @@ fn a_flow_is_built_step_by_step_and_saved() {
     assert!(matches!(st(&app).overlay, Some(Overlay::Prompt { .. })));
     type_text(&mut app, "Write a brief of the change.");
     press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "Include the intent.");
+    ctrl(&mut app, 's');
 
     // 2 review: in parallel over two lenses, a skill, reads the brief
     press(&mut app, KeyCode::Esc);
@@ -505,7 +507,7 @@ fn a_built_in_workflow_is_edited_as_a_copy_and_restored() {
     press(&mut app, KeyCode::Enter);
     ctrl(&mut app, 'u');
     type_text(&mut app, "My stricter review");
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
     press(&mut app, KeyCode::Char('5')); // Review
     press(&mut app, KeyCode::Char('s'));
     if let Mode::AgentEditor(e) = &app.mode {
@@ -572,7 +574,7 @@ fn a_persona_is_written_and_edited_in_the_agent_editor() {
     press(&mut app, KeyCode::Enter);
     ctrl(&mut app, 'u');
     type_text(&mut app, "Review the diff.");
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
     // Limits: edit files on
     press(&mut app, KeyCode::Char('4'));
     press(&mut app, KeyCode::Right);
@@ -636,7 +638,7 @@ fn a_task_agent_runs_on_demand_then_on_a_schedule() {
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     type_text(&mut app, "Summarize the open TODOs.");
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Char('s'));
     if let Mode::AgentEditor(e) = &app.mode {
         assert!(e.error.is_none(), "{:?}", e.error);
@@ -804,4 +806,64 @@ fn a_described_agent_is_a_draft_reviewed_in_the_editor() {
     assert!(saved.contains("name = \"my-reviewer\""), "{saved}");
     assert!(app.personas.contains(&"my-reviewer".to_string()));
     assert!(app.planned_workflows.is_empty());
+}
+
+#[test]
+fn commands_guard_an_unsaved_agent_form_and_enter_is_multiline() {
+    use agent_mux::keymap::ActionId;
+    let (mut app, _temp) = app();
+    app.open_flow_builder_new();
+    add_step(&mut app, "review", 0);
+    open_agents(&mut app);
+    press(&mut app, KeyCode::Char('n'));
+    type_text(&mut app, "new-reviewer");
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "purpose");
+    press(&mut app, KeyCode::Tab);
+    type_text(&mut app, "line one");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "line two");
+    // The flow itself can be clean while a nested form has unsaved text.
+    if let Mode::AgentEditor(ed) = &mut app.mode {
+        ed.dirty = false;
+        if let Body::Flow(flow) = &mut ed.body {
+            flow.dirty = false;
+        }
+    }
+    app.execute_command(ActionId::FocusAgents, Instant::now());
+    assert!(matches!(
+        app.command_overlay,
+        Some(agent_mux::app::commands::Overlay::Navigation(_))
+    ));
+    press(&mut app, KeyCode::Esc);
+    let Some(Overlay::Agent(p)) = &st(&app).overlay else {
+        panic!("agent form lost")
+    };
+    assert_eq!(
+        p.form.as_ref().unwrap().instructions.text,
+        "line one\nline two"
+    );
+}
+
+#[test]
+fn commands_save_a_flow_from_when_and_limits() {
+    use agent_mux::app::agent_editor::Tab;
+    use agent_mux::keymap::ActionId;
+    for tab in [Tab::When, Tab::Limits] {
+        let (mut app, _temp) = app();
+        app.open_flow_builder_new();
+        add_step(&mut app, "review", 0);
+        if let Mode::AgentEditor(ed) = &mut app.mode {
+            ed.set_tab(tab);
+        }
+        app.execute_command(ActionId::Save, Instant::now());
+        assert!(!st(&app).dirty, "{tab:?}: {:?}", app.notice);
+        assert!(
+            app.library_root
+                .as_ref()
+                .unwrap()
+                .join("workflows/my-flow.toml")
+                .exists()
+        );
+    }
 }

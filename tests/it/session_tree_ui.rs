@@ -212,7 +212,7 @@ fn clicking_a_heading_folds_its_rows() {
 }
 
 #[test]
-fn the_digits_count_the_rows_the_tree_draws() {
+fn digits_do_not_select_sessions_from_the_agents_list() {
     let (mut app, _t) = app_with_sessions(&[
         None,
         Some(wf("abcd1234ef", "read:src")),
@@ -220,7 +220,10 @@ fn the_digits_count_the_rows_the_tree_draws() {
     ]);
     app.sidebar_section = SidebarSection::Active;
     app.handle_key(&key(KeyCode::Char('3')), Instant::now());
-    assert_eq!(app.selected, 2, "the third drawn session is the last step");
+    assert_eq!(
+        app.selected, 0,
+        "digits are reserved for visibly numbered tabs"
+    );
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     assert_eq!(app.selected, 0);
 }
@@ -708,12 +711,12 @@ async fn clean_lists_only_the_harnesses_and_their_sessions() {
         2,
         "every session sits under a harness"
     );
-    // History stays: Tab reaches it and comes back
+    // Tab focuses the pane; the Agents command returns to the same list.
     app.focus_list();
     app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::History);
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_ne!(app.sidebar_section, SidebarSection::History);
+    assert_eq!(app.focus, agent_mux::app::Focus::Pane);
+    app.execute_command(agent_mux::keymap::ActionId::FocusAgents, Instant::now());
+    assert_eq!(app.focus, agent_mux::app::Focus::List);
     // n is a new session, not the chooser
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
     assert!(matches!(app.mode, Mode::NewSession(_)), "{:?}", app.mode);

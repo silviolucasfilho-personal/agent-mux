@@ -251,6 +251,9 @@ async fn kill_confirm_respawn_and_remove() {
     .await;
     assert!(ok);
     app.handle_key(&key(KeyCode::Char('d')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert_eq!(app.sessions.len(), 1, "Enter does not approve deletion");
+    app.handle_key(&key(KeyCode::Char('y')), Instant::now());
     assert!(app.sessions.is_empty());
 }
 

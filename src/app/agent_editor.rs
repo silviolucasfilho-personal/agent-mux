@@ -815,6 +815,25 @@ impl App {
 
     fn agent_editor_key(&mut self, st: &mut AgentEditorState, key: &KeyEvent) -> After {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl
+            && key.code == KeyCode::Char('s')
+            && !st.confirm_discard
+            && !st.confirm_restore
+            && !matches!(st.body, Body::Flow(_))
+        {
+            if let Some(mut tasks) = st.tasks.take() {
+                self.loop_key(&mut tasks, key);
+                self.sync_task(st, &tasks);
+                let pending =
+                    tasks.edit.is_some() || tasks.overlay.is_some() || tasks.error.is_some();
+                st.tasks = Some(tasks);
+                if pending {
+                    return After::Stay;
+                }
+            }
+            st.editing = false;
+            return self.agent_editor_save(st, false);
+        }
         if let Body::Flow(f) = &mut st.body {
             let busy = f.overlay.is_some() || f.edit.is_some();
             let tab = match key.code {
@@ -829,8 +848,8 @@ impl App {
             }
             // When and Limits are panels: save, run and leave still work
             if matches!(st.tab, Tab::When | Tab::Limits) && !busy {
-                let passes =
-                    matches!(key.code, KeyCode::Char('s' | 'r' | 'q') | KeyCode::Esc) && !ctrl;
+                let passes = matches!(key.code, KeyCode::Char('s'))
+                    || (matches!(key.code, KeyCode::Char('r' | 'q') | KeyCode::Esc) && !ctrl);
                 if !passes {
                     return After::Stay;
                 }
@@ -851,13 +870,13 @@ impl App {
         if st.confirm_discard {
             st.confirm_discard = false;
             return match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => After::Close,
+                KeyCode::Char('y') => After::Close,
                 _ => After::Stay,
             };
         }
         if st.confirm_restore {
             st.confirm_restore = false;
-            if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter)
+            if matches!(key.code, KeyCode::Char('y'))
                 && let Body::Persona(p) = &st.body
                 && let Some(name) = p.original.clone()
             {
@@ -876,9 +895,14 @@ impl App {
                 return After::Stay;
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                let at = Tab::ALL.iter().position(|t| *t == st.tab).unwrap_or(0);
-                let d = if key.code == KeyCode::Tab { 1 } else { 4 };
-                st.set_tab(Tab::ALL[(at + d) % 5]);
+                if n > 0 {
+                    st.field = if key.code == KeyCode::Tab {
+                        (st.field + 1) % n
+                    } else {
+                        (st.field + n - 1) % n
+                    };
+                    st.sync_loop_field();
+                }
                 return After::Stay;
             }
             KeyCode::Up | KeyCode::Char('k') if !ctrl => {
@@ -1066,6 +1090,10 @@ impl App {
             self.agent_editor_open_text(st);
             return;
         }
+        let multiline = matches!(
+            st.current(),
+            Some(EdField::Agent(AgentField::Instructions) | EdField::Task(TaskField::Text))
+        );
         match &mut st.body {
             Body::Scheduled(d) => {
                 if d.field == LoopField::Workspace {
@@ -1113,7 +1141,25 @@ impl App {
             }
             Body::Persona(p) => match key.code {
                 KeyCode::Esc => st.editing = false,
+                KeyCode::Enter if key.modifiers.is_empty() && multiline => {
+                    if let Some(t) = p.text_mut() {
+                        t.insert('\n');
+                        st.dirty = true;
+                    }
+                }
                 KeyCode::Enter if key.modifiers.is_empty() => st.editing = false,
+                KeyCode::Tab | KeyCode::BackTab => {
+                    st.editing = false;
+                    let n = st.fields().len();
+                    if n > 0 {
+                        st.field = if key.code == KeyCode::Tab {
+                            (st.field + 1) % n
+                        } else {
+                            (st.field + n - 1) % n
+                        };
+                        st.sync_loop_field();
+                    }
+                }
                 _ => {
                     if let Some(t) = p.text_mut() {
                         text_key(t, key, ctrl);

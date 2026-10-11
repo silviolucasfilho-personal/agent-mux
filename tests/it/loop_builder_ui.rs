@@ -77,6 +77,10 @@ fn to_loops(app: &mut App) {
 }
 
 fn to_field(app: &mut App, f: LField) {
+    assert!(
+        st(app).edit.is_none(),
+        "finish typing before selecting another field"
+    );
     let target = LField::ALL.iter().position(|x| *x == f).unwrap();
     while st(app).field > target {
         press(app, KeyCode::Up);
@@ -91,7 +95,7 @@ fn type_field(app: &mut App, f: LField, text: &str) {
     press(app, KeyCode::Enter);
     ctrl(app, 'u');
     type_text(app, text);
-    press(app, KeyCode::Enter);
+    press(app, KeyCode::Tab);
 }
 
 fn select_pattern(app: &mut App, id: &str) {
@@ -129,7 +133,7 @@ fn patterns_are_created_edited_as_copies_and_restored() {
     );
     press(&mut app, KeyCode::Enter);
     type_text(&mut app, "Find docs that no longer match the code.");
-    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Tab);
     type_field(&mut app, LField::Every, "2h");
     // add loop-fix to its skills
     to_field(&mut app, LField::Skills);

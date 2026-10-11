@@ -533,13 +533,21 @@ async fn s_opens_the_workbench_grouped_by_harness() {
     assert!(app.sessions.is_empty());
     app.handle_key(&key(KeyCode::Left), Instant::now());
 
-    // 2 narrows to Codex, 2 again clears; Esc clears a filter before closing
+    // Numbered tabs select content; filters are named Commands actions.
     app.handle_key(&key(KeyCode::Char('2')), Instant::now());
+    let Mode::SkillsView(v) = &app.mode else {
+        panic!()
+    };
+    assert_eq!(v.tab, agent_mux::app::SkillsTab::Executions);
+    app.execute_command(agent_mux::keymap::ActionId::FilterCodex, Instant::now());
     assert_eq!(shape(&app), vec!["# codex", "heimdall@codex"]);
     assert!(screen(&app).contains("[harness: codex]"));
-    app.handle_key(&key(KeyCode::Char('2')), Instant::now());
+    app.execute_command(agent_mux::keymap::ActionId::FilterCodex, Instant::now());
     assert_eq!(shape(&app).len(), 6);
-    app.handle_key(&key(KeyCode::Char('3')), Instant::now());
+    app.execute_command(
+        agent_mux::keymap::ActionId::FilterAntigravity,
+        Instant::now(),
+    );
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(
         matches!(app.mode, Mode::SkillsView(_)),
@@ -587,10 +595,21 @@ async fn the_view_has_details_and_executions_tabs_and_reflects_install_state() {
         )
     );
     app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(tabs(&app).1, SkillsTab::Executions);
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(tabs(&app).1, SkillsTab::Details);
+    let Mode::SkillsView(v) = &app.mode else {
+        panic!()
+    };
+    assert_eq!(v.focus, SkillsPane::Detail);
     app.handle_key(&key(KeyCode::BackTab), Instant::now());
+    let Mode::SkillsView(v) = &app.mode else {
+        panic!()
+    };
+    assert_eq!(v.focus, SkillsPane::Skills);
+    app.handle_key(&key(KeyCode::Char('2')), Instant::now());
+    assert_eq!(tabs(&app).1, SkillsTab::Executions);
+    app.handle_key(&key(KeyCode::Char('1')), Instant::now());
+    assert_eq!(tabs(&app).1, SkillsTab::Details);
+    app.handle_key(&key(KeyCode::Char('2')), Instant::now());
     assert_eq!(tabs(&app).1, SkillsTab::Executions);
 
     // the Codex row shows the CLI-made install; Claude and agy do not

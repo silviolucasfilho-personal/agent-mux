@@ -101,9 +101,7 @@ fn the_sidebar_is_agents_and_history_and_a_loop_is_an_agent() {
     let screen = render(&app, 120, 34);
     assert!(screen.contains("SCHEDULED"), "{screen}");
     assert!(screen.contains("daily-triage"), "{screen}");
-    // Tab goes to History and back to the same row
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::History);
+    // Tab targets the pane; it keeps the selected agent row.
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     assert_eq!(app.sidebar_section, SidebarSection::Loops);
 }
@@ -115,7 +113,7 @@ fn the_hint_lines_fit_a_hundred_columns_and_the_help_fits() {
     app.sidebar_section = SidebarSection::Loops;
     let screen = render(&app, 100, 34);
     let last = screen.lines().last().unwrap().trim_end();
-    assert!(last.contains("[n] new"), "{last}");
+    assert!(last.contains("[F1 Commands]"), "{last}");
     assert!(last.chars().count() <= 100);
     app.loop_registry.pause_all = true;
     let screen = render(&app, 100, 34);
@@ -437,7 +435,10 @@ fn the_report_tab_shows_what_the_run_found_and_who_has_to_act() {
     let first = out.lines().next().unwrap();
     assert!(first.starts_with(" Runs "), "{first}");
     let last = out.lines().rev().find(|l| !l.trim().is_empty()).unwrap();
-    assert!(last.contains("Esc back"), "{last}");
+    assert!(
+        last.contains("Runs") && last.contains("[F1 Commands]"),
+        "{last}"
+    );
 }
 
 #[test]
@@ -540,7 +541,7 @@ fn a_loop_is_named_by_its_workspace_and_its_hints_fit() {
         "a hint wrapped:\n{screen}"
     );
     let last = screen.lines().last().unwrap().trim_end();
-    assert!(last.ends_with("[?] help"), "{last}");
+    assert!(last.contains("[F1 Commands]"), "{last}");
 }
 
 /// The preview leads with what the loop found, then what it may do and
@@ -657,7 +658,7 @@ fn the_inbox_gathers_loop_runs_plans_and_failed_runs() {
     assert_eq!(app.inbox_count(), 3);
     let screen = render(&app, 120, 34);
     let last = screen.lines().last().unwrap();
-    assert!(last.starts_with("● 3 need you [I]"), "{last}");
+    assert!(screen.contains("3 need you"), "{last}");
 
     app.handle_key(&key(KeyCode::Char('I')), Instant::now());
     let Mode::Inbox(state) = &app.mode else {

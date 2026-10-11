@@ -2179,9 +2179,10 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let on_text = dialog.text().is_some();
-        // Enter submits in every agent-mux dialog, so a newline is
-        // Alt+Enter (Shift+Enter and Ctrl+J where the terminal sends them)
-        let wants_newline = matches!(key.code, KeyCode::Enter) && (alt || shift)
+        // Task and argument fields are multiline; Ctrl+Enter submits.
+        let multiline = matches!(dialog.field, DialogField::Task | DialogField::Arg(_));
+        let wants_newline = matches!(key.code, KeyCode::Enter)
+            && (alt || shift || (multiline && !ctrl))
             || (ctrl && matches!(key.code, KeyCode::Char('j')));
         if wants_newline && on_text {
             if let Some(t) = dialog.text_mut() {

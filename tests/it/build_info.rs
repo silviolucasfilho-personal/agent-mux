@@ -147,13 +147,14 @@ mod overlay {
         assert!(screen.contains("tracing is off"), "{screen}");
         assert!(screen.contains("[Esc] close"), "{screen}");
 
-        // ? switches to the key reference, which lists the About key itself
+        // Help overlays About and dismissal returns to the same screen.
         app.handle_key(&key(KeyCode::Char('?')), Instant::now());
-        assert!(matches!(app.mode, Mode::Help));
+        assert!(matches!(app.mode, Mode::About(_)));
+        assert!(app.command_overlay.is_some());
         let help = render(&app, 120, 60);
-        assert!(help.contains("about: version, build time"), "{help}");
-
-        app.handle_key(&key(KeyCode::Char('v')), Instant::now());
+        assert!(help.contains("Help ·"), "{help}");
+        app.handle_key(&key(KeyCode::Esc), Instant::now());
+        assert!(matches!(app.mode, Mode::About(_)));
         app.handle_key(&key(KeyCode::Esc), Instant::now());
         assert!(matches!(app.mode, Mode::Main), "Esc closes About");
     }

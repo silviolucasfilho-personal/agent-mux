@@ -45,10 +45,10 @@
 
 **Interfaces:** Produce `ActionId`, `ActionDef { id, label, keywords, scope }`, `ACTIONS`, `Availability::{Enabled, Disabled(String)}`, and `App::command_availability(&self, id: ActionId) -> Availability`. Expose `App::execute_command(&mut self, id: ActionId, now: Instant)`; it checks current availability before effects. Action IDs cover Commands, Help, FocusAgents, ReturnToSession, ToggleSidebar, Quit, Traces, Runs, New, Edit, Delete, Run, Stop, Save, Reload, Restore, Editor, SetVerdict, TestShortcuts and previous/next session.
 
-- [ ] Add failing `command_availability_tracks_current_context`: ReturnToSession is disabled with no sessions, enabled with a live session; Save is disabled in read-only screens; ToggleSidebar is disabled in an editor without a sidebar; a removed selected item makes its command unavailable.
-- [ ] Run `cargo test --test it keyboard_ux::command_availability_tracks_current_context`; expect failure until the API exists.
-- [ ] Implement the registry and availability adapter using existing selected-item and screen state. Reuse existing action effects; do not duplicate launches or confirmation logic.
-- [ ] Run the new test and existing dispatch tests with `cargo test dispatch_tests`; expect pass. Commit `feat: centralize keyboard action availability`.
+- [x] Add failing `command_availability_tracks_current_context`: ReturnToSession is disabled with no sessions, enabled with a live session; Save is disabled in read-only screens; ToggleSidebar is disabled in an editor without a sidebar; a removed selected item makes its command unavailable.
+- [x] Run `cargo test --test it keyboard_ux::command_availability_tracks_current_context`; expect failure until the API exists.
+- [x] Implement the registry and availability adapter using existing selected-item and screen state. Reuse existing action effects; do not duplicate launches or confirmation logic.
+- [x] Run the new test and existing dispatch tests with `cargo test dispatch_tests`; expect pass. Commit `feat: centralize keyboard action availability`.
 
 ### Task 2: Global command and help overlays
 
@@ -56,10 +56,10 @@
 
 **Interfaces:** Consume task 1 APIs. Produce `CommandMenu { query: String, selected: usize }`, `Overlay::{Commands(CommandMenu), Help}`, an `App::command_overlay: Option<Overlay>` independent of Mode, and `App::handle_command_overlay(&mut self, key: &KeyEvent, now: Instant) -> bool`. Renderer consumes filtered ActionDefs and current availability.
 
-- [ ] Add failing `commands_open_on_every_screen` over Main list/pane, Trace Browser, Skills, Configuration, Agent Editor, Task Library, Flow Builder, Runs, Inbox and Markdown: F1 opens Commands; Esc restores each screen. Add `overlay_preserves_text_and_search` asserting unchanged buffers/cursors after opening and dismissing. Add `disabled_command_cannot_execute` and `help_and_commands_do_not_stack`.
-- [ ] Run `cargo test --test it keyboard_ux`; expect new tests to fail.
-- [ ] Implement F1 as Commands, retain help chords and local ? as Help, process overlay input before search and screen handlers, and filter action labels/keywords. Keep disabled reasons visible and recheck before Enter execution. Preserve underlying Mode instead of replacing it with Help. If an action opens a confirmation, close the menu and use the existing confirmation.
-- [ ] Run `cargo test --test it keyboard_ux` and existing help/search tests; update only expectations intentionally changed by the spec. Commit `feat: add a global searchable command menu`.
+- [x] Add failing `commands_open_on_every_screen` over Main list/pane, Trace Browser, Skills, Configuration, Agent Editor, Task Library, Flow Builder, Runs, Inbox and Markdown: F1 opens Commands; Esc restores each screen. Add `overlay_preserves_text_and_search` asserting unchanged buffers/cursors after opening and dismissing. Add `disabled_command_cannot_execute` and `help_and_commands_do_not_stack`.
+- [x] Run `cargo test --test it keyboard_ux`; expect new tests to fail.
+- [x] Implement F1 as Commands, retain help chords and local ? as Help, process overlay input before search and screen handlers, and filter action labels/keywords. Keep disabled reasons visible and recheck before Enter execution. Preserve underlying Mode instead of replacing it with Help. If an action opens a confirmation, close the menu and use the existing confirmation.
+- [x] Run `cargo test --test it keyboard_ux` and existing help/search tests; update only expectations intentionally changed by the spec. Commit `feat: add a global searchable command menu`.
 
 ### Task 3: Explicit navigation and dirty-state handling
 
@@ -67,10 +67,10 @@
 
 **Interfaces:** Produce `NavigationTarget::{Agents, Session(String)}` and `App::request_navigation(&mut self, target: NavigationTarget, now: Instant)`. Use stable session IDs, not list offsets. Preserve originating session ID when entering app screens. Retain F2's legacy toggle on Main; explicit actions remain separate.
 
-- [ ] Add failing `focus_agents_reveals_without_hiding`, `return_to_originating_session`, `hidden_sidebar_transfers_focus`, and `dirty_navigation_cancel_preserves_editor`: repeated FocusAgents leaves Agents visible/focused; return selects the origin despite intervening list movement; hide transfers focus; cancel preserves text and prevents later unrelated navigation.
-- [ ] Run `cargo test --test it keyboard_ux`; expect failures.
-- [ ] Implement target tracking and navigation through existing unsaved-change decisions. On a missing origin, use the selected session if available; otherwise disable ReturnToSession. ToggleSidebar never exits an editor. Recheck target validity when a delayed decision completes.
-- [ ] Run keyboard tests plus `cargo test --test it flow_builder_ui` and Markdown tests; expect pass. Commit `feat: make agent and session navigation explicit`.
+- [x] Add failing `focus_agents_reveals_without_hiding`, `return_to_originating_session`, `hidden_sidebar_transfers_focus`, and `dirty_navigation_cancel_preserves_editor`: repeated FocusAgents leaves Agents visible/focused; return selects the origin despite intervening list movement; hide transfers focus; cancel preserves text and prevents later unrelated navigation.
+- [x] Run `cargo test --test it keyboard_ux`; expect failures.
+- [x] Implement target tracking and navigation through existing unsaved-change decisions. On a missing origin, use the selected session if available; otherwise disable ReturnToSession. ToggleSidebar never exits an editor. Recheck target validity when a delayed decision completes.
+- [x] Run keyboard tests plus `cargo test --test it flow_builder_ui` and Markdown tests; expect pass. Commit `feat: make agent and session navigation explicit`.
 
 ### Task 4: Consistent local controls and text behavior
 
@@ -78,10 +78,10 @@
 
 **Interfaces:** Consume ActionId registry. Expose `App::local_command(&self, key: &KeyEvent) -> Option<ActionId>` for non-text controls only. Existing text handlers remain responsible for cursor/editing semantics; registry maps Ctrl+S to enclosing-editor Save.
 
-- [ ] Add failing `save_never_changes_verdict`, `tab_moves_focus_not_tabs`, `digits_select_visible_numbered_tabs`, `multiline_enter_inserts_singleline_enter_submits`, and `editor_arrows_do_not_scroll_session`. Test plain letters in text fields stay literal and unmatched modified letters never become local verbs.
-- [ ] Run keyboard tests and targeted existing editor/control tests; expect the specified behavior changes to fail.
-- [ ] Replace conflicting raw matches with shared commands. Move verdict selection to the named SetVerdict menu action; remove s/+ verdict aliases. Make Tab/Shift+Tab traverse controls, use visible numbered tabs for tab selection, remove undocumented session digit selection, and keep legacy q Back/Quit only outside text fields. Enter inserts in multiline fields and Ctrl+J remains its alias; Ctrl+S saves, Esc finishes field editing first. Keep existing confirmation semantics safe and explicit.
-- [ ] Run `cargo test --test it keyboard_ux`, existing text-area tests and editor/trace tests. Commit `fix: unify local keyboard controls across screens`.
+- [x] Add failing `save_never_changes_verdict`, `tab_moves_focus_not_tabs`, `digits_select_visible_numbered_tabs`, `multiline_enter_inserts_singleline_enter_submits`, and `editor_arrows_do_not_scroll_session`. Test plain letters in text fields stay literal and unmatched modified letters never become local verbs.
+- [x] Run keyboard tests and targeted existing editor/control tests; expect the specified behavior changes to fail.
+- [x] Replace conflicting raw matches with shared commands. Move verdict selection to the named SetVerdict menu action; remove s/+ verdict aliases. Make Tab/Shift+Tab traverse controls, use visible numbered tabs for tab selection, remove undocumented session digit selection, and keep legacy q Back/Quit only outside text fields. Enter inserts in multiline fields and Ctrl+J remains its alias; Ctrl+S saves, Esc finishes field editing first. Keep existing confirmation semantics safe and explicit.
+- [x] Run `cargo test --test it keyboard_ux`, existing text-area tests and editor/trace tests. Commit `fix: unify local keyboard controls across screens`.
 
 ### Task 5: Observed shortcut preferences and probe
 
@@ -89,10 +89,10 @@
 
 **Interfaces:** Produce `ShortcutState` storing session-local observed bindings keyed by ActionId, `ShortcutProbe` for Commands/FocusAgents/Sidebar/Help/Traces, `ShortcutState::observe(&mut self, id: ActionId, key: KeyEvent)` and `ShortcutState::preferred_label(&self, id: ActionId) -> Option<String>`. Probe consumes normalized events without running their actions. Reuse `keys::normalize_event`; retain F1 as the known menu entry.
 
-- [ ] Add failing unit tests `probe_records_only_matching_events`, `collapsed_ctrl_is_not_verified`, `skip_and_cancel_preserve_preferences`, and integration test `probe_does_not_execute_actions`. Observed alias becomes preferred; unsupported candidate is never advertised as verified; cancel closes probe without navigation.
-- [ ] Run `cargo test shortcut_probe`; expect failures before implementation.
-- [ ] Implement TestShortcuts menu action and interactive probe with skip/cancel. Modifier protocol support alone records no preferred modifier chord. Distinguish candidate aliases in Help from observed preferences; actions lacking verified shortcuts remain reachable through Commands. Do not persist preferences across app launches.
-- [ ] Run probe tests and keyboard integration tests. Commit `feat: verify delivered shortcuts before advertising them`.
+- [x] Add failing unit tests `probe_records_only_matching_events`, `collapsed_ctrl_is_not_verified`, `skip_and_cancel_preserve_preferences`, and integration test `probe_does_not_execute_actions`. Observed alias becomes preferred; unsupported candidate is never advertised as verified; cancel closes probe without navigation.
+- [x] Run `cargo test shortcut_probe`; expect failures before implementation.
+- [x] Implement TestShortcuts menu action and interactive probe with skip/cancel. Modifier protocol support alone records no preferred modifier chord. Distinguish candidate aliases in Help from observed preferences; actions lacking verified shortcuts remain reachable through Commands. Do not persist preferences across app launches.
+- [x] Run probe tests and keyboard integration tests. Commit `feat: verify delivered shortcuts before advertising them`.
 
 ### Task 6: Focus, shared hints, documentation and whole-feature verification
 
@@ -100,13 +100,21 @@
 
 **Interfaces:** Consume action availability and preferred labels. Produce shared hint entries from ActionDefs; preserve existing fit_hints truncation behavior. Register clickable Commands/FocusAgents/ReturnToSession footer hit regions using actual rendered geometry.
 
-- [ ] Add failing `footer_uses_current_context`, `narrow_footer_keeps_commands_and_focus`, `focus_has_text_and_border`, and `footer_click_executes_same_action`. Assert backgrounds do not leak hints, disabled actions show no active shortcut, and narrow labels are never split.
-- [ ] Run UI and keyboard tests; expect failures.
-- [ ] Implement textual focus indicators and distinct border, one preferred binding per action, shared footer/help content, clickable controls and narrow layout priorities. Update keyboard docs and repository guidance for F1 Commands, preserved F2 toggle, explicit navigation, text behavior and shortcut testing.
-- [ ] Run `cargo fmt --check`, `cargo clippy --all-targets`, and `cargo test`; record complete results. Investigate the known memory opt-out test's inherited AGENT_MUX_MEMORY environment separately; if needed rerun with that session-only environment removed and report both outcomes, without quietly changing memory code.
+- [x] Add failing `footer_uses_current_context`, `narrow_footer_keeps_commands_and_focus`, `focus_has_text_and_border`, and `footer_click_executes_same_action`. Assert backgrounds do not leak hints, disabled actions show no active shortcut, and narrow labels are never split.
+- [x] Run UI and keyboard tests; expect failures.
+- [x] Implement textual focus indicators and distinct border, one preferred binding per action, shared footer/help content, clickable controls and narrow layout priorities. Update keyboard docs and repository guidance for F1 Commands, preserved F2 toggle, explicit navigation, text behavior and shortcut testing.
+- [x] Run `cargo fmt --check`, `cargo clippy --all-targets`, and `cargo test`; record complete results. Investigate the known memory opt-out test's inherited AGENT_MUX_MEMORY environment separately; if needed rerun with that session-only environment removed and report both outcomes, without quietly changing memory code.
 - [ ] Manually run `agent-mux keys` and exercise menu, dirty navigation, probe and harness forwarding in the installed terminal. Record terminal/version and actual events; if interactive terminal access is unavailable, report manual verification as outstanding.
-- [ ] Review the whole diff against the spec, fix discovered defects, rerun only relevant checks after fixes, and commit `feat: expose consistent keyboard focus and action hints`. Keep the feature branch for review; publishing a PR is a separate user action.
+- [x] Review the whole diff against the spec, fix discovered defects, rerun only relevant checks after fixes, and commit `feat: expose consistent keyboard focus and action hints`. Keep the feature branch for review; publishing a PR is a separate user action.
 
 ## Self-review
 
 All spec sections map to tasks above. Task 1's IDs and availability are consumed consistently by tasks 2–6; no new Mode is required for overlays. Navigation uses stable session IDs and existing save/cancel behavior. The five review conditions each have a named owning test. Verification includes dispatch, rendering, text preservation and real terminal observations rather than asserting terminal compatibility from documentation.
+
+## Execution notes
+
+Completed behavioral coverage uses the final APIs and groups some proposed cases into broader preservation, availability and rendering tests. Core tasks 1–3 were committed together; tasks 4–6 and review fixes are committed together after final verification. Help carries its scroll position, session targets use the existing stable usize IDs, and delete-session confirmation is an independent overlay.
+
+Physical terminal verification remains outstanding. A synthetic PTY diagnostic decoded F1 Commands, F2 focus and F3 Traces; Ctrl+B was not interpreted as a chord. This does not establish physical macOS modifier delivery.
+
+Final verification: 621 library tests passed; fresh integration suite 355 passed, 0 failed, 4 ignored (209.10s). Doc tests passed (0 cases). cargo build, cargo fmt --check, cargo clippy --all-targets and git diff --check passed. Integration subprocess removed inherited memory variables. An older overlapping integration run was stopped after stale expectations and process-sensitive failures; final fresh integration results are authoritative.
