@@ -96,3 +96,7 @@ agent-mux skill import <dir> [--force]        # bring a package written for one 
 ## 7. Heimdall
 
 Heimdall declares `auto_approve = true`: it only reads, and it is usually launched to report rather than to be watched, so all three CLIs start it with tool permissions already granted. Heimdall starts from the startup dossier in `$AGENT_MUX_BRIEFING` (`$AGENT_MUX_BRIEFING_SCHEMA=2`, details in `docs/heimdall-dossier.md`), answering its default startup briefing and evaluation reports without tool calls. It asks follow-up drill-down questions through the ten `agent_mux_*` MCP tools when `$AGENT_MUX_MCP` is not `unavailable`, and otherwise uses the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`). It never writes. `SKILL.md` carries the tool-to-CLI table and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); the `reference/` files hold thresholds and report shapes. Ad-hoc SQL lives in `docs/trace-sql-examples.md`. See `skills/heimdall/`.
+
+## 8. Memory
+
+The `memory` package (`skills/memory/`, `hidden = true`, `writes = true`) is compiled in and installed user-level for each harness a session with shared memory runs on, once per run, so it never appears in the Agents sidebar. It saves, recalls and forgets notes in `$AGENT_MUX_MEMORY` and writes hand-off briefs: `/memory` on Claude Code and Antigravity, `$memory` on Codex. A package at `~/.agent-mux/skills/memory/` shadows it like Heimdall. See `docs/memory.md`.

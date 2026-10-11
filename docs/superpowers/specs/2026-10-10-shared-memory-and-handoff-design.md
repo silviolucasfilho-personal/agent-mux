@@ -1,6 +1,6 @@
 # Shared memory across harnesses, and the hand-off that uses it — design
 
-Status: proposal, 2026-10-10, revised the same day against ai-memory (section 13). Reviews `f` (continue a session in a new one) as shipped on 2026-09-28 and 2026-09-30, and designs one memory every harness and agent inside agent-mux reads and writes. Nothing here is implemented. Code facts cite `file:line` at commit 675e16f; CLI facts were probed on the installed Claude Code 2.1.296, codex-cli 0.162.1 and Antigravity 1.3.3 (section 11 says what was probed and what was not); ai-memory facts cite its tree at `../ai-memory` (commit 88f88044).
+Status: proposal, 2026-10-10, revised the same day against ai-memory (section 13). Phase 1 implemented on the `shared-memory` branch; section 15 lists where the build differs from the text above. Reviews `f` (continue a session in a new one) as shipped on 2026-09-28 and 2026-09-30, and designs one memory every harness and agent inside agent-mux reads and writes. Nothing here is implemented. Code facts cite `file:line` at commit 675e16f; CLI facts were probed on the installed Claude Code 2.1.296, codex-cli 0.162.1 and Antigravity 1.3.3 (section 11 says what was probed and what was not); ai-memory facts cite its tree at `../ai-memory` (commit 88f88044).
 
 ## 1. Why
 
@@ -331,3 +331,17 @@ Decided 2026-10-10: the memory is built inside agent-mux. The note shape and the
 4. **Antigravity and the keeper.** The agy injection once probed, the `memory-keeper` agent.
 
 Each phase lands with its tests (`tests/it/memory.rs`, `tests/it/session_handoff.rs` extended) and its guide, `docs/memory.md`, with the probed facts recorded in the module docs as `AGENTS.md` asks.
+
+## 15. Phase 1 as built
+
+Implemented 2026-10-10 from `docs/superpowers/plans/2026-10-10-shared-memory.md`; guide `docs/memory.md`. Where the build differs from the sections above:
+
+1. **The index is in the start text, not only behind a pointer.** The `SessionStart` answer carries the hint and the fenced workspace and user indexes, cut under 9,000 characters (Claude takes 10,000). The cap and the byte-stable order keep it cheap and cached. Codex gets the same text in `developer_instructions`, since its command line is passed again on every launch. Only the Claude fallback (`--append-system-prompt`, frozen per session) carries the hint alone.
+2. **`SessionStart` is synchronous when the launch has memory**, with a 10 s timeout. The hooks reference says an async hook's context arrives a turn late. macOS scans a freshly installed binary for about 20 s on its first run, so a 3 s timeout lost the answer once after every upgrade.
+3. **Probed on Claude Code 2.1.296**: an inline `--settings` `SessionStart` answer of 8,600 characters reached the first turn whole; `--resume` and `--resume --fork-session` ran the hook again with `source` `resume` and `fork`, and the model saw the new answer; `agent-mux trace hook claude --memory <dir>` delivered a note the model quoted.
+4. **The hook reads its memory from the environment** the session passes it (`AGENT_MUX_MEMORY`, `AGENT_MUX_MEMORY_USER`, `AGENT_MUX_MEMORY_BRIEF`) and answers before any store work. `AGENT_MUX_MEMORY_USER` is a fourth variable not in section 4.2.
+5. **A note records `source.launch`**, the agent-mux launch id the skill always has, and `source.session` only when the writer knows the harness's id.
+6. **Codex instructions are merged, not added.** A persona's `developer_instructions` and the user's own from `config.toml` stay first; agent-mux's part follows a marker, is replaced at every launch and is stripped from the saved session.
+7. **Notes are moved, never deleted**: `memory rm` and `R` in the Configuration view move a note to `notes/.removed/`, expiry to `notes/.expired/`.
+8. **A `profiles.toml` with only `[memory]` loads**; the loader used to accept a file only with profiles or `[tracing]`.
+9. **Memory is on in the binaries and off in an `App` built by a test**, so the test suite never writes a user's memory or skill folders.
