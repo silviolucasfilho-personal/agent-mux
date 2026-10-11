@@ -50,6 +50,9 @@ pub(super) fn draw(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
     let (title, selected, rows): (String, Option<usize>, Vec<ListItem>) = match overlay {
         Overlay::Commands(menu) => {
+            use unicode_width::UnicodeWidthStr;
+            // borders and the highlight symbol
+            let inner = usize::from(width.saturating_sub(4));
             let rows = app
                 .filtered_commands()
                 .iter()
@@ -59,19 +62,34 @@ pub(super) fn draw(f: &mut Frame, app: &App) {
                         .reason()
                         .map(|r| format!(" — {r}"))
                         .unwrap_or_default();
-                    let label = app
-                        .command_label(a.id)
-                        .map(|s| format!(" [{s}]"))
-                        .unwrap_or_default();
                     let color = if available.enabled() {
                         Color::White
                     } else {
                         Color::DarkGray
                     };
-                    ListItem::new(Line::styled(
-                        format!("{}{}{}", a.label, label, suffix),
-                        Style::default().fg(color),
-                    ))
+                    let (key, known) = app.command_shortcut(a.id).unwrap_or_default();
+                    let key_width = key.width();
+                    let room = inner.saturating_sub(if key.is_empty() { 0 } else { key_width + 2 });
+                    let mut left = String::new();
+                    for c in format!("{}{}", a.label, suffix).chars() {
+                        if left.width() + unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+                            > room
+                        {
+                            break;
+                        }
+                        left.push(c);
+                    }
+                    let pad = inner.saturating_sub(left.width() + key_width);
+                    let key_color = match (available.enabled(), known) {
+                        (false, _) => Color::DarkGray,
+                        (true, true) => Color::Cyan,
+                        (true, false) => Color::Gray,
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(left, Style::default().fg(color)),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(key, Style::default().fg(key_color)),
+                    ]))
                 })
                 .collect();
             (

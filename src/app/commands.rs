@@ -404,6 +404,11 @@ impl App {
         if id == ActionId::Commands {
             return Some("F1".into());
         }
+        self.local_key_label(id)
+    }
+
+    /// The key a local action answers to on this screen.
+    fn local_key_label(&self, id: ActionId) -> Option<String> {
         ACTIONS
             .iter()
             .find(|a| a.id == id)
@@ -418,6 +423,20 @@ impl App {
                     c.to_string()
                 }
             })
+    }
+
+    /// The shortcut the Commands menu shows beside `id`, available or
+    /// not, and whether it is known to reach agent-mux here: observed by
+    /// Test shortcuts, a function key or a plain key. A modifier chord
+    /// not yet observed is a candidate (`false`): the terminal may keep it.
+    pub fn command_shortcut(&self, id: ActionId) -> Option<(String, bool)> {
+        if let Some(label) = self.shortcuts.preferred_label(id) {
+            return Some((label, true));
+        }
+        if let Some(s) = crate::app::shortcut_probe::default_shortcut(id) {
+            return Some((s.to_string(), s.starts_with('F')));
+        }
+        self.local_key_label(id).map(|l| (l, true))
     }
 }
 

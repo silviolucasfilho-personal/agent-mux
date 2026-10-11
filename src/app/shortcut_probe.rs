@@ -70,6 +70,61 @@ pub fn candidates(id: ActionId) -> &'static str {
         _ => "Commands",
     }
 }
+/// The one shortcut the Commands menu shows for a chord action before
+/// any is observed: the function key when there is one, else this
+/// platform's chord (`⌘` on macOS, `Ctrl+Shift` elsewhere).
+pub fn default_shortcut(id: ActionId) -> Option<&'static str> {
+    let mac = crate::keymap::MACOS;
+    Some(match id {
+        ActionId::Commands => "F1",
+        ActionId::Traces => "F3",
+        ActionId::Quit => "F10",
+        ActionId::FocusAgents => {
+            if mac {
+                "⌘L"
+            } else {
+                "Ctrl+Shift+L"
+            }
+        }
+        ActionId::ReturnToSession => {
+            if mac {
+                "⌘Enter"
+            } else {
+                "Ctrl+Shift+Enter"
+            }
+        }
+        ActionId::ToggleSidebar => {
+            if mac {
+                "⌘B"
+            } else {
+                "Ctrl+Shift+B"
+            }
+        }
+        ActionId::Help => {
+            if mac {
+                "⌘/"
+            } else {
+                "Ctrl+Shift+/"
+            }
+        }
+        ActionId::PrevSession => {
+            if mac {
+                "⌘↑"
+            } else {
+                "Ctrl+Shift+↑"
+            }
+        }
+        ActionId::NextSession => {
+            if mac {
+                "⌘↓"
+            } else {
+                "Ctrl+Shift+↓"
+            }
+        }
+        _ => return None,
+    })
+}
+
 fn event_label(key: &KeyEvent) -> String {
     let mut label = String::new();
     if key.modifiers.contains(KeyModifiers::SUPER) {
