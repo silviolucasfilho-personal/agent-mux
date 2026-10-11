@@ -573,3 +573,82 @@ fn the_cli_adds_lists_checks_and_removes_notes() {
     );
     assert!(ok && out.contains("/memory/_user/notes/u.md"), "{out}");
 }
+
+/// The save job agent-mux wrote for conversation `conv` of `harness`.
+fn save_job(dir: &Path, harness: &str, conv: &str) -> Option<memory::save::Job> {
+    let path = dir
+        .join(memory::save::SAVES)
+        .join(format!("{harness}-{conv}.json"));
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(serde_json::from_str(&text).unwrap())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_closing_session_hands_its_conversation_to_one_save() {
+    let f = fixture();
+    let claude = profile(
+        "Claude Code",
+        fake_harness(&f.bin, "claude"),
+        &["--model", "opus"],
+    );
+    let (tx, _rx) = mpsc::channel(64);
+    let mut app = app(&f, vec![claude.clone()], None, tx, MemoryConfig::default());
+    let id = app.launch(claude, f.ws.clone()).unwrap();
+    let run = Run::read(&f.bin);
+    let dir = PathBuf::from(run.var(memory::ENV_DIR).unwrap());
+    app.sessions[0].conversation = Some("conv-1".into());
+
+    app.sessions[0].kill();
+    app.handle_pty_exit(id);
+    let job = save_job(&dir, "claude", "conv-1").expect("a save job");
+    assert_eq!(job.conversation, "conv-1");
+    assert_eq!(job.model.as_deref(), Some("opus"));
+    assert_eq!(job.workspace, f.ws);
+    assert_eq!(job.memory, dir);
+    assert!(job.command.ends_with("claude"));
+
+    // once: a second exit, or the quit after it, starts nothing
+    std::fs::remove_dir_all(dir.join(memory::save::SAVES)).unwrap();
+    app.handle_pty_exit(id);
+    assert_eq!(app.save_memory_of_all(), 0);
+    assert!(save_job(&dir, "claude", "conv-1").is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn quitting_saves_every_open_session() {
+    let f = fixture();
+    let claude = profile("Claude Code", fake_harness(&f.bin, "claude"), &[]);
+    let (tx, _rx) = mpsc::channel(64);
+    let mut app = app(&f, vec![claude.clone()], None, tx, MemoryConfig::default());
+    app.launch(claude, f.ws.clone()).unwrap();
+    let run = Run::read(&f.bin);
+    let dir = PathBuf::from(run.var(memory::ENV_DIR).unwrap());
+    app.sessions[0].conversation = Some("conv-2".into());
+
+    app.kill_all();
+    assert_eq!(app.save_memory_of_all(), 1);
+    assert!(save_job(&dir, "claude", "conv-2").is_some());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn save_on_close_off_starts_no_save() {
+    let f = fixture();
+    let claude = profile("Claude Code", fake_harness(&f.bin, "claude"), &[]);
+    let (tx, _rx) = mpsc::channel(64);
+    let cfg = MemoryConfig {
+        save_on_close: Some(false),
+        ..Default::default()
+    };
+    let mut app = app(&f, vec![claude.clone()], None, tx, cfg);
+    let id = app.launch(claude, f.ws.clone()).unwrap();
+    let run = Run::read(&f.bin);
+    let dir = PathBuf::from(run.var(memory::ENV_DIR).unwrap());
+    app.sessions[0].conversation = Some("conv-3".into());
+    app.sessions[0].kill();
+    app.handle_pty_exit(id);
+    assert_eq!(app.save_memory_of_all(), 0);
+    assert!(!dir.join(memory::save::SAVES).exists());
+}

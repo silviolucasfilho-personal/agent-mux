@@ -366,6 +366,9 @@ async fn main() -> Result<()> {
     // kill_all must run on every exit from the loop above -- including the
     // draw-error path -- so live PTY children are never orphaned when we quit.
     app.kill_all();
+    // every session still open asks for its save on close, in the
+    // background: they outlive this process
+    app.save_memory_of_all();
     app.cleanup_live_snapshot();
     // Bounded store flush AFTER kill_all: the main loop is gone, so the
     // runtime's shutdown watch is the pipelines' only exit signal; the

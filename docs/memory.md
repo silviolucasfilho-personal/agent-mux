@@ -79,7 +79,7 @@ Every launch with memory gets these variables:
 | `AGENT_MUX_MEMORY_USER` | the `_user` folder |
 | `AGENT_MUX_MEMORY_BRIEF` | a brief addressed to this session (set by the hand-off, a later phase) |
 
-It also gets one **start text**: the hint (`[memory] hint` in `prompts.toml`), then the workspace index and the user index inside the trust fence (section 6), cut to stay under 9,000 characters. How it arrives depends on the harness:
+It also gets one **start text**: the hint (`[memory] hint` in `prompts.toml`), then the workspace index and the user index inside the trust fence (section 7), cut to stay under 9,000 characters. How it arrives depends on the harness:
 
 | Harness | Channel | Notes |
 | --- | --- | --- |
@@ -92,7 +92,26 @@ The skill is named `mux-memory` to avoid replacing Claude Code’s built-in `/me
 
 The **`mux-memory` skill** is installed for each harness a session runs on, once per run: `/mux-memory` on Claude Code and Antigravity, `$mux-memory` on Codex. It saves a note (checking the index for one that already covers the fact), recalls notes with their sources, forgets one only on your word, and writes a hand-off brief. After a save it runs `agent-mux memory check` when the binary is on the `PATH`, so the index is rebuilt at once.
 
-## 5. Command line
+## 5. Saved on close
+
+A session also saves what it learned when it ends, without being asked. When an interactive session closes (you exit the harness, or stop it with `x`), and for every session still open when agent-mux quits, agent-mux starts one save in the background. It runs as its own process (`agent-mux memory save-session`), so quitting agent-mux does not stop it:
+
+1. agent-mux finds the session's conversation, the same way `f` does: from the trace store, from a resume, or from the harness's own folder.
+2. It skips a conversation whose transcript has not grown since its last save, so a session restored and closed again without a new turn costs nothing. The mark is `.saves/<harness>-<conversation>.saved`.
+3. It runs the harness headless once with the `[memory] save` prompt and the current index, and asks for at most 5 notes in ```` ```mux-note ```` blocks, or `nothing to save`.
+4. It writes the notes itself: they are validated like any other, carry the session as their `source`, and keep a pin you gave them. Then it rebuilds the index and records the result in `log.md` (`save-on-close`, `update-on-close`, `closed … notes`, `closed no new turns`, `save-failed`).
+
+The save never changes the conversation. As probed on 2026-10-11:
+
+| Harness | Run | What it leaves |
+| --- | --- | --- |
+| Claude Code 2.1.296 | `claude --resume <id> --fork-session --no-session-persistence --tools "" -p …` | nothing: the copy is not written, the original keeps its size |
+| Codex 0.162.1 | `codex exec --ephemeral -o <file> -c sandbox_mode="read-only" fork <id> …` | nothing (`exec resume --ephemeral` still appends to the original, so a fork is used) |
+| Antigravity 1.3.3 | `agy -p … --mode plan`, reading the transcript agent-mux renders to `.saves/` | a new agy conversation; the original is untouched |
+
+It costs one turn per closed session. A forked turn reuses the conversation's prompt cache, so on Claude Code and Codex it is cheap. On Antigravity the fresh conversation reads the whole transcript. Loop runs and workflow steps never save on close, and a save is not itself saved. `[memory] save_on_close = false` turns it off.
+
+## 6. Command line
 
 ```sh
 agent-mux memory ls [--all] [--json]       # the notes in index order
@@ -102,13 +121,14 @@ echo "The fact." | agent-mux memory add <name> --description "…"   # the body 
 agent-mux memory rm <name>                 # move it to notes/.removed/
 agent-mux memory check                     # validate, expire, rebuild; exit 1 on problems
 agent-mux memory path                      # which folder, and why
+agent-mux memory save-session <job>        # one save on close (agent-mux starts it)
 ```
 
 Every command takes `--workspace DIR` or `--user`. Without either, a command run inside a session works on that session's memory (`$AGENT_MUX_MEMORY`), and one run in a terminal works on the current folder's.
 
 The **Configuration view** (`C`) lists every note of the library's memory folders under **Memory**, named `<workspace> · <note>` (`user · <note>` for `_user`). `Enter` opens one in your editor, `n` writes a new note about you from a template, and `R` moves one to `notes/.removed/`. `agent-mux config new memory-note <name>` does the same as `n`. A workspace that keeps its memory in its own tree is not listed there; use `agent-mux memory ls` in it.
 
-## 6. The trust fence
+## 7. The trust fence
 
 Everything injected from memory is text a model or a person wrote earlier, so it sits between a notice and two markers:
 
@@ -121,13 +141,14 @@ Everything injected from memory is text a model or a person wrote earlier, so it
 
 A note's text cannot close the fence early: any marker spelling inside it is broken before it is injected. Nothing in a note widens what a session may do; the guard and the harness's approvals decide that.
 
-## 7. Settings
+## 8. Settings
 
 ```toml
 [memory]
 enabled = true            # false: no session gets memory
 location = "library"      # or "workspace"
 index_lines = 60
+save_on_close = true      # false: a closing session saves nothing on its own
 
 [[profiles]]
 name = "Scratch"
@@ -136,9 +157,9 @@ command = "claude"
 enabled = false           # this profile's sessions get no memory
 ```
 
-The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/mux-memory/` like Heimdall. `imports`, `handoff`, `brief_timeout_s` and `keeper` are read but not used yet.
+The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`, `save`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/mux-memory/` like Heimdall. `imports`, `handoff`, `brief_timeout_s` and `keeper` are read but not used yet.
 
-## 8. Not yet
+## 9. Not yet
 
 These are designed in the spec and come in later phases:
 

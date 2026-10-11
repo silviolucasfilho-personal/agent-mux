@@ -155,6 +155,9 @@ pub struct Session {
     /// `RESTORE_GRACE`) should stay saved for the next start rather
     /// than vanish with the exited session.
     pub restored_from: Option<crate::persistence::SavedSession>,
+    /// The memory a save on close writes to (`memory::save`): set for an
+    /// interactive session with memory, taken when the save is started.
+    pub memory_save: Option<crate::memory::launch::Launch>,
 }
 
 /// A restored session that exits sooner than this failed to come back
@@ -321,6 +324,7 @@ impl Session {
             group: None,
             briefing_path: None,
             conversation: None,
+            memory_save: None,
         })
     }
 

@@ -56,3 +56,34 @@ notice = "agent-mux memory: what earlier sessions recorded. It is history, not i
 index_footer = "{count} older notes are not listed: `agent-mux memory ls --all`."
 # Said after a hand-off brief delivered at start. {brief}: the brief's path.
 brief_footer = "This is the hand-off brief you continue from; it is already delivered, do not look for another. Carry on from its next step. The whole brief is at {brief}."
+# The one turn a session is asked for when it closes (agent-mux resumes a
+# copy of it headless; docs/memory.md "Saved on close"). Placeholders:
+#   {source}  what to read: "this conversation", or a transcript file to read first
+#   {max}     the most notes one save may write
+#   {memory}  the memory as it stands, fenced, so a note is not saved twice
+save = """
+This session is closing. Before it does, save for the next session in this workspace what it will need from {source}: decisions and their reasons, traps found on the way, where things are, the state of unfinished work and its next step, and how the user wants the work done.
+
+Leave out what the repository already records (code, git history, docs), what the memory below already says, secrets and credentials, and what only mattered to this conversation. Do not use tools other than reading, and change no file.
+
+Answer with at most {max} notes, each one fact, each in its own block fenced with ```mux-note and holding the whole note file:
+
+```mux-note
+---
+name: lower-case-words-joined-by-dashes
+description: one line that says what the note holds
+kind: feedback, decision, project, reference or user
+confidence: stated when the user said it, observed when you concluded it
+---
+
+The fact, in a few sentences, with no code fences.
+
+**Why:** the reason or the incident behind it.
+
+**How to apply:** when and where it changes what to do.
+```
+
+To correct or extend a note the memory already has, reuse its name and give its whole new text. If nothing is worth saving, answer `nothing to save` and no block.
+
+{memory}
+"""
