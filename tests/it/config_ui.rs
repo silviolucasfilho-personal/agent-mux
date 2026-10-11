@@ -578,7 +578,20 @@ fn memory_notes_are_listed_created_and_moved_aside() {
     // R moves a note aside instead of deleting it
     press(&mut f.app, KeyCode::Char('R'));
     assert_eq!(view(&f.app).pending, Pending::Reset);
+    assert!(
+        view(&f.app)
+            .footer()
+            .contains("Move memory/_user/notes/likes-tables.md to notes/.removed/")
+    );
     press(&mut f.app, KeyCode::Char('y'));
+    assert!(
+        f.app
+            .notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("moved to notes/.removed/")
+    );
     assert!(
         !f.library
             .join("memory/_user/notes/likes-tables.md")

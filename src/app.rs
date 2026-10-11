@@ -5829,6 +5829,9 @@ impl App {
                     return;
                 };
                 let notice = match view.catalog.reset(&asset) {
+                    Ok(()) if asset.kind == Kind::MemoryNote => {
+                        Notice::info(format!("{} moved to notes/.removed/", asset.id))
+                    }
                     Ok(()) => Notice::info(format!("{} reset", asset.id)),
                     Err(e) => Notice::warn(e),
                 };

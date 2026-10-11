@@ -488,6 +488,9 @@ impl ConfigViewState {
     pub fn footer(&self) -> String {
         match &self.pending {
             Pending::Reset => match self.selected_asset() {
+                Some(a) if a.kind == Kind::MemoryNote => {
+                    format!(" Move {} to notes/.removed/? [y/n]", a.id)
+                }
                 Some(a) if a.source == Source::User => {
                     format!(" Delete {}? [y/n]", a.id)
                 }
