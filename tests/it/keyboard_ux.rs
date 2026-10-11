@@ -528,3 +528,40 @@ fn paging_aliases_still_work_in_application_readers() {
     };
     assert_eq!(v.scroll, 10);
 }
+
+#[test]
+fn commands_list_each_shortcut_beside_its_command() {
+    let mut a = app();
+    a.handle_key(&key(KeyCode::F(1)), Instant::now());
+    let text = screen(&a, 100);
+    let row = |label: &str| {
+        text.lines()
+            .find(|l| l.contains(label))
+            .unwrap_or_else(|| panic!("no {label} row in\n{text}"))
+            .to_string()
+    };
+    let chord = |mac: &str, other: &str| {
+        if agent_mux::keymap::MACOS {
+            mac.to_string()
+        } else {
+            other.to_string()
+        }
+    };
+    // a candidate chord shows before Test shortcuts, right-aligned
+    let focus = row("Focus Agents");
+    assert!(
+        focus
+            .trim_end_matches(['│', ' '])
+            .ends_with(&chord("⌘L", "Ctrl+Shift+L")),
+        "{focus}"
+    );
+    assert!(row("Open traces").contains("F3"));
+    // an unavailable command still shows its key
+    assert!(
+        row("Return to session").contains(&chord("⌘Enter", "Ctrl+Shift+Enter")),
+        "{text}"
+    );
+    // an observed shortcut replaces the candidate
+    let observed = a.command_shortcut(ActionId::FocusAgents);
+    assert_eq!(observed, Some((chord("⌘L", "Ctrl+Shift+L"), false)));
+}

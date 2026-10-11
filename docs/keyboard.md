@@ -4,7 +4,7 @@ agent-mux uses one command registry (`src/keymap.rs`) for the Commands menu, ava
 
 ## Commands and focus
 
-**F1 opens Commands on every screen**, including inside a text field or search. Type to filter commands, use arrows to choose, Enter to execute and Esc to close. The underlying screen, text and selection remain intact. Disabled commands explain why they cannot run. Help is available from Commands, the help chord, or `?` outside text fields.
+**F1 opens Commands on every screen**, including inside a text field or search. Type to filter commands, use arrows to choose, Enter to execute and Esc to close. The underlying screen, text and selection remain intact. Each command shows its shortcut at the right: one observed by **Test shortcuts**, else the function key or this platform's chord (`⌘` on macOS, `Ctrl+Shift` elsewhere) in grey until a test confirms it reaches agent-mux, else the screen's plain key (`n`, `e`, …). Disabled commands explain why they cannot run and still show their key. Help is available from Commands, the help chord, or `?` outside text fields.
 
 The persistent footer provides clickable Commands, Focus Agents and Return to session controls when space and availability permit. Its text says where the keyboard goes, and the focused pane has a distinct border. At narrow widths Commands and focus take priority over other hints.
 
