@@ -36,7 +36,7 @@
 //! macOS too, for terminals that keep `⌘`). Terminals that report no
 //! modifiers at all (Terminal.app, plain xterm) deliver `Ctrl+Shift+B` as
 //! `Ctrl+B`, so the two chords that matter also have a protocol-free form:
-//! `F2` switches focus, `F3` opens the traces and `F1` opens help. `CHORDS` is the whole set; the
+//! `F2` switches focus, `F3` opens the traces and `F1` opens Commands. `CHORDS` is the whole set; the
 //! status bar, the help overlay and the welcome card print from it with
 //! `chord_label`. `agent-mux keys` shows what a terminal delivers.
 //!
@@ -118,6 +118,9 @@ pub const VERBS: &[(Verb, &str, &str, &str)] = &[
 /// harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chord {
+    Commands,
+    FocusAgents,
+    ReturnSession,
     /// `⌘E` / `Ctrl+Shift+E` / `F2`: focus list ⇄ pane.
     ToggleFocus,
     /// `⌘B` / `Ctrl+Shift+B`: show or hide the sidebar.
@@ -132,7 +135,7 @@ pub enum Chord {
     Copy,
     /// `Ctrl+Shift+V`: paste into the pane (`⌘V` is the host's).
     Paste,
-    /// `⌘/` / `Ctrl+Shift+/` / `F1`: help.
+    /// `⌘/` / `Ctrl+Shift+/`: help.
     Help,
     /// `⌘I` / `Ctrl+Shift+I` / `F3`: the Trace Browser on this session,
     /// and back.
@@ -158,6 +161,15 @@ pub enum Chord {
 /// `(chord, macOS label, label elsewhere, protocol-free label, meaning)`.
 /// The protocol-free label is empty when the chord has no such form.
 pub const CHORDS: &[(Chord, &str, &str, &str, &str)] = &[
+    (Chord::Commands, "⌘P", "Ctrl+Shift+P", "F1", "Commands"),
+    (Chord::FocusAgents, "⌘L", "Ctrl+Shift+L", "", "Focus Agents"),
+    (
+        Chord::ReturnSession,
+        "⌘Enter",
+        "Ctrl+Shift+Enter",
+        "",
+        "Return to session",
+    ),
     (
         Chord::ToggleFocus,
         "⌘E",
@@ -183,7 +195,7 @@ pub const CHORDS: &[(Chord, &str, &str, &str, &str)] = &[
         "",
         "paste into the pane",
     ),
-    (Chord::Help, "⌘/", "Ctrl+Shift+/", "F1", "help"),
+    (Chord::Help, "⌘/", "Ctrl+Shift+/", "", "help"),
     (
         Chord::Traces,
         "⌘I",
@@ -244,9 +256,12 @@ pub fn chord(key: &KeyEvent) -> Option<Chord> {
     let letter = |c: char, want: char| c.eq_ignore_ascii_case(&want);
     Some(match key.code {
         KeyCode::F(2) => Chord::ToggleFocus,
-        KeyCode::F(1) => Chord::Help,
+        KeyCode::F(1) => Chord::Commands,
         KeyCode::F(3) => Chord::Traces,
         KeyCode::F(10) => Chord::Quit,
+        KeyCode::Char(c) if app && letter(c, 'p') => Chord::Commands,
+        KeyCode::Char(c) if app && letter(c, 'l') => Chord::FocusAgents,
+        KeyCode::Enter if app => Chord::ReturnSession,
         KeyCode::Char(c) if app && letter(c, 'e') => Chord::ToggleFocus,
         KeyCode::Char(c) if app && letter(c, 'b') => Chord::ToggleSidebar,
         KeyCode::Char(c) if app && letter(c, 'f') => Chord::Find,
@@ -280,7 +295,7 @@ pub fn chord_label_for(c: Chord, macos: bool, modifiers_reported: bool) -> &'sta
     let Some((_, mac, other, bare, _)) = CHORDS.iter().find(|(x, ..)| *x == c) else {
         return "";
     };
-    if !modifiers_reported && !bare.is_empty() {
+    if !modifiers_reported {
         bare
     } else if macos {
         mac
@@ -393,8 +408,8 @@ pub enum TextKey {
     Other,
 }
 
-/// The shared text-field keys. `Enter` is never a new line: it submits,
-/// and the owner handles it (`Other`).
+/// Shared text editing. Plain Enter is handled by the field's owner:
+/// newline in multiline fields, finish or submit in single-line fields.
 pub fn text_key(key: &KeyEvent) -> TextKey {
     let c = ctrl(key);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -598,7 +613,7 @@ mod tests {
         );
         assert_eq!(
             chord(&k(KeyCode::F(1), KeyModifiers::NONE)),
-            Some(Chord::Help)
+            Some(Chord::Commands)
         );
         // the harness's keys
         assert_eq!(chord(&k(KeyCode::Char('b'), KeyModifiers::CONTROL)), None);
@@ -619,9 +634,273 @@ mod tests {
             "Ctrl+Shift+E"
         );
         assert_eq!(chord_label_for(Chord::ToggleFocus, true, false), "F2");
-        assert_eq!(chord_label_for(Chord::Help, false, false), "F1");
-        // no protocol-free form: the OS label stands
-        assert_eq!(chord_label_for(Chord::ToggleSidebar, true, false), "⌘B");
+        assert_eq!(chord_label_for(Chord::Commands, false, false), "F1");
+        // No protocol-free form: do not advertise an unsupported chord.
+        assert_eq!(chord_label_for(Chord::ToggleSidebar, true, false), "");
         assert_eq!(chord_meaning(Chord::Find), "find in the pane");
     }
 }
+
+/// Stable actions shared by dispatch, Commands and help.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ActionId {
+    Commands,
+    Help,
+    FocusAgents,
+    ReturnToSession,
+    ToggleSidebar,
+    Quit,
+    Traces,
+    Runs,
+    New,
+    Edit,
+    Delete,
+    Run,
+    Stop,
+    Save,
+    Reload,
+    Restore,
+    Editor,
+    SetVerdict,
+    TestShortcuts,
+    PrevSession,
+    NextSession,
+    SubmitDialog,
+    Skills,
+    Configuration,
+    Inbox,
+    History,
+    FilterClaude,
+    FilterCodex,
+    FilterAntigravity,
+    FindNext,
+    FindPrev,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ActionScope {
+    Global,
+    Local,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ActionDef {
+    pub id: ActionId,
+    pub label: &'static str,
+    pub keywords: &'static str,
+    pub key: Option<char>,
+    pub scope: ActionScope,
+}
+
+pub const ACTIONS: &[ActionDef] = &[
+    ActionDef {
+        id: ActionId::Help,
+        label: "Help for this screen",
+        keywords: "keyboard shortcuts",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::SubmitDialog,
+        label: "Submit dialog",
+        keywords: "start compose launch",
+        key: None,
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::Skills,
+        label: "Open skills",
+        keywords: "library",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::Configuration,
+        label: "Open configuration",
+        keywords: "settings memory prompts",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::Inbox,
+        label: "Open inbox",
+        keywords: "review pending",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::History,
+        label: "Open session history",
+        keywords: "logs past",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::FilterClaude,
+        label: "Filter skills: Claude",
+        keywords: "harness",
+        key: None,
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::FilterCodex,
+        label: "Filter skills: Codex",
+        keywords: "harness",
+        key: None,
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::FilterAntigravity,
+        label: "Filter skills: Antigravity",
+        keywords: "harness",
+        key: None,
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::FindNext,
+        label: "Next search match",
+        keywords: "find trace",
+        key: None,
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::FindPrev,
+        label: "Previous search match",
+        keywords: "find trace",
+        key: None,
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::FocusAgents,
+        label: "Focus Agents",
+        keywords: "sidebar list navigation",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::ReturnToSession,
+        label: "Return to session",
+        keywords: "pane harness terminal",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::ToggleSidebar,
+        label: "Show/hide sidebar",
+        keywords: "layout",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::Traces,
+        label: "Open traces",
+        keywords: "trace browser",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::Runs,
+        label: "Open runs",
+        keywords: "history workflow loop",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::PrevSession,
+        label: "Previous session",
+        keywords: "switch",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::NextSession,
+        label: "Next session",
+        keywords: "switch",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::New,
+        label: "New",
+        keywords: "create",
+        key: Some('n'),
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::Edit,
+        label: "Edit selected item",
+        keywords: "change",
+        key: Some('e'),
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::Delete,
+        label: "Delete/remove selected item",
+        keywords: "dismiss",
+        key: Some('d'),
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::Run,
+        label: "Run/resume",
+        keywords: "launch",
+        key: Some('r'),
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::Stop,
+        label: "Stop selected run",
+        keywords: "kill cancel",
+        key: Some('x'),
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::Save,
+        label: "Save",
+        keywords: "write",
+        key: Some('s'),
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::Reload,
+        label: "Reload",
+        keywords: "rescan refresh",
+        key: Some('r'),
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::Restore,
+        label: "Restore built-in",
+        keywords: "reset",
+        key: Some('R'),
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::Editor,
+        label: "Open in editor",
+        keywords: "compose external",
+        key: Some('o'),
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::SetVerdict,
+        label: "Change verdict",
+        keywords: "score trace",
+        key: None,
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::TestShortcuts,
+        label: "Test shortcuts",
+        keywords: "keyboard terminal verify",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::Quit,
+        label: "Quit agent-mux",
+        keywords: "exit",
+        key: None,
+        scope: ActionScope::Global,
+    },
+];

@@ -524,10 +524,13 @@ fn editing_settings_reloads_profiles_and_the_editor() {
 fn the_help_and_hints_mention_the_view() {
     let mut f = fixture();
     let text = screen(&f.app);
-    assert!(text.contains("[C] config"), "{text}");
-    press(&mut f.app, KeyCode::Char('?'));
+    assert!(text.contains("[F1 Commands]"), "{text}");
+    press(&mut f.app, KeyCode::F(1));
+    for c in "configuration".chars() {
+        press(&mut f.app, KeyCode::Char(c));
+    }
     let text = screen(&f.app);
-    assert!(text.contains("configuration: edit every prompt"), "{text}");
+    assert!(text.contains("Open configuration"), "{text}");
 }
 
 #[test]

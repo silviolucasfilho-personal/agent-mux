@@ -1,5 +1,6 @@
 use crate::app::about::{AboutRow, AboutState};
 mod agent_editor;
+mod commands;
 mod flow;
 mod loop_builder;
 pub mod markdown;
@@ -9,8 +10,8 @@ use crate::app::loops::LoopStatus;
 use crate::app::workflows_view::{DialogField as WfField, DialogPurpose, WorkflowDialogState};
 use crate::app::{
     App, BrowserPane, DialogContentMode, DialogField, DialogState, HistoryPane, HistoryState,
-    InstallLabel, Mode, NoticeLevel, SidebarSection, SkillLauncherField, SkillRow, SkillsPane,
-    SkillsTab, SkillsViewState, TraceBrowserState,
+    InstallLabel, Mode, SidebarSection, SkillLauncherField, SkillRow, SkillsPane, SkillsTab,
+    SkillsViewState, TraceBrowserState,
 };
 use crate::app::{ConfigPane, ConfigRow, ConfigViewState, Pending};
 use crate::status::Status;
@@ -320,7 +321,6 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         draw_sidebar(f, side, app, now);
         draw_main(f, main, app, now);
     }
-    draw_status_bar(f, bar, app);
 
     match &app.mode {
         Mode::NewSession(dialog) => draw_new_session_dialog(f, dialog, app),
@@ -348,6 +348,8 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         ),
         _ => {}
     }
+    commands::draw_footer(f, bar, app);
+    commands::draw(f, app);
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, now: Instant) {
@@ -398,7 +400,17 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(accent)
-        .title(Span::styled(format!(" {title} "), title_style));
+        .title(Span::styled(
+            format!(
+                " {title}{} ",
+                if is_focused {
+                    " • Keyboard focus"
+                } else {
+                    ""
+                }
+            ),
+            title_style,
+        ));
     let inner = usize::from(area.width.saturating_sub(2));
     let visible = usize::from(area.height.saturating_sub(2));
     let heights = agent_row_heights(&lines);
@@ -1038,7 +1050,21 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         session.profile.name,
         session.dir.display()
     );
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let title = if app.focus == crate::app::Focus::Pane && matches!(app.mode, Mode::Main) {
+        format!("{title} • Keyboard goes to {}", session.profile.name)
+    } else {
+        title
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(
+            Style::default().fg(if app.focus == crate::app::Focus::Pane {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            }),
+        );
     let whole = block.inner(area);
     f.render_widget(block, area);
     // the strip takes its rows from the bottom of the pane; the pty was
@@ -1055,7 +1081,11 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         underline_hyperlinks(f.buffer_mut(), inner, screen);
         // real cursor while the pane has the keyboard AND is live: a
         // scrolled view is history, the cursor belongs to the bottom
-        (app.pane_session().is_some() && !screen.hide_cursor() && scroll_offset == 0)
+        (app.pane_session().is_some()
+            && app.command_overlay.is_none()
+            && app.shortcut_probe.is_none()
+            && !screen.hide_cursor()
+            && scroll_offset == 0)
             .then(|| screen.cursor_position())
     };
     if let Some((row, col)) = cursor
@@ -2014,22 +2044,6 @@ pub(crate) fn fit_hints(text: &str, width: usize) -> String {
 
 /// The hints of the pane: the chord layer in the labels of this platform
 /// and terminal (`keymap::chord_label`).
-fn pane_hints(app: &App) -> String {
-    use crate::keymap::{Chord, chord_label};
-    let e = app.keys_enhanced;
-    format!(
-        "{} list · {}/{} session · {} traces · {} sidebar · {} find · {} help · {} quit",
-        chord_label(Chord::ToggleFocus, e),
-        chord_label(Chord::PrevSession, e),
-        chord_label(Chord::NextSession, e),
-        chord_label(Chord::Traces, e),
-        chord_label(Chord::ToggleSidebar, e),
-        chord_label(Chord::Find, e),
-        chord_label(Chord::Help, e),
-        chord_label(Chord::Quit, e),
-    )
-}
-
 /// Every form of a chord, for the help overlay: `⌘E / Ctrl+Shift+E / F2`.
 fn chord_forms(c: crate::keymap::Chord) -> String {
     use crate::keymap::chord_label_for;
@@ -2058,8 +2072,6 @@ fn chord_row<'a>(c: crate::keymap::Chord) -> Line<'a> {
 
 /// The pane with nothing to show: how to start, and the chord layer.
 fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
-    use crate::keymap::{Chord, chord_label};
-    let e = app.keys_enhanced;
     let key = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -2100,25 +2112,12 @@ fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
         ),
         Line::raw(""),
     ]);
-    for c in [
-        Chord::ToggleFocus,
-        Chord::PrevSession,
-        Chord::NextSession,
-        Chord::Traces,
-        Chord::ToggleSidebar,
-        Chord::Find,
-        Chord::Help,
-        Chord::Quit,
-    ] {
-        lines.push(line(chord_label(c, e), crate::keymap::chord_meaning(c)));
-    }
-    if !cfg!(windows) && !e {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            "This terminal does not report modifier keys, so ⌘ and Ctrl+Shift chords cannot reach agent-mux; F2, F3, F1 and F10 do. Ghostty, iTerm2, kitty and WezTerm report them.",
-            dim,
-        ));
-    }
+    lines.push(line("F1", "Commands: navigate, run actions, or open Help"));
+    lines.push(line("F2", "legacy focus toggle on the main screen"));
+    lines.push(line(
+        "Commands",
+        "Test shortcuts observes what this terminal delivers",
+    ));
     let block = Block::default().borders(Borders::ALL).title("agent-mux");
     f.render_widget(
         Paragraph::new(lines)
@@ -2126,134 +2125,6 @@ fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
             .block(block),
         area,
     );
-}
-
-fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
-    let fit = |hints: &str| fit_hints(hints, usize::from(area.width));
-    let text = if let Some(st) = &app.search {
-        let count = if st.matches.is_empty() {
-            if st.query.is_empty() {
-                String::new()
-            } else {
-                "no matches".into()
-            }
-        } else {
-            format!("{}/{}", st.current + 1, st.matches.len())
-        };
-        Line::raw(format!(
-            "Search: {}  {count}  [Enter] next  [Shift+Enter] prev  [Esc] close",
-            st.query
-        ))
-    } else if let Some(notice) = &app.notice {
-        let color = match notice.level {
-            NoticeLevel::Info => Color::Cyan,
-            NoticeLevel::Warn => Color::Yellow,
-            NoticeLevel::Error => Color::Red,
-        };
-        Line::styled(notice.text.clone(), Style::default().fg(color))
-    } else {
-        match app.mode {
-            Mode::Main if app.pane_session().is_some() => Line::raw(fit(&pane_hints(app))),
-            Mode::Main => {
-                if app.sidebar_hidden {
-                    Line::raw(fit(
-                        "[b] sidebar  [Tab] select  [Enter] pane  [n] new  [l] logs  [S] skills  [C] config  [t/T] trace  [?] help  [q] quit",
-                    ))
-                } else {
-                    use crate::app::agents_list::AgentKind;
-                    let row = if app.sidebar_section == SidebarSection::History {
-                        None
-                    } else {
-                        app.agent_row()
-                    };
-                    match (app.sidebar_section, row) {
-                        (SidebarSection::History, _) if app.clean => Line::raw(fit(
-                            "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [m] more agents  [?] help  [q] quit",
-                        )),
-                        (SidebarSection::History, _) => Line::raw(fit(
-                            "[Enter/r] restart  [a] all projects  [Tab] agents  [l] logs  [S] skills  [C] config  [m] harnesses only  [?] help  [q] quit",
-                        )),
-                        (_, Some(AgentKind::Harness(_))) if app.clean => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter] new session  [n] new session  [m] more agents  [Tab] history  [b] sidebar  [q] quit",
-                        )),
-                        (_, Some(AgentKind::Session(_))) if app.clean => Line::raw(fit(
-                            "[←] fold  [?] help  [Enter] pane  [n] new session  [f] fork  [x] stop  [d] remove  [X] clear exited  [m] more agents  [Tab] history  [q] quit",
-                        )),
-                        (_, Some(AgentKind::Harness(_))) => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter] new session  [n] new agent  [Tab] history  [S] skills  [C] config  [m] harnesses only  [q] quit",
-                        )),
-                        (_, Some(AgentKind::Session(_))) => Line::raw(fit(
-                            "[←] fold  [?] help  [Enter] pane  [n] new agent  [f] fork  [x] stop  [d] remove  [X] clear exited  [t/T] trace  [Tab] history  [m] harnesses only  [q] quit",
-                        )),
-                        (_, Some(AgentKind::Loop(_))) if app.loop_registry.pause_all => {
-                            Line::styled(
-                                fit(
-                                    "‖ LOOPS PAUSED  [←→] fold  [?] help  [K] resume all  [Enter] details  [n] new agent  [r] run now  [p] pause  [e] edit  [d] remove",
-                                ),
-                                Style::default().fg(Color::Yellow),
-                            )
-                        }
-                        (_, Some(AgentKind::Loop(_))) => Line::raw(fit(
-                            "[←→] fold  [n] new  [Enter] details  [r] run  [p] pause  [e] edit  [d] remove  [m] harnesses only  [?] help",
-                        )),
-                        (_, Some(AgentKind::Flow(_))) => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter] run / view  [n] new agent  [e] edit  [c] compose  [x] stop  [d] discard plan  [⌃O] file  [m] harnesses only  [W] view",
-                        )),
-                        (_, Some(AgentKind::Skill(_))) => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter] launch  [n] new agent  [S] skills  [C] config  [Tab] history  [b] sidebar  [m] harnesses only  [q] quit",
-                        )),
-                        (_, Some(AgentKind::Persona(_))) => Line::raw(fit(
-                            "[←→] fold  [?] help  [Enter/e] edit  [n] new agent  [Tab] history  [C] config  [m] harnesses only  [q] quit",
-                        )),
-                        _ => Line::raw(fit(
-                            "[←→] fold  [?] help  [j/k] its sessions  [n] new agent  [Tab] history  [b] sidebar  [m] more / fewer agents  [q] quit",
-                        )),
-                    }
-                }
-            }
-            Mode::TraceBrowser(ref browser) => browser_hints(browser, app, usize::from(area.width)),
-            // Every other screen is a dialog or a full-screen view that
-            // prints its own keys; this row is for notices. Never the keys
-            // of the main screen behind it: none of them works here.
-            _ => Line::raw(""),
-        }
-    };
-    // What waits on a human leads the control-mode hints, so the inbox is
-    // seen without opening it.
-    let pending = if matches!(app.mode, Mode::Main)
-        && app.search.is_none()
-        && app.notice.is_none()
-        && !app.clean
-    {
-        app.inbox_count()
-    } else {
-        0
-    };
-    let text = if pending > 0 {
-        let badge = format!("● {pending} need you [I]  ");
-        let rest: String = text.spans.iter().map(|s| s.content.as_ref()).collect();
-        let rest = fit_hints(
-            &rest,
-            usize::from(area.width).saturating_sub(badge.chars().count()),
-        );
-        Line::from(vec![
-            Span::styled(
-                badge,
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(rest, text.style),
-        ])
-    } else {
-        text
-    };
-    f.render_widget(Paragraph::new(text), area);
-    if let Some(st) = &app.search {
-        let cursor_x =
-            (area.x + 8 + st.query.len() as u16).min(area.x + area.width.saturating_sub(1));
-        f.set_cursor_position((cursor_x, area.y));
-    }
 }
 
 /// Full keybinding reference — the one place every chord (including the
@@ -2335,8 +2206,8 @@ fn draw_help(f: &mut Frame) {
             "j/k, ↑/↓",
             "walk the Agents list: sessions sit under their agent",
         ),
-        row("1-9", "jump to session N"),
-        row("Tab", "Agents list ⇄ History"),
+        row("1-9", "select visible numbered tabs"),
+        row("Tab", "Agents list ⇄ session pane"),
         row(
             "Enter",
             "new session (harness) · attach · launch / attach the selected agent",
@@ -2427,8 +2298,11 @@ fn draw_help(f: &mut Frame) {
         ),
         Line::raw(""),
         Line::styled("Skills view", head),
-        row("Tab, ←/→", "next tab / focus the list or the detail pane"),
-        row("1-3, c/x/a", "filter to one harness (again to clear)"),
+        row(
+            "Tab / Shift+Tab",
+            "focus list / detail; 1–2 select a numbered tab",
+        ),
+        row("Commands", "filter to a harness (again to clear)"),
         row(
             "r · Ctrl+R",
             "launch the skill · rescan packages and install state",
@@ -2451,7 +2325,7 @@ fn draw_help(f: &mut Frame) {
         ),
         row("/ · a", "full-text search · this project / all projects"),
         row(
-            "s · r",
+            "Commands: verdict · r",
             "verdict good → bad → cleared (also sent to Langfuse) · resume",
         ),
         Line::from(vec![
@@ -3699,53 +3573,6 @@ fn wrap_line(line: &Line, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
-/// The Trace Browser's keys, in the app's one footer row: what works at
-/// this level, and nothing from the screen behind.
-fn browser_hints(browser: &TraceBrowserState, app: &App, width: usize) -> Line<'static> {
-    use crate::keymap::{Chord, chord_label};
-    if let Some(input) = &browser.search_input {
-        let (what, run) = if browser.zoomed {
-            ("Find", "find")
-        } else {
-            ("Search", "search turns")
-        };
-        return Line::styled(
-            format!(" {what}: {input}▏  [Enter] {run}  [Esc] cancel"),
-            Style::default().fg(Color::Black).bg(Color::Yellow),
-        );
-    }
-    let close = chord_label(Chord::Traces, app.keys_enhanced);
-    let hints = if browser.zoomed {
-        format!(
-            "[↑/↓] scroll  [⌃D/⌃U] page  [g/G] top/end  [[/]] section  [/] find  [n/N] next/prev  [⌃O] editor  [Esc] back  [{close}] close"
-        )
-    } else {
-        match browser.focused {
-            BrowserPane::Sessions => format!(
-                "[↑/↓] session  [→/Enter] turns  [space] fold run  [/] search  [a] all projects  [r] resume  [b] sidebar  [Esc/{close}] close"
-            ),
-            BrowserPane::Turns => format!(
-                "[↑/↓] turn  [→/Enter] steps  [z] zoom  [⌃D/⌃U] scroll  [1-5] view  [s] score  [/] search  [⌃O] editor  [←/Esc] sessions  [{close}] close"
-            ),
-            BrowserPane::Detail if browser.detail_view.lists_steps() => {
-                let fold = if browser.detail_view == crate::app::DetailView::Tree {
-                    "[space] fold  "
-                } else {
-                    ""
-                };
-                format!(
-                    "[↑/↓] step  [Enter/z] zoom  [⌃D/⌃U] scroll  [1-5] view  {fold}[⌃O] editor  [s] score  [←/Esc] turns  [{close}] close"
-                )
-            }
-            BrowserPane::Detail => format!("[1-5] view  [s] score  [←/Esc] turns  [{close}] close"),
-        }
-    };
-    Line::styled(
-        fit_hints(&hints, width),
-        Style::default().fg(Color::Black).bg(Color::Cyan),
-    )
-}
-
 /// One row of the trace browser's Sessions tree: a loop or workflow
 /// header, or a traced session under it.
 fn traced_session_row<'a>(
@@ -4407,13 +4234,16 @@ fn draw_skills_view(f: &mut Frame, view: &SkillsViewState, app: &App) {
         }
         title_spans.push(if tab == view.tab {
             Span::styled(
-                tab.label(),
+                format!("{} {}", i + 1, tab.label()),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(tab.label(), Style::default().fg(Color::DarkGray))
+            Span::styled(
+                format!("{} {}", i + 1, tab.label()),
+                Style::default().fg(Color::DarkGray),
+            )
         });
     }
     if !selected_name.is_empty() {
@@ -5604,7 +5434,7 @@ fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
         ));
         if dialog.field == WfField::Task {
             lines.push(Line::styled(
-                "            what the composed workflow should do; ⌃J new line, ⌃O editor, ⌃V paste",
+                "            what the composed workflow should do; Enter new line, Ctrl+Enter submit, ⌃O editor",
                 dim,
             ));
         }
@@ -5728,7 +5558,7 @@ fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
         ));
     }
     lines.push(Line::styled(
-        "  [Enter] start  [Tab] field  [⌃J] new line  [⌃O] editor  [⌃V] paste  [Esc] cancel",
+        "  [Ctrl+Enter] start  [Tab] field  [Enter] line / submit  [⌃O] editor  [⌃V] paste  [Esc] cancel",
         dim,
     ));
     f.render_widget(Paragraph::new(lines).block(block), area);
@@ -6258,7 +6088,10 @@ mod tests {
             "unexpected sidebar in {text}"
         );
         // Status bar advertises [b] sidebar
-        assert!(text.contains("[b] sidebar"), "missing sidebar hint: {text}");
+        assert!(
+            text.contains("[F1 Commands]"),
+            "missing Commands entry: {text}"
+        );
     }
 
     #[test]
@@ -6384,7 +6217,7 @@ mod tests {
         };
         // the main screen's own hints, as a baseline
         app.focus_list();
-        assert!(bottom(&app).contains("[n] new"), "{}", bottom(&app));
+        assert!(bottom(&app).contains("[n] New"), "{}", bottom(&app));
         for mode in [
             crate::app::Mode::Help,
             crate::app::Mode::ConfirmKill,
@@ -6414,7 +6247,7 @@ mod tests {
             buffer_text(&terminal)
         };
         assert_eq!(text.matches("[/] search").count(), 1, "{text}");
-        assert!(text.lines().last().unwrap().contains("close"), "{text}");
+        assert!(text.lines().last().unwrap().contains("Traces"), "{text}");
     }
 
     #[test]
@@ -6432,7 +6265,7 @@ mod tests {
             "Ctrl+Shift+E",
             "F2",
             "focus list ⇄ pane",
-            "jump to session N",
+            "select visible numbered tabs",
             "launch / attach the selected agent",
             "skills view",
             "open the selected execution's traces",
@@ -6468,18 +6301,19 @@ mod tests {
         let app = App::new(Config::default_profiles(), None, tx);
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
-        assert!(buffer_text(&terminal).contains("[?] help"));
+        assert!(buffer_text(&terminal).contains("[F1 Commands]"));
     }
 
     #[test]
     fn a_harness_row_hint_offers_a_session_and_a_new_agent() {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let app = App::new(Config::default_profiles(), None, tx);
+        let mut app = App::new(Config::default_profiles(), None, tx);
+        app.focus_list();
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("[Enter] new session"), "{text}");
-        assert!(text.contains("[n] new agent"), "{text}");
+        assert!(text.contains("[n] New"), "{text}");
     }
 
     #[test]
@@ -6497,8 +6331,16 @@ mod tests {
         ] {
             app.notice = Some(notice);
             terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
-            let cell = &terminal.backend().buffer()[(0, 23)];
-            assert_eq!(cell.style().fg, Some(want), "level color mismatch");
+            let buffer = terminal.backend().buffer();
+            let text = buffer_text(&terminal);
+            assert!(
+                text.contains(app.notice.as_ref().unwrap().text.as_str()),
+                "{text}"
+            );
+            assert!(
+                (0..80).any(|x| buffer[(x, 23)].style().fg == Some(want)),
+                "level color mismatch"
+            );
         }
     }
 
@@ -6873,7 +6715,7 @@ mod tests {
             text.contains("cwd …/silvio/workspace/agent-mux"),
             "got: {text}"
         );
-        assert!(text.contains("[→/Enter] turns"), "got: {text}");
+        assert!(text.contains("[/] search"), "got: {text}");
         // the turn level reads the turn: its prompt and answer, its steps
         if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
             b.drill();
@@ -6912,7 +6754,7 @@ mod tests {
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("(zoomed)"), "got: {text}");
-        assert!(text.contains("[[/]] section"), "got: {text}");
+        assert!(text.contains("[1-5] view"), "got: {text}");
         assert!(!text.contains("Sessions (1)"), "the reader alone: {text}");
         for code in [
             KeyCode::Char('/'),

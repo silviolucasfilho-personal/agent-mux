@@ -1,87 +1,63 @@
 # Keyboard
 
-agent-mux has one keymap for every screen: each key means one thing, and a screen may leave a key out but never gives it another meaning. The table lives in `src/keymap.rs` (`VERBS`); the help overlay (`?`) prints it from there, with macOS labels (`⌃J`, `↩`) on a Mac.
+agent-mux uses one command registry (`src/keymap.rs`) for the Commands menu, availability checks and shared hints. Ordinary keys in a session pane go to the coding harness; application screens use the controls below.
 
-It is built for a Mac keyboard: nothing needs `Home`, `End`, `PgUp`, `PgDn`, forward `Delete`, an F-key or an Option chord. Those keys still work where a keyboard has them.
+## Commands and focus
 
-## Where the focus is
+**F1 opens Commands on every screen**, including inside a text field or search. Type to filter commands, use arrows to choose, Enter to execute and Esc to close. The underlying screen, text and selection remain intact. Disabled commands explain why they cannot run. Help is available from Commands, the help chord, or `?` outside text fields.
 
-The main screen has no modes and nothing to attach to. The keyboard is either in the **list** (the sidebar) or in the **pane** (the selected session), and agent-mux starts in the pane when there is a session to type into. With the pane focused every plain key, `Ctrl+letter`, `Alt`, `Esc`, `Tab` and `Enter` goes to the harness, `Ctrl+Q` included. With the list focused the plain keys are the verbs below.
+The persistent footer provides clickable Commands, Focus Agents and Return to session controls when space and availability permit. Its text says where the keyboard goes, and the focused pane has a distinct border. At narrow widths Commands and focus take priority over other hints.
 
-| Moves the focus | To |
+| Action | Behavior |
 | --- | --- |
-| `Enter` on a session row, `Esc` in the list, a click in the pane, a click on a session row, a session you start, respawn, fork or resume, a paste | the pane |
-| `⌘E` (`Ctrl+Shift+E`, `F2`) from either side; the pane's session exiting | the list |
+| Focus Agents | Reveal the sidebar and focus the Agents list; repeating it never hides the list. |
+| Return to session | Return to the session from which the app screen was opened, falling back to the selected session if the original is gone. |
+| Show/hide sidebar | Change layout on Main or the Trace Browser; it does not leave an editor. Hiding the focused sidebar transfers focus to the pane. |
+| F2 | Legacy list/pane focus toggle on Main, separate from sidebar visibility. |
 
-The keys that work with either focus live in the layer GUI terminals reserve for the application: `⌘` on macOS, `Ctrl+Shift` on Windows and Linux (and on macOS too, for terminals that keep `⌘` for themselves). They never reach the harness.
+Leaving an editor with unsaved changes through Commands asks before discarding. `y` continues; `n` or Esc keeps the editor. Enter does not discard changes.
 
-| Does | macOS | Windows, Linux, and macOS fallback |
-| --- | --- | --- |
-| focus list ⇄ pane | `⌘E` | `Ctrl+Shift+E` (`F2` everywhere) |
-| sidebar show / hide | `⌘B` | `Ctrl+Shift+B` (`b` in the list) |
-| previous / next session | `⌘↑` / `⌘↓` | `Ctrl+Shift+↑` / `Ctrl+Shift+↓` |
-| find in the pane | `⌘F` | `Ctrl+Shift+F` (`Ctrl+F` in the list) |
-| copy the selection / paste | the host's `⌘C` / `⌘V` | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
-| traces of this session (the Trace Browser; again, or `Esc` from its top level, back) | `⌘I` | `Ctrl+Shift+I` (`F3` everywhere; `T` in the list) |
-| help | `⌘/` | `Ctrl+Shift+/` (`F1` everywhere; `?` in the list) |
-| quit agent-mux (asks first while a session runs) | `⌃⇧Q` | `Ctrl+Shift+Q` (`F10` everywhere; `q` in the list) |
-| scroll three lines, a page, to the oldest / newest | `Shift+↑/↓`, `Fn+↑/↓`, `Shift+Fn+←/→` | `Shift+↑/↓`, `PgUp/PgDn`, `Shift+Home/End` |
+## Shortcut reliability
 
-Not in the layer, on purpose: `⌘N`, `⌘W`, `⌘T`, `⌘Q`, `⌘1`-`9` and `⌘,`. Every host terminal takes those first (new window, close, new tab, quit, tab N, preferences), and `⌘Q` would quit the terminal. New and stop are list verbs, one `⌘E` away; quit has its own chord, `⌃⇧Q` (`F10`), since leaving should not take a detour through the list. Plain `Ctrl+Q` stays the harness's.
+The terminal may intercept a key or collapse its modifiers. Protocol support alone does not establish that a particular binding reaches agent-mux. **Test shortcuts** in Commands observes the actual delivered events without executing actions. Space skips a probe; Esc cancels. Verified preferences last for the current app session. Help lists candidate aliases separately from observed bindings. Essential actions remain accessible through F1 and the menu even without modifier reporting.
 
-**What the terminal lets through.** A chord reaches agent-mux only if the terminal does not bind it itself and reports its modifiers. Windows always reports them; on macOS and Linux it takes the kitty keyboard protocol (Ghostty, kitty, WezTerm, foot, iTerm2 3.5+, Alacritty 0.13+, VTE 0.78+). Terminal.app and plain xterm report none, so there `Ctrl+Shift+B` is Claude Code's `Ctrl+B` and is forwarded: use `F2`, `F3`, `F1` and `F10` (on a Mac keyboard with `fn`), the mouse, or another terminal; the status bar and the About view (`v`) say which applies. A chord the host binds (`⌘F` find in Terminal.app, iTerm2 and Ghostty; `Ctrl+Shift+F` in GNOME Terminal and kitty; `⌘↑`/`⌘↓` marks in Terminal.app and iTerm2) never arrives; its twin does. `agent-mux keys` prints what your terminal delivers.
-
-**Links.** A click on a link in the pane opens it (`src/links.rs`). While the pointer rests on a link, and only then, agent-mux pushes a second kitty keyboard mode that reports every key with its press and release, modifiers alone included, so it can see `⌘` held: the pointer becomes a hand (OSC 22: Ghostty, kitty, foot) and goes back when `⌘` is released or the pointer leaves the link. `keys::normalize_event` makes keys typed in that mode read like ordinary ones (a repeat is a press, Caps Lock applies, `Ctrl+Shift+B` keeps its Shift), and the first key typed leaves the mode until the pointer moves again. A `⌘` already held when the pointer reaches the link is not seen; press it there. A terminal without the protocol shows no hand; the click still opens.
-
-## Everywhere
-
-| Key | Means |
+| Action | Candidate aliases |
 | --- | --- |
-| `Enter` | open, choose, confirm |
-| `Esc` / `q` | back one level; close at the top (`q` outside text fields) |
-| `n` | new, in the place you are: a session, a loop, a flow, a step, a field, a pattern, an agent; a new session starts on the harness under the cursor (Claude Code, Codex or Antigravity) |
-| `e` | edit the selected item |
-| `d` | delete, remove or dismiss, always with a `y`/`n` question |
-| `x` | stop something running: kill a session, cancel a workflow run |
-| `s` | save (`Ctrl+S` in forms) |
-| `r` | run, run now, resume |
-| `Ctrl+R` | reload, rescan |
-| `R` | restore the built-in (a workflow, loop pattern, agent or configuration item you edited) |
-| `J` / `K` | move the selected item down / up |
-| `g` / `G` | top / bottom (`Home` / `End` too) |
-| `Ctrl+D` / `Ctrl+U` | page down / up (`PgDn` / `PgUp` too) |
-| `1`-`9` | a tab or a screen |
-| `Tab` / `Shift+Tab` | next / previous field or pane |
-| `Ctrl+O` | open in `$EDITOR` (`editor` in profiles.toml, `$VISUAL`, `$EDITOR`, `vi`) |
-| `?` | help |
+| Commands | F1, Command+P, Ctrl+Shift+P |
+| Focus Agents | Command+L, Ctrl+Shift+L |
+| Return to session | Command+Enter, Ctrl+Shift+Enter |
+| Sidebar | Command+B, Ctrl+Shift+B |
+| Help | Command+/, Ctrl+Shift+/ |
+| Traces | F3, Command+I, Ctrl+Shift+I |
+| Previous / next session | Command+Up / Down, Ctrl+Shift+Up / Down |
+| Quit | F10, Ctrl+Shift+Q |
 
-Confirmations are `y` / `Enter` for yes and `n` / `Esc` for no.
+`agent-mux keys` is the raw terminal event diagnostic. F1 now opens Commands instead of opening Help directly. Existing Command+E / Ctrl+Shift+E and F2 retain their Main focus-toggle meaning.
 
-## In a text field
+## Application screens
 
-| Key | Does |
+| Key | Meaning |
 | --- | --- |
-| `Enter` | submits; it never inserts a new line |
-| `Ctrl+J` | a new line, in every terminal (`Option+Enter` and `Shift+Enter` too, where the terminal sends them) |
-| `Ctrl+A` / `Ctrl+E` | start / end of the line |
-| `Ctrl+W` or `Option+Backspace` | delete the word before the cursor |
-| `Ctrl+U` | clear the field |
-| `Ctrl+V` | paste |
-| `Ctrl+O` | compose the field in `$EDITOR`; what you save comes back |
+| Up / Down | Move selection or scroll the focused reader. |
+| Tab / Shift+Tab | Next / previous field or pane. |
+| Enter | Open the selected item or begin editing a field. |
+| Esc | Cancel the innermost interaction, then back one level. |
+| n / e / d | New / Edit / Delete or dismiss, where supported. |
+| r / x | Run or resume / Stop. |
+| s | Save; it never sets a trace verdict. Use Change verdict in Commands. |
+| Ctrl+R / R | Reload / Restore built-in. |
+| Ctrl+O | Open in the configured external editor. |
+| 1–9 | Select a visibly numbered tab. They no longer silently select sessions on Main. |
+| g / G | Top / bottom where supported. |
+| Ctrl+D / Ctrl+U | Page down / up outside text fields. |
+| ? | Help outside text fields. |
 
-For `Option` combinations, turn on "Use Option as Meta key" (Terminal.app) or "Esc+" for the left Option key (iTerm2). agent-mux never needs them.
+`q` remains a Back alias outside text fields and a legacy Quit alias in Main's list. Context-specific actions remain reachable through Commands; unavailable actions cannot run against a stale selection.
 
-## By place
+## Text and sessions
 
-| Place | Keys of its own |
-| --- | --- |
-| Main screen, list focused | `Enter` on a session or `Esc`: the pane takes the keyboard. `b` sidebar, `Tab` section, `Space` fold a heading or agent (on a session, fold its parent); click a heading or its arrow to fold with the mouse. `l` session logs, `t` tracing on / off, `T` the trace strip under the session (off → one line → eight rows → the Trace Browser; `⌘I` / `Ctrl+Shift+I` / `F3` opens the browser at once, from either side), `S` skills, `C` configuration, `E` or `W` runs view, `I` inbox, `v` about, `K` loops kill switch, `X` clear exited sessions, `m` show or hide the scheduled, flows, skills, on demand and personas sections (hidden when agent-mux starts), `f` on a session: continue it in a new session with its memory; `←` folds the row under the cursor (on a session, or a row with nothing to fold, it climbs to the parent), `→` unfolds (or steps onto the first child), `Space` toggles a fold, a click on the arrow folds too |
-| Loops section | `p` pause, `o` its task in the task library (the editor's What tab), `f` a new pattern there |
-| Workflows section | `c` compose a workflow for a task |
-| Trace browser (full screen; `b` brings the sidebar) | One level at a time, sessions → turns → steps: `↑↓` moves in the list on the left, `→`/`Enter` goes deeper, `←`/`Esc` back (`Esc` at the sessions closes); the right column reads what is selected, wrapped. `z` (or `Enter` on a step) gives the reader the whole screen: `↑↓` scroll, `Ctrl+D`/`Ctrl+U` page, `g`/`G`, `[`/`]` sections, `/` find and `n`/`N`; `Ctrl+O` opens the whole text in your editor. `1`-`5` steps views (list · tree · timeline · loop · summary), `Space` fold, `/` search turns, `a` all projects, `s` verdict, `r` resume |
-| Skills view | `v` validate, `1`-`3` harness filter |
-| Configuration view | `u` push loop skills to workspaces |
-| Agent editor | `R` restores a built-in you saved a copy of (it asks); `1`-`5` Who · What · When · Limits · Review (`Tab` / `Shift+Tab` in a scheduled agent or a persona); `Enter` types a field, `←` `→` `Space` change the others; a scheduled agent's What is the task library; a flow's fields: `Space` makes a field required, `[` `]` previous / next step, `Enter` on Answers with opens what passes |
-| Task library (What tab of a scheduled agent) | `↑↓` picks the task, `→` edits it, `n` new pattern, `c` copies one, `R` restores a built-in, `d` deletes yours; `1`-`5`, `s` and `r` are the editor's |
-| Runs view | `1`-`5` Report · History or Steps · Change · Result · Setup or Document; `p` pauses a loop; `s` saves a flow's document; `Enter` applies a change, runs a plan or attaches to a running run; `d` rejects or dismisses (a plan asks first); `r` runs a scheduled agent again or resumes a flow run; `x` stops; `e` edits the run's agent; `T` traces |
-| Main screen, pane focused | every key goes to the harness except the chord layer above |
+Letters remain literal while editing. Enter finishes a single-line field; in multiline instruction/task editors it inserts a newline. Ctrl+J remains a newline alias. Ctrl+S saves an enclosing editor, including an in-progress field. Esc ends or cancels field editing before leaving the editor; field hints show which applies. Existing cursor, word deletion, clipboard and external-editor controls remain available.
+
+Compose task and argument fields use Enter for a newline and Ctrl+Enter (or Submit dialog in Commands) to submit. Destructive confirmations require `y`; Enter does not approve them.
+
+With session focus, ordinary characters, Ctrl letters, Alt, Esc, Tab and Enter go to the harness. Only recognized application chords and the explicit session scroll controls are intercepted. Host copy/paste shortcuts continue to use the terminal's clipboard path. Application editors never scroll a background session in response to their navigation keys.

@@ -379,10 +379,10 @@ async fn test_sidebar_split_navigation() {
         Some(agent_mux::app::agents_list::AgentKind::Session(0))
     ));
 
-    // Tab switches between the Agents list and History, and back
+    // Tab focuses the pane; returning to Agents preserves the row.
     app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::History);
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    assert_eq!(app.focus, agent_mux::app::Focus::Pane);
+    app.execute_command(agent_mux::keymap::ActionId::FocusAgents, Instant::now());
     assert_ne!(app.sidebar_section, SidebarSection::History);
     assert!(matches!(
         app.agent_row(),
@@ -559,8 +559,8 @@ async fn test_toggle_sidebar_and_fullscreen_harness() {
     // When sidebar is hidden, pane columns expand by SIDEBAR_WIDTH (30)
     assert_eq!(app.pane_size.1, 80 + agent_mux::ui::SIDEBAR_WIDTH);
 
-    // Press 'b' again to show the sidebar
-    app.handle_key(&key(KeyCode::Char('b')), Instant::now());
+    // Hiding transfers focus to the pane; sidebar remains reachable by command.
+    app.execute_command(agent_mux::keymap::ActionId::ToggleSidebar, Instant::now());
     assert!(!app.sidebar_hidden);
     assert_eq!(app.pane_size.1, 80);
 
@@ -612,34 +612,19 @@ async fn test_sidebar_hidden_navigation_and_mouse_click() {
     app.toggle_sidebar();
     assert!(app.sidebar_hidden);
 
-    // In hidden sidebar, Tab cycles between active sessions
+    // Ordinary pane keys are forwarded, while named session commands navigate.
     app.selected = 0;
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    for code in [KeyCode::Tab, KeyCode::Down, KeyCode::Up, KeyCode::Char('2')] {
+        app.handle_key(&key(code), Instant::now());
+        assert_eq!(app.selected, 0);
+    }
+    app.execute_command(agent_mux::keymap::ActionId::NextSession, Instant::now());
     assert_eq!(app.selected, 1);
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
+    app.execute_command(agent_mux::keymap::ActionId::PrevSession, Instant::now());
     assert_eq!(app.selected, 0);
-
-    // Down and Up navigate active sessions
-    app.handle_key(&key(KeyCode::Down), Instant::now());
-    assert_eq!(app.selected, 1);
-    app.handle_key(&key(KeyCode::Up), Instant::now());
-    assert_eq!(app.selected, 0);
-
-    // 1-9 jumps to session
-    app.handle_key(&key(KeyCode::Char('2')), Instant::now());
-    assert_eq!(app.selected, 1);
-    app.handle_key(&key(KeyCode::Char('1')), Instant::now());
-    assert_eq!(app.selected, 0);
-
-    // Click on status bar toggle (row >= terminal_size.0 - 1, col <= 18)
-    let click_status = MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: 5,
-        row: app.terminal_size.0.saturating_sub(1),
-        modifiers: KeyModifiers::NONE,
-    };
-    app.handle_mouse(click_status, Instant::now());
+    app.execute_command(agent_mux::keymap::ActionId::FocusAgents, Instant::now());
     assert!(!app.sidebar_hidden);
+    assert_eq!(app.focus, agent_mux::app::Focus::List);
 
     app.kill_all();
 }

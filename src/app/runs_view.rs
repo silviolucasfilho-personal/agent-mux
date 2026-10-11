@@ -152,6 +152,7 @@ pub struct RunsViewState {
     pub selected: usize,
     pub tab: RunTab,
     pub scroll: usize,
+    pub detail_focused: bool,
     /// Why stored runs could not be read (tracing off, store error).
     pub error: Option<String>,
     /// The selected flow run's steps, read when it is selected.
@@ -427,6 +428,7 @@ impl App {
             selected,
             tab: RunTab::Report,
             scroll: 0,
+            detail_focused: false,
             error,
             steps: Vec::new(),
             today,
@@ -605,7 +607,7 @@ impl App {
         let mut stay = true;
         if st.confirm_discard {
             st.confirm_discard = false;
-            if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+            if matches!(key.code, KeyCode::Char('y')) {
                 self.runs_view_reject(&mut st);
             }
             self.mode = Mode::RunsView(st);
@@ -633,10 +635,12 @@ impl App {
                 st.tab = RunTab::ALL[c as usize - '1' as usize];
                 st.scroll = 0;
             }
-            KeyCode::Tab => {
-                let at = RunTab::ALL.iter().position(|t| *t == st.tab).unwrap_or(0);
-                st.tab = RunTab::ALL[(at + 1) % RunTab::ALL.len()];
-                st.scroll = 0;
+            KeyCode::Tab | KeyCode::BackTab => st.detail_focused = !st.detail_focused,
+            KeyCode::Down | KeyCode::Char('j') if st.detail_focused => {
+                st.scroll = (st.scroll + 1).min(st.max_scroll.get())
+            }
+            KeyCode::Up | KeyCode::Char('k') if st.detail_focused => {
+                st.scroll = st.scroll.saturating_sub(1)
             }
             KeyCode::Char('p') if !ctrl => self.runs_view_pause(&mut st),
             // a plan's document in $EDITOR
@@ -690,6 +694,7 @@ impl App {
             KeyCode::Char('e') if !ctrl => stay = !self.runs_view_edit(&st),
             KeyCode::Char('T') if !ctrl => self.runs_view_traces(&st),
             _ => match verb(&crate::keymap::list_alias(key)) {
+                Some(Verb::Back) if st.detail_focused => st.detail_focused = false,
                 Some(Verb::Back) => stay = false,
                 Some(Verb::Top) => st.selected = 0,
                 Some(Verb::Bottom) => st.selected = n.saturating_sub(1),

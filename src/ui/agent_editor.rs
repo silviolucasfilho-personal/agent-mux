@@ -144,7 +144,18 @@ fn footer(st: &AgentEditorState) -> Line<'static> {
     use crate::keymap::{Verb, ctrl_label, label, newline_label};
     let editor = ctrl_label('o');
     if st.editing {
-        let mut v = vec![("↩", "done"), ("Esc", "done")];
+        let multiline = matches!(
+            st.current(),
+            Some(
+                EdField::Agent(AgentField::Instructions)
+                    | EdField::Task(crate::app::agent_editor::TaskField::Text)
+            )
+        );
+        let mut v = vec![
+            ("↩", if multiline { "new line" } else { "done" }),
+            ("Esc", "done"),
+            ("Ctrl+S", "save"),
+        ];
         if matches!(st.body, Body::Persona(_)) {
             v.push((newline_label(), "new line"));
             v.push((&editor, "editor"));
@@ -762,7 +773,7 @@ fn persona_facts(st: &AgentEditorState, p: &PersonaBody) -> (String, Vec<Line<'s
                 ),
                 gap(),
                 l(&format!(
-                    "{} types a new line; ↩ ends typing.",
+                    "Enter or {} types a new line; Esc ends typing; Ctrl+S saves.",
                     crate::keymap::newline_label()
                 )),
             ],

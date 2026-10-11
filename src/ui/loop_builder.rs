@@ -95,8 +95,8 @@ pub(super) fn draw_in(f: &mut Frame, area: Rect, st: &LoopBuilderState) {
             );
             f.render_widget(
                 Paragraph::new(hints(&[
-                    ("Enter", "done"),
-                    ("⌃J", "new line"),
+                    ("Enter", "new line"),
+                    ("Ctrl+S", "save"),
                     ("⌃O", "editor"),
                     ("⌃R", "back to the default"),
                     ("Esc", "cancel"),

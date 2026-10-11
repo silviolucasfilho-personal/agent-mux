@@ -274,7 +274,14 @@ fn c_opens_the_compose_dialog_and_w_the_view() {
     let Mode::RunsView(v) = &app.mode else {
         panic!()
     };
+    assert_eq!(v.tab, agent_mux::app::runs_view::RunTab::Report);
+    assert!(v.detail_focused);
+    press(&mut app, KeyCode::Char('2'));
+    let Mode::RunsView(v) = &app.mode else {
+        panic!()
+    };
     assert_eq!(v.tab, agent_mux::app::runs_view::RunTab::Sessions);
+    press(&mut app, KeyCode::Esc); // focus the list
     press(&mut app, KeyCode::Esc);
     assert!(matches!(app.mode, Mode::Main));
 }
@@ -323,6 +330,10 @@ fn a_planned_document_is_listed_run_saved_or_discarded_from_the_view() {
     for c in "peek".chars() {
         press(&mut app, KeyCode::Char(c));
     }
+    press(&mut app, KeyCode::F(1));
+    for c in "Save".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
     press(&mut app, KeyCode::Enter);
     let saved = temp.path().join("library/workflows/quick-peek.toml");
     assert!(saved.is_file(), "{:?}", app.notice);
@@ -339,6 +350,12 @@ fn a_planned_document_is_listed_run_saved_or_discarded_from_the_view() {
     // d discards it, after a y
     press(&mut app, KeyCode::Char('d'));
     assert!(!app.planned_workflows.is_empty(), "it asks first");
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        !app.planned_workflows.is_empty(),
+        "Enter does not approve discard"
+    );
+    press(&mut app, KeyCode::Char('d'));
     press(&mut app, KeyCode::Char('y'));
     assert!(app.planned_workflows.is_empty());
     let Mode::RunsView(v) = &app.mode else {
@@ -352,8 +369,10 @@ fn the_help_overlay_and_the_section_hints_mention_workflows() {
     let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
     press(&mut app, KeyCode::Char('?'));
     let text = render(&app, 120, 64);
-    assert!(text.contains("runs view (every run)"), "{text}");
-    assert!(text.contains("A flow row"), "{text}");
+    assert!(text.contains("Help ·"), "{text}");
+    press(&mut app, KeyCode::End);
+    let text = render(&app, 120, 64);
+    assert!(text.contains("Test shortcuts"), "{text}");
 }
 
 fn press_mod(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -366,8 +385,7 @@ fn the_task_field_takes_a_multi_line_prompt() {
     to_workflows(&mut app);
     press(&mut app, KeyCode::Char('c'));
 
-    // a prompt with paragraphs: Alt+Enter makes the newlines, Enter is
-    // still reserved for submitting
+    // Enter inserts paragraphs; the existing modified newline aliases work too.
     for c in "Audit the parser for unchecked indexing.".chars() {
         press(&mut app, KeyCode::Char(c));
     }
@@ -393,7 +411,7 @@ fn the_task_field_takes_a_multi_line_prompt() {
     assert!(text.contains("Audit the parser for unchecked"), "{text}");
     assert!(text.contains("Report by file."), "{text}");
     assert!(
-        text.contains("[⌃J] new line"),
+        text.contains("[Ctrl+Enter] start") && text.contains("[Enter] line / submit"),
         "the keys are on screen\n{text}"
     );
 
@@ -763,8 +781,8 @@ input = "confirmed"
         "a refuter's reason is on screen\n{out}"
     );
 
-    // the ledger is one tab away and names every session
-    press(&mut app, KeyCode::Tab);
+    // The numbered Steps tab names every session.
+    press(&mut app, KeyCode::Char('2'));
     let steps = render(&app, 120, 40);
     assert!(steps.contains("confirmed[0]/vote1"), "{steps}");
     assert!(steps.contains("Verify · confirmed"), "{steps}");

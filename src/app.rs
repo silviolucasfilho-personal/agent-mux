@@ -21,6 +21,7 @@ use tokio::sync::mpsc::Sender;
 pub mod about;
 pub mod agent_editor;
 pub mod agents_list;
+pub mod commands;
 mod config_view;
 pub mod dir_picker;
 pub mod flow_builder;
@@ -28,6 +29,7 @@ pub mod inbox;
 pub mod loop_builder;
 pub mod new_agent;
 pub mod runs_view;
+pub mod shortcut_probe;
 pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
@@ -634,14 +636,9 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                     App::workflows_section_action(key).unwrap_or(Action::None)
                 }
                 KeyCode::Char('b') | KeyCode::Char('B') => Action::ToggleSidebar,
-                KeyCode::Tab | KeyCode::BackTab => Action::ToggleSidebarSection,
+                KeyCode::Tab | KeyCode::BackTab => Action::FocusPane,
                 KeyCode::Char('j') | KeyCode::Down => Action::MoveDown,
                 KeyCode::Char('k') | KeyCode::Up => Action::MoveUp,
-                KeyCode::Char(c @ '1'..='9')
-                    if ctx.sidebar_hidden || ctx.sidebar_section == SidebarSection::Active =>
-                {
-                    Action::SelectSession(c as usize - '1' as usize)
-                }
                 // Esc in the list is back one level, and below the list
                 // is the pane
                 KeyCode::Esc if ctx.selected_status.is_some() => Action::FocusPane,
@@ -792,19 +789,17 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::NewAgent(_) => Action::NewAgentKey,
         Mode::Markdown(_) => Action::MarkdownKey,
         Mode::ConfirmRemoveLoop => match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                Action::EnterConfirmRemoveLoop
-            }
+            KeyCode::Char('y') | KeyCode::Char('Y') => Action::EnterConfirmRemoveLoop,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
             _ => Action::None,
         },
         Mode::ConfirmKill => match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::KillSelected,
+            KeyCode::Char('y') | KeyCode::Char('Y') => Action::KillSelected,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
             _ => Action::None,
         },
         Mode::ConfirmQuit => match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Action::Quit,
+            KeyCode::Char('y') | KeyCode::Char('Y') => Action::Quit,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
             _ => Action::None,
         },
@@ -2560,6 +2555,12 @@ pub struct App {
     /// on Unix, always on Windows): decides whether the hints print the
     /// `⌘`/`Ctrl+Shift` chords or their protocol-free forms.
     pub keys_enhanced: bool,
+    pub command_overlay: Option<commands::Overlay>,
+    pub command_origin: Option<usize>,
+    pub command_dispatching: bool,
+    pub shortcuts: shortcut_probe::ShortcutState,
+    pub shortcut_probe: Option<shortcut_probe::ShortcutProbe>,
+    pub footer_controls: std::cell::RefCell<Vec<(ratatui::layout::Rect, crate::keymap::ActionId)>>,
     /// The trace strip under the selected session (`T`).
     pub trace_strip: TraceStrip,
     /// What the strip shows: the selected session's latest turn, read
@@ -2744,6 +2745,12 @@ impl App {
             link_opener: crate::links::open,
             focus: Focus::List,
             keys_enhanced: cfg!(windows),
+            command_overlay: None,
+            command_origin: None,
+            command_dispatching: false,
+            shortcuts: shortcut_probe::ShortcutState::default(),
+            shortcut_probe: None,
+            footer_controls: std::cell::RefCell::new(Vec::new()),
             trace_strip: TraceStrip::Off,
             strip: None,
             strip_launch: None,
@@ -3029,12 +3036,9 @@ impl App {
         if marker.exists() {
             return;
         }
-        let e = self.keys_enhanced;
-        self.notice = Some(Notice::info(format!(
-            "No more attach: type straight into the session. {} reaches the list, {} the help.",
-            crate::keymap::chord_label(crate::keymap::Chord::ToggleFocus, e),
-            crate::keymap::chord_label(crate::keymap::Chord::Help, e),
-        )));
+        self.notice = Some(Notice::info(
+            "Type straight into the session. F1 opens Commands; Focus Agents moves the keyboard to the list.",
+        ));
         let _ = std::fs::write(marker, "");
     }
 
@@ -3053,6 +3057,23 @@ impl App {
     /// A paste from the host terminal (`⌘V`, `Ctrl+Shift+V`, middle click)
     /// is typing: it lands in the pane and the pane takes the keyboard.
     pub fn handle_paste(&mut self, text: &str) {
+        if self.shortcut_probe.is_some() {
+            return;
+        }
+        if let Some(overlay) = &mut self.command_overlay {
+            if let commands::Overlay::Commands(menu) = overlay {
+                menu.query.extend(text.chars().filter(|c| !c.is_control()));
+                menu.selected = 0;
+            }
+            return;
+        }
+        if let Some(search) = &mut self.search {
+            search
+                .query
+                .extend(text.chars().filter(|c| !c.is_control()));
+            self.rerun_search();
+            return;
+        }
         if let Mode::Markdown(view) = &mut self.mode {
             view.paste(text);
             return;
@@ -3079,6 +3100,7 @@ impl App {
         self.sidebar_hidden = !self.sidebar_hidden;
         if self.sidebar_hidden {
             self.sidebar_section = SidebarSection::Active;
+            self.focus = Focus::Pane;
         }
         self.recompute_pane_size();
     }
@@ -3943,7 +3965,10 @@ impl App {
     /// With the pane focused, follows the session's DECSCUSR requests (or
     /// DefaultUserShape); in the list, a dialog or a browser, DefaultUserShape.
     pub fn active_cursor_style(&self) -> crossterm::cursor::SetCursorStyle {
-        if self.pane_session().is_some() {
+        if self.pane_session().is_some()
+            && self.command_overlay.is_none()
+            && self.shortcut_probe.is_none()
+        {
             self.sessions
                 .get(self.selected)
                 .and_then(|s| s.cursor_style())
@@ -4019,12 +4044,51 @@ impl App {
             self.link_keys_suspended = true;
             self.cmd_held = false;
         }
+        if matches!(self.mode, Mode::Main) {
+            self.command_origin = self.sessions.get(self.selected).map(|s| s.id);
+        }
+        if self.handle_shortcut_probe(key) {
+            return;
+        }
+        if self.handle_command_overlay(key, now) {
+            return;
+        }
         self.notice = None;
         if self.search.is_some() {
             self.handle_search_key(key);
             return;
         }
         if self.handle_ux_key(key) {
+            return;
+        }
+        if (!matches!(self.mode, Mode::Main) || self.focus == Focus::List)
+            && matches!(key.code, KeyCode::Char(_))
+            && key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            return;
+        }
+        if self.handle_local_command(key, now) {
+            return;
+        }
+        if (!matches!(self.mode, Mode::Main) || self.focus == Focus::List)
+            && !self.text_entry_active()
+            && !self.command_dispatching
+            && matches!(key.code, KeyCode::Char(_))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !((self.list_keys_apply()
+                || matches!(self.mode, Mode::RunsView(_) | Mode::Markdown(_)))
+                && matches!(key.code, KeyCode::Char('d' | 'u')))
+        {
+            return;
+        }
+        if (!matches!(self.mode, Mode::Main) || self.focus == Focus::List)
+            && !self.text_entry_active()
+            && !self.confirmation_active()
+            && key.code == KeyCode::Char('?')
+        {
+            self.execute_command(crate::keymap::ActionId::Help, now);
             return;
         }
         let app_cursor = self
@@ -4076,6 +4140,7 @@ impl App {
     /// keymap's list aliases (`g`/`G`, `Ctrl+D`/`Ctrl+U`).
     fn list_keys_apply(&self) -> bool {
         match &self.mode {
+            Mode::Main => self.focus == Focus::List,
             Mode::TraceBrowser(b) => b.search_input.is_none(),
             Mode::SessionHistory(_) | Mode::SkillsView(_) | Mode::Inbox(_) => true,
             Mode::ConfigView(v) => v.pending == Pending::None,
@@ -4119,6 +4184,9 @@ impl App {
         };
         let page = i32::from(self.pane_size.0.saturating_sub(1).max(1));
         match chord {
+            Chord::Commands | Chord::FocusAgents | Chord::ReturnSession => {
+                unreachable!("global commands handled before screen dispatch")
+            }
             Chord::ToggleFocus => self.toggle_focus(),
             Chord::ToggleSidebar => self.toggle_sidebar(),
             Chord::PrevSession => self.select_adjacent_session(-1),
@@ -4327,6 +4395,21 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, ev: MouseEvent, _now: Instant) {
+        if self.command_overlay.is_some() || self.shortcut_probe.is_some() {
+            return;
+        }
+        if ev.kind == MouseEventKind::Down(MouseButton::Left) {
+            let action = self
+                .footer_controls
+                .borrow()
+                .iter()
+                .find(|(r, _)| r.contains((ev.column, ev.row).into()))
+                .map(|(_, id)| *id);
+            if let Some(id) = action {
+                self.execute_command(id, _now);
+                return;
+            }
+        }
         if let Mode::Markdown(ref mut view) = self.mode {
             let outcome = view.handle_mouse(&ev);
             self.markdown_outcome(outcome);
@@ -4409,14 +4492,6 @@ impl App {
             // the text under the pointer moves: look again on the next move
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => self.hover = None,
             _ => {}
-        }
-        // Click on the status bar sidebar toggle button "[b] sidebar"
-        if matches!(ev.kind, MouseEventKind::Down(MouseButton::Left))
-            && ev.row >= self.terminal_size.0.saturating_sub(1)
-            && ev.column <= 12
-        {
-            self.toggle_sidebar();
-            return;
         }
         // Left click on a sidebar row selects that session (and follows it
         // when attached). Only a fresh Down, never a drag that slid over.
@@ -4946,7 +5021,7 @@ impl App {
             }
             Action::OpenNewAgent => self.open_new_agent(),
             Action::NewAgentKey => self.handle_new_agent_key(key),
-            Action::OpenHelp => self.mode = Mode::Help,
+            Action::OpenHelp => self.command_overlay = Some(commands::Overlay::Help(0)),
             Action::EnterConfirmKill => self.mode = Mode::ConfirmKill,
             Action::KillSelected => {
                 if let Some(s) = self.sessions.get_mut(self.selected) {
@@ -5230,24 +5305,22 @@ impl App {
                 browser.search_input = Some(String::new());
                 return;
             }
-            KeyCode::Char('s') | KeyCode::Char('+') => {
-                let outcome = browser.cycle_score();
-                self.notice = Some(match outcome {
-                    Ok(message) => Notice::info(message),
-                    Err(e) => Notice::error(format!("score: {e}")),
-                });
-                return;
-            }
             _ => {}
+        }
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            if !browser.zoomed {
+                browser.focused = if browser.focused == BrowserPane::Detail {
+                    BrowserPane::Sessions
+                } else {
+                    BrowserPane::Detail
+                };
+            }
+            return;
         }
         // the zoomed reader: the keys scroll it
         if browser.zoomed {
             match key.code {
-                KeyCode::Esc
-                | KeyCode::Char('q')
-                | KeyCode::Char('z')
-                | KeyCode::Left
-                | KeyCode::BackTab => {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('z') | KeyCode::Left => {
                     browser.back();
                 }
                 KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter => browser.scroll_reader(1),
@@ -5269,12 +5342,12 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left | KeyCode::BackTab => {
-                if !browser.back() && key.code != KeyCode::Left && key.code != KeyCode::BackTab {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Left => {
+                if !browser.back() && key.code != KeyCode::Left {
                     self.mode = Mode::Main;
                 }
             }
-            KeyCode::Right | KeyCode::Tab | KeyCode::Enter => browser.drill(),
+            KeyCode::Right | KeyCode::Enter => browser.drill(),
             KeyCode::Char('z') => browser.toggle_zoom(),
             KeyCode::Char(c @ '1'..='5') => {
                 browser.set_view(DetailView::ALL[c as usize - '1' as usize]);
@@ -5810,10 +5883,7 @@ impl App {
         // a footer question first
         match &mut view.pending {
             Pending::Reset => {
-                let yes = matches!(
-                    key.code,
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
-                );
+                let yes = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
                 let no = matches!(
                     key.code,
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
@@ -5843,10 +5913,7 @@ impl App {
                 return;
             }
             Pending::Push => {
-                let yes = matches!(
-                    key.code,
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter
-                );
+                let yes = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
                 let no = matches!(
                     key.code,
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc
@@ -5915,8 +5982,14 @@ impl App {
                     self.mode = Mode::Main;
                 }
             }
-            KeyCode::Right | KeyCode::Tab => view.focus = ConfigPane::Detail,
-            KeyCode::Left | KeyCode::BackTab => view.focus = ConfigPane::List,
+            KeyCode::Tab | KeyCode::BackTab => {
+                view.focus = match view.focus {
+                    ConfigPane::List => ConfigPane::Detail,
+                    ConfigPane::Detail => ConfigPane::List,
+                }
+            }
+            KeyCode::Right => view.focus = ConfigPane::Detail,
+            KeyCode::Left => view.focus = ConfigPane::List,
             KeyCode::Down | KeyCode::Char('j') => match view.focus {
                 ConfigPane::List => view.step(1, &self.loop_registry),
                 ConfigPane::Detail => view.scroll(1),
@@ -6059,17 +6132,23 @@ impl App {
                     self.mode = Mode::Main;
                 }
             }
-            KeyCode::Tab => view.next_tab(),
-            KeyCode::BackTab => view.prev_tab(),
+            KeyCode::Tab | KeyCode::BackTab => {
+                view.focus = match view.focus {
+                    SkillsPane::Skills => SkillsPane::Detail,
+                    SkillsPane::Detail => SkillsPane::Skills,
+                }
+            }
+            KeyCode::Char('1') => view.tab = SkillsTab::Details,
+            KeyCode::Char('2') => view.tab = SkillsTab::Executions,
             KeyCode::Right => view.focus = SkillsPane::Detail,
             KeyCode::Left => view.focus = SkillsPane::Skills,
-            KeyCode::Char('1') | KeyCode::Char('c') | KeyCode::Char('C') => {
+            KeyCode::Char('c') | KeyCode::Char('C') => {
                 view.toggle_filter(crate::harness::Harness::Claude)
             }
-            KeyCode::Char('2') | KeyCode::Char('x') | KeyCode::Char('X') => {
+            KeyCode::Char('x') | KeyCode::Char('X') => {
                 view.toggle_filter(crate::harness::Harness::Codex)
             }
-            KeyCode::Char('3') | KeyCode::Char('a') | KeyCode::Char('A') => {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
                 view.toggle_filter(crate::harness::Harness::Antigravity)
             }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -6746,15 +6825,15 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn digits_select_sessions_and_question_mark_opens_help() {
+    fn digits_do_not_select_sessions_and_question_mark_opens_help() {
         let c = ctx(Some(Status::Idle));
         assert!(matches!(
             dispatch(&Mode::Main, &key(KeyCode::Char('1')), &c),
-            Action::SelectSession(0)
+            Action::None
         ));
         assert!(matches!(
             dispatch(&Mode::Main, &key(KeyCode::Char('9')), &c),
-            Action::SelectSession(8)
+            Action::None
         ));
         assert!(matches!(
             dispatch(&Mode::Main, &key(KeyCode::Char('?')), &c),
@@ -6961,7 +7040,7 @@ mod confirm_modes {
         ));
         assert!(matches!(
             dispatch(&Mode::ConfirmKill, &key(KeyCode::Enter), &c),
-            Action::KillSelected
+            Action::None
         ));
         assert!(matches!(
             dispatch(&Mode::ConfirmKill, &key(KeyCode::Esc), &c),

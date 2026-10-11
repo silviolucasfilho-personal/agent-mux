@@ -898,6 +898,17 @@ impl App {
         if st.overlay.is_some() {
             return self.flow_overlay_key(st, key);
         }
+        if ctrl && key.code == KeyCode::Char('s') {
+            if let Some(edit) = st.edit.take() {
+                if let Err(e) = self.flow_commit(st, &edit) {
+                    self.notice = Some(Notice::warn(e));
+                    st.edit = Some(edit);
+                    return After::Stay;
+                }
+                st.touch();
+            }
+            return self.flow_save(st, false, false);
+        }
         if st.edit.is_some() {
             self.flow_edit_key(st, key);
             return After::Stay;
@@ -1353,9 +1364,21 @@ impl App {
     fn flow_edit_key(&mut self, st: &mut FlowBuilderState, key: &KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let Some(edit) = st.edit.as_mut() else { return };
+        let multiline = matches!(
+            edit.target,
+            EditTarget::Field(
+                Field::FlowDescription
+                    | Field::FlowWhen
+                    | Field::FlowArgs
+                    | Field::Does
+                    | Field::Gets
+                    | Field::Paths
+            )
+        );
         match key.code {
             KeyCode::Esc => st.edit = None,
-            KeyCode::Enter => {
+            KeyCode::Enter if multiline => edit.text.insert('\n'),
+            KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {
                 let edit = st.edit.take().expect("an edit");
                 if let Err(e) = self.flow_commit(st, &edit) {
                     self.notice = Some(Notice::warn(e));
@@ -1463,7 +1486,7 @@ impl App {
             Overlay::Confirm { action, .. } => {
                 let action = *action;
                 match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
                         st.overlay = None;
                         match action {
                             ConfirmAction::Discard => return After::Close,
@@ -1569,16 +1592,15 @@ impl App {
             },
             Overlay::Prompt { text } => match key.code {
                 KeyCode::Esc => st.overlay = None,
-                KeyCode::Enter
-                    if !key.modifiers.contains(KeyModifiers::ALT)
-                        && !key.modifiers.contains(KeyModifiers::SHIFT) =>
-                {
+                KeyCode::Enter => text.newline(),
+                KeyCode::Char('s') if ctrl => {
                     let t = text.text.clone();
                     st.overlay = None;
                     if let Some(i) = st.step_index() {
                         st.draft.set_prompt(i, &t);
                         st.touch();
                     }
+                    return self.flow_save(st, false, false);
                 }
                 _ => text_key(text, key, ctrl),
             },
@@ -1670,6 +1692,11 @@ impl App {
                 {
                     if let Some(t) = form.text_mut() {
                         t.newline();
+                    }
+                }
+                KeyCode::Enter if form.field == AgentField::Instructions => {
+                    if let Some(text) = form.text_mut() {
+                        text.newline();
                     }
                 }
                 KeyCode::Enter => {

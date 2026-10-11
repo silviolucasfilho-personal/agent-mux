@@ -229,7 +229,7 @@ fn a_score_is_posted_to_langfuse_as_a_score_create_batch() {
 }
 
 #[test]
-fn s_in_the_browser_cycles_the_verdict() {
+fn commands_changes_verdict_and_save_does_not() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::time::Instant;
 
@@ -247,8 +247,25 @@ fn s_in_the_browser_cycles_the_verdict() {
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     let mut app = App::new(vec![], None, tx);
     app.mode = Mode::TraceBrowser(Box::new(browser));
+    for code in [KeyCode::Char('s'), KeyCode::Char('+')] {
+        app.handle_key(&KeyEvent::new(code, KeyModifiers::NONE), Instant::now());
+        let Mode::TraceBrowser(b) = &app.mode else {
+            panic!()
+        };
+        assert!(b.scores.is_empty(), "Save must not set a verdict");
+    }
     app.handle_key(
-        &KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE),
+        &KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE),
+        Instant::now(),
+    );
+    for c in "Change verdict".chars() {
+        app.handle_key(
+            &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            Instant::now(),
+        );
+    }
+    app.handle_key(
+        &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         Instant::now(),
     );
     let notice = app.notice.clone().expect("a notice says what happened");

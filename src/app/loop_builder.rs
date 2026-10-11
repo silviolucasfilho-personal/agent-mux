@@ -367,13 +367,37 @@ impl App {
 
     pub(crate) fn loop_key(&mut self, st: &mut LoopBuilderState, key: &KeyEvent) -> After {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('s') {
+            if matches!(st.overlay, Some(Overlay::Prompt { .. })) {
+                let Some(Overlay::Prompt { text }) = st.overlay.take() else {
+                    unreachable!()
+                };
+                let t = text.text.trim_end().to_string();
+                let default = crate::prompts::Prompts::current().loop_run.clone();
+                if let Some(p) = st.current_mut() {
+                    p.prompt = (!t.is_empty() && t != default.trim_end()).then_some(t);
+                }
+            } else if st.overlay.is_some() {
+                return After::Stay;
+            }
+            if let Some((f, t)) = st.edit.take()
+                && let Err(e) = self.loop_commit(st, f, t.text.trim())
+            {
+                st.edit = Some((f, t));
+                self.notice = Some(Notice::warn(e));
+                return After::Stay;
+            }
+            self.loop_save(st);
+            return After::Stay;
+        }
         if st.overlay.is_some() {
             return self.loop_overlay_key(st, key);
         }
         if let Some((f, t)) = st.edit.as_mut() {
             match key.code {
                 KeyCode::Esc => st.edit = None,
-                KeyCode::Enter => {
+                KeyCode::Enter if *f == LField::Goal => t.newline(),
+                KeyCode::Enter | KeyCode::Tab | KeyCode::BackTab => {
                     let (f, text) = (*f, t.text.trim().to_string());
                     match self.loop_commit(st, f, &text) {
                         Ok(()) => st.edit = None,
@@ -632,7 +656,7 @@ impl App {
             Overlay::Confirm { action, .. } => {
                 let action = *action;
                 match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
                         st.overlay = None;
                         match action {
                             Confirm::Discard => return After::Close,
@@ -726,6 +750,9 @@ impl App {
                     }
                 }
                 KeyCode::Enter if !alt => {
+                    text.newline();
+                }
+                KeyCode::Char('s') if ctrl => {
                     let t = text.text.trim_end().to_string();
                     st.overlay = None;
                     let default = crate::prompts::Prompts::current().loop_run.clone();

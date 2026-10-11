@@ -47,3 +47,5 @@ mod workflow_cli;
 mod workflow_runs;
 mod workflow_ui;
 mod zz_sub;
+
+mod keyboard_ux;

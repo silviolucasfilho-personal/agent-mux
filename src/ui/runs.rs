@@ -64,8 +64,15 @@ fn glyph_color(g: &str) -> Color {
 fn draw_list(f: &mut Frame, area: Rect, st: &RunsViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(pane_border(true))
-        .title(Span::styled(" Runs ", key_style()));
+        .border_style(pane_border(!st.detail_focused))
+        .title(Span::styled(
+            if st.detail_focused {
+                " Runs "
+            } else {
+                " Runs — Keyboard focus "
+            },
+            key_style(),
+        ));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let width = usize::from(inner.width);
