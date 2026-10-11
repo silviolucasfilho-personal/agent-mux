@@ -16,6 +16,7 @@ mod loop_runs;
 mod loop_skills;
 mod loop_ui;
 mod mcp_protocol;
+mod memory;
 mod persistent_sessions;
 mod pty_session;
 mod scroll_ux;

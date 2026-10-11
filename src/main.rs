@@ -101,6 +101,7 @@ async fn main() -> Result<()> {
             Some("agent") => return agent_mux::agents::cli::run(&args[2..]),
             Some("keys") => return agent_mux::keys_cli::run(&args[2..]),
             Some("md") => return agent_mux::markdown::cli::run(&args[2..]),
+            Some("memory") => return agent_mux::memory::cli::run(&args[2..]),
             Some("langfuse") => {
                 eprintln!(
                     "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\
@@ -278,6 +279,8 @@ async fn main() -> Result<()> {
         .unwrap_or(agent_mux::app::DEFAULT_BYPASS_APPROVALS);
     app.config_path = cfg.loaded_from.clone();
     app.editor = cfg.editor.clone();
+    // before the restore: a restored session gets its memory too
+    app.memory = Some(cfg.memory.clone().unwrap_or_default());
     if hide_sidebar {
         app.sidebar_hidden = true;
     }

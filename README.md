@@ -23,6 +23,7 @@ This README is the developer onboarding guide to the **implemented code in this 
 15. [Loop Engineering](#15-loop-engineering)
 16. [Configuration library: prompts, skills, loops and agents](#16-configuration-library-prompts-skills-loops-and-agents)
 17. [Workflows](#17-workflows)
+18. [Shared memory](#18-shared-memory)
 
 ---
 
@@ -53,6 +54,7 @@ agent-mux trace doctor        # config, store health, provider readiness, hooks
 agent-mux trace path          # where the SQLite store is
 agent-mux skill list
 agent-mux md README.md        # Markdown viewer and editor, Mermaid drawn as text (docs/markdown.md)
+agent-mux memory ls           # the notes every session in this folder shares (docs/memory.md)
 agent-mux run --help
 ```
 
@@ -268,6 +270,8 @@ mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 | `tracing.models` | Price rows: `id`, optional `provider`, `match` patterns, `input`, `output`, optional `cache_read`, `cache_write`, `cache_write_1h`, `reasoning` (USD per million tokens). Rows with an empty id or negative input/output are dropped silently. |
 | Per-profile `[profiles.tracing]` | `enabled`, `provider`, `content_mode`, `inject_session_id`, `hooks`, `backend`, `max_cost_usd`, `max_turns` override the global defaults for that profile. |
 | `[agents] hydrate`, `mcp` | `true` and `"auto"` by default (`config::resolve_agents`). `hydrate = false` writes no briefing snapshots; `mcp = "off"` never registers the MCP server for any session or harness. |
+| `[memory] enabled`, `location`, `index_lines` | `true`, `"library"`, `60` (`memory::Settings`). `location = "workspace"` keeps a workspace's memory in `<workspace>/.agent-mux/memory/`; an unknown value falls back to library and `agent-mux memory path` says so. A `profiles.toml` holding only `[memory]` loads with the default profiles. |
+| Per-profile `[profiles.memory]` | `enabled = false` launches that profile's sessions without memory. |
 | `[loops] enabled`, `max_concurrent`, `catch_up`, `run_timeout_s`, `worktrees_dir` | `true`, `1`, `"once"`, `900`, `".loop-worktrees"` (`config::resolve_loops`). `enabled = false` leaves manual runs only; `catch_up = "skip"` moves a slot missed while agent-mux was closed to the next one; the timeout floors at 30 s. |
 
 Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secret_key`, `flush_interval_ms` default 3,000) or from `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` then `LANGFUSE_BASE_URL` for the host (default `https://cloud.langfuse.com`). If the `[tracing.langfuse]` sub-table exists at all, the legacy `[tracing] host/public_key/secret_key` fields are ignored entirely; they are used only when the sub-table is absent, and trip a migration notice. Both keys must resolve or the remote backend is unavailable and launches fall back to local. A trailing `/` or `/api/public` is stripped from the host.
@@ -283,6 +287,8 @@ Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secr
 | `~/.agent-mux/workflows/<name>.toml` | Workflow documents; a name matching a built-in replaces it (section 17). |
 | `AGENT_MUX_WORKFLOW_CONTEXT`, `AGENT_MUX_WORKFLOW_RUN_ID`, `AGENT_MUX_WORKFLOW`, `AGENT_MUX_WORKFLOW_STEP`, `AGENT_MUX_WORKFLOW_PLAN` | Set on workflow sessions and the planner session (section 17). |
 | `~/.agent-mux/prompts.toml`, `loops/registry.toml`, `loops/skills/`, `loops/agents/`, `loops/templates/` / `AGENT_MUX_LIBRARY_DIR` | The configuration library: file-by-file overrides of every compiled-in prompt, pattern, loop skill, agent and template, edited from the Configuration view (`C`) or `agent-mux config` ([docs/configuration.md](docs/configuration.md)). |
+| `~/.agent-mux/memory/<slug>/`, `memory/_user/` | The shared memory: notes, the index, briefs and `log.md` per workspace, and the facts about the user (section 18). |
+| `AGENT_MUX_MEMORY`, `AGENT_MUX_MEMORY_INDEX`, `AGENT_MUX_MEMORY_USER`, `AGENT_MUX_MEMORY_BRIEF` | Set on every launch with memory: the workspace's memory folder, its index, the user folder, and a brief addressed to the session. `trace hook` reads them to answer Claude's `SessionStart`. |
 | `editor` (top-level key in `profiles.toml`), `VISUAL`, `EDITOR` | The editor the Configuration view and `config edit` open, in that order; `vi` otherwise. |
 | `~/.agent-mux/snapshots/` / `AGENT_MUX_RUNTIME_DIR` | Live-state snapshots, one file per run. |
 | `AGENT_MUX_TRACE_DB` | Store path override. Skill launches from the TUI receive the store the TUI writes (which honours a configured `db_path`); the CLI-less fallback in `skill::launch` uses this variable or the home default. |
@@ -1837,3 +1843,21 @@ A workflow runs several harness sessions with one focused goal each and composes
 | CLI and MCP | [src/workflows/cli.rs](src/workflows/cli.rs), `agent_mux_get_workflow_run` | `agent-mux workflow …`; a read tool for a run's progress |
 
 Tests: `tests/workflow_runs.rs` (fake `claude`, `codex` and `agy` through real PTY sessions: a built-in run, mixed harnesses, the schema retry, timeouts, cancel, resume), `tests/workflow_cli.rs`, `tests/workflow_ui.rs`, and the unit tests of every module.
+
+---
+
+## 18. Shared memory
+
+Every session agent-mux launches in a workspace shares one memory, whatever harness runs it: a folder of Markdown notes under `~/.agent-mux/memory/<slug>/`, one fact per file, with an index (`MEMORY.md`) Rust rebuilds from the notes' frontmatter. At start a session gets the folder in `AGENT_MUX_MEMORY*` and one start text, the hint and the fenced index. Claude Code receives it through the synchronous `SessionStart` hook answer (`trace hook` reads the session's environment and answers before it touches the store), or the hint alone through `--append-system-prompt` when hooks are off. Codex receives it in `developer_instructions`, merged with a persona's or the user's own. Antigravity gets the environment only. The `mux-memory` skill (`skills/mux-memory`, `/mux-memory` or `$mux-memory`) is installed per harness once per run and saves, recalls and forgets notes. `agent-mux memory ls|show|add|rm|check|path` and the Configuration view's Memory group work on the same files. Guide: [docs/memory.md](docs/memory.md).
+
+| Piece | Where | Notes |
+| --- | --- | --- |
+| Settings | `[memory]`, `[profiles.memory]` in [src/config.rs](src/config.rs); `memory::Settings` | On in the binaries (`main`, the loop and workflow runners); off in an `App` built by a test |
+| Folder, note, index, fence | [src/memory/](src/memory/) `paths`, `note`, `index`, `fence`, `log` | Atomic writes; a byte-stable, capped index; notes are moved aside, never deleted |
+| Start text | `memory::context::session_context` | Hint, an addressed brief, the workspace and user indexes, under 9,000 characters |
+| Launch | `App::memory_launch`, `App::apply_memory`, `LaunchPlan::attach_memory` | The environment, the synchronous `SessionStart` registration, the Claude and Codex fallbacks, the skill install |
+| Hook answer | `memory_start_text` in [src/tracing/cli.rs](src/tracing/cli.rs) | `hookSpecificOutput.additionalContext` for Claude's `SessionStart` |
+| CLI | [src/memory/cli.rs](src/memory/cli.rs) | `agent-mux memory …` |
+| Catalog | `Kind::MemoryNote` in [src/assets.rs](src/assets.rs) | The Configuration view's Memory group and `agent-mux config` |
+
+Tests: `tests/it/memory.rs` (fake `claude` and `codex` launches, the hook answer, the CLI), the Memory cases in `tests/it/config_ui.rs` and `tests/it/config_library.rs`, and the unit tests of `src/memory/`.

@@ -124,6 +124,7 @@ mod overlay {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             }],
             None,
             tx,

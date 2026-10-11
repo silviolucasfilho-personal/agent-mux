@@ -477,6 +477,7 @@ pub fn profile_for(spec: &RunSpec, profiles: &[Profile]) -> Profile {
             tracing: None,
             model: None,
             bypass_approvals: None,
+            memory: None,
         });
     let options = LaunchOptions {
         model: spec.model.clone().or_else(|| base.model.clone()),
@@ -868,6 +869,7 @@ mod tests {
             tracing: None,
             model: Some("claude-opus-5".into()),
             bypass_approvals: None,
+            memory: None,
         };
         let spec = RunSpec {
             profile: Some("my claude".into()),

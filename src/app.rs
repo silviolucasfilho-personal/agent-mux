@@ -2679,6 +2679,11 @@ pub struct App {
     /// Finished runs since startup, newest first (the store has the rows).
     pub recent_workflow_runs: Vec<workflows::RecentWorkflowRun>,
     pub workflows: crate::config::WorkflowSettings,
+    /// The shared memory's `[memory]` table; `None` keeps memory off (the
+    /// default for an App built in a test). `main` sets it from the config.
+    pub memory: Option<crate::config::MemoryConfig>,
+    /// Harnesses the `mux-memory` skill was installed for in this run.
+    pub memory_skill_installed: std::collections::HashSet<crate::harness::Harness>,
     pub last_workflow_pass: Option<Instant>,
     /// Planner sessions in flight and the documents they produced.
     pub live_workflow_plans: Vec<workflows::LivePlan>,
@@ -2797,6 +2802,8 @@ impl App {
             live_workflow_runs: Vec::new(),
             recent_workflow_runs: Vec::new(),
             workflows: crate::config::WorkflowSettings::default(),
+            memory: None,
+            memory_skill_installed: std::collections::HashSet::new(),
             last_workflow_pass: None,
             live_workflow_plans: Vec::new(),
             planned_workflows: Vec::new(),
@@ -2844,6 +2851,94 @@ impl App {
     }
 
     /// The home whose harness skill directories receive installs.
+    /// The memory a launch gets, `None` when memory is off (globally, for
+    /// the profile, or for a `claude attach`, which takes no options).
+    fn memory_launch(
+        &mut self,
+        profile: &Profile,
+        dir: &std::path::Path,
+    ) -> Option<crate::memory::launch::Launch> {
+        let cfg = self.memory.as_ref()?;
+        let settings = crate::memory::Settings::resolve(Some(cfg), profile.memory.as_ref())?;
+        if profile.args.first().map(String::as_str) == Some("attach") {
+            return None;
+        }
+        let library = self.library_root();
+        let prompts = crate::prompts::Prompts::load(&library);
+        match crate::memory::launch::Launch::prepare(&library, &settings, dir, &prompts) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                self.notice = Some(Notice::warn(format!("memory: {e}")));
+                None
+            }
+        }
+    }
+
+    /// The memory's environment, the fallback channel for a launch whose
+    /// start hook does not deliver the start text, and the `mux-memory` skill.
+    fn apply_memory(
+        &mut self,
+        m: &crate::memory::launch::Launch,
+        delivered: bool,
+        profile: &mut Profile,
+        extra_args: &mut Vec<String>,
+        extra_env: &mut Vec<(String, String)>,
+    ) {
+        use crate::harness::Harness;
+        use crate::memory::launch as ml;
+        extra_env.extend(m.env());
+        let harness = Harness::detect(&profile.command);
+        let invocation = crate::memory::invocation(harness);
+        let prompts = crate::prompts::Prompts::load(&self.library_root());
+        match harness {
+            // the system prompt is frozen per session: a pointer, never
+            // the memory text
+            Some(Harness::Claude)
+                if !delivered
+                    && !ml::has_append_system_prompt(&profile.args)
+                    && !ml::has_append_system_prompt(extra_args) =>
+            {
+                extra_args.push("--append-system-prompt".into());
+                extra_args.push(crate::memory::context::hint(&m.dir, &invocation, &prompts));
+            }
+            Some(Harness::Codex) => {
+                let user = ml::codex_user_instructions(&self.skill_home());
+                ml::codex_instructions(
+                    &mut profile.args,
+                    extra_args,
+                    &m.start_text(&invocation, &prompts),
+                    user,
+                );
+            }
+            _ => {}
+        }
+        if let Some(h) = harness {
+            self.ensure_memory_skill(h);
+        }
+    }
+
+    /// Installs the `mux-memory` skill for a harness once per run; a failure
+    /// is a notice, the launch goes on.
+    fn ensure_memory_skill(&mut self, harness: crate::harness::Harness) {
+        if self.memory_skill_installed.contains(&harness) {
+            return;
+        }
+        let Some(def) = self.find_skill(crate::memory::SKILL_ID).cloned() else {
+            return;
+        };
+        match crate::skill::install::install(&def, harness, &self.skill_home(), false) {
+            Ok(_) => {
+                self.memory_skill_installed.insert(harness);
+            }
+            Err(e) => {
+                self.notice = Some(Notice::warn(format!(
+                    "memory skill for {}: {e}",
+                    harness.as_str()
+                )));
+            }
+        }
+    }
+
     fn skill_home(&self) -> std::path::PathBuf {
         self.skill_install_home
             .clone()
@@ -3404,6 +3499,8 @@ impl App {
                         if !s.opening_args.is_empty() && p.args.ends_with(&s.opening_args) {
                             p.args.truncate(p.args.len() - s.opening_args.len());
                         }
+                        // composed again at the next launch
+                        crate::memory::launch::strip_codex_memory(&mut p.args);
                         p
                     },
                     continued_from: s.continued_from.clone(),
@@ -3585,6 +3682,17 @@ impl App {
             let home = self.skill_home();
             p.attach_loop(launch, &home);
         }
+        // The shared memory: on Claude with a registered hook, the
+        // `SessionStart` answer carries the start text (`trace hook`);
+        // other launches get a command-line fallback below.
+        let memory = self.memory_launch(&profile, &dir);
+        let memory_delivered = match (&memory, plan.as_mut()) {
+            (Some(_), Some(p)) => {
+                let home = self.skill_home();
+                p.attach_memory(&home)
+            }
+            _ => false,
+        };
         let mut extra_args: Vec<String> = match &plan {
             Some(p) => p.extra_args.clone(),
             None => Vec::new(),
@@ -3595,6 +3703,15 @@ impl App {
             None => Vec::new(),
         };
         extra_env.extend(env.iter().cloned());
+        if let Some(m) = &memory {
+            self.apply_memory(
+                m,
+                memory_delivered,
+                &mut profile,
+                &mut extra_args,
+                &mut extra_env,
+            );
+        }
         // An agent launch (fresh, restored or respawned) gets its facts
         // from Rust: the briefing snapshot and the MCP registration.
         let mut briefing_path = None;
@@ -5640,7 +5757,11 @@ impl App {
                 self.loop_audits.clear();
             }
             Some(Kind::Settings) => self.reload_settings(),
-            Some(Kind::Workflow) | Some(Kind::Agent) | Some(Kind::Prompts) | None => {}
+            Some(Kind::Workflow)
+            | Some(Kind::Agent)
+            | Some(Kind::Prompts)
+            | Some(Kind::MemoryNote)
+            | None => {}
         }
     }
 
@@ -5666,6 +5787,11 @@ impl App {
                 }
                 self.agents = crate::config::resolve_agents(cfg.agents.as_ref());
                 self.loops = crate::config::resolve_loops(cfg.loops.as_ref());
+                // a memory that is on follows the file; one left off (an App
+                // built by a test) stays off
+                if self.memory.is_some() {
+                    self.memory = Some(cfg.memory.unwrap_or_default());
+                }
                 self.editor = cfg.editor;
                 self.config_path = Some(path);
             }
@@ -5703,6 +5829,9 @@ impl App {
                     return;
                 };
                 let notice = match view.catalog.reset(&asset) {
+                    Ok(()) if asset.kind == Kind::MemoryNote => {
+                        Notice::info(format!("{} moved to notes/.removed/", asset.id))
+                    }
                     Ok(()) => Notice::info(format!("{} reset", asset.id)),
                     Err(e) => Notice::warn(e),
                 };
@@ -6197,6 +6326,7 @@ impl App {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             });
         // A profile that says nothing takes the configured default, the
         // same rule the New session dialog shows.
@@ -6271,6 +6401,7 @@ impl App {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             });
         // a resume replaces the profile's arguments: resuming an id and
         // whatever the profile said about starting fresh cannot both hold
@@ -6881,6 +7012,7 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
             Profile {
                 name: "B".into(),
@@ -6890,6 +7022,7 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
         ]
     }
@@ -6985,6 +7118,7 @@ mod dialog_tests {
                 tracing: None,
                 model: Some("claude-opus-5".into()),
                 bypass_approvals: Some(true),
+                memory: None,
             },
             Profile {
                 name: "Codex".into(),
@@ -6994,6 +7128,7 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
             Profile {
                 name: "Shell".into(),
@@ -7003,6 +7138,7 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
         ]
     }
@@ -7302,6 +7438,7 @@ mod dialog_tests {
             tracing: None,
             model: None,
             bypass_approvals: None,
+            memory: None,
         }];
         let d = DialogState::new(&profiles);
         assert_eq!(d.profile_idx, 0);
@@ -7341,6 +7478,7 @@ mod dialog_tests {
             tracing: None,
             model: None,
             bypass_approvals: None,
+            memory: None,
         }];
 
         let mut d = DialogState::new(&profiles);

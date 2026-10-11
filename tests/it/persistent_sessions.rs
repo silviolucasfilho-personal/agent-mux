@@ -19,6 +19,7 @@ fn make_echo_profile(name: &str) -> Profile {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     }
 }
 
@@ -85,6 +86,7 @@ async fn restoring_a_saved_antigravity_session_resumes_its_conversation() {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     };
     agent_mux::persistence::save_sessions(
         &sessions_path,
@@ -175,6 +177,7 @@ async fn a_conversation_running_in_claudes_background_is_attached_not_resumed() 
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     };
     let saved = |conversation: &str| agent_mux::persistence::SavedSession {
         profile: claude.clone(),
@@ -234,6 +237,7 @@ async fn a_restored_session_that_exits_at_once_stays_saved() {
             tracing: None,
             model: None,
             bypass_approvals: None,
+            memory: None,
         },
         dir: temp_dir.path().to_path_buf(),
         skill_id: None,

@@ -6620,6 +6620,7 @@ mod tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
             crate::config::Profile {
                 name: "Shell".into(),
@@ -6629,6 +6630,7 @@ mod tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
+                memory: None,
             },
         ];
         let mut app = App::new(profiles.clone(), None, tx);

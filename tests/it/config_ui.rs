@@ -28,6 +28,7 @@ fn profile(name: &str) -> Profile {
         tracing: None,
         model: None,
         bypass_approvals: None,
+        memory: None,
     }
 }
 
@@ -134,7 +135,7 @@ fn c_opens_the_view_grouped_by_kind_and_esc_unwinds() {
     let mut f = fixture();
     press(&mut f.app, KeyCode::Char('C'));
     let v = view(&f.app);
-    assert_eq!(v.item_count(), 87);
+    assert_eq!(v.item_count(), 89);
     assert!(matches!(v.rows[0], ConfigRow::Header(Kind::Prompts)));
     assert_eq!(v.selected, 1, "the first item, never a header");
     assert_eq!(v.selected_asset().unwrap().id, "prompts.toml");
@@ -150,7 +151,7 @@ fn c_opens_the_view_grouped_by_kind_and_esc_unwinds() {
     assert_eq!(headers, Kind::ALL.to_vec());
 
     let text = screen(&f.app);
-    assert!(text.contains("Configuration (87)"), "{text}");
+    assert!(text.contains("Configuration (89)"), "{text}");
     for h in ["Prompts", "Settings", "Skills"] {
         assert!(text.contains(h), "{h}\n{text}");
     }
@@ -385,7 +386,7 @@ fn n_creates_a_new_loop_skill_and_opens_it() {
     );
     assert_eq!(a.source, Source::User);
     assert!(a.valid(), "{:?}", a.problems);
-    assert_eq!(v.item_count(), 88);
+    assert_eq!(v.item_count(), 90);
     f.app.editor_finished(req, Ok(()));
 
     // a bad name is refused and the footer question closes
@@ -527,4 +528,78 @@ fn the_help_and_hints_mention_the_view() {
     press(&mut f.app, KeyCode::Char('?'));
     let text = screen(&f.app);
     assert!(text.contains("configuration: edit every prompt"), "{text}");
+}
+
+#[test]
+fn memory_notes_are_listed_created_and_moved_aside() {
+    let mut f = fixture();
+    let notes = f.library.join("memory/-some-ws/notes");
+    std::fs::create_dir_all(&notes).unwrap();
+    std::fs::write(
+        notes.join("release-day.md"),
+        "---\nname: release-day\ndescription: releases ship on Thursdays\nkind: decision\nsource:\n  harness: codex\n  when: 2026-10-10T12:00:00Z\nconfidence: stated\npinned: true\n---\nShip on Thursday.\n",
+    )
+    .unwrap();
+    std::fs::write(notes.join("broken.md"), "no frontmatter").unwrap();
+    press(&mut f.app, KeyCode::Char('C'));
+    select(&mut f.app, "notes/release-day.md");
+    let v = view(&f.app);
+    let a = v.selected_asset().unwrap();
+    assert_eq!((a.kind, a.source), (Kind::MemoryNote, Source::User));
+    assert!(a.valid(), "{:?}", a.problems);
+    assert_eq!(a.name, "-some-ws · release-day");
+    let text = screen(&f.app);
+    assert!(text.contains("Memory"), "{text}");
+    assert!(text.contains("codex · 2026-10-10T12:00:00Z"), "{text}");
+    assert!(text.contains("stated · pinned"), "{text}");
+    assert!(!v.catalog.find("notes/broken.md").unwrap().valid());
+
+    // n writes a note about the user, for every workspace
+    press(&mut f.app, KeyCode::Char('n'));
+    assert!(matches!(
+        view(&f.app).pending,
+        Pending::NewName {
+            kind: Kind::MemoryNote,
+            ..
+        }
+    ));
+    type_text(&mut f.app, "likes-tables");
+    press(&mut f.app, KeyCode::Enter);
+    let req = f.app.take_editor_request().expect("opens the new note");
+    assert_eq!(
+        req.path,
+        f.library.join("memory/_user/notes/likes-tables.md")
+    );
+    f.app.editor_finished(req, Ok(()));
+    let a = view(&f.app).selected_asset().unwrap();
+    assert_eq!(a.name, "user · likes-tables");
+    assert!(a.valid(), "{:?}", a.problems);
+
+    // R moves a note aside instead of deleting it
+    press(&mut f.app, KeyCode::Char('R'));
+    assert_eq!(view(&f.app).pending, Pending::Reset);
+    assert!(
+        view(&f.app)
+            .footer()
+            .contains("Move memory/_user/notes/likes-tables.md to notes/.removed/")
+    );
+    press(&mut f.app, KeyCode::Char('y'));
+    assert!(
+        f.app
+            .notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("moved to notes/.removed/")
+    );
+    assert!(
+        !f.library
+            .join("memory/_user/notes/likes-tables.md")
+            .exists()
+    );
+    assert!(
+        f.library
+            .join("memory/_user/notes/.removed/likes-tables.md")
+            .is_file()
+    );
 }
