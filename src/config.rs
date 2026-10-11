@@ -47,6 +47,10 @@ pub struct MemoryConfig {
     pub handoff: Option<String>,
     pub brief_timeout_s: Option<u64>,
     pub keeper: Option<bool>,
+    /// Default true: a session that closes, or is open when agent-mux
+    /// quits, is asked once in the background to save what the next
+    /// session needs (`memory::save`).
+    pub save_on_close: Option<bool>,
 }
 
 /// Global `[tracing]` table (alias: `[langfuse]`). All-optional so a

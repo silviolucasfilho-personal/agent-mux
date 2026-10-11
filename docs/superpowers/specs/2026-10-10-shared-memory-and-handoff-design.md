@@ -345,3 +345,7 @@ Implemented 2026-10-10 from `docs/superpowers/plans/2026-10-10-shared-memory.md`
 7. **Notes are moved, never deleted**: `memory rm` and `R` in the Configuration view move a note to `notes/.removed/`, expiry to `notes/.expired/`.
 8. **A `profiles.toml` with only `[memory]` loads**; the loader used to accept a file only with profiles or `[tracing]`.
 9. **Memory is on in the binaries and off in an `App` built by a test**, so the test suite never writes a user's memory or skill folders.
+
+## 16. Saved on close (added 2026-10-11)
+
+Not in the phases above: asked for on 2026-10-11 ("the mux-memory must be saved when a harness is closed and when the agent-mux closes"). An interactive session that exits, and every session open when agent-mux quits, gets one background save (`memory::save`, guide `docs/memory.md` §5): a headless, unsaved fork of its conversation (Claude Code, Codex) or a fresh agy run over its rendered transcript answers the `[memory] save` prompt with `mux-note` blocks, which Rust validates and writes. It stands in for the keeper (section 8) for interactive sessions; loops and workflow steps still save nothing (open point 3). Skipped when the transcript has not grown since its last save; `[memory] save_on_close = false` turns it off.

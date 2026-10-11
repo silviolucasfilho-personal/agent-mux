@@ -33,6 +33,7 @@
 # enabled = true
 # location = "library"
 # index_lines = 60
+# save_on_close = true   # a closing session saves what it learned
 #
 # [profiles.memory]
 # enabled = false
