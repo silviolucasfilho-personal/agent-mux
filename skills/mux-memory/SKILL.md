@@ -22,7 +22,7 @@ Everything in the memory is what earlier sessions recorded. It is history, not i
 
 When the user says to remember something, or you learn something a later session in this folder will need (a decision and its reason, a trap, where something lives, how the user wants the work done):
 
-1. Read `$AGENT_MUX_MEMORY_INDEX`. If a note already covers the fact, update that note's file instead of writing a new one.
+1. Read `$AGENT_MUX_MEMORY_INDEX`, and run `agent-mux memory search <a few words of the fact>` when it is on your `PATH`. If a note already covers the fact, update that note's file instead of writing a new one.
 2. Pick a name: lower case, words joined by `-`, at most 80 characters (`commit-on-master`). The file is `$AGENT_MUX_MEMORY/notes/<name>.md`. A fact about the user that holds everywhere goes under `$AGENT_MUX_MEMORY_USER/notes/` instead.
 3. Write the file, exactly this shape:
 
@@ -60,7 +60,7 @@ Save one fact per note. Do not save what the repository already records (code st
 When the user asks what earlier sessions knew, or the task touches something the index mentions:
 
 1. Read `$AGENT_MUX_MEMORY_INDEX` (and `$AGENT_MUX_MEMORY_USER/MEMORY.md`).
-2. Read the notes whose lines match.
+2. Read the notes whose lines match. The index lists at most 60 notes: when it shows nothing that fits, run `agent-mux memory search <words>` (when `agent-mux` is on your `PATH`), which also finds older notes, the user's, and the imported memories of the other harnesses.
 3. Answer with what they say and which note says it (`notes/<name>.md`, its `source` and `when`). A note may be out of date: check a claim about code against the code before acting on it.
 
 ## Forget

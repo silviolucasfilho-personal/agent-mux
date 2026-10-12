@@ -26,12 +26,48 @@ pub fn user_dir(library: &Path) -> PathBuf {
     memory_root(library).join(USER)
 }
 
-/// A workspace's memory folder under the settings.
+/// A workspace's memory folder under the settings. The library folder is
+/// named by `history::project_slug`, which since 2026-10-11 turns every
+/// character but a letter or digit into `-`, as Claude Code does; a
+/// folder made earlier under the old name (only `/`, `\` and `:`
+/// turned) keeps being used, so its notes are not left behind.
 pub fn dir_for(library: &Path, settings: &Settings, workspace: &Path) -> PathBuf {
     match settings.location {
-        Location::Library => memory_root(library).join(crate::history::project_slug(workspace)),
+        Location::Library => {
+            let root = memory_root(library);
+            let dir = root.join(crate::history::project_slug(workspace));
+            let legacy = root.join(legacy_slug(workspace));
+            if !dir.exists() && legacy != dir && legacy.is_dir() {
+                return legacy;
+            }
+            dir
+        }
         Location::Workspace => workspace.join(".agent-mux").join("memory"),
     }
+}
+
+/// The slug memory folders were named by before 2026-10-11.
+fn legacy_slug(workspace: &Path) -> String {
+    let new = crate::history::project_slug(workspace);
+    // same canonical path, only `/`, `\` and `:` turned into `-`
+    let abs = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut slug: String = abs
+        .to_string_lossy()
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if !slug.starts_with('-') && !slug.is_empty() {
+        slug.insert(0, '-');
+    }
+    if slug.is_empty() { new } else { slug }
 }
 
 pub fn index_path(dir: &Path) -> PathBuf {
@@ -93,5 +129,25 @@ mod tests {
             "x"
         );
         assert!(d.path().join("briefs").is_dir() && d.path().join("imports").is_dir());
+    }
+
+    #[test]
+    fn a_memory_made_under_the_old_folder_name_is_kept() {
+        let lib = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let ws = ws.path().join("my.app");
+        std::fs::create_dir_all(&ws).unwrap();
+        let s = Settings::default();
+        let new = dir_for(lib.path(), &s, &ws);
+        assert!(
+            new.to_string_lossy().ends_with("-my-app"),
+            "{}",
+            new.display()
+        );
+        // a memory from before the rename: still found
+        let legacy = memory_root(lib.path()).join(legacy_slug(&ws));
+        assert!(legacy.to_string_lossy().ends_with("-my.app"));
+        std::fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(dir_for(lib.path(), &s, &ws), legacy);
     }
 }
