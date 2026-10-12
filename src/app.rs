@@ -3631,11 +3631,18 @@ impl App {
 
     /// Opens a Claude Code background session in a pane with `claude
     /// attach <id>`, standing in for a `--resume` Claude would refuse.
-    /// Untraced: the conversation runs in Claude's background process,
-    /// whose own launch is the one traced, and `attach` takes none of
-    /// the options tracing adds. The session keeps `profile`, the resume
-    /// it stands in for, so a save records the conversation as before.
-    fn spawn_attached(
+    /// `attach` takes none of the options tracing adds, and the background
+    /// process keeps sending the hooks of the launch that started it,
+    /// tagged with that launch's id; the pipeline that read them belonged
+    /// to the agent-mux that made it, gone after a restart. So the
+    /// session is traced the way `t` does it (`plan_attach`: the known
+    /// conversation, its transcript primed, new turns emitted, its hook
+    /// events read by conversation id), but only when its own profile
+    /// would have been traced at launch: tracing on, the profile's
+    /// `[profiles.tracing] enabled` not false, a harness agent-mux traces.
+    /// The session keeps `profile`, the resume it stands in for, so a save
+    /// records the conversation as before.
+    pub fn spawn_attached(
         &mut self,
         id: usize,
         profile: &Profile,
@@ -3650,13 +3657,34 @@ impl App {
             }),
             ..profile.clone()
         };
-        let mut session = self.spawn_traced_with_env(id, attach, dir, &[], None)?;
+        let mut session = self.spawn_traced_with_env(id, attach, dir.clone(), &[], None)?;
         session.profile = profile.clone();
+        session.trace = self.attached_trace(id, profile, &dir);
         self.notice = Some(Notice::info(format!(
-            "'{}' is running in Claude Code's background: attached to it ({})",
-            profile.name, background.id
+            "'{}' is running in Claude Code's background: attached to it ({}){}",
+            profile.name,
+            background.id,
+            if session.trace.is_some() {
+                ", traced"
+            } else {
+                ""
+            }
         )));
         Ok(session)
+    }
+
+    /// The trace of an attached session: the one `t` starts, when
+    /// `profile` would have been traced at launch.
+    fn attached_trace(
+        &mut self,
+        id: usize,
+        profile: &Profile,
+        dir: &std::path::Path,
+    ) -> Option<crate::tracing::SessionTraceHandle> {
+        let rt = self.tracing.as_mut()?;
+        rt.plan_launch(profile, dir)?;
+        let plan = rt.plan_attach(profile, dir)?;
+        Some(rt.start_session(id, plan))
     }
 
     /// Restores saved sessions from disk upon application startup.
