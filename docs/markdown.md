@@ -58,6 +58,12 @@ A ```` ```mermaid ```` block is drawn as a diagram (`src/markdown/mermaid.rs`):
 
 Any other type (class, ER, Gantt, journey, git graph, mind map …) shows its source with the reason. The layout is layered: ranks by longest path, cycles broken and drawn with the arrow turned back, long edges routed through the ranks in between, barycentre ordering, and one track per jog between ranks.
 
+### Images
+
+An image that is a paragraph of its own (or a list item's only content) and names a local file (PNG, JPEG, GIF, WebP, BMP; relative to the document) is drawn in place, scaled to the width and at most 30 rows tall, with its `[image: alt]` caption below; clicking the caption opens the file. Inline images, remote ones (`http…`) and files that are not images show the caption alone. `agent-mux md --print` prints captions only.
+
+The picture uses the terminal's graphics protocol when agent-mux can tell it from the environment: kitty's in kitty and Ghostty, iTerm2's in iTerm2, WezTerm, VS Code and the other terminals `ratatui-image` lists. Everywhere else (Apple Terminal, a terminal that does not report its pixel size, `agent-mux md` run inside an agent-mux pane) it is drawn in Unicode half blocks, two pixels a cell, which needs a 24-bit colour terminal to look right. Nothing is sent to ask the terminal. `AGENT_MUX_IMAGES` overrides the choice: `kitty`, `iterm2`, `sixel` (never picked on its own), `halfblocks`, or `off` for captions only. A picture scrolled partly out of view is cut at the edge.
+
 ## Code
 
-`src/markdown/mod.rs` renders a document to styled lines and reports where links, headings and source blocks landed; `src/markdown/mermaid.rs` draws diagrams; `src/app/markdown_view.rs` holds the state and the keys (shared by the App's `Mode::Markdown` and the CLI); `src/ui/markdown.rs` draws it; `src/markdown/cli.rs` is `agent-mux md`. Pane links: `links::markdown_path_at` and `App::open_link`.
+`src/markdown/mod.rs` renders a document to styled lines and reports where links, headings and source blocks landed; `src/markdown/mermaid.rs` draws diagrams; `src/markdown/image.rs` places images and picks the protocol (`ratatui-image`); `src/app/markdown_view.rs` holds the state and the keys (shared by the App's `Mode::Markdown` and the CLI); `src/ui/markdown.rs` draws it; `src/markdown/cli.rs` is `agent-mux md`. Pane links: `links::markdown_path_at` and `App::open_link`.

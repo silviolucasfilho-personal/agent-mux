@@ -83,6 +83,8 @@ pub struct MarkdownView {
     back: Vec<(PathBuf, usize)>,
     generation: u64,
     cache: RefCell<Option<(u64, usize, Arc<Doc>)>>,
+    /// Pictures encoded for the terminal, by spot.
+    pictures: RefCell<Pictures>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     last_edit: Option<EditKind>,
@@ -109,6 +111,7 @@ impl MarkdownView {
             back: Vec::new(),
             generation: 0,
             cache: RefCell::new(None),
+            pictures: RefCell::default(),
             undo: Vec::new(),
             redo: Vec::new(),
             last_edit: None,
@@ -133,9 +136,35 @@ impl MarkdownView {
         {
             return doc.clone();
         }
-        let doc = Arc::new(markdown::render(&self.text.text, width));
+        let images = self
+            .path
+            .parent()
+            .and_then(markdown::image::Images::for_dir);
+        let doc = Arc::new(markdown::render_with(
+            &self.text.text,
+            width,
+            images.as_ref(),
+        ));
         *cache = Some((self.generation, width, doc.clone()));
         doc
+    }
+
+    /// Runs `draw` with the picture for `spot`, encoded on first use;
+    /// nothing when the file cannot be decoded.
+    pub fn with_picture(
+        &self,
+        spot: &markdown::image::ImageSpot,
+        draw: impl FnOnce(&ratatui_image::sliced::SlicedProtocol),
+    ) {
+        let mut pictures = self.pictures.borrow_mut();
+        let key = (spot.path.clone(), spot.cols, spot.rows);
+        if let Some(p) = pictures
+            .0
+            .entry(key)
+            .or_insert_with(|| markdown::image::encode(spot))
+        {
+            draw(p);
+        }
     }
 
     fn view_doc(&self) -> Arc<Doc> {
@@ -617,6 +646,18 @@ impl MarkdownView {
             }
             Err(e) => self.notice = Some(e),
         }
+    }
+}
+
+/// Encoded pictures, by file and size in cells.
+#[derive(Default)]
+struct Pictures(
+    std::collections::HashMap<(PathBuf, u16, u16), Option<ratatui_image::sliced::SlicedProtocol>>,
+);
+
+impl std::fmt::Debug for Pictures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Pictures({})", self.0.len())
     }
 }
 

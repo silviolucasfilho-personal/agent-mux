@@ -36,6 +36,8 @@ vt100 = "0.16.2"
 schemars = "1.2.2"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 unicode-width = "0.2"
+image = { version = "0.25.6", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+ratatui-image = { version = "11.0.0", default-features = false, features = ["crossterm"] }
 
 [dev-dependencies]
 time = { version = "0.3.55", default-features = false, features = ["std"] }

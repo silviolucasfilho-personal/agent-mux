@@ -75,7 +75,7 @@ impl Item {
     pub fn is_placeholder(&self) -> bool {
         let t = self
             .title
-            .trim_start_matches(['(', '['].as_ref())
+            .trim_start_matches(['(', '['])
             .to_ascii_lowercase();
         self.id.is_none() && (t.starts_with("none") || t.starts_with("no ") || t == "n/a")
     }

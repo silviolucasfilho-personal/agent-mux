@@ -11,6 +11,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui_image::sliced::{SignedPosition, SlicedImage};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Side by side from this many columns; the editor alone below it.
@@ -87,6 +88,17 @@ fn draw_document(f: &mut Frame, area: Rect, v: &MarkdownView, top: usize) -> Str
         lines
     };
     f.render_widget(Paragraph::new(lines), text_area);
+    for spot in &doc.images {
+        if spot.line >= end || spot.line + spot.rows as usize <= top {
+            continue;
+        }
+        // the rows above the view are cut off the top of the picture
+        let y = (spot.line as i64 - top as i64).clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+        let position = SignedPosition::from((spot.col.min(i16::MAX as usize) as i16, y));
+        v.with_picture(spot, |p| {
+            f.render_widget(SlicedImage::new(p, position), text_area);
+        });
+    }
     if doc.lines.len() > h {
         let mut state = ScrollbarState::new(doc.lines.len().saturating_sub(h)).position(top);
         f.render_stateful_widget(
@@ -484,6 +496,36 @@ mod tests {
         std::fs::write(&path, text).unwrap();
         let v = MarkdownView::open(&path).unwrap();
         (dir, v)
+    }
+
+    #[test]
+    fn a_picture_is_painted_over_its_rows_and_cut_at_the_top_when_scrolled() {
+        let (d, mut v) = open("# Pic\n\n![red](red.png)\n\nAfter.\n");
+        image::RgbImage::from_pixel(40, 40, image::Rgb([255, 0, 0]))
+            .save(d.path().join("red.png"))
+            .unwrap();
+        let mut t = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        t.draw(|f| draw(f, f.area(), &v)).unwrap();
+        let doc = v.doc(render_width(v.view_area.get()));
+        let spot = doc.images.first().expect("the image is placed").clone();
+        let area = v.view_area.get();
+        let red = |t: &Terminal<TestBackend>, row: u16| {
+            let buf = t.backend().buffer();
+            (area.x..area.x + spot.cols)
+                .filter(|&x| {
+                    let c = &buf[(x, area.y + row)];
+                    c.fg == Color::Rgb(255, 0, 0) || c.bg == Color::Rgb(255, 0, 0)
+                })
+                .count()
+        };
+        let first = (spot.line - v.scroll) as u16;
+        assert!(red(&t, first) > 0, "the picture's first row is painted");
+        assert_eq!(red(&t, first - 1), 0, "nothing above it");
+        // scrolled one row into the picture: its top row is gone, the rest stays
+        v.scroll = spot.line + 1;
+        t.draw(|f| draw(f, f.area(), &v)).unwrap();
+        assert!(red(&t, 0) > 0);
+        assert_eq!(red(&t, spot.rows - 1), 0, "one row fewer is painted");
     }
 
     #[test]
