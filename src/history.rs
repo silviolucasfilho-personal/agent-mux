@@ -133,6 +133,22 @@ pub fn discover_sessions(
     summaries
 }
 
+/// The conversation Claude Code's `--continue` picks up in `dir`: the
+/// newest transcript in its project folder under `claude_dir`. Used to
+/// tell when that conversation is held by a background session, which
+/// makes Claude refuse `--continue` ("Your most recent conversation is
+/// running in the background", 2.1.296).
+pub fn newest_claude_conversation(claude_dir: &Path, dir: &Path) -> Option<String> {
+    let project = claude_dir.join("projects").join(project_slug(dir));
+    std::fs::read_dir(project)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .max_by_key(|(modified, _)| *modified)
+        .and_then(|(_, path)| Some(path.file_stem()?.to_string_lossy().into_owned()))
+}
+
 /// Scans Claude project folders to discover session JSONL files.
 pub fn discover_claude_sessions(
     claude_dir: Option<&Path>,
@@ -862,6 +878,28 @@ mod tests {
         assert_eq!(
             project_slug(Path::new("/T/tmp.vWJ/my_app v2")),
             "-T-tmp-vWJ-my-app-v2"
+        );
+    }
+
+    #[test]
+    fn newest_claude_conversation_is_the_latest_transcript_in_the_folder() {
+        let claude = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        assert_eq!(newest_claude_conversation(claude.path(), work.path()), None);
+        let project = claude
+            .path()
+            .join("projects")
+            .join(project_slug(work.path()));
+        std::fs::create_dir_all(&project).unwrap();
+        let now = std::time::SystemTime::now();
+        for (name, age) in [("old.jsonl", 60), ("new.jsonl", 0), ("notes.txt", 0)] {
+            let f = std::fs::File::create(project.join(name)).unwrap();
+            f.set_modified(now - std::time::Duration::from_secs(age))
+                .unwrap();
+        }
+        assert_eq!(
+            newest_claude_conversation(claude.path(), work.path()).as_deref(),
+            Some("new")
         );
     }
 

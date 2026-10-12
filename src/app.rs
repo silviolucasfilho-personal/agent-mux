@@ -985,6 +985,9 @@ pub struct DialogLaunch {
     agent: Option<String>,
     link: Option<crate::tracing::experiments::ExperimentLink>,
     brief: Option<std::path::PathBuf>,
+    /// A `--continue` whose conversation runs in Claude Code's
+    /// background: opened with `claude attach` instead.
+    attach: Option<crate::harness::ClaudeBackground>,
 }
 
 /// A continue waiting for the background run writing its brief.
@@ -5329,6 +5332,8 @@ impl App {
                     }
                     None => None,
                 };
+                let attach =
+                    self.resume_last_attach(&dialog, &profile, &dir, agent.is_some(), &handoff);
                 if let Some(harness) = dialog.harness {
                     let mut options = dialog.launch_options();
                     if options.model.is_none() {
@@ -5378,6 +5383,7 @@ impl App {
                     agent: dialog.agent.clone(),
                     link: dialog.experiment_link(),
                     brief,
+                    attach,
                 };
                 // a brief being written: the session starts when it is
                 // ready, or with the facts alone at the deadline
@@ -5409,11 +5415,41 @@ impl App {
         }
     }
 
+    /// The background session a plain "resume last" on Claude Code has to
+    /// attach to: Claude refuses `--continue` when the newest conversation
+    /// in the folder is running in its background. Only for a launch that
+    /// asks nothing else of the conversation (no one-shot prompt, agent or
+    /// hand-off), since `claude attach` takes no options.
+    fn resume_last_attach(
+        &self,
+        dialog: &DialogState,
+        profile: &Profile,
+        dir: &std::path::Path,
+        has_agent: bool,
+        handoff: &Option<crate::handoff::Continue>,
+    ) -> Option<crate::harness::ClaudeBackground> {
+        let options = dialog.launch_options();
+        if dialog.harness != Some(crate::harness::Harness::Claude)
+            || options.resume != crate::harness::Resume::Last
+            || options.one_shot.is_some()
+            || has_agent
+            || handoff.is_some()
+        {
+            return None;
+        }
+        let claude_dir = history::default_claude_dir()?;
+        let conversation = history::newest_claude_conversation(&claude_dir, dir)?;
+        ClaudeBackgroundCache::default().find(profile, &conversation)
+    }
+
     /// Spawns what the New session dialog asked for.
     fn finish_dialog_launch(&mut self, l: DialogLaunch) -> Result<(), String> {
         let id = self.next_id;
         self.next_brief = l.brief;
-        let spawned = self.spawn_traced(id, l.profile, l.dir);
+        let spawned = match &l.attach {
+            Some(background) => self.spawn_attached(id, &l.profile, background, l.dir),
+            None => self.spawn_traced(id, l.profile, l.dir),
+        };
         self.next_brief = None;
         let mut session = spawned.map_err(|e| e.to_string())?;
         session.agent = l.agent;
