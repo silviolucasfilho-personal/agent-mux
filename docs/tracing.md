@@ -194,6 +194,16 @@ equivalent exact launch marker, watched adoption uses available evidence
 short delay, may adopt the sole unclaimed candidate. Such sessions are marked
 as heuristic correlation in trace metadata.
 
+An exact signal comes first when there is one. The `agent-mux-memory` plugin's
+`PreInvocation` hook (installed when agent-mux launches agy with memory) and the
+trace plugin record the payload's `conversationId` under the launch's
+`$AGENT_MUX_SESSION_ID` on the first model call of each turn, and the launch
+adopts that conversation as `announced`. A conversation announced by another
+launch is never a heuristic candidate. The memory save's own `agy -p` runs as
+`memory-save-<conversation>`, so an idle session in another workspace cannot take
+it. A new conversation must also be seen for 3 s before a heuristic adopts it,
+which gives its hook time to land.
+
 The transcript parser maps user and planner/model steps, thinking, tool calls,
 tool results, and `step_index` values. Antigravity's interactive transcript
 does not carry token accounting. Once its transcript is adopted, agent-mux

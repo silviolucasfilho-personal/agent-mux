@@ -572,12 +572,7 @@ impl TraceRuntime {
                     )
                 } else {
                     (
-                        CorrelationSpec::WatchAntigravity {
-                            root,
-                            cwd: dir.to_path_buf(),
-                            t0,
-                            initial: None,
-                        },
+                        CorrelationSpec::watch_antigravity(root, dir.to_path_buf(), t0),
                         "watched",
                     )
                 }
@@ -725,12 +720,11 @@ impl TraceRuntime {
                     )
                 } else {
                     (
-                        CorrelationSpec::WatchAntigravity {
+                        CorrelationSpec::watch_antigravity(
                             root,
-                            cwd: dir.to_path_buf(),
-                            t0: SystemTime::now(),
-                            initial: None,
-                        },
+                            dir.to_path_buf(),
+                            SystemTime::now(),
+                        ),
                         "watched",
                     )
                 }
@@ -1395,9 +1389,15 @@ impl Pipeline {
         if self.adopted.is_none() {
             if let Some(adopted) = self.try_announced() {
                 self.adopt(adopted);
-            } else if let Some(adopted) =
-                correlate::poll(&mut self.ctx.correlation, self.started, &self.ctx.claims)
-            {
+            } else if let Some(adopted) = {
+                let feed = &mut self.hook_feed;
+                correlate::poll_with(
+                    &mut self.ctx.correlation,
+                    self.started,
+                    &self.ctx.claims,
+                    &mut |id| feed.announced_elsewhere(id),
+                )
+            } {
                 self.adopt(adopted);
             }
         }

@@ -247,12 +247,12 @@ fn antigravity_snapshot_then_presence_lock_tier() {
     agy_conv(root, "old-conv", "{}\n");
     let claims = registry();
     let t0 = SystemTime::now() - Duration::from_secs(1);
-    let mut spec = CorrelationSpec::WatchAntigravity {
-        root: root.to_path_buf(),
-        cwd: PathBuf::from("/nonexistent-cwd"),
+    let mut spec = CorrelationSpec::watch_antigravity(
+        root.to_path_buf(),
+        PathBuf::from("/nonexistent-cwd"),
         t0,
-        initial: None,
-    };
+    )
+    .with_settle(Duration::ZERO);
     let started = Instant::now();
     // first poll takes the snapshot
     assert_eq!(correlate::poll(&mut spec, started, &claims), None);
@@ -271,12 +271,12 @@ fn antigravity_cwd_substring_tier_is_heuristic() {
     let root = dir.path();
     let claims = registry();
     let cwd = PathBuf::from("/home/user/my-special-project");
-    let mut spec = CorrelationSpec::WatchAntigravity {
-        root: root.to_path_buf(),
-        cwd: cwd.clone(),
-        t0: SystemTime::now() - Duration::from_secs(1),
-        initial: None,
-    };
+    let mut spec = CorrelationSpec::watch_antigravity(
+        root.to_path_buf(),
+        cwd.clone(),
+        SystemTime::now() - Duration::from_secs(1),
+    )
+    .with_settle(Duration::ZERO);
     let started = Instant::now();
     assert_eq!(correlate::poll(&mut spec, started, &claims), None); // snapshot
     // no presence lock, but the transcript mentions our cwd
@@ -295,12 +295,12 @@ fn antigravity_sole_candidate_tier_needs_the_wait() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let claims = registry();
-    let mut spec = CorrelationSpec::WatchAntigravity {
-        root: root.to_path_buf(),
-        cwd: PathBuf::from("/mentioned-nowhere"),
-        t0: SystemTime::now() - Duration::from_secs(1),
-        initial: None,
-    };
+    let mut spec = CorrelationSpec::watch_antigravity(
+        root.to_path_buf(),
+        PathBuf::from("/mentioned-nowhere"),
+        SystemTime::now() - Duration::from_secs(1),
+    )
+    .with_settle(Duration::ZERO);
     let started_recent = Instant::now();
     assert_eq!(correlate::poll(&mut spec, started_recent, &claims), None); // snapshot
     agy_conv(root, "conv-solo", "{\"content\":\"unrelated\"}\n");
@@ -318,12 +318,12 @@ fn antigravity_two_candidates_are_not_adopted_on_timing() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let claims = registry();
-    let mut spec = CorrelationSpec::WatchAntigravity {
-        root: root.to_path_buf(),
-        cwd: PathBuf::from("/mentioned-nowhere"),
-        t0: SystemTime::now() - Duration::from_secs(1),
-        initial: None,
-    };
+    let mut spec = CorrelationSpec::watch_antigravity(
+        root.to_path_buf(),
+        PathBuf::from("/mentioned-nowhere"),
+        SystemTime::now() - Duration::from_secs(1),
+    )
+    .with_settle(Duration::ZERO);
     let started = Instant::now() - Duration::from_secs(20);
     assert_eq!(correlate::poll(&mut spec, started, &claims), None); // snapshot
     agy_conv(root, "conv-x", "{}\n");
@@ -375,12 +375,8 @@ fn antigravity_adopts_resumed_conversation_with_active_presence_lock() {
     );
 
     let t0 = SystemTime::now() - Duration::from_secs(2);
-    let mut spec = CorrelationSpec::WatchAntigravity {
-        root: root.to_path_buf(),
-        cwd: cwd.clone(),
-        t0,
-        initial: None,
-    };
+    let mut spec = CorrelationSpec::watch_antigravity(root.to_path_buf(), cwd.clone(), t0)
+        .with_settle(Duration::ZERO);
     let started = Instant::now();
     // First poll takes snapshot containing resumed-conv
     assert_eq!(correlate::poll(&mut spec, started, &claims), None);
@@ -392,4 +388,60 @@ fn antigravity_adopts_resumed_conversation_with_active_presence_lock() {
     assert_eq!(adopted.session_id, "resumed-conv");
     assert_eq!(adopted.correlation, "watched");
     assert!(adopted.resume_prime);
+}
+
+/// The 2026-10-12 mix-up: an idle agy session in one workspace took the
+/// conversation a memory save's `agy -p` started in another. The save's
+/// hook announces it under the save's own launch id, so it is skipped.
+#[test]
+fn antigravity_skips_a_conversation_another_launch_announced() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let claims = registry();
+    let mut spec = CorrelationSpec::watch_antigravity(
+        root.to_path_buf(),
+        PathBuf::from("/home/user/agent-mux"),
+        SystemTime::now() - Duration::from_secs(1),
+    )
+    .with_settle(Duration::ZERO);
+    let started = Instant::now() - Duration::from_secs(20);
+    let mut foreign = |id: &str| id == "save-conv";
+    assert_eq!(
+        correlate::poll_with(&mut spec, started, &claims, &mut foreign),
+        None
+    ); // snapshot
+    // the save's conversation: a fresh lock, the sole candidate
+    agy_conv(root, "save-conv", "{\"content\":\"/home/user/lottery\"}\n");
+    write_file(&root.join("presence").join("save-conv.lock"), "");
+    assert_eq!(
+        correlate::poll_with(&mut spec, started, &claims, &mut foreign),
+        None
+    );
+    // this session's own first prompt is still adopted
+    agy_conv(root, "own-conv", "{}\n");
+    write_file(&root.join("presence").join("own-conv.lock"), "");
+    let adopted = correlate::poll_with(&mut spec, started, &claims, &mut foreign).unwrap();
+    assert_eq!(adopted.session_id, "own-conv");
+}
+
+#[test]
+fn antigravity_new_conversation_settles_before_a_heuristic_takes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let claims = registry();
+    let mut spec = CorrelationSpec::watch_antigravity(
+        root.to_path_buf(),
+        PathBuf::from("/nonexistent-cwd"),
+        SystemTime::now() - Duration::from_secs(1),
+    )
+    .with_settle(Duration::from_millis(300));
+    let started = Instant::now();
+    assert_eq!(correlate::poll(&mut spec, started, &claims), None); // snapshot
+    agy_conv(root, "new-conv", "{}\n");
+    write_file(&root.join("presence").join("new-conv.lock"), "");
+    // just seen: its hook may not have landed yet
+    assert_eq!(correlate::poll(&mut spec, started, &claims), None);
+    std::thread::sleep(Duration::from_millis(350));
+    let adopted = correlate::poll(&mut spec, started, &claims).unwrap();
+    assert_eq!(adopted.session_id, "new-conv");
 }
