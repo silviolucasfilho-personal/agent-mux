@@ -455,6 +455,7 @@ fn handle_event(app: &mut App, event: AppEvent) {
         AppEvent::AnalysisUpdated { revision, result } => {
             app.handle_analysis_updated(revision, result);
         }
+        AppEvent::HarnessRecapUpdated(recap) => app.handle_harness_recap_updated(recap),
         AppEvent::Tick => app.on_tick(Instant::now()),
         AppEvent::HistoryLoaded(sessions) => app.apply_history_sessions(sessions),
     }

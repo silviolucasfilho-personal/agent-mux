@@ -48,6 +48,8 @@ pub enum AppEvent {
         revision: u64,
         result: Result<crate::tracing::analysis::Briefing, String>,
     },
+    /// Background recap query finished; drawing only uses the accepted cache.
+    HarnessRecapUpdated(crate::app::harness_recap::HarnessRecap),
     Tick,
     /// The History list, rescanned off the main thread after a session
     /// exited (`App::reload_history_sessions_async`).
