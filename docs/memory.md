@@ -148,6 +148,18 @@ The hook reads the folder from the session (`cwd`, or agy's workspace) and answe
 
 The `PreCompact` and `SessionEnd` hooks start the same save as section 5, from the payload's conversation and transcript, but only in a folder that already has a memory. Your first session in a new folder therefore saves nothing until agent-mux, `agent-mux memory add`, or an earlier session has created that memory. In a session agent-mux launched, `SessionEnd` is left to agent-mux. Antigravity has no compaction or end hook, so a plain `agy` saves nothing on its own.
 
+## 6a. What each harness remembers on its own
+
+Claude Code and Codex also keep memories of their own. agent-mux mirrors them into the shared memory so the other harnesses see them too:
+
+| Harness | Source | Mirror |
+| --- | --- | --- |
+| Claude Code | `~/.claude/projects/<slug>/memory/MEMORY.md` | `imports/claude.md`: Claude's index lines, each linking to Claude's own file (nothing is copied; Claude's edits stay the truth) |
+| Codex | `~/.codex/memories_1.sqlite`, when Codex's `memories` feature is on | `imports/codex.md`: the memory and summary of up to 20 of this folder's threads, newest first |
+| Antigravity | nothing readable yet | — |
+
+`MEMORY.md` ends with an `## Imported` section with one line per mirror, so every session knows the mirrors are there and opens one when it matters; the start text does not carry them whole. A mirror is rebuilt when its source changes: at every launch, at a hook's start answer, and on `agent-mux memory check`. Mirrors are never edited by a session. `[memory] imports = ["claude"]` picks the sources, and `["none"]` turns them off.
+
 ## 7. Command line
 
 ```sh
@@ -196,12 +208,12 @@ command = "claude"
 enabled = false           # this profile's sessions get no memory
 ```
 
-The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`, `save`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/mux-memory/` like Heimdall. `imports`, `handoff`, `brief_timeout_s` and `keeper` are read but not used yet.
+The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`, `save`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/mux-memory/` like Heimdall. `handoff`, `brief_timeout_s` and `keeper` are read but not used yet; `imports` picks the mirrors (section 6a).
 
 ## 10. Not yet
 
 These are designed in the spec and come in later phases:
 
 - **The hand-off.** A Continue dialog for `f`, briefs written by the leaving session or from facts, `f` on History rows, and a link between the two sessions.
-- **Imports and evidence.** Mirrors of Claude Code's and Codex's own memories, a `memory_events` table, a line in Heimdall's dossier, and a mark on sessions that saved notes.
+- **Evidence.** A `memory_events` table, a line in Heimdall's dossier, and a mark on sessions that saved notes.
 - **The keeper.** A scheduled agent that saves what loop runs and workflow steps learned.
