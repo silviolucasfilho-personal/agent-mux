@@ -19,6 +19,7 @@ pub mod memory;
 pub mod mouse;
 pub mod persistence;
 pub mod prompts;
+pub mod ptylog;
 pub mod search;
 pub mod selection;
 pub mod session;

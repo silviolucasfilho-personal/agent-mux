@@ -68,6 +68,10 @@ pub struct Screen {
     link: u16,
     links: Vec<String>,
     link_ids: std::collections::HashMap<String, u16>,
+
+    // Local patch (agent-mux): the last graphic character written, which
+    // REP (`CSI n b`) repeats.
+    last_char: Option<char>,
 }
 
 impl Screen {
@@ -89,6 +93,7 @@ impl Screen {
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
 
             link: 0,
+            last_char: None,
             links: Vec::new(),
             link_ids: std::collections::HashMap::new(),
         }
@@ -749,6 +754,7 @@ impl Screen {
 
 impl Screen {
     pub(crate) fn text(&mut self, c: char) {
+        self.last_char = Some(c);
         let pos = self.grid().pos();
         let size = self.grid().size();
         let attrs = self.attrs;
@@ -1179,6 +1185,53 @@ impl Screen {
     // CSI d
     pub(crate) fn vpa(&mut self, row: u16) {
         self.grid_mut().row_set(row - 1);
+    }
+
+    // Local patch (agent-mux): the cursor and repeat sequences xterm has
+    // and the upstream crate ignored. A TUI that optimizes its redraws
+    // for `TERM=xterm-*` (Bubble Tea v2's ultraviolet renderer, which
+    // Antigravity uses) picks them when they are cheaper; ignored, they
+    // left the cursor where the program did not think it was, and the
+    // rest of the frame landed on the wrong cells (repeated or cut lines).
+
+    // CSI b (REP): the last graphic character, `count` more times
+    pub(crate) fn rep(&mut self, count: u16) {
+        let Some(c) = self.last_char else { return };
+        let size = self.grid().size();
+        let max = usize::from(size.rows) * usize::from(size.cols);
+        for _ in 0..usize::from(count).min(max) {
+            self.text(c);
+        }
+    }
+
+    // CSI ` (HPA): to column `col` of this row
+    pub(crate) fn hpa(&mut self, col: u16) {
+        self.cha(col);
+    }
+
+    // CSI a (HPR): `offset` columns right
+    pub(crate) fn hpr(&mut self, offset: u16) {
+        self.cuf(offset);
+    }
+
+    // CSI e (VPR): `offset` rows down
+    pub(crate) fn vpr(&mut self, offset: u16) {
+        self.cud(offset);
+    }
+
+    // CSI I (CHT): `count` tab stops forward
+    pub(crate) fn cht(&mut self, count: u16) {
+        for _ in 0..count {
+            self.tab();
+        }
+    }
+
+    // CSI Z (CBT): `count` tab stops back (every 8 columns, as `tab`)
+    pub(crate) fn cbt(&mut self, count: u16) {
+        for _ in 0..count {
+            let col = self.grid().pos().col;
+            self.grid_mut().col_set(col.saturating_sub(1) / 8 * 8);
+        }
     }
 
     // CSI ? h

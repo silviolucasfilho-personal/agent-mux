@@ -124,6 +124,13 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
                 'T' => self.screen.sd(canonicalize_params_1(params, 1)),
                 'X' => self.screen.ech(canonicalize_params_1(params, 1)),
                 'd' => self.screen.vpa(canonicalize_params_1(params, 1)),
+                // Local patch (agent-mux): see `Screen::rep`
+                'b' => self.screen.rep(canonicalize_params_1(params, 1)),
+                '`' => self.screen.hpa(canonicalize_params_1(params, 1)),
+                'a' => self.screen.hpr(canonicalize_params_1(params, 1)),
+                'e' => self.screen.vpr(canonicalize_params_1(params, 1)),
+                'I' => self.screen.cht(canonicalize_params_1(params, 1)),
+                'Z' => self.screen.cbt(canonicalize_params_1(params, 1)),
                 'm' => self.screen.sgr(params, unhandled),
                 'r' => self.screen.decstbm(canonicalize_params_decstbm(
                     params,

@@ -158,6 +158,8 @@ pub struct Session {
     /// The memory a save on close writes to (`memory::save`): set for an
     /// interactive session with memory, taken when the save is started.
     pub memory_save: Option<crate::memory::launch::Launch>,
+    /// The raw output recording (`$AGENT_MUX_PTY_LOG`, `ptylog`).
+    pub ptylog: Option<crate::ptylog::Recorder>,
 }
 
 /// A restored session that exits sooner than this failed to come back
@@ -303,6 +305,7 @@ impl Session {
             }
         });
 
+        let profile_name = profile.name.clone();
         Ok(Session {
             id,
             profile,
@@ -330,6 +333,7 @@ impl Session {
             briefing_path: None,
             conversation: None,
             memory_save: None,
+            ptylog: crate::ptylog::Recorder::from_env(&profile_name, id, rows, cols),
         })
     }
 
@@ -344,6 +348,9 @@ impl Session {
         // SCROLLBACK_LINES, a view pinned at the very top (offset == len)
         // can drift as the oldest rows get dropped out from under it --
         // same trade-off real emulators make at their buffer cap.
+        if let Some(log) = self.ptylog.as_mut() {
+            log.output(bytes);
+        }
         self.parser.process(bytes);
         self.scrollback_len = self.probe_scrollback_len();
         let bells = self.parser.callbacks().count;
@@ -351,13 +358,13 @@ impl Session {
         // ConPTY (and some full-screen TUIs) query the cursor position and
         // block until we answer on the input side. See BellCounter's doc
         // comment for why this lives on the callbacks type, and for why
-        // this is a count rather than a flag: a batch can contain more than
-        // one plain `CSI 6 n` query, and each needs its own reply.
+        // this is a list rather than a flag: a batch can contain more than
+        // one plain `CSI 6 n` query, and each needs its own reply, with the
+        // cursor where that query was read.
         let pending = std::mem::take(&mut self.parser.callbacks_mut().pending_cursor_reports);
-        if pending > 0 {
-            let (row, col) = self.parser.screen().cursor_position();
-            let reply = format!("\x1b[{};{}R", row + 1, col + 1);
-            for _ in 0..pending {
+        if !pending.is_empty() {
+            for (row, col) in pending {
+                let reply = format!("\x1b[{};{}R", row + 1, col + 1);
                 // Must be a single write_all: `write!` here fragments the
                 // reply across several small write() calls (one per
                 // formatted segment), and ConPTY's handshake reader does
@@ -379,6 +386,9 @@ impl Session {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        if let Some(log) = self.ptylog.as_mut() {
+            log.resize(rows, cols);
+        }
         self.parser.screen_mut().set_size(rows, cols);
         let _ = self.master.resize(PtySize {
             rows,

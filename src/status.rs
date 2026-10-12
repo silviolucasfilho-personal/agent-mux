@@ -14,9 +14,12 @@ pub const ACTIVITY_WINDOW: Duration = Duration::from_secs(2);
 /// back-channel to the pty to answer this itself, so it can only signal the
 /// request here for `Session` to answer via its writer.
 ///
-/// A count rather than a bool because several plain `CSI 6 n` queries can
-/// arrive in a single `process()` batch and each one needs its own reply,
-/// or a child blocking on the Nth reply hangs forever.
+/// One entry per query rather than a bool because several plain `CSI 6 n`
+/// queries can arrive in a single `process()` batch and each one needs its
+/// own reply, or a child blocking on the Nth reply hangs forever. Each
+/// entry is the cursor where its query was read: answering them all with
+/// the cursor at the end of the batch told a TUI that measures its output
+/// this way the wrong place.
 ///
 /// `CSI ? 6 n` (DECXCPR, the `?`-intermediate variant) is a different query
 /// with a different reply format (`CSI ? row;col;1 R`) and is deliberately
@@ -25,7 +28,8 @@ pub const ACTIVITY_WINDOW: Duration = Duration::from_secs(2);
 #[derive(Debug, Default)]
 pub struct BellCounter {
     pub count: usize,
-    pub pending_cursor_reports: usize,
+    /// (row, col), 0-based, of each plain `CSI 6 n` in this batch.
+    pub pending_cursor_reports: Vec<(u16, u16)>,
     pub cursor_style: Option<crossterm::cursor::SetCursorStyle>,
 }
 
@@ -36,7 +40,7 @@ impl vt100::Callbacks for BellCounter {
 
     fn unhandled_csi(
         &mut self,
-        _: &mut vt100::Screen,
+        screen: &mut vt100::Screen,
         i1: Option<u8>,
         _i2: Option<u8>,
         params: &[&[u16]],
@@ -46,7 +50,7 @@ impl vt100::Callbacks for BellCounter {
         // no-intermediate form; see the doc comment above for why `CSI ? 6
         // n` (i1 == Some(b'?')) is excluded.
         if i1.is_none() && c == 'n' && params.first().and_then(|p| p.first()) == Some(&6) {
-            self.pending_cursor_reports += 1;
+            self.pending_cursor_reports.push(screen.cursor_position());
         } else if i1 == Some(b' ') && c == 'q' {
             // DECSCUSR (Set Cursor Style): CSI Ps SP q
             let ps = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
@@ -216,7 +220,7 @@ mod tests {
         let counter = BellCounter::default();
         let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, counter);
         parser.process(b"\x1b[6n"); // CSI 6 n -- plain cursor position query
-        assert_eq!(parser.callbacks().pending_cursor_reports, 1);
+        assert_eq!(parser.callbacks().pending_cursor_reports, [(0, 0)]);
     }
 
     #[test]
@@ -227,7 +231,7 @@ mod tests {
         let counter = BellCounter::default();
         let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, counter);
         parser.process(b"\x1b[?6n"); // CSI ? 6 n -- DECXCPR
-        assert_eq!(parser.callbacks().pending_cursor_reports, 0);
+        assert!(parser.callbacks().pending_cursor_reports.is_empty());
     }
 
     #[test]
@@ -235,7 +239,37 @@ mod tests {
         let counter = BellCounter::default();
         let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, counter);
         parser.process(b"\x1b[6n\x1b[6n"); // two queries in a single process() call
-        assert_eq!(parser.callbacks().pending_cursor_reports, 2);
+        assert_eq!(parser.callbacks().pending_cursor_reports.len(), 2);
+    }
+
+    #[test]
+    fn each_query_is_answered_with_the_cursor_where_it_was_read() {
+        let counter = BellCounter::default();
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, counter);
+        parser.process(b"\x1b[2;4H\x1b[6n\x1b[3;9H\x1b[6n\x1b[4;12H");
+        assert_eq!(parser.callbacks().pending_cursor_reports, [(1, 3), (2, 8)]);
+    }
+
+    /// The xterm sequences the vendored vt100 used to ignore: a renderer
+    /// optimizing for `TERM=xterm-*` (Antigravity's) uses them, and the
+    /// cursor must end up where it does on xterm.
+    #[test]
+    fn xterm_repeat_and_cursor_sequences_move_like_xterm() {
+        let screen = |bytes: &[u8]| {
+            let mut p = vt100::Parser::new(3, 20, 0);
+            p.process(bytes);
+            p.screen().contents()
+        };
+        assert_eq!(screen(b"a\x1b[4bX"), "aaaaaX", "REP");
+        assert_eq!(screen(b"\x1b[3b-"), "-", "REP with nothing before it");
+        assert_eq!(screen(b"ab\x1b[10`X"), "ab       X", "HPA");
+        assert_eq!(screen(b"ab\x1b[3aX"), "ab   X", "HPR");
+        assert_eq!(screen(b"ab\x1b[1eX"), "ab\n  X", "VPR");
+        assert_eq!(screen(b"ab\x1b[1IX"), "ab      X", "CHT");
+        assert_eq!(screen(b"\x1b[13G\x1b[1ZX"), "        X", "CBT");
+        assert_eq!(screen(b"\x1b[2G\x1b[2ZX"), "X", "CBT stops at column 1");
+        // a huge REP is bounded by the screen, not looped 65535 times
+        assert!(screen(b"x\x1b[65535b").matches('x').count() <= 60);
     }
 
     #[test]
