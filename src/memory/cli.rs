@@ -18,6 +18,11 @@ pub const USAGE: &str = "agent-mux memory <command>
                                exit 1 when a note has problems
   path                         which folder is in use, and why
   save-session <job>           run one save on close (agent-mux starts it; docs/memory.md)
+  install [claude|codex|agy]   give sessions started outside agent-mux the memory: a start
+                               hook in each harness's own settings (default: all three)
+  uninstall [claude|codex|agy] remove those hooks
+  status                       which harnesses have the hook
+  hook <claude|codex|agy>      the hook itself: a harness's payload on stdin
 
 Every command takes --workspace DIR (default: $AGENT_MUX_MEMORY inside a session,
 else the current folder) or --user (the facts that hold in every workspace).
@@ -147,6 +152,15 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
     if matches!(cmd, None | Some("help") | Some("--help") | Some("-h")) || args.has("help") {
         println!("{USAGE}");
         return Ok(());
+    }
+    match cmd {
+        Some("hook") => {
+            return super::hook::run(args.positional.first().map(String::as_str).unwrap_or(""));
+        }
+        Some("install") | Some("uninstall") | Some("status") => {
+            return hooks_cmd(cmd.unwrap_or_default(), &args);
+        }
+        _ => {}
     }
     if cmd == Some("save-session") {
         let job = args
@@ -396,6 +410,61 @@ fn check(t: &Target, prompts: &Prompts) -> anyhow::Result<()> {
     );
     if bad > 0 {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `install`, `uninstall` and `status` of the user-level start hooks.
+fn hooks_cmd(cmd: &str, args: &Args) -> anyhow::Result<()> {
+    use super::hook;
+    use crate::harness::Harness;
+    let home = crate::skill::install::home_dir();
+    let all = [Harness::Claude, Harness::Codex, Harness::Antigravity];
+    let picked: Vec<Harness> = match args.positional.first().map(String::as_str) {
+        None | Some("all") => all.to_vec(),
+        Some(w) => vec![
+            hook::parse_harness(w)
+                .ok_or_else(|| anyhow::anyhow!("{w}: claude, codex, agy or all\n\n{USAGE}"))?,
+        ],
+    };
+    if cmd == "status" {
+        let exe = crate::tracing::hooks::register::current_exe();
+        for h in all {
+            match hook::installed(&home, h) {
+                Some(p) if Some(&p) == exe.as_ref() => println!("{:<7} installed", h.as_str()),
+                Some(p) => println!(
+                    "{:<7} installed, runs {} (not this binary: install again)",
+                    h.as_str(),
+                    p.display()
+                ),
+                None => println!("{:<7} not installed", h.as_str()),
+            }
+        }
+        return Ok(());
+    }
+    let exe = if cmd == "install" {
+        Some(
+            crate::tracing::hooks::register::current_exe()
+                .ok_or_else(|| anyhow::anyhow!("cannot find this binary's path"))?,
+        )
+    } else {
+        None
+    };
+    for h in picked {
+        let (path, changed) =
+            hook::set(&home, h, exe.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
+        let what = match (cmd, changed) {
+            ("install", true) => "installed",
+            ("install", false) => "already installed",
+            (_, true) => "removed",
+            _ => "not installed",
+        };
+        println!("{:<7} {what}: {}", h.as_str(), path.display());
+        if cmd == "install" && h == Harness::Codex {
+            println!(
+                "        Codex runs it only once you trust it: open Codex, run /hooks and trust the agent-mux memory entry."
+            );
+        }
     }
     Ok(())
 }
