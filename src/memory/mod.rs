@@ -64,6 +64,10 @@ pub const ENV_USER: &str = "AGENT_MUX_MEMORY_USER";
 /// `launch` when the launch registered its own `UserPromptSubmit` memory
 /// hook (`memory::fresh`), so a user-level one stays silent.
 pub const ENV_FRESH: &str = "AGENT_MUX_MEMORY_FRESH";
+/// Every variable a launch sets for its memory. A session never inherits
+/// them: an agent-mux started inside another's session would otherwise
+/// hand the outer workspace's memory to sessions that have none.
+pub const ENV_ALL: [&str; 5] = [ENV_DIR, ENV_INDEX, ENV_BRIEF, ENV_USER, ENV_FRESH];
 
 /// The skill package that saves, recalls and forgets notes.
 pub const SKILL_ID: &str = "mux-memory";

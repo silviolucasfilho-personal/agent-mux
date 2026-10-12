@@ -234,6 +234,11 @@ impl Session {
         if std::env::var_os("FORCE_HYPERLINK").is_none() {
             cmd.env("FORCE_HYPERLINK", "1");
         }
+        // the memory is the launch's own (`App::apply_memory`), never one
+        // inherited from a session this agent-mux runs inside
+        for key in crate::memory::ENV_ALL {
+            cmd.env_remove(key);
+        }
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
