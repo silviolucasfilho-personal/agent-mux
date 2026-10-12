@@ -10,6 +10,21 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+/// An executable named `agy` in `dir` that only waits, so a launch is
+/// detected as Antigravity without running the real one.
+fn fake_agy(dir: &Path) -> String {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = bin.join("agy");
+    std::fs::write(&path, "#!/bin/sh\nsleep 30\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path.display().to_string()
+}
+
 fn create_mock_claude_project_dir() -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().unwrap();
     let proj_dir = temp_dir.path().join("projects").join("-workspace-my-app");
@@ -207,11 +222,14 @@ async fn test_antigravity_discovery_and_resume() {
 "#;
     std::fs::write(&transcript, content).unwrap();
 
+    // a stand-in named `agy`: the real one on PATH would start, and
+    // outlive the test, under the user's account
+    let agy = fake_agy(temp.path());
     let (tx, _rx) = mpsc::channel(256);
     let mut app = App::new(
         vec![Profile {
             name: "Antigravity".into(),
-            command: "agy".into(),
+            command: agy.clone(),
             args: vec![],
             default_dir: None,
             tracing: None,
@@ -259,5 +277,6 @@ async fn test_antigravity_discovery_and_resume() {
     app.handle_key(&key(KeyCode::Char('r')), Instant::now());
     assert!(matches!(app.mode, Mode::Main));
     assert_eq!(app.sessions.len(), 1);
-    assert_eq!(app.sessions[0].profile.command, "agy");
+    assert_eq!(app.sessions[0].profile.command, agy);
+    app.kill_all();
 }
