@@ -10,14 +10,13 @@
 # `claude-sonnet-4-5`.
 #
 # Source: LiteLLM `model_prices_and_context_window.json` (the table ccusage
-# prices from), fetched 2026-10-04 and converted per-token → per-million;
+# prices from), converted per-token → per-million by scripts/update_pricing.py;
 # `cache_read` = `cache_read_input_token_cost`, `cache_write` =
 # `cache_creation_input_token_cost`, `cache_write_1h` = the `above_1hr`
 # rate, `reasoning` only where it differs from `output`. Rows LiteLLM does
-# not carry under a bare name are kept from the previous table and say so.
-# Regenerate with the script in docs/superpowers/specs/2026-10-04-tracing-review-and-ux-design.md
-# section 7, or by hand from the same file.
-updated_at = "2026-10-04"
+# does not carry are kept from the previous table and marked. A weekly GitHub
+# Action opens a PR when rates change; it can also be run manually.
+updated_at = "2026-10-12"
 
 [[models]]
 id = "claude-fable-5-1"
@@ -65,7 +64,7 @@ provider = "anthropic"
 match = ["claude-sonnet-5-5", "claude-sonnet-5-5-*"]
 input = 2.0
 output = 10.0
-cache_read = 0.2
+cache_read = 0.1
 cache_write = 2.5
 cache_write_1h = 4.0
 

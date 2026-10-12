@@ -1420,7 +1420,7 @@ DELETE FROM hook_events WHERE ts_ns < ?1;
 
 ### 7.8 Pricing (`pricing.rs`, `pricing.toml`)
 
-The bundled table (17 rows: Claude Fable/Mythos 5.1 and 5, Opus 5 and 4.x, Sonnet 5 and 4.x, Haiku 4.5, GPT-5 and Codex variants) is compiled in with `include_str!`. `PriceTable::find(model)` normalizes the name (lowercase; strip `anthropic/`, `openai/`, `google/`, `models/`, region prefixes such as `us.`, a trailing `[1m]`, `-v1:0`, and date suffixes), refuses empty names and `<synthetic>`, prefers an exact pattern, then the longest `prefix*` match. `[[tracing.models]]` rows replace a bundled id in place or append. `cost_for` charges `input`, `cache_read`, `cache_write` (5-minute and 1-hour buckets at their own rates), and `output` (with `reasoning` split out when a rate exists); a bucket with unknown usage yields `None`, never zero.
+The curated table is compiled in with `include_str!` and refreshed weekly from LiteLLM by the `Update model pricing` workflow, which opens a review PR only when a bundled rate changes. Run the workflow manually with `workflow_dispatch`, or use `python3 scripts/update_pricing.py --source <downloaded-litellm-json>` to refresh locally. `PriceTable::find(model)` normalizes the name (lowercase; strip `anthropic/`, `openai/`, `google/`, `models/`, region prefixes such as `us.`, a trailing `[1m]`, `-v1:0`, and date suffixes), refuses empty names and `<synthetic>`, prefers an exact pattern, then the longest `prefix*` match. `[[tracing.models]]` rows replace a bundled id in place or append. `cost_for` charges `input`, `cache_read`, `cache_write` (5-minute and 1-hour buckets at their own rates), and `output` (with `reasoning` split out when a rate exists); a bucket with unknown usage yields `None`, never zero.
 
 ---
 

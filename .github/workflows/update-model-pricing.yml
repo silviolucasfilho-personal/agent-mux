@@ -1,0 +1,100 @@
+name: Update model pricing
+
+on:
+  schedule:
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-model-pricing
+  cancel-in-progress: false
+
+jobs:
+  update-pricing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download LiteLLM pricing catalog
+        run: >-
+          curl --fail --silent --show-error --location --retry 3
+          https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+          --output "$RUNNER_TEMP/litellm-pricing.json"
+
+      - name: Update curated model prices
+        run: >-
+          python3 scripts/update_pricing.py
+          --source "$RUNNER_TEMP/litellm-pricing.json"
+
+      - name: Test updater
+        run: python3 -m unittest discover -s tests -p 'test_update_pricing.py'
+
+      - name: Validate bundled pricing table
+        run: cargo test --lib tracing::pricing
+
+      - name: Open or update pricing pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BRANCH: automation/update-model-pricing
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- src/tracing/pricing.toml; then
+            open_pr=$(gh pr list \
+              --state open --json number,headRefName \
+              --jq '[.[] | select(.headRefName | startswith("automation/update-model-pricing-"))] | first // empty')
+            if [[ -n "$open_pr" ]]; then
+              gh pr close "$(jq -r '.number' <<<"$open_pr")" --delete-branch \
+                --comment "The bundled prices now match the current LiteLLM catalog."
+            fi
+            echo "No curated model prices changed."
+            exit 0
+          fi
+
+          existing_pr=$(gh pr list \
+            --state open --json number,headRefName \
+            --jq '[.[] | select(.headRefName | startswith("automation/update-model-pricing-"))] | first // empty')
+          if [[ -n "$existing_pr" ]]; then
+            PR_BRANCH=$(jq -r '.headRefName' <<<"$existing_pr")
+            pr_number=$(jq -r '.number' <<<"$existing_pr")
+          else
+            PR_BRANCH="automation/update-model-pricing-${GITHUB_RUN_ID}"
+            pr_number=""
+          fi
+
+          git switch --create "$PR_BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/tracing/pricing.toml
+          git commit -m "chore: refresh model pricing"
+          git push --force origin "$PR_BRANCH"
+
+          cat > "$RUNNER_TEMP/pricing-pr.md" <<'EOF'
+          Refreshes the curated model rates from LiteLLM's model pricing catalog.
+
+          Rows without a usable LiteLLM entry retain their existing rates. The snapshot date changes only when a curated rate changes.
+
+          Validation: `python3 -m unittest discover -s tests -p 'test_update_pricing.py'` and `cargo test --lib tracing::pricing`.
+
+          Source: https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json
+          EOF
+
+          if [[ -n "$pr_number" ]]; then
+            gh pr edit "$pr_number" \
+              --title "chore: refresh model pricing" \
+              --body-file "$RUNNER_TEMP/pricing-pr.md"
+          else
+            gh pr create \
+              --base "$BASE_BRANCH" \
+              --head "$PR_BRANCH" \
+              --title "chore: refresh model pricing" \
+              --body-file "$RUNNER_TEMP/pricing-pr.md"
+          fi
