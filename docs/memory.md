@@ -88,6 +88,14 @@ It also gets one **start text**: the hint (`[memory] hint` in `prompts.toml`), t
 | Codex | `-c developer_instructions=…` with the whole start text. | Merged into a persona's own instructions and into `developer_instructions` from your `config.toml`; a `-c` would otherwise replace them. Left out of the saved session and composed again at every launch. |
 | Antigravity | The `agent-mux-memory` plugin's `PreInvocation` hook answers with `injectSteps` / `ephemeralMessage`. | agy has no instruction flag. agent-mux writes the plugin to `~/.gemini/config/plugins/agent-mux-memory/` the first time it launches agy with memory. The message lasts one model call (probed on 1.3.3), so the hook answers every call; it is not stored, so it does not pile up in the conversation. |
 
+**Kept up to date.** The start text is the memory as it was at start. Before each prompt, a session also hears what changed since it last looked: notes another session saved (or it saved itself), notes updated, and notes removed. Only the changed index lines are sent, inside the trust fence, and nothing at all when nothing changed. What each session has been given is recorded in `<memory>/.seen/<harness>-<session>.json`; records older than 14 days are dropped.
+
+| Harness | How the update arrives |
+| --- | --- |
+| Claude Code | A launch with memory registers its own synchronous `UserPromptSubmit` handler (`agent-mux memory hook claude --per-launch`), beside the tracing one. |
+| Codex | The user-level `UserPromptSubmit` hook from `agent-mux memory install` (section 6), once trusted. Without it, a Codex session sees only the memory it started with. |
+| Antigravity | Nothing extra: its hook already gives the whole current index before every model call. |
+
 The skill is named `mux-memory` to avoid replacing Claude Code’s built-in `/memory` command. Installing it archives an older agent-mux-managed `memory` skill under the harness configuration’s `agent-mux-retired-skills/` directory; unrelated skills are left alone.
 
 The **`mux-memory` skill** is installed for each harness a session runs on, once per run: `/mux-memory` on Claude Code and Antigravity, `$mux-memory` on Codex. It saves a note (checking the index for one that already covers the fact), recalls notes with their sources, forgets one only on your word, and writes a hand-off brief. After a save it runs `agent-mux memory check` when the binary is on the `PATH`, so the index is rebuilt at once.
@@ -132,8 +140,8 @@ agent-mux memory uninstall          # remove them again
 
 | Harness | Where | When it answers |
 | --- | --- | --- |
-| Claude Code | `SessionStart`, `PreCompact` and `SessionEnd` groups in `~/.claude/settings.json` | at start, resume, clear and compaction; saves before compaction and on close |
-| Codex | the same three groups in `~/.codex/hooks.json` | the same. Codex runs a hook only after you trust it: open Codex, run `/hooks` and trust the agent-mux memory entries once |
+| Claude Code | `SessionStart`, `UserPromptSubmit`, `PreCompact` and `SessionEnd` groups in `~/.claude/settings.json` | at start, resume, clear and compaction; what changed before each prompt; saves before compaction and on close |
+| Codex | the same four groups in `~/.codex/hooks.json` | the same. Codex runs a hook only after you trust it: open Codex, run `/hooks` and trust the agent-mux memory entries once |
 | Antigravity | the `agent-mux-memory` plugin | before every model call |
 
 The hook reads the folder from the session (`cwd`, or agy's workspace) and answers with that workspace's start text, the same text an agent-mux launch gets. A folder that has no notes yet gets nothing, and `[memory] enabled = false` turns the hook off. In a session agent-mux launched, the Claude Code and Codex hooks stay silent because the launch already delivered the memory; the Antigravity hook answers there too, since agy has no other channel. The skill finds the folder from the start text, or from `agent-mux memory path`, when `$AGENT_MUX_MEMORY` is not set.
