@@ -3832,6 +3832,7 @@ impl App {
         if let (Some(rt), Some(plan)) = (self.tracing.as_mut(), plan) {
             session.trace = Some(rt.start_session(id, plan));
         }
+        self.record_pending_save(&session);
         Ok(session)
     }
 
