@@ -32,6 +32,7 @@ impl App {
             launch: s.trace.as_ref().map(|t| t.launch_id.clone()),
             index_lines: settings.index_lines,
             reason: None,
+            brief: None,
         }
     }
 

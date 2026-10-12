@@ -2379,6 +2379,14 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
     f.render_widget(Clear, area);
     let title = match &dialog.agent {
         Some(a) => format!(" New session as {a} "),
+        None if dialog.handoff_history.is_some() => {
+            let title = dialog
+                .handoff_history
+                .as_ref()
+                .map(|h| h.title.chars().take(40).collect::<String>())
+                .unwrap_or_default();
+            format!(" Continue \"{title}\" in a new session ")
+        }
         None if dialog.handoff.is_some() => {
             let from = dialog
                 .handoff
@@ -2401,11 +2409,18 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
         };
         lines.push(Line::styled(format!("{marker}{}", p.name), style));
     }
+    if let Some(way) = app.handoff_way(dialog) {
+        lines.push(Line::from(vec![
+            Span::styled("How: ", Style::default().fg(Color::Yellow)),
+            Span::raw(way),
+        ]));
+    }
     lines.push(Line::raw(""));
     // the subfolder list is the flexible part: on a short terminal it
     // shrinks so the fields below it stay on screen
     let fixed_rows = app.profiles.len()
         + 12
+        + usize::from(app.handoff_way(dialog).is_some())
         + if dialog.harness.is_some() { 6 } else { 0 }
         + if dialog.fields().contains(&DialogField::MaxCost) {
             4

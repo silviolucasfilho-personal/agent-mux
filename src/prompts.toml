@@ -87,3 +87,20 @@ To correct or extend a note the memory already has, reuse its name and give its 
 
 {memory}
 """
+
+# The one turn that writes a hand-off brief when `f` continues a session on
+# another harness (docs/memory.md "Hand-off brief"); agent-mux puts the facts
+# it knows (goal, files, last answer, transcript) above it. Placeholder:
+#   {source}  what to read: "this conversation", or a transcript file to read first
+brief = """
+The work in {source} continues now in a new session, on another coding agent, which has not seen any of it. Write the hand-off brief it starts from: one page at most, actionable first, in this shape:
+
+Goal: one line
+Next step: the one thing to do first
+Open: what is left, in order
+Decisions: what was decided, and why
+Done: what was changed, with files
+Watch out: traps found on the way
+
+Write only what the next session cannot get from the repository itself. Do not use tools other than reading, and change no file. Answer with the brief alone, inside one block fenced with ```mux-brief.
+"""

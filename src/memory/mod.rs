@@ -38,6 +38,7 @@
 //! - Antigravity 1.3.3: no instruction flag; the session has the
 //!   environment and the installed skill.
 
+pub mod brief;
 pub mod cli;
 pub mod context;
 pub mod fence;

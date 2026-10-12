@@ -317,6 +317,82 @@ impl App {
         }
     }
 
+    /// What `Enter` will do with the session the dialog continues, said
+    /// before it is done: a fork, a brief, or the whole transcript.
+    pub fn handoff_way(&self, d: &super::DialogState) -> Option<String> {
+        use crate::harness::Harness;
+        let from = match (&d.handoff_history, d.handoff) {
+            (Some(h), _) => h.harness,
+            (None, Some(id)) => {
+                Harness::detect(&self.sessions.iter().find(|s| s.id == id)?.profile.command)?
+            }
+            (None, None) => return None,
+        };
+        let to = d.harness?;
+        let memory = self
+            .memory
+            .as_ref()
+            .and_then(|c| crate::memory::Settings::resolve(Some(c), None))
+            .is_some();
+        Some(if to == from && crate::harness::can_fork(to) {
+            "fork: the conversation is copied; the old session keeps running".into()
+        } else if memory {
+            let wait = self
+                .memory
+                .as_ref()
+                .and_then(|c| c.brief_timeout_s)
+                .unwrap_or(crate::memory::brief::DEFAULT_TIMEOUT_S);
+            format!(
+                "brief: the old conversation writes a hand-off brief the new session starts from (up to {wait} s), with the transcript linked"
+            )
+        } else {
+            "transcript: the new session reads the whole conversation first".into()
+        })
+    }
+
+    /// `f` on a History row: the New session dialog in the folder the
+    /// conversation ran in, on its harness, continuing it.
+    pub fn open_history_handoff_dialog(&mut self, idx: usize) {
+        use crate::harness::Harness;
+        use crate::history::AgentProvider;
+        let Some(h) = self.history_sessions.get(idx).cloned() else {
+            return;
+        };
+        let (harness, provider) = match h.provider {
+            AgentProvider::Claude => (Harness::Claude, crate::transcript::Provider::Claude),
+            AgentProvider::Antigravity => (
+                Harness::Antigravity,
+                crate::transcript::Provider::Antigravity,
+            ),
+        };
+        let Some(dir) = h.cwd.clone().filter(|d| d.is_dir()) else {
+            self.notice = Some(Notice::warn(
+                "that conversation's folder is gone: nothing to continue in",
+            ));
+            return;
+        };
+        let profile = self
+            .profiles
+            .iter()
+            .position(|p| Harness::detect(&p.command) == Some(harness));
+        self.open_new_session_dialog(profile);
+        if let Mode::NewSession(d) = &mut self.mode {
+            d.handoff_history = Some(Box::new(HistoryHandoff {
+                source: crate::handoff::Source {
+                    provider,
+                    conversation: h.session_id.clone(),
+                    transcript: Some(h.file_path.clone()),
+                },
+                harness,
+                dir: dir.clone(),
+                title: h.title.clone(),
+            }));
+            d.dir = dir.to_string_lossy().into_owned();
+            d.dir_edited = true;
+            d.dir_picker.refresh(&d.dir);
+        }
+    }
+
     /// How session `from` continues on `harness` in `dir`: a fork of its
     /// conversation on the same Claude Code or Codex, else its whole
     /// transcript written under `<runtime>/handoffs/` and a first message
@@ -332,9 +408,13 @@ impl App {
         harness: Option<crate::harness::Harness>,
         dir: &std::path::Path,
     ) -> Result<crate::handoff::Continue, String> {
-        use crate::handoff::{self, Continue};
+        let from = self.handoff_from_session(from)?;
+        self.continue_from(from, harness, dir)
+    }
+
+    /// What `f` on a live session continues from.
+    pub fn handoff_from_session(&self, from: usize) -> Result<HandoffFrom, String> {
         use crate::harness::Harness;
-        let harness = harness.ok_or("continue on a Claude Code, Codex or Antigravity profile")?;
         let s = self
             .sessions
             .iter()
@@ -343,7 +423,72 @@ impl App {
         let from_harness = Harness::detect(&s.profile.command)
             .ok_or("that session's CLI is not one agent-mux knows")?;
         let source = self.session_source(s)?;
-        if harness == from_harness && crate::harness::can_fork(harness) {
+        let card = s.trace.as_ref().and_then(|t| {
+            let conn = crate::tracing::store::open_ro(self.trace_db_path.as_deref()?).ok()?;
+            crate::tracing::analysis::query::launch_card(
+                &conn,
+                &t.launch_id,
+                Some(source.provider.as_str()),
+                &s.dir,
+                crate::tracing::analysis::model::RuntimeState::Exited,
+            )
+            .ok()
+        });
+        let folder = s
+            .dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok(HandoffFrom {
+            label: format!("{} · {folder}", s.profile.name),
+            source,
+            from_harness,
+            command: s.profile.command.clone(),
+            dir: s.dir.clone(),
+            card,
+        })
+    }
+
+    /// What `f` on a History row continues from.
+    pub fn handoff_from_history(&self, h: &HistoryHandoff) -> Result<HandoffFrom, String> {
+        let card = (|| {
+            let conn = crate::tracing::store::open_ro(self.trace_db_path.as_deref()?).ok()?;
+            let key = format!("{}:{}", h.source.provider.as_str(), h.source.conversation);
+            crate::tracing::analysis::query::conversation_card(
+                &conn,
+                &key,
+                Some(h.source.provider.as_str()),
+                &h.dir,
+            )
+            .ok()
+            .filter(|c| c.completed_turns + c.open_turns > 0)
+        })();
+        Ok(HandoffFrom {
+            label: format!("History · {}", h.title),
+            source: h.source.clone(),
+            from_harness: h.harness,
+            command: h.harness.as_str().to_string(),
+            dir: h.dir.clone(),
+            card,
+        })
+    }
+
+    /// How `from` continues on `harness` in `dir`: a fork of its
+    /// conversation on the same Claude Code or Codex; else, with memory, a
+    /// hand-off brief (`memory::brief`) a headless fork of the old
+    /// conversation completes, with the rendered transcript linked for
+    /// details; else, memory off, the whole transcript read first.
+    pub fn continue_from(
+        &mut self,
+        from: HandoffFrom,
+        harness: Option<crate::harness::Harness>,
+        dir: &std::path::Path,
+    ) -> Result<crate::handoff::Continue, String> {
+        use crate::handoff::{self, Continue};
+        use crate::harness::Harness;
+        let harness = harness.ok_or("continue on a Claude Code, Codex or Antigravity profile")?;
+        let source = from.source;
+        if harness == from.from_harness && crate::harness::can_fork(harness) {
             return Ok(Continue::Fork(source.conversation));
         }
         let text = handoff::source_text(&source)?;
@@ -358,11 +503,61 @@ impl App {
             &handoff::render(source.provider, &text),
         )
         .map_err(|e| format!("handoff: {e}"))?;
-        let message = handoff::opening_message(source.provider, dir, &file);
-        Ok(Continue::Transcript(match harness {
+        let opening = |message: String| match harness {
             Harness::Antigravity => vec!["--prompt-interactive".into(), message],
             _ => vec![message],
-        }))
+        };
+        // memory off: the whole transcript, read first
+        let Some(settings) = self
+            .memory
+            .as_ref()
+            .and_then(|c| crate::memory::Settings::resolve(Some(c), None))
+        else {
+            return Ok(Continue::Transcript(opening(handoff::opening_message(
+                source.provider,
+                dir,
+                &file,
+            ))));
+        };
+        let library = self.library_root();
+        let mem = crate::memory::paths::dir_for(&library, &settings, dir);
+        crate::memory::paths::ensure(&mem).map_err(|e| format!("memory: {e}"))?;
+        let brief =
+            crate::memory::brief::path_for(&mem, from.from_harness.as_str(), &source.conversation);
+        crate::memory::brief::write_facts(
+            &brief,
+            &crate::memory::brief::Facts {
+                from: &from.label,
+                workspace: &from.dir,
+                card: from.card.as_ref(),
+                transcript: Some(&file),
+            },
+        )
+        .map_err(|e| format!("brief: {e}"))?;
+        let user_dir = crate::memory::paths::user_dir(&library);
+        let job = crate::memory::save::Job {
+            command: from.command.clone(),
+            model: None,
+            workspace: from.dir.clone(),
+            conversation: source.conversation.clone(),
+            transcript: source.transcript.clone(),
+            memory: mem.clone(),
+            user_dir: user_dir.is_dir().then_some(user_dir),
+            launch: None,
+            index_lines: settings.index_lines,
+            reason: Some("brief".into()),
+            brief: Some(brief.clone()),
+        };
+        let exe = crate::memory::save::agent_mux_exe();
+        let job_path = match crate::memory::save::start(&job, exe.as_deref()) {
+            Ok(true) if exe.is_some() => Some(job.job_path()),
+            _ => None,
+        };
+        Ok(Continue::Brief {
+            opening: opening(handoff::brief_opening(&brief, &file)),
+            brief,
+            job: job_path,
+        })
     }
 
     /// The conversation session `s` had: the one the trace store
@@ -435,4 +630,26 @@ impl App {
         }
         self.mode = Mode::NewSession(d);
     }
+}
+
+/// What `f` continues from: a live session or a History row.
+pub struct HandoffFrom {
+    /// `Claude Code · agent-mux`, or `History · <title>`.
+    pub label: String,
+    pub source: crate::handoff::Source,
+    pub from_harness: crate::harness::Harness,
+    /// The program that resumes the conversation for the brief.
+    pub command: String,
+    /// Where the old conversation ran: a resume of it runs there.
+    pub dir: std::path::PathBuf,
+    pub card: Option<crate::tracing::analysis::model::SessionCard>,
+}
+
+/// A History row `f` continues.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryHandoff {
+    pub source: crate::handoff::Source,
+    pub harness: crate::harness::Harness,
+    pub dir: std::path::PathBuf,
+    pub title: String,
 }
