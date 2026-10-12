@@ -1,12 +1,12 @@
 //! Harness recap queries run off the UI thread; drawing reads cached cards only.
+//! A recap is loaded once each time a harness row is selected (and again when
+//! its sessions change), not on a timer while the row stays selected.
 
 use super::{App, Mode, agents_list::AgentKind};
 use crate::events::AppEvent;
 use crate::tracing::analysis::model::{RuntimeState, SessionCard};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
-
-const FRESH: Duration = Duration::from_secs(3);
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Key {
@@ -20,15 +20,18 @@ struct Key {
 #[derive(Debug, Clone)]
 pub struct HarnessRecap {
     key: Key,
-    at: Instant,
     cards: Vec<Option<SessionCard>>,
     warning: Option<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct RecapState {
-    cached: Option<HarnessRecap>,
+    /// The last recap of each harness, by profile.
+    cached: std::collections::HashMap<usize, HarnessRecap>,
     pending: Option<Key>,
+    /// The harness row the cursor was on at the last check: arriving on
+    /// one loads its recap again.
+    shown: Option<usize>,
 }
 
 fn runtime_state(s: crate::status::Status) -> RuntimeState {
@@ -77,7 +80,7 @@ impl App {
         let cached = self
             .harness_recap
             .cached
-            .as_ref()
+            .get(&p)
             .filter(|r| Some(&r.key) == self.recap_key(p).as_ref());
         self.harness_sessions(p)
             .into_iter()
@@ -97,14 +100,14 @@ impl App {
             || !self
                 .harness_recap
                 .cached
-                .as_ref()
+                .get(&p)
                 .is_some_and(|r| r.key == key)
     }
 
     pub fn harness_recap_warning(&self, p: usize) -> Option<&str> {
         self.harness_recap
             .cached
-            .as_ref()
+            .get(&p)
             .filter(|r| Some(&r.key) == self.recap_key(p).as_ref())
             .and_then(|r| r.warning.as_deref())
     }
@@ -114,15 +117,25 @@ impl App {
             return;
         }
         let Some(AgentKind::Harness(p)) = self.agent_row() else {
+            self.harness_recap.shown = None;
             return;
         };
         let Some(key) = self.recap_key(p) else { return };
-        if self.harness_recap.pending.is_some()
-            || self
+        // a load in flight for this harness answers its arrival; one for
+        // another leaves the arrival to be answered when it lands
+        if let Some(pending) = &self.harness_recap.pending {
+            if pending.profile == p {
+                self.harness_recap.shown = Some(p);
+            }
+            return;
+        }
+        let arrived = self.harness_recap.shown.replace(p) != Some(p);
+        if !arrived
+            && self
                 .harness_recap
                 .cached
-                .as_ref()
-                .is_some_and(|r| r.key == key && now.saturating_duration_since(r.at) < FRESH)
+                .get(&p)
+                .is_some_and(|r| r.key == key)
         {
             return;
         }
@@ -138,12 +151,14 @@ impl App {
             })
             .collect();
         if key.db.is_none() || !key.sessions.iter().any(|(_, launch)| launch.is_some()) {
-            self.harness_recap.cached = Some(HarnessRecap {
-                cards: vec![None; key.sessions.len()],
-                key,
-                at: now,
-                warning: None,
-            });
+            self.harness_recap.cached.insert(
+                p,
+                HarnessRecap {
+                    cards: vec![None; key.sessions.len()],
+                    key,
+                    warning: None,
+                },
+            );
             return;
         }
         self.harness_recap.pending = Some(key.clone());
@@ -184,7 +199,6 @@ impl App {
             let _ = tx.blocking_send(AppEvent::HarnessRecapUpdated(HarnessRecap {
                 key,
                 cards,
-                at: Instant::now(),
                 warning,
             }));
         });
@@ -198,7 +212,7 @@ impl App {
         if self.agent_row() == Some(AgentKind::Harness(recap.key.profile))
             && self.recap_key(recap.key.profile).as_ref() == Some(&recap.key)
         {
-            self.harness_recap.cached = Some(recap);
+            self.harness_recap.cached.insert(recap.key.profile, recap);
         }
         self.refresh_harness_recap_if_needed(Instant::now());
     }

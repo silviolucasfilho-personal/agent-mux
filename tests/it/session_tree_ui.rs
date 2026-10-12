@@ -1067,8 +1067,13 @@ fn a_harness_row_shows_a_recap_of_each_session() {
             .iter()
             .all(|(_, c)| c.is_some())
     );
-    // Refreshing retains the previous facts while the worker runs.
-    app.refresh_harness_recap_if_needed(Instant::now() + std::time::Duration::from_secs(4));
+    // Staying on the row does not load it again, however long it stays.
+    app.refresh_harness_recap_if_needed(Instant::now() + std::time::Duration::from_secs(60));
+    assert!(!app.harness_recap_loading(0));
+    // Selecting it again does, keeping the previous facts while the worker runs.
+    app.select_agent_line(&lines, other);
+    app.refresh_harness_recap_if_needed(Instant::now());
+    app.select_agent_line(&lines, at);
     assert!(app.harness_recap_loading(0));
     assert!(
         app.harness_recap(0, Instant::now())
