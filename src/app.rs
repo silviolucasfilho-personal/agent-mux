@@ -852,6 +852,8 @@ pub enum DialogField {
     Approvals,
     /// Pick up the most recent conversation.
     Resume,
+    /// Whether the session reads and saves the workspace's shared memory.
+    Memory,
     /// A prompt to run non-interactively; blank launches interactively.
     OneShot,
     /// Name of an experiment to record this launch under; blank = none.
@@ -951,6 +953,11 @@ pub struct DialogState {
     /// (the top-level `bypass_approvals` in profiles.toml, default true).
     pub bypass_default: bool,
     pub resume_last: bool,
+    /// The session gets the workspace's shared memory (`mux-memory`).
+    pub memory: bool,
+    /// False when memory is off for agent-mux as a whole (or the App has
+    /// none, as in a test): the Memory field is left out.
+    pub memory_available: bool,
     /// A one-shot prompt; blank launches interactively.
     pub one_shot: String,
     /// False when no Langfuse credentials resolved: the field cannot leave
@@ -973,6 +980,15 @@ pub struct DialogState {
     pub handoff: Option<usize>,
     /// The History row this one continues (`f` on History).
     pub handoff_history: Option<Box<new_agent::HistoryHandoff>>,
+}
+
+/// Whether a profile's sessions get the shared memory: on unless its
+/// `[profiles.memory]` says `enabled = false`.
+fn profile_memory(profile: Option<&Profile>) -> bool {
+    profile
+        .and_then(|p| p.memory.as_ref())
+        .and_then(|m| m.enabled)
+        != Some(false)
 }
 
 /// What the New session dialog launches.
@@ -1039,6 +1055,8 @@ impl DialogState {
                 .unwrap_or(DEFAULT_BYPASS_APPROVALS),
             bypass_default: DEFAULT_BYPASS_APPROVALS,
             resume_last: false,
+            memory: profile_memory(first),
+            memory_available: false,
             one_shot: String::new(),
             agent: None,
             handoff: None,
@@ -1109,8 +1127,11 @@ impl DialogState {
                 DialogField::Model,
                 DialogField::Approvals,
                 DialogField::Resume,
-                DialogField::OneShot,
             ]);
+            if self.memory_available {
+                fields.push(DialogField::Memory);
+            }
+            fields.push(DialogField::OneShot);
         }
         if self.guard_available() {
             fields.extend([DialogField::MaxCost, DialogField::MaxTurns]);
@@ -1123,6 +1144,12 @@ impl DialogState {
 
     /// Whether the launch can be recorded as an experiment run: only with
     /// a trace store open, since the run row hangs off the launch row.
+    /// Offers the Memory field when agent-mux's memory is on.
+    pub fn with_memory(mut self, available: bool) -> Self {
+        self.memory_available = available;
+        self
+    }
+
     pub fn with_experiments(mut self, available: bool) -> Self {
         self.experiments_available = available;
         self
@@ -1211,6 +1238,7 @@ impl DialogState {
             self.harness = crate::harness::Harness::detect(&p.command);
             self.model = p.model.clone().unwrap_or_default();
             self.bypass_approvals = p.bypass_approvals.unwrap_or(self.bypass_default);
+            self.memory = profile_memory(Some(p));
             if self.harness.is_none() {
                 // the option fields are gone: do not leave focus on one
                 self.resume_last = false;
@@ -1342,6 +1370,13 @@ impl DialogState {
                 KeyCode::Enter => return DialogResult::Submit,
                 KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
                     self.resume_last = !self.resume_last;
+                }
+                _ => {}
+            },
+            DialogField::Memory => match key.code {
+                KeyCode::Enter => return DialogResult::Submit,
+                KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
+                    self.memory = !self.memory;
                 }
                 _ => {}
             },
@@ -3842,6 +3877,9 @@ impl App {
             None => Vec::new(),
         };
         extra_env.extend(env.iter().cloned());
+        if profile.memory.as_ref().and_then(|m| m.enabled) == Some(false) {
+            extra_env.push((crate::memory::ENV_OFF.into(), "1".into()));
+        }
         if let Some(m) = &memory {
             self.apply_memory(
                 m,
@@ -5276,6 +5314,11 @@ impl App {
                 p_tracing.content_mode = Some(dialog.content_mode.to_string());
                 p_tracing.backend = Some(dialog.backend.as_str().to_string());
                 profile.tracing = Some(p_tracing);
+                if dialog.memory_available && dialog.harness.is_some() {
+                    profile.memory = Some(crate::config::ProfileMemory {
+                        enabled: Some(dialog.memory),
+                    });
+                }
                 // options become real arguments before planning, so the
                 // trace planner sees --continue / -p / --resume and can
                 // decide about session-id injection on the same command
@@ -5319,7 +5362,9 @@ impl App {
                 };
                 let handoff = match from {
                     Some(from) => {
-                        match from.and_then(|f| self.continue_from(f, dialog.harness, &dir)) {
+                        match from.and_then(|f| {
+                            self.continue_from(f, dialog.harness, &dir, dialog.memory)
+                        }) {
                             Ok(h) => Some(h),
                             Err(e) => {
                                 let Mode::NewSession(dialog) = &mut self.mode else {
@@ -7470,6 +7515,34 @@ mod dialog_tests {
                 memory: None,
             },
         ]
+    }
+
+    #[test]
+    fn the_memory_field_follows_the_profile_and_agent_mux() {
+        let mut ps = harness_profiles();
+        ps[1].memory = Some(crate::config::ProfileMemory {
+            enabled: Some(false),
+        });
+        let mut d = DialogState::new(&ps);
+        assert!(d.memory);
+        assert!(
+            !d.fields().contains(&DialogField::Memory),
+            "memory off for agent-mux: no field"
+        );
+        d = d.with_memory(true);
+        let fields = d.fields();
+        let at = |f| fields.iter().position(|x| *x == f).unwrap();
+        assert_eq!(at(DialogField::Memory), at(DialogField::Resume) + 1);
+        d.set_profile(1, &ps);
+        assert!(!d.memory, "the profile's [profiles.memory] enabled = false");
+        d.set_profile(0, &ps);
+        assert!(d.memory);
+        d.field = DialogField::Memory;
+        d.handle_key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), &ps);
+        assert!(!d.memory);
+        // a plain command has no harness options, Memory among them
+        d.set_profile(2, &ps);
+        assert!(!d.fields().contains(&DialogField::Memory));
     }
 
     #[test]

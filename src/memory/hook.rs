@@ -220,6 +220,10 @@ pub fn run(harness_word: &str, per_launch: bool) -> anyhow::Result<()> {
     };
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
+    // a launch with its memory off: no start text, no update, no save
+    if super::launch_turned_off() {
+        return Ok(());
+    }
     let payload: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
     let var = |k: &str| {
         std::env::var_os(k)

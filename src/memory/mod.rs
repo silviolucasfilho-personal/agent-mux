@@ -67,7 +67,17 @@ pub const ENV_FRESH: &str = "AGENT_MUX_MEMORY_FRESH";
 /// Every variable a launch sets for its memory. A session never inherits
 /// them: an agent-mux started inside another's session would otherwise
 /// hand the outer workspace's memory to sessions that have none.
-pub const ENV_ALL: [&str; 5] = [ENV_DIR, ENV_INDEX, ENV_BRIEF, ENV_USER, ENV_FRESH];
+pub const ENV_ALL: [&str; 6] = [ENV_DIR, ENV_INDEX, ENV_BRIEF, ENV_USER, ENV_FRESH, ENV_OFF];
+/// `1` in a launch whose memory was turned off (`[profiles.memory]
+/// enabled = false`, or the New session dialog's Memory field): the
+/// user-level hooks (`memory install`) stay silent and save nothing, as
+/// they would otherwise take it for a session started outside agent-mux.
+pub const ENV_OFF: &str = "AGENT_MUX_MEMORY_OFF";
+
+/// Whether this process runs in a launch whose memory is off.
+pub fn launch_turned_off() -> bool {
+    std::env::var_os(ENV_OFF).is_some_and(|v| v == "1")
+}
 
 /// The skill package that saves, recalls and forgets notes.
 pub const SKILL_ID: &str = "mux-memory";
