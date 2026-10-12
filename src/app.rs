@@ -226,6 +226,8 @@ pub enum Action {
     EditPersona,
     RunAgent,
     ForkSession,
+    /// `f` on a History row: continue that conversation in a new session.
+    ForkHistorySession,
     DeleteWorkflowRow,
     AgentEditorKey,
     OpenLoopBuilder,
@@ -603,6 +605,12 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 KeyCode::Char('f') if in_list && ctx.agent_row == RowTag::Session => {
                     Action::ForkSession
                 }
+                // f on History: continue that conversation, on any harness
+                KeyCode::Char('f')
+                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::History =>
+                {
+                    Action::ForkHistorySession
+                }
                 KeyCode::Char(' ') if in_list => Action::ToggleAgentFold,
                 // ← folds (or climbs to the parent), → unfolds (or descends)
                 KeyCode::Left if in_list => Action::FoldAgent,
@@ -963,6 +971,29 @@ pub struct DialogState {
     /// The session this one continues (`f` on a session): the same
     /// harness forks its conversation, another reads its transcript.
     pub handoff: Option<usize>,
+    /// The History row this one continues (`f` on History).
+    pub handoff_history: Option<Box<new_agent::HistoryHandoff>>,
+}
+
+/// What the New session dialog launches.
+#[derive(Debug)]
+pub struct DialogLaunch {
+    profile: Profile,
+    dir: std::path::PathBuf,
+    opening_args: Vec<String>,
+    continued_from: Option<String>,
+    agent: Option<String>,
+    link: Option<crate::tracing::experiments::ExperimentLink>,
+    brief: Option<std::path::PathBuf>,
+}
+
+/// A continue waiting for the background run writing its brief.
+#[derive(Debug)]
+pub struct PendingHandoff {
+    launch: DialogLaunch,
+    /// The brief job's file: gone when the job is done.
+    job: std::path::PathBuf,
+    deadline: Instant,
 }
 
 impl DialogState {
@@ -1008,6 +1039,7 @@ impl DialogState {
             one_shot: String::new(),
             agent: None,
             handoff: None,
+            handoff_history: None,
             langfuse_available: false,
             experiment: String::new(),
             variant: String::new(),
@@ -2637,6 +2669,10 @@ pub struct App {
     pub runtime_dir: Option<std::path::PathBuf>,
     /// Cached briefing for the active Agents preview (if capable of trace.read).
     pub cached_briefing: Option<crate::tracing::analysis::Briefing>,
+    /// A continue (`f`) waiting for its hand-off brief.
+    pub pending_handoff: Option<PendingHandoff>,
+    /// The brief the next spawn starts from (`$AGENT_MUX_MEMORY_BRIEF`).
+    next_brief: Option<std::path::PathBuf>,
     /// The recap the selected harness row shows (`harness_recap`).
     pub harness_recap: std::cell::RefCell<Option<harness_recap::HarnessRecap>>,
     /// Instant when the briefing was last successfully refreshed.
@@ -2792,6 +2828,8 @@ impl App {
             runtime_dir: None,
             cached_briefing: None,
             harness_recap: Default::default(),
+            pending_handoff: None,
+            next_brief: None,
             cached_briefing_as_of: None,
             cached_briefing_warning: None,
             briefing_revision: 0,
@@ -2882,7 +2920,10 @@ impl App {
         let prompts = crate::prompts::Prompts::load(&library);
         match crate::memory::launch::Launch::prepare(&library, &settings, dir, &prompts, Some(cfg))
         {
-            Ok(l) => Some(l),
+            Ok(mut l) => {
+                l.brief = self.next_brief.clone();
+                Some(l)
+            }
             Err(e) => {
                 self.notice = Some(Notice::warn(format!("memory: {e}")));
                 None
@@ -3303,6 +3344,7 @@ impl App {
             view.refresh_if_live(now);
         }
         self.resync_workflow_selection();
+        self.poll_pending_handoff(now);
         self.refresh_strip_if_needed(now);
         self.publish_live_snapshot_if_needed(now);
         self.refresh_briefing_if_needed(now);
@@ -5062,6 +5104,7 @@ impl App {
                 }
             }
             Action::ForkSession => self.open_handoff_dialog(self.selected),
+            Action::ForkHistorySession => self.open_history_handoff_dialog(self.selected_history),
             Action::RunAgent => {
                 if let Some(agents_list::AgentKind::Persona(name)) = self.agent_focus().cloned() {
                     self.open_agent_session(&name);
@@ -5221,27 +5264,40 @@ impl App {
                 };
                 // what this launch alone sends first, left out of a save
                 let mut opening_args: Vec<String> = Vec::new();
-                let continued_from = dialog.handoff.and_then(|from| {
-                    self.sessions.iter().find(|s| s.id == from).map(|s| {
-                        let folder = s
-                            .dir
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        format!("{} · {folder}", s.profile.name)
-                    })
-                });
-                let handoff = match dialog.handoff {
-                    Some(from) => match self.session_handoff(from, dialog.harness, &dir) {
-                        Ok(h) => Some(h),
-                        Err(e) => {
-                            let Mode::NewSession(dialog) = &mut self.mode else {
+                let continued_from = dialog
+                    .handoff_history
+                    .as_ref()
+                    .map(|h| format!("History · {}", h.title))
+                    .or_else(|| {
+                        dialog.handoff.and_then(|from| {
+                            self.sessions.iter().find(|s| s.id == from).map(|s| {
+                                let folder = s
+                                    .dir
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                format!("{} · {folder}", s.profile.name)
+                            })
+                        })
+                    });
+                let from = match (&dialog.handoff_history, dialog.handoff) {
+                    (Some(h), _) => Some(self.handoff_from_history(h)),
+                    (None, Some(from)) => Some(self.handoff_from_session(from)),
+                    (None, None) => None,
+                };
+                let handoff = match from {
+                    Some(from) => {
+                        match from.and_then(|f| self.continue_from(f, dialog.harness, &dir)) {
+                            Ok(h) => Some(h),
+                            Err(e) => {
+                                let Mode::NewSession(dialog) = &mut self.mode else {
+                                    return;
+                                };
+                                dialog.error = Some(e);
                                 return;
-                            };
-                            dialog.error = Some(e);
-                            return;
+                            }
                         }
-                    },
+                    }
                     None => None,
                 };
                 if let Some(harness) = dialog.harness {
@@ -5268,39 +5324,119 @@ impl App {
                         profile.args.extend(opening.iter().cloned());
                         opening_args.extend(opening.iter().cloned());
                     }
-                    // another harness reads the old conversation first
-                    if let Some(crate::handoff::Continue::Transcript(opening)) = &handoff {
+                    // another harness reads the old conversation first, or
+                    // starts from a hand-off brief
+                    if let Some(
+                        crate::handoff::Continue::Transcript(opening)
+                        | crate::handoff::Continue::Brief { opening, .. },
+                    ) = &handoff
+                    {
                         profile.args.extend(opening.iter().cloned());
                         opening_args.extend(opening.iter().cloned());
                     }
                 }
-                let link = dialog.experiment_link();
-                let id = self.next_id;
-                let agent_name = dialog.agent.clone();
-                match self.spawn_traced(id, profile, dir) {
-                    Ok(mut session) => {
-                        session.agent = agent_name;
-                        session.opening_args = opening_args;
-                        session.continued_from = continued_from;
-                        self.next_id += 1;
-                        self.sessions.push(session);
-                        self.selected = self.sessions.len() - 1;
-                        self.sidebar_section = SidebarSection::Active;
-                        self.mode = Mode::Main;
-                        self.focus_pane();
-                        let _ = self.save_active_sessions();
-                        if let Some(link) = link {
-                            self.experiment_links.insert(id, link);
-                        }
+                let (brief, job) = match &handoff {
+                    Some(crate::handoff::Continue::Brief { brief, job, .. }) => {
+                        (Some(brief.clone()), job.clone())
                     }
-                    Err(e) => {
-                        let Mode::NewSession(dialog) = &mut self.mode else {
-                            return;
-                        };
-                        dialog.error = Some(e.to_string());
-                    }
+                    _ => (None, None),
+                };
+                let launch = DialogLaunch {
+                    profile,
+                    dir,
+                    opening_args,
+                    continued_from,
+                    agent: dialog.agent.clone(),
+                    link: dialog.experiment_link(),
+                    brief,
+                };
+                // a brief being written: the session starts when it is
+                // ready, or with the facts alone at the deadline
+                if let Some(job) = job {
+                    let wait = self
+                        .memory
+                        .as_ref()
+                        .and_then(|c| c.brief_timeout_s)
+                        .unwrap_or(crate::memory::brief::DEFAULT_TIMEOUT_S);
+                    self.notice = Some(Notice::info(format!(
+                        "writing the hand-off brief from {}… the new session starts when it is ready (at most {wait} s)",
+                        launch.continued_from.as_deref().unwrap_or("the session")
+                    )));
+                    self.pending_handoff = Some(PendingHandoff {
+                        launch,
+                        job,
+                        deadline: Instant::now() + std::time::Duration::from_secs(wait),
+                    });
+                    self.mode = Mode::Main;
+                    return;
+                }
+                if let Err(e) = self.finish_dialog_launch(launch) {
+                    let Mode::NewSession(dialog) = &mut self.mode else {
+                        return;
+                    };
+                    dialog.error = Some(e);
                 }
             }
+        }
+    }
+
+    /// Spawns what the New session dialog asked for.
+    fn finish_dialog_launch(&mut self, l: DialogLaunch) -> Result<(), String> {
+        let id = self.next_id;
+        self.next_brief = l.brief;
+        let spawned = self.spawn_traced(id, l.profile, l.dir);
+        self.next_brief = None;
+        let mut session = spawned.map_err(|e| e.to_string())?;
+        session.agent = l.agent;
+        session.opening_args = l.opening_args;
+        session.continued_from = l.continued_from;
+        self.next_id += 1;
+        self.sessions.push(session);
+        self.selected = self.sessions.len() - 1;
+        self.sidebar_section = SidebarSection::Active;
+        self.mode = Mode::Main;
+        self.focus_pane();
+        let _ = self.save_active_sessions();
+        if let Some(link) = l.link {
+            self.experiment_links.insert(id, link);
+        }
+        Ok(())
+    }
+
+    /// A continue waiting for its brief: launched once the brief job is
+    /// done, or at the deadline with the facts alone.
+    pub fn poll_pending_handoff(&mut self, now: Instant) {
+        let Some(p) = &self.pending_handoff else {
+            return;
+        };
+        let done = !p.job.exists();
+        if !done && now < p.deadline {
+            return;
+        }
+        let Some(p) = self.pending_handoff.take() else {
+            return;
+        };
+        let complete = p
+            .launch
+            .brief
+            .as_deref()
+            .is_some_and(crate::memory::brief::is_complete);
+        let from = p
+            .launch
+            .continued_from
+            .clone()
+            .unwrap_or_else(|| "the session".into());
+        match self.finish_dialog_launch(p.launch) {
+            Ok(()) => {
+                self.notice = Some(if complete {
+                    Notice::info(format!("continuing {from} from its hand-off brief"))
+                } else {
+                    Notice::warn(format!(
+                        "the brief from {from} was not ready: continuing from the facts and the transcript"
+                    ))
+                });
+            }
+            Err(e) => self.notice = Some(Notice::error(format!("continue: {e}"))),
         }
     }
 

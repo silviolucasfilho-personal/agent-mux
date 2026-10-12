@@ -64,6 +64,10 @@ pub struct Job {
     /// `recovered`.
     #[serde(default)]
     pub reason: Option<String>,
+    /// A hand-off brief instead of notes: the file it completes (the
+    /// facts agent-mux wrote there stay on top; `memory::brief`).
+    #[serde(default)]
+    pub brief: Option<PathBuf>,
 }
 
 impl Job {
@@ -86,6 +90,9 @@ impl Job {
 
     /// Whether the conversation has not grown since its last save.
     pub fn unchanged(&self) -> bool {
+        if self.brief.is_some() {
+            return false;
+        }
         let Some(now) = self.transcript_len() else {
             return false;
         };
@@ -104,12 +111,20 @@ impl Job {
     fn file_stem(&self) -> String {
         let h = self.harness().map(|h| h.as_str()).unwrap_or("unknown");
         format!(
-            "{h}-{}",
+            "{}{h}-{}",
+            if self.brief.is_some() { "brief-" } else { "" },
             note::slug(&self.conversation)
                 .chars()
                 .take(36)
                 .collect::<String>()
         )
+    }
+
+    /// Where the job file is while the job runs; gone when it is done.
+    pub fn job_path(&self) -> PathBuf {
+        self.memory
+            .join(SAVES)
+            .join(format!("{}.json", self.file_stem()))
     }
 
     /// Writes the job file; the background process reads it back and
@@ -119,7 +134,7 @@ impl Job {
     pub fn write(&self) -> std::io::Result<PathBuf> {
         let dir = self.memory.join(SAVES);
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.json", self.file_stem()));
+        let path = self.job_path();
         let running = std::fs::metadata(&path)
             .and_then(|m| m.modified())
             .ok()
@@ -266,6 +281,32 @@ pub fn note_blocks(text: &str) -> Vec<String> {
     out
 }
 
+/// The brief in an answer: its ```` ```mux-brief ```` block, else the
+/// whole answer.
+pub fn brief_text(answer: &str) -> String {
+    let mut open: Option<usize> = None;
+    let mut body = String::new();
+    for line in answer.lines() {
+        let t = line.trim_start();
+        let ticks = t.chars().take_while(|c| *c == '`').count();
+        match open {
+            None if ticks >= 3 && t[ticks..].trim() == "mux-brief" => open = Some(ticks),
+            None => {}
+            Some(n) if ticks >= n && t[ticks..].trim().is_empty() => {
+                return body.trim().to_string();
+            }
+            Some(_) => {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+    }
+    if open.is_some() {
+        return body.trim().to_string();
+    }
+    answer.trim().to_string()
+}
+
 /// What one save did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
@@ -383,6 +424,17 @@ pub fn run(job_path: &Path) -> anyhow::Result<()> {
     let harness = job.harness().map(|h| h.as_str()).unwrap_or("unknown");
     let launch = job.launch.as_deref();
     match result {
+        Ok(Some(_)) if job.brief.is_some() => {
+            let path = job.brief.as_deref().unwrap_or(Path::new(""));
+            log::append(
+                &job.memory,
+                harness,
+                launch,
+                "brief",
+                &format!("written {}", path.display()),
+            );
+            Ok(())
+        }
         Ok(Some(o)) => {
             let what = if o.saved.is_empty() {
                 "nothing to save".to_string()
@@ -440,7 +492,12 @@ fn run_job(job: &Job, job_path: &Path) -> Result<Option<Outcome>, String> {
     } else {
         None
     };
-    let prompt = prompt(job, transcript_md.as_deref(), &prompts);
+    let prompt = match &job.brief {
+        Some(_) => prompts
+            .memory_brief
+            .replace("{source}", &source_words(transcript_md.as_deref())),
+        None => prompt(job, transcript_md.as_deref(), &prompts),
+    };
     let last = stem.with_extension("last.txt");
     let stdout = stem.with_extension("out.txt");
     let (program, args) = command(job, &prompt, &last).ok_or("not a harness agent-mux knows")?;
@@ -458,6 +515,14 @@ fn run_job(job: &Job, job_path: &Path) -> Result<Option<Outcome>, String> {
         let _ = std::fs::remove_file(f);
     }
     let status = status?;
+    if let Some(brief) = &job.brief {
+        let text = brief_text(&answer);
+        if text.is_empty() {
+            return Err(format!("{program} wrote no brief ({status})"));
+        }
+        super::brief::complete(brief, &text).map_err(|e| e.to_string())?;
+        return Ok(Some(Outcome::default()));
+    }
     if !status.success() && note_blocks(&answer).is_empty() {
         return Err(format!("{program} exited with {status}"));
     }
@@ -542,6 +607,7 @@ pub fn job_from_hook(
             .filter(|s| !s.is_empty()),
         index_lines: settings.index_lines,
         reason: None,
+        brief: None,
     })
 }
 
@@ -756,6 +822,7 @@ mod tests {
             launch: Some("l1".into()),
             index_lines: 60,
             reason: None,
+            brief: None,
         }
     }
 
@@ -986,6 +1053,26 @@ mod tests {
         assert!(
             log.contains("recovered agent-mux ended without saving"),
             "{log}"
+        );
+    }
+
+    #[test]
+    fn a_brief_is_read_from_its_block_or_the_whole_answer() {
+        assert_eq!(
+            brief_text("Here:\n```mux-brief\nGoal: x\nNext step: y\n```\nbye"),
+            "Goal: x\nNext step: y"
+        );
+        assert_eq!(brief_text("Goal: x"), "Goal: x");
+        let d = tempfile::tempdir().unwrap();
+        let mut j = job(d.path(), "claude");
+        j.brief = Some(d.path().join("b.md"));
+        assert!(!j.unchanged(), "a brief always runs");
+        assert!(
+            j.job_path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("brief-claude-")
         );
     }
 }
