@@ -41,6 +41,7 @@
 pub mod cli;
 pub mod context;
 pub mod fence;
+pub mod hook;
 pub mod index;
 pub mod launch;
 pub mod log;
