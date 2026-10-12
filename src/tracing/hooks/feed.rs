@@ -171,6 +171,26 @@ impl HookFeed {
             .unwrap_or(self.last_id)
     }
 
+    /// True when a hook row put `session_id` under another launch: that
+    /// conversation is someone else's, whatever the watch heuristics say.
+    /// An unreadable store answers false (the heuristics decide).
+    pub fn announced_elsewhere(&mut self, session_id: &str) -> bool {
+        let launch_id = self.launch_id.clone();
+        let provider = self.provider.as_str();
+        let Some(conn) = self.open() else {
+            return false;
+        };
+        conn.query_row(
+            "SELECT 1 FROM hook_events
+             WHERE provider = ?1 AND session_id = ?2
+               AND launch_id IS NOT NULL AND launch_id != ?3
+             LIMIT 1",
+            params![provider, session_id, launch_id],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
     /// The first hook row for this launch, preferring one that names the
     /// transcript. Does not move the poll cursor.
     pub fn announcement(&mut self) -> Option<Announcement> {
@@ -241,6 +261,38 @@ mod tests {
             launch.map(str::to_string),
         )
         .unwrap()
+    }
+
+    fn agy(conversation: &str, launch: Option<&str>) -> HookEvent {
+        let v = serde_json::json!({
+            "conversationId": conversation,
+            "invocationNum": 0,
+            "workspacePaths": ["/proj"],
+        });
+        parse(
+            HookSource::Antigravity,
+            Some("PreInvocation"),
+            &v,
+            &ContentPolicy::full(),
+            1,
+            launch.map(str::to_string),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_conversation_another_launch_announced_is_foreign() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = store(dir.path());
+        let sink = open_hook_sink(&db, Duration::from_millis(50)).unwrap();
+        let mut feed = HookFeed::new(&db, Provider::Antigravity, "launch-A");
+        insert_hook_event(&sink, &agy("mine", Some("launch-A"))).unwrap();
+        insert_hook_event(&sink, &agy("theirs", Some("memory-save-1"))).unwrap();
+        insert_hook_event(&sink, &agy("nobodys", None)).unwrap();
+        assert!(!feed.announced_elsewhere("mine"));
+        assert!(feed.announced_elsewhere("theirs"));
+        assert!(!feed.announced_elsewhere("nobodys"));
+        assert!(!feed.announced_elsewhere("unknown"));
     }
 
     #[test]

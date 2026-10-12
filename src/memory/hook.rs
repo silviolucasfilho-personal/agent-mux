@@ -220,6 +220,9 @@ pub fn run(harness_word: &str, per_launch: bool) -> anyhow::Result<()> {
     };
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
+    if harness == Harness::Antigravity {
+        announce_agy(&raw);
+    }
     // a launch with its memory off: no start text, no update, no save
     if super::launch_turned_off() {
         return Ok(());
@@ -267,6 +270,43 @@ pub fn run(harness_word: &str, per_launch: bool) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Tells the launch's trace pipeline which conversation is its own: agy
+/// has no flag that names a new conversation, and watching `brain/` for a
+/// new folder can take another workspace's (a headless `agy -p`, such as
+/// the memory save, started while this session sat idle). The row is the
+/// one the trace plugin would write, keyed by `$AGENT_MUX_SESSION_ID`, so
+/// the pipeline adopts it as announced and other launches skip it. Once
+/// per user turn (`invocationNum` 0), and not when the trace plugin is
+/// installed: it writes the same row.
+fn announce_agy(raw: &str) {
+    let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    if !announces(
+        &payload,
+        std::env::var("AGENT_MUX_SESSION_ID").ok().as_deref(),
+    ) {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    if crate::tracing::hooks::install::agy_status(&home, None).installed {
+        return;
+    }
+    let args = ["agy", "--event", "PreInvocation"].map(String::from);
+    let _ = crate::tracing::cli::hook_run(&args, Some(raw));
+}
+
+/// Whether an agy payload is announced: a launch id, a conversation, and
+/// the first model call of a turn.
+fn announces(payload: &Value, launch: Option<&str>) -> bool {
+    launch.is_some_and(|l| !l.is_empty())
+        && payload
+            .get("conversationId")
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| !c.is_empty())
+        && payload.get("invocationNum").and_then(|n| n.as_i64()) == Some(0)
 }
 
 // ------------------------------------------------------------ installers
@@ -445,6 +485,19 @@ pub fn installed(home: &Path, harness: Harness) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_launchs_first_call_of_a_turn_is_announced() {
+        let first = json!({"conversationId": "c1", "invocationNum": 0});
+        assert!(announces(&first, Some("launch-1")));
+        // no launch: a session agent-mux did not start, or one it does not trace
+        assert!(!announces(&first, None));
+        assert!(!announces(&first, Some("")));
+        // later model calls of the same turn
+        let later = json!({"conversationId": "c1", "invocationNum": 3});
+        assert!(!announces(&later, Some("launch-1")));
+        assert!(!announces(&json!({"invocationNum": 0}), Some("launch-1")));
+    }
 
     fn write_note(dir: &Path, name: &str) {
         paths::ensure(dir).unwrap();

@@ -375,6 +375,13 @@ pub fn apply(job: &Job, answer: &str, prompts: &Prompts) -> Outcome {
     outcome
 }
 
+/// The launch id an Antigravity save runs under: Claude Code and Codex
+/// fork without a new conversation, so they get none.
+fn announce_id(job: &Job) -> Option<String> {
+    (job.harness() == Some(Harness::Antigravity))
+        .then(|| format!("memory-save-{}", job.conversation))
+}
+
 /// Runs `program` with a deadline, its stdout into `stdout`.
 fn run_with_timeout(
     job: &Job,
@@ -398,6 +405,11 @@ fn run_with_timeout(
         "AGENT_MUX_SESSION_ID",
     ] {
         cmd.env_remove(k);
+    }
+    // agy's conversation is announced under an id of its own, so no idle
+    // session takes it for its own (`memory::hook::announce_agy`)
+    if let Some(id) = announce_id(job) {
+        cmd.env("AGENT_MUX_SESSION_ID", id);
     }
     let mut child = cmd.spawn().map_err(|e| format!("{program}: {e}"))?;
     let deadline = Instant::now() + TIMEOUT;
@@ -827,6 +839,17 @@ mod tests {
             reason: None,
             brief: None,
         }
+    }
+
+    #[test]
+    fn only_an_antigravity_save_runs_under_an_id_of_its_own() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(
+            announce_id(&job(d.path(), "agy")).as_deref(),
+            Some("memory-save-abc-123")
+        );
+        assert_eq!(announce_id(&job(d.path(), "claude")), None);
+        assert_eq!(announce_id(&job(d.path(), "codex")), None);
     }
 
     #[test]

@@ -830,3 +830,77 @@ async fn an_attached_session_is_traced_only_when_its_launch_was() {
     );
     assert!(!run(None, false).0, "tracing off in agent-mux");
 }
+
+/// The agy memory hook names the launch's conversation in the trace store,
+/// so the launch adopts it and every other launch leaves it alone.
+#[cfg(unix)]
+#[test]
+fn the_agy_hook_announces_the_conversation_of_its_launch() {
+    use agent_mux::tracing::hooks::feed::HookFeed;
+    use agent_mux::tracing::pricing::PriceTable;
+    use agent_mux::tracing::store::{OpenOptions, open_rw};
+    use agent_mux::transcript::Provider;
+    let f = fixture();
+    std::fs::create_dir_all(&f.home).unwrap();
+    let db = f.root.join("traces.db");
+    let store = open_rw(
+        &db,
+        OpenOptions {
+            prices: PriceTable::empty(),
+            run_id: "r".into(),
+            retention_days: 0,
+            agent_mux_version: "test".into(),
+        },
+    )
+    .unwrap();
+    let _ = store.end_run();
+    let db_s = db.to_string_lossy().into_owned();
+    let payload = |n: i64| {
+        format!(
+            r#"{{"conversationId":"conv-1","invocationNum":{n},"workspacePaths":["{}"]}}"#,
+            f.ws.display()
+        )
+    };
+    // a later model call of the turn, and a session agent-mux did not start
+    let (ok, out) = cli_with(
+        &f,
+        &["hook", "agy"],
+        Some(&payload(2)),
+        &[
+            ("AGENT_MUX_SESSION_ID", "launch-A"),
+            ("AGENT_MUX_TRACE_DB", &db_s),
+        ],
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = cli_with(
+        &f,
+        &["hook", "agy"],
+        Some(&payload(0)),
+        &[("AGENT_MUX_TRACE_DB", &db_s)],
+    );
+    assert!(ok, "{out}");
+    let mut other = HookFeed::new(&db, Provider::Antigravity, "launch-B");
+    assert!(
+        !other.announced_elsewhere("conv-1"),
+        "nothing announced yet"
+    );
+    // the turn's first call inside launch A
+    let (ok, out) = cli_with(
+        &f,
+        &["hook", "agy"],
+        Some(&payload(0)),
+        &[
+            ("AGENT_MUX_SESSION_ID", "launch-A"),
+            ("AGENT_MUX_TRACE_DB", &db_s),
+        ],
+    );
+    assert!(ok, "{out}");
+    let mut own = HookFeed::new(&db, Provider::Antigravity, "launch-A");
+    assert_eq!(
+        own.announcement().map(|a| a.session_id).as_deref(),
+        Some("conv-1")
+    );
+    assert!(!own.announced_elsewhere("conv-1"));
+    let mut other = HookFeed::new(&db, Provider::Antigravity, "launch-B");
+    assert!(other.announced_elsewhere("conv-1"));
+}

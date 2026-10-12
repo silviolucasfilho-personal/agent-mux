@@ -6,14 +6,19 @@
 //! rollout whose first-line `session_meta.cwd` matches ours exactly.
 //! Antigravity has no exact signal: new `brain/` subdirs are confirmed by
 //! presence-lock mtime, a cwd-substring check, or (after 15 s) being the
-//! only unclaimed candidate — those adoptions are tagged "heuristic".
+//! only unclaimed candidate — those adoptions are tagged "heuristic". A
+//! conversation another launch announced through a hook (its
+//! `conversationId` with that launch's id) is never a candidate, and a new
+//! one waits `ANTIGRAVITY_SETTLE` first so that announcement can land: an
+//! idle session must not take the conversation a headless `agy -p` (the
+//! memory save) just started in another workspace.
 //!
 //! A process-wide claim registry keyed `"{provider}:{id}"` prevents two
 //! concurrent sessions from adopting the same transcript; claims are
 //! released when the claiming pipeline exits.
 
 use crate::transcript::{Provider, TranscriptEvent};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
@@ -71,6 +76,9 @@ impl Drop for ClaimGuard {
 /// How long before a sole unclaimed Antigravity candidate is adopted on
 /// timing alone.
 const ANTIGRAVITY_SOLE_CANDIDATE: Duration = Duration::from_secs(15);
+/// How long a new Antigravity conversation is watched before a heuristic
+/// may adopt it: time for the hook that names its launch to be recorded.
+pub const ANTIGRAVITY_SETTLE: Duration = Duration::from_secs(3);
 /// Slack on mtime comparisons (filesystems, WSL clock skew).
 const MTIME_SLACK: Duration = Duration::from_secs(2);
 
@@ -111,6 +119,10 @@ pub enum CorrelationSpec {
         /// brain/ subdirs present at the first poll — only NEW dirs are
         /// candidates. `None` until that snapshot is taken.
         initial: Option<HashSet<OsString>>,
+        /// When each new conversation was first seen.
+        seen: HashMap<String, Instant>,
+        /// How long a new one is seen before a heuristic takes it.
+        settle: Duration,
     },
     /// Untraceable launch (e.g. bare `-r` / `--continue` with no id).
     None,
@@ -231,12 +243,45 @@ fn codex_date_dirs(sessions_dir: &Path, t0: SystemTime) -> Vec<PathBuf> {
     dirs
 }
 
+impl CorrelationSpec {
+    /// Watching `root` for the conversation of a session started in `cwd`.
+    pub fn watch_antigravity(root: PathBuf, cwd: PathBuf, t0: SystemTime) -> CorrelationSpec {
+        CorrelationSpec::WatchAntigravity {
+            root,
+            cwd,
+            t0,
+            initial: None,
+            seen: HashMap::new(),
+            settle: ANTIGRAVITY_SETTLE,
+        }
+    }
+
+    /// The same watch with another settle time (tests use zero).
+    pub fn with_settle(mut self, d: Duration) -> CorrelationSpec {
+        if let CorrelationSpec::WatchAntigravity { settle, .. } = &mut self {
+            *settle = d;
+        }
+        self
+    }
+}
+
 /// One correlation poll tick. Returns the adopted transcript once found (the
 /// claim is already registered); `None` keeps polling.
 pub fn poll(
     spec: &mut CorrelationSpec,
     started: Instant,
     claims: &ClaimRegistry,
+) -> Option<Adopted> {
+    poll_with(spec, started, claims, &mut |_| false)
+}
+
+/// `poll`, skipping the Antigravity conversations `foreign` says another
+/// launch announced.
+pub fn poll_with(
+    spec: &mut CorrelationSpec,
+    started: Instant,
+    claims: &ClaimRegistry,
+    foreign: &mut dyn FnMut(&str) -> bool,
 ) -> Option<Adopted> {
     match spec {
         CorrelationSpec::None => None,
@@ -419,6 +464,8 @@ pub fn poll(
             cwd,
             t0,
             initial,
+            seen,
+            settle,
         } => {
             let brain = root.join("brain");
             let list_dirs = || -> HashSet<OsString> {
@@ -450,6 +497,10 @@ pub fn poll(
                     .map(|set| set.contains(&claim_key(Provider::Antigravity, &id)))
                     .unwrap_or(true)
                 {
+                    continue;
+                }
+                let first = *seen.entry(id.clone()).or_insert_with(Instant::now);
+                if first.elapsed() < *settle || foreign(&id) {
                     continue;
                 }
                 candidates.push(id);
@@ -508,8 +559,10 @@ pub fn poll(
 
             // Resumed Antigravity sessions: check existing directories whose
             // presence lock or transcript was updated since t0.
+            // Only folders from the snapshot: a new one is the tiers'
+            // above, after its settle.
             let mut existing_candidates: Vec<String> = current
-                .iter()
+                .intersection(snapshot)
                 .map(|e| e.to_string_lossy().into_owned())
                 .filter(|id| antigravity_transcript(&brain.join(id)).is_some())
                 .filter(|id| {
@@ -524,6 +577,7 @@ pub fn poll(
                 let lock = root.join("presence").join(format!("{id}.lock"));
                 if lock.is_file()
                     && mtime_in_window(&lock, *t0)
+                    && !foreign(id)
                     && let Some(adopted) = adopt(id, "watched", true)
                 {
                     return Some(adopted);
@@ -543,6 +597,7 @@ pub fn poll(
                         })
                         .unwrap_or_default();
                     if head.contains(cwd_str.as_ref())
+                        && !foreign(id)
                         && let Some(adopted) = adopt(id, "heuristic", true)
                     {
                         return Some(adopted);
