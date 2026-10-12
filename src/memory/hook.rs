@@ -146,6 +146,11 @@ pub fn answer(
         let launch = std::env::var("AGENT_MUX_SESSION_ID").ok();
         log::append(&dir, harness.as_str(), launch.as_deref(), "start", &what);
     }
+    if harness != Harness::Antigravity
+        && let Some(session) = payload.get("session_id").and_then(|v| v.as_str())
+    {
+        super::fresh::record(&dir, user.as_deref(), harness.as_str(), session);
+    }
     let out = match harness {
         Harness::Antigravity => json!({ "injectSteps": [{ "ephemeralMessage": text }] }),
         _ => json!({
@@ -158,9 +163,48 @@ pub fn answer(
     Some(out.to_string())
 }
 
+/// The `UserPromptSubmit` answer: what changed in the memory since this
+/// session last read it (`memory::fresh`), or `None`.
+pub fn update(
+    harness: Harness,
+    payload: &Value,
+    env: &Env<'_>,
+    prompts: &Prompts,
+) -> Option<String> {
+    if harness == Harness::Antigravity {
+        return None;
+    }
+    let (dir, user) = match env.launched_dir.clone().filter(|d| d.is_dir()) {
+        Some(d) => (d, env.launched_user.clone().filter(|u| u.is_dir())),
+        None => {
+            if env.config.and_then(|c| c.enabled) == Some(false) {
+                return None;
+            }
+            let settings = Settings::from_config(env.config);
+            let dir = paths::dir_for(env.library, &settings, &workspace(harness, payload)?);
+            if note::files(&dir).is_empty() {
+                return None;
+            }
+            let user = paths::user_dir(env.library);
+            (dir, user.is_dir().then_some(user))
+        }
+    };
+    let session = payload.get("session_id").and_then(|s| s.as_str())?;
+    let text = super::fresh::delta(&dir, user.as_deref(), harness.as_str(), session, prompts)?;
+    Some(
+        json!({
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": text,
+            }
+        })
+        .to_string(),
+    )
+}
+
 /// `agent-mux memory hook <harness>`: the payload on stdin, the answer on
 /// stdout. Never fails a session: anything wrong is silence.
-pub fn run(harness_word: &str) -> anyhow::Result<()> {
+pub fn run(harness_word: &str, per_launch: bool) -> anyhow::Result<()> {
     use std::io::Read;
     let Some(harness) = parse_harness(harness_word) else {
         anyhow::bail!("memory hook takes claude, codex or agy");
@@ -186,6 +230,15 @@ pub fn run(harness_word: &str) -> anyhow::Result<()> {
         // save per conversation runs at a time (`save::Job::write`)
         Some("PreCompact") => {
             super::save::start_from_hook(harness, &payload, "compact");
+        }
+        // what other sessions saved since this one last looked
+        Some("UserPromptSubmit") => {
+            let launch_has_its_own = std::env::var(super::ENV_FRESH).is_ok_and(|v| v == "launch");
+            if (per_launch || !launch_has_its_own)
+                && let Some(text) = update(harness, &payload, &env, &Prompts::current())
+            {
+                print!("{text}");
+            }
         }
         // inside a launch agent-mux saves on close itself
         Some("SessionEnd") => {
@@ -235,9 +288,15 @@ fn strip(groups: Vec<Value>) -> Vec<Value> {
 }
 
 /// The events the Claude Code and Codex hook answers: the start text at
-/// `SessionStart`, a save before compaction, and, for a session agent-mux
-/// did not launch, the save on close at `SessionEnd`.
-pub const EVENTS: [&str; 3] = ["SessionStart", "PreCompact", "SessionEnd"];
+/// `SessionStart`, what changed since at `UserPromptSubmit`, a save
+/// before compaction, and, for a session agent-mux did not launch, the
+/// save on close at `SessionEnd`.
+pub const EVENTS: [&str; 4] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreCompact",
+    "SessionEnd",
+];
 
 /// A settings or hooks file with our groups for `EVENTS` added (`exe`)
 /// or removed (`None`); everything else is kept.
@@ -535,5 +594,35 @@ mod tests {
         );
         set(home.path(), Harness::Antigravity, None).unwrap();
         assert!(!agy_plugin_dir(home.path()).exists());
+    }
+
+    #[test]
+    fn before_a_prompt_a_session_hears_what_was_saved_since_its_start() {
+        let ws = Path::new("/work/proj");
+        let (t, dir) = library_with_memory(ws);
+        let p = Prompts::builtin();
+        let payload =
+            json!({"cwd": "/work/proj", "session_id": "s-7", "hook_event_name": "SessionStart"});
+        // the start text records what the session was given
+        assert!(answer(Harness::Codex, &payload, &env(t.path(), None), &p).is_some());
+        let prompt = json!({"cwd": "/work/proj", "session_id": "s-7", "hook_event_name": "UserPromptSubmit"});
+        assert!(update(Harness::Codex, &prompt, &env(t.path(), None), &p).is_none());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_note(&dir, "saved-meanwhile");
+        let out = update(Harness::Codex, &prompt, &env(t.path(), None), &p).expect("an update");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+        assert!(
+            v["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("[saved-meanwhile]")
+        );
+        assert!(
+            update(Harness::Codex, &prompt, &env(t.path(), None), &p).is_none(),
+            "once"
+        );
+        // Antigravity gets the whole index before every call instead
+        assert!(update(Harness::Antigravity, &prompt, &env(t.path(), None), &p).is_none());
     }
 }
