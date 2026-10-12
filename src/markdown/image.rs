@@ -3,7 +3,8 @@
 //! place: the renderer reserves rows for it (`ImageSpot`) and the viewer
 //! paints the picture over them (`crate::ui::markdown`), with its
 //! `[image: alt]` caption below. Inline images, remote ones and files that
-//! are not images stay a caption alone.
+//! are not images stay a caption alone. An SVG is rasterized (`resvg`, with
+//! the system's fonts, over white) at the size it is drawn.
 //!
 //! The picture goes through the terminal's graphics protocol when agent-mux
 //! can tell which one it speaks, from the environment: kitty and Ghostty
@@ -74,7 +75,7 @@ impl Images {
     /// The cells `path` takes at most `avail` columns wide: its natural
     /// size, scaled down to fit the width and `MAX_ROWS`.
     pub fn size(&self, path: &Path, avail: usize) -> Option<(u16, u16)> {
-        let (w, h) = image::image_dimensions(path).ok()?;
+        let (w, h) = dimensions(path)?;
         let (cw, ch) = (self.cell.0 as f64, self.cell.1 as f64);
         let mut cols = (w as f64 / cw).max(1.0);
         let mut rows = (h as f64 / ch).max(1.0);
@@ -85,6 +86,65 @@ impl Images {
         rows = (rows * fit).round().max(1.0);
         Some((cols as u16, rows as u16))
     }
+}
+
+fn is_svg(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"))
+}
+
+/// An image's size in pixels.
+fn dimensions(path: &Path) -> Option<(u32, u32)> {
+    if is_svg(path) {
+        let size = svg_tree(path, false)?.size();
+        return Some((size.width().ceil() as u32, size.height().ceil() as u32));
+    }
+    image::image_dimensions(path).ok()
+}
+
+/// The system's fonts, loaded once, for an SVG's text.
+fn fonts() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
+    static FONTS: OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> = OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let mut db = resvg::usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            std::sync::Arc::new(db)
+        })
+        .clone()
+}
+
+/// An SVG parsed, with the system's fonts when its text will be drawn.
+fn svg_tree(path: &Path, with_text: bool) -> Option<resvg::usvg::Tree> {
+    let data = std::fs::read(path).ok()?;
+    let mut opt = resvg::usvg::Options {
+        resources_dir: path.parent().map(Path::to_path_buf),
+        ..Default::default()
+    };
+    if with_text {
+        opt.fontdb = fonts();
+    }
+    resvg::usvg::Tree::from_data(&data, &opt).ok()
+}
+
+/// An SVG drawn over white into `width` × `height` pixels, kept in
+/// proportion and centred.
+fn rasterize(path: &Path, width: u32, height: u32) -> Option<image::DynamicImage> {
+    let tree = svg_tree(path, true)?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width.max(1), height.max(1))?;
+    pixmap.fill(resvg::tiny_skia::Color::WHITE);
+    let size = tree.size();
+    let scale = (width as f32 / size.width()).min(height as f32 / size.height());
+    let (dx, dy) = (
+        (width as f32 - size.width() * scale) / 2.0,
+        (height as f32 - size.height() * scale) / 2.0,
+    );
+    let transform = resvg::tiny_skia::Transform::from_row(scale, 0.0, 0.0, scale, dx, dy);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    // opaque over white, so the premultiplied pixels are plain RGBA
+    let (w, h) = (pixmap.width(), pixmap.height());
+    image::RgbaImage::from_raw(w, h, pixmap.take()).map(image::DynamicImage::ImageRgba8)
 }
 
 /// How pictures are drawn in this terminal, once per process; `None` when
@@ -148,12 +208,21 @@ fn detect(term: &str, program: &str, lc_terminal: &str) -> Option<ProtocolType> 
 /// cannot be decoded.
 pub fn encode(spot: &ImageSpot) -> Option<SlicedProtocol> {
     let picker = picker()?;
-    let img = image::ImageReader::open(&spot.path)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?;
+    let img = if is_svg(&spot.path) {
+        let FontSize { width, height } = picker.font_size();
+        rasterize(
+            &spot.path,
+            spot.cols as u32 * width.max(1) as u32,
+            spot.rows as u32 * height.max(1) as u32,
+        )?
+    } else {
+        image::ImageReader::open(&spot.path)
+            .ok()?
+            .with_guessed_format()
+            .ok()?
+            .decode()
+            .ok()?
+    };
     SlicedProtocol::new(picker, img, Some(Size::new(spot.cols, spot.rows))).ok()
 }
 
@@ -199,6 +268,16 @@ mod tests {
         let tall = d.path().join("t.png");
         image::RgbImage::new(10, 2000).save(&tall).unwrap();
         assert_eq!(imgs.size(&tall, 80), Some((1, MAX_ROWS)));
+        let svg = d.path().join("s.svg");
+        std::fs::write(
+            &svg,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><rect x="0" y="0" width="200" height="200" fill="#ff0000"/></svg>"##,
+        )
+        .unwrap();
+        assert_eq!(imgs.size(&svg, 80), Some((40, 10)), "an SVG's own size");
+        let img = rasterize(&svg, 40, 20).unwrap().to_rgba8();
+        assert_eq!(img.get_pixel(5, 10).0, [255, 0, 0, 255], "drawn");
+        assert_eq!(img.get_pixel(35, 10).0, [255, 255, 255, 255], "over white");
         std::fs::write(d.path().join("n.png"), "not an image").unwrap();
         assert_eq!(imgs.size(&d.path().join("n.png"), 80), None);
     }
