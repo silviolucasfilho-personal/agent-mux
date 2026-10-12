@@ -10,8 +10,11 @@
 //! link and heading landed, and which rendered line each source block
 //! starts on, so the viewer can open links under the pointer, jump between
 //! headings and keep a side-by-side preview level with the editor.
+//! `render_with` also places the images that are paragraphs of their own
+//! (`image`).
 
 pub mod cli;
+pub mod image;
 pub mod mermaid;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -63,6 +66,8 @@ pub struct Doc {
     pub width: usize,
     /// The blocks that scroll sideways, in order.
     pub wide: Vec<Wide>,
+    /// The pictures to draw, in order.
+    pub images: Vec<image::ImageSpot>,
 }
 
 impl Doc {
@@ -155,19 +160,52 @@ pub fn is_markdown_path(path: &std::path::Path) -> bool {
     })
 }
 
-/// Renders `text` for a viewport `width` columns wide.
+/// Renders `text` for a viewport `width` columns wide; images are their
+/// captions.
 pub fn render(text: &str, width: usize) -> Doc {
+    render_with(text, width, None)
+}
+
+/// Renders `text` for a viewport `width` columns wide, with room for the
+/// pictures `images` finds.
+pub fn render_with(text: &str, width: usize, images: Option<&image::Images>) -> Doc {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
     let mut r = Renderer::new(text, width.max(20));
-    for (event, range) in Parser::new_ext(text, opts).into_offset_iter() {
-        r.event(event, range.start);
+    r.images = images.cloned();
+    let events: Vec<_> = Parser::new_ext(text, opts).into_offset_iter().collect();
+    for (i, (event, range)) in events.iter().enumerate() {
+        if let Event::Start(Tag::Image { .. }) = event {
+            r.alone = standalone_image(&events, i);
+        }
+        r.event(event.clone(), range.start);
     }
     r.flush_inline(None);
     r.doc
+}
+
+/// Whether the image starting at `events[i]` is its paragraph's (or a
+/// tight list item's) only content.
+fn standalone_image(events: &[(Event, std::ops::Range<usize>)], i: usize) -> bool {
+    if !matches!(
+        i.checked_sub(1).map(|p| &events[p].0),
+        Some(Event::Start(Tag::Paragraph | Tag::Item))
+    ) {
+        return false;
+    }
+    let Some(end) = events[i..]
+        .iter()
+        .position(|(e, _)| matches!(e, Event::End(TagEnd::Image)))
+    else {
+        return false;
+    };
+    matches!(
+        events.get(i + end + 1).map(|(e, _)| e),
+        Some(Event::End(TagEnd::Paragraph | TagEnd::Item))
+    )
 }
 
 // ---- styles -------------------------------------------------------------
@@ -262,6 +300,9 @@ struct Renderer {
     code: Option<(String, String)>,
     table: Option<Table>,
     image: Option<(usize, String)>,
+    /// The image being read is its paragraph's only content.
+    alone: bool,
+    images: Option<image::Images>,
     meta: Option<String>,
     need_gap: bool,
 }
@@ -286,6 +327,8 @@ impl Renderer {
             code: None,
             table: None,
             image: None,
+            alone: false,
+            images: None,
             meta: None,
             need_gap: false,
         }
@@ -466,11 +509,14 @@ impl Renderer {
                     } else {
                         format!("[image: {}]", alt.trim())
                     };
-                    self.push(Seg {
+                    let caption = Seg {
                         text,
                         style: Style::default().fg(Color::Magenta),
                         link: Some(url),
-                    });
+                    };
+                    if !(std::mem::take(&mut self.alone) && self.picture(url, &caption)) {
+                        self.push(caption);
+                    }
                 }
                 _ => {}
             }
@@ -661,6 +707,35 @@ impl Renderer {
             }
             _ => {}
         }
+    }
+
+    /// Reserves rows for the picture link `url` names, with its caption
+    /// below; false when there is none to draw.
+    fn picture(&mut self, url: usize, caption: &Seg) -> bool {
+        let avail = self.avail();
+        let Some((path, (cols, rows))) = self.images.as_ref().and_then(|imgs| {
+            let path = imgs.resolve(&self.urls[url])?;
+            let size = imgs.size(&path, avail)?;
+            Some((path, size))
+        }) else {
+            return false;
+        };
+        self.flush_inline(None);
+        let line = self.doc.lines.len();
+        for _ in 0..rows {
+            self.emit(Vec::new(), false);
+        }
+        let col = self.prefix_width();
+        self.doc.width = self.doc.width.max(col + cols as usize);
+        self.emit(vec![caption.clone()], false);
+        self.doc.images.push(image::ImageSpot {
+            line,
+            col,
+            rows,
+            cols,
+            path,
+        });
+        true
     }
 
     fn end_heading(&mut self) {
@@ -1148,6 +1223,45 @@ mod tests {
         assert_eq!(doc.link_at(0, 2), None);
         assert_eq!(doc.links[1].url, "x.png");
         assert!(doc.plain()[0].contains("[image: logo]"));
+    }
+
+    #[test]
+    fn an_image_alone_in_its_paragraph_gets_rows_and_a_caption() {
+        let d = tempfile::tempdir().unwrap();
+        ::image::RgbImage::new(100, 60)
+            .save(d.path().join("pic.png"))
+            .unwrap();
+        let imgs = image::Images {
+            base: d.path().to_path_buf(),
+            cell: (10, 20),
+        };
+        let md = "Intro.\n\n![a cat](pic.png)\n\n- ![item](pic.png)\n\nText ![inline](pic.png) here.\n\n![far](https://x.org/a.png)\n";
+        let doc = render_with(md, 40, Some(&imgs));
+        let out = doc.plain();
+        let spots: Vec<(usize, usize, u16, u16)> = doc
+            .images
+            .iter()
+            .map(|s| (s.line, s.col, s.cols, s.rows))
+            .collect();
+        assert_eq!(spots, vec![(2, 0, 10, 3), (7, 2, 10, 3)], "{out:?}");
+        assert_eq!(out[2..5], ["", "", ""], "rows kept free for the picture");
+        assert_eq!(out[5], "[image: a cat]");
+        assert_eq!(doc.link_at(5, 1), Some("pic.png"), "the caption opens it");
+        assert_eq!(out[7], "•", "the list marker stays on its first row");
+        assert_eq!(out[10], "  [image: item]");
+        assert!(out.contains(&"Text [image: inline] here.".to_string()));
+        assert!(
+            out.contains(&"[image: far]".to_string()),
+            "remote: caption only"
+        );
+        assert!(
+            doc.images
+                .iter()
+                .all(|s| s.path == d.path().join("pic.png"))
+        );
+        // without images the same document is captions alone
+        assert!(render(md, 40).images.is_empty());
+        assert_eq!(plain(md, 40)[2], "[image: a cat]");
     }
 
     #[test]
