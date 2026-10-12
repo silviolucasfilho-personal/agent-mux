@@ -22,6 +22,8 @@ pub const USAGE: &str = "agent-mux memory <command>
                                hook in each harness's own settings (default: all three)
   uninstall [claude|codex|agy] remove those hooks
   status                       which harnesses have the hook
+  recover                      start the saves an agent-mux that ended without them left
+                               pending (agent-mux does this at every start)
   hook <claude|codex|agy>      the hook itself: a harness's payload on stdin
 
 Every command takes --workspace DIR (default: $AGENT_MUX_MEMORY inside a session,
@@ -156,6 +158,18 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
     match cmd {
         Some("hook") => {
             return super::hook::run(args.positional.first().map(String::as_str).unwrap_or(""));
+        }
+        Some("recover") => {
+            let cfg = crate::config::load().ok();
+            let store = crate::config::resolve_tracing(
+                cfg.as_ref().and_then(|c| c.tracing.as_ref()),
+                &|k| std::env::var(k).ok(),
+            )
+            .map(|t| t.db_path);
+            let exe = super::save::agent_mux_exe();
+            let n = super::save::recover(&crate::assets::root(), store.as_deref(), exe.as_deref());
+            println!("{n} saves started");
+            return Ok(());
         }
         Some("install") | Some("uninstall") | Some("status") => {
             return hooks_cmd(cmd.unwrap_or_default(), &args);

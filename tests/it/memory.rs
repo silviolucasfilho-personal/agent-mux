@@ -652,3 +652,35 @@ async fn save_on_close_off_starts_no_save() {
     assert_eq!(app.save_memory_of_all(), 0);
     assert!(!dir.join(memory::save::SAVES).exists());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_session_leaves_a_pending_save_until_its_save_starts() {
+    let f = fixture();
+    let claude = profile("Claude Code", fake_harness(&f.bin, "claude"), &[]);
+    let (tx, _rx) = mpsc::channel(64);
+    let mut app = app(&f, vec![claude.clone()], None, tx, MemoryConfig::default());
+    let id = app.launch(claude, f.ws.clone()).unwrap();
+    Run::read(&f.bin);
+    let pending = memory::save::pending_dir(&f.library);
+    let markers = || std::fs::read_dir(&pending).map(|d| d.count()).unwrap_or(0);
+    assert_eq!(markers(), 1, "written at spawn");
+    let marker: memory::save::Pending = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::fs::read_dir(&pending)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(marker.pid, std::process::id());
+    assert_eq!(marker.job.workspace, f.ws);
+    app.sessions[0].conversation = Some("conv-9".into());
+    app.sessions[0].kill();
+    app.handle_pty_exit(id);
+    assert_eq!(markers(), 0, "the save on close took it");
+}

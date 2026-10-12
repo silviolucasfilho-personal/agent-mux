@@ -15,7 +15,10 @@ pub enum AgentProvider {
 }
 
 /// Converts a directory path into Claude Code's project folder slug format.
-/// E.g. `/home/user/project` -> `-home-user-project`
+/// E.g. `/home/user/project` -> `-home-user-project`. Claude Code turns
+/// every character but an ASCII letter or digit into `-` (seen in
+/// `~/.claude/projects/` on 2.1.296: `/a/.loop-worktrees/T09:41` is
+/// `-a--loop-worktrees-T09-41`, `/T/tmp.vWJ` is `-T-tmp-vWJ`).
 pub fn project_slug(path: &Path) -> String {
     let abs_path = if path.is_absolute() {
         path.to_path_buf()
@@ -28,11 +31,7 @@ pub fn project_slug(path: &Path) -> String {
     let s = normalized.to_string_lossy();
     let mut slug = String::with_capacity(s.len() + 1);
     for c in s.chars() {
-        if c == '/' || c == '\\' || c == ':' {
-            slug.push('-');
-        } else {
-            slug.push(c);
-        }
+        slug.push(if c.is_ascii_alphanumeric() { c } else { '-' });
     }
     if !slug.starts_with('-') && !slug.is_empty() {
         slug.insert(0, '-');
@@ -855,7 +854,15 @@ mod tests {
         let win_path = Path::new("C:\\Users\\silvio\\workspace\\app");
         let slug = project_slug(win_path);
         assert!(slug.contains("Users-silvio-workspace-app"));
-        assert!(slug.starts_with('-'));
+        assert!(slug.starts_with('-')); // every character but an ASCII letter or digit, as Claude Code does
+        assert_eq!(
+            project_slug(Path::new("/w/agent-mux/.loop-worktrees/T09:41:33Z")),
+            "-w-agent-mux--loop-worktrees-T09-41-33Z"
+        );
+        assert_eq!(
+            project_slug(Path::new("/T/tmp.vWJ/my_app v2")),
+            "-T-tmp-vWJ-my-app-v2"
+        );
     }
 
     #[test]

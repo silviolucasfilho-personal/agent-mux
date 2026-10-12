@@ -205,6 +205,14 @@ pub fn claude_hooks(reg: &Registration) -> Map<String, Value> {
         );
         hooks.insert(event.to_string(), Value::Array(vec![Value::Object(group)]));
     }
+    // a launch with memory saves what it learned before compaction drops
+    // the detail (`memory::save`); async, the save runs on its own
+    if reg.memory {
+        hooks.insert(
+            "PreCompact".into(),
+            json!([{ "hooks": [handler(reg, "PreCompact", true)] }]),
+        );
+    }
     hooks
 }
 
@@ -552,5 +560,9 @@ mod tests {
         assert_eq!(stop["async"], true);
         let plain: Value = serde_json::from_str(&claude_settings_json(&reg(), &[])).unwrap();
         assert_eq!(plain["hooks"]["SessionStart"][0]["hooks"][0]["async"], true);
+        // a launch with memory saves before compaction; one without does not
+        let pre = &v["hooks"]["PreCompact"][0]["hooks"][0];
+        assert_eq!(pre["async"], true, "{pre}");
+        assert!(plain["hooks"].get("PreCompact").is_none());
     }
 }

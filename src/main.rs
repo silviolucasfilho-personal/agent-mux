@@ -281,6 +281,19 @@ async fn main() -> Result<()> {
     app.editor = cfg.editor.clone();
     // before the restore: a restored session gets its memory too
     app.memory = Some(cfg.memory.clone().unwrap_or_default());
+    // saves an agent-mux that ended without them left pending (a crash, a
+    // closed terminal): started in the background, before this run's own
+    // sessions write theirs
+    {
+        let library = app.library_root();
+        let store = app.trace_db_path.clone();
+        let _ = std::thread::Builder::new()
+            .name("memory-recover".into())
+            .spawn(move || {
+                let exe = agent_mux::memory::save::agent_mux_exe();
+                agent_mux::memory::save::recover(&library, store.as_deref(), exe.as_deref())
+            });
+    }
     if hide_sidebar {
         app.sidebar_hidden = true;
     }
