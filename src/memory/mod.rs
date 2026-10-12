@@ -50,6 +50,7 @@ pub mod launch;
 pub mod log;
 pub mod note;
 pub mod paths;
+pub mod quality;
 pub mod save;
 
 use crate::config::{MemoryConfig, ProfileMemory};
