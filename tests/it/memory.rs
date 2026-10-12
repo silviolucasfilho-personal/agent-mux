@@ -684,3 +684,67 @@ async fn a_session_leaves_a_pending_save_until_its_save_starts() {
     app.handle_pty_exit(id);
     assert_eq!(markers(), 0, "the save on close took it");
 }
+
+/// A Claude Code session restored by attaching to its background process
+/// is traced when its own profile would have been traced at launch, and
+/// not otherwise; `attach` itself gets no tracing arguments.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_attached_session_is_traced_only_when_its_launch_was() {
+    use agent_mux::harness::ClaudeBackground;
+    let bg = ClaudeBackground {
+        id: "bg1".into(),
+        session_id: "conv-1".into(),
+    };
+    let run = |enabled: Option<bool>, with_runtime: bool| {
+        let f = fixture();
+        let toml = format!(
+            "[tracing]\ndb_path = \"{db}\"\nclaude_dir = \"{home}/.claude\"\n",
+            db = f.root.join("traces.db").display(),
+            home = f.home.display(),
+        );
+        let cfg = config::parse(&toml).unwrap();
+        let resolved = config::resolve_tracing(cfg.tracing.as_ref(), &|_| None).unwrap();
+        let (tx, _rx) = mpsc::channel(1024);
+        let runtime = with_runtime.then(|| TraceRuntime::new(resolved, tx.clone()).unwrap());
+        let mut claude = profile(
+            "Claude Code",
+            fake_harness(&f.bin, "claude"),
+            &["--resume", "conv-1"],
+        );
+        if let Some(e) = enabled {
+            claude.tracing = Some(config::ProfileTracing {
+                enabled: Some(e),
+                ..Default::default()
+            });
+        }
+        let mut app = app(
+            &f,
+            vec![claude.clone()],
+            runtime,
+            tx,
+            MemoryConfig::default(),
+        );
+        let s = app.spawn_attached(1, &claude, &bg, f.ws.clone()).unwrap();
+        let argv = Run::read(&f.bin).argv;
+        let traced = s.trace.is_some();
+        assert_eq!(s.profile.args, ["--resume", "conv-1"], "keeps the resume");
+        drop(s);
+        app.kill_all();
+        (traced, argv)
+    };
+    let (traced, argv) = run(None, true);
+    assert!(traced, "a profile traced at launch is traced attached");
+    assert_eq!(argv[..2], ["attach", "bg1"]);
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a == "--settings" || a == "--session-id"),
+        "attach takes no tracing arguments: {argv:?}"
+    );
+    assert!(
+        !run(Some(false), true).0,
+        "launched with tracing off: stays off"
+    );
+    assert!(!run(None, false).0, "tracing off in agent-mux");
+}
