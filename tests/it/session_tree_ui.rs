@@ -977,7 +977,7 @@ fn the_trace_browser_takes_the_screen_and_b_brings_the_sidebar() {
 #[test]
 fn a_harness_row_shows_a_recap_of_each_session() {
     let temp = tempfile::tempdir().unwrap();
-    let (tx, _rx) = mpsc::channel(256);
+    let (tx, mut rx) = mpsc::channel(256);
     let mut app = App::new(vec![profile("Claude Code")], None, tx.clone());
     app.clipboard_enabled = false;
     app.set_pane_size(30, 120);
@@ -1017,5 +1017,66 @@ fn a_harness_row_shows_a_recap_of_each_session() {
     );
     // without a trace store there are no facts, and the card says why
     assert!(screen.contains("Not traced: no recap"), "{screen}");
+    // A traced recap must render a placeholder before a background result arrives.
+    app.trace_db_path = Some(temp.path().join("traces.db"));
+    for session in &mut app.sessions {
+        session.trace = Some(agent_mux::tracing::SessionTraceHandle::detached(
+            SEED[session.id - 900].1,
+            agent_mux::config::Backend::Local,
+        ));
+    }
+    let screen = render(&app, 140, 40);
+    assert!(screen.contains("Loading recap"), "{screen}");
+    assert!(screen.contains("Recap pending"), "{screen}");
+    assert!(!screen.contains("No turn recorded yet"), "{screen}");
+    assert!(!screen.contains("Not traced: no recap"), "{screen}");
+
+    seed_store(temp.path());
+    let receive = |rx: &mut mpsc::Receiver<agent_mux::events::AppEvent>| {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(agent_mux::events::AppEvent::HarnessRecapUpdated(recap)) = rx.try_recv() {
+                break recap;
+            }
+            assert!(Instant::now() < deadline, "background recap did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    app.refresh_harness_recap_if_needed(Instant::now());
+    let old = receive(&mut rx);
+    // Switching harnesses before completion must not install the old result.
+    app.profiles.push(profile("Codex"));
+    let lines = app.agent_lines();
+    let other = lines
+        .iter()
+        .position(|l| l.kind == agent_mux::app::agents_list::AgentKind::Harness(1))
+        .unwrap();
+    app.select_agent_line(&lines, other);
+    app.handle_harness_recap_updated(old);
+    assert!(
+        app.harness_recap(0, Instant::now())
+            .iter()
+            .all(|(_, c)| c.is_none())
+    );
+    app.select_agent_line(&lines, at);
+    assert!(app.harness_recap_loading(0));
+    app.handle_harness_recap_updated(receive(&mut rx));
+    assert!(!app.harness_recap_loading(0));
+    assert!(
+        app.harness_recap(0, Instant::now())
+            .iter()
+            .all(|(_, c)| c.is_some())
+    );
+    // Refreshing retains the previous facts while the worker runs.
+    app.refresh_harness_recap_if_needed(Instant::now() + std::time::Duration::from_secs(4));
+    assert!(app.harness_recap_loading(0));
+    assert!(
+        app.harness_recap(0, Instant::now())
+            .iter()
+            .all(|(_, c)| c.is_some())
+    );
+    app.handle_harness_recap_updated(receive(&mut rx));
+    assert!(!app.harness_recap_loading(0));
+
     app.kill_all();
 }

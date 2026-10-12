@@ -423,6 +423,7 @@ impl App {
                 });
             }
         }
+        self.refresh_harness_recap_if_needed(std::time::Instant::now());
     }
 
     /// Moves the cursor by one selectable row; `false` at either end.

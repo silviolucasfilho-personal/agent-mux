@@ -17,6 +17,8 @@ The persistent footer provides clickable Commands, Focus Agents and Return to se
 
 Leaving an editor with unsaved changes through Commands asks before discarding. `y` continues; `n` or Esc keeps the editor. Enter does not discard changes.
 
+Selecting a harness renders its session list immediately. Recap facts load in the background with a “Loading recap…” message; refreshes retain the previous facts, and results from a different harness or session list are discarded.
+
 ## Shortcut reliability
 
 The terminal may intercept a key or collapse its modifiers. Protocol support alone does not establish that a particular binding reaches agent-mux. **Test shortcuts** in Commands observes the actual delivered events without executing actions. Space skips a probe; Esc cancels. Verified preferences last for the current app session. Help lists candidate aliases separately from observed bindings. Essential actions remain accessible through F1 and the menu even without modifier reporting.

@@ -5801,6 +5801,7 @@ fn draw_harness_card(f: &mut Frame, area: Rect, app: &App, p: usize, now: Instan
     let dim = Style::default().fg(Color::DarkGray);
     let label = Style::default().fg(Color::Yellow);
     let recap = app.harness_recap(p, now);
+    let loading = app.harness_recap_loading(p);
     let running = recap
         .iter()
         .filter(|(i, _)| !matches!(app.sessions[*i].status(now), Status::Exited(_)))
@@ -5845,6 +5846,15 @@ fn draw_harness_card(f: &mut Frame, area: Rect, app: &App, p: usize, now: Instan
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ];
+    if loading {
+        lines.push(Line::styled("   Loading recap…", dim));
+    }
+    if let Some(warning) = app.harness_recap_warning(p) {
+        lines.push(Line::styled(
+            format!("   Recap unavailable: {}", cut(warning)),
+            dim,
+        ));
+    }
     if recap.is_empty() {
         lines.push(Line::styled(
             "   None yet: ↩ or n starts one in a folder you pick.",
@@ -5893,10 +5903,14 @@ fn draw_harness_card(f: &mut Frame, area: Rect, app: &App, p: usize, now: Instan
         ]));
         let Some(c) = card else {
             lines.push(Line::styled(
-                if s.trace.is_some() {
-                    "    No turn recorded yet."
-                } else {
+                if s.trace.is_none() {
                     "    Not traced: no recap (t turns tracing on for a new session)."
+                } else if loading {
+                    "    Recap pending…"
+                } else if app.harness_recap_warning(p).is_some() {
+                    "    Recap unavailable."
+                } else {
+                    "    No turn recorded yet."
                 },
                 dim,
             ));

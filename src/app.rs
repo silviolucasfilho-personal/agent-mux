@@ -2674,7 +2674,7 @@ pub struct App {
     /// The brief the next spawn starts from (`$AGENT_MUX_MEMORY_BRIEF`).
     next_brief: Option<std::path::PathBuf>,
     /// The recap the selected harness row shows (`harness_recap`).
-    pub harness_recap: std::cell::RefCell<Option<harness_recap::HarnessRecap>>,
+    pub harness_recap: harness_recap::RecapState,
     /// Instant when the briefing was last successfully refreshed.
     pub cached_briefing_as_of: Option<Instant>,
     /// Most recent warning / error from briefing refresh, if any.
@@ -3348,6 +3348,7 @@ impl App {
         self.refresh_strip_if_needed(now);
         self.publish_live_snapshot_if_needed(now);
         self.refresh_briefing_if_needed(now);
+        self.refresh_harness_recap_if_needed(now);
         self.refresh_loop_cards_if_needed(now);
         self.scheduler_pass(now);
         self.workflow_pass(now);
