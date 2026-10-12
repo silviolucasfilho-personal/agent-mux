@@ -17,7 +17,7 @@ The persistent footer provides clickable Commands, Focus Agents and Return to se
 
 Leaving an editor with unsaved changes through Commands asks before discarding. `y` continues; `n` or Esc keeps the editor. Enter does not discard changes.
 
-Selecting a harness renders its session list immediately. Recap facts load in the background with a “Loading recap…” message; refreshes retain the previous facts, and results from a different harness or session list are discarded.
+Selecting a harness renders its session list immediately. Recap facts load in the background with a “Loading recap…” message, once each time the harness is selected (and again when its sessions change), not on a timer while it stays selected; a reload keeps the previous facts on screen, and results from a different harness or session list are discarded.
 
 ## Shortcut reliability
 
