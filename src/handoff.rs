@@ -254,7 +254,7 @@ pub fn codex_sessions_dir() -> Option<PathBuf> {
 }
 
 /// Every rollout file under `root` (`YYYY/MM/DD/rollout-*.jsonl`).
-fn codex_rollouts(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn codex_rollouts(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut dirs = vec![(root.to_path_buf(), 0)];
     while let Some((d, depth)) = dirs.pop() {

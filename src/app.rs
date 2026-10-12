@@ -2880,7 +2880,8 @@ impl App {
         }
         let library = self.library_root();
         let prompts = crate::prompts::Prompts::load(&library);
-        match crate::memory::launch::Launch::prepare(&library, &settings, dir, &prompts) {
+        match crate::memory::launch::Launch::prepare(&library, &settings, dir, &prompts, Some(cfg))
+        {
             Ok(l) => Some(l),
             Err(e) => {
                 self.notice = Some(Notice::warn(format!("memory: {e}")));
