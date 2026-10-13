@@ -3134,8 +3134,8 @@ fn draw_turns_pane(f: &mut Frame, area: Rect, browser: &TraceBrowserState, activ
     f.render_widget(List::new(items).block(block), area);
 }
 
-/// A turn's two rows: number, status, time, cost, calls and marks; then
-/// what was asked, cut to the width.
+/// A turn's two rows: number, when it started, status, time, cost, calls
+/// and marks; then what was asked, cut to the width.
 fn turn_rows(
     browser: &TraceBrowserState,
     t: &crate::tracing::store::query::TraceStat,
@@ -3151,6 +3151,10 @@ fn turn_rows(
         Span::raw(if is_sel { "> " } else { "  " }),
         Span::styled(
             format!("#{:<3}", t.ordinal),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!("{} ", &fmt_time(t.start_ns)[5..16]),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(format!("{:<7} ", t.status), status_style),
@@ -3223,7 +3227,8 @@ fn draw_steps_pane(f: &mut Frame, area: Rect, browser: &TraceBrowserState) {
     }
     if let Some(t) = browser.turns.get(browser.selected_turn) {
         title.push(Span::raw(format!(
-            "  {} steps · {} tok · {} ",
+            "  {} · {} steps · {} tok · {} ",
+            &fmt_time(t.start_ns)[5..19],
             browser.observations.len(),
             fmt_tokens(t.total_tokens),
             fmt_cost(t.total_cost_usd)
@@ -3347,9 +3352,10 @@ fn reader_content(browser: &TraceBrowserState) -> (Line<'static>, Vec<Line<'stat
     if browser.focused == BrowserPane::Detail {
         let title = match browser.observations.get(browser.selected_observation) {
             Some(o) => format!(
-                " Step {}/{} · {} {} ",
+                " Step {}/{} · {} · {} {} ",
                 browser.selected_observation + 1,
                 browser.observations.len(),
+                &fmt_time(o.start_ns)[11..19],
                 step_glyph(o),
                 truncate_chars(&obs_display_name(o), 40)
             ),
@@ -4006,11 +4012,15 @@ fn draw_observation_tree(f: &mut Frame, browser: &TraceBrowserState, area: Rect)
             // the name takes whatever the connectors and metrics leave,
             // padded so the metrics stay in one column down the pane
             let budget = width
-                .saturating_sub(r.prefix.chars().count() + metrics.chars().count() + 6)
+                .saturating_sub(r.prefix.chars().count() + metrics.chars().count() + 15)
                 .max(8);
             let name = truncate_chars(&obs_display_name(r.obs), budget);
             let line = Line::from(vec![
                 Span::raw(if is_sel { ">" } else { " " }),
+                Span::styled(
+                    format!("{} ", &fmt_time(r.obs.start_ns)[11..19]),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(fold.to_string(), Style::default().fg(Color::DarkGray)),
                 Span::styled(r.prefix.clone(), Style::default().fg(Color::DarkGray)),
                 Span::raw(format!("{} ", obs_glyph(r.obs))),
@@ -7060,6 +7070,36 @@ mod tests {
             "an expanded parent shows a fold mark: {text}"
         );
         assert!(text.contains("[1-5] view"), "footer: {text}");
+        assert!(
+            text.contains(&fmt_time(base)[5..19]),
+            "the title says when the turn started: {text}"
+        );
+        let bash = text
+            .lines()
+            .find(|l| l.contains("Bash"))
+            .unwrap_or_else(|| panic!("Bash is listed: {text}"));
+        assert!(
+            bash.contains(&fmt_time(base + 2_100_000_000)[11..19]),
+            "each step says when it started: {bash}"
+        );
+
+        // the turns list says when each turn started
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.focused = BrowserPane::Turns;
+        }
+        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
+        let text = buffer_text(&terminal);
+        let turn = text
+            .lines()
+            .find(|l| l.contains("> #1"))
+            .unwrap_or_else(|| panic!("the turn is listed: {text}"));
+        assert!(
+            turn.contains(&fmt_time(base)[5..16]),
+            "the turn row has its start: {turn}"
+        );
+        if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
+            b.focused = BrowserPane::Detail;
+        }
 
         // folded: the children go away and the parent reports the subtree
         if let crate::app::Mode::TraceBrowser(b) = &mut app.mode {
