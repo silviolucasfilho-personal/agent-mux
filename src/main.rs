@@ -102,7 +102,17 @@ async fn main() -> Result<()> {
             Some("keys") => return agent_mux::keys_cli::run(&args[2..]),
             Some("md") => return agent_mux::markdown::cli::run(&args[2..]),
             Some("pty") => return agent_mux::ptylog::cli(&args[2..]),
-            Some("memory") => return agent_mux::memory::cli::run(&args[2..]),
+            // the shared memory was removed; a hook an older build installed
+            // (`agent-mux memory hook …` in a harness's settings) stays
+            // harmless: no output, success
+            Some("memory") => {
+                if args.get(2).map(String::as_str) != Some("hook") {
+                    eprintln!(
+                        "agent-mux memory was removed. Hooks an older build installed can stay (they now do nothing) or be deleted from ~/.claude/settings.json, ~/.codex/hooks.json and the agy agent-mux-memory plugin."
+                    );
+                }
+                return Ok(());
+            }
             Some("langfuse") => {
                 eprintln!(
                     "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\
@@ -280,8 +290,6 @@ async fn main() -> Result<()> {
         .unwrap_or(agent_mux::app::DEFAULT_BYPASS_APPROVALS);
     app.config_path = cfg.loaded_from.clone();
     app.editor = cfg.editor.clone();
-    // before the restore: a restored session gets its memory too
-    app.memory = Some(cfg.memory.clone().unwrap_or_default());
     if hide_sidebar {
         app.sidebar_hidden = true;
     }
