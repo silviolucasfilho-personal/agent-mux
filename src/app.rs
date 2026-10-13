@@ -35,6 +35,7 @@ pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
 pub mod markdown_view;
+pub mod memory_view;
 mod skills_view;
 pub mod text_area;
 pub mod workflows;
@@ -73,6 +74,8 @@ pub enum Mode {
     NewAgent(Box<new_agent::NewAgentState>),
     /// The Markdown viewer and editor: a `.md` link clicked in the pane.
     Markdown(Box<markdown_view::MarkdownView>),
+    /// The Memory screen: ai-memory's setup and its install flow.
+    Memory(Box<memory_view::MemoryView>),
 }
 
 /// An external editor the main loop must run for the App: it leaves the
@@ -209,6 +212,7 @@ pub enum Action {
     /// About mode: App routes the key to the AboutState it owns.
     AboutKey,
     MarkdownKey,
+    MemoryKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
     /// `C`: the Configuration view.
     OpenConfigView,
@@ -789,6 +793,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::RunsView(_) => Action::RunsKey,
         Mode::NewAgent(_) => Action::NewAgentKey,
         Mode::Markdown(_) => Action::MarkdownKey,
+        Mode::Memory(_) => Action::MemoryKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => Action::EnterConfirmRemoveLoop,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
@@ -3182,6 +3187,9 @@ impl App {
         if let Mode::SkillsView(view) = &mut self.mode {
             view.refresh_if_live(now);
         }
+        if let Mode::Memory(view) = &mut self.mode {
+            view.poll();
+        }
         self.resync_workflow_selection();
         self.refresh_strip_if_needed(now);
         self.publish_live_snapshot_if_needed(now);
@@ -4305,6 +4313,65 @@ impl App {
         });
     }
 
+    /// The Memory screen, for the project of the selected session (else
+    /// the default folder).
+    pub fn open_memory_view(&mut self) {
+        let dir = resolve_working_dir(&self.skill_launcher_workspace());
+        let pages = self.workflows_runtime_dir().join("memory-pages");
+        self.mode = Mode::Memory(Box::new(memory_view::MemoryView::open(dir, pages)));
+    }
+
+    fn memory_outcome(&mut self, outcome: memory_view::Outcome) {
+        use memory_view::Outcome;
+        match outcome {
+            Outcome::None => {}
+            Outcome::Close => self.mode = Mode::Main,
+            Outcome::OpenUrl(url) => self.open_url(&url),
+            Outcome::OpenPage(path) => self.open_markdown(&path),
+            Outcome::Ask {
+                harness,
+                dir,
+                message,
+            } => {
+                if let Err(e) = self.ask_memory(harness, dir, message)
+                    && let Mode::Memory(view) = &mut self.mode
+                {
+                    view.error = Some(e);
+                }
+            }
+        }
+    }
+
+    /// A new session on `harness`'s first profile, in `dir`, whose opening
+    /// message is a question for the memory.
+    fn ask_memory(
+        &mut self,
+        harness: crate::harness::Harness,
+        dir: std::path::PathBuf,
+        message: String,
+    ) -> Result<(), String> {
+        let mut profile = self
+            .profiles
+            .iter()
+            .find(|p| crate::harness::Harness::detect(&p.command) == Some(harness))
+            .cloned()
+            .ok_or_else(|| format!("no profile runs {}", harness.as_str()))?;
+        let opening = match harness {
+            crate::harness::Harness::Antigravity => vec!["--prompt-interactive".into(), message],
+            _ => vec![message],
+        };
+        profile.args.extend(opening.iter().cloned());
+        self.finish_dialog_launch(DialogLaunch {
+            profile,
+            dir,
+            opening_args: opening,
+            continued_from: Some("a memory question".into()),
+            agent: None,
+            link: None,
+            attach: None,
+        })
+    }
+
     /// Opens a Markdown file in the viewer, over the main screen.
     pub fn open_markdown(&mut self, path: &std::path::Path) {
         match markdown_view::MarkdownView::open(path) {
@@ -4806,6 +4873,12 @@ impl App {
                 }
             }
             Action::OpenAbout => self.open_about(),
+            Action::MemoryKey => {
+                if let Mode::Memory(view) = &mut self.mode {
+                    let outcome = view.handle_key(key);
+                    self.memory_outcome(outcome);
+                }
+            }
             Action::MarkdownKey => {
                 if let Mode::Markdown(view) = &mut self.mode {
                     let outcome = view.handle_key(key);

@@ -42,7 +42,7 @@ impl App {
         let supported = match id {
             SubmitDialog => matches!(self.mode, Mode::NewSession(_) | Mode::WorkflowDialog(_)),
             Commands | Help | FocusAgents | TestShortcuts | Quit | Runs | Skills
-            | Configuration | Inbox | History => true,
+            | Configuration | Memory | Inbox | History => true,
             ReturnToSession => self.return_session_id().is_some(),
             PrevSession | NextSession => session.is_some(),
             ToggleSidebar => matches!(self.mode, Mode::Main | Mode::TraceBrowser(_)),
@@ -115,7 +115,11 @@ impl App {
             }
             Reload => matches!(
                 self.mode,
-                Mode::ConfigView(_) | Mode::SkillsView(_) | Mode::RunsView(_) | Mode::Markdown(_)
+                Mode::ConfigView(_)
+                    | Mode::SkillsView(_)
+                    | Mode::RunsView(_)
+                    | Mode::Markdown(_)
+                    | Mode::Memory(_)
             ),
             Restore => {
                 editor_library
@@ -187,6 +191,7 @@ impl App {
             }
             Skills => self.request_navigation(NavigationTarget::Skills, now),
             Configuration => self.request_navigation(NavigationTarget::Configuration, now),
+            Memory => self.request_navigation(NavigationTarget::Memory, now),
             Inbox => self.request_navigation(NavigationTarget::Inbox, now),
             History => self.request_navigation(NavigationTarget::History, now),
             FilterClaude | FilterCodex | FilterAntigravity => {
@@ -279,6 +284,7 @@ pub enum NavigationTarget {
     Quit,
     Skills,
     Configuration,
+    Memory,
     Inbox,
     History,
 }
@@ -502,6 +508,7 @@ impl App {
             NavigationTarget::Quit => self.quit_from_chord(),
             NavigationTarget::Skills => self.open_skills_view(),
             NavigationTarget::Configuration => self.open_config_view(),
+            NavigationTarget::Memory => self.open_memory_view(),
             NavigationTarget::Inbox => self.open_inbox(),
             NavigationTarget::History => self.apply(
                 super::Action::OpenSessionHistory,
@@ -523,6 +530,7 @@ impl App {
             Mode::SkillsView(_) => "Skills",
             Mode::ConfigView(_) => "Configuration",
             Mode::Markdown(_) => "Markdown",
+            Mode::Memory(_) => "Memory",
             _ => "Dialog",
         }
     }
@@ -582,11 +590,13 @@ impl App {
             Mode::TraceBrowser(b) => b.search_input.is_some(),
             Mode::ConfigView(v) => matches!(v.pending, super::Pending::NewName { .. }),
             Mode::RunsView(v) => v.save_name.is_some(),
+            Mode::Memory(v) => v.input.is_some(),
             _ => false,
         }
     }
     pub(super) fn confirmation_active(&self) -> bool {
         match &self.mode {
+            Mode::Memory(v) => v.pending.is_some(),
             Mode::ConfirmKill | Mode::ConfirmQuit | Mode::ConfirmRemoveLoop => true,
             Mode::AgentEditor(st) => {
                 st.confirm_discard

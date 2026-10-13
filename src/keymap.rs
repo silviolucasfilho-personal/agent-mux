@@ -668,6 +668,7 @@ pub enum ActionId {
     SubmitDialog,
     Skills,
     Configuration,
+    Memory,
     Inbox,
     History,
     FilterClaude,
@@ -717,7 +718,14 @@ pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: ActionId::Configuration,
         label: "Open configuration",
-        keywords: "settings memory prompts",
+        keywords: "settings prompts",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::Memory,
+        label: "Open memory (ai-memory)",
+        keywords: "memory ai-memory install setup hooks mcp shared",
         key: None,
         scope: ActionScope::Global,
     },
