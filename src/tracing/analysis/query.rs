@@ -299,26 +299,6 @@ fn session_in_store(
     .unwrap_or(false)
 }
 
-/// The card of one conversation by its store key (`claude:<id>`): a
-/// History row, which has no launch of this run.
-pub fn conversation_card(
-    conn: &Connection,
-    session_key: &str,
-    provider: Option<&str>,
-    cwd: &Path,
-) -> Result<SessionCard, AnalysisError> {
-    build_session_card(
-        conn,
-        Some(session_key),
-        None,
-        provider,
-        cwd,
-        RuntimeState::Exited,
-        TaskOutcome::Unknown,
-        &[],
-    )
-}
-
 /// The card of one agent-mux launch: its whole conversation when the
 /// store has tied the launch to one (a resumed conversation counts its
 /// earlier launches too), else the launch alone. For the harness recap.

@@ -13,7 +13,7 @@ pub const USAGE: &str = "agent-mux config <command>
   edit <id>                    copy the built-in text into the library when needed and
                                open it in `editor` (profiles.toml), $VISUAL, $EDITOR or vi
   reset <id>                   delete the override (or a user-added item)
-  new skill|loop-skill|loop-agent|workflow|agent|memory-note <name>
+  new skill|loop-skill|loop-agent|workflow|agent <name>
                                create an item from a skeleton and print its path
   check                        validate every item; exit 1 when one has problems
   push [--dry-run]             rewrite the loop skills and agents in every registered
@@ -137,7 +137,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         Some("new") => {
-            let usage = "usage: agent-mux config new skill|loop-skill|loop-agent|workflow|agent|memory-note <name>";
+            let usage =
+                "usage: agent-mux config new skill|loop-skill|loop-agent|workflow|agent <name>";
             let word = positional(0).map(String::as_str);
             let Some(kind) = Kind::ALL.into_iter().find(|k| k.new_word() == word) else {
                 anyhow::bail!("{usage}");

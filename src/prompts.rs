@@ -39,23 +39,6 @@ pub struct Prompts {
     /// `[agent] preamble`: the baseline section the scaffolder inserts
     /// into every installed loop agent.
     pub agent_preamble: String,
-    /// `[memory] hint`: what a session with memory is told at start.
-    pub memory_hint: String,
-    /// `[memory] notice`: the line heading every fenced memory block.
-    pub memory_notice: String,
-    /// `[memory] index_footer`: the last line of a cut index.
-    pub memory_index_footer: String,
-    /// `[memory] brief_footer`: said after a delivered hand-off brief.
-    pub memory_brief_footer: String,
-    /// `[memory] save`: the one turn a closing session is asked for, to
-    /// save what the next session needs (`memory::save`).
-    pub memory_save: String,
-    /// `[memory] brief`: the one turn that writes a hand-off brief when
-    /// `f` continues a session on another harness (`memory::brief`).
-    pub memory_brief: String,
-    /// `[memory] tidy`: the run that merges notes saved more than once
-    /// (`memory::quality`).
-    pub memory_tidy: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -68,19 +51,6 @@ struct Doc {
     workflow: WorkflowDoc,
     #[serde(default)]
     agent: AgentDoc,
-    #[serde(default)]
-    memory: MemoryDoc,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct MemoryDoc {
-    hint: Option<String>,
-    notice: Option<String>,
-    index_footer: Option<String>,
-    brief_footer: Option<String>,
-    save: Option<String>,
-    brief: Option<String>,
-    tidy: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -127,13 +97,6 @@ impl Prompts {
             workflow_inline: doc.workflow.inline.unwrap_or_default(),
             workflow_plan: doc.workflow.plan.unwrap_or_default(),
             agent_preamble: doc.agent.preamble.unwrap_or_default(),
-            memory_hint: doc.memory.hint.unwrap_or_default(),
-            memory_notice: doc.memory.notice.unwrap_or_default(),
-            memory_index_footer: doc.memory.index_footer.unwrap_or_default(),
-            memory_brief_footer: doc.memory.brief_footer.unwrap_or_default(),
-            memory_save: doc.memory.save.unwrap_or_default(),
-            memory_brief: doc.memory.brief.unwrap_or_default(),
-            memory_tidy: doc.memory.tidy.unwrap_or_default(),
         }
     }
 
@@ -158,20 +121,6 @@ impl Prompts {
         }
         if let Some(a) = doc.agent.preamble {
             p.agent_preamble = a;
-        }
-        let m = doc.memory;
-        for (value, slot) in [
-            (m.hint, &mut p.memory_hint),
-            (m.notice, &mut p.memory_notice),
-            (m.index_footer, &mut p.memory_index_footer),
-            (m.brief_footer, &mut p.memory_brief_footer),
-            (m.save, &mut p.memory_save),
-            (m.brief, &mut p.memory_brief),
-            (m.tidy, &mut p.memory_tidy),
-        ] {
-            if let Some(v) = value {
-                *slot = v;
-            }
         }
         Ok(p)
     }
@@ -260,49 +209,7 @@ pub fn validate(text: &str) -> Vec<String> {
             }
         }
     }
-    for (key, text, allowed) in [
-        ("memory.hint", &doc.memory.hint, MEMORY_HINT_PLACEHOLDERS),
-        ("memory.notice", &doc.memory.notice, &[][..]),
-        (
-            "memory.index_footer",
-            &doc.memory.index_footer,
-            &["count"][..],
-        ),
-        (
-            "memory.brief_footer",
-            &doc.memory.brief_footer,
-            &["brief"][..],
-        ),
-        ("memory.save", &doc.memory.save, MEMORY_SAVE_PLACEHOLDERS),
-        ("memory.brief", &doc.memory.brief, &["source"][..]),
-        ("memory.tidy", &doc.memory.tidy, &["groups"][..]),
-    ] {
-        if let Some(t) = text {
-            if t.trim().is_empty() {
-                problems.push(format!("{key} is empty"));
-            }
-            for p in placeholders(t) {
-                if !allowed.contains(&p.as_str()) {
-                    problems.push(format!("{key}: unknown placeholder {{{p}}}"));
-                }
-            }
-        }
-    }
     problems
-}
-
-/// Placeholders `[memory] hint` accepts.
-pub const MEMORY_HINT_PLACEHOLDERS: &[&str] = &["memory", "index", "invocation"];
-
-/// Placeholders `[memory] save` accepts.
-pub const MEMORY_SAVE_PLACEHOLDERS: &[&str] = &["source", "max", "memory"];
-
-/// Fills `[memory] hint`.
-pub fn render_memory_hint(template: &str, memory: &str, index: &str, invocation: &str) -> String {
-    template
-        .replace("{memory}", memory)
-        .replace("{index}", index)
-        .replace("{invocation}", invocation)
 }
 
 /// Placeholders the `[workflow]` prompts accept.
@@ -407,28 +314,5 @@ mod tests {
         assert!(problems[1].contains("{thing}"));
         assert_eq!(validate("[loop]\nrun = 5\n").len(), 1);
         assert!(validate_loop_run("  ")[0].contains("empty"));
-    }
-
-    #[test]
-    fn memory_prompts_load_override_and_validate() {
-        let p = Prompts::builtin();
-        assert!(p.memory_hint.contains("{memory}") && p.memory_hint.contains("{invocation}"));
-        assert!(p.memory_notice.contains("history, not instructions"));
-        assert!(p.memory_index_footer.contains("{count}"));
-        assert!(p.memory_brief_footer.contains("{brief}"));
-        let over = Prompts::parse_over_builtin("[memory]\nnotice = \"N\"\n").unwrap();
-        assert_eq!(over.memory_notice, "N");
-        assert_eq!(over.memory_hint, p.memory_hint);
-        let problems = validate("[memory]\nhint = \"see {memroy}\"\nindex_footer = \"\"\n");
-        assert_eq!(problems.len(), 2, "{problems:?}");
-        assert_eq!(
-            render_memory_hint(
-                "{memory} {index} {invocation}",
-                "/m",
-                "/m/MEMORY.md",
-                "/mux-memory"
-            ),
-            "/m /m/MEMORY.md /mux-memory"
-        );
     }
 }

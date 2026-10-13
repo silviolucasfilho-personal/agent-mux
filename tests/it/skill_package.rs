@@ -317,7 +317,6 @@ fn launch_composes_each_harness_command_line() {
         tracing: None,
         model: Some("m1".into()),
         bypass_approvals: Some(true),
-        memory: None,
     };
     let prompt_claude = opening_prompt(&h, Harness::Claude);
     assert!(prompt_claude.starts_with("/heimdall "));

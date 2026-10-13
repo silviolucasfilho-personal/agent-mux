@@ -29,7 +29,6 @@ fn profile(name: &str, command: &str) -> Profile {
         tracing: None,
         model: None,
         bypass_approvals: None,
-        memory: None,
     }
 }
 

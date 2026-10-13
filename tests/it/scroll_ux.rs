@@ -20,7 +20,6 @@ pub fn shell_profile() -> Profile {
         tracing: None,
         model: None,
         bypass_approvals: None,
-        memory: None,
     }
 }
 

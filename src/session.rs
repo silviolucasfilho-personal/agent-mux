@@ -155,9 +155,6 @@ pub struct Session {
     /// `RESTORE_GRACE`) should stay saved for the next start rather
     /// than vanish with the exited session.
     pub restored_from: Option<crate::persistence::SavedSession>,
-    /// The memory a save on close writes to (`memory::save`): set for an
-    /// interactive session with memory, taken when the save is started.
-    pub memory_save: Option<crate::memory::launch::Launch>,
     /// The raw output recording (`$AGENT_MUX_PTY_LOG`, `ptylog`).
     pub ptylog: Option<crate::ptylog::Recorder>,
 }
@@ -235,11 +232,6 @@ impl Session {
         // FORCE_HYPERLINK). A value the user set wins.
         if std::env::var_os("FORCE_HYPERLINK").is_none() {
             cmd.env("FORCE_HYPERLINK", "1");
-        }
-        // the memory is the launch's own (`App::apply_memory`), never one
-        // inherited from a session this agent-mux runs inside
-        for key in crate::memory::ENV_ALL {
-            cmd.env_remove(key);
         }
         for (key, value) in extra_env {
             cmd.env(key, value);
@@ -332,7 +324,6 @@ impl Session {
             group: None,
             briefing_path: None,
             conversation: None,
-            memory_save: None,
             ptylog: crate::ptylog::Recorder::from_env(&profile_name, id, rows, cols),
         })
     }

@@ -2379,14 +2379,6 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
     f.render_widget(Clear, area);
     let title = match &dialog.agent {
         Some(a) => format!(" New session as {a} "),
-        None if dialog.handoff_history.is_some() => {
-            let title = dialog
-                .handoff_history
-                .as_ref()
-                .map(|h| h.title.chars().take(40).collect::<String>())
-                .unwrap_or_default();
-            format!(" Continue \"{title}\" in a new session ")
-        }
         None if dialog.handoff.is_some() => {
             let from = dialog
                 .handoff
@@ -2409,18 +2401,11 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
         };
         lines.push(Line::styled(format!("{marker}{}", p.name), style));
     }
-    if let Some(way) = app.handoff_way(dialog) {
-        lines.push(Line::from(vec![
-            Span::styled("How: ", Style::default().fg(Color::Yellow)),
-            Span::raw(way),
-        ]));
-    }
     lines.push(Line::raw(""));
     // the subfolder list is the flexible part: on a short terminal it
     // shrinks so the fields below it stay on screen
     let fixed_rows = app.profiles.len()
         + 12
-        + usize::from(app.handoff_way(dialog).is_some())
         + if dialog.harness.is_some() { 6 } else { 0 }
         + if dialog.fields().contains(&DialogField::MaxCost) {
             4
@@ -2575,28 +2560,6 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
                 dim,
             ),
         ]));
-
-        if dialog.memory_available {
-            lines.push(Line::from(vec![
-                Span::raw("Memory:           "),
-                Span::styled(
-                    if dialog.memory { "[On]" } else { "[Off]" },
-                    focused(DialogField::Memory).fg(if dialog.memory {
-                        Color::Green
-                    } else {
-                        Color::DarkGray
-                    }),
-                ),
-                Span::styled(
-                    if dialog.memory {
-                        " (shared workspace memory, mux-memory)"
-                    } else {
-                        " (no shared memory, nothing saved)"
-                    },
-                    dim,
-                ),
-            ]));
-        }
 
         let one_shot = if dialog.one_shot.is_empty() {
             "(interactive)".to_string()
@@ -6617,21 +6580,6 @@ mod tests {
         assert!(text.contains("Approvals:"), "got: {text}");
         assert!(text.contains("Resume:"), "got: {text}");
         assert!(text.contains("One-shot prompt:"), "got: {text}");
-        // an App without memory (a test) offers no Memory field
-        assert!(!text.contains("Memory:"), "got: {text}");
-
-        let mut d = crate::app::DialogState::new(&app.profiles).with_memory(true);
-        app.mode = crate::app::Mode::NewSession(d.clone());
-        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("Memory:           [On]"), "got: {text}");
-        assert!(text.contains("One-shot prompt:"), "got: {text}");
-        d.memory = false;
-        app.mode = crate::app::Mode::NewSession(d);
-        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("Memory:           [Off]"), "got: {text}");
-        assert!(text.contains("nothing saved"), "got: {text}");
     }
 
     #[test]
@@ -6646,7 +6594,6 @@ mod tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
-                memory: None,
             },
             crate::config::Profile {
                 name: "Shell".into(),
@@ -6656,7 +6603,6 @@ mod tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
-                memory: None,
             },
         ];
         let mut app = App::new(profiles.clone(), None, tx);

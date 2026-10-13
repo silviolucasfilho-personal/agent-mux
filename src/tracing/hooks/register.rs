@@ -125,12 +125,6 @@ pub struct Registration {
     /// A loop launch: `PreToolUse` also carries `--loop`, which enforces
     /// the launch row's `loop_policy` and fails closed for write tools.
     pub loop_guard: bool,
-    /// The launch has a shared memory: `SessionStart` runs synchronously
-    /// so its `additionalContext` (the memory's start text) reaches the
-    /// first turn; an async hook's context arrives a turn late. Its
-    /// timeout is 10 s: the answer takes milliseconds, but macOS scans a
-    /// freshly installed binary for longer than 3 s on its first run.
-    pub memory: bool,
 }
 
 /// The running binary, for hook commands. `None` when the OS cannot say.
@@ -159,8 +153,7 @@ pub const CLAUDE_EVENTS: &[(&str, bool, bool)] = &[
 
 fn handler(reg: &Registration, event: &str, is_async: bool) -> Value {
     let guarded = (reg.guard || reg.loop_guard) && event == "PreToolUse";
-    let memory_start = reg.memory && event == "SessionStart";
-    let is_async = is_async && !guarded && !memory_start;
+    let is_async = is_async && !guarded;
     let mut args = vec![
         "trace".to_string(),
         "hook".to_string(),
@@ -180,7 +173,7 @@ fn handler(reg: &Registration, event: &str, is_async: bool) -> Value {
         "type": "command",
         "command": reg.exe.to_string_lossy(),
         "args": args,
-        "timeout": if is_async { 5 } else if guarded { 2 } else if memory_start { 10 } else { 1 },
+        "timeout": if is_async { 5 } else if guarded { 2 } else { 1 },
     });
     if is_async {
         h["async"] = Value::Bool(true);
@@ -204,31 +197,6 @@ pub fn claude_hooks(reg: &Registration) -> Map<String, Value> {
             Value::Array(vec![handler(reg, event, *is_async)]),
         );
         hooks.insert(event.to_string(), Value::Array(vec![Value::Object(group)]));
-    }
-    // a launch with memory saves what it learned before compaction drops
-    // the detail (`memory::save`); async, the save runs on its own
-    if reg.memory {
-        hooks.insert(
-            "PreCompact".into(),
-            json!([{ "hooks": [handler(reg, "PreCompact", true)] }]),
-        );
-    }
-    // and hears, before each prompt, what other sessions saved since it
-    // started (`memory::fresh`): its own handler, synchronous so the
-    // answer reaches this prompt, beside the tracing one
-    if reg.memory {
-        let fresh = json!({
-            "type": "command",
-            "command": reg.exe.to_string_lossy(),
-            "args": ["memory", "hook", "claude", "--per-launch"],
-            "timeout": 5,
-        });
-        let groups = hooks
-            .entry("UserPromptSubmit")
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if let Value::Array(a) = groups {
-            a.push(json!({ "hooks": [fresh] }));
-        }
     }
     hooks
 }
@@ -345,7 +313,6 @@ mod tests {
             profile: HooksProfile::Standard,
             guard: false,
             loop_guard: false,
-            memory: false,
         }
     }
 
@@ -483,7 +450,6 @@ mod tests {
             profile: HooksProfile::Standard,
             guard: false,
             loop_guard: false,
-            memory: false,
         };
         let value = codex_notify_override(&windows, "l", None);
         let doc: toml::Value = toml::from_str(&value).unwrap();
@@ -561,44 +527,5 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(args.iter().any(|a| a == "--guard") && args.iter().any(|a| a == "--loop"));
-    }
-
-    #[test]
-    fn memory_makes_session_start_synchronous() {
-        let with = Registration {
-            memory: true,
-            ..reg()
-        };
-        let v: Value = serde_json::from_str(&claude_settings_json(&with, &[])).unwrap();
-        let start = &v["hooks"]["SessionStart"][0]["hooks"][0];
-        assert!(start.get("async").is_none(), "{start}");
-        assert_eq!(start["timeout"], 10);
-        let stop = &v["hooks"]["Stop"][0]["hooks"][0];
-        assert_eq!(stop["async"], true);
-        let plain: Value = serde_json::from_str(&claude_settings_json(&reg(), &[])).unwrap();
-        assert_eq!(plain["hooks"]["SessionStart"][0]["hooks"][0]["async"], true);
-        // a launch with memory saves before compaction; one without does not
-        let pre = &v["hooks"]["PreCompact"][0]["hooks"][0];
-        assert_eq!(pre["async"], true, "{pre}");
-        assert!(plain["hooks"].get("PreCompact").is_none());
-        // and its own synchronous UserPromptSubmit handler, beside tracing's
-        let ups = v["hooks"]["UserPromptSubmit"].as_array().unwrap();
-        let fresh = ups
-            .iter()
-            .flat_map(|g| g["hooks"].as_array().unwrap().iter())
-            .find(|h| h["args"][0] == "memory")
-            .expect("the memory handler");
-        assert_eq!(
-            fresh["args"],
-            json!(["memory", "hook", "claude", "--per-launch"])
-        );
-        assert!(fresh.get("async").is_none());
-        assert!(
-            plain["hooks"]["UserPromptSubmit"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|g| g["hooks"][0]["args"][0] != "memory")
-        );
     }
 }

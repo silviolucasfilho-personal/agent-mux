@@ -113,29 +113,12 @@ pub fn install(
     home: &Path,
     force: bool,
 ) -> Result<InstallReport, InstallError> {
-    let root = skills_root(harness, home);
-    let report = install_into(def, harness, &root.join(&def.id), force)?;
-    // Retire the old shared-memory command only after its replacement exists.
-    // Archive outside the scanned skill root, preserving user edits.
-    if def.id == crate::memory::SKILL_ID {
-        let legacy = root.join("memory");
-        let managed = std::fs::read_to_string(legacy.join(MANIFEST))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .is_some_and(|m| m["installed_by"] == "agent-mux" && m["id"] == "memory");
-        if managed {
-            let archive = root
-                .parent()
-                .unwrap_or(&root)
-                .join("agent-mux-retired-skills");
-            std::fs::create_dir_all(&archive)?;
-            std::fs::rename(
-                &legacy,
-                archive.join(format!("memory-{}", uuid::Uuid::new_v4())),
-            )?;
-        }
-    }
-    Ok(report)
+    install_into(
+        def,
+        harness,
+        &skills_root(harness, home).join(&def.id),
+        force,
+    )
 }
 
 /// Writes the package under the workspace's project-level skill
@@ -239,49 +222,6 @@ mod tests {
             None,
         )
         .unwrap()
-    }
-
-    #[test]
-    fn mux_memory_retires_only_managed_legacy_skills_for_every_harness() {
-        for harness in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
-            let temp = tempfile::tempdir().unwrap();
-            let old = parse_skill(
-                "---\nname: memory\ndescription: shared memory\n---\nbody\n",
-                None,
-                Vec::new(),
-                None,
-            )
-            .unwrap();
-            let new = parse_skill(
-                "---\nname: mux-memory\ndescription: shared memory\n---\nbody\n",
-                None,
-                Vec::new(),
-                None,
-            )
-            .unwrap();
-            let legacy = install(&old, harness, temp.path(), false).unwrap().dir;
-            let current = install(&new, harness, temp.path(), false).unwrap().dir;
-            assert!(!legacy.exists());
-            assert!(current.join("SKILL.md").is_file());
-            let archive = skills_root(harness, temp.path())
-                .parent()
-                .unwrap()
-                .join("agent-mux-retired-skills");
-            let archived = std::fs::read_dir(archive)
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path();
-            assert!(archived.join("SKILL.md").is_file());
-            std::fs::create_dir_all(&legacy).unwrap();
-            std::fs::write(legacy.join("SKILL.md"), "foreign skill").unwrap();
-            install(&new, harness, temp.path(), false).unwrap();
-            assert_eq!(
-                std::fs::read_to_string(legacy.join("SKILL.md")).unwrap(),
-                "foreign skill"
-            );
-        }
     }
 
     #[test]

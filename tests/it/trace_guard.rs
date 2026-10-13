@@ -734,7 +734,6 @@ fn attaching_a_loop_to_a_plan_registers_the_loop_flag_and_the_metadata_keys() {
         tracing: None,
         model: None,
         bypass_approvals: None,
-        memory: None,
     };
     let mut plan = rt
         .plan_launch(&profile, temp.path())

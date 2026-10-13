@@ -102,7 +102,17 @@ async fn main() -> Result<()> {
             Some("keys") => return agent_mux::keys_cli::run(&args[2..]),
             Some("md") => return agent_mux::markdown::cli::run(&args[2..]),
             Some("pty") => return agent_mux::ptylog::cli(&args[2..]),
-            Some("memory") => return agent_mux::memory::cli::run(&args[2..]),
+            // the shared memory was removed; a hook an older build installed
+            // (`agent-mux memory hook …` in a harness's settings) stays
+            // harmless: no output, success
+            Some("memory") => {
+                if args.get(2).map(String::as_str) != Some("hook") {
+                    eprintln!(
+                        "agent-mux memory was removed. Hooks an older build installed can stay (they now do nothing) or be deleted from ~/.claude/settings.json, ~/.codex/hooks.json and the agy agent-mux-memory plugin."
+                    );
+                }
+                return Ok(());
+            }
             Some("langfuse") => {
                 eprintln!(
                     "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\
@@ -280,21 +290,6 @@ async fn main() -> Result<()> {
         .unwrap_or(agent_mux::app::DEFAULT_BYPASS_APPROVALS);
     app.config_path = cfg.loaded_from.clone();
     app.editor = cfg.editor.clone();
-    // before the restore: a restored session gets its memory too
-    app.memory = Some(cfg.memory.clone().unwrap_or_default());
-    // saves an agent-mux that ended without them left pending (a crash, a
-    // closed terminal): started in the background, before this run's own
-    // sessions write theirs
-    {
-        let library = app.library_root();
-        let store = app.trace_db_path.clone();
-        let _ = std::thread::Builder::new()
-            .name("memory-recover".into())
-            .spawn(move || {
-                let exe = agent_mux::memory::save::agent_mux_exe();
-                agent_mux::memory::save::recover(&library, store.as_deref(), exe.as_deref())
-            });
-    }
     if hide_sidebar {
         app.sidebar_hidden = true;
     }
@@ -380,9 +375,6 @@ async fn main() -> Result<()> {
     // kill_all must run on every exit from the loop above -- including the
     // draw-error path -- so live PTY children are never orphaned when we quit.
     app.kill_all();
-    // every session still open asks for its save on close, in the
-    // background: they outlive this process
-    app.save_memory_of_all();
     app.cleanup_live_snapshot();
     // Bounded store flush AFTER kill_all: the main loop is gone, so the
     // runtime's shutdown watch is the pipelines' only exit signal; the

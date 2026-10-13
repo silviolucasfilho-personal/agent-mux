@@ -28,7 +28,6 @@ pub mod flow_builder;
 pub mod harness_recap;
 pub mod inbox;
 pub mod loop_builder;
-mod memory_save;
 pub mod new_agent;
 pub mod runs_view;
 pub mod shortcut_probe;
@@ -226,8 +225,6 @@ pub enum Action {
     EditPersona,
     RunAgent,
     ForkSession,
-    /// `f` on a History row: continue that conversation in a new session.
-    ForkHistorySession,
     DeleteWorkflowRow,
     AgentEditorKey,
     OpenLoopBuilder,
@@ -601,15 +598,9 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::RunAgent
                 }
-                // f: continue this session in a new one, with its memory
+                // f: continue this session in a new one
                 KeyCode::Char('f') if in_list && ctx.agent_row == RowTag::Session => {
                     Action::ForkSession
-                }
-                // f on History: continue that conversation, on any harness
-                KeyCode::Char('f')
-                    if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::History =>
-                {
-                    Action::ForkHistorySession
                 }
                 KeyCode::Char(' ') if in_list => Action::ToggleAgentFold,
                 // ← folds (or climbs to the parent), → unfolds (or descends)
@@ -852,8 +843,6 @@ pub enum DialogField {
     Approvals,
     /// Pick up the most recent conversation.
     Resume,
-    /// Whether the session reads and saves the workspace's shared memory.
-    Memory,
     /// A prompt to run non-interactively; blank launches interactively.
     OneShot,
     /// Name of an experiment to record this launch under; blank = none.
@@ -953,11 +942,6 @@ pub struct DialogState {
     /// (the top-level `bypass_approvals` in profiles.toml, default true).
     pub bypass_default: bool,
     pub resume_last: bool,
-    /// The session gets the workspace's shared memory (`mux-memory`).
-    pub memory: bool,
-    /// False when memory is off for agent-mux as a whole (or the App has
-    /// none, as in a test): the Memory field is left out.
-    pub memory_available: bool,
     /// A one-shot prompt; blank launches interactively.
     pub one_shot: String,
     /// False when no Langfuse credentials resolved: the field cannot leave
@@ -978,17 +962,6 @@ pub struct DialogState {
     /// The session this one continues (`f` on a session): the same
     /// harness forks its conversation, another reads its transcript.
     pub handoff: Option<usize>,
-    /// The History row this one continues (`f` on History).
-    pub handoff_history: Option<Box<new_agent::HistoryHandoff>>,
-}
-
-/// Whether a profile's sessions get the shared memory: on unless its
-/// `[profiles.memory]` says `enabled = false`.
-fn profile_memory(profile: Option<&Profile>) -> bool {
-    profile
-        .and_then(|p| p.memory.as_ref())
-        .and_then(|m| m.enabled)
-        != Some(false)
 }
 
 /// What the New session dialog launches.
@@ -1000,19 +973,9 @@ pub struct DialogLaunch {
     continued_from: Option<String>,
     agent: Option<String>,
     link: Option<crate::tracing::experiments::ExperimentLink>,
-    brief: Option<std::path::PathBuf>,
     /// A `--continue` whose conversation runs in Claude Code's
     /// background: opened with `claude attach` instead.
     attach: Option<crate::harness::ClaudeBackground>,
-}
-
-/// A continue waiting for the background run writing its brief.
-#[derive(Debug)]
-pub struct PendingHandoff {
-    launch: DialogLaunch,
-    /// The brief job's file: gone when the job is done.
-    job: std::path::PathBuf,
-    deadline: Instant,
 }
 
 impl DialogState {
@@ -1055,12 +1018,9 @@ impl DialogState {
                 .unwrap_or(DEFAULT_BYPASS_APPROVALS),
             bypass_default: DEFAULT_BYPASS_APPROVALS,
             resume_last: false,
-            memory: profile_memory(first),
-            memory_available: false,
             one_shot: String::new(),
             agent: None,
             handoff: None,
-            handoff_history: None,
             langfuse_available: false,
             experiment: String::new(),
             variant: String::new(),
@@ -1127,11 +1087,8 @@ impl DialogState {
                 DialogField::Model,
                 DialogField::Approvals,
                 DialogField::Resume,
+                DialogField::OneShot,
             ]);
-            if self.memory_available {
-                fields.push(DialogField::Memory);
-            }
-            fields.push(DialogField::OneShot);
         }
         if self.guard_available() {
             fields.extend([DialogField::MaxCost, DialogField::MaxTurns]);
@@ -1144,12 +1101,6 @@ impl DialogState {
 
     /// Whether the launch can be recorded as an experiment run: only with
     /// a trace store open, since the run row hangs off the launch row.
-    /// Offers the Memory field when agent-mux's memory is on.
-    pub fn with_memory(mut self, available: bool) -> Self {
-        self.memory_available = available;
-        self
-    }
-
     pub fn with_experiments(mut self, available: bool) -> Self {
         self.experiments_available = available;
         self
@@ -1238,7 +1189,6 @@ impl DialogState {
             self.harness = crate::harness::Harness::detect(&p.command);
             self.model = p.model.clone().unwrap_or_default();
             self.bypass_approvals = p.bypass_approvals.unwrap_or(self.bypass_default);
-            self.memory = profile_memory(Some(p));
             if self.harness.is_none() {
                 // the option fields are gone: do not leave focus on one
                 self.resume_last = false;
@@ -1370,13 +1320,6 @@ impl DialogState {
                 KeyCode::Enter => return DialogResult::Submit,
                 KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
                     self.resume_last = !self.resume_last;
-                }
-                _ => {}
-            },
-            DialogField::Memory => match key.code {
-                KeyCode::Enter => return DialogResult::Submit,
-                KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
-                    self.memory = !self.memory;
                 }
                 _ => {}
             },
@@ -2697,8 +2640,6 @@ pub struct App {
     /// Antigravity keeps its MCP servers in a global file, so agent-mux
     /// writes the entry once per run rather than on every launch.
     agy_mcp_checked: bool,
-    /// Whether the Antigravity memory plugin was checked this run.
-    agy_memory_checked: bool,
     /// Whether a launch bypasses the harness's approval prompts when the
     /// profile does not say. From `bypass_approvals` in profiles.toml.
     pub bypass_approvals_default: bool,
@@ -2707,10 +2648,6 @@ pub struct App {
     pub runtime_dir: Option<std::path::PathBuf>,
     /// Cached briefing for the active Agents preview (if capable of trace.read).
     pub cached_briefing: Option<crate::tracing::analysis::Briefing>,
-    /// A continue (`f`) waiting for its hand-off brief.
-    pub pending_handoff: Option<PendingHandoff>,
-    /// The brief the next spawn starts from (`$AGENT_MUX_MEMORY_BRIEF`).
-    next_brief: Option<std::path::PathBuf>,
     /// The recap the selected harness row shows (`harness_recap`).
     pub harness_recap: harness_recap::RecapState,
     /// Instant when the briefing was last successfully refreshed.
@@ -2760,11 +2697,6 @@ pub struct App {
     /// Finished runs since startup, newest first (the store has the rows).
     pub recent_workflow_runs: Vec<workflows::RecentWorkflowRun>,
     pub workflows: crate::config::WorkflowSettings,
-    /// The shared memory's `[memory]` table; `None` keeps memory off (the
-    /// default for an App built in a test). `main` sets it from the config.
-    pub memory: Option<crate::config::MemoryConfig>,
-    /// Harnesses the `mux-memory` skill was installed for in this run.
-    pub memory_skill_installed: std::collections::HashSet<crate::harness::Harness>,
     pub last_workflow_pass: Option<Instant>,
     /// Planner sessions in flight and the documents they produced.
     pub live_workflow_plans: Vec<workflows::LivePlan>,
@@ -2861,13 +2793,10 @@ impl App {
             skill_workbench: None,
             agents: crate::config::AgentsSettings::default(),
             agy_mcp_checked: false,
-            agy_memory_checked: false,
             bypass_approvals_default: DEFAULT_BYPASS_APPROVALS,
             runtime_dir: None,
             cached_briefing: None,
             harness_recap: Default::default(),
-            pending_handoff: None,
-            next_brief: None,
             cached_briefing_as_of: None,
             cached_briefing_warning: None,
             briefing_revision: 0,
@@ -2893,8 +2822,6 @@ impl App {
             live_workflow_runs: Vec::new(),
             recent_workflow_runs: Vec::new(),
             workflows: crate::config::WorkflowSettings::default(),
-            memory: None,
-            memory_skill_installed: std::collections::HashSet::new(),
             last_workflow_pass: None,
             live_workflow_plans: Vec::new(),
             planned_workflows: Vec::new(),
@@ -2942,132 +2869,6 @@ impl App {
     }
 
     /// The home whose harness skill directories receive installs.
-    /// The memory a launch gets, `None` when memory is off (globally, for
-    /// the profile, or for a `claude attach`, which takes no options).
-    fn memory_launch(
-        &mut self,
-        profile: &Profile,
-        dir: &std::path::Path,
-    ) -> Option<crate::memory::launch::Launch> {
-        let cfg = self.memory.as_ref()?;
-        let settings = crate::memory::Settings::resolve(Some(cfg), profile.memory.as_ref())?;
-        if profile.args.first().map(String::as_str) == Some("attach") {
-            return None;
-        }
-        let library = self.library_root();
-        let prompts = crate::prompts::Prompts::load(&library);
-        match crate::memory::launch::Launch::prepare(&library, &settings, dir, &prompts, Some(cfg))
-        {
-            Ok(mut l) => {
-                l.brief = self.next_brief.clone();
-                Some(l)
-            }
-            Err(e) => {
-                self.notice = Some(Notice::warn(format!("memory: {e}")));
-                None
-            }
-        }
-    }
-
-    /// The memory's environment, the fallback channel for a launch whose
-    /// start hook does not deliver the start text, and the `mux-memory` skill.
-    fn apply_memory(
-        &mut self,
-        m: &crate::memory::launch::Launch,
-        delivered: bool,
-        profile: &mut Profile,
-        extra_args: &mut Vec<String>,
-        extra_env: &mut Vec<(String, String)>,
-    ) {
-        use crate::harness::Harness;
-        use crate::memory::launch as ml;
-        extra_env.extend(m.env());
-        let harness = Harness::detect(&profile.command);
-        let invocation = crate::memory::invocation(harness);
-        let prompts = crate::prompts::Prompts::load(&self.library_root());
-        match harness {
-            // the system prompt is frozen per session: a pointer, never
-            // the memory text
-            // the launch's own hook tells it what changed before each
-            // prompt; a user-level one stays silent
-            Some(Harness::Claude) if delivered => {
-                extra_env.push((crate::memory::ENV_FRESH.into(), "launch".into()));
-            }
-            Some(Harness::Claude)
-                if !delivered
-                    && !ml::has_append_system_prompt(&profile.args)
-                    && !ml::has_append_system_prompt(extra_args) =>
-            {
-                extra_args.push("--append-system-prompt".into());
-                extra_args.push(crate::memory::context::hint(&m.dir, &invocation, &prompts));
-            }
-            // agy has no instruction flag: its memory plugin answers every
-            // model call (`memory::hook`), installed once per run
-            Some(Harness::Antigravity) => self.ensure_agy_memory_hook(),
-            Some(Harness::Codex) => {
-                let user = ml::codex_user_instructions(&self.skill_home());
-                ml::codex_instructions(
-                    &mut profile.args,
-                    extra_args,
-                    &m.start_text(&invocation, &prompts),
-                    user,
-                );
-            }
-            _ => {}
-        }
-        if let Some(h) = harness {
-            self.ensure_memory_skill(h);
-        }
-    }
-
-    /// Writes the Antigravity memory plugin when it is missing or runs
-    /// another binary; once per run, only from the real binary, and a
-    /// failure is a notice.
-    fn ensure_agy_memory_hook(&mut self) {
-        use crate::harness::Harness;
-        if self.agy_memory_checked || !self.may_install_globally() {
-            return;
-        }
-        self.agy_memory_checked = true;
-        let Some(exe) = crate::tracing::hooks::register::current_exe() else {
-            return;
-        };
-        let home = self.skill_home();
-        if crate::memory::hook::installed(&home, Harness::Antigravity).as_ref() == Some(&exe) {
-            return;
-        }
-        match crate::memory::hook::set(&home, Harness::Antigravity, Some(&exe)) {
-            Ok(_) => {
-                self.notice = Some(Notice::info(
-                    "Antigravity gets the shared memory through the agent-mux-memory plugin",
-                ))
-            }
-            Err(e) => self.notice = Some(Notice::warn(format!("Antigravity gets no memory: {e}"))),
-        }
-    }
-
-    /// Installs the `mux-memory` skill for a harness once per run; a failure
-    /// is a notice, the launch goes on.
-    fn ensure_memory_skill(&mut self, harness: crate::harness::Harness) {
-        if self.memory_skill_installed.contains(&harness) {
-            return;
-        }
-        let Some(def) = self.find_skill(crate::memory::SKILL_ID).cloned() else {
-            return;
-        };
-        match crate::skill::install::install(&def, harness, &self.skill_home(), false) {
-            Ok(_) => {
-                self.memory_skill_installed.insert(harness);
-            }
-            Err(e) => {
-                self.notice = Some(Notice::warn(format!(
-                    "memory skill for {}: {e}",
-                    harness.as_str()
-                )));
-            }
-        }
-    }
-
     fn skill_home(&self) -> std::path::PathBuf {
         self.skill_install_home
             .clone()
@@ -3382,7 +3183,6 @@ impl App {
             view.refresh_if_live(now);
         }
         self.resync_workflow_selection();
-        self.poll_pending_handoff(now);
         self.refresh_strip_if_needed(now);
         self.publish_live_snapshot_if_needed(now);
         self.refresh_briefing_if_needed(now);
@@ -3645,8 +3445,6 @@ impl App {
                         if !s.opening_args.is_empty() && p.args.ends_with(&s.opening_args) {
                             p.args.truncate(p.args.len() - s.opening_args.len());
                         }
-                        // composed again at the next launch
-                        crate::memory::launch::strip_codex_memory(&mut p.args);
                         p
                     },
                     continued_from: s.continued_from.clone(),
@@ -3856,17 +3654,6 @@ impl App {
             let home = self.skill_home();
             p.attach_loop(launch, &home);
         }
-        // The shared memory: on Claude with a registered hook, the
-        // `SessionStart` answer carries the start text (`trace hook`);
-        // other launches get a command-line fallback below.
-        let memory = self.memory_launch(&profile, &dir);
-        let memory_delivered = match (&memory, plan.as_mut()) {
-            (Some(_), Some(p)) => {
-                let home = self.skill_home();
-                p.attach_memory(&home)
-            }
-            _ => false,
-        };
         let mut extra_args: Vec<String> = match &plan {
             Some(p) => p.extra_args.clone(),
             None => Vec::new(),
@@ -3877,18 +3664,6 @@ impl App {
             None => Vec::new(),
         };
         extra_env.extend(env.iter().cloned());
-        if profile.memory.as_ref().and_then(|m| m.enabled) == Some(false) {
-            extra_env.push((crate::memory::ENV_OFF.into(), "1".into()));
-        }
-        if let Some(m) = &memory {
-            self.apply_memory(
-                m,
-                memory_delivered,
-                &mut profile,
-                &mut extra_args,
-                &mut extra_env,
-            );
-        }
         // An agent launch (fresh, restored or respawned) gets its facts
         // from Rust: the briefing snapshot and the MCP registration.
         let mut briefing_path = None;
@@ -3943,14 +3718,9 @@ impl App {
         )?;
         session.briefing_path = briefing_path;
         session.group = group;
-        // loops and workflow steps save nothing on close (spec open point 3)
-        if !is_loop && self.memory.as_ref().and_then(|c| c.save_on_close) != Some(false) {
-            session.memory_save = memory;
-        }
         if let (Some(rt), Some(plan)) = (self.tracing.as_mut(), plan) {
             session.trace = Some(rt.start_session(id, plan));
         }
-        self.record_pending_save(&session);
         Ok(session)
     }
 
@@ -5174,7 +4944,6 @@ impl App {
                 }
             }
             Action::ForkSession => self.open_handoff_dialog(self.selected),
-            Action::ForkHistorySession => self.open_history_handoff_dialog(self.selected_history),
             Action::RunAgent => {
                 if let Some(agents_list::AgentKind::Persona(name)) = self.agent_focus().cloned() {
                     self.open_agent_session(&name);
@@ -5314,11 +5083,6 @@ impl App {
                 p_tracing.content_mode = Some(dialog.content_mode.to_string());
                 p_tracing.backend = Some(dialog.backend.as_str().to_string());
                 profile.tracing = Some(p_tracing);
-                if dialog.memory_available && dialog.harness.is_some() {
-                    profile.memory = Some(crate::config::ProfileMemory {
-                        enabled: Some(dialog.memory),
-                    });
-                }
                 // options become real arguments before planning, so the
                 // trace planner sees --continue / -p / --resume and can
                 // decide about session-id injection on the same command
@@ -5339,42 +5103,27 @@ impl App {
                 };
                 // what this launch alone sends first, left out of a save
                 let mut opening_args: Vec<String> = Vec::new();
-                let continued_from = dialog
-                    .handoff_history
-                    .as_ref()
-                    .map(|h| format!("History · {}", h.title))
-                    .or_else(|| {
-                        dialog.handoff.and_then(|from| {
-                            self.sessions.iter().find(|s| s.id == from).map(|s| {
-                                let folder = s
-                                    .dir
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_default();
-                                format!("{} · {folder}", s.profile.name)
-                            })
-                        })
-                    });
-                let from = match (&dialog.handoff_history, dialog.handoff) {
-                    (Some(h), _) => Some(self.handoff_from_history(h)),
-                    (None, Some(from)) => Some(self.handoff_from_session(from)),
-                    (None, None) => None,
-                };
-                let handoff = match from {
-                    Some(from) => {
-                        match from.and_then(|f| {
-                            self.continue_from(f, dialog.harness, &dir, dialog.memory)
-                        }) {
-                            Ok(h) => Some(h),
-                            Err(e) => {
-                                let Mode::NewSession(dialog) = &mut self.mode else {
-                                    return;
-                                };
-                                dialog.error = Some(e);
+                let continued_from = dialog.handoff.and_then(|from| {
+                    self.sessions.iter().find(|s| s.id == from).map(|s| {
+                        let folder = s
+                            .dir
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        format!("{} · {folder}", s.profile.name)
+                    })
+                });
+                let handoff = match dialog.handoff {
+                    Some(from) => match self.session_handoff(from, dialog.harness, &dir) {
+                        Ok(h) => Some(h),
+                        Err(e) => {
+                            let Mode::NewSession(dialog) = &mut self.mode else {
                                 return;
-                            }
+                            };
+                            dialog.error = Some(e);
+                            return;
                         }
-                    }
+                    },
                     None => None,
                 };
                 let attach =
@@ -5403,23 +5152,12 @@ impl App {
                         profile.args.extend(opening.iter().cloned());
                         opening_args.extend(opening.iter().cloned());
                     }
-                    // another harness reads the old conversation first, or
-                    // starts from a hand-off brief
-                    if let Some(
-                        crate::handoff::Continue::Transcript(opening)
-                        | crate::handoff::Continue::Brief { opening, .. },
-                    ) = &handoff
-                    {
+                    // another harness reads the old conversation first
+                    if let Some(crate::handoff::Continue::Transcript(opening)) = &handoff {
                         profile.args.extend(opening.iter().cloned());
                         opening_args.extend(opening.iter().cloned());
                     }
                 }
-                let (brief, job) = match &handoff {
-                    Some(crate::handoff::Continue::Brief { brief, job, .. }) => {
-                        (Some(brief.clone()), job.clone())
-                    }
-                    _ => (None, None),
-                };
                 let launch = DialogLaunch {
                     profile,
                     dir,
@@ -5427,29 +5165,8 @@ impl App {
                     continued_from,
                     agent: dialog.agent.clone(),
                     link: dialog.experiment_link(),
-                    brief,
                     attach,
                 };
-                // a brief being written: the session starts when it is
-                // ready, or with the facts alone at the deadline
-                if let Some(job) = job {
-                    let wait = self
-                        .memory
-                        .as_ref()
-                        .and_then(|c| c.brief_timeout_s)
-                        .unwrap_or(crate::memory::brief::DEFAULT_TIMEOUT_S);
-                    self.notice = Some(Notice::info(format!(
-                        "writing the hand-off brief from {}… the new session starts when it is ready (at most {wait} s)",
-                        launch.continued_from.as_deref().unwrap_or("the session")
-                    )));
-                    self.pending_handoff = Some(PendingHandoff {
-                        launch,
-                        job,
-                        deadline: Instant::now() + std::time::Duration::from_secs(wait),
-                    });
-                    self.mode = Mode::Main;
-                    return;
-                }
                 if let Err(e) = self.finish_dialog_launch(launch) {
                     let Mode::NewSession(dialog) = &mut self.mode else {
                         return;
@@ -5490,12 +5207,10 @@ impl App {
     /// Spawns what the New session dialog asked for.
     fn finish_dialog_launch(&mut self, l: DialogLaunch) -> Result<(), String> {
         let id = self.next_id;
-        self.next_brief = l.brief;
         let spawned = match &l.attach {
             Some(background) => self.spawn_attached(id, &l.profile, background, l.dir),
             None => self.spawn_traced(id, l.profile, l.dir),
         };
-        self.next_brief = None;
         let mut session = spawned.map_err(|e| e.to_string())?;
         session.agent = l.agent;
         session.opening_args = l.opening_args;
@@ -5511,43 +5226,6 @@ impl App {
             self.experiment_links.insert(id, link);
         }
         Ok(())
-    }
-
-    /// A continue waiting for its brief: launched once the brief job is
-    /// done, or at the deadline with the facts alone.
-    pub fn poll_pending_handoff(&mut self, now: Instant) {
-        let Some(p) = &self.pending_handoff else {
-            return;
-        };
-        let done = !p.job.exists();
-        if !done && now < p.deadline {
-            return;
-        }
-        let Some(p) = self.pending_handoff.take() else {
-            return;
-        };
-        let complete = p
-            .launch
-            .brief
-            .as_deref()
-            .is_some_and(crate::memory::brief::is_complete);
-        let from = p
-            .launch
-            .continued_from
-            .clone()
-            .unwrap_or_else(|| "the session".into());
-        match self.finish_dialog_launch(p.launch) {
-            Ok(()) => {
-                self.notice = Some(if complete {
-                    Notice::info(format!("continuing {from} from its hand-off brief"))
-                } else {
-                    Notice::warn(format!(
-                        "the brief from {from} was not ready: continuing from the facts and the transcript"
-                    ))
-                });
-            }
-            Err(e) => self.notice = Some(Notice::error(format!("continue: {e}"))),
-        }
     }
 
     fn handle_browser_key(&mut self, key: &KeyEvent) {
@@ -6124,11 +5802,7 @@ impl App {
                 self.loop_audits.clear();
             }
             Some(Kind::Settings) => self.reload_settings(),
-            Some(Kind::Workflow)
-            | Some(Kind::Agent)
-            | Some(Kind::Prompts)
-            | Some(Kind::MemoryNote)
-            | None => {}
+            Some(Kind::Workflow) | Some(Kind::Agent) | Some(Kind::Prompts) | None => {}
         }
     }
 
@@ -6154,11 +5828,6 @@ impl App {
                 }
                 self.agents = crate::config::resolve_agents(cfg.agents.as_ref());
                 self.loops = crate::config::resolve_loops(cfg.loops.as_ref());
-                // a memory that is on follows the file; one left off (an App
-                // built by a test) stays off
-                if self.memory.is_some() {
-                    self.memory = Some(cfg.memory.unwrap_or_default());
-                }
                 self.editor = cfg.editor;
                 self.config_path = Some(path);
             }
@@ -6193,9 +5862,6 @@ impl App {
                     return;
                 };
                 let notice = match view.catalog.reset(&asset) {
-                    Ok(()) if asset.kind == Kind::MemoryNote => {
-                        Notice::info(format!("{} moved to notes/.removed/", asset.id))
-                    }
                     Ok(()) => Notice::info(format!("{} reset", asset.id)),
                     Err(e) => Notice::warn(e),
                 };
@@ -6699,7 +6365,6 @@ impl App {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
-                memory: None,
             });
         // A profile that says nothing takes the configured default, the
         // same rule the New session dialog shows.
@@ -6774,7 +6439,6 @@ impl App {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
-                memory: None,
             });
         // a resume replaces the profile's arguments: resuming an id and
         // whatever the profile said about starting fresh cannot both hold
@@ -6937,7 +6601,6 @@ impl App {
                 trace.mark_exited(code);
             }
             self.record_experiment_link(i);
-            self.save_memory_on_close(id);
             self.finish_loop_run_for_session(id);
             self.finish_workflow_session_for_session(id);
             self.finish_plan_for_session(id);
@@ -7386,7 +7049,6 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
-                memory: None,
             },
             Profile {
                 name: "B".into(),
@@ -7396,7 +7058,6 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
-                memory: None,
             },
         ]
     }
@@ -7492,7 +7153,6 @@ mod dialog_tests {
                 tracing: None,
                 model: Some("claude-opus-5".into()),
                 bypass_approvals: Some(true),
-                memory: None,
             },
             Profile {
                 name: "Codex".into(),
@@ -7502,7 +7162,6 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
-                memory: None,
             },
             Profile {
                 name: "Shell".into(),
@@ -7512,37 +7171,8 @@ mod dialog_tests {
                 tracing: None,
                 model: None,
                 bypass_approvals: None,
-                memory: None,
             },
         ]
-    }
-
-    #[test]
-    fn the_memory_field_follows_the_profile_and_agent_mux() {
-        let mut ps = harness_profiles();
-        ps[1].memory = Some(crate::config::ProfileMemory {
-            enabled: Some(false),
-        });
-        let mut d = DialogState::new(&ps);
-        assert!(d.memory);
-        assert!(
-            !d.fields().contains(&DialogField::Memory),
-            "memory off for agent-mux: no field"
-        );
-        d = d.with_memory(true);
-        let fields = d.fields();
-        let at = |f| fields.iter().position(|x| *x == f).unwrap();
-        assert_eq!(at(DialogField::Memory), at(DialogField::Resume) + 1);
-        d.set_profile(1, &ps);
-        assert!(!d.memory, "the profile's [profiles.memory] enabled = false");
-        d.set_profile(0, &ps);
-        assert!(d.memory);
-        d.field = DialogField::Memory;
-        d.handle_key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), &ps);
-        assert!(!d.memory);
-        // a plain command has no harness options, Memory among them
-        d.set_profile(2, &ps);
-        assert!(!d.fields().contains(&DialogField::Memory));
     }
 
     #[test]
@@ -7840,7 +7470,6 @@ mod dialog_tests {
             tracing: None,
             model: None,
             bypass_approvals: None,
-            memory: None,
         }];
         let d = DialogState::new(&profiles);
         assert_eq!(d.profile_idx, 0);
@@ -7880,7 +7509,6 @@ mod dialog_tests {
             tracing: None,
             model: None,
             bypass_approvals: None,
-            memory: None,
         }];
 
         let mut d = DialogState::new(&profiles);
