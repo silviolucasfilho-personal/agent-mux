@@ -2662,8 +2662,6 @@ pub struct App {
     /// Antigravity keeps its MCP servers in a global file, so agent-mux
     /// writes the entry once per run rather than on every launch.
     agy_mcp_checked: bool,
-    /// Whether the Antigravity memory plugin was checked this run.
-    agy_memory_checked: bool,
     /// Whether a launch bypasses the harness's approval prompts when the
     /// profile does not say. From `bypass_approvals` in profiles.toml.
     pub bypass_approvals_default: bool,
@@ -2826,7 +2824,6 @@ impl App {
             skill_workbench: None,
             agents: crate::config::AgentsSettings::default(),
             agy_mcp_checked: false,
-            agy_memory_checked: false,
             bypass_approvals_default: DEFAULT_BYPASS_APPROVALS,
             runtime_dir: None,
             cached_briefing: None,
@@ -2961,9 +2958,6 @@ impl App {
                 extra_args.push("--append-system-prompt".into());
                 extra_args.push(crate::memory::context::hint(&m.dir, &invocation, &prompts));
             }
-            // agy has no instruction flag: its memory plugin answers every
-            // model call (`memory::hook`), installed once per run
-            Some(Harness::Antigravity) => self.ensure_agy_memory_hook(),
             Some(Harness::Codex) => {
                 let user = ml::codex_user_instructions(&self.skill_home());
                 ml::codex_instructions(
@@ -2977,32 +2971,6 @@ impl App {
         }
         if let Some(h) = harness {
             self.ensure_memory_skill(h);
-        }
-    }
-
-    /// Writes the Antigravity memory plugin when it is missing or runs
-    /// another binary; once per run, only from the real binary, and a
-    /// failure is a notice.
-    fn ensure_agy_memory_hook(&mut self) {
-        use crate::harness::Harness;
-        if self.agy_memory_checked || !self.may_install_globally() {
-            return;
-        }
-        self.agy_memory_checked = true;
-        let Some(exe) = crate::tracing::hooks::register::current_exe() else {
-            return;
-        };
-        let home = self.skill_home();
-        if crate::memory::hook::installed(&home, Harness::Antigravity).as_ref() == Some(&exe) {
-            return;
-        }
-        match crate::memory::hook::set(&home, Harness::Antigravity, Some(&exe)) {
-            Ok(_) => {
-                self.notice = Some(Notice::info(
-                    "Antigravity gets the shared memory through the agent-mux-memory plugin",
-                ))
-            }
-            Err(e) => self.notice = Some(Notice::warn(format!("Antigravity gets no memory: {e}"))),
         }
     }
 

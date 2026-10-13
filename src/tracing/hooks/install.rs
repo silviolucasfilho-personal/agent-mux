@@ -144,7 +144,7 @@ fn command_exe(command: &str) -> Option<PathBuf> {
     }
 }
 
-pub(crate) fn read_json(path: &Path) -> Result<Option<Value>, String> {
+fn read_json(path: &Path) -> Result<Option<Value>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) if text.trim().is_empty() => Ok(None),
         Ok(text) => serde_json::from_str(&text)
@@ -155,7 +155,7 @@ pub(crate) fn read_json(path: &Path) -> Result<Option<Value>, String> {
     }
 }
 
-pub(crate) fn write_json(path: &Path, value: &Value) -> Result<(), String> {
+fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
