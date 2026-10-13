@@ -17,7 +17,6 @@ pub const USAGE: &str = "agent-mux memory <command>
   check                        validate every note, expire old ones, rebuild the index;
                                exit 1 when a note has problems
   path                         which folder is in use, and why
-  save-session <job>           run one save on close (agent-mux starts it; docs/memory.md)
 
 Every command takes --workspace DIR (default: $AGENT_MUX_MEMORY inside a session,
 else the current folder) or --user (the facts that hold in every workspace).
@@ -147,13 +146,6 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
     if matches!(cmd, None | Some("help") | Some("--help") | Some("-h")) || args.has("help") {
         println!("{USAGE}");
         return Ok(());
-    }
-    if cmd == Some("save-session") {
-        let job = args
-            .positional
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("a job file is needed\n\n{USAGE}"))?;
-        return super::save::run(std::path::Path::new(job));
     }
     let t = target(&args)?;
     let prompts = Prompts::current();

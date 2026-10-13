@@ -28,7 +28,6 @@ pub mod flow_builder;
 pub mod harness_recap;
 pub mod inbox;
 pub mod loop_builder;
-mod memory_save;
 pub mod new_agent;
 pub mod runs_view;
 pub mod shortcut_probe;
@@ -3868,10 +3867,6 @@ impl App {
         )?;
         session.briefing_path = briefing_path;
         session.group = group;
-        // loops and workflow steps save nothing on close (spec open point 3)
-        if !is_loop && self.memory.as_ref().and_then(|c| c.save_on_close) != Some(false) {
-            session.memory_save = memory;
-        }
         if let (Some(rt), Some(plan)) = (self.tracing.as_mut(), plan) {
             session.trace = Some(rt.start_session(id, plan));
         }
@@ -6854,7 +6849,6 @@ impl App {
                 trace.mark_exited(code);
             }
             self.record_experiment_link(i);
-            self.save_memory_on_close(id);
             self.finish_loop_run_for_session(id);
             self.finish_workflow_session_for_session(id);
             self.finish_plan_for_session(id);

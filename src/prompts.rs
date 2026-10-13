@@ -47,9 +47,6 @@ pub struct Prompts {
     pub memory_index_footer: String,
     /// `[memory] brief_footer`: said after a delivered hand-off brief.
     pub memory_brief_footer: String,
-    /// `[memory] save`: the one turn a closing session is asked for, to
-    /// save what the next session needs (`memory::save`).
-    pub memory_save: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -72,7 +69,6 @@ struct MemoryDoc {
     notice: Option<String>,
     index_footer: Option<String>,
     brief_footer: Option<String>,
-    save: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -123,7 +119,6 @@ impl Prompts {
             memory_notice: doc.memory.notice.unwrap_or_default(),
             memory_index_footer: doc.memory.index_footer.unwrap_or_default(),
             memory_brief_footer: doc.memory.brief_footer.unwrap_or_default(),
-            memory_save: doc.memory.save.unwrap_or_default(),
         }
     }
 
@@ -155,7 +150,6 @@ impl Prompts {
             (m.notice, &mut p.memory_notice),
             (m.index_footer, &mut p.memory_index_footer),
             (m.brief_footer, &mut p.memory_brief_footer),
-            (m.save, &mut p.memory_save),
         ] {
             if let Some(v) = value {
                 *slot = v;
@@ -261,7 +255,6 @@ pub fn validate(text: &str) -> Vec<String> {
             &doc.memory.brief_footer,
             &["brief"][..],
         ),
-        ("memory.save", &doc.memory.save, MEMORY_SAVE_PLACEHOLDERS),
     ] {
         if let Some(t) = text {
             if t.trim().is_empty() {
@@ -279,9 +272,6 @@ pub fn validate(text: &str) -> Vec<String> {
 
 /// Placeholders `[memory] hint` accepts.
 pub const MEMORY_HINT_PLACEHOLDERS: &[&str] = &["memory", "index", "invocation"];
-
-/// Placeholders `[memory] save` accepts.
-pub const MEMORY_SAVE_PLACEHOLDERS: &[&str] = &["source", "max", "memory"];
 
 /// Fills `[memory] hint`.
 pub fn render_memory_hint(template: &str, memory: &str, index: &str, invocation: &str) -> String {

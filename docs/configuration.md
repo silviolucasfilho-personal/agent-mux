@@ -72,7 +72,7 @@ hydration_hint = "Read the briefing snapshot at $AGENT_MUX_BRIEFING …"
 - A skill's opening sentence is `startup_prompt` in its `skill.toml`, already per package; Heimdall's is `skills/heimdall/skill.toml` in the library once you edit it.
 - `agent.preamble` is inserted as a `## Baseline` section right after the frontmatter of every loop agent the scaffolder or `config push` installs (inside the instructions for Codex). Leave it empty to install agents as written.
 
-- `[memory]` holds what a session with shared memory is told at start: `hint` (placeholders `{memory}`, `{index}`, `{invocation}`), `notice` (the line heading every fenced memory block), `index_footer` (`{count}`, the last line of a cut index) and `brief_footer` (`{brief}`), and `save`, the one turn a closing session is asked for (`{source}`, `{max}`, `{memory}`; `docs/memory.md` section 5). `docs/memory.md` section 4 says how each harness receives the others.
+- `[memory]` holds what a session with shared memory is told at start: `hint` (placeholders `{memory}`, `{index}`, `{invocation}`), `notice` (the line heading every fenced memory block), `index_footer` (`{count}`, the last line of a cut index) and `brief_footer` (`{brief}`). `docs/memory.md` section 4 says how each harness receives them.
 
 Prompts are read at launch time: an edit applies to the next run without a restart.
 

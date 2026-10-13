@@ -332,7 +332,7 @@ impl App {
         harness: Option<crate::harness::Harness>,
         dir: &std::path::Path,
     ) -> Result<crate::handoff::Continue, String> {
-        use crate::handoff::{self, Continue};
+        use crate::handoff::{self, Continue, Source};
         use crate::harness::Harness;
         let harness = harness.ok_or("continue on a Claude Code, Codex or Antigravity profile")?;
         let s = self
@@ -340,42 +340,6 @@ impl App {
             .iter()
             .find(|s| s.id == from)
             .ok_or("the session to continue is gone")?;
-        let from_harness = Harness::detect(&s.profile.command)
-            .ok_or("that session's CLI is not one agent-mux knows")?;
-        let source = self.session_source(s)?;
-        if harness == from_harness && crate::harness::can_fork(harness) {
-            return Ok(Continue::Fork(source.conversation));
-        }
-        let text = handoff::source_text(&source)?;
-        let name = format!(
-            "{}-{}",
-            source.provider.as_str(),
-            source.conversation.chars().take(8).collect::<String>()
-        );
-        let file = handoff::write(
-            &self.workflows_runtime_dir().join("handoffs"),
-            &name,
-            &handoff::render(source.provider, &text),
-        )
-        .map_err(|e| format!("handoff: {e}"))?;
-        let message = handoff::opening_message(source.provider, dir, &file);
-        Ok(Continue::Transcript(match harness {
-            Harness::Antigravity => vec!["--prompt-interactive".into(), message],
-            _ => vec![message],
-        }))
-    }
-
-    /// The conversation session `s` had: the one the trace store
-    /// correlated to its launch; else the one it carries (a resume), with
-    /// its file from the store or the harness's own folders; else, tracing
-    /// off, the one transcript the harness wrote in its folder since it
-    /// started.
-    pub fn session_source(
-        &self,
-        s: &crate::session::Session,
-    ) -> Result<crate::handoff::Source, String> {
-        use crate::handoff::{self, Source};
-        use crate::harness::Harness;
         let from_harness = Harness::detect(&s.profile.command)
             .ok_or("that session's CLI is not one agent-mux knows")?;
         let provider = handoff::provider_of(from_harness.as_str()).ok_or("unknown provider")?;
@@ -414,10 +378,30 @@ impl App {
                 transcript: path,
             })
         };
-        match traced.or_else(resumed) {
-            Some(src) => Ok(src),
-            None => handoff::find_on_disk(provider, &s.dir, s.started_at),
+        let source = match traced.or_else(resumed) {
+            Some(src) => src,
+            None => handoff::find_on_disk(provider, &s.dir, s.started_at)?,
+        };
+        if harness == from_harness && crate::harness::can_fork(harness) {
+            return Ok(Continue::Fork(source.conversation));
         }
+        let text = handoff::source_text(&source)?;
+        let name = format!(
+            "{}-{}",
+            source.provider.as_str(),
+            source.conversation.chars().take(8).collect::<String>()
+        );
+        let file = handoff::write(
+            &self.workflows_runtime_dir().join("handoffs"),
+            &name,
+            &handoff::render(source.provider, &text),
+        )
+        .map_err(|e| format!("handoff: {e}"))?;
+        let message = handoff::opening_message(source.provider, dir, &file);
+        Ok(Continue::Transcript(match harness {
+            Harness::Antigravity => vec!["--prompt-interactive".into(), message],
+            _ => vec![message],
+        }))
     }
 
     /// The New session dialog, on harness profile `profile` when given.
