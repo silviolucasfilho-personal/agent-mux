@@ -14,13 +14,8 @@ pub const USAGE: &str = "agent-mux memory <command>
          [--confidence stated|observed] [--harness H] [--launch ID] [--force]
                                write a note (the body from stdin when --body is absent)
   rm <name>                    move a note to notes/.removed/ (nothing is deleted)
-  search <words> [--json]      every note (past the index too, the user's, the imported
-                               mirrors) that matches all the words, best first
-  check                        validate every note, expire old ones, rebuild the index,
-                               report likely duplicates; exit 1 when a note has problems
-  tidy [--dry-run] [--harness claude|codex|agy]
-                               merge the likely duplicates with one model run; the
-                               originals move to notes/.merged/
+  check                        validate every note, expire old ones, rebuild the index;
+                               exit 1 when a note has problems
   path                         which folder is in use, and why
   save-session <job>           run one save on close (agent-mux starts it; docs/memory.md)
   install [claude|codex|agy]   give sessions started outside agent-mux the memory: a start
@@ -44,7 +39,6 @@ const BOOL_FLAGS: &[&str] = &[
     "force",
     "help",
     "per-launch",
-    "dry-run",
 ];
 
 struct Args {
@@ -251,8 +245,6 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         Some("check") => check(&t, &prompts),
-        Some("search") | Some("find") => search_cmd(&t, &args),
-        Some("tidy") => tidy_cmd(&t, &args, &prompts),
         Some("path") => {
             println!("memory   {}", t.dir.display());
             println!("why      {}", t.why);
@@ -447,9 +439,6 @@ fn check(t: &Target, prompts: &Prompts) -> anyhow::Result<()> {
                 format!("{} with problems", problems.len())
             }
         );
-        for g in super::quality::duplicates(dir) {
-            println!("  likely duplicates: {}", g.join(", "));
-        }
     }
     // the start text a session would be given now, as a size check
     let text = context::session_context(
@@ -523,92 +512,6 @@ fn hooks_cmd(cmd: &str, args: &Args) -> anyhow::Result<()> {
                 "        Codex runs it only once you trust it: open Codex, run /hooks and trust the agent-mux memory entry."
             );
         }
-    }
-    Ok(())
-}
-
-fn search_cmd(t: &Target, args: &Args) -> anyhow::Result<()> {
-    let query = args.positional.join(" ");
-    if query.trim().is_empty() {
-        anyhow::bail!("what to search for: agent-mux memory search <words>\n\n{USAGE}");
-    }
-    let user = (!t.is_user && t.user_dir.is_dir()).then_some(t.user_dir.as_path());
-    let hits = super::quality::search(&t.dir, user, &query);
-    if args.has("json") {
-        let items: Vec<serde_json::Value> = hits
-            .iter()
-            .map(|h| {
-                serde_json::json!({
-                    "place": h.place,
-                    "path": h.path,
-                    "line": h.line,
-                    "snippet": h.snippet,
-                    "score": h.score,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&items)?);
-        return Ok(());
-    }
-    if hits.is_empty() {
-        println!("nothing matches {query:?}");
-    }
-    for h in hits.iter().take(20) {
-        println!("{:<9} {}", h.place, h.line);
-        if let Some(s) = &h.snippet {
-            println!("          … {s}");
-        }
-        println!("          {}", h.path.display());
-    }
-    if hits.len() > 20 {
-        println!(
-            "{} more: narrow the words, or --json for all",
-            hits.len() - 20
-        );
-    }
-    Ok(())
-}
-
-fn tidy_cmd(t: &Target, args: &Args, prompts: &Prompts) -> anyhow::Result<()> {
-    use super::quality;
-    let groups = quality::duplicates(&t.dir);
-    if groups.is_empty() {
-        println!("no likely duplicates in {}", t.dir.display());
-        return Ok(());
-    }
-    for g in &groups {
-        println!("likely duplicates: {}", g.join(", "));
-    }
-    if args.has("dry-run") {
-        return Ok(());
-    }
-    let asked = match args.value("harness") {
-        Some(w) => Some(
-            super::hook::parse_harness(w)
-                .ok_or_else(|| anyhow::anyhow!("--harness takes claude, codex or agy"))?,
-        ),
-        None => None,
-    };
-    let harness = quality::tidy_harness(asked)
-        .ok_or_else(|| anyhow::anyhow!("no claude, codex or agy on the PATH to merge them"))?;
-    println!("merging with {}…", harness.as_str());
-    let cwd = t.workspace.clone().unwrap_or_else(|| t.dir.clone());
-    let cwd = if cwd.is_dir() { cwd } else { t.dir.clone() };
-    let done = quality::tidy(&t.dir, harness, prompts, t.settings.index_lines, &cwd)
-        .map_err(|e| anyhow::anyhow!(e))?;
-    for (name, replaced) in &done.merged {
-        println!("merged {} → notes/{name}.md", replaced.join(" + "));
-    }
-    for r in &done.rejected {
-        println!("! {r}");
-    }
-    if done.merged.is_empty() {
-        println!("nothing merged: the model kept the notes apart");
-    } else {
-        println!(
-            "the originals are in {}",
-            paths::notes_dir(&t.dir).join(quality::MERGED).display()
-        );
     }
     Ok(())
 }

@@ -177,27 +177,6 @@ The brief is written in two steps:
 
 The new session starts as soon as the brief is complete, or after `[memory] brief_timeout_s` (90 s by default) with the facts alone. The status line says which. The brief reaches it inside its start text (`$AGENT_MUX_MEMORY_BRIEF`), and its first message tells it to carry on from the brief's next step. A brief is addressed: only the session `f` launches is given it, never whoever starts next in the folder.
 
-## 6c. Search and duplicates
-
-The index lists at most `index_lines` notes (60), pinned first and older observed notes last. Search reaches everything else:
-
-```sh
-agent-mux memory search postgres replication     # every word must match
-agent-mux memory search ci cache --json
-```
-
-It looks through the workspace's notes (past the index too), the user's notes, and each line of the imported mirrors. Results are ranked by where the words match: the name first, then the description, then the body, which also gives a snippet. The start hint and the index footer point sessions at it, and the `mux-memory` skill searches before it saves (to update a note instead of adding a second one) and when the index shows nothing for a recall.
-
-Notes saved by different sessions can still say one thing twice. `agent-mux memory check` reports **likely duplicates**: notes in one folder whose name and description, or whole text, share most of their words. No model is used for this. `agent-mux memory tidy` merges them:
-
-```sh
-agent-mux memory tidy --dry-run          # the groups, nothing changed
-agent-mux memory tidy                    # one headless run merges each group
-agent-mux memory tidy --harness codex    # claude, codex or agy (default: the first installed)
-```
-
-The run is fresh, with no tools, and nothing of it is saved. It gets each group's files with the `[memory] tidy` prompt and answers with one merged note per group, naming the notes it replaces; it may leave a group apart when the notes are really different facts. agent-mux writes the merged note, keeping a pin and `stated` when any original had them, and moves the originals to `notes/.merged/`, never deleting them. The log line is `merged a + b → notes/<name>.md`.
-
 ## 7. Command line
 
 ```sh
@@ -206,9 +185,7 @@ agent-mux memory show <name>               # a note's file
 agent-mux memory add <name> --description "…" [--kind K] [--body TEXT] [--pinned] [--expires YYYY-MM-DD]
 echo "The fact." | agent-mux memory add <name> --description "…"   # the body from stdin
 agent-mux memory rm <name>                 # move it to notes/.removed/
-agent-mux memory search <words> [--json]   # every note that matches, past the index too
-agent-mux memory check                     # validate, expire, rebuild, report duplicates; exit 1 on problems
-agent-mux memory tidy [--dry-run]          # merge likely duplicates with one model run
+agent-mux memory check                     # validate, expire, rebuild; exit 1 on problems
 agent-mux memory path                      # which folder, and why
 agent-mux memory save-session <job>        # one save on close (agent-mux starts it)
 agent-mux memory install|uninstall|status [claude|codex|agy]   # the start hooks (section 6)
@@ -248,7 +225,7 @@ command = "claude"
 enabled = false           # this profile's sessions get no memory
 ```
 
-The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`, `save`, `brief`, `tidy`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/mux-memory/` like Heimdall. `brief_timeout_s` is how long `f` waits for a brief (section 6b); `handoff` and `keeper` are read but not used yet; `imports` picks the mirrors (section 6a).
+The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`, `save`, `brief`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/mux-memory/` like Heimdall. `brief_timeout_s` is how long `f` waits for a brief (section 6b); `handoff` and `keeper` are read but not used yet; `imports` picks the mirrors (section 6a).
 
 ## 10. Not yet
 
