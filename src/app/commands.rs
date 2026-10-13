@@ -42,7 +42,7 @@ impl App {
         let supported = match id {
             SubmitDialog => matches!(self.mode, Mode::NewSession(_) | Mode::WorkflowDialog(_)),
             Commands | Help | FocusAgents | TestShortcuts | Quit | Runs | Skills
-            | Configuration | Inbox | History => true,
+            | Configuration | Memory | Inbox | History => true,
             ReturnToSession => self.return_session_id().is_some(),
             PrevSession | NextSession => session.is_some(),
             ToggleSidebar => matches!(self.mode, Mode::Main | Mode::TraceBrowser(_)),
@@ -187,6 +187,7 @@ impl App {
             }
             Skills => self.request_navigation(NavigationTarget::Skills, now),
             Configuration => self.request_navigation(NavigationTarget::Configuration, now),
+            Memory => self.request_navigation(NavigationTarget::Memory, now),
             Inbox => self.request_navigation(NavigationTarget::Inbox, now),
             History => self.request_navigation(NavigationTarget::History, now),
             FilterClaude | FilterCodex | FilterAntigravity => {
@@ -279,6 +280,7 @@ pub enum NavigationTarget {
     Quit,
     Skills,
     Configuration,
+    Memory,
     Inbox,
     History,
 }
@@ -502,6 +504,9 @@ impl App {
             NavigationTarget::Quit => self.quit_from_chord(),
             NavigationTarget::Skills => self.open_skills_view(),
             NavigationTarget::Configuration => self.open_config_view(),
+            NavigationTarget::Memory => {
+                self.mode = Mode::Memory(Box::new(super::memory_view::MemoryView::open()))
+            }
             NavigationTarget::Inbox => self.open_inbox(),
             NavigationTarget::History => self.apply(
                 super::Action::OpenSessionHistory,
@@ -523,6 +528,7 @@ impl App {
             Mode::SkillsView(_) => "Skills",
             Mode::ConfigView(_) => "Configuration",
             Mode::Markdown(_) => "Markdown",
+            Mode::Memory(_) => "Memory",
             _ => "Dialog",
         }
     }

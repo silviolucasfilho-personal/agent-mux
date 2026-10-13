@@ -53,6 +53,7 @@ agent-mux trace doctor        # config, store health, provider readiness, hooks
 agent-mux trace path          # where the SQLite store is
 agent-mux skill list
 agent-mux md README.md        # Markdown viewer and editor, Mermaid drawn as text (docs/markdown.md)
+agent-mux memory install      # shared memory for Claude, Codex and agy through ai-memory (docs/memory.md)
 agent-mux run --help
 ```
 
@@ -291,6 +292,7 @@ Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secr
 | `AGENT_MUX_BRIEFING`, `AGENT_MUX_BRIEFING_AS_OF` | Path and RFC 3339 time of the briefing snapshot written for an agent launch (section 11). |
 | `AGENT_MUX_MCP`, `AGENT_MUX_WORKSPACE` | `registered`, `installed` or `unavailable`: how the session reaches the MCP server; the workspace the server is scoped to. Set on every session, not only agent launches. |
 | `~/.agent-mux/snapshots/briefings/<key>.json` | Briefing snapshots, owner-only, removed when the session exits and swept after 24 hours. |
+| `AI_MEMORY_BIN`, `AI_MEMORY_SERVER_URL`, `AI_MEMORY_DATA_DIR` | ai-memory's binary, server address and data folder, as the Memory screen and `agent-mux memory` find them (`docs/memory.md`). |
 | `AGENT_MUX_IMAGES` | How the Markdown viewer draws images: `kitty`, `iterm2`, `sixel`, `halfblocks`, or `off` for captions only. Unset: the protocol the terminal's environment points to (kitty, Ghostty, iTerm2, WezTerm …), else half blocks (`docs/markdown.md`). |
 | `AGENT_MUX_PTY_LOG` | A folder: every session records what its program wrote to the terminal (raw bytes and resizes, not your keystrokes) to `<dir>/<time>-<profile>-<id>.ptylog`, for debugging a screen that looks different inside agent-mux. `agent-mux pty replay <file> [--list] [--until N] [--raw]` replays one through agent-mux's emulator, or prints its bytes for a real terminal (`src/ptylog.rs`). Off when unset; the files hold everything the sessions showed. |
 | `AGENT_MUX_AGY_BIN`, `AGENT_MUX_MCP_DEBUG` | Tests point the agy installer at a fake `agy`; the debug variable logs MCP method names on the server's stderr. |

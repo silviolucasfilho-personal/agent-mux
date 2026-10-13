@@ -35,6 +35,7 @@ pub use config_view::*;
 pub mod loops;
 pub mod loops_view;
 pub mod markdown_view;
+pub mod memory_view;
 mod skills_view;
 pub mod text_area;
 pub mod workflows;
@@ -73,6 +74,8 @@ pub enum Mode {
     NewAgent(Box<new_agent::NewAgentState>),
     /// The Markdown viewer and editor: a `.md` link clicked in the pane.
     Markdown(Box<markdown_view::MarkdownView>),
+    /// The Memory screen: ai-memory's setup and its install flow.
+    Memory(Box<memory_view::MemoryView>),
 }
 
 /// An external editor the main loop must run for the App: it leaves the
@@ -209,6 +212,7 @@ pub enum Action {
     /// About mode: App routes the key to the AboutState it owns.
     AboutKey,
     MarkdownKey,
+    MemoryKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
     /// `C`: the Configuration view.
     OpenConfigView,
@@ -789,6 +793,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::RunsView(_) => Action::RunsKey,
         Mode::NewAgent(_) => Action::NewAgentKey,
         Mode::Markdown(_) => Action::MarkdownKey,
+        Mode::Memory(_) => Action::MemoryKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => Action::EnterConfirmRemoveLoop,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
@@ -3182,6 +3187,9 @@ impl App {
         if let Mode::SkillsView(view) = &mut self.mode {
             view.refresh_if_live(now);
         }
+        if let Mode::Memory(view) = &mut self.mode {
+            view.poll();
+        }
         self.resync_workflow_selection();
         self.refresh_strip_if_needed(now);
         self.publish_live_snapshot_if_needed(now);
@@ -4806,6 +4814,13 @@ impl App {
                 }
             }
             Action::OpenAbout => self.open_about(),
+            Action::MemoryKey => {
+                if let Mode::Memory(view) = &mut self.mode
+                    && view.handle_key(key) == memory_view::Outcome::Close
+                {
+                    self.mode = Mode::Main;
+                }
+            }
             Action::MarkdownKey => {
                 if let Mode::Markdown(view) = &mut self.mode {
                     let outcome = view.handle_key(key);
