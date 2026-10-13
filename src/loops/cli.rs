@@ -1013,7 +1013,6 @@ async fn run_loop(args: &Args) -> anyhow::Result<()> {
     app.clipboard_enabled = false;
     app.loops = crate::config::resolve_loops(cfg.loops.as_ref());
     app.loops.enabled = false; // only the loop asked for, never the others
-    app.memory = Some(cfg.memory.clone().unwrap_or_default());
     app.load_loop_registry();
     if args.has("now")
         && let Some(l) = app.loop_registry.find_mut(&entry.id)

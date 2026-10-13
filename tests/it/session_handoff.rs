@@ -21,7 +21,6 @@ fn profile(name: &str) -> Profile {
         tracing: None,
         model: None,
         bypass_approvals: None,
-        memory: None,
     }
 }
 

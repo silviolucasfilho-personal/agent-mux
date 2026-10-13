@@ -86,18 +86,18 @@ fn ls_check_show_and_path_describe_the_builtin_set() {
     assert!(out.contains("loops/skills/loop-triage/SKILL.md"));
     assert!(out.contains("skills/heimdall/reference/agents.md"));
     let builtin_rows = out.lines().filter(|l| l.contains("built-in")).count();
-    assert_eq!(builtin_rows, 89, "{out}");
+    assert_eq!(builtin_rows, 87, "{out}");
 
     let (ok, out, _) = run(&f, &["config", "ls", "--json"]);
     assert!(ok);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["items"].as_array().unwrap().len(), 89);
+    assert_eq!(v["items"].as_array().unwrap().len(), 87);
     assert_eq!(v["root"].as_str().unwrap(), f.library.to_string_lossy());
 
     let (ok, out, _) = run(&f, &["config", "check"]);
     assert!(ok);
     assert!(
-        out.contains("89 items, 0 overridden or added, no problems"),
+        out.contains("87 items, 0 overridden or added, no problems"),
         "{out}"
     );
 
@@ -226,7 +226,7 @@ fn new_items_are_listed_as_user_and_deleted_by_reset() {
     }
     let (ok, out, _) = run(&f, &["config", "check"]);
     assert!(ok, "{out}");
-    assert!(out.contains("93 items, 4 overridden or added"), "{out}");
+    assert!(out.contains("91 items, 4 overridden or added"), "{out}");
 
     // the new skill package is a real package: `skill list` sees it
     let (ok, out, err) = run(&f, &["skill", "list"]);
@@ -575,41 +575,4 @@ fn the_catalog_reads_the_settings_file_it_is_given() {
     let created = cat.create_override(s).unwrap();
     assert!(created.is_file());
     assert!(agent_mux::config::parse(&std::fs::read_to_string(&created).unwrap()).is_ok());
-}
-
-#[test]
-fn memory_notes_are_configuration_items_with_their_problems() {
-    let f = fixture();
-    let notes = f.library.join("memory/_user/notes");
-    std::fs::create_dir_all(&notes).unwrap();
-    std::fs::write(
-        notes.join("good.md"),
-        "---\nname: good\ndescription: a fine note\nkind: user\n---\nx\n",
-    )
-    .unwrap();
-    std::fs::write(
-        notes.join("odd.md"),
-        "---\nname: odd\ndescription: a note of an unknown kind\nkind: gossip\n---\nx\n",
-    )
-    .unwrap();
-    let (ok, out, _) = run(&f, &["config", "ls", "--json"]);
-    assert!(ok);
-    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let kinds: Vec<&str> = v["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|i| i["kind"] == "memory note")
-        .map(|i| i["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(kinds, vec!["user · good", "user · odd"]);
-    let (ok, out, _) = run(&f, &["config", "check"]);
-    assert!(!ok);
-    assert!(
-        out.contains("memory/_user/notes/odd.md: kind \"gossip\""),
-        "{out}"
-    );
-    let (ok, out, _) = run(&f, &["config", "new", "memory-note", "likes-tables"]);
-    assert!(ok, "{out}");
-    assert!(notes.join("likes-tables.md").is_file());
 }

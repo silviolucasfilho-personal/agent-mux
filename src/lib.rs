@@ -15,7 +15,6 @@ pub mod links;
 pub mod loops;
 pub mod markdown;
 pub mod mcp;
-pub mod memory;
 pub mod mouse;
 pub mod persistence;
 pub mod prompts;

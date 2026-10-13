@@ -25,18 +25,6 @@
 # dynamic_approval = "always"
 # default_budget_tokens = 0
 #
-# Memory (docs/memory.md): one memory per workspace, shared by every
-# harness and agent agent-mux launches there. "library" keeps it under
-# ~/.agent-mux/memory/<slug>/, "workspace" under <workspace>/.agent-mux/memory/
-# (where it can be committed). A profile opts out with [profiles.memory].
-# [memory]
-# enabled = true
-# location = "library"
-# index_lines = 60
-#
-# [profiles.memory]
-# enabled = false
-#
 # Note: a cwd-relative ./profiles.toml wins the search even when it contains
 # only a [tracing] section — the built-in default profiles are used and any
 # ~/.agent-mux/profiles.toml is shadowed. If you customize profiles, keep

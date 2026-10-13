@@ -138,7 +138,6 @@ fn fixture(bin: &Path, temp: tempfile::TempDir) -> Fixture {
             tracing: None,
             model: None,
             bypass_approvals: None,
-            memory: None,
         })
         .collect();
     let mut app = App::new(profiles, Some(runtime), tx);

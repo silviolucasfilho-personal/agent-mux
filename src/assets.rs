@@ -62,17 +62,15 @@ pub enum Kind {
     LoopTemplate,
     Workflow,
     Agent,
-    MemoryNote,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 10] = [
+    pub const ALL: [Kind; 9] = [
         Kind::Prompts,
         Kind::Settings,
         Kind::Skill,
         Kind::Workflow,
         Kind::Agent,
-        Kind::MemoryNote,
         Kind::LoopPattern,
         Kind::LoopSkill,
         Kind::LoopAgent,
@@ -90,7 +88,6 @@ impl Kind {
             Kind::LoopTemplate => "loop template",
             Kind::Workflow => "workflow",
             Kind::Agent => "agent",
-            Kind::MemoryNote => "memory note",
         }
     }
 
@@ -106,7 +103,6 @@ impl Kind {
             Kind::LoopTemplate => "Loop templates",
             Kind::Workflow => "Workflows",
             Kind::Agent => "Agents",
-            Kind::MemoryNote => "Memory",
         }
     }
 
@@ -114,12 +110,7 @@ impl Kind {
     pub fn creatable(self) -> bool {
         matches!(
             self,
-            Kind::Skill
-                | Kind::LoopSkill
-                | Kind::LoopAgent
-                | Kind::Workflow
-                | Kind::Agent
-                | Kind::MemoryNote
+            Kind::Skill | Kind::LoopSkill | Kind::LoopAgent | Kind::Workflow | Kind::Agent
         )
     }
 
@@ -131,7 +122,6 @@ impl Kind {
             Kind::LoopAgent => Some("loop-agent"),
             Kind::Workflow => Some("workflow"),
             Kind::Agent => Some("agent"),
-            Kind::MemoryNote => Some("memory-note"),
             _ => None,
         }
     }
@@ -302,7 +292,6 @@ impl Catalog {
         cat.scan_skills();
         cat.scan_workflows();
         cat.scan_agents();
-        cat.scan_memory();
         cat.push_builtin(
             Kind::LoopPattern,
             "loops/registry.toml",
@@ -469,41 +458,6 @@ impl Catalog {
         }
     }
 
-    /// Every note of the library's memory folders (`memory/<slug>/notes/`
-    /// and `memory/_user/notes/`). A workspace that keeps its memory in its
-    /// own tree (`location = "workspace"`) is not scanned here.
-    fn scan_memory(&mut self) {
-        let root = crate::memory::paths::memory_root(&self.root);
-        let home_slug = std::env::var_os("HOME")
-            .map(|h| crate::history::project_slug(Path::new(&h)))
-            .unwrap_or_default();
-        for d in sorted_dirs(&root) {
-            let Some(slug) = d.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
-                continue;
-            };
-            let place = if slug == crate::memory::paths::USER {
-                "user".to_string()
-            } else {
-                slug.strip_prefix(&home_slug)
-                    .map(|s| s.trim_start_matches('-'))
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&slug)
-                    .to_string()
-            };
-            for f in crate::memory::note::files(&d) {
-                let Some(stem) = f.file_stem().and_then(|n| n.to_str()).map(str::to_string) else {
-                    continue;
-                };
-                self.push_user(
-                    Kind::MemoryNote,
-                    format!("memory/{slug}/notes/{stem}.md"),
-                    f,
-                    format!("{place} · {stem}"),
-                );
-            }
-        }
-    }
-
     fn scan_loop_skills(&mut self) {
         for (name, text) in scaffold::embedded_skills() {
             self.push_builtin(
@@ -598,21 +552,6 @@ impl Catalog {
                 Kind::LoopTemplate => validate_template(&a.name, &a.effective()),
                 Kind::Workflow => validate_workflow(&a.name, &a.effective(), &skill_infos),
                 Kind::Agent => validate_agent(&a.name, &a.effective()),
-                Kind::MemoryNote => {
-                    let stem = a
-                        .path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    match crate::memory::note::parse(&a.effective(), &stem) {
-                        Ok(n) if n.name != stem => vec![format!(
-                            "name {:?} does not match the file name {stem:?}",
-                            n.name
-                        )],
-                        Ok(_) => Vec::new(),
-                        Err(e) => vec![e],
-                    }
-                }
             };
             self.assets[i].problems = problems;
         }
@@ -688,12 +627,6 @@ impl Catalog {
         if asset.source == Source::Builtin {
             return Err(format!("{} already uses the built-in text", asset.id));
         }
-        // a memory note is moved aside, never deleted
-        if asset.kind == Kind::MemoryNote {
-            crate::memory::note::shelve_path(&asset.path, crate::memory::paths::REMOVED)
-                .map_err(|e| format!("{}: {e}", asset.path.display()))?;
-            return Ok(());
-        }
         std::fs::remove_file(&asset.path).map_err(|e| format!("{}: {e}", asset.path.display()))?;
         // an emptied loop skill directory is removed too
         if asset.kind == Kind::LoopSkill
@@ -751,15 +684,6 @@ impl Catalog {
                 (
                     path,
                     crate::agents::from_template("blank", name).unwrap_or_default(),
-                )
-            }
-            // a new note from here is about the user and holds everywhere;
-            // a workspace note is born in a session or with `memory add`
-            Kind::MemoryNote => {
-                let dir = crate::memory::paths::user_dir(&self.root);
-                (
-                    crate::memory::paths::note_path(&dir, name),
-                    crate::memory::note::template(name, crate::memory::note::Kind::User),
                 )
             }
             other => {
@@ -1215,8 +1139,8 @@ mod tests {
         assert_eq!(count(Kind::Settings), 1);
         assert_eq!(
             count(Kind::Skill),
-            51,
-            "Heimdall, the planner, mux-memory and the step skills (SKILL.md and skill.toml each)"
+            49,
+            "Heimdall, the planner and twenty step skills"
         );
         assert_eq!(count(Kind::LoopPattern), 1);
         assert_eq!(count(Kind::LoopSkill), 11);
@@ -1307,7 +1231,7 @@ mod tests {
         assert_eq!(docs.source, Source::User);
         assert!(docs.valid(), "{:?}", docs.problems);
         assert!(cat.find("auditor").unwrap().valid());
-        assert_eq!(cat.by_kind(Kind::Skill).count(), 53);
+        assert_eq!(cat.by_kind(Kind::Skill).count(), 51);
         let notes = cat.find("skills/my-notes/SKILL.md").unwrap();
         assert!(notes.valid(), "{:?}", notes.problems);
         assert_eq!(

@@ -110,13 +110,6 @@ pub fn builtin_packages() -> Vec<BuiltinPackage> {
                 ),
             ],
         },
-        BuiltinPackage {
-            id: "mux-memory",
-            repo_dir: "skills/mux-memory/",
-            skill_md: include_str!("../../skills/mux-memory/SKILL.md"),
-            skill_toml: Some(include_str!("../../skills/mux-memory/skill.toml")),
-            files: &[],
-        },
         wf_skill!("wf-review-find"),
         wf_skill!("wf-refute"),
         wf_skill!("wf-synthesize"),

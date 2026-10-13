@@ -93,7 +93,6 @@ fn profile(f: &Fixture) -> Profile {
         tracing: None,
         model: None,
         bypass_approvals: None,
-        memory: None,
     }
 }
 
@@ -344,7 +343,6 @@ fn table_driven_harness_launch_construction() {
         tracing: None,
         model: None,
         bypass_approvals: None,
-        memory: None,
     };
     let ws = Path::new("/work");
 

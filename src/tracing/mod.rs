@@ -138,8 +138,6 @@ pub struct LaunchPlan {
     pub loop_launch: Option<crate::loops::LoopLaunch>,
     /// A workflow session: the keys written to `launches.metadata.workflow_*`.
     pub workflow: Option<crate::workflows::WorkflowLaunch>,
-    /// The launch has a shared memory (`attach_memory`).
-    pub memory: bool,
     profile_name: String,
     dir: PathBuf,
 }
@@ -150,43 +148,6 @@ impl LaunchPlan {
     /// with `--loop` (fail-closed for write tools); Codex reads the same
     /// policy through its installed hooks and needs no argument.
     pub fn attach_loop(&mut self, launch: crate::loops::LoopLaunch, home: &Path) {
-        self.loop_launch = Some(launch);
-        self.rewrite_claude_settings(home);
-    }
-
-    /// Marks the plan as a launch with shared memory. On Claude with a
-    /// registered hook, `SessionStart` becomes synchronous so its answer,
-    /// the memory's start text, reaches the first turn. Returns whether
-    /// that hook will deliver it; otherwise the caller uses a command-line
-    /// fallback.
-    pub fn attach_memory(&mut self, home: &Path) -> bool {
-        self.memory = true;
-        self.rewrite_claude_settings(home);
-        self.delivers_memory()
-    }
-
-    /// Whether this launch's own `SessionStart` hook answers with memory.
-    pub fn delivers_memory(&self) -> bool {
-        self.memory
-            && self.provider == Provider::Claude
-            && self.hooks_registered
-            && self.claude_hooks_profile().includes("SessionStart")
-    }
-
-    fn claude_hooks_profile(&self) -> hooks::register::HooksProfile {
-        if self.loop_launch.is_some() {
-            self.hooks_profile.for_loop()
-        } else {
-            self.hooks_profile
-        }
-    }
-
-    /// Recomputes the per-launch Claude `--settings` document from the
-    /// plan: a loop's `PreToolUse` waits for the guard with `--loop`
-    /// (fail-closed for write tools); a launch with memory has a
-    /// synchronous `SessionStart`. Codex reads the loop policy through its
-    /// installed hooks and needs no argument.
-    fn rewrite_claude_settings(&mut self, home: &Path) {
         if self.provider == Provider::Claude
             && self.hooks_registered
             && let Some(exe) = hooks::register::current_exe()
@@ -195,10 +156,9 @@ impl LaunchPlan {
                 exe,
                 home: home.to_path_buf(),
                 content_mode: self.content_mode,
-                profile: self.claude_hooks_profile(),
+                profile: self.hooks_profile.for_loop(),
                 guard: self.guard.is_some() || self.write_policy.is_some(),
-                loop_guard: self.loop_launch.is_some(),
-                memory: self.memory,
+                loop_guard: true,
             };
             let user_files = [
                 home.join(".claude").join("settings.json"),
@@ -214,6 +174,7 @@ impl LaunchPlan {
                 }
             }
         }
+        self.loop_launch = Some(launch);
     }
 
     pub fn is_loop(&self) -> bool {
@@ -601,7 +562,6 @@ impl TraceRuntime {
             skill: None,
             loop_launch: None,
             workflow: None,
-            memory: false,
             dir: dir.to_path_buf(),
         })
     }
@@ -790,7 +750,6 @@ impl TraceRuntime {
                 profile: hooks_profile,
                 guard: guard.is_some() || write_policy.is_some(),
                 loop_guard: false,
-                memory: false,
             };
             match provider {
                 Provider::Claude => {
@@ -841,7 +800,6 @@ impl TraceRuntime {
             skill: None,
             loop_launch: None,
             workflow: None,
-            memory: false,
             dir: dir.to_path_buf(),
         })
     }
@@ -2017,7 +1975,6 @@ mod plan_tests {
             tracing: None,
             model: None,
             bypass_approvals: None,
-            memory: None,
         }
     }
 

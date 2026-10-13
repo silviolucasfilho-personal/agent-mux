@@ -72,17 +72,11 @@ hydration_hint = "Read the briefing snapshot at $AGENT_MUX_BRIEFING …"
 - A skill's opening sentence is `startup_prompt` in its `skill.toml`, already per package; Heimdall's is `skills/heimdall/skill.toml` in the library once you edit it.
 - `agent.preamble` is inserted as a `## Baseline` section right after the frontmatter of every loop agent the scaffolder or `config push` installs (inside the instructions for Codex). Leave it empty to install agents as written.
 
-- `[memory]` holds what a session with shared memory is told at start: `hint` (placeholders `{memory}`, `{index}`, `{invocation}`), `notice` (the line heading every fenced memory block), `index_footer` (`{count}`, the last line of a cut index) and `brief_footer` (`{brief}`). `docs/memory.md` section 4 says how each harness receives them.
-
 Prompts are read at launch time: an edit applies to the next run without a restart.
 
 ## 4. Skills
 
 Every file of a skill package is one item: `skills/heimdall/SKILL.md`, `skills/heimdall/skill.toml`, `skills/heimdall/reference/*.md`. Editing one copies it into `~/.agent-mux/skills/heimdall/`; from then on that directory is the Heimdall package (`docs/skills.md` section 2), and the Agents sidebar reinstalls it into each harness on the next launch. `n` creates a new package with a `SKILL.md` and a `skill.toml` skeleton.
-
-## 4a. Memory notes
-
-The **Memory** group lists every note of the library's memory folders (`memory/<slug>/notes/*.md` and `memory/_user/notes/*.md`), named `<workspace> · <note>`, each validated against the note format. `Enter` opens one in your editor; `n` (or `agent-mux config new memory-note <name>`) writes a note about you into `memory/_user/notes/` from a template; `R` moves a note to `notes/.removed/` instead of deleting it. `docs/memory.md` describes the notes.
 
 ## 5. Loops
 
