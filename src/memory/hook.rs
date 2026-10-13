@@ -67,8 +67,6 @@ pub struct Env<'a> {
     /// `$AGENT_MUX_MEMORY`: set in a session agent-mux launched.
     pub launched_dir: Option<PathBuf>,
     pub launched_user: Option<PathBuf>,
-    /// `$AGENT_MUX_MEMORY_BRIEF`: the hand-off brief a launch starts from.
-    pub launched_brief: Option<PathBuf>,
     pub library: &'a Path,
     pub config: Option<&'a MemoryConfig>,
 }
@@ -134,11 +132,7 @@ pub fn answer(
         &context::Inputs {
             dir: &dir,
             user_dir: user.as_deref(),
-            // only the launch it is addressed to is given the brief
-            brief: env
-                .launched_brief
-                .as_deref()
-                .filter(|_| env.launched_dir.is_some()),
+            brief: None,
             invocation: &invocation,
         },
         prompts,
@@ -238,7 +232,6 @@ pub fn run(harness_word: &str, per_launch: bool) -> anyhow::Result<()> {
     let env = Env {
         launched_dir: var(ENV_DIR),
         launched_user: var(ENV_USER),
-        launched_brief: var(super::ENV_BRIEF).filter(|b| b.is_file()),
         library: &library,
         config: cfg.as_ref().and_then(|c| c.memory.as_ref()),
     };
@@ -520,7 +513,6 @@ mod tests {
         Env {
             launched_dir: launched.map(Path::to_path_buf),
             launched_user: None,
-            launched_brief: None,
             library: lib,
             config: None,
         }

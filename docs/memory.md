@@ -160,23 +160,6 @@ Claude Code and Codex also keep memories of their own. agent-mux mirrors them in
 
 `MEMORY.md` ends with an `## Imported` section with one line per mirror, so every session knows the mirrors are there and opens one when it matters; the start text does not carry them whole. A mirror is rebuilt when its source changes: at every launch, at a hook's start answer, and on `agent-mux memory check`. Mirrors are never edited by a session. `[memory] imports = ["claude"]` picks the sources, and `["none"]` turns them off.
 
-## 6b. Hand-off brief
-
-`f` continues a session in a new one, and `f` on a History row continues an older conversation. The New session dialog says how it will continue before you press `Enter`:
-
-| From → to | How |
-| --- | --- |
-| The same Claude Code or Codex | **fork**: the conversation is copied (`--resume <id> --fork-session`, `codex fork <id>`), and the old session keeps running. |
-| Another harness, with memory | **brief**: the new session starts from a one-page hand-off brief, with the whole transcript linked for details. |
-| Another harness, memory off | **transcript**: the new session reads the whole conversation first, as before. |
-
-The brief is written in two steps:
-
-1. agent-mux writes the facts it knows at once to `briefs/<harness>-<id>-<time>.md` in the new folder's memory: the goal (the first prompt), turns and cost, the files touched, the last answer, and the rendered transcript's path.
-2. A headless fork of the old conversation, run the same way as a save (section 5) with the `[memory] brief` prompt, completes it under `## From the session`, with the goal, next step, open items, decisions, what was done, and what to watch out for. On Antigravity, a fresh run reads the transcript instead. The old session is not interrupted, and it can even be mid-turn.
-
-The new session starts as soon as the brief is complete, or after `[memory] brief_timeout_s` (90 s by default) with the facts alone. The status line says which. The brief reaches it inside its start text (`$AGENT_MUX_MEMORY_BRIEF`), and its first message tells it to carry on from the brief's next step. A brief is addressed: only the session `f` launches is given it, never whoever starts next in the folder.
-
 ## 7. Command line
 
 ```sh
@@ -225,12 +208,12 @@ command = "claude"
 enabled = false           # this profile's sessions get no memory
 ```
 
-The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`, `save`, `brief`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/mux-memory/` like Heimdall. `brief_timeout_s` is how long `f` waits for a brief (section 6b); `handoff` and `keeper` are read but not used yet; `imports` picks the mirrors (section 6a).
+The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`, `save`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/mux-memory/` like Heimdall. `handoff`, `brief_timeout_s` and `keeper` are read but not used yet; `imports` picks the mirrors (section 6a).
 
 ## 10. Not yet
 
 These are designed in the spec and come in later phases:
 
-- **The rest of the hand-off.** A Continue dialog with fork, move, brief and transcript to choose from, `move` on the same harness, and a two-way link between the two sessions (`↪ continued in …`, `launches.metadata`).
+- **The hand-off.** A Continue dialog for `f`, briefs written by the leaving session or from facts, `f` on History rows, and a link between the two sessions.
 - **Evidence.** A `memory_events` table, a line in Heimdall's dossier, and a mark on sessions that saved notes.
 - **The keeper.** A scheduled agent that saves what loop runs and workflow steps learned.

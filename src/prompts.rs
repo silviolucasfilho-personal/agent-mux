@@ -50,9 +50,6 @@ pub struct Prompts {
     /// `[memory] save`: the one turn a closing session is asked for, to
     /// save what the next session needs (`memory::save`).
     pub memory_save: String,
-    /// `[memory] brief`: the one turn that writes a hand-off brief when
-    /// `f` continues a session on another harness (`memory::brief`).
-    pub memory_brief: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -76,7 +73,6 @@ struct MemoryDoc {
     index_footer: Option<String>,
     brief_footer: Option<String>,
     save: Option<String>,
-    brief: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -128,7 +124,6 @@ impl Prompts {
             memory_index_footer: doc.memory.index_footer.unwrap_or_default(),
             memory_brief_footer: doc.memory.brief_footer.unwrap_or_default(),
             memory_save: doc.memory.save.unwrap_or_default(),
-            memory_brief: doc.memory.brief.unwrap_or_default(),
         }
     }
 
@@ -161,7 +156,6 @@ impl Prompts {
             (m.index_footer, &mut p.memory_index_footer),
             (m.brief_footer, &mut p.memory_brief_footer),
             (m.save, &mut p.memory_save),
-            (m.brief, &mut p.memory_brief),
         ] {
             if let Some(v) = value {
                 *slot = v;
@@ -268,7 +262,6 @@ pub fn validate(text: &str) -> Vec<String> {
             &["brief"][..],
         ),
         ("memory.save", &doc.memory.save, MEMORY_SAVE_PLACEHOLDERS),
-        ("memory.brief", &doc.memory.brief, &["source"][..]),
     ] {
         if let Some(t) = text {
             if t.trim().is_empty() {

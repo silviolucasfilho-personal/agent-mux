@@ -169,11 +169,6 @@ fn f_on_a_session_row_opens_the_dialog_that_continues_it() {
         text.contains("Continue Claude Code in a new session"),
         "{text}"
     );
-    // it says how, before Enter
-    assert!(
-        text.contains("How: fork: the conversation is copied"),
-        "{text}"
-    );
 }
 
 /// A saved continued session comes back linked to where it came from, and
@@ -209,100 +204,4 @@ fn a_restart_keeps_the_link_and_does_not_resend_the_handover() {
     let saved = agent_mux::persistence::load_saved_sessions(&temp.path().join("sessions.json"));
     assert_eq!(saved[0].profile.args, ["--model", "m"]);
     assert_eq!(saved[0].continued_from.as_deref(), Some("Codex · api"));
-}
-
-/// With memory, another harness starts from a hand-off brief: the facts
-/// agent-mux knows at once, completed by a headless fork of the old
-/// conversation, and the transcript linked for details.
-#[test]
-fn with_memory_another_harness_starts_from_a_brief() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut app = app_with_a_claude_session(temp.path());
-    app.memory = Some(agent_mux::config::MemoryConfig {
-        imports: vec!["none".into()],
-        ..Default::default()
-    });
-    // the same harness still forks
-    assert_eq!(
-        app.session_handoff(7, Some(Harness::Claude), temp.path())
-            .unwrap(),
-        Continue::Fork("abc".into())
-    );
-    let other = app
-        .session_handoff(7, Some(Harness::Codex), temp.path())
-        .unwrap();
-    let Continue::Brief {
-        brief,
-        job,
-        opening,
-    } = other
-    else {
-        panic!("{other:?}")
-    };
-    assert!(job.is_none(), "a test binary starts no background run");
-    let text = std::fs::read_to_string(&brief).unwrap();
-    let transcript = temp.path().join("runtime/handoffs/claude-abc.md");
-    assert!(text.starts_with("# Brief: "), "{text}");
-    assert!(text.contains("Continues: Claude Code · "), "{text}");
-    assert!(
-        text.contains(&format!("Transcript: {}", transcript.display())),
-        "{text}"
-    );
-    assert!(
-        opening[0].contains(&brief.display().to_string()),
-        "{opening:?}"
-    );
-    // the run that completes it: a fork of `abc`, where it ran
-    let mem = brief.parent().unwrap().parent().unwrap();
-    let job: agent_mux::memory::save::Job = serde_json::from_str(
-        &std::fs::read_to_string(mem.join(".saves/brief-claude-abc.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(job.brief.as_deref(), Some(brief.as_path()));
-    assert_eq!(job.conversation, "abc");
-    assert_eq!(job.workspace, temp.path());
-    assert_eq!(job.command, "claude");
-}
-
-/// `f` on a History row continues that conversation, in its folder.
-#[test]
-fn f_on_a_history_row_continues_that_conversation() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    let temp = tempfile::tempdir().unwrap();
-    let mut app = app_with_a_claude_session(temp.path());
-    app.history_sessions = vec![agent_mux::history::SessionSummary {
-        session_id: "abc".into(),
-        title: "rename the parser".into(),
-        modified: std::time::SystemTime::UNIX_EPOCH,
-        file_path: temp.path().join("abc.jsonl"),
-        turn_count: 2,
-        project_slug: "-t".into(),
-        timestamp_str: "2026-09-28 10:00".into(),
-        provider: agent_mux::history::AgentProvider::Claude,
-        cwd: Some(temp.path().to_path_buf()),
-    }];
-    app.sidebar_section = agent_mux::app::SidebarSection::History;
-    app.selected_history = 0;
-    app.focus = agent_mux::app::Focus::List;
-    app.handle_key(
-        &KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
-        std::time::Instant::now(),
-    );
-    let Mode::NewSession(d) = &app.mode else {
-        panic!("{:?}", app.mode)
-    };
-    let h = d
-        .handoff_history
-        .clone()
-        .expect("continues the History row");
-    assert_eq!(h.source.conversation, "abc");
-    assert_eq!(h.dir, temp.path());
-    assert_eq!(d.dir, temp.path().display().to_string());
-    // and on another harness, from its transcript (memory off here)
-    let from = app.handoff_from_history(&h).unwrap();
-    assert_eq!(from.label, "History · rename the parser");
-    let c = app
-        .continue_from(from, Some(Harness::Codex), temp.path())
-        .unwrap();
-    assert!(matches!(c, Continue::Transcript(_)), "{c:?}");
 }

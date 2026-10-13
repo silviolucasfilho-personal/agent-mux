@@ -42,25 +42,6 @@ pub enum Continue {
     Fork(String),
     /// The arguments that open the new session with the handover message.
     Transcript(Vec<String>),
-    /// A hand-off brief (`memory::brief`): the new session starts from it.
-    /// `job` is the background run completing it, when one started; the
-    /// launch waits for it up to `[memory] brief_timeout_s`.
-    Brief {
-        brief: PathBuf,
-        job: Option<PathBuf>,
-        opening: Vec<String>,
-    },
-}
-
-/// The first message of a session that continues from a brief.
-pub fn brief_opening(brief: &Path, transcript: &Path) -> String {
-    format!(
-        "Carry on with the work from your hand-off brief: it is in your context, and the file is {}. \
-         The whole earlier conversation is in {}; read it only when you need a detail the brief leaves out. \
-         Start with the brief's next step.",
-        brief.display(),
-        transcript.display()
-    )
 }
 
 /// `claude` → Claude, and so on for the store's provider names.
