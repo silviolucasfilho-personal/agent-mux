@@ -3,7 +3,7 @@
 //! the ones running, and the keys.
 
 use super::flow::{dim, head, hints};
-use crate::app::memory_view::{MemoryView, Pending};
+use crate::app::memory_view::{InputKind, MemoryView, Pending};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -65,7 +65,23 @@ pub fn draw(f: &mut Frame, area: Rect, v: &MemoryView) {
             dim()
         },
     ));
+    lines.push(Line::from(vec![
+        Span::styled("  project     ", dim()),
+        Span::raw(crate::memory::install::shown(&v.dir)),
+    ]));
     lines.push(Line::raw(""));
+    if let Some(input) = &v.input {
+        let label = match input.kind {
+            InputKind::Search => "  search: ".to_string(),
+            InputKind::Ask(h) => format!("  ask {}: ", crate::memory::label(h)),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(label, head()),
+            Span::raw(input.text.clone()),
+            Span::styled("▏", Style::default().fg(Color::Cyan)),
+        ]));
+        lines.push(Line::raw(""));
+    }
     if let Some(e) = &v.error {
         lines.push(Line::styled(
             format!("  {e}"),
@@ -95,6 +111,47 @@ pub fn draw(f: &mut Frame, area: Rect, v: &MemoryView) {
                 lines.push(Line::styled(format!("     {}", s.command), dim()));
             }
         }
+    } else if let Some((query, hits)) = &v.hits {
+        lines.push(Line::styled(
+            format!("  {} page(s) for {query:?}", hits.len()),
+            head(),
+        ));
+        let width = (body.width as usize).saturating_sub(6);
+        let cut = |t: String| -> String {
+            if t.chars().count() > width {
+                t.chars()
+                    .take(width.saturating_sub(1))
+                    .chain(['…'])
+                    .collect()
+            } else {
+                t
+            }
+        };
+        // two lines a result; keep the selected one in sight
+        let room = ((body.height as usize).saturating_sub(lines.len()) / 2).max(1);
+        let first = v.selected.saturating_sub(room - 1);
+        for (i, h) in hits.iter().enumerate().skip(first).take(room) {
+            let sel = i == v.selected;
+            let title = h.title.clone().unwrap_or_else(|| h.path.clone());
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if sel { "  ▸ " } else { "    " },
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    cut(format!("{title}  {}", h.path)),
+                    if sel {
+                        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                    } else {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    },
+                ),
+            ]));
+            lines.push(Line::styled(
+                format!("      {}", cut(h.snippet_line())),
+                dim(),
+            ));
+        }
     } else if !v.log.is_empty() {
         let room = (body.height as usize).saturating_sub(lines.len());
         let end = v.log.len().saturating_sub(v.scroll);
@@ -122,6 +179,19 @@ pub fn draw(f: &mut Frame, area: Rect, v: &MemoryView) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
 
     let keys: Vec<(&str, &str)> = match &v.pending {
+        _ if matches!(v.input.as_ref().map(|i| &i.kind), Some(InputKind::Ask(_))) => vec![
+            ("Enter", "ask in a new session"),
+            ("Tab", "other harness"),
+            ("Esc", "cancel"),
+        ],
+        _ if v.input.is_some() => vec![("Enter", "search"), ("Esc", "cancel")],
+        None if v.hits.is_some() => vec![
+            ("↑/↓", "select"),
+            ("Enter", "open page"),
+            ("/", "search again"),
+            ("a", "ask"),
+            ("Esc", "back"),
+        ],
         Some((Pending::Uninstall { purge }, _)) => vec![
             ("y", "run"),
             (
@@ -137,9 +207,12 @@ pub fn draw(f: &mut Frame, area: Rect, v: &MemoryView) {
         Some(_) => vec![("y", "run"), ("n", "cancel")],
         None if v.running() => vec![("…", "running"), ("↑/↓", "log")],
         None => vec![
+            ("/", "search"),
+            ("a", "ask"),
+            ("w", "web view"),
             ("i", "install or repair"),
             ("u", "uninstall"),
-            ("r", "refresh"),
+            ("Ctrl+R", "refresh"),
             ("Esc", "close"),
         ],
     };
@@ -184,6 +257,7 @@ mod tests {
         assert!(s.contains("✗ ai-memory   not installed"));
         assert!(s.contains("✗ Codex       MCP ✗ · hooks ✗"));
         assert!(s.contains("i install or repair"));
+        assert!(s.contains("/ search"));
         v.handle_key(&crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('i'),
             crossterm::event::KeyModifiers::NONE,

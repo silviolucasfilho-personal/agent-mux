@@ -31,6 +31,36 @@ agent-mux memory install [--yes] [--harness claude|codex|agy]...
 agent-mux memory uninstall [--yes] [--purge-data]
 ```
 
+## Reading the memory and asking it
+
+The Memory screen works on one project folder: the folder of the selected
+session, else the default folder. The folder is shown under the rows.
+ai-memory names the project after the folder's nearest `.ai-memory.toml`,
+else its repository's remote, else the folder's name.
+
+- **`/` searches** the project's memory with ai-memory's full-text search
+  (`ai-memory search --json`). Pick a result with `↑`/`↓`. **`Enter`**
+  fetches the page (`ai-memory read-page --json`) and opens it in the
+  Markdown viewer, with its kind, tier and origin as front matter. `Esc`
+  goes back.
+- **`a` asks a question.** Type it, use `Tab` to choose among the wired
+  harnesses whose CLI is installed, and press `Enter`.
+  - A new session starts in the project folder on that harness's first
+    profile.
+  - Its first message asks it to search the memory with ai-memory's
+    `memory_query` tool and to name the pages its answer comes from.
+  - The conversation goes on there like any other session. The sidebar
+    marks it "a memory question".
+- **`w` opens ai-memory's web view** (`http://127.0.0.1:49374/web`) in the
+  browser. It is read-only: projects, each project's page tree, rendered
+  pages and search.
+
+Inside any session you can also just ask: "have we discussed X?", "catch me
+up", "where did we leave off?". The MCP server answers.
+
+Typing in the search or question line is plain text: the screen's letter
+keys do nothing there. `Ctrl+R` reads the state again.
+
 ## What install does
 
 Each step runs only when it is needed:
@@ -97,6 +127,7 @@ The memory itself stays unless you press `p` on the screen or pass
 | `src/memory/mod.rs` | Reading the state: binary, server, launchd agent, each harness's files |
 | `src/memory/install.rs` | The steps and how each one runs |
 | `src/memory/cli.rs` | `agent-mux memory …` |
+| `src/memory/query.rs` | Search, reading a page, and the question's opening message |
 | `src/app/memory_view.rs` | The Memory screen; its steps run on a thread |
 | `src/ui/memory.rs` | Drawing the Memory screen |
 

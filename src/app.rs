@@ -4313,6 +4313,65 @@ impl App {
         });
     }
 
+    /// The Memory screen, for the project of the selected session (else
+    /// the default folder).
+    pub fn open_memory_view(&mut self) {
+        let dir = resolve_working_dir(&self.skill_launcher_workspace());
+        let pages = self.workflows_runtime_dir().join("memory-pages");
+        self.mode = Mode::Memory(Box::new(memory_view::MemoryView::open(dir, pages)));
+    }
+
+    fn memory_outcome(&mut self, outcome: memory_view::Outcome) {
+        use memory_view::Outcome;
+        match outcome {
+            Outcome::None => {}
+            Outcome::Close => self.mode = Mode::Main,
+            Outcome::OpenUrl(url) => self.open_url(&url),
+            Outcome::OpenPage(path) => self.open_markdown(&path),
+            Outcome::Ask {
+                harness,
+                dir,
+                message,
+            } => {
+                if let Err(e) = self.ask_memory(harness, dir, message)
+                    && let Mode::Memory(view) = &mut self.mode
+                {
+                    view.error = Some(e);
+                }
+            }
+        }
+    }
+
+    /// A new session on `harness`'s first profile, in `dir`, whose opening
+    /// message is a question for the memory.
+    fn ask_memory(
+        &mut self,
+        harness: crate::harness::Harness,
+        dir: std::path::PathBuf,
+        message: String,
+    ) -> Result<(), String> {
+        let mut profile = self
+            .profiles
+            .iter()
+            .find(|p| crate::harness::Harness::detect(&p.command) == Some(harness))
+            .cloned()
+            .ok_or_else(|| format!("no profile runs {}", harness.as_str()))?;
+        let opening = match harness {
+            crate::harness::Harness::Antigravity => vec!["--prompt-interactive".into(), message],
+            _ => vec![message],
+        };
+        profile.args.extend(opening.iter().cloned());
+        self.finish_dialog_launch(DialogLaunch {
+            profile,
+            dir,
+            opening_args: opening,
+            continued_from: Some("a memory question".into()),
+            agent: None,
+            link: None,
+            attach: None,
+        })
+    }
+
     /// Opens a Markdown file in the viewer, over the main screen.
     pub fn open_markdown(&mut self, path: &std::path::Path) {
         match markdown_view::MarkdownView::open(path) {
@@ -4815,10 +4874,9 @@ impl App {
             }
             Action::OpenAbout => self.open_about(),
             Action::MemoryKey => {
-                if let Mode::Memory(view) = &mut self.mode
-                    && view.handle_key(key) == memory_view::Outcome::Close
-                {
-                    self.mode = Mode::Main;
+                if let Mode::Memory(view) = &mut self.mode {
+                    let outcome = view.handle_key(key);
+                    self.memory_outcome(outcome);
                 }
             }
             Action::MarkdownKey => {

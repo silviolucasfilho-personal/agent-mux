@@ -115,7 +115,11 @@ impl App {
             }
             Reload => matches!(
                 self.mode,
-                Mode::ConfigView(_) | Mode::SkillsView(_) | Mode::RunsView(_) | Mode::Markdown(_)
+                Mode::ConfigView(_)
+                    | Mode::SkillsView(_)
+                    | Mode::RunsView(_)
+                    | Mode::Markdown(_)
+                    | Mode::Memory(_)
             ),
             Restore => {
                 editor_library
@@ -504,9 +508,7 @@ impl App {
             NavigationTarget::Quit => self.quit_from_chord(),
             NavigationTarget::Skills => self.open_skills_view(),
             NavigationTarget::Configuration => self.open_config_view(),
-            NavigationTarget::Memory => {
-                self.mode = Mode::Memory(Box::new(super::memory_view::MemoryView::open()))
-            }
+            NavigationTarget::Memory => self.open_memory_view(),
             NavigationTarget::Inbox => self.open_inbox(),
             NavigationTarget::History => self.apply(
                 super::Action::OpenSessionHistory,
@@ -588,11 +590,13 @@ impl App {
             Mode::TraceBrowser(b) => b.search_input.is_some(),
             Mode::ConfigView(v) => matches!(v.pending, super::Pending::NewName { .. }),
             Mode::RunsView(v) => v.save_name.is_some(),
+            Mode::Memory(v) => v.input.is_some(),
             _ => false,
         }
     }
     pub(super) fn confirmation_active(&self) -> bool {
         match &self.mode {
+            Mode::Memory(v) => v.pending.is_some(),
             Mode::ConfirmKill | Mode::ConfirmQuit | Mode::ConfirmRemoveLoop => true,
             Mode::AgentEditor(st) => {
                 st.confirm_discard

@@ -27,6 +27,7 @@
 
 pub mod cli;
 pub mod install;
+pub mod query;
 
 use crate::harness::Harness;
 use serde_json::Value;
