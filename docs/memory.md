@@ -111,13 +111,6 @@ The save never changes the conversation. As probed on 2026-10-11:
 
 It costs one turn per closed session. A forked turn reuses the conversation's prompt cache, so on Claude Code and Codex it is cheap. On Antigravity the fresh conversation reads the whole transcript. Loop runs and workflow steps never save on close, and a save is not itself saved. `[memory] save_on_close = false` turns it off.
 
-The same save also runs at two other moments, so nothing is lost:
-
-- **Before compaction.** A Claude Code launch with memory registers `PreCompact`. When the conversation is about to be compacted, its hook starts the save, while the detail is still there. After that, the save on close saves only what came later.
-- **After a crash.** From spawn until its save starts, each session leaves a marker in `~/.agent-mux/memory/.pending/`. If agent-mux ends without starting the save (a crash, a closed terminal, `kill -9`), the next agent-mux finds markers whose process is gone and saves those sessions in the background. `agent-mux memory recover` does the same by hand. The log line is `recovered`.
-
-Only one save of a conversation runs at a time: a second request while a job file is less than 10 minutes old is skipped. The log names why each save ran (`closed`, `compact`, `recovered`).
-
 ## 6. Sessions started outside agent-mux
 
 A `claude`, `codex` or `agy` you start in a terminal yourself can get the same memory:
@@ -132,13 +125,13 @@ agent-mux memory uninstall          # remove them again
 
 | Harness | Where | When it answers |
 | --- | --- | --- |
-| Claude Code | `SessionStart`, `PreCompact` and `SessionEnd` groups in `~/.claude/settings.json` | at start, resume, clear and compaction; saves before compaction and on close |
-| Codex | the same three groups in `~/.codex/hooks.json` | the same. Codex runs a hook only after you trust it: open Codex, run `/hooks` and trust the agent-mux memory entries once |
+| Claude Code | a `SessionStart` group in `~/.claude/settings.json` | at start, resume, clear and compaction |
+| Codex | a `SessionStart` group in `~/.codex/hooks.json` | at start. Codex runs a hook only after you trust it: open Codex, run `/hooks` and trust the agent-mux memory entry once |
 | Antigravity | the `agent-mux-memory` plugin | before every model call |
 
 The hook reads the folder from the session (`cwd`, or agy's workspace) and answers with that workspace's start text, the same text an agent-mux launch gets. A folder that has no notes yet gets nothing, and `[memory] enabled = false` turns the hook off. In a session agent-mux launched, the Claude Code and Codex hooks stay silent because the launch already delivered the memory; the Antigravity hook answers there too, since agy has no other channel. The skill finds the folder from the start text, or from `agent-mux memory path`, when `$AGENT_MUX_MEMORY` is not set.
 
-The `PreCompact` and `SessionEnd` hooks start the same save as section 5, from the payload's conversation and transcript, but only in a folder that already has a memory. Your first session in a new folder therefore saves nothing until agent-mux, `agent-mux memory add`, or an earlier session has created that memory. In a session agent-mux launched, `SessionEnd` is left to agent-mux. Antigravity has no compaction or end hook, so a plain `agy` saves nothing on its own.
+Saving on close (section 5) needs agent-mux to see the session end, so it covers only sessions agent-mux runs.
 
 ## 7. Command line
 
@@ -152,7 +145,6 @@ agent-mux memory check                     # validate, expire, rebuild; exit 1 o
 agent-mux memory path                      # which folder, and why
 agent-mux memory save-session <job>        # one save on close (agent-mux starts it)
 agent-mux memory install|uninstall|status [claude|codex|agy]   # the start hooks (section 6)
-agent-mux memory recover                   # the saves a crashed agent-mux left pending
 ```
 
 Every command takes `--workspace DIR` or `--user`. Without either, a command run inside a session works on that session's memory (`$AGENT_MUX_MEMORY`), and one run in a terminal works on the current folder's.

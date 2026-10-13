@@ -188,23 +188,8 @@ pub fn run(harness_word: &str) -> anyhow::Result<()> {
         library: &library,
         config: cfg.as_ref().and_then(|c| c.memory.as_ref()),
     };
-    match payload.get("hook_event_name").and_then(|e| e.as_str()) {
-        // inside a launch the trace hook may have started it already: one
-        // save per conversation runs at a time (`save::Job::write`)
-        Some("PreCompact") => {
-            super::save::start_from_hook(harness, &payload, "compact");
-        }
-        // inside a launch agent-mux saves on close itself
-        Some("SessionEnd") => {
-            if env.launched_dir.is_none() {
-                super::save::start_from_hook(harness, &payload, "closed");
-            }
-        }
-        _ => {
-            if let Some(text) = answer(harness, &payload, &env, &Prompts::current()) {
-                print!("{text}");
-            }
-        }
+    if let Some(text) = answer(harness, &payload, &env, &Prompts::current()) {
+        print!("{text}");
     }
     Ok(())
 }
@@ -278,12 +263,7 @@ fn strip(groups: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
-/// The events the Claude Code and Codex hook answers: the start text at
-/// `SessionStart`, a save before compaction, and, for a session agent-mux
-/// did not launch, the save on close at `SessionEnd`.
-pub const EVENTS: [&str; 3] = ["SessionStart", "PreCompact", "SessionEnd"];
-
-/// A settings or hooks file with our groups for `EVENTS` added (`exe`)
+/// A settings or hooks file with our `SessionStart` group added (`exe`)
 /// or removed (`None`); everything else is kept.
 pub fn merge_session_start(existing: Option<Value>, exe: Option<&Path>, harness: Harness) -> Value {
     let mut root = match existing {
@@ -294,25 +274,23 @@ pub fn merge_session_start(existing: Option<Value>, exe: Option<&Path>, harness:
         Some(Value::Object(m)) => m,
         _ => Map::new(),
     };
-    for event in EVENTS {
-        let mut groups = match hooks.remove(event) {
-            Some(Value::Array(a)) => strip(a),
-            _ => Vec::new(),
-        };
-        if let Some(exe) = exe {
-            let mut handler = json!({
-                "type": "command",
-                "command": command(exe, harness),
-                "timeout": TIMEOUT_S,
-            });
-            if harness == Harness::Codex {
-                handler["statusMessage"] = Value::from("agent-mux memory");
-            }
-            groups.push(json!({ "hooks": [handler] }));
+    let mut groups = match hooks.remove("SessionStart") {
+        Some(Value::Array(a)) => strip(a),
+        _ => Vec::new(),
+    };
+    if let Some(exe) = exe {
+        let mut handler = json!({
+            "type": "command",
+            "command": command(exe, harness),
+            "timeout": TIMEOUT_S,
+        });
+        if harness == Harness::Codex {
+            handler["statusMessage"] = Value::from("agent-mux memory");
         }
-        if !groups.is_empty() {
-            hooks.insert(event.into(), Value::Array(groups));
-        }
+        groups.push(json!({ "hooks": [handler] }));
+    }
+    if !groups.is_empty() {
+        hooks.insert("SessionStart".into(), Value::Array(groups));
     }
     if !hooks.is_empty() {
         root.insert("hooks".into(), Value::Object(hooks));

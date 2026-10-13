@@ -60,10 +60,6 @@ pub struct Job {
     /// The agent-mux launch id, a note's `source.launch`.
     pub launch: Option<String>,
     pub index_lines: usize,
-    /// Why the save runs, for the log: `closed` (default), `compact`,
-    /// `recovered`.
-    #[serde(default)]
-    pub reason: Option<String>,
 }
 
 impl Job {
@@ -112,25 +108,11 @@ impl Job {
         )
     }
 
-    /// Writes the job file; the background process reads it back and
-    /// removes it when done. A job file younger than `TIMEOUT` is a save of
-    /// this conversation still running: `AlreadyExists`, so a compaction
-    /// and a close, or two hooks, never run two saves of one conversation.
+    /// Writes the job file; the background process reads it back.
     pub fn write(&self) -> std::io::Result<PathBuf> {
         let dir = self.memory.join(SAVES);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", self.file_stem()));
-        let running = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age < TIMEOUT);
-        if running {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "a save of this conversation is running",
-            ));
-        }
         let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         paths::write_atomic(&path, &text)?;
         Ok(path)
@@ -401,26 +383,14 @@ pub fn run(job_path: &Path) -> anyhow::Result<()> {
             } else {
                 format!("{} notes", o.saved.len())
             };
-            log::append(
-                &job.memory,
-                harness,
-                launch,
-                job.reason.as_deref().unwrap_or("closed"),
-                &what,
-            );
+            log::append(&job.memory, harness, launch, "closed", &what);
             for r in o.rejected {
                 log::append(&job.memory, harness, launch, "save-rejected", &r);
             }
             Ok(())
         }
         Ok(None) => {
-            log::append(
-                &job.memory,
-                harness,
-                launch,
-                job.reason.as_deref().unwrap_or("closed"),
-                "no new turns",
-            );
+            log::append(&job.memory, harness, launch, "closed", "no new turns");
             Ok(())
         }
         Err(e) => {
@@ -478,265 +448,6 @@ fn run_job(job: &Job, job_path: &Path) -> Result<Option<Outcome>, String> {
     Ok(Some(outcome))
 }
 
-/// Writes `job` and starts it with `exe` (agent-mux itself); `None`
-/// leaves the job written, which is what a test's App does. `Ok(false)`:
-/// nothing to do (no new turns, or a save of it is running).
-pub fn start(job: &Job, exe: Option<&Path>) -> Result<bool, String> {
-    if job.unchanged() {
-        return Ok(false);
-    }
-    let path = match job.write() {
-        Ok(p) => p,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(e) => return Err(e.to_string()),
-    };
-    if let Some(exe) = exe {
-        spawn(exe, &path).map_err(|e| e.to_string())?;
-    }
-    Ok(true)
-}
-
-/// This binary, when it is agent-mux: only the real binary starts saves.
-pub fn agent_mux_exe() -> Option<PathBuf> {
-    crate::tracing::hooks::register::current_exe().filter(|e| {
-        e.file_stem()
-            .is_some_and(|s| s.to_string_lossy() == "agent-mux")
-    })
-}
-
-/// The save a hook asks for (`PreCompact`, or `SessionEnd` of a session
-/// outside agent-mux): the conversation, transcript and folder come from
-/// the payload. The memory is the launch's (`launched`), else the
-/// folder's, and only when that folder already has a memory: a hook never
-/// starts one in a folder nobody gave one.
-pub fn job_from_hook(
-    harness: Harness,
-    payload: &serde_json::Value,
-    launched: Option<(PathBuf, Option<PathBuf>)>,
-    library: &Path,
-    config: Option<&crate::config::MemoryConfig>,
-) -> Option<Job> {
-    if config.and_then(|c| c.enabled) == Some(false)
-        || config.and_then(|c| c.save_on_close) == Some(false)
-    {
-        return None;
-    }
-    let get = |k: &str| {
-        payload
-            .get(k)
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-    };
-    let conversation = get("session_id")?.to_string();
-    let workspace = PathBuf::from(get("cwd")?);
-    let settings = super::Settings::from_config(config);
-    let (memory, user_dir) = match launched {
-        Some(l) => l,
-        None => {
-            let dir = paths::dir_for(library, &settings, &workspace);
-            if !paths::index_path(&dir).is_file() {
-                return None;
-            }
-            let user = paths::user_dir(library);
-            (dir, user.is_dir().then_some(user))
-        }
-    };
-    Some(Job {
-        command: harness.as_str().to_string(),
-        model: get("model").map(String::from),
-        workspace,
-        conversation,
-        transcript: get("transcript_path").map(PathBuf::from),
-        memory,
-        user_dir,
-        launch: std::env::var("AGENT_MUX_SESSION_ID")
-            .ok()
-            .filter(|s| !s.is_empty()),
-        index_lines: settings.index_lines,
-        reason: None,
-    })
-}
-
-/// A session agent-mux runs whose save on close has not started: written
-/// at spawn, removed when the save starts. One left behind by an
-/// agent-mux that is gone (a crash, a closed terminal, `kill -9`) is
-/// saved at the next start (`recover`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Pending {
-    /// The agent-mux process that ran the session.
-    pub pid: u32,
-    /// Seconds since the epoch: a conversation found on disk for it must
-    /// be newer (`handoff::find_on_disk`).
-    pub started_at: u64,
-    /// The save, with an empty `conversation` when it was not known yet.
-    pub job: Job,
-}
-
-pub fn pending_dir(library: &Path) -> PathBuf {
-    paths::memory_root(library).join(".pending")
-}
-
-pub fn write_pending(library: &Path, key: &str, p: &Pending) -> std::io::Result<()> {
-    let dir = pending_dir(library);
-    std::fs::create_dir_all(&dir)?;
-    let text = serde_json::to_string_pretty(p).map_err(std::io::Error::other)?;
-    paths::write_atomic(&dir.join(format!("{}.json", note::slug(key))), &text)
-}
-
-pub fn remove_pending(library: &Path, key: &str) {
-    let _ = std::fs::remove_file(pending_dir(library).join(format!("{}.json", note::slug(key))));
-}
-
-/// Whether agent-mux process `pid` is still running (this one counts).
-fn alive(pid: u32) -> bool {
-    if pid == std::process::id() {
-        return true;
-    }
-    std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("agent-mux"))
-        .unwrap_or(true)
-}
-
-/// The conversation a pending save is about: the store's, by its launch;
-/// the one it resumed; else the one transcript its harness wrote in its
-/// folder since it started.
-fn resolve(
-    p: &Pending,
-    store: Option<&rusqlite::Connection>,
-) -> Result<(String, Option<PathBuf>), String> {
-    let harness = p.job.harness().ok_or("not a harness agent-mux knows")?;
-    let provider = handoff::provider_of(harness.as_str()).ok_or("unknown provider")?;
-    if let (Some(conn), Some(launch)) = (store, p.job.launch.as_deref())
-        && let Ok(Some((_, id, path))) =
-            crate::tracing::store::query::launch_transcript(conn, launch)
-    {
-        let path = path
-            .map(PathBuf::from)
-            .or_else(|| handoff::transcript_by_id(provider, &id));
-        return Ok((id, path));
-    }
-    if !p.job.conversation.is_empty() {
-        let id = p.job.conversation.clone();
-        let path = p
-            .job
-            .transcript
-            .clone()
-            .or_else(|| handoff::transcript_by_id(provider, &id));
-        return Ok((id, path));
-    }
-    let since = std::time::UNIX_EPOCH + Duration::from_secs(p.started_at);
-    let found = handoff::find_on_disk(provider, &p.job.workspace, since)?;
-    Ok((found.conversation, found.transcript))
-}
-
-/// At start: a save for every session an agent-mux that is gone left
-/// pending. Returns how many were started.
-pub fn recover(library: &Path, store: Option<&Path>, exe: Option<&Path>) -> usize {
-    let Ok(entries) = std::fs::read_dir(pending_dir(library)) else {
-        return 0;
-    };
-    let conn = store.and_then(|s| crate::tracing::store::open_ro(s).ok());
-    let mut started = 0;
-    for path in entries.flatten().map(|e| e.path()) {
-        let Some(p) = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Pending>(&t).ok())
-        else {
-            let _ = std::fs::remove_file(&path);
-            continue;
-        };
-        if alive(p.pid) {
-            continue;
-        }
-        let _ = std::fs::remove_file(&path);
-        let harness = p.job.harness().map(|h| h.as_str()).unwrap_or("-");
-        let launch = p.job.launch.as_deref();
-        match resolve(&p, conn.as_ref()) {
-            Ok((conversation, transcript)) => {
-                let job = Job {
-                    conversation,
-                    transcript,
-                    reason: Some("recovered".into()),
-                    ..p.job.clone()
-                };
-                match start(&job, exe) {
-                    Ok(true) => {
-                        log::append(
-                            &job.memory,
-                            harness,
-                            launch,
-                            "recovered",
-                            "agent-mux ended without saving",
-                        );
-                        started += 1;
-                    }
-                    Ok(false) => {}
-                    Err(e) => log::append(&job.memory, harness, launch, "save-failed", &e),
-                }
-            }
-            Err(e) => log::append(
-                &p.job.memory,
-                harness,
-                launch,
-                "recovered",
-                &format!("not saved: {e}"),
-            ),
-        }
-    }
-    started
-}
-
-/// A hook's save (`PreCompact`; `SessionEnd` outside agent-mux): the
-/// launch's memory from the environment, else the folder's. Logged; never
-/// fails the hook. Returns whether a save started.
-pub fn start_from_hook(harness: Harness, payload: &serde_json::Value, why: &str) -> bool {
-    let var = |k: &str| {
-        std::env::var_os(k)
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-    };
-    let launched = var(super::ENV_DIR)
-        .filter(|d| d.is_dir())
-        .map(|d| (d, var(super::ENV_USER).filter(|u| u.is_dir())));
-    let cfg = crate::config::load().ok();
-    let library = crate::assets::root();
-    let Some(mut job) = job_from_hook(
-        harness,
-        payload,
-        launched,
-        &library,
-        cfg.as_ref().and_then(|c| c.memory.as_ref()),
-    ) else {
-        return false;
-    };
-    job.reason = Some(why.to_string());
-    match start(&job, agent_mux_exe().as_deref()) {
-        Ok(true) => {
-            log::append(
-                &job.memory,
-                harness.as_str(),
-                job.launch.as_deref(),
-                why,
-                "save started",
-            );
-            true
-        }
-        Ok(false) => false,
-        Err(e) => {
-            log::append(
-                &job.memory,
-                harness.as_str(),
-                job.launch.as_deref(),
-                "save-failed",
-                &e,
-            );
-            false
-        }
-    }
-}
-
 /// Starts the save in its own process group, so neither agent-mux
 /// quitting nor the terminal's signals stop it.
 pub fn spawn(exe: &Path, job_path: &Path) -> std::io::Result<()> {
@@ -767,7 +478,6 @@ mod tests {
             user_dir: None,
             launch: Some("l1".into()),
             index_lines: 60,
-            reason: None,
         }
     }
 
@@ -923,92 +633,5 @@ mod tests {
         assert!(path.starts_with(j.memory.join(SAVES)));
         let back: Job = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(back, j);
-    }
-
-    #[test]
-    fn a_running_save_is_not_started_twice() {
-        let d = tempfile::tempdir().unwrap();
-        let j = job(d.path(), "claude");
-        assert!(start(&j, None).unwrap());
-        assert!(!start(&j, None).unwrap(), "its job file is still there");
-    }
-
-    #[test]
-    fn a_hook_saves_into_the_launch_or_an_existing_folder_memory() {
-        let lib = tempfile::tempdir().unwrap();
-        let payload = serde_json::json!({
-            "session_id": "s-1",
-            "transcript_path": "/t/s-1.jsonl",
-            "cwd": "/work/proj",
-            "hook_event_name": "PreCompact",
-        });
-        // outside agent-mux, a folder with no memory gets no save
-        assert!(job_from_hook(Harness::Claude, &payload, None, lib.path(), None).is_none());
-        let dir = paths::dir_for(
-            lib.path(),
-            &super::super::Settings::default(),
-            Path::new("/work/proj"),
-        );
-        paths::ensure(&dir).unwrap();
-        std::fs::write(paths::index_path(&dir), "# Memory\n").unwrap();
-        let j = job_from_hook(Harness::Codex, &payload, None, lib.path(), None).unwrap();
-        assert_eq!(
-            (j.command.as_str(), j.conversation.as_str()),
-            ("codex", "s-1")
-        );
-        assert_eq!(j.memory, dir);
-        assert_eq!(j.transcript.as_deref(), Some(Path::new("/t/s-1.jsonl")));
-        // a launch's memory wins
-        let launched = lib.path().join("launched");
-        let j = job_from_hook(
-            Harness::Claude,
-            &payload,
-            Some((launched.clone(), None)),
-            lib.path(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(j.memory, launched);
-        // save_on_close = false turns hook saves off too
-        let off = crate::config::MemoryConfig {
-            save_on_close: Some(false),
-            ..Default::default()
-        };
-        assert!(job_from_hook(Harness::Claude, &payload, None, lib.path(), Some(&off)).is_none());
-    }
-
-    #[test]
-    fn a_save_left_pending_by_a_gone_agent_mux_is_recovered() {
-        let lib = tempfile::tempdir().unwrap();
-        let mut j = job(lib.path(), "claude");
-        j.memory = lib.path().join("mem");
-        paths::ensure(&j.memory).unwrap();
-        // one from a process that is gone, one from this live process
-        let gone = Pending {
-            pid: 999_999,
-            started_at: 0,
-            job: j.clone(),
-        };
-        write_pending(lib.path(), "gone", &gone).unwrap();
-        let mut live_job = j.clone();
-        live_job.conversation = "other".into();
-        let live = Pending {
-            pid: std::process::id(),
-            started_at: 0,
-            job: live_job,
-        };
-        write_pending(lib.path(), "live", &live).unwrap();
-        assert_eq!(recover(lib.path(), None, None), 1);
-        assert!(j.memory.join(SAVES).join("claude-abc-123.json").is_file());
-        assert!(!pending_dir(lib.path()).join("gone.json").exists());
-        assert!(
-            pending_dir(lib.path()).join("live.json").exists(),
-            "still running"
-        );
-        let log = std::fs::read_to_string(j.memory.join(paths::LOG)).unwrap();
-        assert!(
-            log.contains("recovered agent-mux ended without saving"),
-            "{log}"
-        );
     }
 }

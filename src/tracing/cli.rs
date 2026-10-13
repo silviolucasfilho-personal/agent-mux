@@ -2664,13 +2664,6 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
             .to_string(),
         );
     }
-    // a launch with memory saves before compaction (`memory::save`)
-    if source == HookSource::Claude
-        && payload.get("hook_event_name").and_then(|v| v.as_str()) == Some("PreCompact")
-        && std::env::var_os(crate::memory::ENV_DIR).is_some_and(|v| !v.is_empty())
-    {
-        crate::memory::save::start_from_hook(crate::harness::Harness::Claude, &payload, "compact");
-    }
     let cfg = match config::load_from_home(&home) {
         Ok(c) => c,
         Err(e) => {
