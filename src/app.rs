@@ -2953,11 +2953,6 @@ impl App {
         match harness {
             // the system prompt is frozen per session: a pointer, never
             // the memory text
-            // the launch's own hook tells it what changed before each
-            // prompt; a user-level one stays silent
-            Some(Harness::Claude) if delivered => {
-                extra_env.push((crate::memory::ENV_FRESH.into(), "launch".into()));
-            }
             Some(Harness::Claude)
                 if !delivered
                     && !ml::has_append_system_prompt(&profile.args)

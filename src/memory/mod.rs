@@ -41,7 +41,6 @@
 pub mod cli;
 pub mod context;
 pub mod fence;
-pub mod fresh;
 pub mod hook;
 pub mod index;
 pub mod launch;
@@ -58,9 +57,6 @@ pub const ENV_INDEX: &str = "AGENT_MUX_MEMORY_INDEX";
 pub const ENV_BRIEF: &str = "AGENT_MUX_MEMORY_BRIEF";
 /// The user-level folder, listed after the workspace's notes.
 pub const ENV_USER: &str = "AGENT_MUX_MEMORY_USER";
-/// `launch` when the launch registered its own `UserPromptSubmit` memory
-/// hook (`memory::fresh`), so a user-level one stays silent.
-pub const ENV_FRESH: &str = "AGENT_MUX_MEMORY_FRESH";
 
 /// The skill package that saves, recalls and forgets notes.
 pub const SKILL_ID: &str = "mux-memory";

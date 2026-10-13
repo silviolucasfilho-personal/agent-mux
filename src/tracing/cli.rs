@@ -2601,9 +2601,6 @@ fn memory_start_text(args: &Args, home: &Path, payload: &serde_json::Value) -> O
         .and_then(|v| v.as_str())
         .unwrap_or("startup");
     memory::log::append(&dir, "claude", launch.as_deref(), "start", start);
-    if let Some(session) = payload.get("session_id").and_then(|v| v.as_str()) {
-        memory::fresh::record(&dir, user_dir.as_deref(), "claude", session);
-    }
     Some(text)
 }
 

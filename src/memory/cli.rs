@@ -31,15 +31,7 @@ else the current folder) or --user (the facts that hold in every workspace).
 Kinds: user, feedback, decision, project, reference, handoff. docs/memory.md
 explains the folder.";
 
-const BOOL_FLAGS: &[&str] = &[
-    "all",
-    "json",
-    "user",
-    "pinned",
-    "force",
-    "help",
-    "per-launch",
-];
+const BOOL_FLAGS: &[&str] = &["all", "json", "user", "pinned", "force", "help"];
 
 struct Args {
     positional: Vec<String>,
@@ -165,10 +157,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
     }
     match cmd {
         Some("hook") => {
-            return super::hook::run(
-                args.positional.first().map(String::as_str).unwrap_or(""),
-                args.has("per-launch"),
-            );
+            return super::hook::run(args.positional.first().map(String::as_str).unwrap_or(""));
         }
         Some("recover") => {
             let cfg = crate::config::load().ok();

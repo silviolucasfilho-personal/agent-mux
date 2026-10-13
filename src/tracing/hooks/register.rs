@@ -213,23 +213,6 @@ pub fn claude_hooks(reg: &Registration) -> Map<String, Value> {
             json!([{ "hooks": [handler(reg, "PreCompact", true)] }]),
         );
     }
-    // and hears, before each prompt, what other sessions saved since it
-    // started (`memory::fresh`): its own handler, synchronous so the
-    // answer reaches this prompt, beside the tracing one
-    if reg.memory {
-        let fresh = json!({
-            "type": "command",
-            "command": reg.exe.to_string_lossy(),
-            "args": ["memory", "hook", "claude", "--per-launch"],
-            "timeout": 5,
-        });
-        let groups = hooks
-            .entry("UserPromptSubmit")
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if let Value::Array(a) = groups {
-            a.push(json!({ "hooks": [fresh] }));
-        }
-    }
     hooks
 }
 
@@ -581,24 +564,5 @@ mod tests {
         let pre = &v["hooks"]["PreCompact"][0]["hooks"][0];
         assert_eq!(pre["async"], true, "{pre}");
         assert!(plain["hooks"].get("PreCompact").is_none());
-        // and its own synchronous UserPromptSubmit handler, beside tracing's
-        let ups = v["hooks"]["UserPromptSubmit"].as_array().unwrap();
-        let fresh = ups
-            .iter()
-            .flat_map(|g| g["hooks"].as_array().unwrap().iter())
-            .find(|h| h["args"][0] == "memory")
-            .expect("the memory handler");
-        assert_eq!(
-            fresh["args"],
-            json!(["memory", "hook", "claude", "--per-launch"])
-        );
-        assert!(fresh.get("async").is_none());
-        assert!(
-            plain["hooks"]["UserPromptSubmit"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|g| g["hooks"][0]["args"][0] != "memory")
-        );
     }
 }
