@@ -302,7 +302,7 @@ fn f_on_a_history_row_continues_that_conversation() {
     let from = app.handoff_from_history(&h).unwrap();
     assert_eq!(from.label, "History · rename the parser");
     let c = app
-        .continue_from(from, Some(Harness::Codex), temp.path(), true)
+        .continue_from(from, Some(Harness::Codex), temp.path())
         .unwrap();
     assert!(matches!(c, Continue::Transcript(_)), "{c:?}");
 }

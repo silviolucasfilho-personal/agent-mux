@@ -2576,28 +2576,6 @@ fn draw_new_session_dialog(f: &mut Frame, dialog: &DialogState, app: &App) {
             ),
         ]));
 
-        if dialog.memory_available {
-            lines.push(Line::from(vec![
-                Span::raw("Memory:           "),
-                Span::styled(
-                    if dialog.memory { "[On]" } else { "[Off]" },
-                    focused(DialogField::Memory).fg(if dialog.memory {
-                        Color::Green
-                    } else {
-                        Color::DarkGray
-                    }),
-                ),
-                Span::styled(
-                    if dialog.memory {
-                        " (shared workspace memory, mux-memory)"
-                    } else {
-                        " (no shared memory, nothing saved)"
-                    },
-                    dim,
-                ),
-            ]));
-        }
-
         let one_shot = if dialog.one_shot.is_empty() {
             "(interactive)".to_string()
         } else {
@@ -6617,21 +6595,6 @@ mod tests {
         assert!(text.contains("Approvals:"), "got: {text}");
         assert!(text.contains("Resume:"), "got: {text}");
         assert!(text.contains("One-shot prompt:"), "got: {text}");
-        // an App without memory (a test) offers no Memory field
-        assert!(!text.contains("Memory:"), "got: {text}");
-
-        let mut d = crate::app::DialogState::new(&app.profiles).with_memory(true);
-        app.mode = crate::app::Mode::NewSession(d.clone());
-        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("Memory:           [On]"), "got: {text}");
-        assert!(text.contains("One-shot prompt:"), "got: {text}");
-        d.memory = false;
-        app.mode = crate::app::Mode::NewSession(d);
-        terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("Memory:           [Off]"), "got: {text}");
-        assert!(text.contains("nothing saved"), "got: {text}");
     }
 
     #[test]

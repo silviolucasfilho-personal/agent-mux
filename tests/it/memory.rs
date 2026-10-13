@@ -259,80 +259,9 @@ async fn a_profile_or_config_without_memory_gets_none() {
     app.launch(claude, f.ws.clone()).unwrap();
     let run = Run::read(&f.bin);
     assert!(run.var(memory::ENV_DIR).is_none());
-    // the user-level hooks are told to stay out of it too
-    assert_eq!(run.var(memory::ENV_OFF), Some("1"));
     assert!(run.after("--append-system-prompt").is_none());
     assert!(!f.library.join("memory").exists());
     app.kill_all();
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn the_new_session_dialog_turns_memory_off_for_one_launch() {
-    use agent_mux::app::{DialogField, Mode};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    let f = fixture();
-    let claude = profile("Claude Code", fake_harness(&f.bin, "claude"), &[]);
-    let (tx, _rx) = mpsc::channel(64);
-    let mut app = app(&f, vec![claude], None, tx, MemoryConfig::default());
-    app.open_new_session_dialog(Some(0));
-    let Mode::NewSession(d) = &mut app.mode else {
-        panic!("no dialog");
-    };
-    assert!(d.memory, "on unless the profile turns it off");
-    assert!(d.fields().contains(&DialogField::Memory));
-    d.dir = f.ws.to_string_lossy().into_owned();
-    d.dir_edited = true;
-    d.field = DialogField::Memory;
-    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
-    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
-    let Mode::NewSession(d) = &app.mode else {
-        panic!("no dialog");
-    };
-    assert!(!d.memory);
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Main), "{:?}", app.notice);
-
-    let run = Run::read(&f.bin);
-    assert!(run.var(memory::ENV_DIR).is_none());
-    assert_eq!(run.var(memory::ENV_OFF), Some("1"));
-    assert!(run.after("--append-system-prompt").is_none());
-    // the session remembers it, so a restore or respawn keeps it off
-    let s = &app.sessions[0];
-    assert_eq!(
-        s.profile.memory.as_ref().and_then(|m| m.enabled),
-        Some(false)
-    );
-    assert!(s.memory_save.is_none(), "nothing saved on close");
-    app.kill_all();
-}
-
-#[cfg(unix)]
-#[test]
-fn the_user_level_hook_stays_silent_in_a_launch_with_memory_off() {
-    let f = fixture();
-    std::fs::create_dir_all(&f.home).unwrap();
-    let (ok, out) = cli(
-        &f,
-        &["add", "a-fact", "--description", "a fact about this folder"],
-        Some("A fact.\n"),
-    );
-    assert!(ok, "{out}");
-    let payload = format!(
-        r#"{{"session_id":"s-1","cwd":"{}","hook_event_name":"SessionStart","source":"startup"}}"#,
-        f.ws.display()
-    );
-    let (ok, out) = cli(&f, &["hook", "claude"], Some(&payload));
-    assert!(ok, "{out}");
-    assert!(out.contains("a-fact"), "outside agent-mux: {out}");
-    let (ok, out) = cli_with(
-        &f,
-        &["hook", "claude"],
-        Some(&payload),
-        &[(memory::ENV_OFF, "1")],
-    );
-    assert!(ok, "{out}");
-    assert!(out.is_empty(), "memory off: {out}");
 }
 
 #[cfg(unix)]
@@ -488,15 +417,6 @@ fn other_events_and_sessions_without_memory_get_no_answer() {
 // ------------------------------------------------------------ the CLI
 
 fn cli(f: &Fixture, args: &[&str], stdin: Option<&str>) -> (bool, String) {
-    cli_with(f, args, stdin, &[])
-}
-
-fn cli_with(
-    f: &Fixture,
-    args: &[&str],
-    stdin: Option<&str>,
-    env: &[(&str, &str)],
-) -> (bool, String) {
     use std::io::Write;
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_agent-mux"));
     cmd.arg("memory")
@@ -508,8 +428,6 @@ fn cli_with(
         .env_remove(memory::ENV_DIR)
         .env_remove(memory::ENV_USER)
         .env_remove("AGENT_MUX_SESSION_ID")
-        .env_remove(memory::ENV_OFF)
-        .envs(env.iter().copied())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

@@ -409,7 +409,7 @@ impl App {
         dir: &std::path::Path,
     ) -> Result<crate::handoff::Continue, String> {
         let from = self.handoff_from_session(from)?;
-        self.continue_from(from, harness, dir, true)
+        self.continue_from(from, harness, dir)
     }
 
     /// What `f` on a live session continues from.
@@ -477,14 +477,12 @@ impl App {
     /// conversation on the same Claude Code or Codex; else, with memory, a
     /// hand-off brief (`memory::brief`) a headless fork of the old
     /// conversation completes, with the rendered transcript linked for
-    /// details; else, memory off (`memory` false turns it off for this
-    /// launch), the whole transcript read first.
+    /// details; else, memory off, the whole transcript read first.
     pub fn continue_from(
         &mut self,
         from: HandoffFrom,
         harness: Option<crate::harness::Harness>,
         dir: &std::path::Path,
-        memory: bool,
     ) -> Result<crate::handoff::Continue, String> {
         use crate::handoff::{self, Continue};
         use crate::harness::Harness;
@@ -509,12 +507,10 @@ impl App {
             Harness::Antigravity => vec!["--prompt-interactive".into(), message],
             _ => vec![message],
         };
-        // memory off, for agent-mux or this launch: the whole transcript,
-        // read first
+        // memory off: the whole transcript, read first
         let Some(settings) = self
             .memory
             .as_ref()
-            .filter(|_| memory)
             .and_then(|c| crate::memory::Settings::resolve(Some(c), None))
         else {
             return Ok(Continue::Transcript(opening(handoff::opening_message(
@@ -628,12 +624,7 @@ impl App {
         let mut d = super::DialogState::new(&self.profiles)
             .with_bypass_default(self.bypass_approvals_default, &self.profiles)
             .with_backend_options(default, available, &self.profiles)
-            .with_experiments(self.tracing.is_some())
-            .with_memory(
-                self.memory
-                    .as_ref()
-                    .is_some_and(|c| c.enabled != Some(false)),
-            );
+            .with_experiments(self.tracing.is_some());
         if let Some(p) = profile.filter(|p| *p < self.profiles.len()) {
             d.set_profile(p, &self.profiles);
         }

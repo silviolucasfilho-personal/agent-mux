@@ -248,8 +248,6 @@ command = "claude"
 enabled = false           # this profile's sessions get no memory
 ```
 
-The New session dialog's **Memory** field (after Resume, for Claude Code, Codex and Antigravity; Space toggles it) turns memory on or off for one launch. It starts from the profile's `[profiles.memory] enabled` and is not offered when `[memory] enabled = false`. The session keeps the choice, so a restore or respawn keeps it. A launch with memory off gets no memory variables, no start text and no `mux-memory` hint. It saves nothing on close, and a hand-off into it reads the whole transcript instead of a brief. Such a launch also carries `AGENT_MUX_MEMORY_OFF=1`, and the hooks `agent-mux memory install` registers (section 6), as well as its compaction save, stay silent when they see it. Without that variable they would take the launch for a session started outside agent-mux.
-
 The prompts live in `prompts.toml` under `[memory]` (`hint`, `notice`, `index_footer`, `brief_footer`, `save`, `brief`, `tidy`) and are edited like every prompt (`docs/configuration.md`). The skill is shadowed from `~/.agent-mux/skills/mux-memory/` like Heimdall. `brief_timeout_s` is how long `f` waits for a brief (section 6b); `handoff` and `keeper` are read but not used yet; `imports` picks the mirrors (section 6a).
 
 ## 10. Not yet

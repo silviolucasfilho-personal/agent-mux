@@ -758,9 +758,6 @@ pub fn recover(library: &Path, store: Option<&Path>, exe: Option<&Path>) -> usiz
 /// launch's memory from the environment, else the folder's. Logged; never
 /// fails the hook. Returns whether a save started.
 pub fn start_from_hook(harness: Harness, payload: &serde_json::Value, why: &str) -> bool {
-    if super::launch_turned_off() {
-        return false;
-    }
     let var = |k: &str| {
         std::env::var_os(k)
             .filter(|v| !v.is_empty())
