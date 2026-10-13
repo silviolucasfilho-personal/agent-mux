@@ -122,9 +122,6 @@ pub fn answer(
         _ => true,
     };
     if first {
-        if let Some(ws) = workspace(harness, payload) {
-            super::imports::refresh(&dir, &ws, env.config);
-        }
         context::refresh(&dir, user.as_deref(), settings.index_lines, prompts);
     }
     let invocation = super::invocation(Some(harness));

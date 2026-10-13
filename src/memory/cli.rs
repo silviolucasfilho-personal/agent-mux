@@ -87,10 +87,6 @@ impl Args {
 /// The folder a command works on, and why.
 struct Target {
     dir: PathBuf,
-    /// The workspace this memory belongs to, when known: what `check`
-    /// refreshes the imports from.
-    workspace: Option<PathBuf>,
-    config: Option<crate::config::MemoryConfig>,
     why: String,
     user_dir: PathBuf,
     is_user: bool,
@@ -137,20 +133,8 @@ fn target(args: &Args) -> anyhow::Result<Target> {
             false,
         )
     };
-    let workspace = if is_user {
-        None
-    } else if let Some(ws) = args.value("workspace") {
-        Some(PathBuf::from(ws))
-    } else {
-        std::env::var_os("AGENT_MUX_WORKSPACE")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| std::env::current_dir().ok())
-    };
     Ok(Target {
         dir,
-        workspace,
-        config: mem_cfg.cloned(),
         why,
         user_dir,
         is_user,
@@ -410,12 +394,6 @@ fn check(t: &Target, prompts: &Prompts) -> anyhow::Result<()> {
     } else {
         vec![t.dir.clone(), t.user_dir.clone()]
     };
-    // the harnesses' own memories, mirrored before the index is rebuilt
-    if let Some(ws) = &t.workspace
-        && t.dir.is_dir()
-    {
-        super::imports::refresh(&t.dir, ws, t.config.as_ref());
-    }
     let today = super::today();
     for dir in dirs.iter().filter(|d| d.is_dir() || **d == t.dir) {
         paths::ensure(dir)?;

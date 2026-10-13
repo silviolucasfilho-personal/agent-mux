@@ -78,17 +78,10 @@ pub fn render(notes: Vec<Note>, cap: usize, footer_template: &str) -> String {
     out
 }
 
-/// Rebuilds the folder's index; returns its text. The mirrors of the
-/// harnesses' own memories follow the notes under `## Imported`.
+/// Rebuilds the folder's index; returns its text.
 pub fn rebuild(dir: &Path, cap: usize, footer_template: &str) -> std::io::Result<String> {
     let (notes, _) = note::load_all(dir);
-    let mut text = render(notes, cap, footer_template);
-    let imported = super::imports::index_lines(dir);
-    if !imported.is_empty() {
-        text.push_str("\n## Imported\n\n");
-        text.push_str(&imported.join("\n"));
-        text.push('\n');
-    }
+    let text = render(notes, cap, footer_template);
     let path = paths::index_path(dir);
     if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
         paths::write_atomic(&path, &text)?;
@@ -116,20 +109,9 @@ pub fn is_stale(dir: &Path) -> bool {
     if mtime(&notes_dir).is_some_and(|t| t > index) {
         return true;
     }
-    let imports = dir.join(paths::IMPORTS);
-    if mtime(&imports).is_some_and(|t| t > index) {
-        return true;
-    }
-    let mirror_newer = std::fs::read_dir(&imports)
-        .map(|d| {
-            d.flatten()
-                .any(|e| mtime(&e.path()).is_some_and(|t| t > index))
-        })
-        .unwrap_or(false);
-    mirror_newer
-        || note::files(dir)
-            .iter()
-            .any(|p| mtime(p).is_some_and(|t| t > index))
+    note::files(dir)
+        .iter()
+        .any(|p| mtime(p).is_some_and(|t| t > index))
 }
 
 /// Rebuilds the index when it is stale; returns whether it did.
@@ -264,27 +246,5 @@ mod tests {
         assert_eq!(expire(d.path(), "2026-01-01"), Vec::<String>::new());
         assert_eq!(expire(d.path(), "2026-01-02"), vec!["old".to_string()]);
         assert!(d.path().join("notes/.expired/old.md").is_file());
-    }
-
-    #[test]
-    fn mirrors_are_listed_after_the_notes_and_make_the_index_stale() {
-        let d = tempfile::tempdir().unwrap();
-        paths::ensure(d.path()).unwrap();
-        rebuild(d.path(), 60, "").unwrap();
-        assert!(!is_stale(d.path()));
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let imports = d.path().join(paths::IMPORTS);
-        std::fs::create_dir_all(&imports).unwrap();
-        std::fs::write(
-            imports.join("codex.md"),
-            "<!-- summary: Codex's own memories of this folder: 1 threads -->\nx\n",
-        )
-        .unwrap();
-        assert!(is_stale(d.path()), "a new mirror");
-        let text = rebuild(d.path(), 60, "").unwrap();
-        assert!(
-            text.ends_with("\n## Imported\n\n- [codex](imports/codex.md) — Codex's own memories of this folder: 1 threads (imported)\n"),
-            "{text}"
-        );
     }
 }

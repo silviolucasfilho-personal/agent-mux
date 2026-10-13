@@ -28,13 +28,11 @@ impl Launch {
         settings: &Settings,
         workspace: &Path,
         prompts: &Prompts,
-        cfg: Option<&crate::config::MemoryConfig>,
     ) -> std::io::Result<Launch> {
         let dir = paths::dir_for(library, settings, workspace);
         let user_dir = paths::user_dir(library);
         paths::ensure(&dir)?;
         paths::ensure(&user_dir)?;
-        super::imports::refresh(&dir, workspace, cfg);
         context::refresh(&dir, Some(&user_dir), settings.index_lines, prompts);
         Ok(Launch {
             dir,
@@ -215,17 +213,11 @@ mod tests {
     fn prepare_lays_out_both_folders_and_the_env() {
         let lib = tempfile::tempdir().unwrap();
         let ws = tempfile::tempdir().unwrap();
-        // the real harness folders stay out of a test
-        let no_imports = crate::config::MemoryConfig {
-            imports: vec!["none".into()],
-            ..Default::default()
-        };
         let l = Launch::prepare(
             lib.path(),
             &Settings::default(),
             ws.path(),
             &Prompts::builtin(),
-            Some(&no_imports),
         )
         .unwrap();
         assert!(l.dir.starts_with(lib.path().join("memory")));
