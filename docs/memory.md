@@ -29,6 +29,7 @@ The same flow works from a shell:
 agent-mux memory status [--json]
 agent-mux memory install [--yes] [--harness claude|codex|agy]...
 agent-mux memory uninstall [--yes] [--purge-data]
+agent-mux memory backfill [--yes] [--force] [--max-sessions N] [<folder>...]
 ```
 
 ## Reading the memory and asking it
@@ -108,6 +109,42 @@ history is not sent. `AGENT_MUX_MEMORY_FEED=off` turns the feed off, and
 ai-memory's hooks record every session again. The Memory screen and
 `agent-mux memory status` show a `feed` row.
 
+## Importing older sessions
+
+ai-memory's hooks capture only the sessions that start after they are
+installed. `agent-mux memory backfill` imports the ones from before.
+
+```
+agent-mux memory backfill
+```
+
+1. agent-mux lists every folder its trace store has seen a session in and
+   that still exists. Loop worktrees and agent-mux's own folders are left
+   out. To import only some folders, name them.
+2. For each folder it asks ai-memory what an import would bring
+   (`ai-memory backfill --dry-run`). It prints the result one project at a
+   time, then asks before importing anything.
+3. Each folder is imported with ai-memory's own `ai-memory backfill`. It
+   reads the Claude Code, Codex and Antigravity transcripts recorded in
+   that exact folder, keeps their original times, and sends them through
+   the same path as live capture. The sessions then become searchable
+   pages.
+
+It stays safe to run again:
+
+- **A project that already has captured sessions is left alone.** With
+  `--force` it is imported anyway. ai-memory does not notice that a session
+  was already captured, so those sessions are stored twice.
+- **A folder is imported only once.** Every import stores every session
+  again, so agent-mux lists the folders it has imported in
+  `~/.agent-mux/ai-memory-feed/backfilled` and skips them from then on,
+  even with `--force`. To import a folder again, delete its line.
+
+The import covers every transcript in a folder, including headless runs
+such as workflows, which the live feed leaves out. `--max-sessions N` keeps
+only the newest N of each folder. ai-memory reads at most 200 sessions per
+harness and 50,000 events per run.
+
 ## What install does
 
 Each step runs only when it is needed:
@@ -175,6 +212,7 @@ The memory itself stays unless you press `p` on the screen or pass
 | `src/memory/install.rs` | The steps and how each one runs |
 | `src/memory/cli.rs` | `agent-mux memory …` |
 | `src/memory/feed.rs` | Taking over a launch's capture and the relay to `/hook/batch` |
+| `src/memory/backfill.rs` | Importing older sessions with `ai-memory backfill`, folder by folder |
 | `src/memory/query.rs` | Search, reading a page, and the question's opening message |
 | `src/app/memory_view.rs` | The Memory screen; its steps run on a thread |
 | `src/ui/memory.rs` | Drawing the Memory screen |

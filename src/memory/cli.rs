@@ -1,5 +1,6 @@
-//! `agent-mux memory status|install|uninstall`: the install flow from the
-//! command line (`super::install`). `memory hook …`, what an older
+//! `agent-mux memory status|install|uninstall|backfill`: the install flow
+//! from the command line (`super::install`), and the import of the
+//! history from before it (`super::backfill`). `memory hook …`, what an older
 //! agent-mux put into a harness's settings, does nothing and succeeds.
 
 use super::install::{self, Options, Step};
@@ -20,7 +21,16 @@ Shared memory for Claude Code, Codex and Antigravity through ai-memory
   uninstall [--yes] [--purge-data]
                                remove ai-memory's hooks and MCP entries from
                                every harness and stop its server; --purge-data
-                               also deletes the memory. The binary stays.";
+                               also deletes the memory. The binary stays.
+  backfill [--yes] [--force] [--max-sessions N] [<folder>...]
+                               import the sessions from before ai-memory was
+                               installed (Claude Code, Codex and Antigravity
+                               transcripts) in every folder the trace store
+                               has seen, or the ones named; shows what each
+                               project gets and asks first unless --yes.
+                               A project that already has captured sessions
+                               is left alone unless --force (those may then
+                               be stored twice); a folder is imported once.";
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     let rest = args.get(1..).unwrap_or(&[]);
@@ -28,6 +38,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         Some("status") => status(rest),
         Some("install") => install_cmd(rest),
         Some("uninstall") => uninstall_cmd(rest),
+        Some("backfill") => backfill_cmd(rest),
         // the hook an older agent-mux installed: silent
         Some("hook") => Ok(()),
         _ => {
@@ -241,6 +252,129 @@ fn uninstall_cmd(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
     execute(&steps)
+}
+
+fn backfill_cmd(args: &[String]) -> anyhow::Result<()> {
+    use super::backfill;
+    use std::io::{BufRead, Write};
+    let (mut yes, mut force, mut max) = (false, false, backfill::ALL);
+    let mut named: Vec<std::path::PathBuf> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--yes" | "-y" => yes = true,
+            "--force" => force = true,
+            "--max-sessions" => {
+                max = it
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .filter(|n| *n > 0)
+                    .ok_or_else(|| anyhow::anyhow!("--max-sessions <N>"))?
+            }
+            o if o.starts_with('-') => anyhow::bail!("unknown option {o:?}\n\n{USAGE}"),
+            dir => {
+                named.push(std::fs::canonicalize(dir).map_err(|e| anyhow::anyhow!("{dir}: {e}"))?)
+            }
+        }
+    }
+    let home = home();
+    let state = State::detect();
+    let Some(bin) = state.binary.as_ref().map(|b| b.path.clone()) else {
+        anyhow::bail!("ai-memory is not installed: `agent-mux memory install` first");
+    };
+    if !state.server {
+        anyhow::bail!(
+            "ai-memory's server does not answer on {}: `agent-mux memory install` starts it",
+            super::server_addr()
+        );
+    }
+    let amx = crate::assets::root();
+    let dirs = if named.is_empty() {
+        let db = crate::tracing::analysis::default_trace_db_path();
+        backfill::folders(&db, &amx).map_err(|e| anyhow::anyhow!(e))?
+    } else {
+        named
+    };
+    // an import stores every session again: a folder goes once
+    let done = backfill::done(&amx);
+    let (old, dirs): (Vec<_>, Vec<_>) = dirs.into_iter().partition(|d| done.contains(d));
+    for d in &old {
+        println!("already imported: {}", install::shown(d));
+    }
+    if dirs.is_empty() {
+        println!("Nothing to import.");
+        return Ok(());
+    }
+    println!("Looking at {} folder(s)…", dirs.len());
+    let mut folders = Vec::new();
+    for (dir, f) in backfill::plan(&bin, &dirs, max) {
+        match f {
+            Ok(f) => folders.push(f),
+            Err(e) => println!("  skipped {}: {e}", install::shown(&dir)),
+        }
+    }
+    for line in backfill::plan_lines(&folders, force, &home) {
+        println!("{line}");
+    }
+    let todo: Vec<&backfill::Folder> = folders.iter().filter(|f| f.imported(force)).collect();
+    let total: usize = todo.iter().map(|f| f.sessions).sum();
+    if todo.is_empty() {
+        println!("Nothing to import.");
+        return Ok(());
+    }
+    if !yes {
+        print!(
+            "Import {total} session(s) from {} folder(s)? [y/N] ",
+            todo.len()
+        );
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().lock().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("Nothing changed.");
+            return Ok(());
+        }
+    }
+    let (mut sessions, mut events, mut failed) = (0, 0, 0);
+    for (i, f) in todo.iter().enumerate() {
+        print!(
+            "[{}/{}] {} ({}) … ",
+            i + 1,
+            todo.len(),
+            install::shown(&f.dir),
+            f.scope()
+        );
+        std::io::stdout().flush()?;
+        match backfill::import(&bin, f, max) {
+            Ok(r) => {
+                if let Err(e) = backfill::mark_done(&amx, &f.dir) {
+                    eprintln!("{}: {e}", backfill::done_file(&amx).display());
+                }
+                println!(
+                    "{} session(s), {} event(s){}",
+                    r.imported_sessions,
+                    r.imported_events,
+                    if r.failed_sessions > 0 {
+                        format!(", {} failed", r.failed_sessions)
+                    } else {
+                        String::new()
+                    }
+                );
+                sessions += r.imported_sessions;
+                events += r.imported_events;
+                failed += r.failed_sessions;
+            }
+            Err(e) => {
+                println!("failed: {e}");
+                failed += f.sessions;
+            }
+        }
+    }
+    println!("Imported {sessions} session(s), {events} event(s).");
+    if failed > 0 {
+        anyhow::bail!("{failed} session(s) were not imported");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
