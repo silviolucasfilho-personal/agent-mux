@@ -280,6 +280,11 @@ async fn main() -> Result<()> {
         .unwrap_or(agent_mux::app::DEFAULT_BYPASS_APPROVALS);
     app.config_path = cfg.loaded_from.clone();
     app.editor = cfg.editor.clone();
+    // agent-mux feeds ai-memory from its trace store (`memory::feed`)
+    app.memory_feed = true;
+    if let Some(db) = app.trace_db_path.clone() {
+        agent_mux::memory::feed::spawn(agent_mux::memory::home(), agent_mux::assets::root(), db);
+    }
     if hide_sidebar {
         app.sidebar_hidden = true;
     }

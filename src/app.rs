@@ -2598,6 +2598,10 @@ pub struct App {
     tracing: Option<crate::tracing::TraceRuntime>,
     /// Where the trace browser reads from; `None` when tracing is off.
     pub trace_db_path: Option<std::path::PathBuf>,
+    /// agent-mux feeds ai-memory from the trace store for the launches it
+    /// can (`memory::feed`). Off in an App built by a test; `main` turns
+    /// it on.
+    pub memory_feed: bool,
     /// Optional override for the persistent sessions file path (defaults to ~/.agent-mux/sessions.json).
     pub sessions_file: Option<std::path::PathBuf>,
     /// Whether the sidebar is currently hidden (full-screen harness).
@@ -2779,6 +2783,7 @@ impl App {
             tx,
             tracing,
             trace_db_path,
+            memory_feed: false,
             sessions_file: None,
             sidebar_hidden: false,
             clean: false,
@@ -2871,6 +2876,49 @@ impl App {
         std::env::current_dir()
             .map(|cwd| cwd.to_string_lossy().into_owned())
             .unwrap_or_else(|_| ".".into())
+    }
+
+    /// `AI_MEMORY_CAPTURE_OWNER` for a launch whose capture agent-mux takes
+    /// over (`memory::feed`): relayed from the trace store, or, for a loop
+    /// or workflow run, kept out of ai-memory. Nothing when the feed is off,
+    /// ai-memory is not wired for the harness, or the store does not get the
+    /// launch's prompts and tool calls.
+    fn memory_feed_env(
+        &self,
+        plan: &crate::tracing::LaunchPlan,
+        profile: &Profile,
+        is_loop: bool,
+    ) -> Vec<(String, String)> {
+        use crate::harness::Harness;
+        use crate::memory::feed;
+        if !self.memory_feed {
+            return Vec::new();
+        }
+        let Some(harness) = Harness::detect(&profile.command) else {
+            return Vec::new();
+        };
+        let home = crate::memory::home();
+        let complete = is_loop
+            || match harness {
+                Harness::Claude => plan.hooks_capture_content(),
+                Harness::Codex => {
+                    plan.full_content()
+                        && crate::tracing::hooks::install::codex_status(&home, None).installed
+                }
+                Harness::Antigravity => false,
+            };
+        if !feed::should_own(&home, harness, complete) {
+            return Vec::new();
+        }
+        let how = if is_loop {
+            feed::Ownership::Suppress
+        } else {
+            feed::Ownership::Relay
+        };
+        match feed::own(&self.library_root(), &plan.launch_id, how) {
+            Ok(()) => vec![(feed::ENV_OWNER.into(), feed::OWNER.into())],
+            Err(_) => Vec::new(),
+        }
     }
 
     /// The home whose harness skill directories receive installs.
@@ -3672,6 +3720,9 @@ impl App {
             None => Vec::new(),
         };
         extra_env.extend(env.iter().cloned());
+        if let Some(p) = plan.as_ref() {
+            extra_env.extend(self.memory_feed_env(p, &profile, is_loop));
+        }
         // An agent launch (fresh, restored or respawned) gets its facts
         // from Rust: the briefing snapshot and the MCP registration.
         let mut briefing_path = None;

@@ -244,6 +244,7 @@ mod tests {
             initialized: false,
             server: false,
             launchd: false,
+            feed: true,
             harnesses: vec![Wiring {
                 harness: Harness::Codex,
                 cli: true,

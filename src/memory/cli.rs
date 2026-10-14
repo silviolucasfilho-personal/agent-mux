@@ -61,6 +61,7 @@ pub fn to_json(s: &State) -> serde_json::Value {
         "address": super::server_addr(),
         "launchd": s.launchd,
         "ready": s.ready(),
+        "feed": s.feed,
         "harnesses": s.harnesses.iter().map(|w| serde_json::json!({
             "harness": w.harness.as_str(),
             "cli": w.cli, "mcp": w.mcp, "hooks": w.hooks,
@@ -100,6 +101,14 @@ pub fn status_lines(s: &State) -> Vec<String> {
         };
         out.push(line);
     }
+    out.push(if s.feed {
+        "✓ feed        agent-mux sends the sessions it launches from its traces".into()
+    } else {
+        format!(
+            "– feed        off ({}=off): ai-memory's hooks capture",
+            super::feed::ENV_SWITCH
+        )
+    });
     out
 }
 
@@ -249,6 +258,7 @@ mod tests {
             initialized: true,
             server: true,
             launchd: true,
+            feed: true,
             harnesses: vec![
                 Wiring {
                     harness: Harness::Claude,
