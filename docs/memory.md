@@ -61,6 +61,53 @@ up", "where did we leave off?". The MCP server answers.
 Typing in the search or question line is plain text: the screen's letter
 keys do nothing there. `Ctrl+R` reads the state again.
 
+## agent-mux feeds ai-memory
+
+agent-mux already records every session it launches in its trace store. For
+those sessions agent-mux sends ai-memory the events from that store, so
+ai-memory's hooks don't record them a second time. Prompts and tool output
+arrive masked and truncated the way the trace store keeps them.
+
+**What it changes**
+
+- **At launch.** A session gets `AI_MEMORY_CAPTURE_OWNER=agent-mux`.
+  ai-memory's hooks in that session then stop recording. They still hand
+  the session its handoff, and the MCP server still answers. A file under
+  `~/.agent-mux/ai-memory-feed/launches/` records that agent-mux owns the
+  session's capture.
+- **The relay.** A thread of the TUI reads the trace store's hook events past
+  a cursor (`~/.agent-mux/ai-memory-feed/cursor`). It sends the owned
+  sessions' events to ai-memory's `/hook/batch`, in order, in the shape
+  ai-memory's own hooks use:
+  - the harness's name and session id;
+  - `extension=agent-mux`;
+  - an `ingest_key` derived from the stored row, so a retry is recognised
+    instead of stored twice.
+
+  Before an event goes, ai-memory's own check (`ai-memory hook
+  --check-capture`) applies the repository's capture policy and gives the
+  project routing its hooks would use. The cursor moves past what the server
+  acknowledged. If the server is down, events wait in the trace store until
+  it's back.
+
+**Which sessions**
+
+| Session | Who records it |
+|---|---|
+| Claude Code, with agent-mux's per-launch hooks at the `standard` or `strict` profile and `full` content mode | agent-mux |
+| Codex, when agent-mux's Codex trace hooks are installed | agent-mux |
+| Antigravity | ai-memory's own hooks (agent-mux records only an Antigravity session's first model call) |
+| Loop and workflow runs | Nobody: agent-mux owns their capture and sends nothing, so headless runs stay out of the memory |
+| Sessions started outside agent-mux | ai-memory's own hooks |
+
+The assistant's last message is not sent. ai-memory keeps it only when you
+turn on its `capture_assistant` option.
+
+When the relay first starts it begins at the newest stored event, so earlier
+history is not sent. `AGENT_MUX_MEMORY_FEED=off` turns the feed off, and
+ai-memory's hooks record every session again. The Memory screen and
+`agent-mux memory status` show a `feed` row.
+
 ## What install does
 
 Each step runs only when it is needed:
@@ -127,6 +174,7 @@ The memory itself stays unless you press `p` on the screen or pass
 | `src/memory/mod.rs` | Reading the state: binary, server, launchd agent, each harness's files |
 | `src/memory/install.rs` | The steps and how each one runs |
 | `src/memory/cli.rs` | `agent-mux memory …` |
+| `src/memory/feed.rs` | Taking over a launch's capture and the relay to `/hook/batch` |
 | `src/memory/query.rs` | Search, reading a page, and the question's opening message |
 | `src/app/memory_view.rs` | The Memory screen; its steps run on a thread |
 | `src/ui/memory.rs` | Drawing the Memory screen |

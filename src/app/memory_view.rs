@@ -429,6 +429,7 @@ mod tests {
             initialized: true,
             server: true,
             launchd: true,
+            feed: true,
             harnesses: vec![Wiring {
                 harness: Harness::Claude,
                 cli: true,

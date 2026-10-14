@@ -143,6 +143,23 @@ pub struct LaunchPlan {
 }
 
 impl LaunchPlan {
+    /// Whether this launch's own hooks deliver its prompts and tool calls
+    /// to the store with their content: registered, at a profile with the
+    /// tool events, in `full` content mode (`memory::feed`).
+    pub fn hooks_capture_content(&self) -> bool {
+        self.hooks_registered
+            && matches!(
+                self.hooks_profile,
+                hooks::register::HooksProfile::Standard | hooks::register::HooksProfile::Strict
+            )
+            && self.content_mode == ContentMode::Full
+    }
+
+    /// Whether the content of this launch's rows is kept (`full` mode).
+    pub fn full_content(&self) -> bool {
+        self.content_mode == ContentMode::Full
+    }
+
     /// Marks the plan as a loop run. On Claude the per-launch `--settings`
     /// hook document is recomputed so `PreToolUse` waits for the guard
     /// with `--loop` (fail-closed for write tools); Codex reads the same

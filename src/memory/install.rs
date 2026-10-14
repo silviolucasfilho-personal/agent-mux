@@ -516,6 +516,7 @@ mod tests {
             initialized: binary,
             server,
             launchd,
+            feed: true,
             harnesses: vec![
                 Wiring {
                     harness: Harness::Claude,

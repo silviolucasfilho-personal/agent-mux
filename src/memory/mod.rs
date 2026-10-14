@@ -26,6 +26,7 @@
 //! the ai-memory binary or its staged hooks (`.../ai-memory/hooks/...`).
 
 pub mod cli;
+pub mod feed;
 pub mod install;
 pub mod query;
 
@@ -127,6 +128,8 @@ pub struct State {
     pub server: bool,
     pub launchd: bool,
     pub harnesses: Vec<Wiring>,
+    /// agent-mux feeds ai-memory from its traces (`feed`).
+    pub feed: bool,
 }
 
 impl State {
@@ -147,6 +150,7 @@ impl State {
                 .iter()
                 .map(|&h| wiring(&home, h, on_path(h.as_str()).is_some()))
                 .collect(),
+            feed: feed::enabled(),
         }
     }
 
