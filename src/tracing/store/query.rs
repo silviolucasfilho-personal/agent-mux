@@ -367,10 +367,13 @@ fn trace_from_row(r: &Row) -> rusqlite::Result<TraceStat> {
     })
 }
 
+/// A session's turns in the order they happened. Ordinals count per
+/// launch, so a resumed session repeats them; start time orders the turns
+/// and the ordinal only breaks ties.
 pub fn list_traces(conn: &Connection, session_key: &str) -> rusqlite::Result<Vec<TraceStat>> {
     let mut stmt = conn.prepare(&trace_stats_sql(
         "t.session_key = ?1",
-        "ORDER BY t.ordinal, t.start_ns",
+        "ORDER BY t.start_ns, t.ordinal",
     ))?;
     let rows = stmt.query_map(params![session_key], trace_from_row)?;
     rows.collect()
@@ -1274,7 +1277,7 @@ mod tests {
     /// query is expected to reproduce.
     fn traces_from_view(conn: &Connection, session_key: &str) -> Vec<TraceStat> {
         let mut stmt = conn
-            .prepare("SELECT * FROM trace_stats WHERE session_key = ?1 ORDER BY ordinal, start_ns")
+            .prepare("SELECT * FROM trace_stats WHERE session_key = ?1 ORDER BY start_ns, ordinal")
             .unwrap();
         stmt.query_map(params![session_key], trace_from_row)
             .unwrap()
@@ -1304,6 +1307,35 @@ mod tests {
             );
         }
         assert_eq!(list_traces(&conn, "claude:nope").unwrap(), Vec::new());
+    }
+
+    /// A resumed session starts its ordinals again in the new launch; the
+    /// turns still come back in the order they happened.
+    #[test]
+    fn list_traces_orders_a_resumed_session_by_time() {
+        let conn = seeded(1);
+        let ns = 1_000_000_000i64;
+        // two launches, each counting its turns from 1
+        for (id, ordinal, start) in [
+            ("r-a1", 1, ns + 1_000),
+            ("r-a2", 2, ns + 2_000),
+            ("r-b1", 1, ns + 3_000),
+            ("r-b2", 2, ns + 4_000),
+        ] {
+            conn.execute(
+                "INSERT INTO traces (id, session_key, ordinal, name, status, start_ns,
+                     end_ns, skills)
+                 VALUES (?1, 'claude:s0', ?2 + 10, 'turn', 'closed', ?3, ?3 + 10, '[]')",
+                params![id, ordinal, start],
+            )
+            .unwrap();
+        }
+        let ids: Vec<String> = list_traces(&conn, "claude:s0")
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids, ["t0-0", "t0-1", "r-a1", "r-a2", "r-b1", "r-b2"]);
     }
 
     #[test]
@@ -1384,7 +1416,7 @@ mod tests {
         let plan: Vec<String> = conn
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN {}",
-                trace_stats_sql("t.session_key = ?1", "ORDER BY t.ordinal, t.start_ns")
+                trace_stats_sql("t.session_key = ?1", "ORDER BY t.start_ns, t.ordinal")
             ))
             .unwrap()
             .query_map(params!["claude:s0"], |r| r.get::<_, String>(3))
