@@ -25,6 +25,7 @@
 //! ai-memory's installers. A hook is ai-memory's when its command names
 //! the ai-memory binary or its staged hooks (`.../ai-memory/hooks/...`).
 
+pub mod backfill;
 pub mod cli;
 pub mod feed;
 pub mod install;
