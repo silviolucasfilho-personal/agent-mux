@@ -646,25 +646,19 @@ Fingerprint: 1919|2026-09-16T19:47:13Z|BLOCKED||3 2238|2026-09-13T19:18:37Z|DIRT
     fn snapshots_are_kept_per_run_and_the_previous_one_is_found() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        write_snapshot(root, "abc", "2026-09-17T17:21:00Z", "# one\n").unwrap();
-        write_snapshot(root, "abc", "2026-09-17T17:36:53Z", "# two\n").unwrap();
-        assert_eq!(
-            read_snapshot(root, "abc", "2026-09-17T17:36:53Z").as_deref(),
-            Some("# two\n")
-        );
+        let now = crate::loops::now();
+        let t1 = crate::loops::format_timestamp(now - time::Duration::minutes(15));
+        let t2 = crate::loops::format_timestamp(now);
+        write_snapshot(root, "abc", &t1, "# one\n").unwrap();
+        write_snapshot(root, "abc", &t2, "# two\n").unwrap();
+        assert_eq!(read_snapshot(root, "abc", &t2).as_deref(), Some("# two\n"));
         let ids: Vec<String> = snapshots(root, "abc").into_iter().map(|(i, _)| i).collect();
+        assert_eq!(ids, vec![t1.clone(), t2.clone()]);
         assert_eq!(
-            ids,
-            vec![
-                "2026-09-17T17:21:00Z".to_string(),
-                "2026-09-17T17:36:53Z".to_string()
-            ]
-        );
-        assert_eq!(
-            previous_snapshot(root, "abc", "2026-09-17T17:36:53Z").as_deref(),
+            previous_snapshot(root, "abc", &t2).as_deref(),
             Some("# one\n")
         );
-        assert_eq!(previous_snapshot(root, "abc", "2026-09-17T17:21:00Z"), None);
+        assert_eq!(previous_snapshot(root, "abc", &t1), None);
         // a loop with no snapshots is not an error
         assert!(snapshots(root, "nope").is_empty());
     }

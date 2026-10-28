@@ -30,3 +30,4 @@ pub mod transcript;
 pub mod tree;
 pub mod ui;
 pub mod workflows;
+pub mod workspace;

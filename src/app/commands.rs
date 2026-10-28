@@ -39,10 +39,14 @@ impl App {
         let config_item = matches!(&self.mode, Mode::ConfigView(v) if v.selected_asset().is_some());
         let skills_package =
             matches!(&self.mode, Mode::SkillsView(v) if v.selected_package().is_some());
+        let workspace_node = match &self.mode {
+            Mode::Workspaces(v) => v.selected_node(),
+            _ => None,
+        };
         let supported = match id {
             SubmitDialog => matches!(self.mode, Mode::NewSession(_) | Mode::WorkflowDialog(_)),
             Commands | Help | FocusAgents | TestShortcuts | Quit | Runs | Skills
-            | Configuration | Memory | Inbox | History => true,
+            | Configuration | Memory | Workspaces | Inbox | History => true,
             ReturnToSession => self.return_session_id().is_some(),
             PrevSession | NextSession => session.is_some(),
             ToggleSidebar => matches!(self.mode, Mode::Main | Mode::TraceBrowser(_)),
@@ -54,8 +58,15 @@ impl App {
             FilterClaude | FilterCodex | FilterAntigravity => {
                 matches!(self.mode, Mode::SkillsView(_))
             }
-            Save => editor || runs_item.is_some_and(|i| i.run.is_flow()),
-            New => main_list || matches!(self.mode, Mode::ConfigView(_)) || editor_library,
+            Save => {
+                editor || runs_item.is_some_and(|i| i.run.is_flow()) || workspace_node.is_some()
+            }
+            New => {
+                main_list
+                    || matches!(self.mode, Mode::ConfigView(_))
+                    || editor_library
+                    || workspace_node.is_some()
+            }
             Edit => {
                 matches!(
                     row,
@@ -64,6 +75,7 @@ impl App {
                     || skills_package
                     || runs_item.is_some()
                     || matches!(self.mode, Mode::Markdown(_) | Mode::AgentEditor(_))
+                    || workspace_node.is_some_and(|n| n.customization.primary_doc.is_some())
             }
             Delete => {
                 matches!(row, Some(AgentKind::Loop(_)))
@@ -100,6 +112,7 @@ impl App {
                     || matches!(self.mode, Mode::AgentEditor(_))
                     || runs_item.is_some()
                     || skills_package
+                    || workspace_node.is_some()
                     || matches!(&self.mode, Mode::TraceBrowser(b) if !b.sessions.is_empty())
                     || matches!(&self.mode, Mode::SessionHistory(h) if !h.sessions.is_empty())
             }
@@ -120,6 +133,7 @@ impl App {
                     | Mode::RunsView(_)
                     | Mode::Markdown(_)
                     | Mode::Memory(_)
+                    | Mode::Workspaces(_)
             ),
             Restore => {
                 editor_library
@@ -192,6 +206,7 @@ impl App {
             Skills => self.request_navigation(NavigationTarget::Skills, now),
             Configuration => self.request_navigation(NavigationTarget::Configuration, now),
             Memory => self.request_navigation(NavigationTarget::Memory, now),
+            Workspaces => self.request_navigation(NavigationTarget::Workspaces, now),
             Inbox => self.request_navigation(NavigationTarget::Inbox, now),
             History => self.request_navigation(NavigationTarget::History, now),
             FilterClaude | FilterCodex | FilterAntigravity => {
@@ -285,6 +300,7 @@ pub enum NavigationTarget {
     Skills,
     Configuration,
     Memory,
+    Workspaces,
     Inbox,
     History,
 }
@@ -509,6 +525,7 @@ impl App {
             NavigationTarget::Skills => self.open_skills_view(),
             NavigationTarget::Configuration => self.open_config_view(),
             NavigationTarget::Memory => self.open_memory_view(),
+            NavigationTarget::Workspaces => self.open_workspaces_view(),
             NavigationTarget::Inbox => self.open_inbox(),
             NavigationTarget::History => self.apply(
                 super::Action::OpenSessionHistory,
@@ -531,6 +548,7 @@ impl App {
             Mode::ConfigView(_) => "Configuration",
             Mode::Markdown(_) => "Markdown",
             Mode::Memory(_) => "Memory",
+            Mode::Workspaces(_) => "Workspaces",
             _ => "Dialog",
         }
     }
@@ -591,6 +609,7 @@ impl App {
             Mode::ConfigView(v) => matches!(v.pending, super::Pending::NewName { .. }),
             Mode::RunsView(v) => v.save_name.is_some(),
             Mode::Memory(v) => v.input.is_some(),
+            Mode::Workspaces(v) => v.filtering,
             _ => false,
         }
     }
