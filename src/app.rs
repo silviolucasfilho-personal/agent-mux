@@ -40,6 +40,7 @@ mod skills_view;
 pub mod text_area;
 pub mod workflows;
 pub mod workflows_view;
+pub mod workspaces_view;
 pub use skills_view::*;
 
 #[derive(Debug)]
@@ -76,6 +77,8 @@ pub enum Mode {
     Markdown(Box<markdown_view::MarkdownView>),
     /// The Memory screen: ai-memory's setup and its install flow.
     Memory(Box<memory_view::MemoryView>),
+    /// The Workspaces Explorer screen: folders, sub-folders, stacks and agents.
+    Workspaces(Box<workspaces_view::WorkspacesView>),
 }
 
 /// An external editor the main loop must run for the App: it leaves the
@@ -213,6 +216,7 @@ pub enum Action {
     AboutKey,
     MarkdownKey,
     MemoryKey,
+    WorkspacesKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
     /// `C`: the Configuration view.
     OpenConfigView,
@@ -794,6 +798,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::NewAgent(_) => Action::NewAgentKey,
         Mode::Markdown(_) => Action::MarkdownKey,
         Mode::Memory(_) => Action::MemoryKey,
+        Mode::Workspaces(_) => Action::WorkspacesKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => Action::EnterConfirmRemoveLoop,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
@@ -3238,6 +3243,9 @@ impl App {
         if let Mode::Memory(view) = &mut self.mode {
             view.poll();
         }
+        if let Mode::Workspaces(view) = &mut self.mode {
+            view.poll();
+        }
         self.resync_workflow_selection();
         self.refresh_strip_if_needed(now);
         self.publish_live_snapshot_if_needed(now);
@@ -4372,6 +4380,168 @@ impl App {
         self.mode = Mode::Memory(Box::new(memory_view::MemoryView::open(dir, pages)));
     }
 
+    /// Opens the Workspaces Explorer rooted at the launch directory (or
+    /// current working directory).
+    pub fn open_workspaces_view(&mut self) {
+        let root = std::env::current_dir()
+            .unwrap_or_else(|_| resolve_working_dir(&self.skill_launcher_workspace()));
+        let source = self.workspace_activity_source();
+        let default_harness = self
+            .profiles
+            .first()
+            .and_then(|p| crate::harness::Harness::detect(&p.command))
+            .map(|h| h.as_str().to_string())
+            .unwrap_or_else(|| "claude".to_string());
+        self.mode = Mode::Workspaces(Box::new(workspaces_view::WorkspacesView::open(
+            root,
+            self.library_root(),
+            default_harness,
+            &source,
+        )));
+    }
+
+    fn workspace_activity_source(&self) -> crate::workspace::activity::ActivitySource {
+        let now = Instant::now();
+        let live: Vec<crate::workspace::activity::LiveSessionSnapshot> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(idx, s)| {
+                let st = s.status(now);
+                let (status_label, is_running) = match st {
+                    Status::Working => ("running".into(), true),
+                    Status::NeedsAttention => ("needs attention".into(), true),
+                    Status::Idle => ("idle".into(), false),
+                    Status::Exited(code) => (
+                        match code {
+                            Some(c) => format!("exited ({c})"),
+                            None => "exited".into(),
+                        },
+                        false,
+                    ),
+                };
+                crate::workspace::activity::LiveSessionSnapshot {
+                    session_idx: idx,
+                    session_id: s.id,
+                    profile_name: s.profile.name.clone(),
+                    harness: crate::harness::Harness::detect(&s.profile.command),
+                    status_label,
+                    is_running,
+                    dir: s.dir.clone(),
+                }
+            })
+            .collect();
+        crate::workspace::activity::ActivitySource::load(
+            self.trace_db_path.as_deref(),
+            self.loops_file.as_deref(),
+            &self.library_root(),
+            live,
+        )
+    }
+
+    fn workspaces_outcome(&mut self, outcome: workspaces_view::Outcome) {
+        use workspaces_view::Outcome;
+        match outcome {
+            Outcome::None => {}
+            Outcome::Close => self.mode = Mode::Main,
+            Outcome::Reload => {
+                let source = self.workspace_activity_source();
+                if let Mode::Workspaces(view) = &mut self.mode {
+                    view.rescan(&source);
+                }
+            }
+            Outcome::ChangeRoot(new_root) => {
+                let source = self.workspace_activity_source();
+                if let Mode::Workspaces(view) = &mut self.mode {
+                    view.set_root(new_root, &source);
+                }
+            }
+            Outcome::LaunchDefaultInDir(dir) => {
+                if let Some(first_profile) = self.profiles.first().cloned() {
+                    if let Err(e) = self.finish_dialog_launch(DialogLaunch {
+                        profile: first_profile,
+                        dir,
+                        opening_args: Vec::new(),
+                        continued_from: None,
+                        agent: None,
+                        link: None,
+                        attach: None,
+                    }) {
+                        self.notice = Some(Notice::error(e));
+                    }
+                } else {
+                    self.open_new_session_in_dir(&dir, None);
+                }
+            }
+            Outcome::NewSessionDialogInDir(dir) => {
+                self.open_new_session_in_dir(&dir, None);
+            }
+            Outcome::LaunchPersonaInDir { agent, dir } => {
+                self.open_new_session_in_dir(&dir, Some(agent));
+            }
+            Outcome::AttachSession(idx) => {
+                if idx < self.sessions.len() {
+                    self.attach_to_session(idx);
+                }
+            }
+            Outcome::ResumeSession {
+                provider,
+                session_id,
+                cwd,
+            } => {
+                let harness = match provider.as_str() {
+                    "claude" => crate::harness::Harness::Claude,
+                    "codex" => crate::harness::Harness::Codex,
+                    "antigravity" | "agy" => crate::harness::Harness::Antigravity,
+                    other => {
+                        self.notice = Some(Notice::warn(format!(
+                            "resume is not supported for {other} sessions"
+                        )));
+                        return;
+                    }
+                };
+                self.resume_conversation(harness, &session_id, Some(cwd));
+            }
+            Outcome::OpenLoopRuns(loop_id) => {
+                self.open_runs_view_on_loop(&loop_id);
+            }
+            Outcome::RunLoopNow(loop_id) => {
+                if let Some(pos) = self
+                    .loop_registry
+                    .loops
+                    .iter()
+                    .position(|l| l.id == loop_id)
+                {
+                    self.selected_loop = pos;
+                    self.run_selected_loop_now();
+                    let source = self.workspace_activity_source();
+                    if let Mode::Workspaces(view) = &mut self.mode {
+                        view.rescan(&source);
+                    }
+                }
+            }
+            Outcome::EditLoop(loop_id) => {
+                self.open_scheduled_editor(Some(loop_id), None);
+            }
+            Outcome::EditPersona(name) => {
+                self.open_persona_editor(&name);
+            }
+            Outcome::OpenMarkdown(path) => {
+                self.open_markdown(&path);
+            }
+        }
+    }
+
+    fn open_new_session_in_dir(&mut self, dir: &std::path::Path, agent: Option<String>) {
+        self.open_new_session_dialog(None);
+        if let Mode::NewSession(d) = &mut self.mode {
+            d.dir = dir.to_string_lossy().into_owned();
+            d.dir_edited = true;
+            d.dir_picker = dir_picker::DirPicker::for_path(&d.dir);
+            d.agent = agent;
+        }
+    }
+
     fn memory_outcome(&mut self, outcome: memory_view::Outcome) {
         use memory_view::Outcome;
         match outcome {
@@ -4928,6 +5098,12 @@ impl App {
                 if let Mode::Memory(view) = &mut self.mode {
                     let outcome = view.handle_key(key);
                     self.memory_outcome(outcome);
+                }
+            }
+            Action::WorkspacesKey => {
+                if let Mode::Workspaces(view) = &mut self.mode {
+                    let outcome = view.handle_key(key);
+                    self.workspaces_outcome(outcome);
                 }
             }
             Action::MarkdownKey => {
