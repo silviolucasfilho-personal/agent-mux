@@ -12,7 +12,7 @@ use crate::tracing::analysis::default_trace_db_path;
 use crate::tracing::store::{now_ns, open_aux};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const USAGE: &str = "usage: agent-mux bus <command> [options]
@@ -131,6 +131,9 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
     if matches!(cmd, "help" | "--help" | "-h") {
         println!("{USAGE}");
         return Ok(());
+    }
+    if cmd == "swarm" {
+        return run_swarm(&raw[1..]);
     }
     let args = Args::parse(&raw[1..]);
     if args.has("help") {
@@ -602,6 +605,217 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         }
         other => {
             anyhow::bail!("unknown bus command: {other}\n\n{USAGE}");
+        }
+    }
+    Ok(())
+}
+
+pub const SWARM_USAGE: &str = "usage: agent-mux swarm <command> [options]
+
+commands:
+  status [--workspace DIR] [--db PATH] [--json]
+                                inspect workspace swarm coordinator, workers, board, leases, messages
+  start <goal...> [--coordinator claude|codex|agy] [--workers N] [--isolation shared|worktree] [--workspace DIR]
+                                launch a Swarm Coordinator with delegated workers in the running TUI
+  broadcast <message...> [--urgent] [--wake] [--workspace DIR] [--db PATH] [--json]
+                                broadcast a directive or blocker message to all swarm workers
+  stop [--workspace DIR] [--db PATH] [--json]
+                                cancel open tasks and release all cooperative file leases in the workspace";
+
+pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
+    let cmd = raw.first().map(String::as_str).unwrap_or("status");
+    if matches!(cmd, "--help" | "-h" | "help") {
+        println!("{SWARM_USAGE}");
+        return Ok(());
+    }
+    let rest = if raw.is_empty() { &[][..] } else { &raw[1..] };
+    let args = Args::parse(rest);
+    let workspace = resolve_workspace(&args);
+    let db_path = resolve_db(&args);
+    let now = now_ns();
+
+    match cmd {
+        "status" => {
+            let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+            let now_s = now / 1_000_000_000;
+            let snap =
+                super::swarm::load_snapshot(Some(&conn), Path::new(&workspace), &[], None, now_s);
+            if args.has("json") {
+                println!("{}", serde_json::to_string_pretty(&snap)?);
+            } else {
+                println!("Workspace: {}", snap.workspace);
+                if let Some(g) = &snap.goal {
+                    println!("Mission Goal: {g}");
+                }
+                println!(
+                    "Coordinator: {}",
+                    match &snap.coordinator {
+                        Some(c) => format!(
+                            "★ Coord ({}, state: {}, launch: {})",
+                            c.provider,
+                            c.state,
+                            crate::bus::short_id(&c.launch_id)
+                        ),
+                        None => "(none)".to_string(),
+                    }
+                );
+                println!("Workers ({}):", snap.workers.len());
+                for w in &snap.workers {
+                    println!(
+                        "  - {} ({}, state: {}, tasks: {})",
+                        w.label,
+                        w.provider,
+                        w.state,
+                        w.active_tasks.join(", ")
+                    );
+                }
+                let (running, open, done, failed) = snap.task_counts();
+                println!(
+                    "Tasks: {} total ({} running, {} open/claimed, {} done, {} failed)",
+                    snap.tasks.len(),
+                    running,
+                    open,
+                    done,
+                    failed
+                );
+                println!("File Leases: {}", snap.leases.len());
+                for l in &snap.leases {
+                    println!(
+                        "  - 🔒 {} ← {}",
+                        l.pattern,
+                        snap.member_label(&l.owner_launch)
+                    );
+                }
+                println!(
+                    "Total Tokens: {}   Cost: ${:.4}",
+                    snap.total_tokens, snap.total_cost_usd
+                );
+            }
+        }
+        "start" => {
+            let goal_words = args.positional.clone();
+            if goal_words.is_empty() {
+                anyhow::bail!("swarm start requires a goal description\n\n{SWARM_USAGE}");
+            }
+            let goal = goal_words.join(" ");
+            let harness = args.value("coordinator").map(str::to_string);
+            let max_workers = args
+                .value("workers")
+                .and_then(|w| w.parse::<usize>().ok())
+                .unwrap_or(3);
+            let isolation = match args.value("isolation") {
+                Some("worktree") => TaskIsolation::Worktree,
+                _ => TaskIsolation::Shared,
+            };
+            let req = ControlRequest::SpawnCoordinator {
+                workspace: workspace.clone(),
+                goal: goal.clone(),
+                harness: harness.clone(),
+                max_workers,
+                isolation,
+            };
+            match control::send_request(None, &req, Duration::from_millis(1500)) {
+                Ok(resp) if resp.ok => {
+                    println!(
+                        "Swarm Coordinator spawned: launch_id={}",
+                        resp.launch_id.as_deref().unwrap_or("?")
+                    );
+                }
+                Ok(resp) => {
+                    anyhow::bail!(
+                        "Failed to spawn coordinator: {}",
+                        resp.error.unwrap_or_default()
+                    );
+                }
+                Err(err) => {
+                    let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+                    let norm_ws = bstore::normalize_workspace(Path::new(&workspace));
+                    let coord_id = format!("coord-{}", uuid::Uuid::new_v4().simple());
+                    bstore::record_coordinator(
+                        &conn,
+                        Some(&db_path),
+                        &norm_ws,
+                        &coord_id,
+                        &goal,
+                        now,
+                    )?;
+                    println!(
+                        "Recorded Swarm Coordinator in traces.db: {coord_id} (control socket unavailable: {err})"
+                    );
+                }
+            }
+        }
+        "broadcast" => {
+            if args.positional.is_empty() {
+                anyhow::bail!("swarm broadcast requires a message body\n\n{SWARM_USAGE}");
+            }
+            let body = args.positional.join(" ");
+            let urgent = args.has("urgent");
+            let wake = args.has("wake");
+            let topic = if urgent { "blocker" } else { "directive" };
+            let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+            let norm_ws = bstore::normalize_workspace(Path::new(&workspace));
+            let msg = bstore::send_message(
+                &conn,
+                Some(&db_path),
+                &norm_ws,
+                "cli",
+                None,
+                topic,
+                &body,
+                None,
+                now,
+            )?;
+            if wake {
+                let req = ControlRequest::WakeSession {
+                    launch_id: "*".into(),
+                    prompt: format!("[Swarm Broadcast on {topic}]: {body}"),
+                };
+                let _ = control::send_request(None, &req, Duration::from_millis(500));
+            }
+            if args.has("json") {
+                println!("{}", serde_json::to_string_pretty(&msg)?);
+            } else {
+                println!("Broadcast message sent (id: {})", msg.id);
+            }
+        }
+        "stop" => {
+            let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+            let norm_ws = bstore::normalize_workspace(Path::new(&workspace));
+            let tasks = bstore::list_tasks(&conn, &norm_ws, None, None, None).unwrap_or_default();
+            let mut cancelled = 0;
+            for t in tasks {
+                if !t.status.is_terminal() {
+                    let _ = bstore::update_task(
+                        &conn,
+                        Some(&db_path),
+                        &t.id,
+                        "",
+                        TaskStatus::Cancelled,
+                        Some(serde_json::json!("Swarm stopped")),
+                        None,
+                        None,
+                        None,
+                        now,
+                    );
+                    cancelled += 1;
+                }
+            }
+            let leases_released =
+                bstore::release_leases(&conn, &norm_ws, "cli", None, &[]).unwrap_or(0);
+            if args.has("json") {
+                println!(
+                    "{}",
+                    json!({ "tasks_cancelled": cancelled, "leases_released": leases_released })
+                );
+            } else {
+                println!(
+                    "Swarm stopped: cancelled {cancelled} task(s), released {leases_released} lease(s)"
+                );
+            }
+        }
+        other => {
+            anyhow::bail!("unknown swarm subcommand: {other}\n\n{SWARM_USAGE}");
         }
     }
     Ok(())

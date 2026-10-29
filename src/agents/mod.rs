@@ -519,6 +519,10 @@ pub const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../agents/builtin/doc-writer.toml"),
     ),
     ("judge", include_str!("../../agents/builtin/judge.toml")),
+    (
+        "coordinator",
+        include_str!("../../agents/builtin/coordinator.toml"),
+    ),
 ];
 
 pub fn builtin(name: &str) -> Option<&'static str> {

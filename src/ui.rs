@@ -6,6 +6,7 @@ mod loop_builder;
 pub mod markdown;
 pub mod memory;
 mod runs;
+pub mod swarm;
 pub mod workspaces;
 
 use crate::app::loops::LoopStatus;
@@ -353,6 +354,11 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
             let full = f.area();
             let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
             workspaces::draw(f, area, view);
+        }
+        Mode::Swarm(view) => {
+            let full = f.area();
+            let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
+            swarm::draw(f, area, view, app);
         }
         Mode::ConfirmRemoveLoop => draw_confirm(
             f,

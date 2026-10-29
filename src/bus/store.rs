@@ -937,6 +937,148 @@ pub fn update_task(
         .ok_or_else(|| format!("task '{task_id}' disappeared"))
 }
 
+/// Lists the most recent `limit` messages across the entire workspace in
+/// chronological order (oldest first among the recent window).
+pub fn list_workspace_messages(
+    conn: &Connection,
+    workspace: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<BusMessage>> {
+    let limit = limit.clamp(1, 500) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace, from_launch, to_launch, topic, body, reply_to, created_ns, delivered_ns, acked_ns
+         FROM (
+             SELECT id, workspace, from_launch, to_launch, topic, body, reply_to, created_ns, delivered_ns, acked_ns
+             FROM agent_messages
+             WHERE workspace = ?1
+             ORDER BY created_ns DESC
+             LIMIT ?2
+         )
+         ORDER BY created_ns ASC",
+    )?;
+    let rows = stmt.query_map(params![workspace, limit], |r| {
+        Ok(BusMessage {
+            id: r.get(0)?,
+            workspace: r.get(1)?,
+            from_launch: r.get(2)?,
+            to_launch: r.get(3)?,
+            topic: r.get(4)?,
+            body: r.get(5)?,
+            reply_to: r.get(6)?,
+            created_ns: r.get(7)?,
+            delivered_ns: r.get(8)?,
+            acked_ns: r.get(9)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Records `coordinator_launch` as the active Swarm Coordinator for `workspace`
+/// by posting a `swarm-coordinator` event onto the workspace bus.
+pub fn record_coordinator(
+    conn: &Connection,
+    db_path: Option<&Path>,
+    workspace: &str,
+    coordinator_launch: &str,
+    note: &str,
+    now: i64,
+) -> rusqlite::Result<BusMessage> {
+    let body = if note.trim().is_empty() {
+        format!("Swarm Coordinator set to {coordinator_launch}")
+    } else {
+        note.trim().to_string()
+    };
+    send_message(
+        conn,
+        db_path,
+        workspace,
+        coordinator_launch,
+        None,
+        "swarm-coordinator",
+        &body,
+        None,
+        now,
+    )
+}
+
+/// Returns the launch ID of the most recently designated Swarm Coordinator in `workspace`.
+pub fn active_coordinator_launch(conn: &Connection, workspace: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT from_launch FROM agent_messages
+         WHERE workspace = ?1 AND topic = 'swarm-coordinator'
+         ORDER BY created_ns DESC
+         LIMIT 1",
+        params![workspace],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// Updates a task's title, instructions, and scoped file patterns.
+pub fn update_task_spec(
+    conn: &Connection,
+    db_path: Option<&Path>,
+    task_id: &str,
+    title: &str,
+    instructions: &str,
+    files: &[String],
+    now: i64,
+) -> Result<BusTask, String> {
+    let Some(before) = get_task(conn, task_id).map_err(|e| e.to_string())? else {
+        return Err(format!("no task '{task_id}'"));
+    };
+    let clean_title = title.trim();
+    if clean_title.is_empty() {
+        return Err("task title cannot be empty".into());
+    }
+    let norm_files: Vec<String> = files
+        .iter()
+        .map(|f| normalize_rel_path(&before.workspace, f))
+        .filter(|f| !f.is_empty())
+        .collect();
+    let files_json = serde_json::to_string(&norm_files).unwrap_or_else(|_| "[]".into());
+    conn.execute(
+        "UPDATE agent_tasks
+         SET title = ?1,
+             instructions = ?2,
+             files_json = ?3,
+             updated_ns = ?4
+         WHERE id = ?5",
+        params![clean_title, instructions.trim(), files_json, now, task_id],
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(p) = db_path {
+        crate::tracing::store::poke_wake(p);
+    }
+    get_task(conn, task_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("task '{task_id}' disappeared"))
+}
+
+/// Force-releases a single file lease by pattern in `workspace`, regardless of owner.
+pub fn force_release_lease(
+    conn: &Connection,
+    db_path: Option<&Path>,
+    workspace: &str,
+    pattern: &str,
+) -> rusqlite::Result<usize> {
+    let pat = normalize_rel_path(workspace, pattern);
+    let n = conn.execute(
+        "DELETE FROM agent_leases WHERE workspace = ?1 AND pattern = ?2",
+        params![workspace, pat],
+    )?;
+    if let Some(p) = db_path {
+        crate::tracing::store::poke_wake(p);
+    }
+    Ok(n)
+}
+
 /// Waits until all specified `task_ids` reach a terminal state (`done`, `failed`, `cancelled`)
 /// or `wait_ms` elapses.
 pub fn wait_tasks(
