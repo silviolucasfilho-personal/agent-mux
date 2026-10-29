@@ -134,7 +134,7 @@ fn c_opens_the_view_grouped_by_kind_and_esc_unwinds() {
     let mut f = fixture();
     press(&mut f.app, KeyCode::Char('C'));
     let v = view(&f.app);
-    assert_eq!(v.item_count(), 87);
+    assert_eq!(v.item_count(), 88);
     assert!(matches!(v.rows[0], ConfigRow::Header(Kind::Prompts)));
     assert_eq!(v.selected, 1, "the first item, never a header");
     assert_eq!(v.selected_asset().unwrap().id, "prompts.toml");
@@ -146,11 +146,11 @@ fn c_opens_the_view_grouped_by_kind_and_esc_unwinds() {
             _ => None,
         })
         .collect();
-    // every group, Agents too: it has no built-ins but a placeholder row
+    // every group, Agents too: it has built-ins plus a placeholder row
     assert_eq!(headers, Kind::ALL.to_vec());
 
     let text = screen(&f.app);
-    assert!(text.contains("Configuration (87)"), "{text}");
+    assert!(text.contains("Configuration (88)"), "{text}");
     for h in ["Prompts", "Settings", "Skills"] {
         assert!(text.contains(h), "{h}\n{text}");
     }
@@ -385,7 +385,7 @@ fn n_creates_a_new_loop_skill_and_opens_it() {
     );
     assert_eq!(a.source, Source::User);
     assert!(a.valid(), "{:?}", a.problems);
-    assert_eq!(v.item_count(), 88);
+    assert_eq!(v.item_count(), 89);
     f.app.editor_finished(req, Ok(()));
 
     // a bad name is refused and the footer question closes

@@ -37,6 +37,7 @@ pub mod loops_view;
 pub mod markdown_view;
 pub mod memory_view;
 mod skills_view;
+pub mod swarm_view;
 pub mod text_area;
 pub mod workflows;
 pub mod workflows_view;
@@ -79,6 +80,8 @@ pub enum Mode {
     Memory(Box<memory_view::MemoryView>),
     /// The Workspaces Explorer screen: folders, sub-folders, stacks and agents.
     Workspaces(Box<workspaces_view::WorkspacesView>),
+    /// The Agent Swarm Control Room screen: Coordinator, Workers, Board, Leases and Feed.
+    Swarm(Box<swarm_view::SwarmView>),
 }
 
 /// An external editor the main loop must run for the App: it leaves the
@@ -217,6 +220,7 @@ pub enum Action {
     MarkdownKey,
     MemoryKey,
     WorkspacesKey,
+    SwarmKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
     /// `C`: the Configuration view.
     OpenConfigView,
@@ -799,6 +803,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::Markdown(_) => Action::MarkdownKey,
         Mode::Memory(_) => Action::MemoryKey,
         Mode::Workspaces(_) => Action::WorkspacesKey,
+        Mode::Swarm(_) => Action::SwarmKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => Action::EnterConfirmRemoveLoop,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
@@ -3268,6 +3273,7 @@ impl App {
         if let Mode::Workspaces(view) = &mut self.mode {
             view.poll();
         }
+        self.refresh_swarm_if_needed(now);
         self.resync_workflow_selection();
         self.refresh_strip_if_needed(now);
         self.publish_live_snapshot_if_needed(now);
@@ -4170,6 +4176,7 @@ impl App {
             Mode::TraceBrowser(b) => b.search_input.is_none(),
             Mode::SessionHistory(_) | Mode::SkillsView(_) | Mode::Inbox(_) => true,
             Mode::ConfigView(v) => v.pending == Pending::None,
+            Mode::Swarm(v) => !v.text_entry_active() && !v.confirmation_active(),
             _ => false,
         }
     }
@@ -4557,6 +4564,447 @@ impl App {
             }
             Outcome::OpenMarkdown(path) => {
                 self.open_markdown(&path);
+            }
+        }
+    }
+
+    /// Opens the Agent Swarm Control Room for the workspace of the selected session
+    /// (or current working directory).
+    pub fn open_swarm_view(&mut self) {
+        let ws = self
+            .sessions
+            .get(self.selected)
+            .map(|s| s.dir.clone())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let live = self.swarm_live_sessions(&ws);
+        let conn = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|p| crate::tracing::store::open_aux(p).ok());
+        let now_s = crate::tracing::store::now_ns() / 1_000_000_000;
+        let view = swarm_view::SwarmView::open(ws, conn.as_ref(), &live, now_s);
+        self.mode = Mode::Swarm(Box::new(view));
+    }
+
+    /// Gathers live session telemetry for all active sessions in `workspace` (including worktrees).
+    pub fn swarm_live_sessions(
+        &self,
+        workspace: &std::path::Path,
+    ) -> Vec<crate::bus::swarm::LiveSwarmSession> {
+        let now = Instant::now();
+        let target_norm = crate::bus::store::normalize_workspace(workspace);
+        self.sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, s)| {
+                let ws_norm = crate::bus::store::normalize_workspace(&s.dir);
+                if ws_norm != target_norm && !s.dir.starts_with(workspace) {
+                    return None;
+                }
+                let (turns, tokens, cost) = s
+                    .trace_stats
+                    .as_ref()
+                    .map(|st| {
+                        (
+                            st.turns.max(0) as usize,
+                            st.total_tokens.unwrap_or(0),
+                            st.cost_usd.unwrap_or(0.0),
+                        )
+                    })
+                    .unwrap_or((0, 0, 0.0));
+                let running_tool = s
+                    .trace_stats
+                    .as_ref()
+                    .and_then(|st| st.running_tool.clone());
+                let launch_id = s
+                    .trace
+                    .as_ref()
+                    .map(|t| t.launch_id.clone())
+                    .unwrap_or_else(|| format!("session-{}", s.id));
+                let provider = crate::harness::Harness::detect(&s.profile.command)
+                    .map(|h| h.as_str().to_string())
+                    .unwrap_or_else(|| s.profile.command.clone());
+                let is_delegated_worker = s
+                    .group
+                    .as_ref()
+                    .is_some_and(|g| g.kind == crate::tree::GroupKind::Bus);
+                let state = match s.status(now) {
+                    Status::Working => "working",
+                    Status::NeedsAttention => "attention",
+                    Status::Idle => "idle",
+                    Status::Exited(_) => "exited",
+                };
+
+                Some(crate::bus::swarm::LiveSwarmSession {
+                    session_idx: idx,
+                    session_id: s.id,
+                    launch_id,
+                    provider,
+                    profile_name: s.profile.name.clone(),
+                    agent_persona: s.agent.clone(),
+                    state: state.to_string(),
+                    workspace: ws_norm,
+                    is_delegated_worker,
+                    turns,
+                    tokens,
+                    cost_usd: cost,
+                    running_tool,
+                })
+            })
+            .collect()
+    }
+
+    pub fn refresh_swarm_if_needed(&mut self, _now: Instant) {
+        let now_s = crate::tracing::store::now_ns() / 1_000_000_000;
+        let ws = match &self.mode {
+            Mode::Swarm(view) if now_s * 1_000 >= view.last_refresh_ms + 1_000 => {
+                view.workspace.clone()
+            }
+            _ => return,
+        };
+        let live = self.swarm_live_sessions(&ws);
+        let conn = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|p| crate::tracing::store::open_aux(p).ok());
+        if let Mode::Swarm(ref mut view) = self.mode {
+            view.last_refresh_ms = now_s * 1_000;
+            view.refresh(conn.as_ref(), &live, now_s);
+        }
+    }
+
+    fn swarm_outcome(&mut self, outcome: swarm_view::Outcome, now: Instant) {
+        use swarm_view::Outcome;
+        let mut needs_refresh = false;
+        match outcome {
+            Outcome::None => {}
+            Outcome::Close => self.mode = Mode::Main,
+            Outcome::Reload => {
+                needs_refresh = true;
+            }
+            Outcome::AttachSession(idx) => {
+                if idx < self.sessions.len() {
+                    self.attach_to_session(idx);
+                }
+            }
+            Outcome::StartSwarm {
+                goal,
+                harness,
+                max_workers,
+                isolation,
+                prewarm_workers,
+            } => {
+                let ws_path = if let Mode::Swarm(v) = &self.mode {
+                    v.workspace.clone()
+                } else {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                };
+                let resp = self.handle_bus_control(
+                    crate::bus::control::ControlRequest::SpawnCoordinator {
+                        workspace: ws_path.to_string_lossy().into_owned(),
+                        goal: goal.clone(),
+                        harness: Some(harness.as_str().to_string()),
+                        max_workers,
+                        isolation,
+                    },
+                    now,
+                );
+                let coord_launch = resp.launch_id.clone();
+                for i in 1..=prewarm_workers {
+                    let _ = self.handle_bus_control(
+                        crate::bus::control::ControlRequest::SpawnWorker {
+                            parent_launch: coord_launch.clone(),
+                            workspace: ws_path.to_string_lossy().into_owned(),
+                            task_id: uuid::Uuid::new_v4().to_string(),
+                            title: format!("Worker Standby #{i}"),
+                            instructions: "Standby for tasks from the Swarm Coordinator.".into(),
+                            harness: Some(harness.as_str().to_string()),
+                            agent: None,
+                            isolation,
+                        },
+                        now,
+                    );
+                }
+                needs_refresh = true;
+            }
+            Outcome::PromoteCoordinator { launch_id } => {
+                let ws_path = if let Mode::Swarm(v) = &self.mode {
+                    v.workspace.clone()
+                } else {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                };
+                if let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let now_ns = crate::tracing::store::now_ns();
+                    let norm = crate::bus::store::normalize_workspace(&ws_path);
+                    let _ = crate::bus::store::record_coordinator(
+                        &conn,
+                        Some(db),
+                        &norm,
+                        &launch_id,
+                        "Swarm Coordinator role reassigned by user in Control Room",
+                        now_ns,
+                    );
+                }
+                needs_refresh = true;
+            }
+            Outcome::SpawnWorker {
+                title,
+                instructions,
+                files,
+                harness,
+                agent,
+                isolation,
+            } => {
+                let (ws_path, coord_launch) = if let Mode::Swarm(v) = &self.mode {
+                    (
+                        v.workspace.clone(),
+                        v.snapshot.coordinator.as_ref().map(|c| c.launch_id.clone()),
+                    )
+                } else {
+                    (
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                        None,
+                    )
+                };
+                let task_id = uuid::Uuid::new_v4().to_string();
+                if let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let now_ns = crate::tracing::store::now_ns();
+                    let norm = crate::bus::store::normalize_workspace(&ws_path);
+                    let _ = crate::bus::store::split_tasks(
+                        &conn,
+                        Some(db),
+                        &norm,
+                        coord_launch.as_deref().unwrap_or("user"),
+                        &[crate::bus::NewTaskSpec {
+                            title: title.clone(),
+                            instructions: instructions.clone(),
+                            files: files.clone(),
+                            target_harness: Some(harness.as_str().to_string()),
+                            target_agent: agent.clone(),
+                            isolation,
+                            ..Default::default()
+                        }],
+                        now_ns,
+                    );
+                }
+                let _ = self.handle_bus_control(
+                    crate::bus::control::ControlRequest::SpawnWorker {
+                        parent_launch: coord_launch,
+                        workspace: ws_path.to_string_lossy().into_owned(),
+                        task_id,
+                        title,
+                        instructions,
+                        harness: Some(harness.as_str().to_string()),
+                        agent,
+                        isolation,
+                    },
+                    now,
+                );
+                needs_refresh = true;
+            }
+            Outcome::DelegateTask { task_id } => {
+                let (ws_path, coord_launch) = if let Mode::Swarm(v) = &self.mode {
+                    (
+                        v.workspace.clone(),
+                        v.snapshot.coordinator.as_ref().map(|c| c.launch_id.clone()),
+                    )
+                } else {
+                    (
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                        None,
+                    )
+                };
+                let task_opt = self
+                    .trace_db_path
+                    .as_deref()
+                    .and_then(|db| crate::tracing::store::open_ro(db).ok())
+                    .and_then(|c| crate::bus::store::get_task(&c, &task_id).ok().flatten());
+                if let Some(task) = task_opt {
+                    let _ = self.handle_bus_control(
+                        crate::bus::control::ControlRequest::SpawnWorker {
+                            parent_launch: coord_launch,
+                            workspace: ws_path.to_string_lossy().into_owned(),
+                            task_id: task.id.clone(),
+                            title: task.title,
+                            instructions: task.instructions,
+                            harness: task.target_harness,
+                            agent: task.target_agent,
+                            isolation: task.isolation,
+                        },
+                        now,
+                    );
+                }
+                needs_refresh = true;
+            }
+            Outcome::WakeAgent { launch_id } => {
+                let _ = self.handle_bus_control(
+                    crate::bus::control::ControlRequest::WakeSession {
+                        launch_id,
+                        prompt: "Wakeup check-in from Swarm Control Room".into(),
+                    },
+                    now,
+                );
+            }
+            Outcome::CreateTask {
+                title,
+                instructions,
+                files,
+                isolation,
+            } => {
+                let ws_path = if let Mode::Swarm(v) = &self.mode {
+                    v.workspace.clone()
+                } else {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                };
+                if let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let now_ns = crate::tracing::store::now_ns();
+                    let norm = crate::bus::store::normalize_workspace(&ws_path);
+                    let _ = crate::bus::store::split_tasks(
+                        &conn,
+                        Some(db),
+                        &norm,
+                        "user",
+                        &[crate::bus::NewTaskSpec {
+                            title,
+                            instructions,
+                            files,
+                            isolation,
+                            ..Default::default()
+                        }],
+                        now_ns,
+                    );
+                }
+                needs_refresh = true;
+            }
+            Outcome::UpdateTask {
+                task_id,
+                title,
+                instructions,
+                files,
+            } => {
+                if let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let now_ns = crate::tracing::store::now_ns();
+                    let _ = crate::bus::store::update_task_spec(
+                        &conn,
+                        Some(db),
+                        &task_id,
+                        &title,
+                        &instructions,
+                        &files,
+                        now_ns,
+                    );
+                }
+                needs_refresh = true;
+            }
+            Outcome::CancelTask(task_id) => {
+                if let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let now_ns = crate::tracing::store::now_ns();
+                    let _ = crate::bus::store::update_task(
+                        &conn,
+                        Some(db),
+                        &task_id,
+                        "",
+                        crate::bus::TaskStatus::Cancelled,
+                        Some(serde_json::json!("Cancelled by user from Swarm Board")),
+                        None,
+                        None,
+                        None,
+                        now_ns,
+                    );
+                }
+                needs_refresh = true;
+            }
+            Outcome::ReleaseLease(pattern) => {
+                let ws_path = if let Mode::Swarm(v) = &self.mode {
+                    v.workspace.clone()
+                } else {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                };
+                if let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let norm = crate::bus::store::normalize_workspace(&ws_path);
+                    let _ =
+                        crate::bus::store::force_release_lease(&conn, Some(db), &norm, &pattern);
+                }
+                needs_refresh = true;
+            }
+            Outcome::StopSession(idx) => {
+                if idx < self.sessions.len() {
+                    self.sessions[idx].kill();
+                }
+                needs_refresh = true;
+            }
+            Outcome::SendMessage {
+                to_launch,
+                topic,
+                body,
+                urgent,
+                wake,
+            } => {
+                let ws_path = if let Mode::Swarm(v) = &self.mode {
+                    v.workspace.clone()
+                } else {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                };
+                if let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let now_ns = crate::tracing::store::now_ns();
+                    let norm = crate::bus::store::normalize_workspace(&ws_path);
+                    let _ = crate::bus::store::send_message(
+                        &conn,
+                        Some(db),
+                        &norm,
+                        "user",
+                        to_launch.as_deref(),
+                        &topic,
+                        &body,
+                        None,
+                        now_ns,
+                    );
+                }
+                if wake && let Some(target) = to_launch.as_deref() {
+                    let _ = self.handle_bus_control(
+                        crate::bus::control::ControlRequest::WakeSession {
+                            launch_id: target.to_string(),
+                            prompt: if urgent {
+                                format!("[URGENT message on {topic}]: {body}")
+                            } else {
+                                format!("[Message on {topic}]: {body}")
+                            },
+                        },
+                        now,
+                    );
+                }
+                needs_refresh = true;
+            }
+        }
+
+        if needs_refresh {
+            let ws = match &self.mode {
+                Mode::Swarm(v) => v.workspace.clone(),
+                _ => return,
+            };
+            let live = self.swarm_live_sessions(&ws);
+            let conn = self
+                .trace_db_path
+                .as_deref()
+                .and_then(|p| crate::tracing::store::open_aux(p).ok());
+            let now_s = crate::tracing::store::now_ns() / 1_000_000_000;
+            if let Mode::Swarm(ref mut view) = self.mode {
+                view.refresh(conn.as_ref(), &live, now_s);
             }
         }
     }
@@ -5133,6 +5581,12 @@ impl App {
                 if let Mode::Workspaces(view) = &mut self.mode {
                     let outcome = view.handle_key(key);
                     self.workspaces_outcome(outcome);
+                }
+            }
+            Action::SwarmKey => {
+                if let Mode::Swarm(view) = &mut self.mode {
+                    let outcome = view.handle_key(*key);
+                    self.swarm_outcome(outcome, _now);
                 }
             }
             Action::MarkdownKey => {
@@ -7354,6 +7808,162 @@ impl App {
                     worktree: worktree_path,
                     branch: branch_name,
                     detail: Some("spawned delegated worker session".into()),
+                    error: None,
+                }
+            }
+            ControlRequest::SpawnCoordinator {
+                workspace,
+                goal,
+                harness,
+                max_workers,
+                isolation,
+            } => {
+                let target_harness = match harness.as_deref() {
+                    Some(h) if !h.trim().is_empty() => match h.parse::<crate::harness::Harness>() {
+                        Ok(parsed) => parsed,
+                        Err(e) => return ControlResponse::err(e),
+                    },
+                    _ => self
+                        .profiles
+                        .iter()
+                        .find_map(|p| crate::harness::Harness::detect(&p.command))
+                        .unwrap_or(crate::harness::Harness::Claude),
+                };
+
+                let ws_path = std::path::PathBuf::from(&workspace);
+                if !ws_path.is_dir() {
+                    return ControlResponse::err(format!(
+                        "workspace '{}' does not exist",
+                        ws_path.display()
+                    ));
+                }
+
+                let mut profile = self
+                    .profiles
+                    .iter()
+                    .find(|p| crate::harness::Harness::detect(&p.command) == Some(target_harness))
+                    .cloned()
+                    .unwrap_or_else(|| Profile {
+                        name: format!("coordinator · {}", target_harness.as_str()),
+                        command: target_harness.as_str().to_string(),
+                        args: Vec::new(),
+                        default_dir: None,
+                        tracing: None,
+                        model: None,
+                        bypass_approvals: Some(self.bypass_approvals_default),
+                    });
+                profile.name = format!("★ Coord ({})", target_harness.as_str());
+                let bypass = profile
+                    .bypass_approvals
+                    .unwrap_or(self.bypass_approvals_default);
+                let mut options = crate::harness::LaunchOptions {
+                    model: profile.model.clone(),
+                    bypass_approvals: bypass,
+                    ..Default::default()
+                };
+
+                let agent_prep =
+                    match self.session_agent("coordinator", Some(target_harness), &ws_path) {
+                        Ok(prep) => Some(prep),
+                        Err(e) => return ControlResponse::err(e),
+                    };
+                if options.model.is_none() {
+                    options.model = agent_prep.as_ref().and_then(|a| a.0.model.clone());
+                }
+                if !options.is_empty() {
+                    profile.args =
+                        crate::harness::compose(&profile.args, &options.render(target_harness));
+                }
+                if let Some((plan, _)) = &agent_prep {
+                    profile.args.retain(|a| !plan.remove.contains(a));
+                    profile.args.extend(plan.args.iter().cloned());
+                    if let Some(e) = plan.effort.as_deref()
+                        && let Some(mut a) =
+                            crate::workflows::harness::effort_args(target_harness, e)
+                    {
+                        profile.args.append(&mut a);
+                    }
+                }
+
+                let prompt =
+                    crate::bus::swarm::compose_coordinator_prompt(&goal, max_workers, isolation);
+                let opening_args = match target_harness {
+                    crate::harness::Harness::Antigravity => {
+                        vec!["--prompt-interactive".to_string(), prompt]
+                    }
+                    _ => vec![prompt],
+                };
+                profile.args.extend(opening_args.iter().cloned());
+
+                let id = self.next_id;
+                let extra_env = vec![
+                    (
+                        "AGENT_MUX_SWARM_ROLE".to_string(),
+                        "coordinator".to_string(),
+                    ),
+                    ("AGENT_MUX_SWARM_GOAL".to_string(), goal.clone()),
+                ];
+                let mut session = match self.spawn_traced_full(
+                    id,
+                    profile,
+                    ws_path.clone(),
+                    &extra_env,
+                    None,
+                    None,
+                    None,
+                    &[],
+                ) {
+                    Ok(s) => s,
+                    Err(e) => return ControlResponse::err(format!("spawn failed: {e}")),
+                };
+                session.agent = Some("coordinator".to_string());
+                session.opening_args = opening_args;
+                session.group = Some(crate::tree::GroupRef {
+                    kind: crate::tree::GroupKind::Bus,
+                    id: format!("swarm-coord-{id}"),
+                    title: "coordinator".into(),
+                    detail: target_harness.as_str().into(),
+                    label: "Swarm Coordinator".into(),
+                });
+                let new_launch_id = session
+                    .trace
+                    .as_ref()
+                    .map(|t| t.launch_id.clone())
+                    .unwrap_or_else(|| format!("session-{id}"));
+                let session_id = session.id;
+                self.next_id += 1;
+                self.sessions.push(session);
+                let _ = self.save_active_sessions();
+
+                if let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let now_ns = crate::tracing::store::now_ns();
+                    let norm_ws = crate::bus::store::normalize_workspace(&ws_path);
+                    let _ = crate::bus::store::record_coordinator(
+                        &conn,
+                        Some(db),
+                        &norm_ws,
+                        &new_launch_id,
+                        &goal,
+                        now_ns,
+                    );
+                }
+
+                self.notice = Some(Notice::info(format!(
+                    "launched Swarm Coordinator on {} ({})",
+                    target_harness.as_str(),
+                    crate::bus::short_id(&new_launch_id)
+                )));
+
+                ControlResponse {
+                    ok: true,
+                    launch_id: Some(new_launch_id),
+                    session_id: Some(session_id),
+                    harness: Some(target_harness.as_str().to_string()),
+                    worktree: None,
+                    branch: None,
+                    detail: Some("spawned Swarm Coordinator session".into()),
                     error: None,
                 }
             }

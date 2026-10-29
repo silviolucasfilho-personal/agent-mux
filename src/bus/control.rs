@@ -36,6 +36,14 @@ pub enum ControlRequest {
         agent: Option<String>,
         isolation: TaskIsolation,
     },
+    /// Spawn a new Swarm Coordinator session in `App` for `workspace`.
+    SpawnCoordinator {
+        workspace: String,
+        goal: String,
+        harness: Option<String>,
+        max_workers: usize,
+        isolation: TaskIsolation,
+    },
 }
 
 /// Response returned from `App` to the control socket client.

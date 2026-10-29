@@ -43,10 +43,11 @@ impl App {
             Mode::Workspaces(v) => v.selected_node(),
             _ => None,
         };
+        let in_swarm = matches!(self.mode, Mode::Swarm(_));
         let supported = match id {
             SubmitDialog => matches!(self.mode, Mode::NewSession(_) | Mode::WorkflowDialog(_)),
             Commands | Help | FocusAgents | TestShortcuts | Quit | Runs | Skills
-            | Configuration | Memory | Workspaces | Inbox | History => true,
+            | Configuration | Memory | Workspaces | Swarm | Inbox | History => true,
             ReturnToSession => self.return_session_id().is_some(),
             PrevSession | NextSession => session.is_some(),
             ToggleSidebar => matches!(self.mode, Mode::Main | Mode::TraceBrowser(_)),
@@ -66,6 +67,7 @@ impl App {
                     || matches!(self.mode, Mode::ConfigView(_))
                     || editor_library
                     || workspace_node.is_some()
+                    || in_swarm
             }
             Edit => {
                 matches!(
@@ -76,6 +78,7 @@ impl App {
                     || runs_item.is_some()
                     || matches!(self.mode, Mode::Markdown(_) | Mode::AgentEditor(_))
                     || workspace_node.is_some_and(|n| n.customization.primary_doc.is_some())
+                    || in_swarm
             }
             Delete => {
                 matches!(row, Some(AgentKind::Loop(_)))
@@ -92,6 +95,7 @@ impl App {
                     || runs_item.is_some_and(|i| matches!(i.run, RunRef::Inbox(_)))
                     || matches!(self.mode, Mode::Inbox(_))
                     || editor_library
+                    || in_swarm
             }
             Run => {
                 matches!(
@@ -113,6 +117,7 @@ impl App {
                     || runs_item.is_some()
                     || skills_package
                     || workspace_node.is_some()
+                    || in_swarm
                     || matches!(&self.mode, Mode::TraceBrowser(b) if !b.sessions.is_empty())
                     || matches!(&self.mode, Mode::SessionHistory(h) if !h.sessions.is_empty())
             }
@@ -125,6 +130,7 @@ impl App {
                     || runs_item.is_some_and(|i| {
                         matches!(i.run, RunRef::LoopLive { .. } | RunRef::FlowLive(_))
                     })
+                    || in_swarm
             }
             Reload => matches!(
                 self.mode,
@@ -134,6 +140,7 @@ impl App {
                     | Mode::Markdown(_)
                     | Mode::Memory(_)
                     | Mode::Workspaces(_)
+                    | Mode::Swarm(_)
             ),
             Restore => {
                 editor_library
@@ -207,6 +214,7 @@ impl App {
             Configuration => self.request_navigation(NavigationTarget::Configuration, now),
             Memory => self.request_navigation(NavigationTarget::Memory, now),
             Workspaces => self.request_navigation(NavigationTarget::Workspaces, now),
+            Swarm => self.request_navigation(NavigationTarget::Swarm, now),
             Inbox => self.request_navigation(NavigationTarget::Inbox, now),
             History => self.request_navigation(NavigationTarget::History, now),
             FilterClaude | FilterCodex | FilterAntigravity => {
@@ -301,6 +309,7 @@ pub enum NavigationTarget {
     Configuration,
     Memory,
     Workspaces,
+    Swarm,
     Inbox,
     History,
 }
@@ -526,6 +535,7 @@ impl App {
             NavigationTarget::Configuration => self.open_config_view(),
             NavigationTarget::Memory => self.open_memory_view(),
             NavigationTarget::Workspaces => self.open_workspaces_view(),
+            NavigationTarget::Swarm => self.open_swarm_view(),
             NavigationTarget::Inbox => self.open_inbox(),
             NavigationTarget::History => self.apply(
                 super::Action::OpenSessionHistory,
@@ -549,6 +559,7 @@ impl App {
             Mode::Markdown(_) => "Markdown",
             Mode::Memory(_) => "Memory",
             Mode::Workspaces(_) => "Workspaces",
+            Mode::Swarm(_) => "Swarm",
             _ => "Dialog",
         }
     }
@@ -610,12 +621,14 @@ impl App {
             Mode::RunsView(v) => v.save_name.is_some(),
             Mode::Memory(v) => v.input.is_some(),
             Mode::Workspaces(v) => v.filtering,
+            Mode::Swarm(v) => v.text_entry_active(),
             _ => false,
         }
     }
     pub(super) fn confirmation_active(&self) -> bool {
         match &self.mode {
             Mode::Memory(v) => v.pending.is_some(),
+            Mode::Swarm(v) => v.confirmation_active(),
             Mode::ConfirmKill | Mode::ConfirmQuit | Mode::ConfirmRemoveLoop => true,
             Mode::AgentEditor(st) => {
                 st.confirm_discard

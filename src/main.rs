@@ -95,6 +95,7 @@ async fn main() -> Result<()> {
             Some("trace") => return agent_mux::tracing::cli::run(&args[2..]),
             Some("mcp") => return agent_mux::mcp::run(&args[2..]),
             Some("bus") => return agent_mux::bus::cli::run(&args[2..]),
+            Some("swarm") => return agent_mux::bus::cli::run_swarm(&args[2..]),
             Some("run") => return agent_mux::tracing::experiments::run_cli(&args[2..]).await,
             Some("loop") => return agent_mux::loops::cli::run(&args[2..]).await,
             Some("config") => return agent_mux::config_cli::run(&args[2..]),
