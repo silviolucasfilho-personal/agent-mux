@@ -78,6 +78,8 @@ impl Args {
                         | "tree"
                         | "timeline"
                         | "all-workspaces"
+                        | "guard"
+                        | "loop"
                 ) {
                     flags.insert(name.to_string(), None);
                 } else {
@@ -2667,17 +2669,50 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
         outcome.blocked = Some(reason);
     }
     match store::open_hook_sink(&resolved.db_path, HOOK_BUSY_CAP) {
-        Ok(conn) => match store::insert_hook_event(&conn, &ev) {
-            Ok(inserted) => {
-                outcome.inserted = inserted;
-                // the row is in; the TUI's pipelines read it now, not on
-                // their next poll
-                if inserted {
-                    store::poke_wake(&resolved.db_path);
+        Ok(conn) => {
+            if ev.event == "PreToolUse"
+                && outcome.blocked.is_none()
+                && source != HookSource::Antigravity
+                && let Some(id) = ev.launch_id.clone()
+            {
+                if !args.has("guard")
+                    && !args.has("loop")
+                    && let Some(tool) = payload.get("tool_name").and_then(|v| v.as_str())
+                    && let Some(cwd) = ev.cwd.as_deref().filter(|s| !s.is_empty())
+                    && let hooks::guard::Verdict::Block(reason) = hooks::guard::bus_lease_verdict(
+                        &conn,
+                        cwd,
+                        &id,
+                        tool,
+                        payload.get("tool_input"),
+                    )
+                {
+                    ev.payload.insert(
+                        "agent_mux_guard".into(),
+                        serde_json::json!({ "blocked": true, "reason": reason }),
+                    );
+                    outcome.response = Some(hooks::guard::deny_json(&reason));
+                    outcome.blocked = Some(reason);
+                }
+                if outcome.blocked.is_none()
+                    && let Some(ctx) =
+                        crate::bus::store::drain_urgent_for_hook(&conn, &id, store::now_ns())
+                {
+                    outcome.response = Some(hooks::guard::allow_with_context_json(&ctx));
                 }
             }
-            Err(e) => outcome.error = Some(format!("insert: {e}")),
-        },
+            match store::insert_hook_event(&conn, &ev) {
+                Ok(inserted) => {
+                    outcome.inserted = inserted;
+                    // the row is in; the TUI's pipelines read it now, not on
+                    // their next poll
+                    if inserted {
+                        store::poke_wake(&resolved.db_path);
+                    }
+                }
+                Err(e) => outcome.error = Some(format!("insert: {e}")),
+            }
+        }
         Err(e) => outcome.error = Some(e),
     }
     // a user's own notify program, displaced by our per-launch override,

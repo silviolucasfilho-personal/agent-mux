@@ -54,4 +54,10 @@ pub enum AppEvent {
     /// The History list, rescanned off the main thread after a session
     /// exited (`App::reload_history_sessions_async`).
     HistoryLoaded(Vec<crate::history::SessionSummary>),
+    /// Inter-agent bus control request from `agent-mux mcp serve` or `agent-mux bus`
+    /// over the TUI control socket (`$AGENT_MUX_CONTROL_SOCK`).
+    BusControl {
+        request: crate::bus::control::ControlRequest,
+        reply: tokio::sync::oneshot::Sender<crate::bus::control::ControlResponse>,
+    },
 }

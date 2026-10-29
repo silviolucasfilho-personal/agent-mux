@@ -126,11 +126,12 @@ fn the_server_speaks_initialize_list_and_call_over_stdio() {
     srv.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}));
     let list = srv.recv();
     let tools = list["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 17);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"agent_mux_get_briefing") && names.contains(&"agent_mux_get_health"));
+    assert!(names.contains(&"agent_mux_list_peers") && names.contains(&"agent_mux_delegate"));
     for t in tools {
-        assert_eq!(t["annotations"]["readOnlyHint"], true);
+        assert_eq!(t["annotations"]["destructiveHint"], false);
         assert_eq!(t["inputSchema"]["type"], "object");
         assert!(t["description"].as_str().unwrap().len() > 20);
     }
