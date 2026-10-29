@@ -24,6 +24,8 @@ pub enum GroupKind {
     Loop,
     /// One run of a workflow document; its steps are the children.
     Workflow,
+    /// Delegated worker sessions spawned from a lead session via the agent bus.
+    Bus,
 }
 
 impl GroupKind {
@@ -33,6 +35,7 @@ impl GroupKind {
         match self {
             GroupKind::Loop => "loop",
             GroupKind::Workflow => "wf",
+            GroupKind::Bus => "bus",
         }
     }
 
@@ -41,6 +44,7 @@ impl GroupKind {
         match self {
             GroupKind::Loop => "⟳",
             GroupKind::Workflow => "⚙",
+            GroupKind::Bus => "⇄",
         }
     }
 }

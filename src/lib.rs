@@ -2,6 +2,7 @@ pub mod agents;
 pub mod app;
 pub mod assets;
 pub mod build_info;
+pub mod bus;
 pub mod config;
 pub mod config_cli;
 pub mod events;

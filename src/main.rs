@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
         match args.get(1).map(String::as_str) {
             Some("trace") => return agent_mux::tracing::cli::run(&args[2..]),
             Some("mcp") => return agent_mux::mcp::run(&args[2..]),
+            Some("bus") => return agent_mux::bus::cli::run(&args[2..]),
             Some("run") => return agent_mux::tracing::experiments::run_cli(&args[2..]).await,
             Some("loop") => return agent_mux::loops::cli::run(&args[2..]).await,
             Some("config") => return agent_mux::config_cli::run(&args[2..]),
@@ -277,6 +278,7 @@ async fn main() -> Result<()> {
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let mut app = App::new(cfg.profiles, trace_rt, tx);
+    app.start_bus_listener(agent_mux::tracing::analysis::default_snapshot_dir().join("bus.sock"));
     app.agents = config::resolve_agents(cfg.agents.as_ref());
     app.bypass_approvals_default = cfg
         .bypass_approvals
@@ -462,5 +464,9 @@ fn handle_event(app: &mut App, event: AppEvent) {
         AppEvent::HarnessRecapUpdated(recap) => app.handle_harness_recap_updated(recap),
         AppEvent::Tick => app.on_tick(Instant::now()),
         AppEvent::HistoryLoaded(sessions) => app.apply_history_sessions(sessions),
+        AppEvent::BusControl { request, reply } => {
+            let resp = app.handle_bus_control(request, Instant::now());
+            let _ = reply.send(resp);
+        }
     }
 }

@@ -1,10 +1,10 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 15;
+pub const SCHEMA_VERSION: i32 = 16;
 
 pub const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -784,4 +784,58 @@ WHEN old.input IS NOT new.input OR old.output IS NOT new.output BEGIN
   INSERT INTO traces_fts (traces_fts, rowid, input, output) VALUES ('delete', old.rid, old.input, old.output);
   INSERT INTO traces_fts (rowid, input, output) VALUES (new.rid, new.input, new.output);
 END;
+"#;
+
+// v16: Inter-agent communication & task coordination bus (`src/bus/`).
+// Replay-safe: tables and indexes use IF NOT EXISTS.
+const V16: &str = r#"
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id            TEXT PRIMARY KEY,
+  workspace     TEXT NOT NULL,
+  from_launch   TEXT NOT NULL,
+  to_launch     TEXT,
+  topic         TEXT NOT NULL DEFAULT 'message',
+  body          TEXT NOT NULL,
+  reply_to      TEXT,
+  created_ns    INTEGER NOT NULL,
+  delivered_ns  INTEGER,
+  acked_ns      INTEGER
+);
+CREATE INDEX IF NOT EXISTS agent_messages_inbox ON agent_messages (workspace, to_launch, created_ns ASC);
+CREATE INDEX IF NOT EXISTS agent_messages_from ON agent_messages (from_launch, created_ns DESC);
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id              TEXT PRIMARY KEY,
+  workspace       TEXT NOT NULL,
+  created_by      TEXT NOT NULL,
+  parent_task_id  TEXT,
+  assigned_to     TEXT,
+  target_harness  TEXT,
+  target_agent    TEXT,
+  title           TEXT NOT NULL,
+  instructions    TEXT NOT NULL,
+  files_json      TEXT NOT NULL DEFAULT '[]',
+  isolation       TEXT NOT NULL DEFAULT 'shared' CHECK (isolation IN ('shared','worktree')),
+  status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','claimed','running','done','failed','cancelled')),
+  result_json     TEXT,
+  error           TEXT,
+  worktree        TEXT,
+  branch          TEXT,
+  created_ns      INTEGER NOT NULL,
+  updated_ns      INTEGER NOT NULL,
+  ended_ns        INTEGER
+);
+CREATE INDEX IF NOT EXISTS agent_tasks_workspace ON agent_tasks (workspace, status, created_ns ASC);
+CREATE INDEX IF NOT EXISTS agent_tasks_assigned ON agent_tasks (assigned_to, status);
+
+CREATE TABLE IF NOT EXISTS agent_leases (
+  workspace     TEXT NOT NULL,
+  pattern       TEXT NOT NULL,
+  owner_launch  TEXT NOT NULL,
+  task_id       TEXT REFERENCES agent_tasks (id) ON DELETE CASCADE,
+  acquired_ns   INTEGER NOT NULL,
+  expires_ns    INTEGER NOT NULL,
+  PRIMARY KEY (workspace, pattern)
+);
+CREATE INDEX IF NOT EXISTS agent_leases_owner ON agent_leases (owner_launch);
 "#;

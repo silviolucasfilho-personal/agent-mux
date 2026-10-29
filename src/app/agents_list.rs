@@ -181,6 +181,7 @@ impl App {
                         matches!(r, WorkflowRow::Live(id) | WorkflowRow::Recent(id) if *id == g.id)
                     })
                     .map(AgentKind::Flow),
+                crate::tree::GroupKind::Bus => None,
             };
             // a run no row stands for still keeps its sessions together
             return known.unwrap_or_else(|| AgentKind::Run(g.key()));

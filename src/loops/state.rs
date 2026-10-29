@@ -510,8 +510,12 @@ fn restore_run_id(stem: &str) -> String {
 
 fn prune(runtime_dir: &Path, loop_id: &str, days: i64) {
     let cutoff = crate::loops::format_timestamp(crate::loops::now() - time::Duration::days(days));
-    for (id, path) in snapshots(runtime_dir, loop_id) {
-        if id < cutoff {
+    let all = snapshots(runtime_dir, loop_id);
+    if all.len() <= 2 {
+        return;
+    }
+    for (id, path) in &all[..all.len() - 2] {
+        if id.as_str() < cutoff.as_str() {
             let _ = std::fs::remove_file(path);
         }
     }

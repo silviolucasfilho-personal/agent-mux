@@ -2723,6 +2723,11 @@ pub struct App {
     pub workflow_anchor: Option<workflows::WorkflowRow>,
     /// Inbox items the user dismissed this session (`run:<id>`).
     pub inbox_dismissed: std::collections::HashSet<String>,
+    /// Unix domain socket path for inter-agent bus control (`WakeSession`, `SpawnWorker`).
+    pub bus_control_sock: Option<std::path::PathBuf>,
+    bus_control_guard: Option<crate::bus::control::ControlListenerGuard>,
+    /// Bus wake prompts queued while their target session is `Working`.
+    pub pending_bus_wakes: Vec<(String, String)>,
 }
 
 impl App {
@@ -2844,11 +2849,28 @@ impl App {
             selected_workflow: 0,
             workflow_anchor: None,
             inbox_dismissed: Default::default(),
+            bus_control_sock: None,
+            bus_control_guard: None,
+            pending_bus_wakes: Vec::new(),
         };
+        if let Some(sock_dir) = app.trace_db_path.as_deref().and_then(|p| p.parent()) {
+            let sock = sock_dir.join("bus.sock");
+            app.start_bus_listener(sock);
+        }
         // the Agents list shows flows and personas from the start
         app.workflow_list = app.workflow_entries();
         app.reload_personas();
         app
+    }
+
+    /// Binds a Unix domain control socket for inter-agent bus operations
+    /// (`WakeSession` and `SpawnWorker`) and passes `AGENT_MUX_CONTROL_SOCK`
+    /// to every child session spawned afterwards.
+    pub fn start_bus_listener(&mut self, path: std::path::PathBuf) {
+        if let Some(guard) = crate::bus::control::spawn_listener(path.clone(), self.tx.clone()) {
+            self.bus_control_sock = Some(path);
+            self.bus_control_guard = Some(guard);
+        }
     }
 
     /// Rescans the user skill directory and the compiled-in packages,
@@ -3256,6 +3278,7 @@ impl App {
         self.workflow_pass(now);
         self.workflow_plan_pass(now);
         self.refresh_runs_view(now);
+        self.flush_pending_bus_wakes(now);
     }
 
     /// Publishes live session snapshot bounded to 1MiB every second if needed.
@@ -3771,6 +3794,12 @@ impl App {
             extra_env.push((
                 "AGENT_MUX_WORKSPACE".into(),
                 dir.to_string_lossy().into_owned(),
+            ));
+        }
+        if let Some(sock) = &self.bus_control_sock {
+            extra_env.push((
+                crate::bus::control::ENV_CONTROL_SOCK.into(),
+                sock.to_string_lossy().into_owned(),
             ));
         }
         let mut session = Session::spawn(
@@ -6979,6 +7008,355 @@ impl App {
                 "experiment {}: {e}",
                 link.experiment
             )));
+        }
+    }
+
+    /// Resolves a session index by launch id (exact or >=6-char unique prefix)
+    /// or `session-<id>`.
+    fn find_session_by_launch(&self, query: &str) -> Option<usize> {
+        let q = query.trim();
+        if q.is_empty() {
+            return None;
+        }
+        let mut prefix_matches = Vec::new();
+        for (idx, s) in self.sessions.iter().enumerate() {
+            let lid = s
+                .trace
+                .as_ref()
+                .map(|t| t.launch_id.clone())
+                .unwrap_or_else(|| format!("session-{}", s.id));
+            if lid == q || format!("session-{}", s.id) == q {
+                return Some(idx);
+            }
+            if q.len() >= 6 && lid.starts_with(q) {
+                prefix_matches.push(idx);
+            }
+        }
+        if prefix_matches.len() == 1 {
+            Some(prefix_matches[0])
+        } else {
+            None
+        }
+    }
+
+    /// Flushes any bus wake prompts whose target session has transitioned to `Idle`.
+    pub fn flush_pending_bus_wakes(&mut self, now: Instant) {
+        if self.pending_bus_wakes.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_bus_wakes);
+        for (launch_id, prompt) in pending {
+            let Some(idx) = self.find_session_by_launch(&launch_id) else {
+                continue;
+            };
+            let st = self.sessions[idx].status(now);
+            match st {
+                Status::Idle => {
+                    let line = format!("{}\r", prompt.replace(['\r', '\n'], " "));
+                    let _ = self.sessions[idx].write_bytes(line.as_bytes());
+                }
+                Status::Working | Status::NeedsAttention => {
+                    self.pending_bus_wakes.push((launch_id, prompt));
+                }
+                Status::Exited(_) => {}
+            }
+        }
+    }
+
+    /// Handles an incoming request on the inter-agent bus control socket
+    /// (`WakeSession` or `SpawnWorker`).
+    pub fn handle_bus_control(
+        &mut self,
+        req: crate::bus::control::ControlRequest,
+        now: Instant,
+    ) -> crate::bus::control::ControlResponse {
+        use crate::bus::control::{ControlRequest, ControlResponse};
+        match req {
+            ControlRequest::WakeSession { launch_id, prompt } => {
+                let Some(idx) = self.find_session_by_launch(&launch_id) else {
+                    return ControlResponse::err(format!(
+                        "session '{launch_id}' is not active in this agent-mux"
+                    ));
+                };
+                let resolved_id = self.sessions[idx]
+                    .trace
+                    .as_ref()
+                    .map(|t| t.launch_id.clone())
+                    .unwrap_or_else(|| format!("session-{}", self.sessions[idx].id));
+                let session_id = self.sessions[idx].id;
+                match self.sessions[idx].status(now) {
+                    Status::Exited(_) => {
+                        ControlResponse::err(format!("session '{resolved_id}' has exited"))
+                    }
+                    Status::Idle => {
+                        let line = format!("{}\r", prompt.replace(['\r', '\n'], " "));
+                        match self.sessions[idx].write_bytes(line.as_bytes()) {
+                            Ok(()) => ControlResponse {
+                                ok: true,
+                                launch_id: Some(resolved_id),
+                                session_id: Some(session_id),
+                                harness: None,
+                                worktree: None,
+                                branch: None,
+                                detail: Some("injected into idle PTY".into()),
+                                error: None,
+                            },
+                            Err(e) => ControlResponse::err(format!("PTY write failed: {e}")),
+                        }
+                    }
+                    Status::Working | Status::NeedsAttention => {
+                        if !self
+                            .pending_bus_wakes
+                            .iter()
+                            .any(|(id, _)| id == &resolved_id)
+                        {
+                            self.pending_bus_wakes.push((resolved_id.clone(), prompt));
+                        }
+                        ControlResponse {
+                            ok: true,
+                            launch_id: Some(resolved_id),
+                            session_id: Some(session_id),
+                            harness: None,
+                            worktree: None,
+                            branch: None,
+                            detail: Some("queued until session is idle".into()),
+                            error: None,
+                        }
+                    }
+                }
+            }
+            ControlRequest::SpawnWorker {
+                parent_launch,
+                workspace,
+                task_id,
+                title,
+                instructions,
+                harness,
+                agent,
+                isolation,
+            } => {
+                let target_harness = match harness.as_deref() {
+                    Some(h) if !h.trim().is_empty() => match h.parse::<crate::harness::Harness>() {
+                        Ok(parsed) => parsed,
+                        Err(e) => return ControlResponse::err(e),
+                    },
+                    _ => parent_launch
+                        .as_deref()
+                        .and_then(|p| self.find_session_by_launch(p))
+                        .and_then(|idx| {
+                            crate::harness::Harness::detect(&self.sessions[idx].profile.command)
+                        })
+                        .or_else(|| {
+                            self.profiles
+                                .iter()
+                                .find_map(|p| crate::harness::Harness::detect(&p.command))
+                        })
+                        .unwrap_or(crate::harness::Harness::Claude),
+                };
+
+                let ws_path = std::path::PathBuf::from(&workspace);
+                if !ws_path.is_dir() {
+                    return ControlResponse::err(format!(
+                        "workspace '{}' does not exist",
+                        ws_path.display()
+                    ));
+                }
+
+                let mut worktree_path: Option<String> = None;
+                let mut branch_name: Option<String> = None;
+                let spawn_dir = if isolation == crate::bus::TaskIsolation::Worktree
+                    && crate::loops::worktree::is_git_repo(&ws_path)
+                {
+                    let now_str = time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default();
+                    let wt_id = format!("bus-{}", crate::bus::short_id(&task_id));
+                    match crate::loops::worktree::create(
+                        &ws_path,
+                        &self.loops.worktrees_dir,
+                        &wt_id,
+                        "bus",
+                        &now_str,
+                    ) {
+                        Ok(wt) => {
+                            worktree_path = Some(wt.path.to_string_lossy().into_owned());
+                            branch_name = Some(wt.branch);
+                            wt.path
+                        }
+                        Err(e) => {
+                            return ControlResponse::err(format!(
+                                "failed to create git worktree for delegated task: {e}"
+                            ));
+                        }
+                    }
+                } else {
+                    ws_path.clone()
+                };
+
+                let task_files: Vec<String> = self
+                    .trace_db_path
+                    .as_deref()
+                    .and_then(|db| crate::tracing::store::open_ro(db).ok())
+                    .and_then(|conn| crate::bus::store::get_task(&conn, &task_id).ok().flatten())
+                    .map(|t| t.files)
+                    .unwrap_or_default();
+
+                let mut profile = self
+                    .profiles
+                    .iter()
+                    .find(|p| crate::harness::Harness::detect(&p.command) == Some(target_harness))
+                    .cloned()
+                    .unwrap_or_else(|| Profile {
+                        name: target_harness.as_str().to_string(),
+                        command: target_harness.as_str().to_string(),
+                        args: Vec::new(),
+                        default_dir: None,
+                        tracing: None,
+                        model: None,
+                        bypass_approvals: Some(self.bypass_approvals_default),
+                    });
+                profile.name = format!(
+                    "{} · {}",
+                    target_harness.as_str(),
+                    crate::bus::short_id(&task_id)
+                );
+                let bypass = profile
+                    .bypass_approvals
+                    .unwrap_or(self.bypass_approvals_default);
+                let mut options = crate::harness::LaunchOptions {
+                    model: profile.model.clone(),
+                    bypass_approvals: bypass,
+                    ..Default::default()
+                };
+
+                let agent_prep = match agent.as_deref().filter(|a| !a.trim().is_empty()) {
+                    Some(name) => {
+                        match self.session_agent(name, Some(target_harness), &spawn_dir) {
+                            Ok(prep) => Some(prep),
+                            Err(e) => return ControlResponse::err(e),
+                        }
+                    }
+                    None => None,
+                };
+                if options.model.is_none() {
+                    options.model = agent_prep.as_ref().and_then(|a| a.0.model.clone());
+                }
+                if !options.is_empty() {
+                    profile.args =
+                        crate::harness::compose(&profile.args, &options.render(target_harness));
+                }
+                if let Some((plan, _)) = &agent_prep {
+                    profile.args.retain(|a| !plan.remove.contains(a));
+                    profile.args.extend(plan.args.iter().cloned());
+                    if let Some(e) = plan.effort.as_deref()
+                        && let Some(mut a) =
+                            crate::workflows::harness::effort_args(target_harness, e)
+                    {
+                        profile.args.append(&mut a);
+                    }
+                }
+
+                let prompt = crate::bus::control::compose_worker_prompt(
+                    &task_id,
+                    &title,
+                    &instructions,
+                    &task_files,
+                    parent_launch.as_deref(),
+                );
+                let opening_args = match target_harness {
+                    crate::harness::Harness::Antigravity => {
+                        vec!["--prompt-interactive".to_string(), prompt]
+                    }
+                    _ => vec![prompt],
+                };
+                profile.args.extend(opening_args.iter().cloned());
+
+                let id = self.next_id;
+                let extra_env = vec![("AGENT_MUX_TASK_ID".to_string(), task_id.clone())];
+                let mut session = match self.spawn_traced_full(
+                    id,
+                    profile,
+                    spawn_dir,
+                    &extra_env,
+                    None,
+                    None,
+                    None,
+                    &[],
+                ) {
+                    Ok(s) => s,
+                    Err(e) => return ControlResponse::err(format!("spawn failed: {e}")),
+                };
+                session.agent = agent;
+                session.opening_args = opening_args;
+                let group_id = parent_launch
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&task_id)
+                    .to_string();
+                session.group = Some(crate::tree::GroupRef {
+                    kind: crate::tree::GroupKind::Bus,
+                    id: group_id,
+                    title: "delegated".into(),
+                    detail: crate::bus::short_id(&task_id).to_string(),
+                    label: title.clone(),
+                });
+                let new_launch_id = session
+                    .trace
+                    .as_ref()
+                    .map(|t| t.launch_id.clone())
+                    .unwrap_or_else(|| format!("session-{id}"));
+                let session_id = session.id;
+                self.next_id += 1;
+                self.sessions.push(session);
+                let _ = self.save_active_sessions();
+
+                if let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let now_ns = crate::tracing::store::now_ns();
+                    let _ = crate::bus::store::update_task(
+                        &conn,
+                        Some(db),
+                        &task_id,
+                        &new_launch_id,
+                        crate::bus::TaskStatus::Running,
+                        None,
+                        None,
+                        worktree_path.clone(),
+                        branch_name.clone(),
+                        now_ns,
+                    );
+                    if isolation == crate::bus::TaskIsolation::Shared && !task_files.is_empty() {
+                        let _ = crate::bus::store::acquire_leases(
+                            &conn,
+                            &workspace,
+                            &new_launch_id,
+                            Some(&task_id),
+                            &task_files,
+                            crate::bus::DEFAULT_LEASE_TTL_NS,
+                            now_ns,
+                        );
+                    }
+                }
+
+                self.notice = Some(Notice::info(format!(
+                    "delegated '{}' to {} ({})",
+                    title,
+                    target_harness.as_str(),
+                    crate::bus::short_id(&new_launch_id)
+                )));
+
+                ControlResponse {
+                    ok: true,
+                    launch_id: Some(new_launch_id),
+                    session_id: Some(session_id),
+                    harness: Some(target_harness.as_str().to_string()),
+                    worktree: worktree_path,
+                    branch: branch_name,
+                    detail: Some("spawned delegated worker session".into()),
+                    error: None,
+                }
+            }
         }
     }
 }

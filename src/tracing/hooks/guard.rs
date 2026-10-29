@@ -333,6 +333,44 @@ pub fn write_verdict(policy: &LoopPolicy, tool_name: &str, tool_input: Option<&V
     Verdict::Permit
 }
 
+/// Checks whether a write tool touches a file currently leased by a peer
+/// session on the inter-agent bus.
+pub fn bus_lease_verdict(
+    conn: &rusqlite::Connection,
+    workspace: &str,
+    launch_id: &str,
+    tool_name: &str,
+    tool_input: Option<&Value>,
+) -> Verdict {
+    if is_shell_tool(tool_name) || !crate::loops::store::is_write_tool(tool_name) {
+        return Verdict::Permit;
+    }
+    let paths = tool_input
+        .map(crate::loops::store::paths_in_tool_input)
+        .unwrap_or_default();
+    if paths.is_empty() {
+        return Verdict::Permit;
+    }
+    if let Some((rel, lease)) = crate::bus::store::check_lease_conflict(
+        conn,
+        workspace,
+        launch_id,
+        &paths,
+        crate::tracing::store::now_ns(),
+    ) {
+        return Verdict::Block(format!(
+            "agent-mux bus: {rel} is leased by peer {}{}",
+            crate::bus::short_id(&lease.owner_launch),
+            lease
+                .task_id
+                .as_deref()
+                .map(|t| format!(" (task {})", crate::bus::short_id(t)))
+                .unwrap_or_default()
+        ));
+    }
+    Verdict::Permit
+}
+
 /// The guard for one tool call. `tool_name`/`tool_input` come from the
 /// raw `PreToolUse` payload; `loop_flag` is `--loop` on the hook, which
 /// makes a missing answer a refusal for write tools.
@@ -355,18 +393,24 @@ pub fn check_tool(
     let Ok(conn) = crate::tracing::store::open_hook_sink(db, budget) else {
         return closed("no store");
     };
-    let meta: Option<String> = match conn
+    let row: Option<(Option<String>, Option<String>)> = match conn
         .query_row(
-            "SELECT metadata FROM launches WHERE id = ?1",
+            "SELECT metadata, cwd FROM launches WHERE id = ?1",
             [launch_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
     {
-        Ok(m) => m.flatten(),
+        Ok(r) => r,
         Err(_) => return closed("store busy"),
     };
-    let meta: Option<Value> = meta.and_then(|m| serde_json::from_str(&m).ok());
+    let (meta_raw, cwd_opt) = row.unwrap_or((None, None));
+    if let (Some(tool), Some(cwd)) = (tool_name, cwd_opt.as_deref().filter(|s| !s.is_empty()))
+        && let Verdict::Block(reason) = bus_lease_verdict(&conn, cwd, launch_id, tool, tool_input)
+    {
+        return Verdict::Block(reason);
+    }
+    let meta: Option<Value> = meta_raw.and_then(|m| serde_json::from_str(&m).ok());
     let Some(meta) = meta else {
         return closed("no launch row");
     };
@@ -437,6 +481,18 @@ pub fn deny_json(reason: &str) -> String {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
+        }
+    })
+    .to_string()
+}
+
+/// The `PreToolUse` reply that permits the call while injecting urgent
+/// inter-agent bus messages into the model's context.
+pub fn allow_with_context_json(context: &str) -> String {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": context,
         }
     })
     .to_string()
