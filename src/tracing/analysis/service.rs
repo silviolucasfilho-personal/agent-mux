@@ -1109,7 +1109,7 @@ impl TraceService {
             .optional()?
             .or_else(|| {
                 conn.query_row(
-                    "SELECT cwd, provider FROM traces WHERE session_key = ?1 LIMIT 1",
+                    "SELECT s.cwd, s.provider FROM traces t LEFT JOIN sessions s ON s.key = t.session_key WHERE t.session_key = ?1 LIMIT 1",
                     params![args.session_key],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
@@ -1210,7 +1210,7 @@ impl TraceService {
             .optional()?
             .or_else(|| {
                 conn.query_row(
-                    "SELECT cwd FROM traces WHERE session_key = ?1 LIMIT 1",
+                    "SELECT s.cwd FROM traces t LEFT JOIN sessions s ON s.key = t.session_key WHERE t.session_key = ?1 LIMIT 1",
                     params![args.session_key],
                     |r| r.get(0),
                 )
@@ -1453,7 +1453,7 @@ impl TraceService {
                 .optional()?
                 .or_else(|| {
                     conn.query_row(
-                        "SELECT cwd FROM traces WHERE session_key = ?1 LIMIT 1",
+                        "SELECT s.cwd FROM traces t LEFT JOIN sessions s ON s.key = t.session_key WHERE t.session_key = ?1 LIMIT 1",
                         params![sk],
                         |r| r.get(0),
                     )
@@ -1749,7 +1749,7 @@ impl TraceService {
             let (tokens, cost, start_ns, end_ns): (Option<i64>, Option<f64>, Option<i64>, Option<i64>) = conn
                 .query_row(
                     "SELECT SUM(total_tokens), SUM(total_cost_usd), MIN(start_ns), MAX(COALESCE(end_ns, start_ns))
-                     FROM traces WHERE launch_id = ?1",
+                     FROM trace_stats WHERE launch_id = ?1",
                     params![lid],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
@@ -1944,5 +1944,191 @@ fn truncate_json_strings(val: &mut serde_json::Value, max_len: usize) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::path::Path;
+
+    #[test]
+    fn test_schema_conformance_real_migrations() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("real_traces.db");
+        // Touch file so migrate_in_place recognizes it
+        std::fs::File::create(&db_path).unwrap();
+        crate::tracing::store::migrate_in_place(&db_path).unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        // Insert sample session, launch, trace, observation
+        conn.execute(
+            "INSERT INTO sessions (key, provider, session_id, cwd, project_slug, first_seen_ns, last_seen_ns)
+             VALUES ('claude:s1', 'claude', 's1', '/workspace/app', 'app', 1000000000, 2000000000)",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO runs (id, agent_mux_version, started_ns, heartbeat_ns)
+             VALUES ('r1', '0.1.0', 1000000000, 1000000000)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO launches (id, run_id, agent_mux_session, profile, provider, cwd, project_slug, content_mode, correlation_plan, started_ns, session_key, agent_mux_version)
+             VALUES ('l1', 'r1', 1, 'default', 'claude', '/workspace/app', 'app', 'full', 'none', 1000000000, 'claude:s1', '0.1.0')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO traces (id, session_key, launch_id, ordinal, name, status, start_ns, end_ns, input, output)
+             VALUES ('t1', 'claude:s1', 'l1', 1, 'turn-1', 'closed', 1000000000, 1500000000, 'Fix compiler bug', 'Fixed bug')",
+            [],
+        ).unwrap();
+
+        conn.execute(
+            "INSERT INTO observations (id, trace_id, type, name, start_ns, end_ns, total_tokens, total_cost_usd)
+             VALUES ('o1', 't1', 'tool', 'cargo', 1100000000, 1200000000, 100, 0.05)",
+            [],
+        ).unwrap();
+
+        let scope = Scope::workspace(Path::new("/workspace/app")).unwrap();
+        let service = TraceService::new(ServiceConfig {
+            db_path: db_path.clone(),
+            scope,
+            snapshot_dir: None,
+            limits: Limits::default(),
+            admission_hook: None,
+        })
+        .unwrap();
+
+        // 1. ListSessions (verifies st.tool_count and st.key = s.key)
+        let res = service.execute(Request::ListSessions(ListSessionsArgs {
+            since: Some("1970-01-01T00:00:00Z".into()),
+            until: Some("2030-01-01T00:00:00Z".into()),
+            ..Default::default()
+        }));
+        assert!(res.is_ok(), "ListSessions failed: {:?}", res.err());
+        let env = res.unwrap();
+        let sessions = env.data.get("sessions").and_then(|s| s.as_array()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].get("tools").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(sessions[0].get("turns").and_then(|v| v.as_i64()), Some(1));
+
+        // 2. Search (verifies traces LEFT JOIN sessions for s.provider and s.cwd)
+        let search_res = service.execute(Request::Search(SearchArgs {
+            query: "compiler".into(),
+            session_key: None,
+            provider: None,
+            since: Some("1970-01-01T00:00:00Z".into()),
+            until: Some("2030-01-01T00:00:00Z".into()),
+            cursor: None,
+            limit: None,
+        }));
+        assert!(search_res.is_ok(), "Search failed: {:?}", search_res.err());
+        let search_env = search_res.unwrap();
+        let matches = search_env
+            .data
+            .get("matches")
+            .and_then(|m| m.as_array())
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].get("provider").and_then(|p| p.as_str()),
+            Some("claude")
+        );
+
+        // 3. CompareRuns (verifies launch_id query joining sessions and trace_stats)
+        let compare_res = service.execute(Request::CompareRuns(CompareRunsArgs {
+            a: "l1".into(),
+            b: "l1".into(),
+        }));
+        assert!(
+            compare_res.is_ok(),
+            "CompareRuns failed: {:?}",
+            compare_res.err()
+        );
+        let compare_env = compare_res.unwrap();
+        let run_a = compare_env.data.get("run_a").unwrap();
+        assert_eq!(
+            run_a.get("provider").and_then(|p| p.as_str()),
+            Some("claude")
+        );
+        assert_eq!(
+            run_a.get("cwd").and_then(|c| c.as_str()),
+            Some("/workspace/app")
+        );
+        assert_eq!(run_a.get("turns").and_then(|t| t.as_i64()), Some(1));
+        assert_eq!(run_a.get("tools").and_then(|t| t.as_i64()), Some(1));
+        assert_eq!(run_a.get("tokens").and_then(|t| t.as_i64()), Some(100));
+
+        // 4. GetSession & Timeline
+        let get_res = service.execute(Request::GetSession(GetSessionArgs {
+            session_key: "claude:s1".into(),
+            launch_id: None,
+        }));
+        assert!(get_res.is_ok(), "GetSession failed: {:?}", get_res.err());
+
+        let timeline_res = service.execute(Request::Timeline(TimelineArgs {
+            session_key: "claude:s1".into(),
+            launch_id: None,
+            cursor: None,
+            limit: None,
+        }));
+        assert!(
+            timeline_res.is_ok(),
+            "Timeline failed: {:?}",
+            timeline_res.err()
+        );
+
+        // 5. Verify NotFound errors (exercising fallback query branches without crashing on invalid schema)
+        let missing_res = service.execute(Request::GetSession(GetSessionArgs {
+            session_key: "nonexistent".into(),
+            launch_id: None,
+        }));
+        assert!(
+            matches!(missing_res, Err(ServiceError::NotFound(_))),
+            "Expected NotFound, got: {:?}",
+            missing_res
+        );
+
+        let missing_timeline = service.execute(Request::Timeline(TimelineArgs {
+            session_key: "nonexistent".into(),
+            launch_id: None,
+            cursor: None,
+            limit: None,
+        }));
+        assert!(
+            matches!(missing_timeline, Err(ServiceError::NotFound(_))),
+            "Expected NotFound, got: {:?}",
+            missing_timeline
+        );
+
+        let missing_search = service.execute(Request::Search(SearchArgs {
+            query: "test".into(),
+            session_key: Some("nonexistent".into()),
+            provider: None,
+            since: Some("1970-01-01T00:00:00Z".into()),
+            until: Some("2030-01-01T00:00:00Z".into()),
+            cursor: None,
+            limit: None,
+        }));
+        assert!(
+            matches!(missing_search, Err(ServiceError::NotFound(_))),
+            "Expected NotFound, got: {:?}",
+            missing_search
+        );
+
+        let missing_launch = service.execute(Request::CompareRuns(CompareRunsArgs {
+            a: "nonexistent".into(),
+            b: "l1".into(),
+        }));
+        assert!(
+            matches!(missing_launch, Err(ServiceError::NotFound(_))),
+            "Expected NotFound, got: {:?}",
+            missing_launch
+        );
     }
 }
