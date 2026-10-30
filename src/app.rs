@@ -4582,8 +4582,7 @@ impl App {
             .trace_db_path
             .as_deref()
             .and_then(|p| crate::tracing::store::open_aux(p).ok());
-        let now_s = crate::tracing::store::now_ns() / 1_000_000_000;
-        let view = swarm_view::SwarmView::open(ws, conn.as_ref(), &live, now_s);
+        let view = swarm_view::SwarmView::open(ws, conn, &live, crate::tracing::store::now_ns());
         self.mode = Mode::Swarm(Box::new(view));
     }
 
@@ -4678,22 +4677,44 @@ impl App {
         created.into_iter().next().map(|t| t.id)
     }
 
-    pub fn refresh_swarm_if_needed(&mut self, _now: Instant) {
-        let now_s = crate::tracing::store::now_ns() / 1_000_000_000;
+    /// `Some((active, cap))` when `workspace`'s swarm has a `max_workers`
+    /// and that many delegated workers are already live there (sessions in
+    /// a bus group, the coordinator not counted).
+    fn swarm_worker_cap_reached(&self, workspace: &std::path::Path) -> Option<(usize, usize)> {
+        let db = self.trace_db_path.as_deref()?;
+        let conn = crate::tracing::store::open_ro(db).ok()?;
+        let norm = crate::bus::store::normalize_workspace(workspace);
+        let state = crate::bus::store::swarm_state(&conn, &norm)
+            .ok()
+            .flatten()?;
+        let cap = state.max_workers?;
+        let active = self
+            .swarm_live_sessions(workspace)
+            .iter()
+            .filter(|s| {
+                s.is_delegated_worker
+                    && s.state != "exited"
+                    && s.launch_id != state.coordinator_launch
+            })
+            .count();
+        (active >= cap).then_some((active, cap))
+    }
+
+    /// Refreshes the swarm screen when something it shows changed: the
+    /// store's change feed, a live session's state, a lease's expiry
+    /// (`SwarmView::refresh_due`). A quiet swarm costs one `MAX(seq)` every
+    /// half second.
+    pub fn refresh_swarm_if_needed(&mut self, now: Instant) {
         let ws = match &self.mode {
-            Mode::Swarm(view) if now_s * 1_000 >= view.last_refresh_ms + 1_000 => {
-                view.workspace.clone()
-            }
+            Mode::Swarm(view) => view.workspace.clone(),
             _ => return,
         };
         let live = self.swarm_live_sessions(&ws);
-        let conn = self
-            .trace_db_path
-            .as_deref()
-            .and_then(|p| crate::tracing::store::open_aux(p).ok());
-        if let Mode::Swarm(ref mut view) = self.mode {
-            view.last_refresh_ms = now_s * 1_000;
-            view.refresh(conn.as_ref(), &live, now_s);
+        let now_ns = crate::tracing::store::now_ns();
+        if let Mode::Swarm(ref mut view) = self.mode
+            && view.refresh_due(&live, now_ns, now)
+        {
+            view.refresh(&live, now_ns);
         }
     }
 
@@ -4832,7 +4853,7 @@ impl App {
                     }
                     return;
                 };
-                let _ = self.handle_bus_control(
+                let resp = self.handle_bus_control(
                     crate::bus::control::ControlRequest::SpawnWorker {
                         parent_launch: coord_launch,
                         workspace: ws_path.to_string_lossy().into_owned(),
@@ -4845,6 +4866,14 @@ impl App {
                     },
                     now,
                 );
+                if !resp.ok
+                    && let Mode::Swarm(view) = &mut self.mode
+                {
+                    view.status_msg = Some(format!(
+                        "task is on the board, no worker spawned: {}",
+                        resp.error.unwrap_or_default()
+                    ));
+                }
                 needs_refresh = true;
             }
             Outcome::DelegateTask { task_id } => {
@@ -4865,7 +4894,7 @@ impl App {
                     .and_then(|db| crate::tracing::store::open_ro(db).ok())
                     .and_then(|c| crate::bus::store::get_task(&c, &task_id).ok().flatten());
                 if let Some(task) = task_opt {
-                    let _ = self.handle_bus_control(
+                    let resp = self.handle_bus_control(
                         crate::bus::control::ControlRequest::SpawnWorker {
                             parent_launch: coord_launch,
                             workspace: ws_path.to_string_lossy().into_owned(),
@@ -4878,6 +4907,14 @@ impl App {
                         },
                         now,
                     );
+                    if !resp.ok
+                        && let Mode::Swarm(view) = &mut self.mode
+                    {
+                        view.status_msg = Some(format!(
+                            "no worker spawned: {}",
+                            resp.error.unwrap_or_default()
+                        ));
+                    }
                 }
                 needs_refresh = true;
             }
@@ -5053,13 +5090,8 @@ impl App {
                 _ => return,
             };
             let live = self.swarm_live_sessions(&ws);
-            let conn = self
-                .trace_db_path
-                .as_deref()
-                .and_then(|p| crate::tracing::store::open_aux(p).ok());
-            let now_s = crate::tracing::store::now_ns() / 1_000_000_000;
             if let Mode::Swarm(ref mut view) = self.mode {
-                view.refresh(conn.as_ref(), &live, now_s);
+                view.refresh(&live, crate::tracing::store::now_ns());
             }
         }
     }
@@ -7710,6 +7742,12 @@ impl App {
                     return ControlResponse::err(format!(
                         "workspace '{}' does not exist",
                         ws_path.display()
+                    ));
+                }
+                if let Some((active, cap)) = self.swarm_worker_cap_reached(&ws_path) {
+                    return ControlResponse::err(format!(
+                        "worker cap reached: {active}/{cap} workers active in this workspace; \
+                         the task stays on the board until one finishes (or raise max_workers)"
                     ));
                 }
 

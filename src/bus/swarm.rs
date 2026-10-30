@@ -149,7 +149,9 @@ impl SwarmSnapshot {
 }
 
 /// Builds a [`SwarmSnapshot`] for `workspace` by combining `traces.db` with optional
-/// in-memory `live_sessions` from the running `App`.
+/// in-memory `live_sessions` from the running `App`. `now` is in nanoseconds,
+/// like every timestamp the store compares it with (lease expiry, peer
+/// recency). Reads only: expired leases are left out, not pruned.
 pub fn load_snapshot(
     conn: Option<&Connection>,
     workspace_path: &Path,
@@ -165,7 +167,6 @@ pub fn load_snapshot(
     let mut state: Option<bstore::SwarmState> = None;
 
     if let Some(c) = conn {
-        let _ = bstore::prune_stale_leases(c, now);
         tasks = bstore::list_tasks(c, &workspace, None, None, None).unwrap_or_default();
         leases = bstore::list_leases(c, &workspace, now).unwrap_or_default();
         messages = bstore::list_workspace_messages(c, &workspace, 150).unwrap_or_default();

@@ -25,16 +25,16 @@ pub fn draw(f: &mut Frame, area: Rect, v: &SwarmView, app: &App) {
         Some(c) => format!("★ Coord: {} ({})", c.provider, c.state),
         None => "★ Coord: none (press r to launch)".to_string(),
     };
+    let workers = match v.snapshot.max_workers {
+        Some(cap) => format!("{}/{cap} Workers", v.snapshot.workers.len()),
+        None if v.snapshot.workers.len() == 1 => "1 Worker".to_string(),
+        None => format!("{} Workers", v.snapshot.workers.len()),
+    };
     let title = format!(
-        " Swarm · {} · {} · {} Worker{} · Tasks {}/{} done ({} ●, {} ○{}) · {} Lease{} · {} tok ({}) ",
+        " Swarm · {} · {} · {} · Tasks {}/{} done ({} ●, {} ○{}) · {} Lease{} · {} tok ({}) ",
         tilde_path(&v.workspace),
         coord_tag,
-        v.snapshot.workers.len(),
-        if v.snapshot.workers.len() == 1 {
-            ""
-        } else {
-            "s"
-        },
+        workers,
         done_tasks,
         total_tasks,
         running_tasks,

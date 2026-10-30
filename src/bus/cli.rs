@@ -639,9 +639,8 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
     match cmd {
         "status" => {
             let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
-            let now_s = now / 1_000_000_000;
             let snap =
-                super::swarm::load_snapshot(Some(&conn), Path::new(&workspace), &[], None, now_s);
+                super::swarm::load_snapshot(Some(&conn), Path::new(&workspace), &[], None, now);
             if args.has("json") {
                 println!("{}", serde_json::to_string_pretty(&snap)?);
             } else {

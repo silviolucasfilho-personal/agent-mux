@@ -351,17 +351,48 @@ pub struct SwarmView {
     pub modal: Option<Modal>,
     pub confirm: Option<Confirm>,
     pub status_msg: Option<String>,
-    pub last_refresh_ms: i64,
+    /// The store, held for the screen's lifetime: one connection, not one
+    /// per tick.
+    conn: Option<Connection>,
+    /// The `trace_changes` sequence the snapshot was read at, so a quiet
+    /// store costs one indexed `MAX(seq)` per tick instead of the full
+    /// read. `None` when the feed could not be read: every tick re-reads.
+    last_change_seq: Option<i64>,
+    /// What the live sessions looked like at the last read (state, turns,
+    /// tokens, running tool), so a session turning idle or finishing a turn
+    /// refreshes the roster without a store write.
+    live_fingerprint: u64,
+    /// When the tick last asked whether a refresh is due.
+    last_check: Option<std::time::Instant>,
+}
+
+/// How often a tick may ask the store whether anything changed.
+const REFRESH_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn live_fingerprint(live: &[LiveSwarmSession]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for s in live {
+        s.launch_id.hash(&mut h);
+        s.state.hash(&mut h);
+        s.turns.hash(&mut h);
+        s.tokens.hash(&mut h);
+        s.running_tool.hash(&mut h);
+    }
+    h.finish()
 }
 
 impl SwarmView {
+    /// Opens the screen on `workspace`, reading `conn` (kept for later
+    /// refreshes). `now` is in nanoseconds.
     pub fn open(
         workspace: PathBuf,
-        conn: Option<&Connection>,
+        conn: Option<Connection>,
         live_sessions: &[LiveSwarmSession],
         now: i64,
     ) -> Self {
-        let snapshot = load_snapshot(conn, &workspace, live_sessions, None, now);
+        let snapshot = load_snapshot(conn.as_ref(), &workspace, live_sessions, None, now);
+        let last_change_seq = conn.as_ref().and_then(Self::change_seq);
         let msg_count = snapshot.messages.len();
         let mut view = Self {
             workspace,
@@ -380,27 +411,69 @@ impl SwarmView {
             modal: None,
             confirm: None,
             status_msg: None,
-            last_refresh_ms: now * 1_000,
+            conn,
+            last_change_seq,
+            live_fingerprint: live_fingerprint(live_sessions),
+            last_check: None,
         };
         view.clamp_selections();
         view
     }
 
-    pub fn refresh(
+    /// The change feed's sequence, `None` only when it cannot be read. A
+    /// store this binary opened has the feed (and, from v18, the bus
+    /// triggers), so an empty feed is a quiet store, not a missing one.
+    fn change_seq(conn: &Connection) -> Option<i64> {
+        crate::tracing::store::latest_change_seq(conn).ok()
+    }
+
+    /// Whether the snapshot is stale: the store's change feed advanced (a
+    /// message, task, lease or the swarm record), a live session changed
+    /// state or telemetry, or a lease the snapshot shows has expired. At
+    /// most one store read per [`REFRESH_CHECK_INTERVAL`]; a feed that
+    /// cannot be read counts as always changed. `now` is in nanoseconds.
+    pub fn refresh_due(
         &mut self,
-        conn: Option<&Connection>,
         live_sessions: &[LiveSwarmSession],
         now: i64,
-    ) {
+        tick: std::time::Instant,
+    ) -> bool {
+        if self
+            .last_check
+            .is_some_and(|t| tick.duration_since(t) < REFRESH_CHECK_INTERVAL)
+        {
+            return false;
+        }
+        self.last_check = Some(tick);
+        let fingerprint = live_fingerprint(live_sessions);
+        if fingerprint != self.live_fingerprint {
+            return true;
+        }
+        if self.snapshot.leases.iter().any(|l| l.expires_ns <= now) {
+            return true;
+        }
+        let Some(conn) = &self.conn else {
+            return false;
+        };
+        match Self::change_seq(conn) {
+            Some(seq) => self.last_change_seq != Some(seq),
+            None => true,
+        }
+    }
+
+    /// Re-reads the store and the live sessions. `now` is in nanoseconds.
+    pub fn refresh(&mut self, live_sessions: &[LiveSwarmSession], now: i64) {
         let prev_msg_len = self.filtered_messages().len();
         let was_at_bottom = prev_msg_len == 0 || self.selected_message + 1 >= prev_msg_len;
         self.snapshot = load_snapshot(
-            conn,
+            self.conn.as_ref(),
             &self.workspace,
             live_sessions,
             self.coordinator_override.as_deref(),
             now,
         );
+        self.last_change_seq = self.conn.as_ref().and_then(Self::change_seq);
+        self.live_fingerprint = live_fingerprint(live_sessions);
         self.clamp_selections();
         let new_msg_len = self.filtered_messages().len();
         if was_at_bottom && new_msg_len > 0 {
@@ -1469,7 +1542,12 @@ mod tests {
         )
         .unwrap();
 
-        let mut view = SwarmView::open(dir.path().to_path_buf(), Some(&conn), &[], 2_000);
+        let mut view = SwarmView::open(
+            dir.path().to_path_buf(),
+            Some(open_aux(&db).unwrap()),
+            &[],
+            2_000,
+        );
         assert_eq!(view.pane, SwarmPane::Agents);
         assert_eq!(view.snapshot.tasks.len(), 1);
 
