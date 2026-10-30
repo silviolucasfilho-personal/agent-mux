@@ -198,21 +198,23 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
                 args.value("reply-to"),
                 now,
             )?;
-            if args.has("wake")
-                && let Some(target) = msg.to_launch.as_deref()
-            {
+            if args.has("wake") {
                 let prompt = format!(
                     "[agent-mux bus] Message ({}) from peer {}: \"{}\". Reply or inspect with agent_mux_recv_messages.",
                     msg.topic, msg.from_launch, msg.body
                 );
-                let _ = control::send_request(
-                    None,
-                    &ControlRequest::WakeSession {
+                let req = match msg.to_launch.as_deref() {
+                    Some(target) => ControlRequest::WakeSession {
                         launch_id: target.to_string(),
                         prompt,
                     },
-                    Duration::from_secs(3),
-                );
+                    None => ControlRequest::WakeWorkspace {
+                        workspace: workspace.clone(),
+                        prompt,
+                        exclude: Some(caller.clone()),
+                    },
+                };
+                let _ = control::send_request(None, &req, Duration::from_secs(3));
             }
             if args.has("json") {
                 println!("{}", serde_json::to_string_pretty(&msg)?);
@@ -728,19 +730,8 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                     );
                 }
                 Err(err) => {
-                    let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
-                    let norm_ws = bstore::normalize_workspace(Path::new(&workspace));
-                    let coord_id = format!("coord-{}", uuid::Uuid::new_v4().simple());
-                    bstore::record_coordinator(
-                        &conn,
-                        Some(&db_path),
-                        &norm_ws,
-                        &coord_id,
-                        &goal,
-                        now,
-                    )?;
-                    println!(
-                        "Recorded Swarm Coordinator in traces.db: {coord_id} (control socket unavailable: {err})"
+                    anyhow::bail!(
+                        "a coordinator is a live session, which only the running agent-mux TUI can start: {err}"
                     );
                 }
             }
@@ -766,17 +757,35 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                 None,
                 now,
             )?;
-            if wake {
-                let req = ControlRequest::WakeSession {
-                    launch_id: "*".into(),
+            let woken = if wake {
+                let req = ControlRequest::WakeWorkspace {
+                    workspace: norm_ws.clone(),
                     prompt: format!("[Swarm Broadcast on {topic}]: {body}"),
+                    exclude: None,
                 };
-                let _ = control::send_request(None, &req, Duration::from_millis(500));
-            }
+                Some(control::send_request(None, &req, Duration::from_secs(3)))
+            } else {
+                None
+            };
             if args.has("json") {
-                println!("{}", serde_json::to_string_pretty(&msg)?);
+                let wake_json = match &woken {
+                    Some(Ok(resp)) => serde_json::to_value(resp)?,
+                    Some(Err(e)) => json!({ "ok": false, "error": e }),
+                    None => serde_json::Value::Null,
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({ "message": msg, "wake": wake_json }))?
+                );
             } else {
                 println!("Broadcast message sent (id: {})", msg.id);
+                match &woken {
+                    Some(Ok(resp)) => {
+                        println!("{}", resp.detail.as_deref().unwrap_or("woke the swarm"))
+                    }
+                    Some(Err(e)) => println!("no session woken: {e}"),
+                    None => {}
+                }
             }
         }
         "stop" => {
@@ -803,6 +812,7 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             }
             let leases_released =
                 bstore::release_leases(&conn, &norm_ws, "cli", None, &[]).unwrap_or(0);
+            let _ = bstore::clear_swarm(&conn, Some(&db_path), &norm_ws);
             if args.has("json") {
                 println!(
                     "{}",

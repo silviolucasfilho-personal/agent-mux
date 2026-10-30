@@ -1,6 +1,7 @@
 //! Control socket for real-time TUI actions from `agent-mux mcp serve` and
-//! `agent-mux bus`: waking an idle peer session's PTY (`WakeSession`) and
-//! dynamically spawning a delegated worker session (`SpawnWorker`).
+//! `agent-mux bus`: waking an idle peer session's PTY (`WakeSession`, or
+//! every peer of a workspace with `WakeWorkspace`) and dynamically spawning a
+//! delegated worker session (`SpawnWorker`).
 //!
 //! Unix domain stream socket at `<snapshot_dir>/bus.sock` (or
 //! `$AGENT_MUX_CONTROL_SOCK`). Every child session spawned by `App` receives
@@ -25,6 +26,16 @@ pub enum ControlRequest {
     /// Wake a peer session by injecting `prompt` + `\r` into its PTY if idle,
     /// or queueing it until the session becomes idle.
     WakeSession { launch_id: String, prompt: String },
+    /// Wake every active session of `workspace` (and of the worktrees its
+    /// tasks run in) the way `WakeSession` wakes one, except `exclude`: the
+    /// sender of a broadcast. The response's `detail` counts the sessions
+    /// reached.
+    WakeWorkspace {
+        workspace: String,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exclude: Option<String>,
+    },
     /// Spawn a new worker session in `App` to execute `task_id`.
     SpawnWorker {
         parent_launch: Option<String>,

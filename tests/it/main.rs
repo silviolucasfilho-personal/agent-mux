@@ -5,6 +5,7 @@
 
 mod app_flow;
 mod build_info;
+mod bus_swarm;
 mod config_library;
 mod config_ui;
 mod flow_builder_ui;

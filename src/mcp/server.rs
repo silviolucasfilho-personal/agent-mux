@@ -646,21 +646,26 @@ fn bus_send_message_result(service: &TraceService, arguments: Value) -> Value {
     };
     crate::tracing::store::poke_wake(&config.db_path);
 
-    let wake_result = if args.wake.unwrap_or(false) && target != "*" {
+    let wake_result = if args.wake.unwrap_or(false) {
         let prompt = format!(
             "[agent-mux bus] New message #{} from {}: {}. Call agent_mux_recv_messages or `agent-mux bus recv` to read and respond.",
             msg.id,
             crate::bus::short_id(&sender),
             topic_str
         );
-        match crate::bus::control::send_request(
-            None,
-            &crate::bus::control::ControlRequest::WakeSession {
+        let req = if target == "*" {
+            crate::bus::control::ControlRequest::WakeWorkspace {
+                workspace: ws_str.clone(),
+                prompt,
+                exclude: Some(sender.clone()),
+            }
+        } else {
+            crate::bus::control::ControlRequest::WakeSession {
                 launch_id: target.clone(),
                 prompt,
-            },
-            std::time::Duration::from_secs(2),
-        ) {
+            }
+        };
+        match crate::bus::control::send_request(None, &req, std::time::Duration::from_secs(2)) {
             Ok(resp) => serde_json::to_value(resp).unwrap_or(Value::Null),
             Err(e) => json!({ "ok": false, "error": e }),
         }
