@@ -4655,6 +4655,29 @@ impl App {
             .collect()
     }
 
+    /// Puts one task on `workspace`'s board and answers its id, `None` without
+    /// a trace store.
+    fn swarm_create_task(
+        &self,
+        workspace: &std::path::Path,
+        created_by: &str,
+        spec: crate::bus::NewTaskSpec,
+    ) -> Option<String> {
+        let db = self.trace_db_path.as_deref()?;
+        let conn = crate::tracing::store::open_aux(db).ok()?;
+        let norm = crate::bus::store::normalize_workspace(workspace);
+        let created = crate::bus::store::split_tasks(
+            &conn,
+            Some(db),
+            &norm,
+            created_by,
+            &[spec],
+            crate::tracing::store::now_ns(),
+        )
+        .ok()?;
+        created.into_iter().next().map(|t| t.id)
+    }
+
     pub fn refresh_swarm_if_needed(&mut self, _now: Instant) {
         let now_s = crate::tracing::store::now_ns() / 1_000_000_000;
         let ws = match &self.mode {
@@ -4711,14 +4734,30 @@ impl App {
                     now,
                 );
                 let coord_launch = resp.launch_id.clone();
+                // A pre-warmed worker holds a real board task, so its
+                // `AGENT_MUX_TASK_ID` resolves and the board shows it as busy
+                // until the coordinator dismisses it.
                 for i in 1..=prewarm_workers {
+                    let Some(task_id) = self.swarm_create_task(
+                        &ws_path,
+                        coord_launch.as_deref().unwrap_or("user"),
+                        crate::bus::NewTaskSpec {
+                            title: format!("Standby worker #{i}"),
+                            instructions: crate::bus::swarm::STANDBY_WORKER_INSTRUCTIONS.into(),
+                            target_harness: Some(harness.as_str().to_string()),
+                            isolation,
+                            ..Default::default()
+                        },
+                    ) else {
+                        continue;
+                    };
                     let _ = self.handle_bus_control(
                         crate::bus::control::ControlRequest::SpawnWorker {
                             parent_launch: coord_launch.clone(),
                             workspace: ws_path.to_string_lossy().into_owned(),
-                            task_id: uuid::Uuid::new_v4().to_string(),
-                            title: format!("Worker Standby #{i}"),
-                            instructions: "Standby for tasks from the Swarm Coordinator.".into(),
+                            task_id,
+                            title: format!("Standby worker #{i}"),
+                            instructions: crate::bus::swarm::STANDBY_WORKER_INSTRUCTIONS.into(),
                             harness: Some(harness.as_str().to_string()),
                             agent: None,
                             isolation,
@@ -4739,12 +4778,14 @@ impl App {
                 {
                     let now_ns = crate::tracing::store::now_ns();
                     let norm = crate::bus::store::normalize_workspace(&ws_path);
-                    let _ = crate::bus::store::record_coordinator(
+                    let _ = crate::bus::store::set_coordinator(
                         &conn,
                         Some(db),
                         &norm,
                         &launch_id,
-                        "Swarm Coordinator role reassigned by user in Control Room",
+                        None,
+                        None,
+                        None,
                         now_ns,
                     );
                 }
@@ -4769,29 +4810,28 @@ impl App {
                         None,
                     )
                 };
-                let task_id = uuid::Uuid::new_v4().to_string();
-                if let Some(db) = self.trace_db_path.as_deref()
-                    && let Ok(conn) = crate::tracing::store::open_aux(db)
-                {
-                    let now_ns = crate::tracing::store::now_ns();
-                    let norm = crate::bus::store::normalize_workspace(&ws_path);
-                    let _ = crate::bus::store::split_tasks(
-                        &conn,
-                        Some(db),
-                        &norm,
-                        coord_launch.as_deref().unwrap_or("user"),
-                        &[crate::bus::NewTaskSpec {
-                            title: title.clone(),
-                            instructions: instructions.clone(),
-                            files: files.clone(),
-                            target_harness: Some(harness.as_str().to_string()),
-                            target_agent: agent.clone(),
-                            isolation,
-                            ..Default::default()
-                        }],
-                        now_ns,
-                    );
-                }
+                // The worker runs the board task just created: same id, so
+                // the spawn claims it and the worker's `AGENT_MUX_TASK_ID`
+                // and scoped files resolve.
+                let Some(task_id) = self.swarm_create_task(
+                    &ws_path,
+                    coord_launch.as_deref().unwrap_or("user"),
+                    crate::bus::NewTaskSpec {
+                        title: title.clone(),
+                        instructions: instructions.clone(),
+                        files: files.clone(),
+                        target_harness: Some(harness.as_str().to_string()),
+                        target_agent: agent.clone(),
+                        isolation,
+                        ..Default::default()
+                    },
+                ) else {
+                    if let Mode::Swarm(view) = &mut self.mode {
+                        view.status_msg =
+                            Some("could not create the task on the board (no trace store)".into());
+                    }
+                    return;
+                };
                 let _ = self.handle_bus_control(
                     crate::bus::control::ControlRequest::SpawnWorker {
                         parent_launch: coord_launch,
@@ -4975,18 +5015,33 @@ impl App {
                         now_ns,
                     );
                 }
-                if wake && let Some(target) = to_launch.as_deref() {
-                    let _ = self.handle_bus_control(
-                        crate::bus::control::ControlRequest::WakeSession {
+                if wake {
+                    let prompt = if urgent {
+                        format!("[URGENT message on {topic}]: {body}")
+                    } else {
+                        format!("[Message on {topic}]: {body}")
+                    };
+                    let req = match to_launch.as_deref() {
+                        Some(target) => crate::bus::control::ControlRequest::WakeSession {
                             launch_id: target.to_string(),
-                            prompt: if urgent {
-                                format!("[URGENT message on {topic}]: {body}")
-                            } else {
-                                format!("[Message on {topic}]: {body}")
-                            },
+                            prompt,
                         },
-                        now,
-                    );
+                        None => crate::bus::control::ControlRequest::WakeWorkspace {
+                            workspace: ws_path.to_string_lossy().into_owned(),
+                            prompt,
+                            exclude: None,
+                        },
+                    };
+                    let resp = self.handle_bus_control(req, now);
+                    if let Mode::Swarm(view) = &mut self.mode {
+                        view.status_msg = Some(match (resp.ok, resp.detail, resp.error) {
+                            (true, Some(d), _) => format!("message sent · {d}"),
+                            (true, None, _) => "message sent".into(),
+                            (false, _, e) => {
+                                format!("message sent, wake failed: {}", e.unwrap_or_default())
+                            }
+                        });
+                    }
                 }
                 needs_refresh = true;
             }
@@ -7526,6 +7581,48 @@ impl App {
     ) -> crate::bus::control::ControlResponse {
         use crate::bus::control::{ControlRequest, ControlResponse};
         match req {
+            ControlRequest::WakeWorkspace {
+                workspace,
+                prompt,
+                exclude,
+            } => {
+                let targets: Vec<String> = self
+                    .swarm_live_sessions(std::path::Path::new(&workspace))
+                    .into_iter()
+                    .filter(|s| s.state != "exited" && Some(&s.launch_id) != exclude.as_ref())
+                    .map(|s| s.launch_id)
+                    .collect();
+                let mut woken = 0usize;
+                let mut queued = 0usize;
+                for launch_id in &targets {
+                    let resp = self.handle_bus_control(
+                        ControlRequest::WakeSession {
+                            launch_id: launch_id.clone(),
+                            prompt: prompt.clone(),
+                        },
+                        now,
+                    );
+                    if resp.ok {
+                        if resp.detail.as_deref() == Some("queued until session is idle") {
+                            queued += 1;
+                        } else {
+                            woken += 1;
+                        }
+                    }
+                }
+                ControlResponse {
+                    ok: true,
+                    launch_id: None,
+                    session_id: None,
+                    harness: None,
+                    worktree: None,
+                    branch: None,
+                    detail: Some(format!(
+                        "woke {woken} session(s), queued {queued} until idle"
+                    )),
+                    error: None,
+                }
+            }
             ControlRequest::WakeSession { launch_id, prompt } => {
                 let Some(idx) = self.find_session_by_launch(&launch_id) else {
                     return ControlResponse::err(format!(
@@ -7940,12 +8037,14 @@ impl App {
                 {
                     let now_ns = crate::tracing::store::now_ns();
                     let norm_ws = crate::bus::store::normalize_workspace(&ws_path);
-                    let _ = crate::bus::store::record_coordinator(
+                    let _ = crate::bus::store::set_coordinator(
                         &conn,
                         Some(db),
                         &norm_ws,
                         &new_launch_id,
-                        &goal,
+                        Some(&goal),
+                        Some(max_workers),
+                        Some(isolation),
                         now_ns,
                     );
                 }

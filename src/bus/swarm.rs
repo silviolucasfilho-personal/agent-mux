@@ -86,6 +86,12 @@ pub struct SwarmSnapshot {
     pub workspace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<String>,
+    /// The worker cap the swarm was started with (`swarm_state`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_workers: Option<usize>,
+    /// The default task isolation the swarm was started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<TaskIsolation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<SwarmMember>,
     pub workers: Vec<SwarmMember>,
@@ -156,8 +162,7 @@ pub fn load_snapshot(
     let mut leases = Vec::new();
     let mut messages = Vec::new();
     let mut db_peers: Vec<PeerInfo> = Vec::new();
-    let mut db_coord: Option<String> = None;
-    let mut swarm_goal: Option<String> = None;
+    let mut state: Option<bstore::SwarmState> = None;
 
     if let Some(c) = conn {
         let _ = bstore::prune_stale_leases(c, now);
@@ -165,13 +170,7 @@ pub fn load_snapshot(
         leases = bstore::list_leases(c, &workspace, now).unwrap_or_default();
         messages = bstore::list_workspace_messages(c, &workspace, 150).unwrap_or_default();
         db_peers = bstore::list_peers(c, &workspace, None, true, now).unwrap_or_default();
-        db_coord = bstore::active_coordinator_launch(c, &workspace);
-        swarm_goal = messages
-            .iter()
-            .rev()
-            .find(|m| m.topic == "swarm-coordinator")
-            .map(|m| m.body.clone())
-            .filter(|b| !b.starts_with("Swarm Coordinator set to "));
+        state = bstore::swarm_state(c, &workspace).ok().flatten();
     }
 
     // Also include worktree paths created for tasks in this workspace so workers running
@@ -193,12 +192,12 @@ pub fn load_snapshot(
 
     // Determine which launch_id is the Coordinator:
     // 1. Explicit coordinator override from `App`
-    // 2. Latest `swarm-coordinator` bus record if that launch is known
+    // 2. The coordinator recorded in `swarm_state` (started or promoted)
     // 3. A live session in this workspace with `agent_persona == Some("coordinator")`
     // 4. A session that created tasks on the board (`created_by`) and is not a delegated worker
     let coord_launch_id: Option<String> = explicit_coordinator
         .map(str::to_string)
-        .or(db_coord)
+        .or_else(|| state.as_ref().map(|st| st.coordinator_launch.clone()))
         .or_else(|| {
             live_by_launch
                 .values()
@@ -356,7 +355,9 @@ pub fn load_snapshot(
 
     SwarmSnapshot {
         workspace,
-        goal: swarm_goal,
+        goal: state.as_ref().and_then(|st| st.goal.clone()),
+        max_workers: state.as_ref().and_then(|st| st.max_workers),
+        isolation: state.as_ref().and_then(|st| st.isolation),
         coordinator,
         workers,
         tasks,
@@ -387,6 +388,13 @@ fn query_launch_totals(conn: &Connection, launch_id: &str) -> Option<(usize, i64
     )
     .ok()
 }
+
+/// The task a pre-warmed worker holds until the coordinator hands it real work.
+pub const STANDBY_WORKER_INSTRUCTIONS: &str = "You are a standby worker of this workspace's swarm. \
+Do not change any file yet. Call `agent_mux_recv_messages(wait_ms = 30000)` and `agent_mux_task_board` \
+until the Swarm Coordinator assigns you a task or messages you; then claim that task with \
+`agent_mux_task_update(action = \"claim\")` and do it. When the coordinator says the swarm is finished, \
+mark this standby task done.";
 
 /// Composes the opening mission prompt handed to a newly spawned Swarm Coordinator.
 pub fn compose_coordinator_prompt(
@@ -446,12 +454,14 @@ mod tests {
         let conn = open_aux(&db).unwrap();
         let ws = bstore::normalize_workspace(dir.path());
 
-        bstore::record_coordinator(
+        bstore::set_coordinator(
             &conn,
             Some(&db),
             &ws,
             "coord-11112222",
-            "Build auth + UI in parallel",
+            Some("Build auth + UI in parallel"),
+            Some(4),
+            Some(TaskIsolation::Shared),
             1_000,
         )
         .unwrap();
@@ -521,6 +531,7 @@ mod tests {
 
         let snap = load_snapshot(Some(&conn), dir.path(), &live, None, 4_000);
         assert_eq!(snap.goal.as_deref(), Some("Build auth + UI in parallel"));
+        assert_eq!(snap.max_workers, Some(4));
         let coord = snap.coordinator.as_ref().expect("coordinator present");
         assert_eq!(coord.launch_id, "coord-11112222");
         assert_eq!(coord.unread_messages, 1);
@@ -528,7 +539,9 @@ mod tests {
         assert_eq!(snap.workers[0].label, "W1");
         assert_eq!(snap.workers[0].leased_files, vec!["src/auth/**"]);
         assert_eq!(snap.leases.len(), 1);
-        assert_eq!(snap.messages.len(), 2);
+        // Recording the coordinator posts nothing on the bus: the feed holds
+        // only the worker's question.
+        assert_eq!(snap.messages.len(), 1);
         assert_eq!(snap.total_turns, 6);
         assert_eq!(snap.total_tokens, 17_000);
         assert_eq!(snap.member_label("coord-11112222"), "★ Coord (claude)");

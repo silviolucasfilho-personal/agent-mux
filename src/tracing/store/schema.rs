@@ -1,10 +1,10 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 16;
+pub const SCHEMA_VERSION: i32 = 17;
 
 pub const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -838,4 +838,23 @@ CREATE TABLE IF NOT EXISTS agent_leases (
   PRIMARY KEY (workspace, pattern)
 );
 CREATE INDEX IF NOT EXISTS agent_leases_owner ON agent_leases (owner_launch);
+"#;
+
+// v17: the swarm's own state (`src/bus/swarm.rs`). Which launch leads a
+// workspace's swarm, the goal and the parameters it was started with. Before
+// this the coordinator was recorded as a `swarm-coordinator` broadcast on
+// `agent_messages`, which every worker then received as unread mail and whose
+// body doubled as the goal; those rows carried nothing else, so they go.
+// Replay-safe: IF NOT EXISTS, and the DELETE matches nothing the second time.
+const V17: &str = r#"
+CREATE TABLE IF NOT EXISTS swarm_state (
+  workspace          TEXT PRIMARY KEY,
+  coordinator_launch TEXT NOT NULL,
+  goal               TEXT,
+  max_workers        INTEGER,
+  isolation          TEXT CHECK (isolation IN ('shared','worktree')),
+  started_ns         INTEGER NOT NULL,
+  updated_ns         INTEGER NOT NULL
+);
+DELETE FROM agent_messages WHERE topic = 'swarm-coordinator';
 "#;

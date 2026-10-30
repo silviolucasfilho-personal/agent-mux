@@ -437,26 +437,21 @@ impl SwarmView {
         self.snapshot
             .messages
             .iter()
-            .filter(|m| {
-                if m.topic == "swarm-coordinator" {
-                    return false;
-                }
-                match self.message_filter {
-                    MessageFilter::All => true,
-                    MessageFilter::SelectedAgent => match selected_launch {
-                        Some(lid) => {
-                            m.from_launch == lid
-                                || m.to_launch.as_deref() == Some(lid)
-                                || m.to_launch.is_none()
-                        }
-                        None => true,
-                    },
-                    MessageFilter::QuestionsAndUrgent => {
-                        m.topic == "question"
-                            || m.topic == "blocker"
-                            || m.topic == "api-contract"
-                            || m.acked_ns.is_none()
+            .filter(|m| match self.message_filter {
+                MessageFilter::All => true,
+                MessageFilter::SelectedAgent => match selected_launch {
+                    Some(lid) => {
+                        m.from_launch == lid
+                            || m.to_launch.as_deref() == Some(lid)
+                            || m.to_launch.is_none()
                     }
+                    None => true,
+                },
+                MessageFilter::QuestionsAndUrgent => {
+                    m.topic == "question"
+                        || m.topic == "blocker"
+                        || m.topic == "api-contract"
+                        || m.acked_ns.is_none()
                 }
             })
             .collect()

@@ -977,47 +977,97 @@ pub fn list_workspace_messages(
     Ok(out)
 }
 
-/// Records `coordinator_launch` as the active Swarm Coordinator for `workspace`
-/// by posting a `swarm-coordinator` event onto the workspace bus.
-pub fn record_coordinator(
+/// The swarm a workspace is running: who leads it and what it was started with.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SwarmState {
+    pub workspace: String,
+    pub coordinator_launch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_workers: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<TaskIsolation>,
+    pub started_ns: i64,
+    pub updated_ns: i64,
+}
+
+/// Makes `coordinator_launch` the Swarm Coordinator of `workspace`. A `goal`
+/// (and `max_workers`, `isolation`) given here replaces what was recorded;
+/// `None` keeps it, so promoting another session keeps the swarm's goal.
+#[allow(clippy::too_many_arguments)]
+pub fn set_coordinator(
     conn: &Connection,
     db_path: Option<&Path>,
     workspace: &str,
     coordinator_launch: &str,
-    note: &str,
+    goal: Option<&str>,
+    max_workers: Option<usize>,
+    isolation: Option<TaskIsolation>,
     now: i64,
-) -> rusqlite::Result<BusMessage> {
-    let body = if note.trim().is_empty() {
-        format!("Swarm Coordinator set to {coordinator_launch}")
-    } else {
-        note.trim().to_string()
-    };
-    send_message(
-        conn,
-        db_path,
-        workspace,
-        coordinator_launch,
-        None,
-        "swarm-coordinator",
-        &body,
-        None,
-        now,
-    )
+) -> rusqlite::Result<SwarmState> {
+    let goal = goal.map(str::trim).filter(|g| !g.is_empty());
+    conn.execute(
+        "INSERT INTO swarm_state (workspace, coordinator_launch, goal, max_workers, isolation, started_ns, updated_ns)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+         ON CONFLICT (workspace) DO UPDATE SET
+             coordinator_launch = excluded.coordinator_launch,
+             goal = COALESCE(excluded.goal, swarm_state.goal),
+             max_workers = COALESCE(excluded.max_workers, swarm_state.max_workers),
+             isolation = COALESCE(excluded.isolation, swarm_state.isolation),
+             updated_ns = excluded.updated_ns",
+        params![
+            workspace,
+            coordinator_launch,
+            goal,
+            max_workers.map(|n| n as i64),
+            isolation.map(TaskIsolation::as_str),
+            now
+        ],
+    )?;
+    if let Some(p) = db_path {
+        crate::tracing::store::poke_wake(p);
+    }
+    Ok(swarm_state(conn, workspace)?.expect("row written above"))
 }
 
-/// Returns the launch ID of the most recently designated Swarm Coordinator in `workspace`.
-pub fn active_coordinator_launch(conn: &Connection, workspace: &str) -> Option<String> {
+/// The swarm recorded for `workspace`, if one was started or a coordinator promoted.
+pub fn swarm_state(conn: &Connection, workspace: &str) -> rusqlite::Result<Option<SwarmState>> {
     conn.query_row(
-        "SELECT from_launch FROM agent_messages
-         WHERE workspace = ?1 AND topic = 'swarm-coordinator'
-         ORDER BY created_ns DESC
-         LIMIT 1",
+        "SELECT workspace, coordinator_launch, goal, max_workers, isolation, started_ns, updated_ns
+         FROM swarm_state WHERE workspace = ?1",
         params![workspace],
-        |r| r.get::<_, String>(0),
+        |r| {
+            Ok(SwarmState {
+                workspace: r.get(0)?,
+                coordinator_launch: r.get(1)?,
+                goal: r.get(2)?,
+                max_workers: r.get::<_, Option<i64>>(3)?.map(|n| n.max(0) as usize),
+                isolation: r
+                    .get::<_, Option<String>>(4)?
+                    .and_then(|s| TaskIsolation::parse(&s)),
+                started_ns: r.get(5)?,
+                updated_ns: r.get(6)?,
+            })
+        },
     )
     .optional()
-    .ok()
-    .flatten()
+}
+
+/// Forgets the swarm recorded for `workspace` (`agent-mux swarm stop`).
+pub fn clear_swarm(
+    conn: &Connection,
+    db_path: Option<&Path>,
+    workspace: &str,
+) -> rusqlite::Result<usize> {
+    let n = conn.execute(
+        "DELETE FROM swarm_state WHERE workspace = ?1",
+        params![workspace],
+    )?;
+    if let Some(p) = db_path {
+        crate::tracing::store::poke_wake(p);
+    }
+    Ok(n)
 }
 
 /// Updates a task's title, instructions, and scoped file patterns.

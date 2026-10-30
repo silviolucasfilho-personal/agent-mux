@@ -51,3 +51,19 @@ agent-mux bus unlease [pattern...] [--task-id ID] [--from LAUNCH_ID] [--workspac
 - **Lease enforcement**: when a session runs in a shared workspace and another peer holds an active lease in `agent_leases` matching a file targeted by `Write`, `Edit`, `MultiEdit`, or `NotebookEdit`, `tracing::hooks::guard::bus_lease_verdict` blocks the tool call in `PreToolUse` and names the owning peer and task.
 - **Automatic lease lifecycle**: claiming a task (`claim`) or spawning a shared-workspace worker automatically acquires leases on the task's `files` (`DEFAULT_LEASE_TTL_NS` = 30 minutes); marking a task `done`, `failed`, or `cancelled` automatically releases its leases and posts a `"result"` message back to the task creator.
 - **Urgent message injection**: unread messages sent with `topic = "urgent"` (or `urgent = true`) are drained by `bus::store::drain_urgent_for_hook` on the recipient's next `PreToolUse` hook invocation and injected via `hookSpecificOutput.additionalContext`.
+
+## Swarm Control Room (`Mode::Swarm`, `agent-mux swarm …`)
+
+The swarm screen (`F1` → "Open swarm control room", `src/app/swarm_view.rs`, `src/ui/swarm.rs`) shows one workspace's Coordinator, its Workers, the task board with its leases and the message feed on one screen, and starts a swarm from a goal: `r` opens the launch dialog, which spawns a Coordinator session (built-in `coordinator` persona, `$AGENT_MUX_SWARM_ROLE=coordinator`, `$AGENT_MUX_SWARM_GOAL`) and, if asked, pre-warmed workers. Design: `docs/superpowers/specs/2026-10-29-agent-swarm-screen-design.md`.
+
+- **The swarm's state** is one row per workspace in `swarm_state` (schema `v17`): the coordinator's launch id, the goal, `max_workers` and the default isolation. `bus::store::set_coordinator` writes it when a swarm starts (goal and parameters) and when the user promotes another session with `c` (the goal and parameters stay); `swarm_state` reads it; `clear_swarm` forgets it (`agent-mux swarm stop`). `bus::swarm::load_snapshot` takes the coordinator from it, then from a live session whose persona is `coordinator`, then from the creator of the board's first task. Nothing of this is posted on the bus, so workers never receive the registry as mail.
+- **Every worker holds a board task.** A worker spawned from the screen (`n` on the roster) runs the task the screen just created, same id, so the spawn claims it (`running`, `assigned_to`, leases on its `files`) and the worker's `$AGENT_MUX_TASK_ID` resolves. A pre-warmed worker holds a `Standby worker #n` task whose instructions (`bus::swarm::STANDBY_WORKER_INSTRUCTIONS`) tell it to poll the board and its inbox until the coordinator hands it work.
+- **Broadcast wakes.** `ControlRequest::WakeWorkspace { workspace, prompt, exclude }` wakes every live session of the workspace (and of the worktrees its tasks run in) the way `WakeSession` wakes one, except the sender; the response's `detail` counts how many were woken and how many queued until idle. The screen's composer (`b`, or `m` with nothing selected), `agent-mux swarm broadcast --wake`, `agent-mux bus send --wake` without `--to` and `agent_mux_send_message(to = "*", wake = true)` all send it.
+- **`agent-mux swarm start`** needs the running TUI: a coordinator is a live session, so without the control socket the command refuses rather than recording a coordinator that does not exist.
+
+```
+agent-mux swarm status [--workspace DIR] [--db PATH] [--json]
+agent-mux swarm start <goal...> [--coordinator claude|codex|agy] [--workers N] [--isolation shared|worktree] [--workspace DIR]
+agent-mux swarm broadcast <message...> [--urgent] [--wake] [--workspace DIR] [--db PATH] [--json]
+agent-mux swarm stop [--workspace DIR] [--db PATH] [--json]
+```
