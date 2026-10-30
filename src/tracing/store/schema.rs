@@ -1,10 +1,10 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 17;
+pub const SCHEMA_VERSION: i32 = 18;
 
 pub const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -857,4 +857,73 @@ CREATE TABLE IF NOT EXISTS swarm_state (
   updated_ns         INTEGER NOT NULL
 );
 DELETE FROM agent_messages WHERE topic = 'swarm-coordinator';
+"#;
+
+// v18: the bus tables feed `trace_changes`, so a screen that shows them (the
+// Swarm Control Room) can ask `latest_change_seq` whether anything moved
+// instead of re-reading the board, the leases and the feed every tick.
+// Replay-safe: IF NOT EXISTS throughout.
+const V18: &str = r#"
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_agent_messages_insert
+AFTER INSERT ON agent_messages
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('bus_message', NEW.id, NULL, NEW.from_launch, 'insert');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_agent_messages_update
+AFTER UPDATE ON agent_messages
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('bus_message', NEW.id, NULL, NEW.from_launch, 'update');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_agent_tasks_insert
+AFTER INSERT ON agent_tasks
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('bus_task', NEW.id, NULL, NEW.assigned_to, 'insert');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_agent_tasks_update
+AFTER UPDATE ON agent_tasks
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('bus_task', NEW.id, NULL, NEW.assigned_to, 'update');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_agent_leases_insert
+AFTER INSERT ON agent_leases
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('bus_lease', NEW.workspace || char(0) || NEW.pattern, NULL, NEW.owner_launch, 'insert');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_agent_leases_delete
+AFTER DELETE ON agent_leases
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('bus_lease', OLD.workspace || char(0) || OLD.pattern, NULL, OLD.owner_launch, 'delete');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_state_insert
+AFTER INSERT ON swarm_state
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm', NEW.workspace, NULL, NEW.coordinator_launch, 'insert');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_state_update
+AFTER UPDATE ON swarm_state
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm', NEW.workspace, NULL, NEW.coordinator_launch, 'update');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_state_delete
+AFTER DELETE ON swarm_state
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm', OLD.workspace, NULL, OLD.coordinator_launch, 'delete');
+END;
 "#;

@@ -2,18 +2,23 @@
 //! not as a bus message, so workers get no phantom mail and promoting another
 //! session keeps the goal; a broadcast wake (`WakeWorkspace`) reaches every
 //! live session of the workspace but the sender; and `agent-mux swarm start`
-//! without a running TUI refuses instead of inventing a coordinator.
+//! without a running TUI refuses instead of inventing a coordinator. The
+//! screen refreshes only when the bus's change feed, a live session or a
+//! lease's expiry says so, and a swarm's `max_workers` refuses the spawn
+//! that would exceed it.
 
+use agent_mux::app::swarm_view::SwarmView;
 use agent_mux::app::{App, Mode};
 use agent_mux::bus::control::ControlRequest;
 use agent_mux::bus::store as bstore;
 use agent_mux::bus::swarm::{LiveSwarmSession, load_snapshot};
-use agent_mux::bus::{NewTaskSpec, TaskIsolation};
+use agent_mux::bus::{DEFAULT_LEASE_TTL_NS, NewTaskSpec, TaskIsolation};
 use agent_mux::config::Profile;
 use agent_mux::events::AppEvent;
 use agent_mux::status::Status;
 use agent_mux::tracing::pricing::PriceTable;
-use agent_mux::tracing::store::{OpenOptions, open_aux, open_rw};
+use agent_mux::tracing::store::{OpenOptions, latest_change_seq, open_aux, open_rw};
+use agent_mux::tree::{GroupKind, GroupRef};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::Path;
 use std::process::Command;
@@ -302,5 +307,217 @@ async fn wake_workspace_reaches_every_idle_session_but_the_sender() {
         resp.detail.as_deref(),
         Some("woke 0 session(s), queued 0 until idle")
     );
+    app.kill_all();
+}
+
+#[test]
+fn bus_writes_advance_the_change_feed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_store(dir.path());
+    let conn = open_aux(&db).unwrap();
+    let ws = bstore::normalize_workspace(dir.path());
+    let mut seen = latest_change_seq(&conn).unwrap();
+    let mut advanced = |what: &str| {
+        let seq = latest_change_seq(&conn).unwrap();
+        assert!(seq > seen, "{what} did not advance the change feed");
+        seen = seq;
+    };
+
+    bstore::send_message(
+        &conn,
+        Some(&db),
+        &ws,
+        "a",
+        None,
+        "message",
+        "hi",
+        None,
+        1_000,
+    )
+    .unwrap();
+    advanced("send_message");
+    let created = bstore::split_tasks(
+        &conn,
+        Some(&db),
+        &ws,
+        "a",
+        &[NewTaskSpec {
+            title: "t".into(),
+            instructions: "i".into(),
+            files: vec!["src/x.rs".into()],
+            ..Default::default()
+        }],
+        2_000,
+    )
+    .unwrap();
+    advanced("split_tasks");
+    bstore::claim_task(&conn, Some(&db), &created[0].id, "b", 3_000).unwrap();
+    advanced("claim_task (task update + lease)");
+    bstore::release_leases(&conn, &ws, "b", Some(&created[0].id), &[]).unwrap();
+    advanced("release_leases");
+    bstore::set_coordinator(&conn, Some(&db), &ws, "c", Some("g"), None, None, 4_000).unwrap();
+    advanced("set_coordinator");
+    bstore::clear_swarm(&conn, Some(&db), &ws).unwrap();
+    advanced("clear_swarm");
+}
+
+#[test]
+fn the_screen_refreshes_only_when_something_it_shows_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_store(dir.path());
+    let conn = open_aux(&db).unwrap();
+    let ws = bstore::normalize_workspace(dir.path());
+    let t0 = 1_000_000_000_000i64; // ns
+    let tick = Instant::now();
+    let later = |n: u64| tick + Duration::from_secs(n);
+
+    let mut view = SwarmView::open(
+        dir.path().to_path_buf(),
+        Some(open_aux(&db).unwrap()),
+        &[],
+        t0,
+    );
+    assert!(
+        !view.refresh_due(&[], t0, tick),
+        "nothing changed since open"
+    );
+
+    // A bus write: due once, then quiet again after the read.
+    bstore::send_message(&conn, Some(&db), &ws, "a", None, "message", "hi", None, t0).unwrap();
+    assert!(!view.refresh_due(&[], t0, tick), "checks are rate limited");
+    assert!(view.refresh_due(&[], t0, later(1)));
+    view.refresh(&[], t0);
+    assert_eq!(view.snapshot.messages.len(), 1);
+    assert!(!view.refresh_due(&[], t0, later(2)));
+
+    // A live session changing state: due without any store write.
+    let mut live = vec![LiveSwarmSession {
+        session_idx: 0,
+        session_id: 1,
+        launch_id: "w-1".into(),
+        provider: "claude".into(),
+        profile_name: "Claude Code".into(),
+        agent_persona: None,
+        state: "working".into(),
+        workspace: ws.clone(),
+        is_delegated_worker: true,
+        turns: 1,
+        tokens: 10,
+        cost_usd: 0.0,
+        running_tool: None,
+    }];
+    assert!(view.refresh_due(&live, t0, later(3)));
+    view.refresh(&live, t0);
+    assert!(!view.refresh_due(&live, t0, later(4)));
+    live[0].state = "idle".into();
+    assert!(view.refresh_due(&live, t0, later(5)));
+    view.refresh(&live, t0);
+
+    // A lease the snapshot shows expiring: due when its time comes.
+    bstore::split_tasks(
+        &conn,
+        Some(&db),
+        &ws,
+        "a",
+        &[NewTaskSpec {
+            title: "t".into(),
+            instructions: "i".into(),
+            files: vec!["src/x.rs".into()],
+            assigned_to: Some("w-1".into()),
+            ..Default::default()
+        }],
+        t0,
+    )
+    .unwrap();
+    assert!(view.refresh_due(&live, t0, later(6)));
+    view.refresh(&live, t0);
+    assert_eq!(view.snapshot.leases.len(), 1);
+    assert!(!view.refresh_due(&live, t0, later(7)));
+    let expired = t0 + DEFAULT_LEASE_TTL_NS;
+    assert!(view.refresh_due(&live, expired, later(8)));
+    view.refresh(&live, expired);
+    assert!(
+        view.snapshot.leases.is_empty(),
+        "expired leases are left out"
+    );
+    assert!(!view.refresh_due(&live, expired, later(9)));
+}
+
+fn bus_group(label: &str) -> GroupRef {
+    GroupRef {
+        kind: GroupKind::Bus,
+        id: "swarm".into(),
+        title: "swarm".into(),
+        detail: String::new(),
+        label: label.into(),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn max_workers_refuses_the_spawn_past_the_cap_without_counting_the_coordinator() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().canonicalize().unwrap();
+    let db = open_store(&ws);
+    let (tx, _rx) = mpsc::channel(256);
+    let mut app = App::new(shell_profiles(&ws), None, tx);
+    app.trace_db_path = Some(db.clone());
+    let now = Instant::now();
+    for _ in 0..2 {
+        app.focus_list();
+        app.handle_key(&key(KeyCode::Char('n')), now);
+        app.handle_key(&key(KeyCode::Enter), now);
+        app.handle_key(&key(KeyCode::Enter), now);
+    }
+    assert_eq!(app.sessions.len(), 2);
+    // Session 0 is the coordinator, session 1 a delegated worker: both sit in a bus group.
+    let coordinator = format!("session-{}", app.sessions[0].id);
+    app.sessions[0].group = Some(bus_group("coordinator"));
+    app.sessions[1].group = Some(bus_group("worker"));
+    let conn = open_aux(&db).unwrap();
+    let norm = bstore::normalize_workspace(&ws);
+    bstore::set_coordinator(
+        &conn,
+        Some(&db),
+        &norm,
+        &coordinator,
+        Some("g"),
+        Some(1),
+        None,
+        1,
+    )
+    .unwrap();
+
+    let spawn = ControlRequest::SpawnWorker {
+        parent_launch: Some(coordinator.clone()),
+        workspace: ws.to_string_lossy().into_owned(),
+        task_id: "task-x".into(),
+        title: "one more".into(),
+        instructions: "…".into(),
+        harness: Some("claude".into()),
+        agent: None,
+        isolation: TaskIsolation::Shared,
+    };
+    let resp = app.handle_bus_control(spawn.clone(), now);
+    assert!(!resp.ok);
+    let err = resp.error.unwrap_or_default();
+    assert!(err.contains("worker cap reached: 1/1"), "{err}");
+    assert_eq!(app.sessions.len(), 2, "nothing was spawned");
+
+    // A cap of 0 refuses before counting anyone.
+    bstore::set_coordinator(
+        &conn,
+        Some(&db),
+        &norm,
+        &coordinator,
+        None,
+        Some(0),
+        None,
+        2,
+    )
+    .unwrap();
+    let resp = app.handle_bus_control(spawn, now);
+    let err = resp.error.unwrap_or_default();
+    assert!(err.contains("worker cap reached: 1/0"), "{err}");
     app.kill_all();
 }
