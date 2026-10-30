@@ -220,6 +220,36 @@ impl TaskField {
     }
 }
 
+/// The composer's fields: the body is text, the rest are options Tab
+/// reaches, so no text-editing key (Ctrl+U, Ctrl+W) is taken from the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeField {
+    Body,
+    Topic,
+    Urgent,
+    Wake,
+}
+
+impl ComposeField {
+    pub fn next(self) -> Self {
+        match self {
+            ComposeField::Body => ComposeField::Topic,
+            ComposeField::Topic => ComposeField::Urgent,
+            ComposeField::Urgent => ComposeField::Wake,
+            ComposeField::Wake => ComposeField::Body,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            ComposeField::Body => ComposeField::Wake,
+            ComposeField::Topic => ComposeField::Body,
+            ComposeField::Urgent => ComposeField::Topic,
+            ComposeField::Wake => ComposeField::Urgent,
+        }
+    }
+}
+
 pub const MESSAGE_TOPICS: [&str; 6] = [
     "directive",
     "answer",
@@ -269,14 +299,29 @@ pub enum Modal {
         body: TextArea,
         urgent: bool,
         wake: bool,
+        field: ComposeField,
     },
+    /// One message in full: the feed shows a line of it; `Enter` opens this.
+    ViewMessage { message: BusMessage, scroll: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirm {
-    ReleaseLease { pattern: String },
-    CancelTask { task_id: String, title: String },
-    StopSession { session_idx: usize, label: String },
+    /// `r` while a coordinator is live: a second launch would replace it.
+    RelaunchSwarm {
+        coordinator: String,
+    },
+    ReleaseLease {
+        pattern: String,
+    },
+    CancelTask {
+        task_id: String,
+        title: String,
+    },
+    StopSession {
+        session_idx: usize,
+        label: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -646,7 +691,38 @@ impl SwarmView {
             body: TextArea::new(""),
             urgent: false,
             wake: true,
+            field: ComposeField::Body,
         });
+    }
+
+    /// Opens the selected feed message in full.
+    pub fn open_view_message(&mut self, message: BusMessage) {
+        self.modal = Some(Modal::ViewMessage { message, scroll: 0 });
+    }
+
+    /// The composer addressed to a message's sender, with a fitting topic.
+    fn open_reply(&mut self, message: &BusMessage) {
+        let sender = message.from_launch.clone();
+        let label = self.snapshot.member_label(&sender);
+        let topic_idx = if message.topic == "question" { 1 } else { 0 };
+        self.open_compose_message(Some(sender), label, topic_idx);
+    }
+
+    /// The task the preview's Task Detail shows: the board's selection when
+    /// the board has focus, else the selected agent's latest task, else the
+    /// board's selection.
+    pub fn detail_task(&self) -> Option<&BusTask> {
+        if self.pane == SwarmPane::Board {
+            return self.selected_task();
+        }
+        let agent_task = self.selected_member().and_then(|m| {
+            self.snapshot
+                .tasks
+                .iter()
+                .rev()
+                .find(|t| t.assigned_to.as_deref() == Some(m.launch_id.as_str()))
+        });
+        agent_task.or_else(|| self.selected_task())
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
@@ -795,11 +871,8 @@ impl SwarmView {
                     Outcome::None
                 }
                 SwarmPane::Messages => {
-                    if let Some(msg) = self.selected_filtered_message() {
-                        let sender = msg.from_launch.clone();
-                        let label = self.snapshot.member_label(&sender);
-                        let topic_idx = if msg.topic == "question" { 1 } else { 0 };
-                        self.open_compose_message(Some(sender), label, topic_idx);
+                    if let Some(msg) = self.selected_filtered_message().cloned() {
+                        self.open_view_message(msg);
                     }
                     Outcome::None
                 }
@@ -816,6 +889,12 @@ impl SwarmView {
                     return Outcome::DelegateTask {
                         task_id: task.id.clone(),
                     };
+                }
+                if let Some(c) = self.snapshot.coordinator.as_ref().filter(|c| c.is_active()) {
+                    self.confirm = Some(Confirm::RelaunchSwarm {
+                        coordinator: format!("{} ({})", c.label, c.provider),
+                    });
+                    return Outcome::None;
                 }
                 self.open_launch_modal();
                 Outcome::None
@@ -872,12 +951,9 @@ impl SwarmView {
             // `m`: Direct message to selected agent (or reply in Messages pane)
             (KeyCode::Char('m'), KeyModifiers::NONE) => {
                 if self.pane == SwarmPane::Messages
-                    && let Some(msg) = self.selected_filtered_message()
+                    && let Some(msg) = self.selected_filtered_message().cloned()
                 {
-                    let sender = msg.from_launch.clone();
-                    let label = self.snapshot.member_label(&sender);
-                    let topic_idx = if msg.topic == "question" { 1 } else { 0 };
-                    self.open_compose_message(Some(sender), label, topic_idx);
+                    self.open_reply(&msg);
                     return Outcome::None;
                 }
                 if let Some(member) = self.selected_member() {
@@ -940,13 +1016,19 @@ impl SwarmView {
         }
     }
 
+    /// `y` approves; Enter does not (`docs/keyboard.md`: a destructive
+    /// confirmation is never a keypress away from a habit).
     fn handle_confirm_key(&mut self, key: KeyEvent) -> Outcome {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
                 let Some(confirm) = self.confirm.take() else {
                     return Outcome::None;
                 };
                 match confirm {
+                    Confirm::RelaunchSwarm { .. } => {
+                        self.open_launch_modal();
+                        Outcome::None
+                    }
                     Confirm::ReleaseLease { pattern } => Outcome::ReleaseLease(pattern),
                     Confirm::CancelTask { task_id, .. } => Outcome::CancelTask(task_id),
                     Confirm::StopSession { session_idx, .. } => Outcome::StopSession(session_idx),
@@ -966,9 +1048,29 @@ impl SwarmView {
             return Outcome::None;
         }
 
-        let submit = (key.code == KeyCode::Char('s')
-            && key.modifiers.contains(KeyModifiers::CONTROL))
+        if let Some(Modal::ViewMessage { message, scroll }) = &mut self.modal {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => *scroll += 1,
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::Char('m') | KeyCode::Char('r') | KeyCode::Enter => {
+                    let msg = message.clone();
+                    self.open_reply(&msg);
+                }
+                _ => {}
+            }
+            return Outcome::None;
+        }
+
+        // Ctrl+S submits every form; Enter submits from a single-line field
+        // and is a newline in a multi-line one (the composer's body too,
+        // where Ctrl+Enter submits).
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let submit = (key.code == KeyCode::Char('s') && ctrl)
             || (key.code == KeyCode::Enter
+                && ctrl
+                && matches!(self.modal, Some(Modal::ComposeMessage { .. })))
+            || (key.code == KeyCode::Enter
+                && !ctrl
                 && !matches!(
                     self.modal,
                     Some(Modal::LaunchSwarm {
@@ -983,7 +1085,10 @@ impl SwarmView {
                     }) | Some(Modal::EditTask {
                         field: TaskField::Instructions,
                         ..
-                    }) | Some(Modal::ComposeMessage { .. })
+                    }) | Some(Modal::ComposeMessage {
+                        field: ComposeField::Body,
+                        ..
+                    })
                 ));
 
         if submit {
@@ -1169,24 +1274,48 @@ impl SwarmView {
                 body,
                 urgent,
                 wake,
+                field,
                 ..
             } => match (key.code, key.modifiers) {
-                (KeyCode::Tab, KeyModifiers::NONE) => {
-                    *topic_idx = (*topic_idx + 1) % MESSAGE_TOPICS.len();
-                }
-                (KeyCode::BackTab, _) => {
-                    *topic_idx = (*topic_idx + MESSAGE_TOPICS.len() - 1) % MESSAGE_TOPICS.len();
-                }
-                (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    *urgent = !*urgent;
-                }
-                (KeyCode::Char('w'), m) if m.contains(KeyModifiers::CONTROL) => {
-                    *wake = !*wake;
-                }
-                _ => {
-                    crate::keymap::apply_text(body, &key);
-                }
+                (KeyCode::Tab, KeyModifiers::NONE) => *field = field.next(),
+                (KeyCode::BackTab, _) => *field = field.prev(),
+                _ => match field {
+                    ComposeField::Body => {
+                        if key.code == KeyCode::Enter {
+                            body.newline();
+                        } else {
+                            crate::keymap::apply_text(body, &key);
+                        }
+                    }
+                    ComposeField::Topic => match key.code {
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            *topic_idx =
+                                (*topic_idx + MESSAGE_TOPICS.len() - 1) % MESSAGE_TOPICS.len();
+                        }
+                        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                            *topic_idx = (*topic_idx + 1) % MESSAGE_TOPICS.len();
+                        }
+                        _ => {}
+                    },
+                    ComposeField::Urgent => {
+                        if matches!(
+                            key.code,
+                            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter
+                        ) {
+                            *urgent = !*urgent;
+                        }
+                    }
+                    ComposeField::Wake => {
+                        if matches!(
+                            key.code,
+                            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter
+                        ) {
+                            *wake = !*wake;
+                        }
+                    }
+                },
             },
+            Modal::ViewMessage { .. } => {}
         }
 
         Outcome::None
@@ -1285,6 +1414,7 @@ impl SwarmView {
                     files: parse_csv_files(&files.text),
                 }
             }
+            Modal::ViewMessage { .. } => Outcome::None,
             Modal::ComposeMessage {
                 to_launch,
                 topic_idx,
@@ -1588,6 +1718,169 @@ mod tests {
                 body: "Hi".into(),
                 urgent: false,
                 wake: true,
+            }
+        );
+    }
+
+    fn store() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("traces.db");
+        let _ = open_rw(
+            &db,
+            OpenOptions {
+                prices: PriceTable::builtin(),
+                run_id: "r1".into(),
+                retention_days: 0,
+                agent_mux_version: "test".into(),
+            },
+        )
+        .unwrap();
+        (dir, db)
+    }
+
+    fn coordinator_live(ws: &str, state: &str) -> LiveSwarmSession {
+        LiveSwarmSession {
+            session_idx: 0,
+            session_id: 1,
+            launch_id: "coord-1".into(),
+            provider: "claude".into(),
+            profile_name: "Claude Code".into(),
+            agent_persona: Some("coordinator".into()),
+            state: state.into(),
+            workspace: ws.into(),
+            is_delegated_worker: false,
+            turns: 1,
+            tokens: 10,
+            cost_usd: 0.0,
+            running_tool: None,
+        }
+    }
+
+    #[test]
+    fn a_confirmation_takes_y_not_enter() {
+        let (dir, db) = store();
+        let conn = open_aux(&db).unwrap();
+        let ws = bstore::normalize_workspace(dir.path());
+        bstore::split_tasks(
+            &conn,
+            Some(&db),
+            &ws,
+            "user",
+            &[NewTaskSpec {
+                title: "t".into(),
+                instructions: "i".into(),
+                ..Default::default()
+            }],
+            1_000,
+        )
+        .unwrap();
+        let mut view = SwarmView::open(
+            dir.path().to_path_buf(),
+            Some(open_aux(&db).unwrap()),
+            &[],
+            2_000,
+        );
+        view.pane = SwarmPane::Board;
+        view.handle_key(key(KeyCode::Char('x')));
+        assert!(matches!(view.confirm, Some(Confirm::CancelTask { .. })));
+        assert_eq!(view.handle_key(key(KeyCode::Enter)), Outcome::None);
+        assert!(view.confirm.is_some(), "Enter does not approve");
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('y'))),
+            Outcome::CancelTask(_)
+        ));
+        assert!(view.confirm.is_none());
+    }
+
+    #[test]
+    fn r_with_a_live_coordinator_asks_before_relaunching() {
+        let (dir, db) = store();
+        let ws = bstore::normalize_workspace(dir.path());
+        let live = vec![coordinator_live(&ws, "working")];
+        let mut view = SwarmView::open(
+            dir.path().to_path_buf(),
+            Some(open_aux(&db).unwrap()),
+            &live,
+            2_000,
+        );
+        assert!(view.snapshot.coordinator.is_some());
+        view.handle_key(key(KeyCode::Char('r')));
+        assert!(matches!(view.confirm, Some(Confirm::RelaunchSwarm { .. })));
+        assert!(view.modal.is_none());
+        view.handle_key(key(KeyCode::Esc));
+        assert!(view.confirm.is_none() && view.modal.is_none());
+        view.handle_key(key(KeyCode::Char('r')));
+        view.handle_key(key(KeyCode::Char('y')));
+        assert!(matches!(view.modal, Some(Modal::LaunchSwarm { .. })));
+
+        // An exited coordinator is no swarm: `r` launches directly.
+        let live = vec![coordinator_live(&ws, "exited")];
+        let mut view = SwarmView::open(
+            dir.path().to_path_buf(),
+            Some(open_aux(&db).unwrap()),
+            &live,
+            2_000,
+        );
+        view.handle_key(key(KeyCode::Char('r')));
+        assert!(matches!(view.modal, Some(Modal::LaunchSwarm { .. })));
+    }
+
+    #[test]
+    fn the_composer_keeps_text_keys_for_the_body_and_tabs_to_its_options() {
+        let (dir, db) = store();
+        let mut view = SwarmView::open(
+            dir.path().to_path_buf(),
+            Some(open_aux(&db).unwrap()),
+            &[],
+            2_000,
+        );
+        view.handle_key(key(KeyCode::Char('b')));
+        for c in "one two".chars() {
+            view.handle_key(key(KeyCode::Char(c)));
+        }
+        // Ctrl+W deletes a word in the body, Enter adds a line.
+        view.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        view.handle_key(key(KeyCode::Enter));
+        view.handle_key(key(KeyCode::Char('x')));
+        match &view.modal {
+            Some(Modal::ComposeMessage { body, wake, .. }) => {
+                assert_eq!(body.text, "one \nx");
+                assert!(*wake);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Tab reaches the options; Space changes them.
+        view.handle_key(key(KeyCode::Tab));
+        view.handle_key(key(KeyCode::Char(' ')));
+        view.handle_key(key(KeyCode::Tab));
+        view.handle_key(key(KeyCode::Char(' ')));
+        view.handle_key(key(KeyCode::Tab));
+        view.handle_key(key(KeyCode::Char(' ')));
+        match &view.modal {
+            Some(Modal::ComposeMessage {
+                topic_idx,
+                urgent,
+                wake,
+                field,
+                ..
+            }) => {
+                assert_eq!(*topic_idx, 1);
+                assert!(*urgent);
+                assert!(!*wake);
+                assert_eq!(*field, ComposeField::Wake);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Ctrl+Enter sends from any field.
+        let out = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(
+            out,
+            Outcome::SendMessage {
+                to_launch: None,
+                topic: "answer".into(),
+                body: "one \nx".into(),
+                urgent: true,
+                wake: false,
             }
         );
     }
