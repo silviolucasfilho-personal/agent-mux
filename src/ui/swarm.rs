@@ -3,12 +3,12 @@
 use super::flow::{dim, head, hints};
 use crate::app::App;
 use crate::app::swarm_view::{
-    BoardMode, Confirm, HARNESS_CYCLE, LaunchField, MESSAGE_TOPICS, Modal, PreviewMode, SwarmPane,
-    SwarmView, TaskField, WorkerField, format_task_detail_lines,
+    BoardMode, ComposeField, Confirm, HARNESS_CYCLE, LaunchField, MESSAGE_TOPICS, Modal,
+    PreviewMode, SwarmPane, SwarmView, TaskField, WorkerField, format_task_detail_lines,
 };
 use crate::app::workspaces_view::tilde_path;
 use crate::bus::{TaskStatus, short_id};
-use crate::tracing::cli::{fmt_cost, fmt_time, fmt_tokens};
+use crate::tracing::cli::{fmt_cost, fmt_tokens};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -85,7 +85,7 @@ pub fn draw(f: &mut Frame, area: Rect, v: &SwarmView, app: &App) {
     draw_footer_bar(f, foot, v);
 
     if let Some(modal) = &v.modal {
-        draw_modal(f, area, modal);
+        draw_modal(f, area, modal, v);
     }
     if let Some(confirm) = &v.confirm {
         draw_confirm(f, area, confirm);
@@ -320,14 +320,7 @@ fn draw_preview_pane(f: &mut Frame, area: Rect, v: &SwarmView, app: &App) {
             f.render_widget(Paragraph::new(lines), inner);
         }
         PreviewMode::TaskDetail => {
-            let task = v.selected_task().or_else(|| {
-                let lid = v.selected_member()?.launch_id.as_str();
-                v.snapshot
-                    .tasks
-                    .iter()
-                    .find(|t| t.assigned_to.as_deref() == Some(lid))
-            });
-            let Some(task) = task else {
+            let Some(task) = v.detail_task() else {
                 f.render_widget(
                     Paragraph::new(vec![
                         Line::raw(""),
@@ -622,9 +615,9 @@ fn draw_messages_pane(f: &mut Frame, area: Rect, v: &SwarmView) {
             .as_deref()
             .map(|r| v.snapshot.member_label(r))
             .unwrap_or_else(|| "* (all)".into());
-        let time_str = fmt_time(msg.created_ns / 1_000_000_000);
+        let time_str = fmt_clock(msg.created_ns);
         let single_line_body = msg.body.lines().next().unwrap_or("");
-        let prefix_len = 22 + from_lbl.len() + to_lbl.len() + msg.topic.len();
+        let prefix_len = 18 + from_lbl.len() + to_lbl.len() + msg.topic.len();
         let body_budget = max_w.saturating_sub(prefix_len).max(12);
         let row_bg = if is_sel && focused {
             Style::default().bg(Color::Rgb(24, 38, 52))
@@ -709,7 +702,8 @@ fn draw_footer_bar(f: &mut Frame, area: Rect, v: &SwarmView) {
         SwarmPane::Messages => &[
             ("1-4/Tab", "pane"),
             ("f/←/→", "filter"),
-            ("Enter/m", "reply"),
+            ("Enter", "read"),
+            ("m", "reply"),
             ("b/n", "broadcast"),
             ("j/k", "scroll"),
             ("Esc", "back"),
@@ -727,7 +721,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal) {
+fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, v: &SwarmView) {
     let popup = centered_rect(74, 20, area);
     f.render_widget(Clear, popup);
 
@@ -997,6 +991,7 @@ fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             body,
             urgent,
             wake,
+            field,
             ..
         } => {
             let block = Block::default()
@@ -1011,22 +1006,41 @@ fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             f.render_widget(block, popup);
 
             let topic = MESSAGE_TOPICS[*topic_idx % MESSAGE_TOPICS.len()];
+            let on_off = |on: bool| if on { "[x]" } else { "[ ]" };
             let mut lines = Vec::new();
+            lines.push(field_header("Message Body:", *field == ComposeField::Body));
+            for l in body.text.lines().take(6) {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(l.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+            if body.text.is_empty() {
+                lines.push(Line::styled("  (Enter adds a line)", dim()));
+            }
+            lines.push(Line::raw(""));
             lines.push(Line::from(vec![
-                Span::styled("  Topic (Tab): ", dim()),
-                Span::styled(format!("[{topic}]"), topic_style(topic)),
-                Span::raw("   "),
+                field_span("Topic: ", *field == ComposeField::Topic),
+                Span::styled(format!("◀ {topic} ▶"), topic_style(topic)),
+            ]));
+            lines.push(Line::from(vec![
+                field_span(
+                    "Urgent (injected mid-turn): ",
+                    *field == ComposeField::Urgent,
+                ),
                 Span::styled(
-                    format!("Urgent (Ctrl+U): {}", if *urgent { "YES" } else { "no" }),
+                    on_off(*urgent),
                     if *urgent {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                     } else {
                         dim()
                     },
                 ),
-                Span::raw("   "),
+            ]));
+            lines.push(Line::from(vec![
+                field_span("Wake idle session: ", *field == ComposeField::Wake),
                 Span::styled(
-                    format!("Wake PTY (Ctrl+W): {}", if *wake { "YES" } else { "no" }),
+                    on_off(*wake),
                     if *wake {
                         Style::default()
                             .fg(Color::Green)
@@ -1037,20 +1051,70 @@ fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 ),
             ]));
             lines.push(Line::raw(""));
-            lines.push(field_header("Message Body:", true));
-            for l in body.text.lines().take(6) {
-                lines.push(Line::from(vec![
+            lines.push(hints(&[
+                ("Tab", "field"),
+                ("←/→/Space", "change"),
+                ("Ctrl+Enter", "send"),
+                ("Esc", "cancel"),
+            ]));
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        }
+
+        Modal::ViewMessage { message, scroll } => {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .title(format!(" Message {} ", short_id(&message.id)));
+            let inner = block.inner(popup);
+            f.render_widget(block, popup);
+
+            let to = message
+                .to_launch
+                .as_deref()
+                .map(|r| v.snapshot.member_label(r))
+                .unwrap_or_else(|| "* (all)".into());
+            let delivery = if message.acked_ns.is_some() {
+                "✓ read"
+            } else if message.delivered_ns.is_some() {
+                "⚡ delivered"
+            } else {
+                "⏳ unread"
+            };
+            let header = vec![
+                Line::from(vec![
+                    Span::styled(format!(" {} ", fmt_clock(message.created_ns)), dim()),
+                    Span::styled(
+                        v.snapshot.member_label(&message.from_launch),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(" → ", dim()),
+                    Span::styled(to, Style::default().fg(Color::White)),
                     Span::raw("  "),
-                    Span::styled(l.to_string(), Style::default().fg(Color::White)),
-                ]));
-            }
+                    Span::styled(format!("[{}]", message.topic), topic_style(&message.topic)),
+                    Span::raw("  "),
+                    Span::styled(delivery, dim()),
+                ]),
+                Line::raw(""),
+            ];
+            let body_rows = (inner.height as usize).saturating_sub(header.len() + 2);
+            let body_lines: Vec<Line<'static>> = message
+                .body
+                .lines()
+                .skip(*scroll)
+                .take(body_rows.max(1))
+                .map(|l| Line::from(format!("  {l}")))
+                .collect();
+            let mut lines = header;
+            lines.extend(body_lines);
             lines.push(Line::raw(""));
             lines.push(hints(&[
-                ("Tab", "cycle topic"),
-                ("Ctrl+U", "urgent"),
-                ("Ctrl+W", "wake"),
-                ("Ctrl+S", "send"),
-                ("Esc", "cancel"),
+                ("j/k", "scroll"),
+                ("m", "reply"),
+                ("Esc", "close"),
             ]));
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         }
@@ -1072,6 +1136,11 @@ fn draw_confirm(f: &mut Frame, area: Rect, confirm: &Confirm) {
     f.render_widget(block, popup);
 
     let prompt = match confirm {
+        Confirm::RelaunchSwarm { coordinator } => {
+            format!(
+                "A swarm is running under {coordinator}. Launch a new one and replace it as coordinator?"
+            )
+        }
         Confirm::ReleaseLease { pattern } => {
             format!("Force-release cooperative file lease `{pattern}`?")
         }
@@ -1087,7 +1156,7 @@ fn draw_confirm(f: &mut Frame, area: Rect, confirm: &Confirm) {
         Line::raw(""),
         Line::styled(format!("  {prompt}"), Style::default().fg(Color::White)),
         Line::raw(""),
-        hints(&[("y / Enter", "confirm"), ("n / Esc", "cancel")]),
+        hints(&[("y", "confirm"), ("n / Esc", "cancel")]),
     ];
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -1106,6 +1175,20 @@ fn field_span(label: &str, active: bool) -> Span<'static> {
         )
     } else {
         Span::styled(format!("  {label}"), dim())
+    }
+}
+
+/// A message's time of day in the machine's zone (`HH:MM:SS`): a live feed
+/// has no room for the date, and the nanosecond timestamp is the store's.
+fn fmt_clock(ns: i64) -> String {
+    match time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ns)) {
+        Ok(t) => {
+            let t = time::UtcOffset::local_offset_at(t)
+                .map(|offset| t.to_offset(offset))
+                .unwrap_or(t);
+            format!("{:02}:{:02}:{:02}", t.hour(), t.minute(), t.second())
+        }
+        Err(_) => "--:--:--".into(),
     }
 }
 
