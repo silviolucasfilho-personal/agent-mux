@@ -26,6 +26,7 @@ mod session_tree_ui;
 mod skill_hydrate;
 mod skill_package;
 mod skill_ui;
+mod swarm_ui;
 mod trace_analysis;
 mod trace_analysis_benchmark;
 mod trace_capture;
