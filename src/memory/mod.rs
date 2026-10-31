@@ -158,7 +158,7 @@ impl State {
             launchd: plist_path(&home).is_file(),
             harnesses: HARNESSES
                 .iter()
-                .map(|&h| wiring(&home, h, on_path(h.as_str()).is_some()))
+                .map(|&h| wiring(&home, h, crate::tracing::cli::on_path(h.as_str()).is_some()))
                 .collect(),
             feed: feed::enabled(),
         }
