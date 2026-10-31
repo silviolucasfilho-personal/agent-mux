@@ -80,9 +80,10 @@ fn find_shim(command: &str, path_var: &OsStr) -> bool {
 ///    of spawning `cmd.exe` for a command that doesn't exist and only
 ///    failing later with exit code 9009.
 ///
-/// Unix has no shim concept and no separate resolution step of its own --
-/// this always succeeds, and a genuinely missing command surfaces as a
-/// spawn error from the OS.
+/// Unix has no shim concept: a command on `PATH` (or any path) is handed
+/// through as-is, and a genuinely missing command surfaces as a spawn
+/// error from the OS. The one extra step is `install_fallback`, for a CLI
+/// whose installer puts it in a folder only a shell profile adds to `PATH`.
 #[cfg(windows)]
 pub fn resolve_command(command: &str) -> Option<(String, Vec<String>)> {
     resolve_command_with_path(command, &std::env::var_os("PATH").unwrap_or_default())
@@ -101,7 +102,59 @@ fn resolve_command_with_path(command: &str, path_var: &OsStr) -> Option<(String,
 
 #[cfg(not(windows))]
 pub fn resolve_command(command: &str) -> Option<(String, Vec<String>)> {
+    resolve_command_with(
+        command,
+        &std::env::var_os("PATH").unwrap_or_default(),
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    )
+}
+
+#[cfg(not(windows))]
+fn resolve_command_with(
+    command: &str,
+    path_var: &OsStr,
+    home: Option<&Path>,
+) -> Option<(String, Vec<String>)> {
+    let bare = !command.contains('/');
+    let on_path = || std::env::split_paths(path_var).any(|d| is_runnable(&d.join(command)));
+    if bare
+        && !on_path()
+        && let Some(found) = home.and_then(|h| install_fallback(command, h))
+    {
+        return Some((found.to_string_lossy().into_owned(), vec![]));
+    }
     Some((command.to_string(), vec![]))
+}
+
+/// Where a harness's own installer puts its binary when that folder is
+/// added to `PATH` only by a shell profile: a terminal opened before the
+/// install (or agent-mux started from one) has no such entry, and the
+/// launch would fail with "No such file or directory". OpenCode's
+/// installer (`curl -fsSL https://opencode.ai/install | bash`, 2.0.32)
+/// writes `~/.opencode/bin/opencode` and appends that folder to the
+/// shell's rc file.
+pub fn install_fallback(command: &str, home: &Path) -> Option<PathBuf> {
+    let candidate = match command {
+        "opencode" => home.join(".opencode").join("bin").join("opencode"),
+        _ => return None,
+    };
+    is_runnable(&candidate).then_some(candidate)
+}
+
+/// An existing file with an execute bit (any existing file off Unix).
+pub fn is_runnable(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        p.is_file()
+            && p.metadata()
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
 }
 
 pub struct Session {
@@ -622,6 +675,61 @@ mod resolve_tests {
             resolve_command_with_path("myscript", dir.path().as_os_str()).unwrap();
         assert_eq!(program, "cmd.exe");
         assert_eq!(args, vec!["/c".to_string(), "myscript".to_string()]);
+    }
+
+    #[cfg(unix)]
+    fn executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_off_path_falls_back_to_its_install_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".opencode/bin/opencode");
+        executable(&bin);
+        let (program, args) =
+            resolve_command_with("opencode", empty.path().as_os_str(), Some(home.path())).unwrap();
+        assert_eq!(program, bin.to_string_lossy());
+        assert!(args.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_on_path_wins_over_the_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        let path = tempfile::tempdir().unwrap();
+        executable(&home.path().join(".opencode/bin/opencode"));
+        executable(&path.path().join("opencode"));
+        let (program, _) =
+            resolve_command_with("opencode", path.path().as_os_str(), Some(home.path())).unwrap();
+        assert_eq!(program, "opencode");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_fallback_leaves_the_command_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        // nothing installed under the home folder
+        let (program, _) =
+            resolve_command_with("opencode", empty.path().as_os_str(), Some(home.path())).unwrap();
+        assert_eq!(program, "opencode");
+        // a non-executable file is not a fallback
+        let bin = home.path().join(".opencode/bin/opencode");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"").unwrap();
+        assert_eq!(install_fallback("opencode", home.path()), None);
+        // other commands and explicit paths have none
+        assert_eq!(install_fallback("claude", home.path()), None);
+        let (program, _) =
+            resolve_command_with("./opencode", empty.path().as_os_str(), Some(home.path()))
+                .unwrap();
+        assert_eq!(program, "./opencode");
     }
 
     #[cfg(not(windows))]

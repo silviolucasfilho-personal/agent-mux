@@ -286,9 +286,11 @@ fn check(label: &str, ok: bool, detail: &str) {
 }
 
 /// The first runnable `command` on `PATH`, for readiness checks and the
-/// About overlay.
+/// About overlay; else where the CLI's own installer puts it when only a
+/// shell profile adds that to `PATH` (`session::install_fallback`), which
+/// is where a launch finds it too.
 pub fn on_path(command: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
     #[cfg(unix)]
     fn runnable(p: &Path) -> bool {
         use std::os::unix::fs::PermissionsExt;
@@ -313,7 +315,7 @@ pub fn on_path(command: &str) -> Option<PathBuf> {
             }
         }
     }
-    None
+    std::env::var_os("HOME").and_then(|h| crate::session::install_fallback(command, Path::new(&h)))
 }
 
 fn dir_status(path: Option<&Path>) -> (bool, String) {
