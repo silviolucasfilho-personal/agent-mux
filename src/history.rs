@@ -150,6 +150,43 @@ pub fn newest_claude_conversation(claude_dir: &Path, dir: &Path) -> Option<Strin
         .and_then(|(_, path)| Some(path.file_stem()?.to_string_lossy().into_owned()))
 }
 
+/// The conversation Antigravity picks up in `dir`: the newest transcript
+/// in its brain directory matching `dir`.
+pub fn newest_antigravity_conversation(brain_dir: Option<&Path>, dir: &Path) -> Option<String> {
+    let base = match brain_dir {
+        Some(d) => d.to_path_buf(),
+        None => default_antigravity_dir()?,
+    };
+    let entries = std::fs::read_dir(&base).ok()?;
+    let mut candidates: Vec<(SystemTime, PathBuf, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let conv_dir = entry.path();
+        if !conv_dir.is_dir() {
+            continue;
+        }
+        let transcript = conv_dir
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript.jsonl");
+        if let Ok(meta) = std::fs::metadata(&transcript) {
+            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let session_id = entry.file_name().to_string_lossy().into_owned();
+            candidates.push((mtime, transcript, session_id));
+        }
+    }
+    candidates.sort_by_key(|(mtime, _, _)| std::cmp::Reverse(*mtime));
+
+    let target_dir_str = dir.to_string_lossy();
+    for (_mtime, transcript_path, session_id) in candidates {
+        if summarize_antigravity_file(&transcript_path, &session_id, Some(&target_dir_str), false)
+            .is_some()
+        {
+            return Some(session_id);
+        }
+    }
+    None
+}
+
 /// Scans Claude project folders to discover session JSONL files.
 pub fn discover_claude_sessions(
     claude_dir: Option<&Path>,
@@ -996,5 +1033,38 @@ mod tests {
         assert!(text.contains("install rust and build this app"));
         assert!(text.contains("TOOL: list_dir"));
         assert!(text.contains("Result"));
+    }
+
+    #[test]
+    fn test_newest_antigravity_conversation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let brain_base = temp_dir.path().join("brain");
+
+        // Older session
+        let old_dir = brain_base.join("old-session-uuid");
+        let old_logs = old_dir.join(".system_generated").join("logs");
+        std::fs::create_dir_all(&old_logs).unwrap();
+        let old_file = old_logs.join("transcript.jsonl");
+        std::fs::write(
+            &old_file,
+            r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-08-30T10:00:00Z","content":"/test/project old"}
+"#,
+        )
+        .unwrap();
+
+        // Newer session for same project
+        let new_dir = brain_base.join("new-session-uuid");
+        let new_logs = new_dir.join(".system_generated").join("logs");
+        std::fs::create_dir_all(&new_logs).unwrap();
+        let new_file = new_logs.join("transcript.jsonl");
+        std::fs::write(
+            &new_file,
+            r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-08-30T11:00:00Z","content":"/test/project new"}
+"#,
+        )
+        .unwrap();
+
+        let newest = newest_antigravity_conversation(Some(&brain_base), Path::new("/test/project"));
+        assert_eq!(newest.as_deref(), Some("new-session-uuid"));
     }
 }

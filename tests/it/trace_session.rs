@@ -745,3 +745,212 @@ sleep 30
     );
     app2.kill_all();
 }
+
+#[tokio::test]
+async fn an_antigravity_session_persists_newest_conversation_on_disk_across_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let brain_dir = temp.path().join("brain");
+    let workdir = temp.path().join("workspace");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let agy_bin = bin_dir.join("agy");
+    std::fs::write(&agy_bin, "#!/bin/sh\nsleep 30\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&agy_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let old_conv = "agy-old-session-001";
+    let new_conv = "agy-new-session-002";
+
+    // Create older transcript for workdir
+    let old_dir = brain_dir
+        .join(old_conv)
+        .join(".system_generated")
+        .join("logs");
+    std::fs::create_dir_all(&old_dir).unwrap();
+    std::fs::write(
+        old_dir.join("transcript.jsonl"),
+        format!(
+            "{{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-08-30T10:00:00Z\",\"content\":\"work in {}\"}}\n",
+            workdir.display()
+        ),
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Create newer transcript for workdir
+    let new_dir = brain_dir
+        .join(new_conv)
+        .join(".system_generated")
+        .join("logs");
+    std::fs::create_dir_all(&new_dir).unwrap();
+    std::fs::write(
+        new_dir.join("transcript.jsonl"),
+        format!(
+            "{{\"step_index\":0,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"created_at\":\"2026-08-30T11:00:00Z\",\"content\":\"more work in {}\"}}\n",
+            workdir.display()
+        ),
+    )
+    .unwrap();
+
+    let (tx, _rx) = mpsc::channel(1024);
+    let profile = Profile {
+        name: "Antigravity".into(),
+        command: agy_bin.to_string_lossy().into_owned(),
+        args: vec!["--conversation".into(), old_conv.into()],
+        default_dir: None,
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    let mut app = App::new(vec![profile.clone()], None, tx);
+    app.antigravity_dir = Some(brain_dir.clone());
+    let sessions_path = temp.path().join("sessions.json");
+    app.set_sessions_file(&sessions_path);
+
+    let session = agent_mux::session::Session::spawn(
+        0,
+        profile,
+        workdir.clone(),
+        24,
+        80,
+        mpsc::channel(100).0,
+        &[],
+        &[],
+    )
+    .unwrap();
+    app.sessions.push(session);
+
+    // Save active sessions: must record new_conv because disk has the latest active session!
+    app.save_active_sessions().unwrap();
+    let saved = agent_mux::persistence::load_saved_sessions(&sessions_path);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        saved[0].conversation.as_deref(),
+        Some(new_conv),
+        "persisted conversation must be the newest on disk ({new_conv}), not the stale old one ({old_conv})"
+    );
+
+    // Restart into app2: must restore new_conv
+    app.kill_all();
+    let (tx2, _rx2) = mpsc::channel(1024);
+    let mut app2 = App::new(vec![], None, tx2);
+    app2.antigravity_dir = Some(brain_dir);
+    app2.set_sessions_file(&sessions_path);
+    app2.restore_saved_sessions();
+
+    assert_eq!(app2.sessions.len(), 1);
+    assert_eq!(
+        app2.sessions[0].profile.args,
+        vec!["--conversation", new_conv],
+        "restored session must resume newest conversation {new_conv}"
+    );
+    app2.kill_all();
+}
+
+#[tokio::test]
+async fn a_claude_session_persists_newest_conversation_on_disk_across_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let claude_dir = temp.path().join("claude");
+    let workdir = temp.path().join("workspace");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let claude_bin = bin_dir.join("claude");
+    std::fs::write(&claude_bin, "#!/bin/sh\nsleep 30\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&claude_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let old_conv = "claude-old-session-001";
+    let new_conv = "claude-new-session-002";
+
+    let proj_dir = claude_dir
+        .join("projects")
+        .join(agent_mux::history::project_slug(&workdir));
+    std::fs::create_dir_all(&proj_dir).unwrap();
+
+    // Older transcript
+    std::fs::write(
+        proj_dir.join(format!("{old_conv}.jsonl")),
+        format!(
+            "{{\"type\":\"user\",\"timestamp\":\"2026-08-30T10:00:00Z\",\"cwd\":\"{}\"}}\n",
+            workdir.display()
+        ),
+    )
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Newer transcript
+    std::fs::write(
+        proj_dir.join(format!("{new_conv}.jsonl")),
+        format!(
+            "{{\"type\":\"user\",\"timestamp\":\"2026-08-30T11:00:00Z\",\"cwd\":\"{}\"}}\n",
+            workdir.display()
+        ),
+    )
+    .unwrap();
+
+    let (tx, _rx) = mpsc::channel(1024);
+    let profile = Profile {
+        name: "Claude Code".into(),
+        command: claude_bin.to_string_lossy().into_owned(),
+        args: vec!["--resume".into(), old_conv.into()],
+        default_dir: None,
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    let mut app = App::new(vec![profile.clone()], None, tx);
+    app.claude_dir = Some(claude_dir.clone());
+    let sessions_path = temp.path().join("sessions.json");
+    app.set_sessions_file(&sessions_path);
+
+    let session = agent_mux::session::Session::spawn(
+        0,
+        profile,
+        workdir.clone(),
+        24,
+        80,
+        mpsc::channel(100).0,
+        &[],
+        &[],
+    )
+    .unwrap();
+    app.sessions.push(session);
+
+    // Save active sessions: must record new_conv because disk has the latest active session!
+    app.save_active_sessions().unwrap();
+    let saved = agent_mux::persistence::load_saved_sessions(&sessions_path);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        saved[0].conversation.as_deref(),
+        Some(new_conv),
+        "persisted conversation must be the newest on disk ({new_conv}), not the stale old one ({old_conv})"
+    );
+
+    // Restart into app2: must restore new_conv
+    app.kill_all();
+    let (tx2, _rx2) = mpsc::channel(1024);
+    let mut app2 = App::new(vec![], None, tx2);
+    app2.claude_dir = Some(claude_dir);
+    app2.set_sessions_file(&sessions_path);
+    app2.restore_saved_sessions();
+
+    assert_eq!(app2.sessions.len(), 1);
+    assert_eq!(
+        app2.sessions[0].profile.args,
+        vec!["--resume", new_conv],
+        "restored session must resume newest conversation {new_conv}"
+    );
+    app2.kill_all();
+}
