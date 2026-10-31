@@ -3,12 +3,15 @@
 //! One workspace's swarm as lanes, an agent and the task it holds
 //! (`bus::swarm::Lane`), beside a focus panel on the selected lane with four
 //! tabs: Live (its terminal), Thread (its messages), Changes (its diff) and
-//! Task (its task card). `a` swaps the panel for the whole swarm's Activity.
+//! Task (its task card), under the Needs-you strip (`bus::swarm::Need`:
+//! what only the operator can resolve, `!` to act). `a` swaps the panel for
+//! the whole swarm's Activity (messages and task and lease events).
 //! Design: `docs/superpowers/specs/2026-10-30-swarm-mission-control-ux-design.md`.
 
 use crate::app::text_area::TextArea;
 use crate::bus::swarm::{
-    Lane, LaneKind, LaneState, LiveSwarmSession, SwarmSnapshot, load_snapshot,
+    ActivityItem, Lane, LaneKind, LaneState, LiveSwarmSession, Need, NeedKind, SwarmSnapshot,
+    load_snapshot,
 };
 use crate::bus::{BusMessage, BusTask, TaskIsolation, short_id};
 use crate::harness::Harness;
@@ -24,6 +27,8 @@ pub const HARNESS_CYCLE: [Harness; 3] = [Harness::Claude, Harness::Codex, Harnes
 pub enum Focus {
     Lanes,
     Panel,
+    /// The Needs-you strip (`!`).
+    Needs,
 }
 
 /// The focus panel's tabs, `1`–`4`.
@@ -303,6 +308,10 @@ pub enum Outcome {
     DelegateTask {
         task_id: String,
     },
+    /// Re-open a failed or abandoned task and delegate it again.
+    RetryTask {
+        task_id: String,
+    },
     WakeAgent {
         launch_id: String,
     },
@@ -338,8 +347,14 @@ pub struct SwarmView {
     pub chosen_tab: Option<(String, PanelTab)>,
     /// The panel shows the whole swarm's messages instead of one lane.
     pub activity: bool,
-    /// The chosen message in Thread or Activity.
+    /// The chosen message in Thread, or line in Activity.
     pub selected_message: usize,
+    /// What needs the operator, less what they dismissed (`d`).
+    pub needs: Vec<Need>,
+    pub selected_need: usize,
+    /// Dismissed needs by key, for this screen's lifetime: a dismissed
+    /// failure comes back if the task fails again (a new key).
+    dismissed: std::collections::HashSet<String>,
     pub panel_scroll: usize,
     pub coordinator_override: Option<String>,
     pub diff_lines: Vec<String>,
@@ -377,6 +392,11 @@ fn live_fingerprint(live: &[LiveSwarmSession]) -> u64 {
         s.turns.hash(&mut h);
         s.tokens.hash(&mut h);
         s.running_tool.hash(&mut h);
+        // Crossing the stuck threshold is a change worth a refresh; the
+        // quiet time itself moves every tick and is not.
+        s.quiet_ns
+            .is_some_and(|q| q >= crate::bus::swarm::STUCK_AFTER_NS)
+            .hash(&mut h);
     }
     h.finish()
 }
@@ -402,6 +422,9 @@ impl SwarmView {
             chosen_tab: None,
             activity: false,
             selected_message: 0,
+            needs: Vec::new(),
+            selected_need: 0,
+            dismissed: std::collections::HashSet::new(),
             panel_scroll: 0,
             coordinator_override: None,
             diff_lines: Vec::new(),
@@ -415,9 +438,23 @@ impl SwarmView {
             live_fingerprint: live_fingerprint(live_sessions),
             last_check: None,
         };
-        view.selected_message = view.panel_messages().len().saturating_sub(1);
+        view.recompute_needs();
+        view.selected_message = view.list_len().saturating_sub(1);
         view.after_lane_change();
         view
+    }
+
+    fn recompute_needs(&mut self) {
+        self.needs = self
+            .snapshot
+            .needs(&self.lanes, self.now_ns)
+            .into_iter()
+            .filter(|n| !self.dismissed.contains(&n.key))
+            .collect();
+        self.selected_need = self.selected_need.min(self.needs.len().saturating_sub(1));
+        if self.focus == Focus::Needs && self.needs.is_empty() {
+            self.focus = Focus::Lanes;
+        }
     }
 
     /// The change feed's sequence, `None` only when it cannot be read. A
@@ -466,7 +503,7 @@ impl SwarmView {
     /// there. `now` is in nanoseconds.
     pub fn refresh(&mut self, live_sessions: &[LiveSwarmSession], now: i64) {
         let key = self.selected().map(|l| l.key.clone());
-        let prev_len = self.panel_messages().len();
+        let prev_len = self.list_len();
         let was_at_bottom = prev_len == 0 || self.selected_message + 1 >= prev_len;
         self.snapshot = load_snapshot(
             self.conn.as_ref(),
@@ -485,7 +522,8 @@ impl SwarmView {
             self.selected_lane = i;
         }
         self.selected_lane = self.selected_lane.min(self.lanes.len().saturating_sub(1));
-        let len = self.panel_messages().len();
+        self.recompute_needs();
+        let len = self.list_len();
         if was_at_bottom || self.selected_message >= len {
             self.selected_message = len.saturating_sub(1);
         }
@@ -519,12 +557,8 @@ impl SwarmView {
         }
     }
 
-    /// The messages the panel lists: the whole swarm's in Activity, else the
-    /// selected lane's (from it, to it, and broadcasts).
+    /// The selected lane's thread: its messages, those to it, and broadcasts.
     pub fn panel_messages(&self) -> Vec<&BusMessage> {
-        if self.activity {
-            return self.snapshot.messages.iter().collect();
-        }
         let Some(launch) = self.selected().and_then(|l| l.launch_id.as_deref()) else {
             return Vec::new();
         };
@@ -539,15 +573,54 @@ impl SwarmView {
             .collect()
     }
 
+    /// The swarm's Activity: messages with task and lease events.
+    pub fn activity_items(&self) -> Vec<ActivityItem<'_>> {
+        self.snapshot.timeline()
+    }
+
+    /// How many lines the panel's list has: Activity's, else the thread's.
+    fn list_len(&self) -> usize {
+        if self.activity {
+            self.activity_items().len()
+        } else {
+            self.panel_messages().len()
+        }
+    }
+
+    /// The chosen message, in the thread or in Activity (an event is none).
     pub fn selected_message(&self) -> Option<&BusMessage> {
+        if self.activity {
+            return match self.activity_items().get(self.selected_message) {
+                Some(ActivityItem::Message(m)) => Some(*m),
+                _ => None,
+            };
+        }
         self.panel_messages().get(self.selected_message).copied()
+    }
+
+    pub fn selected_need(&self) -> Option<&Need> {
+        self.needs.get(self.selected_need)
+    }
+
+    /// Selects the lane with `key`, if it is on screen.
+    fn select_lane(&mut self, key: &str) -> bool {
+        match self.lanes.iter().position(|l| l.key == key) {
+            Some(i) => {
+                if i != self.selected_lane {
+                    self.selected_lane = i;
+                    self.after_lane_change();
+                }
+                true
+            }
+            None => false,
+        }
     }
 
     /// The lane changed (or the screen opened): back to the lane's default
     /// tab, the newest message and the top of the panel.
     fn after_lane_change(&mut self) {
         self.panel_scroll = 0;
-        self.selected_message = self.panel_messages().len().saturating_sub(1);
+        self.selected_message = self.list_len().saturating_sub(1);
         if self.tab() == PanelTab::Changes {
             self.load_diff();
         }
@@ -560,7 +633,7 @@ impl SwarmView {
         self.activity = false;
         self.chosen_tab = Some((key, tab));
         self.panel_scroll = 0;
-        self.selected_message = self.panel_messages().len().saturating_sub(1);
+        self.selected_message = self.list_len().saturating_sub(1);
         if tab == PanelTab::Changes {
             self.load_diff();
         }
@@ -691,6 +764,11 @@ impl SwarmView {
         }
 
         self.status_msg = None;
+        if self.focus == Focus::Needs
+            && let Some(out) = self.handle_needs_key(key)
+        {
+            return out;
+        }
         let lanes_focused = self.focus == Focus::Lanes;
         let lists_messages = self.activity || self.tab() == PanelTab::Thread;
 
@@ -704,8 +782,16 @@ impl SwarmView {
             (KeyCode::Tab, KeyModifiers::NONE) | (KeyCode::BackTab, _) => {
                 self.focus = match self.focus {
                     Focus::Lanes => Focus::Panel,
-                    Focus::Panel => Focus::Lanes,
+                    Focus::Panel | Focus::Needs => Focus::Lanes,
                 };
+            }
+            (KeyCode::Char('!'), _) => {
+                if self.needs.is_empty() {
+                    self.status_msg = Some("Nothing needs you.".into());
+                } else {
+                    self.focus = Focus::Needs;
+                    self.selected_need = 0;
+                }
             }
             (KeyCode::Char(c @ '1'..='4'), KeyModifiers::NONE) => {
                 let tab = PanelTab::ALL[(c as usize) - ('1' as usize)];
@@ -714,7 +800,7 @@ impl SwarmView {
             (KeyCode::Char('a'), KeyModifiers::NONE) => {
                 self.activity = !self.activity;
                 self.panel_scroll = 0;
-                self.selected_message = self.panel_messages().len().saturating_sub(1);
+                self.selected_message = self.list_len().saturating_sub(1);
             }
             (KeyCode::Char('r'), m) if m.contains(KeyModifiers::CONTROL) => {
                 return Outcome::Reload;
@@ -738,6 +824,13 @@ impl SwarmView {
                 if !lanes_focused && lists_messages {
                     if let Some(msg) = self.selected_message().cloned() {
                         self.open_view_message(msg);
+                    } else if let Some(ActivityItem::Event {
+                        lane_key: Some(k), ..
+                    }) = self.activity_items().get(self.selected_message).cloned()
+                        && self.select_lane(&k)
+                    {
+                        self.activity = false;
+                        self.focus = Focus::Lanes;
                     }
                 } else if let Some(idx) = self.selected().and_then(|l| l.session_idx) {
                     return Outcome::AttachSession(idx);
@@ -783,12 +876,18 @@ impl SwarmView {
             }
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
                 if let Some(lane) = self.selected()
-                    && lane.kind == LaneKind::Queued
                     && let Some(task) = &lane.task
                 {
-                    return Outcome::DelegateTask {
-                        task_id: task.id.clone(),
-                    };
+                    if lane.kind == LaneKind::Queued {
+                        return Outcome::DelegateTask {
+                            task_id: task.id.clone(),
+                        };
+                    }
+                    if matches!(lane.state, LaneState::Failed | LaneState::Lost) {
+                        return Outcome::RetryTask {
+                            task_id: task.id.clone(),
+                        };
+                    }
                 }
                 self.start_swarm();
             }
@@ -835,6 +934,84 @@ impl SwarmView {
                 }
             }
             _ => {}
+        }
+        Outcome::None
+    }
+
+    /// Keys while the Needs-you strip has focus; `None` lets the screen's
+    /// own keys (Tab, Esc, `a`, `1`–`4`, …) handle the rest.
+    fn handle_needs_key(&mut self, key: KeyEvent) -> Option<Outcome> {
+        let need = self.selected_need().cloned()?;
+        let lane_session = need
+            .lane_key
+            .as_deref()
+            .and_then(|k| self.lanes.iter().find(|l| l.key == k))
+            .and_then(|l| l.session_idx);
+        let out = match (key.code, key.modifiers) {
+            (KeyCode::Down, KeyModifiers::NONE) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                self.move_cursor(1);
+                Outcome::None
+            }
+            (KeyCode::Up, KeyModifiers::NONE) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                self.move_cursor(-1);
+                Outcome::None
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) => self.act_on(&need, lane_session),
+            (KeyCode::Char('m'), KeyModifiers::NONE) if need.kind == NeedKind::Question => {
+                self.act_on(&need, lane_session)
+            }
+            (KeyCode::Char('r'), KeyModifiers::NONE) => match &need.task_id {
+                Some(id) if need.kind.retryable() => Outcome::RetryTask {
+                    task_id: id.clone(),
+                },
+                _ => {
+                    self.status_msg = Some("Only a failed or lost task can be retried.".into());
+                    Outcome::None
+                }
+            },
+            (KeyCode::Char('d'), KeyModifiers::NONE) => {
+                self.dismissed.insert(need.key.clone());
+                self.recompute_needs();
+                Outcome::None
+            }
+            _ => return None,
+        };
+        Some(out)
+    }
+
+    /// A need's primary action: answer a question, attach to a session that
+    /// waits or idles, or show the lane on the tab that explains it.
+    fn act_on(&mut self, need: &Need, lane_session: Option<usize>) -> Outcome {
+        match need.kind {
+            NeedKind::Question => {
+                let msg = need
+                    .message_id
+                    .as_deref()
+                    .and_then(|id| self.snapshot.messages.iter().find(|m| m.id == id).cloned());
+                if let Some(msg) = msg {
+                    self.open_reply(&msg);
+                }
+                return Outcome::None;
+            }
+            NeedKind::Attention | NeedKind::Stuck => {
+                if let Some(idx) = lane_session {
+                    return Outcome::AttachSession(idx);
+                }
+            }
+            _ => {}
+        }
+        if let Some(k) = &need.lane_key
+            && self.select_lane(k)
+        {
+            self.focus = Focus::Lanes;
+            self.activity = false;
+            match need.kind {
+                NeedKind::Failed | NeedKind::Lost => self.set_tab(PanelTab::Task),
+                NeedKind::Review => self.set_tab(PanelTab::Changes),
+                _ => {}
+            }
+        } else {
+            self.status_msg = Some("That agent is no longer on screen.".into());
         }
         Outcome::None
     }
@@ -1219,8 +1396,11 @@ impl SwarmView {
                 }
             }
             Focus::Panel if self.activity || self.tab() == PanelTab::Thread => {
-                let len = self.panel_messages().len();
+                let len = self.list_len();
                 self.selected_message = step_index(self.selected_message, len, delta);
+            }
+            Focus::Needs => {
+                self.selected_need = step_index(self.selected_need, self.needs.len(), delta);
             }
             Focus::Panel => {
                 self.panel_scroll = if delta < 0 {
@@ -1508,6 +1688,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn r_retries_a_failed_lane_and_bang_says_when_nothing_needs_you() {
+        let (dir, db) = store();
+        let conn = open_aux(&db).unwrap();
+        let ws = bstore::normalize_workspace(dir.path());
+        let mut view = SwarmView::open(
+            dir.path().to_path_buf(),
+            Some(open_aux(&db).unwrap()),
+            &[],
+            2_000,
+        );
+        view.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT));
+        assert_eq!(view.focus, Focus::Lanes);
+        assert_eq!(view.status_msg.as_deref(), Some("Nothing needs you."));
+
+        let id = bstore::split_tasks(
+            &conn,
+            Some(&db),
+            &ws,
+            "coord-1",
+            &[NewTaskSpec {
+                title: "ui tests".into(),
+                instructions: "…".into(),
+                assigned_to: Some("coord-1".into()),
+                ..Default::default()
+            }],
+            1_000,
+        )
+        .unwrap()
+        .remove(0)
+        .id;
+        bstore::update_task(
+            &conn,
+            Some(&db),
+            &id,
+            "coord-1",
+            crate::bus::TaskStatus::Failed,
+            None,
+            Some("boom".into()),
+            None,
+            None,
+            1_500,
+        )
+        .unwrap();
+        let live = vec![coordinator_live(&ws, "idle")];
+        view.refresh(&live, 3_000);
+        assert_eq!(view.selected().unwrap().state, LaneState::Failed);
+        assert_eq!(view.tab(), PanelTab::Task);
+        assert_eq!(
+            view.handle_key(key(KeyCode::Char('r'))),
+            Outcome::RetryTask { task_id: id }
+        );
+    }
+
     fn store() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("traces.db");
@@ -1539,6 +1773,7 @@ mod tests {
             tokens: 10,
             cost_usd: 0.0,
             running_tool: None,
+            quiet_ns: None,
         }
     }
 

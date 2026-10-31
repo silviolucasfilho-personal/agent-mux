@@ -486,6 +486,11 @@ impl Session {
     pub fn status(&self, now: Instant) -> Status {
         self.tracker.status(now)
     }
+
+    /// How long since the session last printed anything (`StatusTracker::quiet_for`).
+    pub fn quiet_for(&self, now: Instant) -> Option<std::time::Duration> {
+        self.tracker.quiet_for(now)
+    }
 }
 
 #[cfg(test)]

@@ -1070,6 +1070,46 @@ pub fn clear_swarm(
     Ok(n)
 }
 
+/// Puts a failed or abandoned task back on the board for another try: open,
+/// nobody's, no result or error, its leases released. Its worktree and
+/// branch stay, so a retry continues the work already there.
+pub fn reopen_task(
+    conn: &Connection,
+    db_path: Option<&Path>,
+    task_id: &str,
+    now: i64,
+) -> Result<BusTask, String> {
+    let Some(before) = get_task(conn, task_id).map_err(|e| e.to_string())? else {
+        return Err(format!("no task '{task_id}'"));
+    };
+    if before.status == TaskStatus::Done {
+        return Err(format!("task '{}' is done; nothing to retry", before.title));
+    }
+    conn.execute(
+        "UPDATE agent_tasks
+         SET status = 'open',
+             assigned_to = NULL,
+             result_json = NULL,
+             error = NULL,
+             ended_ns = NULL,
+             updated_ns = ?1
+         WHERE id = ?2",
+        params![now, task_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM agent_leases WHERE task_id = ?1",
+        params![task_id],
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(p) = db_path {
+        crate::tracing::store::poke_wake(p);
+    }
+    get_task(conn, task_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("task '{task_id}' disappeared"))
+}
+
 /// Updates a task's title, instructions, and scoped file patterns.
 pub fn update_task_spec(
     conn: &Connection,

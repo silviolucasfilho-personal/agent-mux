@@ -112,6 +112,7 @@ fn promoting_a_coordinator_keeps_the_goal_and_posts_no_message() {
         tokens: 0,
         cost_usd: 0.0,
         running_tool: None,
+        quiet_ns: None,
     }];
     let snap = load_snapshot(Some(&conn), dir.path(), &live, None, 4);
     assert_eq!(
@@ -405,6 +406,7 @@ fn the_screen_refreshes_only_when_something_it_shows_changed() {
         tokens: 10,
         cost_usd: 0.0,
         running_tool: None,
+        quiet_ns: None,
     }];
     assert!(view.refresh_due(&live, t0, later(3)));
     view.refresh(&live, t0);
