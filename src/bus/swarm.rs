@@ -103,6 +103,12 @@ pub struct SwarmSnapshot {
     /// When the swarm was started (`swarm_state.started_ns`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_ns: Option<i64>,
+    /// The plan gate (`swarm_plans`), when the swarm has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<bstore::PlanGate>,
+    /// What the operator did with finished worktree branches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<bstore::Review>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<SwarmMember>,
     pub workers: Vec<SwarmMember>,
@@ -172,6 +178,8 @@ pub fn load_snapshot(
     let mut messages = Vec::new();
     let mut db_peers: Vec<PeerInfo> = Vec::new();
     let mut state: Option<bstore::SwarmState> = None;
+    let mut plan: Option<bstore::PlanGate> = None;
+    let mut reviews: Vec<bstore::Review> = Vec::new();
 
     if let Some(c) = conn {
         tasks = bstore::list_tasks(c, &workspace, None, None, None).unwrap_or_default();
@@ -179,6 +187,8 @@ pub fn load_snapshot(
         messages = bstore::list_workspace_messages(c, &workspace, 150).unwrap_or_default();
         db_peers = bstore::list_peers(c, &workspace, None, true, now).unwrap_or_default();
         state = bstore::swarm_state(c, &workspace).ok().flatten();
+        plan = bstore::plan_gate(c, &workspace).ok().flatten();
+        reviews = bstore::reviews(c, &workspace).unwrap_or_default();
     }
 
     // Also include worktree paths created for tasks in this workspace so workers running
@@ -382,6 +392,8 @@ pub fn load_snapshot(
         max_workers: state.as_ref().and_then(|st| st.max_workers),
         isolation: state.as_ref().and_then(|st| st.isolation),
         started_ns: state.as_ref().map(|st| st.started_ns),
+        plan,
+        reviews,
         coordinator,
         workers,
         tasks,
@@ -433,8 +445,12 @@ pub const STUCK_AFTER_NS: i64 = 5 * 60 * 1_000_000_000;
 #[serde(rename_all = "kebab-case")]
 pub enum Phase {
     NotStarted,
+    /// The coordinator is splitting the goal; with the plan gate, until the
+    /// operator approves the plan.
     Planning,
     Executing,
+    /// Every task is settled; finished worktree branches wait for review.
+    Integrating,
     WrappingUp,
     Done,
 }
@@ -445,6 +461,7 @@ impl Phase {
             Phase::NotStarted => "not started",
             Phase::Planning => "planning",
             Phase::Executing => "executing",
+            Phase::Integrating => "integrating",
             Phase::WrappingUp => "wrapping up",
             Phase::Done => "done",
         }
@@ -579,7 +596,7 @@ impl SwarmSnapshot {
     /// Where the swarm is: see [`Phase`].
     pub fn phase(&self) -> Phase {
         let coordinator_live = self.coordinator.as_ref().is_some_and(|c| c.is_active());
-        if self.tasks.is_empty() {
+        if self.tasks.is_empty() || (coordinator_live && self.plan_held()) {
             return if coordinator_live {
                 Phase::Planning
             } else {
@@ -588,11 +605,44 @@ impl SwarmSnapshot {
         }
         if self.tasks.iter().any(|t| !t.status.is_terminal()) {
             Phase::Executing
+        } else if !self.pending_reviews().is_empty() {
+            Phase::Integrating
         } else if coordinator_live {
             Phase::WrappingUp
         } else {
             Phase::Done
         }
+    }
+
+    /// The gate is on and the plan is not approved yet.
+    pub fn plan_held(&self) -> bool {
+        self.plan
+            .as_ref()
+            .is_some_and(|p| p.gate && p.status != bstore::PlanStatus::Approved)
+    }
+
+    /// The coordinator's latest `plan` message since the last decision: the
+    /// plan waiting for the operator.
+    pub fn plan_proposal(&self) -> Option<&BusMessage> {
+        let coordinator = self.coordinator.as_ref()?;
+        let since = self
+            .plan
+            .as_ref()
+            .and_then(|p| p.decided_ns)
+            .unwrap_or(i64::MIN);
+        self.messages.iter().rev().find(|m| {
+            m.topic == "plan" && m.from_launch == coordinator.launch_id && m.created_ns > since
+        })
+    }
+
+    /// Done worktree tasks whose branch the operator has not merged or
+    /// discarded yet.
+    pub fn pending_reviews(&self) -> Vec<&BusTask> {
+        self.tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Done && t.isolation == TaskIsolation::Worktree)
+            .filter(|t| !self.reviews.iter().any(|r| r.task_id == t.id))
+            .collect()
     }
 
     /// The lanes, coordinator first, then agents in the order they joined,
@@ -741,6 +791,8 @@ impl SwarmSnapshot {
 pub enum NeedKind {
     /// A session waits on a prompt in its terminal.
     Attention,
+    /// The coordinator proposed a plan; the gate holds work until you decide.
+    Plan,
     /// A question to the operator, or one nobody answered for `STUCK_AFTER`.
     Question,
     Failed,
@@ -752,18 +804,22 @@ pub enum NeedKind {
     CapReached,
     /// A task finished in a worktree: its branch waits for review.
     Review,
+    /// Every task is settled and every branch reviewed.
+    Finished,
 }
 
 impl NeedKind {
     pub fn label(self) -> &'static str {
         match self {
             NeedKind::Attention => "needs you",
+            NeedKind::Plan => "plan",
             NeedKind::Question => "question",
             NeedKind::Failed => "failed",
             NeedKind::Lost => "lost",
             NeedKind::Stuck => "stuck",
             NeedKind::CapReached => "cap",
             NeedKind::Review => "review",
+            NeedKind::Finished => "finished",
         }
     }
 
@@ -834,6 +890,28 @@ impl SwarmSnapshot {
                 text: format!("{} waits on a prompt in its terminal", lane.name),
                 since_ns: now,
                 message_id: None,
+                task_id: None,
+            });
+        }
+        if self.plan_held()
+            && let Some(p) = self.plan_proposal()
+        {
+            let open = self
+                .tasks
+                .iter()
+                .filter(|t| !t.status.is_terminal())
+                .count();
+            out.push(Need {
+                kind: NeedKind::Plan,
+                key: format!("plan:{}", p.id),
+                lane_key: self.coordinator.as_ref().map(|c| c.launch_id.clone()),
+                text: format!(
+                    "{} proposes a plan of {open} task{}: y approves, e sends it back",
+                    self.member_label(&p.from_launch),
+                    if open == 1 { "" } else { "s" }
+                ),
+                since_ns: p.created_ns,
+                message_id: Some(p.id.clone()),
                 task_id: None,
             });
         }
@@ -944,11 +1022,7 @@ impl SwarmSnapshot {
                 });
             }
         }
-        for t in self
-            .tasks
-            .iter()
-            .filter(|t| t.status == TaskStatus::Done && t.isolation == TaskIsolation::Worktree)
-        {
+        for t in self.pending_reviews() {
             let who = t
                 .assigned_to
                 .as_deref()
@@ -963,7 +1037,7 @@ impl SwarmSnapshot {
                     .and_then(lane_of)
                     .map(|l| l.key.clone()),
                 text: format!(
-                    "{who} finished \"{}\"{}: review it",
+                    "{who} finished \"{}\"{}: y merges, x discards",
                     t.title,
                     t.branch
                         .as_deref()
@@ -973,6 +1047,29 @@ impl SwarmSnapshot {
                 since_ns: t.ended_ns.unwrap_or(t.updated_ns),
                 message_id: None,
                 task_id: Some(t.id.clone()),
+            });
+        }
+        if matches!(self.phase(), Phase::WrappingUp | Phase::Done) {
+            let count = |s: TaskStatus| self.tasks.iter().filter(|t| t.status == s).count();
+            let last = self
+                .tasks
+                .iter()
+                .filter_map(|t| t.ended_ns)
+                .max()
+                .unwrap_or(now);
+            out.push(Need {
+                kind: NeedKind::Finished,
+                key: format!("finished:{last}"),
+                lane_key: self.coordinator.as_ref().map(|c| c.launch_id.clone()),
+                text: format!(
+                    "the swarm is finished: {} done, {} failed, {} cancelled; y closes it, d keeps it",
+                    count(TaskStatus::Done),
+                    count(TaskStatus::Failed),
+                    count(TaskStatus::Cancelled)
+                ),
+                since_ns: last,
+                message_id: None,
+                task_id: None,
             });
         }
         out.sort_by_key(|n| (n.kind, n.since_ns));
@@ -1075,8 +1172,9 @@ pub fn compose_coordinator_prompt(
     goal: &str,
     max_workers: usize,
     isolation: TaskIsolation,
+    plan_gate: bool,
 ) -> String {
-    format!(
+    let mut prompt = format!(
         "You are the **Swarm Coordinator** for this workspace.\n\n\
          ### Swarm Mission Goal\n\
          {goal}\n\n\
@@ -1101,8 +1199,66 @@ pub fn compose_coordinator_prompt(
             TaskIsolation::Worktree => "isolated git worktree branch per worker",
         },
         isolation.as_str(),
-    )
+    );
+    if plan_gate {
+        prompt.push_str(PLAN_GATE_PROMPT);
+    }
+    prompt
 }
+
+/// Merges `branch` into `workspace`'s checked-out branch with a merge
+/// commit (`git merge --no-ff --no-edit`). Git itself refuses when local
+/// changes would be overwritten; on a conflict the merge is aborted and the
+/// workspace left as it was. Answers the new commit's short hash.
+pub fn merge_branch(workspace: &Path, branch: &str) -> Result<String, String> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(args)
+            .output()
+            .map_err(|e| format!("git: {e}"))
+    };
+    let out = git(&["merge", "--no-ff", "--no-edit", branch])?;
+    if !out.status.success() {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let conflicted =
+            git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok_and(|o| o.status.success());
+        if conflicted {
+            let _ = git(&["merge", "--abort"]);
+        }
+        let why = text
+            .lines()
+            .map(str::trim)
+            .find(|l| {
+                l.starts_with("CONFLICT") || l.starts_with("error:") || l.starts_with("fatal:")
+            })
+            .or_else(|| text.lines().map(str::trim).find(|l| !l.is_empty()))
+            .unwrap_or("git merge failed")
+            .to_string();
+        return Err(if conflicted {
+            format!("{why} (merge aborted, nothing changed)")
+        } else {
+            why
+        });
+    }
+    let head = git(&["rev-parse", "--short", "HEAD"])?;
+    Ok(String::from_utf8_lossy(&head.stdout).trim().to_string())
+}
+
+/// What a coordinator under the plan gate must do before step 2 delegates
+/// anything: `agent_mux_delegate` and task claims are refused until the
+/// operator approves (`bus::store::plan_blocks`).
+pub const PLAN_GATE_PROMPT: &str = "\n\n### Plan approval (required before any worker starts)\n\
+The operator approves your plan before work begins; until then `agent_mux_delegate` and task claims are refused.\n\
+1. Put every subtask on the board with `agent_mux_task_split`. Do not delegate or wake workers yet.\n\
+2. Send the plan to the operator: `agent_mux_send_message(to = \"user\", topic = \"plan\", body = <a numbered list: each task, its files, and why this split>)`.\n\
+3. Wait with `agent_mux_recv_messages(wait_ms = 30000)`. On `plan-approved`, delegate the tasks (step 2 above). \
+On `plan-changes`, revise the board (`agent_mux_task_update` to cancel, `agent_mux_task_split` to add) and send a new `plan` message.";
 
 #[cfg(test)]
 mod tests {
@@ -1660,7 +1816,7 @@ mod tests {
         assert_eq!(needs[2].text, "w-fail failed \"ui tests\": exit 101");
         assert!(needs[2].kind.retryable() && needs[3].kind.retryable());
         assert!(
-            needs[4].text.ends_with("on bus-abc: review it"),
+            needs[4].text.ends_with("on bus-abc: y merges, x discards"),
             "{}",
             needs[4].text
         );
@@ -1809,5 +1965,149 @@ mod tests {
                 "msg on it"
             ]
         );
+    }
+
+    #[test]
+    fn the_gate_keeps_the_swarm_planning_until_approval_then_integrating_then_finished() {
+        let (dir, db, conn, ws) = store();
+        let coord = live(0, "coord-1", Some("coordinator"), "claude", "idle", &ws);
+        bstore::set_coordinator(
+            &conn,
+            Some(&db),
+            &ws,
+            "coord-1",
+            Some("g"),
+            Some(2),
+            None,
+            0,
+        )
+        .unwrap();
+        bstore::set_plan_gate(&conn, Some(&db), &ws, true, 0, 1).unwrap();
+        let wt = bstore::split_tasks(
+            &conn,
+            Some(&db),
+            &ws,
+            "coord-1",
+            &[NewTaskSpec {
+                title: "schema".into(),
+                instructions: "…".into(),
+                isolation: TaskIsolation::Worktree,
+                ..Default::default()
+            }],
+            2,
+        )
+        .unwrap()
+        .remove(0);
+        let snap = |now| {
+            load_snapshot(
+                Some(&conn),
+                dir.path(),
+                std::slice::from_ref(&coord),
+                None,
+                now,
+            )
+        };
+        let kinds = |s: &SwarmSnapshot, now| {
+            s.needs(&s.lanes(now), now)
+                .iter()
+                .map(|n| n.kind)
+                .collect::<Vec<_>>()
+        };
+
+        // Tasks on the board, no proposal yet: still planning, nothing to decide.
+        let s = snap(3);
+        assert_eq!(s.phase(), Phase::Planning);
+        assert!(s.plan_proposal().is_none() && kinds(&s, 3).is_empty());
+
+        // A proposal is a need; the answer to it does not count as a question.
+        bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "coord-1",
+            Some("user"),
+            "plan",
+            "1. schema",
+            None,
+            4,
+        )
+        .unwrap();
+        let s = snap(5);
+        assert_eq!(kinds(&s, 5), [NeedKind::Plan]);
+        assert!(
+            s.needs(&s.lanes(5), 5)[0]
+                .text
+                .contains("proposes a plan of 1 task")
+        );
+
+        // Sent back: the old proposal no longer counts, a new one does.
+        bstore::decide_plan(&conn, Some(&db), &ws, false, 6).unwrap();
+        assert!(snap(7).plan_proposal().is_none());
+        bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "coord-1",
+            Some("user"),
+            "plan",
+            "1. schema v2",
+            None,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            snap(9).plan_proposal().map(|m| m.body.as_str()),
+            Some("1. schema v2")
+        );
+
+        // Approved: executing; done in a worktree: integrating with a review need.
+        bstore::decide_plan(&conn, Some(&db), &ws, true, 10).unwrap();
+        assert_eq!(snap(11).phase(), Phase::Executing);
+        bstore::update_task(
+            &conn,
+            Some(&db),
+            &wt.id,
+            "w-1",
+            TaskStatus::Done,
+            None,
+            None,
+            None,
+            Some("loop/bus-x".into()),
+            12,
+        )
+        .unwrap();
+        let s = snap(13);
+        assert_eq!(s.phase(), Phase::Integrating);
+        assert_eq!(kinds(&s, 13), [NeedKind::Review]);
+
+        // Reviewed: wrapping up, and the swarm is finished.
+        bstore::record_review(
+            &conn,
+            Some(&db),
+            &ws,
+            &wt.id,
+            false,
+            Some("loop/bus-x"),
+            None,
+            14,
+        )
+        .unwrap();
+        let s = snap(15);
+        assert_eq!(s.phase(), Phase::WrappingUp);
+        assert_eq!(kinds(&s, 15), [NeedKind::Finished]);
+        assert!(
+            s.needs(&s.lanes(15), 15)[0]
+                .text
+                .starts_with("the swarm is finished: 1 done, 0 failed")
+        );
+    }
+
+    #[test]
+    fn the_coordinator_prompt_carries_the_gate_only_when_it_is_on() {
+        let on = compose_coordinator_prompt("g", 3, TaskIsolation::Shared, true);
+        let off = compose_coordinator_prompt("g", 3, TaskIsolation::Shared, false);
+        assert!(on.contains("### Plan approval") && on.contains("topic = \"plan\""));
+        assert!(on.contains("plan-approved") && on.contains("plan-changes"));
+        assert!(!off.contains("Plan approval"));
     }
 }

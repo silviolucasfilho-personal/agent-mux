@@ -617,12 +617,12 @@ pub const SWARM_USAGE: &str = "usage: agent-mux swarm <command> [options]
 commands:
   status [--workspace DIR] [--db PATH] [--json]
                                 inspect workspace swarm coordinator, workers, board, leases, messages
-  start <goal...> [--coordinator claude|codex|agy] [--workers N] [--isolation shared|worktree] [--workspace DIR]
-                                launch a Swarm Coordinator with delegated workers in the running TUI
+  start <goal...> [--coordinator claude|codex|agy] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--workspace DIR]
+                                launch a Swarm Coordinator in the running TUI; its plan waits for your approval unless --no-plan-gate
   broadcast <message...> [--urgent] [--wake] [--workspace DIR] [--db PATH] [--json]
                                 broadcast a directive or blocker message to all swarm workers
   stop [--workspace DIR] [--db PATH] [--json]
-                                cancel open tasks and release all cooperative file leases in the workspace";
+                                stop the swarm's sessions (through the running TUI), cancel its open tasks, release its leases";
 
 pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
     let cmd = raw.first().map(String::as_str).unwrap_or("status");
@@ -714,6 +714,7 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                 harness: harness.clone(),
                 max_workers,
                 isolation,
+                plan_gate: Some(!args.has("no-plan-gate")),
             };
             match control::send_request(None, &req, Duration::from_millis(1500)) {
                 Ok(resp) if resp.ok => {
@@ -788,39 +789,31 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             }
         }
         "stop" => {
-            let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
             let norm_ws = bstore::normalize_workspace(Path::new(&workspace));
-            let tasks = bstore::list_tasks(&conn, &norm_ws, None, None, None).unwrap_or_default();
-            let mut cancelled = 0;
-            for t in tasks {
-                if !t.status.is_terminal() {
-                    let _ = bstore::update_task(
-                        &conn,
-                        Some(&db_path),
-                        &t.id,
-                        "",
-                        TaskStatus::Cancelled,
-                        Some(serde_json::json!("Swarm stopped")),
-                        None,
-                        None,
-                        None,
-                        now,
-                    );
-                    cancelled += 1;
+            // The TUI stops the sessions too; without it, the store alone.
+            let req = ControlRequest::StopSwarm {
+                workspace: norm_ws.clone(),
+            };
+            let summary = match control::send_request(None, &req, Duration::from_secs(3)) {
+                Ok(resp) if resp.ok => resp.detail.unwrap_or_default(),
+                Ok(resp) => anyhow::bail!(
+                    "could not stop the swarm: {}",
+                    resp.error.unwrap_or_default()
+                ),
+                Err(_) => {
+                    let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+                    let (cancelled, released) =
+                        bstore::stop_swarm(&conn, Some(&db_path), &norm_ws, now)
+                            .map_err(|e| anyhow::anyhow!(e))?;
+                    format!(
+                        "cancelled {cancelled} task(s), released {released} lease(s); no agent-mux TUI is running, so no session was stopped"
+                    )
                 }
-            }
-            let leases_released =
-                bstore::release_leases(&conn, &norm_ws, "cli", None, &[]).unwrap_or(0);
-            let _ = bstore::clear_swarm(&conn, Some(&db_path), &norm_ws);
+            };
             if args.has("json") {
-                println!(
-                    "{}",
-                    json!({ "tasks_cancelled": cancelled, "leases_released": leases_released })
-                );
+                println!("{}", json!({ "stopped": summary }));
             } else {
-                println!(
-                    "Swarm stopped: cancelled {cancelled} task(s), released {leases_released} lease(s)"
-                );
+                println!("Swarm stopped: {summary}");
             }
         }
         other => {

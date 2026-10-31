@@ -92,6 +92,7 @@ fn mission_strip(v: &SwarmView, width: usize) -> Line<'static> {
         Style::default()
             .fg(match phase {
                 Phase::Executing => Color::Green,
+                Phase::Integrating => Color::Magenta,
                 Phase::Planning | Phase::WrappingUp => Color::Yellow,
                 Phase::Done => Color::Cyan,
                 Phase::NotStarted => Color::Gray,
@@ -326,6 +327,7 @@ fn draw_panel(f: &mut Frame, area: Rect, v: &SwarmView, lane: &Lane, app: &App) 
             PanelTab::Thread if thread_len > 0 && !compact => {
                 format!("{} {} ({thread_len})", n + 1, tab.label())
             }
+            PanelTab::Task if lane.kind == LaneKind::Coordinator => format!("{} Plan", n + 1),
             _ => format!("{} {}", n + 1, tab.label()),
         };
         tabs.push(if *tab == current {
@@ -403,6 +405,14 @@ fn draw_panel(f: &mut Frame, area: Rect, v: &SwarmView, lane: &Lane, app: &App) 
                 .collect();
             f.render_widget(Paragraph::new(lines), content);
         }
+        PanelTab::Task if lane.kind == LaneKind::Coordinator => {
+            let lines: Vec<Line<'static>> =
+                plan_lines(v).into_iter().skip(v.panel_scroll).collect();
+            f.render_widget(
+                Paragraph::new(lines).wrap(Wrap { trim: false }),
+                indented(content),
+            );
+        }
         PanelTab::Task => {
             let Some(task) = &lane.task else {
                 f.render_widget(
@@ -439,6 +449,136 @@ fn draw_panel(f: &mut Frame, area: Rect, v: &SwarmView, lane: &Lane, app: &App) 
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), content);
         }
     }
+}
+
+/// The coordinator's Plan tab: where the plan stands and what to press, the
+/// proposal as the coordinator wrote it, the board, and, once every task is
+/// settled, the summary.
+fn plan_lines(v: &SwarmView) -> Vec<Line<'static>> {
+    use crate::bus::store::PlanStatus;
+    let snap = &v.snapshot;
+    let mut out: Vec<Line<'static>> = vec![Line::raw("")];
+    let heading = |t: &str| {
+        Line::styled(
+            t.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let proposal = snap.plan_proposal();
+    let (status, hint) = match (&snap.plan, proposal) {
+        (Some(p), _) if !p.gate => ("no gate: workers start as soon as they are delegated", ""),
+        (Some(p), _) if p.status == PlanStatus::Approved => ("approved", ""),
+        (Some(_), Some(_)) => (
+            "proposed, waiting for you",
+            "y approves · e sends it back with notes",
+        ),
+        (Some(p), None) if p.status == PlanStatus::SentBack => (
+            "sent back: the coordinator is revising it",
+            "y approves it as it stands",
+        ),
+        (Some(_), None) => (
+            "being drafted by the coordinator",
+            "y approves the board as it stands",
+        ),
+        (None, _) => ("no plan gate on this swarm", ""),
+    };
+    out.push(Line::from(vec![
+        Span::styled("Plan: ", dim()),
+        Span::styled(
+            status.to_string(),
+            Style::default()
+                .fg(if snap.plan_held() {
+                    Color::Yellow
+                } else {
+                    Color::Green
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    if !hint.is_empty() && snap.plan_held() {
+        out.push(Line::styled(hint.to_string(), dim()));
+    }
+    if let Some(p) = proposal {
+        out.push(Line::raw(""));
+        out.push(heading("── Proposal ──"));
+        out.extend(p.body.lines().map(|l| Line::raw(l.to_string())));
+    }
+    out.push(Line::raw(""));
+    out.push(heading(&format!("── Board ({}) ──", snap.tasks.len())));
+    if snap.tasks.is_empty() {
+        out.push(Line::styled("no tasks yet", dim()));
+    }
+    for t in &snap.tasks {
+        let who = t
+            .assigned_to
+            .as_deref()
+            .map(|a| format!(" → {}", snap.member_label(a)))
+            .or_else(|| {
+                t.target_agent
+                    .as_deref()
+                    .or(t.target_harness.as_deref())
+                    .map(|w| format!(" for {w}"))
+            })
+            .unwrap_or_default();
+        let files = if t.files.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", t.files.join(", "))
+        };
+        out.push(Line::from(vec![
+            Span::styled(format!("{:<9} ", t.status.as_str()), dim()),
+            Span::raw(t.title.clone()),
+            Span::styled(format!("{who}{files}"), dim()),
+        ]));
+    }
+    if matches!(
+        snap.phase(),
+        Phase::Integrating | Phase::WrappingUp | Phase::Done
+    ) {
+        let count = |s: TaskStatus| snap.tasks.iter().filter(|t| t.status == s).count();
+        out.push(Line::raw(""));
+        out.push(heading("── Summary ──"));
+        out.push(Line::raw(format!(
+            "{} done · {} failed · {} cancelled",
+            count(TaskStatus::Done),
+            count(TaskStatus::Failed),
+            count(TaskStatus::Cancelled)
+        )));
+        for r in &snap.reviews {
+            out.push(Line::raw(format!(
+                "{} {}{}",
+                r.verdict,
+                r.branch.as_deref().unwrap_or("?"),
+                r.detail
+                    .as_deref()
+                    .map(|d| format!(" ({d})"))
+                    .unwrap_or_default()
+            )));
+        }
+        for t in snap.pending_reviews() {
+            out.push(Line::styled(
+                format!(
+                    "waiting for review: {}",
+                    t.branch.as_deref().unwrap_or(&t.title)
+                ),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        if let Some(start) = snap.started_ns {
+            out.push(Line::styled(
+                format!(
+                    "{} · {} tok {}",
+                    crate::bus::swarm::short_age(v.now_ns - start),
+                    fmt_tokens(Some(snap.total_tokens)),
+                    fmt_cost(Some(snap.total_cost_usd))
+                ),
+                dim(),
+            ));
+        }
+    }
+    out
 }
 
 fn draw_activity(f: &mut Frame, area: Rect, v: &SwarmView) {
@@ -519,10 +659,13 @@ fn draw_needs(f: &mut Frame, area: Rect, v: &SwarmView, shown: usize) {
             NeedKind::Failed | NeedKind::Lost => {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             }
-            NeedKind::Attention | NeedKind::Question | NeedKind::Stuck => Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            NeedKind::Attention | NeedKind::Plan | NeedKind::Question | NeedKind::Stuck => {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            }
             NeedKind::CapReached | NeedKind::Review => Style::default().fg(Color::Cyan),
+            NeedKind::Finished => Style::default().fg(Color::Green),
         };
         let age = format!(
             "  {}",
@@ -870,6 +1013,21 @@ fn draw_footer(f: &mut Frame, area: Rect, v: &SwarmView) {
             ("a", "activity"),
             ("Tab/Esc", "lanes"),
         ]
+    } else if v.snapshot.plan_held()
+        && v.selected()
+            .is_some_and(|l| l.kind == LaneKind::Coordinator)
+    {
+        &[
+            ("y", "approve plan"),
+            ("e", "send it back"),
+            ("↑↓", "lane"),
+            ("Tab", "panel"),
+            ("1-4", "view"),
+            ("Enter", "attach"),
+            ("m", "message"),
+            ("a", "activity"),
+            ("Esc", "close"),
+        ]
     } else if queued {
         &[
             ("↑↓", "lane"),
@@ -917,6 +1075,7 @@ fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, v: &SwarmView) {
             harness_idx,
             max_workers,
             isolation,
+            plan_gate,
             prewarm_workers,
             field,
         } => {
@@ -979,7 +1138,27 @@ fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, v: &SwarmView) {
             ]));
             lines.push(Line::from(vec![
                 field_span(
-                    "Pre-warm Standby Workers: ",
+                    "Approve the plan before workers start: ",
+                    *field == LaunchField::PlanGate,
+                ),
+                Span::styled(
+                    if *plan_gate {
+                        "◀ yes ▶"
+                    } else {
+                        "◀ no ▶"
+                    },
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                field_span(
+                    if *plan_gate {
+                        "Standby Workers (after approval): "
+                    } else {
+                        "Pre-warm Standby Workers: "
+                    },
                     *field == LaunchField::PrewarmWorkers,
                 ),
                 Span::styled(
@@ -1197,6 +1376,15 @@ fn draw_confirm(f: &mut Frame, area: Rect, confirm: &Confirm) {
                 "A swarm is running under {coordinator}. Launch a new one and replace it as coordinator?"
             )
         }
+        Confirm::MergeBranch { branch, .. } => format!(
+            "Merge {branch} into this workspace's branch (git merge --no-ff)? A conflict aborts it."
+        ),
+        Confirm::DiscardBranch { branch, .. } => {
+            format!("Set {branch} aside without merging? The branch is kept.")
+        }
+        Confirm::CloseSwarm => "Close the swarm? Its sessions stop, open tasks are cancelled \
+             and leases released."
+            .to_string(),
         Confirm::ReleaseLeases { lane, patterns } => {
             format!("Release {lane}'s leases on {}?", patterns.join(", "))
         }

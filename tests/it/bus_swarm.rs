@@ -523,3 +523,383 @@ async fn max_workers_refuses_the_spawn_past_the_cap_without_counting_the_coordin
     assert!(err.contains("worker cap reached: 1/0"), "{err}");
     app.kill_all();
 }
+
+#[test]
+fn the_plan_gate_holds_claims_until_the_operator_approves() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_store(dir.path());
+    let conn = open_aux(&db).unwrap();
+    let ws = bstore::normalize_workspace(dir.path());
+    let task = bstore::split_tasks(
+        &conn,
+        Some(&db),
+        &ws,
+        "coord-1",
+        &[NewTaskSpec {
+            title: "wire bus".into(),
+            instructions: "…".into(),
+            ..Default::default()
+        }],
+        1,
+    )
+    .unwrap()
+    .remove(0);
+
+    // No plan row: nothing holds work back.
+    assert!(bstore::plan_blocks(&conn, &ws).is_none());
+
+    let seq = latest_change_seq(&conn).unwrap();
+    bstore::set_plan_gate(&conn, Some(&db), &ws, true, 2, 2).unwrap();
+    assert!(
+        latest_change_seq(&conn).unwrap() > seq,
+        "the gate feeds the change feed"
+    );
+    let plan = bstore::plan_gate(&conn, &ws).unwrap().unwrap();
+    assert_eq!(
+        (plan.gate, plan.status, plan.standby),
+        (true, bstore::PlanStatus::Drafting, 2)
+    );
+    let err = bstore::claim_task(&conn, Some(&db), &task.id, "w-1", 3).unwrap_err();
+    assert!(err.contains("awaits the operator's approval"), "{err}");
+
+    // Sent back: still held.
+    bstore::decide_plan(&conn, Some(&db), &ws, false, 4).unwrap();
+    assert!(bstore::claim_task(&conn, Some(&db), &task.id, "w-1", 5).is_err());
+    // Approved: work starts.
+    let plan = bstore::decide_plan(&conn, Some(&db), &ws, true, 6).unwrap();
+    assert_eq!(
+        (plan.status, plan.decided_ns),
+        (bstore::PlanStatus::Approved, Some(6))
+    );
+    assert!(bstore::plan_blocks(&conn, &ws).is_none());
+    bstore::claim_task(&conn, Some(&db), &task.id, "w-1", 7).unwrap();
+
+    // A gate turned off never holds anything.
+    bstore::set_plan_gate(&conn, Some(&db), &ws, false, 0, 8).unwrap();
+    assert!(bstore::plan_blocks(&conn, &ws).is_none());
+
+    // Closing the swarm forgets the plan too.
+    bstore::set_coordinator(&conn, Some(&db), &ws, "coord-1", Some("g"), None, None, 9).unwrap();
+    bstore::clear_swarm(&conn, Some(&db), &ws).unwrap();
+    assert!(bstore::plan_gate(&conn, &ws).unwrap().is_none());
+    assert!(bstore::decide_plan(&conn, Some(&db), &ws, true, 10).is_err());
+}
+
+#[test]
+fn a_review_records_what_happened_to_a_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_store(dir.path());
+    let conn = open_aux(&db).unwrap();
+    let ws = bstore::normalize_workspace(dir.path());
+    let seq = latest_change_seq(&conn).unwrap();
+    bstore::record_review(
+        &conn,
+        Some(&db),
+        &ws,
+        "task-a",
+        true,
+        Some("loop/bus-a"),
+        Some("abc123"),
+        1,
+    )
+    .unwrap();
+    bstore::record_review(
+        &conn,
+        Some(&db),
+        &ws,
+        "task-b",
+        false,
+        Some("loop/bus-b"),
+        None,
+        2,
+    )
+    .unwrap();
+    assert!(latest_change_seq(&conn).unwrap() > seq);
+    let reviews = bstore::reviews(&conn, &ws).unwrap();
+    let got: Vec<_> = reviews
+        .iter()
+        .map(|r| (r.task_id.as_str(), r.verdict.as_str()))
+        .collect();
+    assert_eq!(got, [("task-a", "merged"), ("task-b", "discarded")]);
+    assert_eq!(reviews[0].detail.as_deref(), Some("abc123"));
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A repository on `main` with a `feature` branch that changes `file`
+/// to `feature` (or, with `clash`, a `main` that changes it too).
+fn repo(dir: &Path, clash: bool) {
+    git(dir, &["init", "-q", "-b", "main"]);
+    git(dir, &["config", "user.email", "test@example.com"]);
+    git(dir, &["config", "user.name", "Test"]);
+    git(dir, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("file"), "base\n").unwrap();
+    git(dir, &["add", "file"]);
+    git(dir, &["commit", "-q", "-m", "base"]);
+    git(dir, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(dir.join("file"), "feature\n").unwrap();
+    git(dir, &["commit", "-q", "-am", "feature"]);
+    git(dir, &["checkout", "-q", "main"]);
+    if clash {
+        std::fs::write(dir.join("file"), "main\n").unwrap();
+        git(dir, &["commit", "-q", "-am", "main"]);
+    }
+}
+
+#[test]
+fn merging_a_branch_makes_a_merge_commit_and_a_conflict_changes_nothing() {
+    let clean = tempfile::tempdir().unwrap();
+    repo(clean.path(), false);
+    let head = agent_mux::bus::swarm::merge_branch(clean.path(), "feature").unwrap();
+    assert_eq!(git(clean.path(), &["rev-parse", "--short", "HEAD"]), head);
+    assert_eq!(
+        std::fs::read_to_string(clean.path().join("file")).unwrap(),
+        "feature\n"
+    );
+    let parents = git(clean.path(), &["rev-list", "--parents", "-n", "1", "HEAD"]);
+    assert_eq!(
+        parents.split(' ').count(),
+        3,
+        "a merge commit has two parents"
+    );
+
+    let clash = tempfile::tempdir().unwrap();
+    repo(clash.path(), true);
+    let before = git(clash.path(), &["rev-parse", "HEAD"]);
+    let err = agent_mux::bus::swarm::merge_branch(clash.path(), "feature").unwrap_err();
+    assert!(
+        err.contains("CONFLICT") && err.contains("merge aborted"),
+        "{err}"
+    );
+    assert_eq!(git(clash.path(), &["rev-parse", "HEAD"]), before);
+    assert_eq!(
+        git(clash.path(), &["status", "--porcelain"]),
+        "",
+        "the workspace is as it was"
+    );
+
+    let err = agent_mux::bus::swarm::merge_branch(clean.path(), "no-such-branch").unwrap_err();
+    assert!(!err.is_empty());
+}
+
+fn swarm_app(ws: &Path, db: &Path) -> App {
+    let (tx, _rx) = mpsc::channel(256);
+    let mut app = App::new(shell_profiles(ws), None, tx);
+    app.trace_db_path = Some(db.to_path_buf());
+    app.mode = Mode::Swarm(Box::new(SwarmView::open(
+        ws.to_path_buf(),
+        Some(open_aux(db).unwrap()),
+        &[],
+        agent_mux::tracing::store::now_ns(),
+    )));
+    app
+}
+
+#[tokio::test]
+async fn y_on_a_finished_branch_merges_it_into_the_workspace_and_records_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().canonicalize().unwrap();
+    repo(&ws, false);
+    let store_dir = tempfile::tempdir().unwrap();
+    let db = open_store(store_dir.path());
+    let conn = open_aux(&db).unwrap();
+    let norm = bstore::normalize_workspace(&ws);
+    let task = bstore::split_tasks(
+        &conn,
+        Some(&db),
+        &norm,
+        "coord-1",
+        &[NewTaskSpec {
+            title: "feature".into(),
+            instructions: "…".into(),
+            assigned_to: Some("w-1".into()),
+            isolation: TaskIsolation::Worktree,
+            ..Default::default()
+        }],
+        1,
+    )
+    .unwrap()
+    .remove(0);
+    bstore::update_task(
+        &conn,
+        Some(&db),
+        &task.id,
+        "w-1",
+        agent_mux::bus::TaskStatus::Done,
+        None,
+        None,
+        None,
+        Some("feature".into()),
+        2,
+    )
+    .unwrap();
+
+    let mut app = swarm_app(&ws, &db);
+    let Mode::Swarm(view) = &app.mode else {
+        unreachable!()
+    };
+    assert_eq!(
+        view.snapshot.phase(),
+        agent_mux::bus::swarm::Phase::Integrating
+    );
+    assert_eq!(view.needs.len(), 1, "{:#?}", view.needs);
+    let now = Instant::now();
+    app.handle_key(&KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT), now);
+    app.handle_key(&key(KeyCode::Char('y')), now);
+    let Mode::Swarm(view) = &app.mode else {
+        unreachable!()
+    };
+    assert!(view.confirm.is_some(), "a merge asks first");
+    app.handle_key(&key(KeyCode::Char('y')), now);
+
+    let Mode::Swarm(view) = &app.mode else {
+        unreachable!()
+    };
+    let status = view.status_msg.clone().unwrap_or_default();
+    assert!(status.starts_with("merged feature ("), "{status}");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("file")).unwrap(),
+        "feature\n"
+    );
+    let reviews = bstore::reviews(&conn, &norm).unwrap();
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].verdict, "merged");
+    assert!(view.snapshot.pending_reviews().is_empty());
+    assert!(
+        view.needs
+            .iter()
+            .all(|n| n.kind != agent_mux::bus::swarm::NeedKind::Review),
+        "the review need is gone: {:#?}",
+        view.needs
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn y_on_a_proposed_plan_approves_it_tells_the_coordinator_and_lifts_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().canonicalize().unwrap();
+    let store_dir = tempfile::tempdir().unwrap();
+    let db = open_store(store_dir.path());
+    let conn = open_aux(&db).unwrap();
+    let norm = bstore::normalize_workspace(&ws);
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut app = App::new(shell_profiles(&ws), None, tx);
+    app.trace_db_path = Some(db.clone());
+    let now = Instant::now();
+    app.handle_key(&key(KeyCode::Char('n')), now);
+    app.handle_key(&key(KeyCode::Enter), now);
+    app.handle_key(&key(KeyCode::Enter), now);
+    assert_eq!(app.sessions.len(), 1);
+    app.sessions[0].group = Some(bus_group("coordinator"));
+    let coordinator = format!("session-{}", app.sessions[0].id);
+
+    bstore::set_coordinator(
+        &conn,
+        Some(&db),
+        &norm,
+        &coordinator,
+        Some("g"),
+        Some(2),
+        None,
+        1,
+    )
+    .unwrap();
+    bstore::set_plan_gate(&conn, Some(&db), &norm, true, 0, 1).unwrap();
+    bstore::split_tasks(
+        &conn,
+        Some(&db),
+        &norm,
+        &coordinator,
+        &[NewTaskSpec {
+            title: "wire bus".into(),
+            instructions: "…".into(),
+            ..Default::default()
+        }],
+        2,
+    )
+    .unwrap();
+    let plan = bstore::send_message(
+        &conn,
+        Some(&db),
+        &norm,
+        &coordinator,
+        Some("user"),
+        "plan",
+        "1. wire bus (src/bus/**)",
+        None,
+        3,
+    )
+    .unwrap();
+
+    let live = app.swarm_live_sessions(&ws);
+    app.mode = Mode::Swarm(Box::new(SwarmView::open(
+        ws.clone(),
+        Some(open_aux(&db).unwrap()),
+        &live,
+        agent_mux::tracing::store::now_ns(),
+    )));
+    let Mode::Swarm(view) = &app.mode else {
+        unreachable!()
+    };
+    assert_eq!(
+        view.snapshot.phase(),
+        agent_mux::bus::swarm::Phase::Planning
+    );
+    assert_eq!(
+        view.needs.first().map(|n| n.kind),
+        Some(agent_mux::bus::swarm::NeedKind::Plan),
+        "{:#?}",
+        view.needs
+    );
+    // The coordinator's lane opens on its plan.
+    assert_eq!(view.tab(), agent_mux::app::swarm_view::PanelTab::Task);
+
+    app.handle_key(&KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT), now);
+    app.handle_key(&key(KeyCode::Char('y')), now);
+
+    assert!(
+        bstore::plan_blocks(&conn, &norm).is_none(),
+        "the gate is lifted"
+    );
+    let decision = bstore::list_workspace_messages(&conn, &norm, 10)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.topic == "plan-approved")
+        .expect("the coordinator is told");
+    assert_eq!(decision.to_launch.as_deref(), Some(coordinator.as_str()));
+    assert_eq!(decision.reply_to.as_deref(), Some(plan.id.as_str()));
+    let Mode::Swarm(view) = &app.mode else {
+        unreachable!()
+    };
+    assert!(
+        view.needs
+            .iter()
+            .all(|n| n.kind != agent_mux::bus::swarm::NeedKind::Plan),
+        "{:#?}",
+        view.needs
+    );
+    // The wake reaches the coordinator's terminal once it is idle.
+    let _ = pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {
+        a.sessions[0]
+            .parser
+            .screen()
+            .contents()
+            .contains("plan-approved")
+    })
+    .await;
+    app.kill_all();
+}

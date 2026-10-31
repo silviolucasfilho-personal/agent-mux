@@ -85,6 +85,8 @@ pub enum LaunchField {
     Harness,
     MaxWorkers,
     Isolation,
+    /// Approve the coordinator's plan before any worker starts.
+    PlanGate,
     PrewarmWorkers,
 }
 
@@ -94,7 +96,8 @@ impl LaunchField {
             LaunchField::Goal => LaunchField::Harness,
             LaunchField::Harness => LaunchField::MaxWorkers,
             LaunchField::MaxWorkers => LaunchField::Isolation,
-            LaunchField::Isolation => LaunchField::PrewarmWorkers,
+            LaunchField::Isolation => LaunchField::PlanGate,
+            LaunchField::PlanGate => LaunchField::PrewarmWorkers,
             LaunchField::PrewarmWorkers => LaunchField::Goal,
         }
     }
@@ -105,7 +108,8 @@ impl LaunchField {
             LaunchField::Harness => LaunchField::Goal,
             LaunchField::MaxWorkers => LaunchField::Harness,
             LaunchField::Isolation => LaunchField::MaxWorkers,
-            LaunchField::PrewarmWorkers => LaunchField::Isolation,
+            LaunchField::PlanGate => LaunchField::Isolation,
+            LaunchField::PrewarmWorkers => LaunchField::PlanGate,
         }
     }
 }
@@ -386,6 +390,7 @@ pub enum Modal {
         harness_idx: usize,
         max_workers: usize,
         isolation: TaskIsolation,
+        plan_gate: bool,
         prewarm_workers: usize,
         field: LaunchField,
     },
@@ -415,6 +420,18 @@ pub enum Confirm {
     RelaunchSwarm {
         coordinator: String,
     },
+    /// Merge a finished worktree branch into the workspace.
+    MergeBranch {
+        task_id: String,
+        branch: String,
+    },
+    /// Set a finished branch aside without merging it.
+    DiscardBranch {
+        task_id: String,
+        branch: String,
+    },
+    /// End the swarm: stop its sessions, cancel what is open, forget it.
+    CloseSwarm,
     ReleaseLeases {
         lane: String,
         patterns: Vec<String>,
@@ -440,8 +457,20 @@ pub enum Outcome {
         harness: Harness,
         max_workers: usize,
         isolation: TaskIsolation,
+        plan_gate: bool,
         prewarm_workers: usize,
     },
+    /// The operator's decision on the coordinator's plan.
+    DecidePlan {
+        approve: bool,
+    },
+    MergeBranch {
+        task_id: String,
+    },
+    DiscardBranch {
+        task_id: String,
+    },
+    CloseSwarm,
     PromoteCoordinator {
         launch_id: String,
     },
@@ -704,6 +733,19 @@ impl SwarmView {
         };
         match &self.chosen_tab {
             Some((key, tab)) if *key == lane.key => *tab,
+            // The coordinator opens on its plan while the plan holds work,
+            // and on the summary once every task is settled.
+            _ if lane.kind == LaneKind::Coordinator
+                && (self.snapshot.plan_held()
+                    || matches!(
+                        self.snapshot.phase(),
+                        crate::bus::swarm::Phase::Integrating
+                            | crate::bus::swarm::Phase::WrappingUp
+                            | crate::bus::swarm::Phase::Done
+                    )) =>
+            {
+                PanelTab::Task
+            }
             _ => PanelTab::for_lane(lane),
         }
     }
@@ -819,6 +861,7 @@ impl SwarmView {
             harness_idx: 0,
             max_workers: 3,
             isolation: TaskIsolation::Shared,
+            plan_gate: true,
             prewarm_workers: 0,
             field: LaunchField::Goal,
         });
@@ -978,6 +1021,11 @@ impl SwarmView {
         self.status_msg = None;
         if self.focus == Focus::Needs
             && let Some(out) = self.handle_needs_key(key)
+        {
+            return out;
+        }
+        if self.focus != Focus::Needs
+            && let Some(out) = self.plan_key(key)
         {
             return out;
         }
@@ -1144,6 +1192,47 @@ impl SwarmView {
         Outcome::None
     }
 
+    /// Asks before merging (or setting aside) a finished task's branch.
+    fn confirm_review(&mut self, task_id: Option<&str>, merge: bool) {
+        let Some(task) = task_id.and_then(|id| self.snapshot.tasks.iter().find(|t| t.id == id))
+        else {
+            return;
+        };
+        let Some(branch) = task.branch.clone() else {
+            self.status_msg = Some("That task has no branch to review.".into());
+            return;
+        };
+        let task_id = task.id.clone();
+        self.confirm = Some(if merge {
+            Confirm::MergeBranch { task_id, branch }
+        } else {
+            Confirm::DiscardBranch { task_id, branch }
+        });
+    }
+
+    /// Sends the plan back: records the decision and opens the command line
+    /// to the coordinator for what should change.
+    fn send_plan_back(&mut self) -> Outcome {
+        self.open_command("@coord #plan-changes ", None);
+        Outcome::DecidePlan { approve: false }
+    }
+
+    /// `y` and `e` on the coordinator's lane while its plan waits.
+    fn plan_key(&mut self, key: KeyEvent) -> Option<Outcome> {
+        if !self.snapshot.plan_held()
+            || self
+                .selected()
+                .is_none_or(|l| l.kind != LaneKind::Coordinator)
+        {
+            return None;
+        }
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('y'), KeyModifiers::NONE) => Some(Outcome::DecidePlan { approve: true }),
+            (KeyCode::Char('e'), KeyModifiers::NONE) => Some(self.send_plan_back()),
+            _ => None,
+        }
+    }
+
     /// Keys while the Needs-you strip has focus; `None` lets the screen's
     /// own keys (Tab, Esc, `a`, `1`–`4`, …) handle the rest.
     fn handle_needs_key(&mut self, key: KeyEvent) -> Option<Outcome> {
@@ -1178,6 +1267,25 @@ impl SwarmView {
             (KeyCode::Char('d'), KeyModifiers::NONE) => {
                 self.dismissed.insert(need.key.clone());
                 self.recompute_needs();
+                Outcome::None
+            }
+            (KeyCode::Char('y'), KeyModifiers::NONE) => match need.kind {
+                NeedKind::Plan => Outcome::DecidePlan { approve: true },
+                NeedKind::Review => {
+                    self.confirm_review(need.task_id.as_deref(), true);
+                    Outcome::None
+                }
+                NeedKind::Finished => {
+                    self.confirm = Some(Confirm::CloseSwarm);
+                    Outcome::None
+                }
+                _ => return None,
+            },
+            (KeyCode::Char('e'), KeyModifiers::NONE) if need.kind == NeedKind::Plan => {
+                self.send_plan_back()
+            }
+            (KeyCode::Char('x'), KeyModifiers::NONE) if need.kind == NeedKind::Review => {
+                self.confirm_review(need.task_id.as_deref(), false);
                 Outcome::None
             }
             _ => return None,
@@ -1235,6 +1343,9 @@ impl SwarmView {
                         self.open_launch_modal();
                         Outcome::None
                     }
+                    Confirm::MergeBranch { task_id, .. } => Outcome::MergeBranch { task_id },
+                    Confirm::DiscardBranch { task_id, .. } => Outcome::DiscardBranch { task_id },
+                    Confirm::CloseSwarm => Outcome::CloseSwarm,
                     Confirm::ReleaseLeases { patterns, .. } => Outcome::ReleaseLeases(patterns),
                     Confirm::CancelTask { task_id, .. } => Outcome::CancelTask(task_id),
                     Confirm::StopSession { session_idx, .. } => Outcome::StopSession(session_idx),
@@ -1301,6 +1412,7 @@ impl SwarmView {
                 harness_idx,
                 max_workers,
                 isolation,
+                plan_gate,
                 prewarm_workers,
                 field,
             } => match (key.code, key.modifiers) {
@@ -1346,6 +1458,18 @@ impl SwarmView {
                         }
                         _ => {}
                     },
+                    LaunchField::PlanGate => {
+                        if matches!(
+                            key.code,
+                            KeyCode::Left
+                                | KeyCode::Right
+                                | KeyCode::Char('h')
+                                | KeyCode::Char('l')
+                                | KeyCode::Char(' ')
+                        ) {
+                            *plan_gate = !*plan_gate;
+                        }
+                    }
                     LaunchField::PrewarmWorkers => match key.code {
                         KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('-') => {
                             *prewarm_workers = prewarm_workers.saturating_sub(1);
@@ -1447,6 +1571,7 @@ impl SwarmView {
                 harness_idx,
                 max_workers,
                 isolation,
+                plan_gate,
                 prewarm_workers,
                 ..
             } => {
@@ -1460,6 +1585,7 @@ impl SwarmView {
                     harness: HARNESS_CYCLE[harness_idx % HARNESS_CYCLE.len()],
                     max_workers,
                     isolation,
+                    plan_gate,
                     prewarm_workers,
                 }
             }
@@ -2237,5 +2363,89 @@ mod tests {
         );
         view.handle_key(key(KeyCode::Esc));
         assert!(view.command.is_none() && !view.text_entry_active());
+    }
+
+    #[test]
+    fn the_launch_form_asks_for_plan_approval_by_default() {
+        let (dir, db) = store();
+        let mut view = SwarmView::open(
+            dir.path().to_path_buf(),
+            Some(open_aux(&db).unwrap()),
+            &[],
+            1,
+        );
+        view.handle_key(key(KeyCode::Char('r')));
+        for c in "ship".chars() {
+            view.handle_key(key(KeyCode::Char(c)));
+        }
+        let out = view.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(
+            matches!(
+                out,
+                Outcome::StartSwarm {
+                    plan_gate: true,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
+        // Tab to the gate (goal, harness, workers, isolation, gate) and turn it off.
+        view.handle_key(key(KeyCode::Char('r')));
+        for _ in 0..4 {
+            view.handle_key(key(KeyCode::Tab));
+        }
+        view.handle_key(key(KeyCode::Char(' ')));
+        view.handle_key(key(KeyCode::BackTab));
+        view.handle_key(key(KeyCode::BackTab));
+        view.handle_key(key(KeyCode::BackTab));
+        view.handle_key(key(KeyCode::BackTab));
+        for c in "ship".chars() {
+            view.handle_key(key(KeyCode::Char(c)));
+        }
+        let out = view.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(
+            matches!(
+                out,
+                Outcome::StartSwarm {
+                    plan_gate: false,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn e_sends_the_plan_back_and_opens_the_line_to_the_coordinator() {
+        let (dir, db) = store();
+        let conn = open_aux(&db).unwrap();
+        let ws = bstore::normalize_workspace(dir.path());
+        bstore::set_plan_gate(&conn, Some(&db), &ws, true, 0, 1).unwrap();
+        let live = vec![coordinator_live(&ws, "idle")];
+        let mut view = SwarmView::open(
+            dir.path().to_path_buf(),
+            Some(open_aux(&db).unwrap()),
+            &live,
+            2,
+        );
+        assert_eq!(view.selected().unwrap().kind, LaneKind::Coordinator);
+        assert_eq!(
+            view.tab(),
+            PanelTab::Task,
+            "the coordinator opens on its plan"
+        );
+        assert_eq!(
+            view.handle_key(key(KeyCode::Char('e'))),
+            Outcome::DecidePlan { approve: false }
+        );
+        assert_eq!(
+            view.command.as_ref().map(|c| c.text.text.as_str()),
+            Some("@coord #plan-changes ")
+        );
+        view.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            view.handle_key(key(KeyCode::Char('y'))),
+            Outcome::DecidePlan { approve: true }
+        );
     }
 }

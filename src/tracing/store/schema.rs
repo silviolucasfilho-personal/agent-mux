@@ -1,10 +1,10 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 18;
+pub const SCHEMA_VERSION: i32 = 19;
 
 pub const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -925,5 +925,55 @@ AFTER DELETE ON swarm_state
 BEGIN
   INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
   VALUES ('swarm', OLD.workspace, NULL, OLD.coordinator_launch, 'delete');
+END;
+"#;
+
+// v19: the swarm's plan gate and its review of finished branches
+// (`bus::store::set_plan_gate`, `record_review`). Side tables rather than
+// columns on `swarm_state`, so the migration stays replay-safe (no
+// `ADD COLUMN IF NOT EXISTS` in SQLite). Both feed `trace_changes` so the
+// swarm screen refreshes on a decision.
+const V19: &str = r#"
+CREATE TABLE IF NOT EXISTS swarm_plans (
+  workspace   TEXT PRIMARY KEY,
+  gate        INTEGER NOT NULL DEFAULT 1,
+  status      TEXT NOT NULL DEFAULT 'drafting' CHECK (status IN ('drafting','approved','sent-back')),
+  standby     INTEGER NOT NULL DEFAULT 0,
+  decided_ns  INTEGER,
+  updated_ns  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS swarm_reviews (
+  task_id     TEXT PRIMARY KEY,
+  workspace   TEXT NOT NULL,
+  verdict     TEXT NOT NULL CHECK (verdict IN ('merged','discarded')),
+  branch      TEXT,
+  detail      TEXT,
+  decided_ns  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS swarm_reviews_workspace ON swarm_reviews (workspace);
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_plans_insert
+AFTER INSERT ON swarm_plans
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_plan', NEW.workspace, NULL, NULL, 'insert');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_plans_update
+AFTER UPDATE ON swarm_plans
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_plan', NEW.workspace, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_plans_delete
+AFTER DELETE ON swarm_plans
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_plan', OLD.workspace, NULL, NULL, 'delete');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_reviews_insert
+AFTER INSERT ON swarm_reviews
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_review', NEW.task_id, NULL, NULL, 'insert');
 END;
 "#;
