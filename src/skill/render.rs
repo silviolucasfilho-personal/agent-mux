@@ -1,7 +1,9 @@
-//! The per-harness SKILL.md. The three CLIs read the same shape (a
+//! The per-harness SKILL.md. The four CLIs read the same shape (a
 //! `SKILL.md` with `name` and `description` frontmatter under
 //! `<skills-root>/<name>/`), and differ in how a user invokes the skill:
-//! Claude Code and Antigravity expand `/name`, Codex mentions `$name`.
+//! Claude Code and Antigravity expand `/name`, Codex mentions `$name`,
+//! and OpenCode has no syntax at all: its model loads a skill through its
+//! `skill` tool when the prompt asks for it by name (probed on 2.0.32).
 
 use super::SkillDefinition;
 use crate::harness::Harness;
@@ -11,6 +13,7 @@ pub fn invocation(id: &str, harness: Harness) -> String {
     match harness {
         Harness::Claude | Harness::Antigravity => format!("/{id}"),
         Harness::Codex => format!("${id}"),
+        Harness::OpenCode => format!("load skill {id}"),
     }
 }
 

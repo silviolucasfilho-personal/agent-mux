@@ -313,7 +313,7 @@ pub fn project_skills_dir(harness: Harness, workspace: &Path) -> Option<PathBuf>
     match harness {
         Harness::Claude => Some(workspace.join(".claude").join("skills")),
         Harness::Codex => Some(workspace.join(".codex").join("skills")),
-        Harness::Antigravity => None,
+        Harness::Antigravity | Harness::OpenCode => None,
     }
 }
 
@@ -332,7 +332,7 @@ pub fn verifier_path(harness: Harness, workspace: &Path) -> Option<PathBuf> {
                 .join("agents")
                 .join("verifier.toml"),
         ),
-        Harness::Antigravity => None,
+        Harness::Antigravity | Harness::OpenCode => None,
     }
 }
 
@@ -355,7 +355,7 @@ pub fn agent_path(harness: Harness, workspace: &Path, name: &str) -> Option<Path
                 .join("agents")
                 .join(format!("{name}.toml")),
         ),
-        Harness::Antigravity => None,
+        Harness::Antigravity | Harness::OpenCode => None,
     }
 }
 

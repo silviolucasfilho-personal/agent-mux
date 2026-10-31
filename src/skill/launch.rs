@@ -341,8 +341,8 @@ pub fn build_skill_launch_full(
     }
     // `auto_approve` in skill.toml is the package's own demand, so it wins
     // over a base profile that leaves approvals on: the flags below are the
-    // three CLIs' spellings of the same thing (checked against `--help` on
-    // claude 2.1.274, codex 0.154.0 and agy 1.2.4).
+    // four CLIs' spellings of the same thing (checked against `--help` on
+    // claude 2.1.274, codex 0.154.0, agy 1.2.4 and opencode 2.0.32).
     let bypass = def.auto_approve || base.bypass_approvals.unwrap_or(false);
     match harness {
         Harness::Claude => {
@@ -362,6 +362,13 @@ pub fn build_skill_launch_full(
                 args.push("--dangerously-skip-permissions".into());
             }
             args.push("--prompt-interactive".into());
+            args.push(prompt);
+        }
+        Harness::OpenCode => {
+            if bypass {
+                args.push("--auto".into());
+            }
+            args.push("--prompt".into());
             args.push(prompt);
         }
     }

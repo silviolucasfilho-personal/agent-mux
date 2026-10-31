@@ -8,6 +8,7 @@ implementations:
 | Claude Code | `claude` | `~/.claude/projects/<project>/<session>.jsonl` |
 | Codex | `codex` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
 | Antigravity | `agy` | `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript_full.jsonl` (falling back to `transcript.jsonl`) |
+| OpenCode | `opencode` | not traced yet: OpenCode 2 keeps sessions and messages in `~/.local/share/opencode/opencode.db` (tables `session_v2`, `session_message`, with tokens and cost per message) and has plugins instead of hooks; an OpenCode launch gets no trace plan and the sidebar says `not traced` |
 
 Tracing is enabled by default. It is deliberately *fail-open*: a missing
 transcript, unavailable database, malformed line, full queue, or failed
@@ -18,8 +19,8 @@ remote exporter must not block, slow, or prevent the agent session itself.
 At application startup, `TraceRuntime` resolves `[tracing]` configuration and
 opens the local SQLite trace store (by default
 `~/.agent-mux/traces.db`). A profile launch is recognized as traceable from
-its command name (`claude`, `codex`, or `agy`), or from
-`[profiles.tracing].provider` for wrapper commands.
+its command name (`claude`, `codex`, or `agy`; `opencode` is launched but not
+traced yet), or from `[profiles.tracing].provider` for wrapper commands.
 
 For each traceable launch, agent-mux:
 

@@ -108,6 +108,7 @@ pub struct ProfileTracing {
     pub enabled: Option<bool>,
     /// "claude" | "codex" | "antigravity" | "none" — forces CLI-kind
     /// detection for wrapper commands; "none" disables tracing entirely.
+    /// (OpenCode sessions are not traced yet, so it has no value here.)
     pub provider: Option<String>,
     pub content_mode: Option<String>,
     pub inject_session_id: Option<bool>,
@@ -692,6 +693,15 @@ impl Config {
                 model: None,
                 bypass_approvals: None,
             },
+            Profile {
+                name: "OpenCode".into(),
+                command: "opencode".into(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            },
         ]
     }
 }
@@ -851,6 +861,7 @@ mod tests {
         assert!(profiles.iter().any(|p| p.command == "claude"));
         assert!(profiles.iter().any(|p| p.command == "codex"));
         assert!(profiles.iter().any(|p| p.command == "agy"));
+        assert!(profiles.iter().any(|p| p.command == "opencode"));
     }
 
     fn no_env(_: &str) -> Option<String> {

@@ -18,6 +18,7 @@ pub mod markdown;
 pub mod mcp;
 pub mod memory;
 pub mod mouse;
+pub mod opencode;
 pub mod persistence;
 pub mod prompts;
 pub mod ptylog;

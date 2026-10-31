@@ -1,8 +1,8 @@
 # Shared memory (ai-memory)
 
 agent-mux does not keep a memory itself. It installs and wires
-[ai-memory](https://github.com/akitaonrails/ai-memory), so Claude Code, Codex
-and Antigravity share one memory per project.
+[ai-memory](https://github.com/akitaonrails/ai-memory), so Claude Code, Codex,
+Antigravity and OpenCode share one memory per project.
 
 ai-memory works in three parts:
 
@@ -27,7 +27,7 @@ The same flow works from a shell:
 
 ```
 agent-mux memory status [--json]
-agent-mux memory install [--yes] [--harness claude|codex|agy]...
+agent-mux memory install [--yes] [--harness claude|codex|agy|opencode]...
 agent-mux memory uninstall [--yes] [--purge-data]
 agent-mux memory backfill [--yes] [--force] [--max-sessions N] [<folder>...]
 ```
@@ -98,6 +98,7 @@ arrive masked and truncated the way the trace store keeps them.
 | Claude Code, with agent-mux's per-launch hooks at the `standard` or `strict` profile and `full` content mode | agent-mux |
 | Codex, when agent-mux's Codex trace hooks are installed | agent-mux |
 | Antigravity | ai-memory's own hooks (agent-mux records only an Antigravity session's first model call) |
+| OpenCode | ai-memory's own plugin (agent-mux does not trace OpenCode sessions yet) |
 | Loop and workflow runs | Nobody: agent-mux owns their capture and sends nothing, so headless runs stay out of the memory |
 | Sessions started outside agent-mux | ai-memory's own hooks |
 
@@ -181,8 +182,9 @@ The wiring goes into these files:
 | Claude Code | `~/.claude.json` (`mcpServers.ai-memory`) | `~/.claude/settings.json` |
 | Codex | `~/.codex/config.toml` (`[mcp_servers.ai-memory]`) | `~/.codex/hooks.json` |
 | Antigravity | `~/.gemini/config/mcp_config.json` | `~/.gemini/config/hooks.json` (group `ai-memory`) |
+| OpenCode | `~/.config/opencode/opencode.json` (`mcp.servers.ai-memory`) | `~/.config/opencode/plugins/ai-memory-opencode2.ts`, a plugin: OpenCode has no hooks (ai-memory's agent name is `open-code`; it needs `opencode` on `PATH` to pick the plugin shape) |
 
-`CLAUDE_CONFIG_DIR` and `CODEX_HOME` move the Claude and Codex files.
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `OPENCODE_CONFIG_DIR` move the Claude, Codex and OpenCode files.
 
 ## After installing
 
@@ -190,6 +192,7 @@ The wiring goes into these files:
   "Trust all and continue".
 - **Antigravity** has no session-end event. To summarise its last session,
   run `ai-memory finalize-session --agent antigravity-cli`.
+- **OpenCode** loads plugins at startup: restart it after the plugin is written.
 - **Running sessions** must be restarted to load the MCP server.
 - **The web view** is at `http://127.0.0.1:49374/web`.
 

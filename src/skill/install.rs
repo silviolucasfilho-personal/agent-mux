@@ -2,8 +2,12 @@
 //!
 //! Roots, as the trace inventory verified against the installed CLIs:
 //! Claude Code `~/.claude/skills/`, Codex `~/.codex/skills/`, Antigravity
-//! `~/.gemini/config/skills/`. agent-mux marks the directories it writes
-//! with a manifest and never overwrites a directory it did not write.
+//! `~/.gemini/config/skills/`, OpenCode `~/.config/opencode/skill/`
+//! (`$OPENCODE_CONFIG_DIR/skill/`; opencode 2.0.32 also reads `skills/`
+//! and `.claude/skills/`, at user and project level — probed 2026-10-31
+//! by loading skills from each). agent-mux marks the directories it
+//! writes with a manifest and never overwrites a directory it did not
+//! write.
 
 use super::SkillDefinition;
 use super::render::render_skill_md;
@@ -25,7 +29,17 @@ pub fn skills_root(harness: Harness, home: &Path) -> PathBuf {
         Harness::Claude => home.join(".claude").join("skills"),
         Harness::Codex => home.join(".codex").join("skills"),
         Harness::Antigravity => home.join(".gemini").join("config").join("skills"),
+        Harness::OpenCode => opencode_config_dir(home).join("skill"),
     }
+}
+
+/// OpenCode's configuration directory: `$OPENCODE_CONFIG_DIR`, else
+/// `~/.config/opencode` (`opencode debug paths`, 2.0.32).
+pub fn opencode_config_dir(home: &Path) -> PathBuf {
+    std::env::var_os("OPENCODE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config").join("opencode"))
 }
 
 /// The directory a harness scans for project-level skills under a
@@ -36,6 +50,7 @@ pub fn project_skills_root(harness: Harness, workspace: &Path) -> Option<PathBuf
         Harness::Claude => Some(workspace.join(".claude").join("skills")),
         Harness::Codex => Some(workspace.join(".codex").join("skills")),
         Harness::Antigravity => None,
+        Harness::OpenCode => Some(workspace.join(".opencode").join("skill")),
     }
 }
 

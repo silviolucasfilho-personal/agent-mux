@@ -425,17 +425,20 @@ fn provider_key(h: crate::harness::Harness) -> &'static str {
         crate::harness::Harness::Claude => "claude",
         crate::harness::Harness::Codex => "codex",
         crate::harness::Harness::Antigravity => "antigravity",
+        crate::harness::Harness::OpenCode => "opencode",
     }
 }
 
-/// `--harness claude|codex|agy` narrows the inventory.
+/// `--harness claude|codex|agy|opencode` narrows the inventory.
 fn harness_filter(args: &Args) -> anyhow::Result<Option<crate::harness::Harness>> {
     match args.value("harness") {
         None => Ok(None),
         Some(h) => crate::harness::Harness::detect(h)
             .or_else(|| (h == "antigravity").then_some(crate::harness::Harness::Antigravity))
             .map(Some)
-            .ok_or_else(|| anyhow::anyhow!("unknown harness {h:?}: claude, codex or agy")),
+            .ok_or_else(|| {
+                anyhow::anyhow!("unknown harness {h:?}: claude, codex, agy or opencode")
+            }),
     }
 }
 
@@ -558,11 +561,7 @@ fn skills_lint(args: &Args) -> anyhow::Result<()> {
         crate::harness::Harness,
         std::collections::HashSet<String>,
     > = std::collections::HashMap::new();
-    for h in [
-        crate::harness::Harness::Claude,
-        crate::harness::Harness::Codex,
-        crate::harness::Harness::Antigravity,
-    ] {
+    for h in crate::harness::Harness::ALL {
         let seen = conn
             .as_ref()
             .and_then(|c| query::tool_names(c, provider_key(h)).ok())

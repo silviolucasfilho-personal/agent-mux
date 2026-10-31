@@ -121,7 +121,7 @@ The card and the Setup tab name what is still missing, in those words. An older 
 
 A loop run passes `--dangerously-skip-permissions` (Claude Code) or `--yolo` (Codex) whatever the profile says: print mode cannot answer an approval prompt, and the guard, the gate and the worktree are the controls instead.
 
-Per harness: Claude Code may edit (per-launch guard with `--loop`, fail-closed for write tools); Codex may edit with `agent-mux trace hooks install codex`, else it only reports; Antigravity is not supported (section 8).
+Per harness: Claude Code may edit (per-launch guard with `--loop`, fail-closed for write tools); Codex may edit with `agent-mux trace hooks install codex`, else it only reports; Antigravity and OpenCode are not supported (section 10).
 
 A loop that edits can still run as report-only for one run: tokens today at 80 % or more of the cap, a circuit breaker one attempt short of tripping (two identical errors where three trip it, nine attempts where ten are the cap), a stale state file (`Last run` older than 14 days), a readiness gate that no longer holds, or a missing guard make that run report only; the reason travels in the context (`run.level_reason`, `breaker.near_trip`) and the preview, so the loop reports instead of spending its last attempt.
 
@@ -208,7 +208,9 @@ The **Setup** tab (`3`) is everything about the loop that is not a run: what it 
 - **Loops**: runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. For a run with a branch, `a` marks it **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed. A run that asked for a decision without a branch reads `a` done and `x` dismiss; both record the decision. `Enter` opens its loop's History, `T` its traces.
 - **Workflows**: plans the planner wrote that wait for you (`Enter` opens one in the runs view, `d` discards it) and runs since startup that did not finish cleanly (`Enter` opens the run, `x` dismisses it from the inbox for this session).
 
-## 10. Antigravity
+## 10. Antigravity and OpenCode
+
+OpenCode is not supported for loops either: it has plugins, not hooks, so no `PreToolUse` guard can be registered, and agent-mux does not trace its sessions yet, so a run's facts (tokens, files touched) could not be computed. The loop dialog and `agent-mux loop` refuse an OpenCode profile.
 
 Not supported for loops in this version. agy 1.2.3 requires a `decision` in every `PreToolUse` reply and each value changes permission behaviour, so no selective path guard can be registered; its hooks and MCP entry are global installs, its skills and agents are user-level only, and sub-agent spawning is unverified. The spec's section 16 lists the probes and the two deliveries that bring it in.
 

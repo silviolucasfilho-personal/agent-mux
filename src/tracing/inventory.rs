@@ -340,6 +340,49 @@ fn roots(harness: Harness, cwd: &Path, home: &Path) -> Vec<Root> {
                 agy_plugin(name, &path, &mut r);
             }
         }
+        Harness::OpenCode => {
+            // opencode 2.0.32 reads `skill/` and `skills/` under its
+            // config directory and the project's `.opencode/`, plus
+            // `.claude/skills/` (probed by loading a skill from each)
+            for (dir, scope) in [
+                (cwd.join(".opencode"), Scope::Project),
+                (
+                    crate::skill::install::opencode_config_dir(home),
+                    Scope::Home,
+                ),
+            ] {
+                for name in ["skill", "skills"] {
+                    r.push(Root {
+                        dir: dir.join(name),
+                        kind: Kind::Skill,
+                        layout: Layout::SkillDirs,
+                        scope: scope.clone(),
+                    });
+                }
+                for name in ["agent", "agents"] {
+                    r.push(Root {
+                        dir: dir.join(name),
+                        kind: Kind::Agent,
+                        layout: Layout::MdFiles,
+                        scope: scope.clone(),
+                    });
+                }
+                for name in ["command", "commands"] {
+                    r.push(Root {
+                        dir: dir.join(name),
+                        kind: Kind::Command,
+                        layout: Layout::MdFiles,
+                        scope: scope.clone(),
+                    });
+                }
+            }
+            r.push(Root {
+                dir: cwd.join(".claude").join("skills"),
+                kind: Kind::Skill,
+                layout: Layout::SkillDirs,
+                scope: Scope::Project,
+            });
+        }
     }
     r
 }
@@ -422,9 +465,9 @@ pub fn inventory(harness: Harness, cwd: &Path, home: &Path) -> Vec<Definition> {
     out
 }
 
-/// All three harnesses.
+/// All four harnesses.
 pub fn inventory_all(cwd: &Path, home: &Path) -> Vec<Definition> {
-    [Harness::Claude, Harness::Codex, Harness::Antigravity]
+    Harness::ALL
         .into_iter()
         .flat_map(|h| inventory(h, cwd, home))
         .collect()
@@ -613,7 +656,7 @@ pub fn known_tools(harness: Harness, seen: impl IntoIterator<Item = String>) -> 
     let mut set: HashSet<String> = match harness {
         Harness::Claude => CLAUDE_TOOLS.iter().map(|t| t.to_string()).collect(),
         // no verified floor for these: only what was measured
-        Harness::Codex | Harness::Antigravity => HashSet::new(),
+        Harness::Codex | Harness::Antigravity | Harness::OpenCode => HashSet::new(),
     };
     set.extend(seen);
     set
