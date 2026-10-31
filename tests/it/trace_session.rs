@@ -802,7 +802,7 @@ async fn an_antigravity_session_persists_newest_conversation_on_disk_across_rest
     let profile = Profile {
         name: "Antigravity".into(),
         command: agy_bin.to_string_lossy().into_owned(),
-        args: vec!["--conversation".into(), old_conv.into()],
+        args: vec![],
         default_dir: None,
         tracing: None,
         model: None,

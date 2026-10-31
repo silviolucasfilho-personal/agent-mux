@@ -3524,7 +3524,25 @@ impl App {
         session: &Session,
         conn: Option<&rusqlite::Connection>,
     ) -> Option<String> {
+        let trace_conv = conn.zip(session.trace.as_ref()).and_then(|(c, t)| {
+            crate::tracing::store::query::launch_conversation(c, &t.launch_id)
+                .ok()
+                .flatten()
+        });
+
         let harness = crate::harness::Harness::detect(&session.profile.command);
+
+        // For non-Claude harnesses (Antigravity, Codex, OpenCode), an explicit conversation
+        // recorded by the session or trace is definitive and must not be guessed from disk.
+        if harness != Some(crate::harness::Harness::Claude)
+            && let Some(conv) = trace_conv
+                .as_ref()
+                .cloned()
+                .or_else(|| session.conversation.clone())
+        {
+            return Some(conv);
+        }
+
         let disk_conv = match harness {
             Some(crate::harness::Harness::Claude) => {
                 let dir = self.claude_dir.clone().or_else(history::default_claude_dir);
@@ -3542,12 +3560,6 @@ impl App {
             }
             Some(crate::harness::Harness::Codex) | None => None,
         };
-
-        let trace_conv = conn.zip(session.trace.as_ref()).and_then(|(c, t)| {
-            crate::tracing::store::query::launch_conversation(c, &t.launch_id)
-                .ok()
-                .flatten()
-        });
 
         let disk_claimed_by_other = disk_conv.as_ref().is_some_and(|disk_id| {
             self.sessions.iter().any(|other| {
