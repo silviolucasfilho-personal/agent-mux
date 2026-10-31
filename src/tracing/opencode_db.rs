@@ -96,6 +96,42 @@ pub fn newest_session_in(db: &Path, cwd: &Path, since_ms: i64) -> Option<(String
     .ok()
 }
 
+/// A session as `session_v2` lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionInfo {
+    pub id: String,
+    pub directory: String,
+    /// Set on a subagent's session.
+    pub parent_id: Option<String>,
+    /// Milliseconds since the epoch.
+    pub time_created: i64,
+}
+
+/// Every session in the database that has at least one message, oldest
+/// first (subagent sessions included: each is a conversation of its own).
+pub fn list_sessions(db: &Path) -> Vec<SessionInfo> {
+    let Some(conn) = open(db) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT s.id, s.directory, s.parent_id, s.time_created FROM session_v2 s
+         WHERE EXISTS (SELECT 1 FROM session_message m WHERE m.session_id = s.id)
+         ORDER BY s.time_created, s.id",
+    ) else {
+        return Vec::new();
+    };
+    stmt.query_map([], |r| {
+        Ok(SessionInfo {
+            id: r.get(0)?,
+            directory: r.get(1)?,
+            parent_id: r.get(2)?,
+            time_created: r.get(3)?,
+        })
+    })
+    .map(|rows| rows.flatten().collect())
+    .unwrap_or_default()
+}
+
 /// One session's message rows, handed over as transcript events as they
 /// complete.
 #[derive(Debug)]
@@ -125,6 +161,12 @@ impl OpenCodeReader {
 
     /// The completed rows since the last poll, in order.
     pub fn poll(&mut self) -> Vec<TranscriptEvent> {
+        self.poll_rows().into_iter().flat_map(|(_, e)| e).collect()
+    }
+
+    /// `poll`, grouped by row with the row's `time.created` (milliseconds):
+    /// an import clocks itself by it.
+    pub fn poll_rows(&mut self) -> Vec<(Option<i64>, Vec<TranscriptEvent>)> {
         let Some(conn) = open(&self.db) else {
             return Vec::new();
         };
@@ -145,7 +187,7 @@ impl OpenCodeReader {
         let Ok(rows) = rows else {
             return Vec::new();
         };
-        let mut events = Vec::new();
+        let mut out = Vec::new();
         for row in rows.flatten() {
             let (id, kind, seq, data) = row;
             let data: serde_json::Value = serde_json::from_str(&data).unwrap_or_default();
@@ -159,7 +201,11 @@ impl OpenCodeReader {
                 // still streaming: everything from here on waits
                 break;
             }
-            events.extend(opencode_row_events(&id, &kind, &data));
+            let created = data
+                .get("time")
+                .and_then(|t| t.get("created"))
+                .and_then(serde_json::Value::as_i64);
+            let mut events = opencode_row_events(&id, &kind, &data);
             if kind == "assistant" {
                 let cost = data
                     .get("cost")
@@ -180,8 +226,9 @@ impl OpenCodeReader {
                 }
             }
             self.last_seq = seq;
+            out.push((created, events));
         }
-        events
+        out
     }
 }
 
@@ -299,6 +346,28 @@ mod tests {
                 .poll()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn sessions_with_messages_are_listed_oldest_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("opencode.db");
+        let conn = fixture::create(&db);
+        fixture::session(&conn, "ses_b", "/work", 200);
+        fixture::session(&conn, "ses_a", "/work", 100);
+        fixture::session(&conn, "ses_empty", "/work", 300);
+        fixture::message(&conn, "ses_a", 1, "user", USER);
+        fixture::message(&conn, "ses_b", 1, "user", USER);
+        let ids: Vec<String> = list_sessions(&db).into_iter().map(|s| s.id).collect();
+        assert_eq!(
+            ids,
+            vec!["ses_a", "ses_b"],
+            "a session without messages is not listed"
+        );
+        assert!(list_sessions(Path::new("/nonexistent/opencode.db")).is_empty());
+        let rows = OpenCodeReader::new(db, "ses_a").poll_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, Some(1000));
     }
 
     #[test]

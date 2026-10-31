@@ -827,7 +827,7 @@ Because ids are content-derived, replaying a transcript, re-importing a file, or
 
 A transcript that yields no trace and no observation is **skipped whole**: no session row, no launch row, nothing. Such files are common — a CLI opened and closed without a prompt writes only its `agent-setting`, `mode`, `permission-mode` and `cost-state` lines, and a slash command the CLI rejects (`Unknown command: /x`) ends the session before the first turn opens. Seeding a session for one leaves a permanently empty row in every listing and in the dossier. `ImportSummary::empty` reports the skip and the CLI prints `skipped <path>: no turns in transcript`; the run's closing line counts them separately.
 
-Once a transcript does carry a turn, a session flagged `legacy_capture` has its capture rows replaced transactionally, ops are applied in chunks of 512, and `recompute_session_bounds` follows. `--discover` enumerates every transcript the history viewer finds plus `rollout-*.jsonl` under `<codex_dir>/sessions` to depth 6.
+Once a transcript does carry a turn, a session flagged `legacy_capture` has its capture rows replaced transactionally, ops are applied in chunks of 512, and `recompute_session_bounds` follows. `--discover` enumerates every transcript the history viewer finds plus `rollout-*.jsonl` under `<codex_dir>/sessions` to depth 6, plus every session with messages in OpenCode's database (`discover_sources` → `ImportSource::OpenCode`; `import_opencode_session` reads its completed rows like a live launch, dates the session by OpenCode's own `time_created` and derives the launch id from the database and session id, so a re-import rewrites the same rows); `--provider` narrows the sweep to one provider. Both paths share `import_rows`.
 
 ### 5.10 Antigravity usage database (`agy_usage.rs`)
 
@@ -1520,7 +1520,7 @@ The remaining analysis-service requests are listed in section 10.
 
 | Command | Side effects |
 | --- | --- |
-| `trace import <path>… \| --discover [--provider claude\|codex\|antigravity] [--content-mode full\|metadata]` | Opens/creates/migrates the store and assembles transcripts into idempotent rows (section 5.9). |
+| `trace import <path>… \| --discover [--provider claude\|codex\|antigravity\|opencode] [--content-mode full\|metadata]` | Opens/creates/migrates the store and assembles transcripts, and OpenCode's sessions from its database, into idempotent rows (section 5.9). |
 | `trace export [--session ID] [--since 30d] [--out FILE]` | JSON Lines of `sessions`, `launches`, `traces`, `observations`, `hook_events` only (each row tagged `table`); not a full backup. |
 | `trace export --langfuse [--session ID] [--since 30d] [--dry-run]` | Replays stored sessions to Langfuse (section 13). |
 | `trace prune [--older-than 90d] [--vacuum] [--dry-run]` | Section 7.7. Dry run still opens the store writable (run row, migration). |

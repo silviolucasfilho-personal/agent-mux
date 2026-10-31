@@ -262,6 +262,15 @@ completes it, anything else aborts it). The message `cost` OpenCode
 reports is summed into the turn's `provided_cost` (`$` in the sidebar,
 not `≈$`), so a free model shows `$0.00`.
 
+**Backfill.** `agent-mux trace import --discover` imports every OpenCode
+session that has messages, alongside the transcript files
+(`--discover --provider opencode` for OpenCode alone). It reads the same
+completed rows a live launch reads, dates the session by OpenCode's own
+clock, and is idempotent: the launch id derives from the database path and
+the session id, so running it again rewrites the same rows, and a session
+still running imports up to its message in progress. A subagent's session
+imports as a session of its own.
+
 **No hooks.** OpenCode has plugins, not hooks; on 2.0.32 a plugin file in
 its `plugins/` directory is not loaded by a standalone server and hangs
 `opencode run --standalone`, so agent-mux registers none: the write guard,
