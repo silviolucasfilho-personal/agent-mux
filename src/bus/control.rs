@@ -54,7 +54,14 @@ pub enum ControlRequest {
         harness: Option<String>,
         max_workers: usize,
         isolation: TaskIsolation,
+        /// The plan gate: workers wait for the operator to approve the
+        /// coordinator's plan. Absent means on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_gate: Option<bool>,
     },
+    /// End `workspace`'s swarm: stop its coordinator and worker sessions,
+    /// cancel its open tasks, release its leases, forget it.
+    StopSwarm { workspace: String },
 }
 
 /// Response returned from `App` to the control socket client.
