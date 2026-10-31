@@ -1,6 +1,6 @@
 //! Drawing Swarm Mission Control (`crate::app::swarm_view`): the mission
-//! strip, the lanes, the focus panel (Live, Thread, Changes, Task) or the
-//! swarm's Activity, and the footer.
+//! strip, the Needs-you strip, the lanes, the focus panel (Live, Thread,
+//! Changes, Task) or the swarm's Activity, and the footer.
 
 use super::flow::{dim, head, hints};
 use crate::app::App;
@@ -9,8 +9,8 @@ use crate::app::swarm_view::{
     SwarmView, TaskField, WorkerField, format_task_detail_lines,
 };
 use crate::app::workspaces_view::tilde_path;
-use crate::bus::swarm::{Lane, LaneKind, LaneState, Phase};
-use crate::bus::{BusMessage, TaskStatus, short_id};
+use crate::bus::swarm::{ActivityItem, Lane, LaneKind, LaneState, NeedKind, Phase};
+use crate::bus::{TaskStatus, short_id};
 use crate::tracing::cli::{fmt_cost, fmt_tokens};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -29,7 +29,24 @@ pub fn draw(f: &mut Frame, area: Rect, v: &SwarmView, app: &App) {
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
-    let [body, foot] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+    // The strip lists up to five needs while it has focus, three otherwise,
+    // and one line when nothing needs the operator.
+    let shown = v
+        .needs
+        .len()
+        .min(if v.focus == Focus::Needs { 5 } else { 3 });
+    let needs_h = if v.needs.is_empty() {
+        1
+    } else {
+        1 + shown as u16
+    };
+    let [needs_area, body, foot] = Layout::vertical([
+        Constraint::Length(needs_h.min(inner.height.saturating_sub(4))),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    draw_needs(f, needs_area, v, shown);
     let lanes_w = (body.width * 44 / 100).clamp(36.min(body.width), 64);
     let [lanes_area, panel_area] =
         Layout::horizontal([Constraint::Length(lanes_w), Constraint::Min(0)]).areas(body);
@@ -358,7 +375,9 @@ fn draw_panel(f: &mut Frame, area: Rect, v: &SwarmView, lane: &Lane, app: &App) 
                     content,
                 );
             } else {
-                draw_messages(f, content, v, &msgs, focused);
+                let items: Vec<ActivityItem<'_>> =
+                    msgs.into_iter().map(ActivityItem::Message).collect();
+                draw_messages(f, content, v, &items, focused);
             }
         }
         PanelTab::Changes => {
@@ -422,14 +441,14 @@ fn draw_panel(f: &mut Frame, area: Rect, v: &SwarmView, lane: &Lane, app: &App) 
 
 fn draw_activity(f: &mut Frame, area: Rect, v: &SwarmView) {
     let focused = v.focus == Focus::Panel;
-    let msgs = v.panel_messages();
+    let items = v.activity_items();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(focus_border(focused))
         .title(Span::styled(
             format!(
                 " Activity · whole swarm ({}) · a back to the lane ",
-                msgs.len()
+                items.len()
             ),
             if focused {
                 head()
@@ -439,23 +458,117 @@ fn draw_activity(f: &mut Frame, area: Rect, v: &SwarmView) {
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
-    if msgs.is_empty() {
+    if items.is_empty() {
         f.render_widget(
             Paragraph::new(vec![
                 Line::raw(""),
-                Line::styled("  Nothing said yet. b writes to everyone.", dim()),
+                Line::styled("  Nothing has happened yet. b writes to everyone.", dim()),
             ]),
             inner,
         );
         return;
     }
-    draw_messages(f, inner, v, &msgs, focused);
+    draw_messages(f, inner, v, &items, focused);
+}
+
+/// The Needs-you strip: a header and up to `shown` needs, each with its kind,
+/// what it is about and how long ago; one quiet line when there are none.
+fn draw_needs(f: &mut Frame, area: Rect, v: &SwarmView, shown: usize) {
+    if area.height == 0 {
+        return;
+    }
+    if v.needs.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" ✓ ", Style::default().fg(Color::Green)),
+                Span::styled("Nothing needs you.", dim()),
+            ])),
+            area,
+        );
+        return;
+    }
+    let focused = v.focus == Focus::Needs;
+    let width = area.width as usize;
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!(" ⚑ NEEDS YOU ({}) ", v.needs.len()),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if focused {
+                "  Enter act · r retry · d dismiss · Esc back"
+            } else {
+                "  ! to act"
+            },
+            dim(),
+        ),
+    ])];
+    let start = if focused {
+        super::sidebar_window(v.selected_need, v.needs.len(), shown.max(1))
+    } else {
+        0
+    };
+    for (i, need) in v.needs.iter().enumerate().skip(start).take(shown) {
+        let selected = focused && i == v.selected_need;
+        let kind_style = match need.kind {
+            NeedKind::Failed | NeedKind::Lost => {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            }
+            NeedKind::Attention | NeedKind::Question | NeedKind::Stuck => Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            NeedKind::CapReached | NeedKind::Review => Style::default().fg(Color::Cyan),
+        };
+        let age = format!(
+            "  {}",
+            crate::bus::swarm::short_age(v.now_ns - need.since_ns)
+        );
+        let label = format!("{:<10}", need.kind.label());
+        let room = width.saturating_sub(4 + label.len() + age.len());
+        lines.push(
+            Line::from(vec![
+                Span::styled(
+                    if selected { " ▸ " } else { "   " },
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(label, kind_style),
+                Span::styled(
+                    truncate_str(&need.text, room),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(age, dim()),
+            ])
+            .style(if selected {
+                Style::default().bg(Color::Rgb(52, 44, 20))
+            } else {
+                Style::default()
+            }),
+        );
+    }
+    let hidden = v.needs.len().saturating_sub(shown);
+    if hidden > 0
+        && !focused
+        && let Some(last) = lines.last_mut()
+    {
+        last.spans
+            .push(Span::styled(format!("   +{hidden} more"), dim()));
+    }
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Messages as a conversation: a header line (time, sender → recipient,
-/// topic) and the body, wrapped, up to six lines; the chosen one is kept in
-/// view and marked.
-fn draw_messages(f: &mut Frame, area: Rect, v: &SwarmView, msgs: &[&BusMessage], focused: bool) {
+/// topic) and the body, wrapped, up to six lines; an event is one line (time,
+/// who, what). The chosen line is kept in view and marked.
+fn draw_messages(
+    f: &mut Frame,
+    area: Rect,
+    v: &SwarmView,
+    items: &[ActivityItem<'_>],
+    focused: bool,
+) {
     let width = (area.width as usize).saturating_sub(4).max(16);
     let open: Vec<&str> = v
         .snapshot
@@ -465,9 +578,40 @@ fn draw_messages(f: &mut Frame, area: Rect, v: &SwarmView, msgs: &[&BusMessage],
         .collect();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut sel_range = (0usize, 0usize);
-    for (i, m) in msgs.iter().enumerate() {
+    for (i, item) in items.iter().enumerate() {
         let selected = i == v.selected_message;
         let first = lines.len();
+        let marker = Span::styled(
+            if selected && focused { "▸ " } else { "  " },
+            Style::default().fg(Color::Cyan),
+        );
+        let m = match item {
+            ActivityItem::Message(m) => *m,
+            ActivityItem::Event {
+                at_ns, who, text, ..
+            } => {
+                let who_label = who
+                    .as_deref()
+                    .map(|w| v.snapshot.member_label(w))
+                    .unwrap_or_default();
+                let room = (area.width as usize)
+                    .saturating_sub(13 + unicode_width::UnicodeWidthStr::width(who_label.as_str()));
+                let text = truncate_str(text, room.max(8));
+                lines.push(Line::from(vec![
+                    marker,
+                    Span::styled(format!("{} ", fmt_clock(*at_ns)), dim()),
+                    Span::styled(
+                        who_label,
+                        Style::default().fg(who.as_deref().map_or(Color::Gray, agent_color)),
+                    ),
+                    Span::styled(format!(" {text}"), dim()),
+                ]));
+                if selected {
+                    sel_range = (first, lines.len());
+                }
+                continue;
+            }
+        };
         let from = v.snapshot.member_label(&m.from_launch);
         let to = m
             .to_launch
@@ -475,10 +619,7 @@ fn draw_messages(f: &mut Frame, area: Rect, v: &SwarmView, msgs: &[&BusMessage],
             .map(|t| v.snapshot.member_label(t))
             .unwrap_or_else(|| "everyone".into());
         let head = vec![
-            Span::styled(
-                if selected && focused { "▸ " } else { "  " },
-                Style::default().fg(Color::Cyan),
-            ),
+            marker,
             Span::styled(format!("{} ", fmt_clock(m.created_ns)), dim()),
             Span::styled(
                 from,
@@ -625,7 +766,16 @@ fn draw_footer(f: &mut Frame, area: Rect, v: &SwarmView) {
     }
     let lists_messages = v.activity || v.tab() == PanelTab::Thread;
     let queued = v.selected().is_some_and(|l| l.kind == LaneKind::Queued);
-    let pairs: &[(&str, &str)] = if v.lanes.is_empty() {
+    let pairs: &[(&str, &str)] = if v.focus == Focus::Needs {
+        &[
+            ("↑↓", "need"),
+            ("Enter", "act"),
+            ("r", "retry"),
+            ("d", "dismiss"),
+            ("1-4", "view"),
+            ("Tab/Esc", "lanes"),
+        ]
+    } else if v.lanes.is_empty() {
         &[("r", "start a swarm"), ("Esc", "close")]
     } else if v.focus == Focus::Panel && lists_messages {
         &[

@@ -2,7 +2,7 @@
 //! the lanes, a waiting lane's thread with its clock and whole question, the
 //! task tab, a message opened in full and a reply that answers it.
 
-use agent_mux::app::swarm_view::{Focus, Modal, PanelTab, SwarmView};
+use agent_mux::app::swarm_view::{Focus, Modal, Outcome, PanelTab, SwarmView};
 use agent_mux::app::{App, Mode};
 use agent_mux::bus::store as bstore;
 use agent_mux::bus::swarm::{LaneState, LiveSwarmSession};
@@ -53,6 +53,7 @@ fn live(idx: usize, launch: &str, provider: &str, state: &str, ws: &str) -> Live
         tokens: 1_000,
         cost_usd: 0.01,
         running_tool: None,
+        quiet_ns: None,
     }
 }
 
@@ -294,4 +295,162 @@ fn enter_opens_a_message_in_full_and_m_answers_it() {
         }
         other => panic!("expected the composer, got {other:?}"),
     }
+}
+
+/// The fixture plus a question to the operator and a failed task.
+fn needs_fixture(dir: &Path) -> (PathBuf, PathBuf, Vec<LiveSwarmSession>, i64, String, String) {
+    let (ws, db, sessions, now) = swarm_fixture(dir);
+    let conn = open_aux(&db).unwrap();
+    let norm = bstore::normalize_workspace(&ws);
+    let q = bstore::send_message(
+        &conn,
+        Some(&db),
+        &norm,
+        "worker-aaaa",
+        Some("user"),
+        "question",
+        "May I drop the v15 trigger while migrating?",
+        None,
+        now - 60_000_000_000,
+    )
+    .unwrap();
+    let failed = bstore::split_tasks(
+        &conn,
+        Some(&db),
+        &norm,
+        "coord-1111",
+        &[NewTaskSpec {
+            title: "UI tests".into(),
+            instructions: "the tests".into(),
+            assigned_to: Some("worker-cccc".into()),
+            ..Default::default()
+        }],
+        now - 300_000_000_000,
+    )
+    .unwrap()
+    .remove(0);
+    bstore::update_task(
+        &conn,
+        Some(&db),
+        &failed.id,
+        "worker-cccc",
+        TaskStatus::Failed,
+        None,
+        Some("cargo test exit 101".into()),
+        None,
+        None,
+        now - 120_000_000_000,
+    )
+    .unwrap();
+    (ws, db, sessions, now, q.id, failed.id)
+}
+
+#[test]
+fn nothing_needing_you_is_one_quiet_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, db, sessions, now) = swarm_fixture(dir.path());
+    let mut app = app();
+    app.mode = Mode::Swarm(Box::new(open(&ws, &db, &sessions, now)));
+    let screen = render(&app, 120, 20);
+    assert!(
+        screen
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains("Nothing needs you."),
+        "{screen}"
+    );
+}
+
+#[test]
+fn the_strip_lists_what_needs_you_and_bang_acts_on_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, db, sessions, now, question, failed) = needs_fixture(dir.path());
+    let view = open(&ws, &db, &sessions, now);
+    assert_eq!(view.needs.len(), 2, "{:#?}", view.needs);
+    let mut app = app();
+    app.mode = Mode::Swarm(Box::new(view));
+    let screen = render(&app, 120, 20);
+    let strip: Vec<&str> = screen.lines().skip(1).take(3).collect();
+    assert!(strip[0].contains("NEEDS YOU (2)"), "{screen}");
+    assert!(
+        strip[1].contains("question  worker·claude asks you: \"May I drop the v15 trigger"),
+        "{screen}"
+    );
+    assert!(
+        strip[2].contains("failed    worker-c failed \"UI tests\": cargo test exit 101"),
+        "{screen}"
+    );
+    assert!(screen.contains("waiting 1m on you"), "{screen}");
+
+    let Mode::Swarm(view) = app.mode else {
+        unreachable!()
+    };
+    let mut view = *view;
+    // `!` focuses the strip; Enter on a question answers it.
+    view.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT));
+    assert_eq!(view.focus, Focus::Needs);
+    view.handle_key(key(KeyCode::Enter));
+    match &view.modal {
+        Some(Modal::ComposeMessage {
+            to_launch,
+            reply_to,
+            ..
+        }) => {
+            assert_eq!(to_launch.as_deref(), Some("worker-aaaa"));
+            assert_eq!(reply_to.as_deref(), Some(question.as_str()));
+        }
+        other => panic!("expected the composer, got {other:?}"),
+    }
+    view.handle_key(key(KeyCode::Esc));
+
+    // `r` retries the failed task; `d` dismisses it.
+    view.handle_key(key(KeyCode::Down));
+    assert_eq!(
+        view.handle_key(key(KeyCode::Char('r'))),
+        Outcome::RetryTask {
+            task_id: failed.clone()
+        }
+    );
+    view.handle_key(key(KeyCode::Char('d')));
+    assert_eq!(view.needs.len(), 1);
+    assert!(
+        view.needs
+            .iter()
+            .all(|n| n.task_id.as_deref() != Some(&failed))
+    );
+
+    // A refresh does not bring the dismissed failure back.
+    view.refresh(&sessions, now + 1);
+    assert_eq!(view.needs.len(), 1);
+}
+
+#[test]
+fn activity_tells_the_story_with_task_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, db, sessions, now, _, _) = needs_fixture(dir.path());
+    let mut view = open(&ws, &db, &sessions, now);
+    view.handle_key(key(KeyCode::Char('a')));
+    view.handle_key(key(KeyCode::Tab));
+    // It opens on the newest line; `g` goes back to how it began.
+    view.handle_key(key(KeyCode::Char('g')));
+    let mut app = app();
+    app.mode = Mode::Swarm(Box::new(view));
+    let screen = render(&app, 120, 40);
+    for line in [
+        "coordinator·claude planned \"Add swarm view state",
+        "worker-c failed \"UI tests\"",
+    ] {
+        assert!(screen.contains(line), "{line:?} missing:\n{screen}");
+    }
+    let Mode::Swarm(mut view) = app.mode else {
+        unreachable!()
+    };
+    view.handle_key(key(KeyCode::Char('G')));
+    app.mode = Mode::Swarm(view);
+    let screen = render(&app, 120, 40);
+    assert!(
+        screen.contains("worker·claude → User  open question"),
+        "{screen}"
+    );
 }

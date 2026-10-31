@@ -48,6 +48,8 @@ pub struct LiveSwarmSession {
     pub tokens: i64,
     pub cost_usd: f64,
     pub running_tool: Option<String>,
+    /// Nanoseconds since the session last printed anything.
+    pub quiet_ns: Option<i64>,
 }
 
 /// One member (Coordinator or Worker) of a workspace swarm.
@@ -71,6 +73,9 @@ pub struct SwarmMember {
     pub cost_usd: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running_tool: Option<String>,
+    /// Nanoseconds since its session last printed anything (live sessions only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_ns: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,6 +277,7 @@ pub fn load_snapshot(
             tokens: ls.tokens,
             cost_usd: ls.cost_usd,
             running_tool: ls.running_tool.clone(),
+            quiet_ns: ls.quiet_ns,
             worktree: assigned_task.and_then(|t| t.worktree.clone()),
             branch: assigned_task.and_then(|t| t.branch.clone()),
         });
@@ -323,6 +329,7 @@ pub fn load_snapshot(
             tokens,
             cost_usd,
             running_tool: None,
+            quiet_ns: None,
             worktree: assigned_task.and_then(|t| t.worktree.clone()),
             branch: assigned_task.and_then(|t| t.branch.clone()),
         });
@@ -511,6 +518,8 @@ pub struct Lane {
     /// When its oldest unanswered question was asked.
     pub waiting_since_ns: Option<i64>,
     pub unread: usize,
+    /// How long its session has printed nothing, for a live lane.
+    pub quiet_ns: Option<i64>,
 }
 
 fn first_line(s: &str, max: usize) -> String {
@@ -638,6 +647,7 @@ impl SwarmSnapshot {
                 leases: Vec::new(),
                 waiting_since_ns: None,
                 unread: 0,
+                quiet_ns: None,
             });
         }
         out
@@ -681,11 +691,11 @@ impl SwarmSnapshot {
             LaneState::Attention => "needs you in its terminal".into(),
             LaneState::Waiting => {
                 let q = waiting.expect("waiting has a question");
-                let to = q
-                    .to_launch
-                    .as_deref()
-                    .map(|t| self.member_label(t))
-                    .unwrap_or_else(|| "everyone".into());
+                let to = match q.to_launch.as_deref() {
+                    Some(t) if is_operator(t) => "you".to_string(),
+                    Some(t) => self.member_label(t),
+                    None => "everyone".into(),
+                };
                 format!("waiting {} on {to}", short_age(now - q.created_ns))
             }
             LaneState::Working => match &m.running_tool {
@@ -721,7 +731,303 @@ impl SwarmSnapshot {
             leases,
             waiting_since_ns: waiting.map(|q| q.created_ns),
             unread: m.unread_messages,
+            quiet_ns: m.quiet_ns,
         }
+    }
+}
+
+/// What a [`Need`] asks of the operator, in the order the strip lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NeedKind {
+    /// A session waits on a prompt in its terminal.
+    Attention,
+    /// A question to the operator, or one nobody answered for `STUCK_AFTER`.
+    Question,
+    Failed,
+    /// A task still open whose session exited.
+    Lost,
+    /// Idle on an unfinished task for `STUCK_AFTER`, no tool running.
+    Stuck,
+    /// The worker cap is reached while tasks wait.
+    CapReached,
+    /// A task finished in a worktree: its branch waits for review.
+    Review,
+}
+
+impl NeedKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            NeedKind::Attention => "needs you",
+            NeedKind::Question => "question",
+            NeedKind::Failed => "failed",
+            NeedKind::Lost => "lost",
+            NeedKind::Stuck => "stuck",
+            NeedKind::CapReached => "cap",
+            NeedKind::Review => "review",
+        }
+    }
+
+    /// Whether `r` can retry it (re-open the task and delegate it again).
+    pub fn retryable(self) -> bool {
+        matches!(self, NeedKind::Failed | NeedKind::Lost)
+    }
+}
+
+/// One thing in the swarm only the operator can resolve.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Need {
+    pub kind: NeedKind,
+    /// Identifies this occurrence, so a dismissal does not hide the next one
+    /// (a task failing again, a later question).
+    pub key: String,
+    /// The lane it is about, when there is one.
+    pub lane_key: Option<String>,
+    pub text: String,
+    pub since_ns: i64,
+    pub message_id: Option<String>,
+    pub task_id: Option<String>,
+}
+
+fn is_operator(launch: &str) -> bool {
+    matches!(launch, "user" | "operator" | "cli")
+}
+
+/// A line of the Activity timeline: a message, or something that happened
+/// to a task or a lease.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActivityItem<'a> {
+    Message(&'a BusMessage),
+    Event {
+        at_ns: i64,
+        /// Who did it, a launch id.
+        who: Option<String>,
+        text: String,
+        /// The lane it concerns, for `Enter`.
+        lane_key: Option<String>,
+    },
+}
+
+impl ActivityItem<'_> {
+    pub fn at_ns(&self) -> i64 {
+        match self {
+            ActivityItem::Message(m) => m.created_ns,
+            ActivityItem::Event { at_ns, .. } => *at_ns,
+        }
+    }
+}
+
+impl SwarmSnapshot {
+    /// What only the operator can resolve, most urgent first, each kind
+    /// oldest first. `lanes` is `self.lanes(now)`.
+    pub fn needs(&self, lanes: &[Lane], now: i64) -> Vec<Need> {
+        let mut out = Vec::new();
+        let lane_of = |launch: &str| {
+            lanes
+                .iter()
+                .find(|l| l.launch_id.as_deref() == Some(launch))
+        };
+        for lane in lanes.iter().filter(|l| l.state == LaneState::Attention) {
+            out.push(Need {
+                kind: NeedKind::Attention,
+                key: format!("attention:{}", lane.key),
+                lane_key: Some(lane.key.clone()),
+                text: format!("{} waits on a prompt in its terminal", lane.name),
+                since_ns: now,
+                message_id: None,
+                task_id: None,
+            });
+        }
+        for q in self.open_questions() {
+            let to_operator = q.to_launch.as_deref().is_some_and(is_operator);
+            if !to_operator && now - q.created_ns < STUCK_AFTER_NS {
+                continue;
+            }
+            let from = self.member_label(&q.from_launch);
+            let to = match q.to_launch.as_deref() {
+                Some(t) if is_operator(t) => "you".to_string(),
+                Some(t) => self.member_label(t),
+                None => "everyone".into(),
+            };
+            out.push(Need {
+                kind: NeedKind::Question,
+                key: format!("question:{}", q.id),
+                lane_key: lane_of(&q.from_launch).map(|l| l.key.clone()),
+                text: format!("{from} asks {to}: \"{}\"", first_line(&q.body, 72)),
+                since_ns: q.created_ns,
+                message_id: Some(q.id.clone()),
+                task_id: None,
+            });
+        }
+        for t in self.tasks.iter().filter(|t| t.status == TaskStatus::Failed) {
+            let who = t
+                .assigned_to
+                .as_deref()
+                .map(|a| self.member_label(a))
+                .unwrap_or_else(|| "a worker".into());
+            let why = t
+                .error
+                .as_deref()
+                .filter(|e| !e.trim().is_empty())
+                .map(|e| format!(": {}", first_line(e, 48)))
+                .unwrap_or_default();
+            out.push(Need {
+                kind: NeedKind::Failed,
+                key: format!("failed:{}:{}", t.id, t.ended_ns.unwrap_or(t.updated_ns)),
+                lane_key: t
+                    .assigned_to
+                    .as_deref()
+                    .and_then(lane_of)
+                    .map(|l| l.key.clone()),
+                text: format!("{who} failed \"{}\"{why}", t.title),
+                since_ns: t.ended_ns.unwrap_or(t.updated_ns),
+                message_id: None,
+                task_id: Some(t.id.clone()),
+            });
+        }
+        for lane in lanes {
+            let Some(task) = &lane.task else { continue };
+            match lane.state {
+                LaneState::Lost => out.push(Need {
+                    kind: NeedKind::Lost,
+                    key: format!("lost:{}", task.id),
+                    lane_key: Some(lane.key.clone()),
+                    text: format!(
+                        "{}'s session exited with \"{}\" unfinished",
+                        lane.name, task.title
+                    ),
+                    since_ns: task.updated_ns,
+                    message_id: None,
+                    task_id: Some(task.id.clone()),
+                }),
+                LaneState::Idle if lane.quiet_ns.is_some_and(|q| q >= STUCK_AFTER_NS) => {
+                    let quiet = lane.quiet_ns.unwrap_or(0);
+                    out.push(Need {
+                        kind: NeedKind::Stuck,
+                        key: format!("stuck:{}:{}", lane.key, task.id),
+                        lane_key: Some(lane.key.clone()),
+                        text: format!(
+                            "{} has been quiet {} on \"{}\"",
+                            lane.name,
+                            short_age(quiet),
+                            task.title
+                        ),
+                        since_ns: now - quiet,
+                        message_id: None,
+                        task_id: Some(task.id.clone()),
+                    });
+                }
+                _ => {}
+            }
+        }
+        let queued: Vec<&Lane> = lanes
+            .iter()
+            .filter(|l| l.kind == LaneKind::Queued)
+            .collect();
+        if let Some(cap) = self.max_workers
+            && let Some(first) = queued.first()
+        {
+            let active = self.workers.iter().filter(|w| w.is_active()).count();
+            if active >= cap {
+                out.push(Need {
+                    kind: NeedKind::CapReached,
+                    key: format!("cap:{}", first.key),
+                    lane_key: Some(first.key.clone()),
+                    text: format!(
+                        "all {cap} workers are busy and {} task{} wait{}",
+                        queued.len(),
+                        if queued.len() == 1 { "" } else { "s" },
+                        if queued.len() == 1 { "s" } else { "" }
+                    ),
+                    since_ns: first.task.as_ref().map_or(now, |t| t.created_ns),
+                    message_id: None,
+                    task_id: None,
+                });
+            }
+        }
+        for t in self
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Done && t.isolation == TaskIsolation::Worktree)
+        {
+            let who = t
+                .assigned_to
+                .as_deref()
+                .map(|a| self.member_label(a))
+                .unwrap_or_else(|| "a worker".into());
+            out.push(Need {
+                kind: NeedKind::Review,
+                key: format!("review:{}", t.id),
+                lane_key: t
+                    .assigned_to
+                    .as_deref()
+                    .and_then(lane_of)
+                    .map(|l| l.key.clone()),
+                text: format!(
+                    "{who} finished \"{}\"{}: review it",
+                    t.title,
+                    t.branch
+                        .as_deref()
+                        .map(|b| format!(" on {b}"))
+                        .unwrap_or_default()
+                ),
+                since_ns: t.ended_ns.unwrap_or(t.updated_ns),
+                message_id: None,
+                task_id: Some(t.id.clone()),
+            });
+        }
+        out.sort_by_key(|n| (n.kind, n.since_ns));
+        out
+    }
+
+    /// Messages and the events of tasks and leases, oldest first: a task
+    /// planned or added, finished, failed or cancelled; a lease taken.
+    pub fn timeline(&self) -> Vec<ActivityItem<'_>> {
+        let mut out: Vec<ActivityItem<'_>> =
+            self.messages.iter().map(ActivityItem::Message).collect();
+        let lane_key = |launch: Option<&str>| {
+            launch
+                .filter(|l| self.all_members().iter().any(|m| m.launch_id == *l))
+                .map(str::to_string)
+        };
+        for t in &self.tasks {
+            let creator_is_coord = self
+                .coordinator
+                .as_ref()
+                .is_some_and(|c| c.launch_id == t.created_by);
+            out.push(ActivityItem::Event {
+                at_ns: t.created_ns,
+                who: Some(t.created_by.clone()),
+                text: format!(
+                    "{} \"{}\"",
+                    if creator_is_coord { "planned" } else { "added" },
+                    t.title
+                ),
+                lane_key: lane_key(t.assigned_to.as_deref()),
+            });
+            if let Some(end) = t.ended_ns {
+                let verb = match t.status {
+                    TaskStatus::Done => "finished",
+                    TaskStatus::Failed => "failed",
+                    _ => "cancelled",
+                };
+                out.push(ActivityItem::Event {
+                    at_ns: end,
+                    who: t.assigned_to.clone(),
+                    text: format!("{verb} \"{}\"", t.title),
+                    lane_key: lane_key(t.assigned_to.as_deref()),
+                });
+            }
+        }
+        for l in &self.leases {
+            out.push(ActivityItem::Event {
+                at_ns: l.acquired_ns,
+                who: Some(l.owner_launch.clone()),
+                text: format!("took a lease on {}", l.pattern),
+                lane_key: lane_key(Some(&l.owner_launch)),
+            });
+        }
+        out.sort_by_key(ActivityItem::at_ns);
+        out
     }
 }
 
@@ -879,6 +1185,7 @@ mod tests {
                 tokens: 12_000,
                 cost_usd: 0.15,
                 running_tool: Some("agent_mux_task_board".into()),
+                quiet_ns: None,
             },
             LiveSwarmSession {
                 session_idx: 1,
@@ -894,6 +1201,7 @@ mod tests {
                 tokens: 5_000,
                 cost_usd: 0.05,
                 running_tool: None,
+                quiet_ns: None,
             },
         ];
 
@@ -938,6 +1246,7 @@ mod tests {
             tokens: 0,
             cost_usd: 0.0,
             running_tool: None,
+            quiet_ns: None,
         }
     }
 
@@ -1224,6 +1533,281 @@ mod tests {
         assert_eq!(
             (lane.state, lane.activity.as_str()),
             (LaneState::Failed, "failed · cargo test exit 101")
+        );
+    }
+
+    #[test]
+    fn needs_list_what_only_the_operator_can_resolve_most_urgent_first() {
+        let (dir, db, conn, ws) = store();
+        let min = 60 * 1_000_000_000i64;
+        bstore::set_coordinator(
+            &conn,
+            Some(&db),
+            &ws,
+            "coord-1",
+            Some("g"),
+            Some(3),
+            None,
+            0,
+        )
+        .unwrap();
+        let failed = task(&conn, &db, &ws, "ui tests", Some("w-fail"), 1);
+        bstore::update_task(
+            &conn,
+            Some(&db),
+            &failed,
+            "w-fail",
+            TaskStatus::Failed,
+            None,
+            Some("exit 101".into()),
+            None,
+            None,
+            2 * min,
+        )
+        .unwrap();
+        task(&conn, &db, &ws, "wire bus", Some("w-idle"), 3);
+        task(&conn, &db, &ws, "write docs", Some("w-gone"), 4);
+        // A worktree task done: its branch waits for review.
+        let wt = bstore::split_tasks(
+            &conn,
+            Some(&db),
+            &ws,
+            "coord-1",
+            &[NewTaskSpec {
+                title: "schema".into(),
+                instructions: "…".into(),
+                assigned_to: Some("w-done".into()),
+                isolation: TaskIsolation::Worktree,
+                ..Default::default()
+            }],
+            5,
+        )
+        .unwrap()
+        .remove(0);
+        bstore::update_task(
+            &conn,
+            Some(&db),
+            &wt.id,
+            "w-done",
+            TaskStatus::Done,
+            None,
+            None,
+            None,
+            Some("bus-abc".into()),
+            3 * min,
+        )
+        .unwrap();
+        // A question to the operator counts at once; one to the coordinator only after 5 minutes.
+        bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "w-idle",
+            Some("user"),
+            "question",
+            "Ship Friday?",
+            None,
+            9 * min,
+        )
+        .unwrap();
+        bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "w-gone",
+            Some("coord-1"),
+            "question",
+            "TTL?",
+            None,
+            9 * min,
+        )
+        .unwrap();
+
+        let mut idle = live(1, "w-idle", Some("implementer"), "codex", "idle", &ws);
+        idle.quiet_ns = Some(6 * min);
+        let sessions = vec![
+            live(
+                0,
+                "coord-1",
+                Some("coordinator"),
+                "claude",
+                "attention",
+                &ws,
+            ),
+            idle,
+            live(2, "w-gone", Some("writer"), "claude", "exited", &ws),
+        ];
+        let now = 10 * min;
+        let snap = load_snapshot(Some(&conn), dir.path(), &sessions, None, now);
+        let lanes = snap.lanes(now);
+        let needs = snap.needs(&lanes, now);
+        let kinds: Vec<_> = needs.iter().map(|n| n.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                NeedKind::Attention,
+                NeedKind::Question,
+                NeedKind::Failed,
+                NeedKind::Lost,
+                NeedKind::Review
+            ],
+            "{needs:#?}"
+        );
+        assert_eq!(
+            needs[1].text,
+            "implementer·codex asks you: \"Ship Friday?\""
+        );
+        assert_eq!(needs[2].text, "w-fail failed \"ui tests\": exit 101");
+        assert!(needs[2].kind.retryable() && needs[3].kind.retryable());
+        assert!(
+            needs[4].text.ends_with("on bus-abc: review it"),
+            "{}",
+            needs[4].text
+        );
+        // The implementer has a question open, so it is waiting, not stuck.
+        assert!(!kinds.contains(&NeedKind::Stuck));
+
+        // Five minutes later the coordinator's question is overdue; the answered
+        // one is gone, and a quiet lane with nothing to ask is stuck.
+        bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "user",
+            Some("w-idle"),
+            "answer",
+            "yes",
+            None,
+            11 * min,
+        )
+        .unwrap();
+        let now = 15 * min;
+        let snap = load_snapshot(Some(&conn), dir.path(), &sessions, None, now);
+        let lanes = snap.lanes(now);
+        let needs = snap.needs(&lanes, now);
+        let texts: Vec<_> = needs.iter().map(|n| (n.kind, n.text.as_str())).collect();
+        assert!(
+            texts.contains(&(
+                NeedKind::Question,
+                "writer·claude asks coordinator·claude: \"TTL?\""
+            )),
+            "{texts:#?}"
+        );
+        assert!(
+            texts.contains(&(
+                NeedKind::Stuck,
+                "implementer·codex has been quiet 6m on \"wire bus\""
+            )),
+            "{texts:#?}"
+        );
+        assert!(!texts.iter().any(|(_, t)| t.contains("Ship Friday")));
+    }
+
+    #[test]
+    fn the_cap_needs_you_only_while_tasks_wait() {
+        let (dir, db, conn, ws) = store();
+        bstore::set_coordinator(&conn, Some(&db), &ws, "coord-1", None, Some(1), None, 0).unwrap();
+        task(&conn, &db, &ws, "a", Some("w-1"), 1);
+        let sessions = vec![live(1, "w-1", Some("implementer"), "codex", "working", &ws)];
+        let snap = load_snapshot(Some(&conn), dir.path(), &sessions, None, 2);
+        assert!(snap.needs(&snap.lanes(2), 2).is_empty());
+        task(&conn, &db, &ws, "b", None, 3);
+        let snap = load_snapshot(Some(&conn), dir.path(), &sessions, None, 4);
+        let needs = snap.needs(&snap.lanes(4), 4);
+        assert_eq!(needs.len(), 1);
+        assert_eq!(needs[0].kind, NeedKind::CapReached);
+        assert_eq!(needs[0].text, "all 1 workers are busy and 1 task waits");
+    }
+
+    #[test]
+    fn a_failed_task_reopens_for_another_worker_and_a_done_one_does_not() {
+        let (_dir, db, conn, ws) = store();
+        let id = task(&conn, &db, &ws, "ui tests", Some("w-1"), 1);
+        bstore::update_task(
+            &conn,
+            Some(&db),
+            &id,
+            "w-1",
+            TaskStatus::Failed,
+            None,
+            Some("boom".into()),
+            None,
+            Some("bus-x".into()),
+            2,
+        )
+        .unwrap();
+        let t = bstore::reopen_task(&conn, Some(&db), &id, 3).unwrap();
+        assert_eq!(t.status, TaskStatus::Open);
+        assert_eq!(t.assigned_to, None);
+        assert_eq!(t.error, None);
+        assert_eq!(t.ended_ns, None);
+        assert_eq!(
+            t.branch.as_deref(),
+            Some("bus-x"),
+            "the branch stays for the retry"
+        );
+        bstore::update_task(
+            &conn,
+            Some(&db),
+            &id,
+            "w-2",
+            TaskStatus::Done,
+            None,
+            None,
+            None,
+            None,
+            4,
+        )
+        .unwrap();
+        assert!(bstore::reopen_task(&conn, Some(&db), &id, 5).is_err());
+    }
+
+    #[test]
+    fn the_timeline_merges_messages_with_task_and_lease_events() {
+        let (dir, db, conn, ws) = store();
+        let coord = live(0, "coord-1", Some("coordinator"), "claude", "working", &ws);
+        let id = bstore::split_tasks(
+            &conn,
+            Some(&db),
+            &ws,
+            "coord-1",
+            &[NewTaskSpec {
+                title: "wire bus".into(),
+                instructions: "…".into(),
+                files: vec!["src/bus/**".into()],
+                ..Default::default()
+            }],
+            10,
+        )
+        .unwrap()
+        .remove(0)
+        .id;
+        bstore::claim_task(&conn, Some(&db), &id, "w-1", 20).unwrap();
+        bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "w-1",
+            Some("coord-1"),
+            "message",
+            "on it",
+            None,
+            30,
+        )
+        .unwrap();
+        let snap = load_snapshot(Some(&conn), dir.path(), &[coord], None, 40);
+        let line = |i: &ActivityItem| match i {
+            ActivityItem::Message(m) => format!("msg {}", m.body),
+            ActivityItem::Event { text, .. } => text.clone(),
+        };
+        let lines: Vec<_> = snap.timeline().iter().map(line).collect();
+        assert_eq!(
+            lines,
+            [
+                "planned \"wire bus\"",
+                "took a lease on src/bus/**",
+                "msg on it"
+            ]
         );
     }
 }

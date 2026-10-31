@@ -108,6 +108,13 @@ impl StatusTracker {
         self.exited = Some(code);
     }
 
+    /// How long since the session last printed anything, `None` before its
+    /// first output. A session that keeps printing is not stuck, whatever
+    /// its task says.
+    pub fn quiet_for(&self, now: Instant) -> Option<std::time::Duration> {
+        self.last_output.map(|t| now.duration_since(t))
+    }
+
     pub fn status(&self, now: Instant) -> Status {
         if let Some(code) = self.exited {
             return Status::Exited(code);

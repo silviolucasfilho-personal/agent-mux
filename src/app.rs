@@ -4649,6 +4649,9 @@ impl App {
                     tokens,
                     cost_usd: cost,
                     running_tool,
+                    quiet_ns: s
+                        .quiet_for(now)
+                        .map(|d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)),
                 })
             })
             .collect()
@@ -4917,6 +4920,29 @@ impl App {
                     }
                 }
                 needs_refresh = true;
+            }
+            Outcome::RetryTask { task_id } => {
+                let reopened = self
+                    .trace_db_path
+                    .as_deref()
+                    .ok_or_else(|| "no trace store".to_string())
+                    .and_then(|db| {
+                        let conn = crate::tracing::store::open_aux(db)?;
+                        crate::bus::store::reopen_task(
+                            &conn,
+                            Some(db),
+                            &task_id,
+                            crate::tracing::store::now_ns(),
+                        )
+                    });
+                match reopened {
+                    Ok(_) => return self.swarm_outcome(Outcome::DelegateTask { task_id }, now),
+                    Err(e) => {
+                        if let Mode::Swarm(view) = &mut self.mode {
+                            view.status_msg = Some(format!("could not retry: {e}"));
+                        }
+                    }
+                }
             }
             Outcome::WakeAgent { launch_id } => {
                 let _ = self.handle_bus_control(
@@ -7723,7 +7749,22 @@ impl App {
 
                 let mut worktree_path: Option<String> = None;
                 let mut branch_name: Option<String> = None;
+                // A retried task keeps its worktree: the new worker continues
+                // the work already there (`bus::store::reopen_task`).
+                let existing_tree = self
+                    .trace_db_path
+                    .as_deref()
+                    .and_then(|db| crate::tracing::store::open_ro(db).ok())
+                    .and_then(|c| crate::bus::store::get_task(&c, &task_id).ok().flatten())
+                    .and_then(|t| Some((t.worktree?, t.branch)))
+                    .filter(|(p, _)| std::path::Path::new(p).is_dir());
                 let spawn_dir = if isolation == crate::bus::TaskIsolation::Worktree
+                    && let Some((path, branch)) = existing_tree
+                {
+                    worktree_path = Some(path.clone());
+                    branch_name = branch;
+                    std::path::PathBuf::from(path)
+                } else if isolation == crate::bus::TaskIsolation::Worktree
                     && crate::loops::worktree::is_git_repo(&ws_path)
                 {
                     let now_str = time::OffsetDateTime::now_utc()
