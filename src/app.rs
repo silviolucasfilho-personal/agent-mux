@@ -4922,43 +4922,10 @@ impl App {
                 let _ = self.handle_bus_control(
                     crate::bus::control::ControlRequest::WakeSession {
                         launch_id,
-                        prompt: "Wakeup check-in from Swarm Control Room".into(),
+                        prompt: "Wakeup check-in from Swarm Mission Control".into(),
                     },
                     now,
                 );
-            }
-            Outcome::CreateTask {
-                title,
-                instructions,
-                files,
-                isolation,
-            } => {
-                let ws_path = if let Mode::Swarm(v) = &self.mode {
-                    v.workspace.clone()
-                } else {
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                };
-                if let Some(db) = self.trace_db_path.as_deref()
-                    && let Ok(conn) = crate::tracing::store::open_aux(db)
-                {
-                    let now_ns = crate::tracing::store::now_ns();
-                    let norm = crate::bus::store::normalize_workspace(&ws_path);
-                    let _ = crate::bus::store::split_tasks(
-                        &conn,
-                        Some(db),
-                        &norm,
-                        "user",
-                        &[crate::bus::NewTaskSpec {
-                            title,
-                            instructions,
-                            files,
-                            isolation,
-                            ..Default::default()
-                        }],
-                        now_ns,
-                    );
-                }
-                needs_refresh = true;
             }
             Outcome::UpdateTask {
                 task_id,
@@ -5002,7 +4969,7 @@ impl App {
                 }
                 needs_refresh = true;
             }
-            Outcome::ReleaseLease(pattern) => {
+            Outcome::ReleaseLeases(patterns) => {
                 let ws_path = if let Mode::Swarm(v) = &self.mode {
                     v.workspace.clone()
                 } else {
@@ -5012,8 +4979,10 @@ impl App {
                     && let Ok(conn) = crate::tracing::store::open_aux(db)
                 {
                     let norm = crate::bus::store::normalize_workspace(&ws_path);
-                    let _ =
-                        crate::bus::store::force_release_lease(&conn, Some(db), &norm, &pattern);
+                    for pattern in &patterns {
+                        let _ =
+                            crate::bus::store::force_release_lease(&conn, Some(db), &norm, pattern);
+                    }
                 }
                 needs_refresh = true;
             }
@@ -5025,6 +4994,7 @@ impl App {
             }
             Outcome::SendMessage {
                 to_launch,
+                reply_to,
                 topic,
                 body,
                 urgent,
@@ -5048,7 +5018,7 @@ impl App {
                         to_launch.as_deref(),
                         &topic,
                         &body,
-                        None,
+                        reply_to.as_deref(),
                         now_ns,
                     );
                 }

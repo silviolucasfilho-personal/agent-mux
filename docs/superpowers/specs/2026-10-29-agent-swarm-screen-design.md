@@ -1,6 +1,6 @@
 # Agent Swarm Screen (`Mode::Swarm`) — design
 
-Status: draft, 2026-10-29.
+Status: draft, 2026-10-29. Section 3 (the four-quadrant layout) and its keys in section 6 are superseded by `2026-10-30-swarm-mission-control-ux-design.md`.
 
 ## 1. Why
 
