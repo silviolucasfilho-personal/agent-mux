@@ -240,7 +240,7 @@ fn show(args: &Args) -> anyhow::Result<()> {
     println!("  tools   {}", spec.tools_label());
     println!("  hash    {}", spec.short_hash());
     println!();
-    for h in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+    for h in Harness::ALL {
         let plan = launch::plan(spec, h);
         let mut line: Vec<String> = Vec::new();
         if let Some(m) = &plan.model {
@@ -266,6 +266,12 @@ fn show(args: &Args) -> anyhow::Result<()> {
                 launch::agy_dir(&crate::skill::install::home_dir(), spec)
                     .join("agent.md")
                     .display()
+            );
+        }
+        if h == Harness::OpenCode {
+            println!(
+                "          sets {} (the agent inline, with --standalone; `default_agent` for an interactive session)",
+                crate::opencode::CONFIG_ENV
             );
         }
         for (level, note) in launch::tool_notes(spec, h) {

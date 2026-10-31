@@ -56,7 +56,7 @@ impl App {
             FindNext | FindPrev => {
                 matches!(&self.mode, Mode::TraceBrowser(b) if b.zoomed && b.find.is_some())
             }
-            FilterClaude | FilterCodex | FilterAntigravity => {
+            FilterClaude | FilterCodex | FilterAntigravity | FilterOpenCode => {
                 matches!(self.mode, Mode::SkillsView(_))
             }
             Save => {
@@ -217,11 +217,12 @@ impl App {
             Swarm => self.request_navigation(NavigationTarget::Swarm, now),
             Inbox => self.request_navigation(NavigationTarget::Inbox, now),
             History => self.request_navigation(NavigationTarget::History, now),
-            FilterClaude | FilterCodex | FilterAntigravity => {
+            FilterClaude | FilterCodex | FilterAntigravity | FilterOpenCode => {
                 if let Mode::SkillsView(v) = &mut self.mode {
                     v.toggle_filter(match id {
                         FilterClaude => crate::harness::Harness::Claude,
                         FilterCodex => crate::harness::Harness::Codex,
+                        FilterOpenCode => crate::harness::Harness::OpenCode,
                         _ => crate::harness::Harness::Antigravity,
                     });
                 }

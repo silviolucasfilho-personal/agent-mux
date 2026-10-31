@@ -22,6 +22,7 @@ pub mod inventory;
 pub mod langfuse;
 pub mod loops;
 pub mod map;
+pub mod opencode_db;
 pub mod pricing;
 pub mod scores;
 pub mod store;
@@ -236,6 +237,14 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
+}
+
+/// Milliseconds since the epoch, OpenCode's clock.
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn now_nanos() -> i128 {
@@ -458,6 +467,15 @@ impl TraceRuntime {
             .or_else(crate::history::default_antigravity_root)
     }
 
+    /// OpenCode's session database: `[tracing] opencode_db`, else
+    /// `~/.local/share/opencode/opencode.db`.
+    fn opencode_db(&self) -> Option<PathBuf> {
+        self.settings
+            .opencode_db
+            .clone()
+            .or_else(|| home_dir().map(|h| opencode_db::default_db_path(&h)))
+    }
+
     /// Decides how (and whether) to trace one launch. `None` = fully
     /// untraced: no extras, no markers, no pipeline, no launch row.
     pub fn plan_launch(&self, profile: &Profile, dir: &Path) -> Option<LaunchPlan> {
@@ -473,12 +491,14 @@ impl TraceRuntime {
             Some("claude") => Provider::Claude,
             Some("codex") => Provider::Codex,
             Some("antigravity") => Provider::Antigravity,
+            Some("opencode") => Provider::OpenCode,
             Some("none") => return None,
             Some(_) => return None,
             None => match basename(&profile.command) {
                 "claude" => Provider::Claude,
                 "codex" => Provider::Codex,
                 "agy" => Provider::Antigravity,
+                "opencode" => Provider::OpenCode,
                 _ => return None,
             },
         };
@@ -555,6 +575,34 @@ impl TraceRuntime {
                     )
                 }
             }
+            Provider::OpenCode => {
+                let db = self.opencode_db()?;
+                let args = &profile.args;
+                if let Some(id) = arg_value(args, "--session").or_else(|| arg_value(args, "-s")) {
+                    known_session_id = Some(id.to_string());
+                    (
+                        CorrelationSpec::KnownOpenCode {
+                            session_id: id.to_string(),
+                            db,
+                            resume: true,
+                        },
+                        "deterministic",
+                    )
+                } else {
+                    let t0_ms = t0
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    (
+                        CorrelationSpec::WatchOpenCode {
+                            db,
+                            cwd: dir.to_path_buf(),
+                            t0_ms,
+                        },
+                        "watched",
+                    )
+                }
+            }
         };
 
         let (backend, backend_requested) = self.resolve_backend(profile);
@@ -597,12 +645,14 @@ impl TraceRuntime {
             Some("claude") => Provider::Claude,
             Some("codex") => Provider::Codex,
             Some("antigravity") => Provider::Antigravity,
+            Some("opencode") => Provider::OpenCode,
             Some("none") => return None,
             Some(_) => return None, // unknown override: fail safe, untraced
             None => match basename(&profile.command) {
                 "claude" => Provider::Claude,
                 "codex" => Provider::Codex,
                 "agy" => Provider::Antigravity,
+                "opencode" => Provider::OpenCode,
                 _ => return None,
             },
         };
@@ -706,6 +756,58 @@ impl TraceRuntime {
                     )
                 }
             }
+            Provider::OpenCode => {
+                // `--session <id>` names the conversation on both of
+                // opencode's command forms and creates it when it does
+                // not exist (2.0.32), so a fresh launch gets an id of
+                // agent-mux's choosing, the way Claude gets `--session-id`
+                let db = self.opencode_db()?;
+                let args = &profile.args;
+                let inject_allowed = over.and_then(|o| o.inject_session_id).unwrap_or(true)
+                    && !self
+                        .injection_disabled
+                        .lock()
+                        .map(|s| s.contains(&profile.name))
+                        .unwrap_or(false);
+                let continues = args.iter().any(|a| {
+                    matches_flag(a, "--continue") || matches_flag(a, "--fork") || a == "-c"
+                });
+                if let Some(id) = arg_value(args, "--session").or_else(|| arg_value(args, "-s"))
+                    && !args.iter().any(|a| a == "--fork")
+                {
+                    known_session_id = Some(id.to_string());
+                    (
+                        CorrelationSpec::KnownOpenCode {
+                            session_id: id.to_string(),
+                            db,
+                            resume: true,
+                        },
+                        "deterministic",
+                    )
+                } else if continues || !inject_allowed {
+                    (
+                        CorrelationSpec::WatchOpenCode {
+                            db,
+                            cwd: dir.to_path_buf(),
+                            t0_ms: now_ms(),
+                        },
+                        "watched",
+                    )
+                } else {
+                    let id = opencode_db::new_session_id();
+                    extra_args = vec!["--session".into(), id.clone()];
+                    injected = true;
+                    known_session_id = Some(id.clone());
+                    (
+                        CorrelationSpec::KnownOpenCode {
+                            session_id: id,
+                            db,
+                            resume: false,
+                        },
+                        "deterministic",
+                    )
+                }
+            }
         };
 
         // Per-launch hook registrations: nothing is written anywhere, and a
@@ -744,6 +846,7 @@ impl TraceRuntime {
                 }
                 Provider::Codex => Some("Codex needs `agent-mux trace hooks install codex`"),
                 Provider::Antigravity => Some("agy's PreToolUse hook is not registered"),
+                Provider::OpenCode => Some("opencode has no PreToolUse hook"),
             };
             if let Some(why) = why {
                 let _ = self.status_tx.try_send(AppEvent::TraceStatus(format!(
@@ -790,8 +893,8 @@ impl TraceRuntime {
                     hooks_registered = true;
                 }
                 // agy loads hooks only from customization roots: see
-                // `trace hooks install agy`
-                Provider::Antigravity => {}
+                // `trace hooks install agy`; opencode has plugins, not hooks
+                Provider::Antigravity | Provider::OpenCode => {}
             }
         }
 
@@ -984,6 +1087,7 @@ impl TraceRuntime {
             &plan.correlation,
             CorrelationSpec::KnownClaude { resume: true, .. }
                 | CorrelationSpec::KnownAntigravity { .. }
+                | CorrelationSpec::KnownOpenCode { resume: true, .. }
         );
         let codex_sessions_dir = match &plan.correlation {
             CorrelationSpec::WatchCodex { sessions_dir, .. } => Some(sessions_dir.clone()),
@@ -1142,6 +1246,8 @@ struct Pipeline {
     claim_guard: Option<correlate::ClaimGuard>,
     /// Antigravity: the per-request usage agy keeps outside the transcript.
     agy_usage: Option<agy_usage::AgyUsageReader>,
+    /// OpenCode: the session's rows in its database, in place of a tailer.
+    opencode: Option<opencode_db::OpenCodeReader>,
     /// The hook channel for this launch.
     hook_feed: HookFeed,
     hook_events: u64,
@@ -1231,7 +1337,20 @@ impl Pipeline {
             [map::session_key(self.ctx.provider, &adopted.session_id)], |r| r.get::<_, bool>(0),
         ).ok()).unwrap_or(false);
         self.assembler.set_resume_native(resume_native);
-        if adopted.resume_prime {
+        if self.ctx.provider == Provider::OpenCode {
+            // the database is the transcript: rows, not lines
+            let mut reader =
+                opencode_db::OpenCodeReader::new(adopted.path.clone(), &adopted.session_id);
+            if adopted.resume_prime {
+                self.assembler.set_emitting(false);
+                let recv = now_nanos();
+                for event in reader.prime() {
+                    let _ = self.assembler.feed(event, recv);
+                }
+                self.assembler.set_emitting(true);
+            }
+            self.opencode = Some(reader);
+        } else if adopted.resume_prime {
             match Tailer::prime(&adopted.path, self.ctx.backfill_max_bytes) {
                 Ok((tailer, lines, truncated)) => {
                     self.assembler.set_emitting(false);
@@ -1274,6 +1393,24 @@ impl Pipeline {
             )),
         ]);
         self.adopted = Some(adopted);
+    }
+
+    /// OpenCode: the rows completed since the last tick.
+    fn poll_opencode(&mut self) {
+        let Some(reader) = self.opencode.as_mut() else {
+            return;
+        };
+        let events = reader.poll();
+        if events.is_empty() {
+            return;
+        }
+        let recv = now_nanos();
+        let mut ops = Vec::new();
+        for event in events {
+            ops.extend(self.assembler.feed(event, recv));
+        }
+        self.send_ops(ops);
+        self.flush_warnings();
     }
 
     /// Antigravity side channel: attach any new per-request usage records.
@@ -1377,6 +1514,7 @@ impl Pipeline {
             }
         }
         self.tick_tail();
+        self.poll_opencode();
         self.follow_continuation();
         self.poll_agy_usage();
         self.poll_hooks();
@@ -1545,6 +1683,7 @@ impl Pipeline {
         if let Some(line) = self.tailer.as_mut().and_then(|t| t.take_remainder()) {
             self.feed_line(&line);
         }
+        self.poll_opencode();
         self.poll_agy_usage();
         self.poll_hooks();
         let mut ops = self.assembler.finalize();
@@ -1645,6 +1784,7 @@ async fn run_pipeline(
         adopted: None,
         claim_guard: None,
         agy_usage: None,
+        opencode: None,
         hook_feed,
         hook_events: 0,
         parse_errors: 0,

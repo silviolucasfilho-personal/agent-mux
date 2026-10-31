@@ -124,6 +124,23 @@ pub enum CorrelationSpec {
         /// How long a new one is seen before a heuristic takes it.
         settle: Duration,
     },
+    /// OpenCode with a known session id: injected `--session <id>` (the
+    /// CLI creates the session under it) or the id of a resume. Adopted
+    /// once the row exists in `db` (`opencode_db`).
+    KnownOpenCode {
+        session_id: String,
+        /// `~/.local/share/opencode/opencode.db`
+        db: PathBuf,
+        /// True for resumes: the rows so far are primed, not emitted.
+        resume: bool,
+    },
+    /// OpenCode `--continue` or a `run --fork`: the newest top-level
+    /// session of `cwd` created since `t0_ms` (milliseconds).
+    WatchOpenCode {
+        db: PathBuf,
+        cwd: PathBuf,
+        t0_ms: i64,
+    },
     /// Untraceable launch (e.g. bare `-r` / `--continue` with no id).
     None,
 }
@@ -285,6 +302,36 @@ pub fn poll_with(
 ) -> Option<Adopted> {
     match spec {
         CorrelationSpec::None => None,
+        CorrelationSpec::KnownOpenCode {
+            session_id,
+            db,
+            resume,
+        } => {
+            if !crate::tracing::opencode_db::session_exists(db, session_id) {
+                return None;
+            }
+            if !try_claim(claims, Provider::OpenCode, session_id) {
+                return None;
+            }
+            Some(Adopted {
+                session_id: session_id.clone(),
+                path: db.clone(),
+                correlation: "deterministic",
+                resume_prime: *resume,
+            })
+        }
+        CorrelationSpec::WatchOpenCode { db, cwd, t0_ms } => {
+            let (id, _) = crate::tracing::opencode_db::newest_session_in(db, cwd, *t0_ms)?;
+            if !try_claim(claims, Provider::OpenCode, &id) {
+                return None;
+            }
+            Some(Adopted {
+                session_id: id,
+                path: db.clone(),
+                correlation: "watched",
+                resume_prime: false,
+            })
+        }
         CorrelationSpec::KnownClaude {
             session_id,
             expected_path,

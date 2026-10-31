@@ -43,7 +43,12 @@ pub const LAUNCHD_LABEL: &str = "com.github.akitaonrails.ai-memory";
 /// The name of ai-memory's MCP entry in each harness.
 pub const MCP_NAME: &str = "ai-memory";
 /// The harnesses agent-mux wires, in order.
-pub const HARNESSES: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Antigravity];
+pub const HARNESSES: [Harness; 4] = [
+    Harness::Claude,
+    Harness::Codex,
+    Harness::Antigravity,
+    Harness::OpenCode,
+];
 
 /// ai-memory's name for a harness (`--agent` / `--client`).
 pub fn agent_name(h: Harness) -> &'static str {
@@ -51,6 +56,9 @@ pub fn agent_name(h: Harness) -> &'static str {
         Harness::Claude => "claude-code",
         Harness::Codex => "codex",
         Harness::Antigravity => "antigravity-cli",
+        // ai-memory 2.6.7 probes `opencode --version` under this name and
+        // writes its V2 plugin and `mcp.servers` entry
+        Harness::OpenCode => "open-code",
     }
 }
 
@@ -60,6 +68,7 @@ pub fn label(h: Harness) -> &'static str {
         Harness::Claude => "Claude Code",
         Harness::Codex => "Codex",
         Harness::Antigravity => "Antigravity",
+        Harness::OpenCode => "OpenCode",
     }
 }
 
@@ -250,6 +259,16 @@ pub fn config_files(home: &Path, h: Harness) -> (PathBuf, PathBuf) {
             let dir = home.join(".gemini").join("config");
             (dir.join("mcp_config.json"), dir.join("hooks.json"))
         }
+        Harness::OpenCode => {
+            // OpenCode has plugins, not hooks: ai-memory 2.6.7 writes a
+            // TypeScript plugin (`install-hooks --agent open-code`, dry
+            // run read 2026-10-31) next to the config its MCP entry goes in
+            let dir = crate::skill::install::opencode_config_dir(home);
+            (
+                dir.join("opencode.json"),
+                dir.join("plugins").join("ai-memory-opencode2.ts"),
+            )
+        }
     }
 }
 
@@ -261,19 +280,29 @@ pub fn wiring(home: &Path, h: Harness, cli: bool) -> Wiring {
         Harness::Codex => codex_has_mcp(&read(&mcp_file)),
         _ => json_has_mcp(&read(&mcp_file)),
     };
+    let hooks = match h {
+        // a plugin file, not JSON: present and ai-memory's
+        Harness::OpenCode => read(&hooks_file).contains(MCP_NAME),
+        _ => hooks_mention_ai_memory(&read(&hooks_file)),
+    };
     Wiring {
         harness: h,
         cli,
         mcp,
-        hooks: hooks_mention_ai_memory(&read(&hooks_file)),
+        hooks,
     }
 }
 
 /// A JSON config with `mcpServers.ai-memory`.
 pub fn json_has_mcp(text: &str) -> bool {
-    serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|v| v.get("mcpServers")?.get(MCP_NAME).cloned())
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    // `mcpServers.<name>` (Claude Code, Antigravity) or OpenCode 2's
+    // `mcp.servers.<name>`
+    v.get("mcpServers")
+        .and_then(|m| m.get(MCP_NAME))
+        .or_else(|| v.get("mcp")?.get("servers")?.get(MCP_NAME))
         .is_some()
 }
 
@@ -332,6 +361,11 @@ mod tests {
         ));
         assert!(!json_has_mcp(r#"{"mcpServers":{"other":{}}}"#));
         assert!(!json_has_mcp("not json"));
+        // opencode 2's nesting, as `ai-memory install-mcp --client open-code` prints it
+        assert!(json_has_mcp(
+            r#"{"mcp":{"servers":{"ai-memory":{"type":"remote","url":"http://127.0.0.1:49374/mcp","oauth":false}}}}"#
+        ));
+        assert!(!json_has_mcp(r#"{"mcp":{"servers":{"agent-mux":{}}}}"#));
         assert!(codex_has_mcp(
             "model = \"x\"\n[mcp_servers.ai-memory]\nurl = \"http://127.0.0.1:49374/mcp\"\n"
         ));
@@ -374,6 +408,22 @@ mod tests {
         .unwrap();
         assert!(wiring(home, Harness::Antigravity, true).complete());
         assert!(!wiring(home, Harness::Claude, true).mcp);
+        // opencode: its config file and a plugin file
+        let cfg = home.join(".config/opencode");
+        std::fs::create_dir_all(cfg.join("plugins")).unwrap();
+        std::fs::write(
+            cfg.join("opencode.json"),
+            r#"{"mcp":{"servers":{"ai-memory":{"type":"remote","url":"http://127.0.0.1:49374/mcp"}}}}"#,
+        )
+        .unwrap();
+        let w = wiring(home, Harness::OpenCode, true);
+        assert!(w.mcp && !w.hooks);
+        std::fs::write(
+            cfg.join("plugins/ai-memory-opencode2.ts"),
+            "const AiMemoryOpencode2 = { id: \"ai-memory-opencode2\" }\n",
+        )
+        .unwrap();
+        assert!(wiring(home, Harness::OpenCode, true).complete());
     }
 
     #[test]

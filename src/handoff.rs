@@ -50,6 +50,7 @@ pub fn provider_of(name: &str) -> Option<Provider> {
         "claude" => Some(Provider::Claude),
         "codex" => Some(Provider::Codex),
         "antigravity" | "agy" => Some(Provider::Antigravity),
+        "opencode" => Some(Provider::OpenCode),
         _ => None,
     }
 }
@@ -59,6 +60,7 @@ fn provider_label(p: Provider) -> &'static str {
         Provider::Claude => "Claude Code",
         Provider::Codex => "Codex",
         Provider::Antigravity => "Antigravity",
+        Provider::OpenCode => "OpenCode",
     }
 }
 
@@ -361,6 +363,9 @@ pub fn transcript_by_id(provider: Provider, id: &str) -> Option<PathBuf> {
                 .join("transcript.jsonl");
             p.is_file().then_some(p)
         }
+        // opencode keeps its conversations in a database, not in files:
+        // the trace store is the only source (`tracing::opencode_db`)
+        Provider::OpenCode => None,
     }
 }
 
@@ -437,6 +442,8 @@ pub fn find_in(
                 (m.cwd.as_deref() == Some(dir)).then_some((m.id, p))
             })
             .collect(),
+        // no files: an untraced opencode session has nothing to hand over
+        Provider::OpenCode => Vec::new(),
     };
     match found.len() {
         0 => Err(format!(

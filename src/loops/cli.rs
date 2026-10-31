@@ -144,7 +144,7 @@ fn guard_available(harness: Harness, home: &Path) -> bool {
             let st = crate::tracing::hooks::install::codex_status(home, exe.as_deref());
             st.installed && !st.stale
         }
-        Harness::Antigravity => false,
+        Harness::Antigravity | Harness::OpenCode => false,
     }
 }
 
@@ -169,6 +169,7 @@ fn parse_harness(s: &str) -> anyhow::Result<Harness> {
         "claude" | "claude-code" => Ok(Harness::Claude),
         "codex" => Ok(Harness::Codex),
         "agy" | "antigravity" => anyhow::bail!("Antigravity is not supported for loops"),
+        "opencode" | "open-code" => anyhow::bail!("OpenCode is not supported for loops"),
         other => anyhow::bail!("unknown harness {other:?}: claude or codex"),
     }
 }
@@ -494,6 +495,9 @@ fn pick_profile(
             .ok_or_else(|| anyhow::anyhow!("profile {n:?} runs {}, not a harness", p.command))?;
         if h == Harness::Antigravity {
             anyhow::bail!("Antigravity is not supported for loops");
+        }
+        if h == Harness::OpenCode {
+            anyhow::bail!("OpenCode is not supported for loops");
         }
         if let Some(want) = harness
             && parse_harness(want)? != h

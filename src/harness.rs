@@ -1,16 +1,28 @@
 //! Which CLI a profile launches, and how each one spells the launch
 //! options the new-session dialog offers.
 //!
-//! The three harnesses agree on the *concepts* — a model, skipping
+//! The four harnesses agree on the *concepts* — a model, skipping
 //! approval prompts, resuming, a one-shot prompt — and disagree on almost
-//! every spelling. Codex is the odd one structurally: it says one-shot
-//! and resume as subcommands that have to lead the command line, while
-//! Claude and Antigravity say them as ordinary flags.
+//! every spelling. Codex and OpenCode are the odd ones structurally: they
+//! say one-shot as a subcommand that has to lead the command line (`codex
+//! exec`, `opencode run`; Codex's resume is a subcommand too), while
+//! Claude and Antigravity say everything as ordinary flags.
 //!
 //! Every mapping below was checked against `--help` on the installed
-//! CLIs (codex-cli 0.153.2) rather than taken from documentation.
-//! Claude Code's background sessions (`claude agents --json`, `claude
-//! attach <id>`) were probed on 2.1.296.
+//! CLIs (codex-cli 0.153.2, opencode 2.0.32) rather than taken from
+//! documentation. Claude Code's background sessions (`claude agents
+//! --json`, `claude attach <id>`) were probed on 2.1.296.
+//!
+//! OpenCode 2.0.32 (probed 2026-10-31): the interactive command
+//! (`opencode [dir]`) takes `--continue`/`-c`, `--session`/`-s <id>`,
+//! `--prompt <text>` (an opening message, the session stays interactive)
+//! and `--auto`, and *rejects* `--model` and `--agent` ("Unrecognized
+//! flag"); only `opencode run [flags] <message…>` has `--model`,
+//! `--agent`, `--fork` and `--format json`. A model or an agent for an
+//! interactive session therefore travels in `OPENCODE_CONFIG_CONTENT`
+//! (see `crate::opencode`), which `render` leaves to the spawn step: it
+//! renders `--model` for both forms and `opencode::adapt_launch` moves it
+//! out of an interactive command line.
 
 use std::path::Path;
 
@@ -19,6 +31,7 @@ pub enum Harness {
     Claude,
     Codex,
     Antigravity,
+    OpenCode,
 }
 
 impl Harness {
@@ -35,17 +48,24 @@ impl Harness {
             "claude" => Some(Harness::Claude),
             "codex" => Some(Harness::Codex),
             "agy" => Some(Harness::Antigravity),
+            "opencode" => Some(Harness::OpenCode),
             _ => None,
         }
     }
 
-    pub const ALL: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Antigravity];
+    pub const ALL: [Harness; 4] = [
+        Harness::Claude,
+        Harness::Codex,
+        Harness::Antigravity,
+        Harness::OpenCode,
+    ];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
             Harness::Antigravity => "agy",
+            Harness::OpenCode => "opencode",
         }
     }
 
@@ -54,6 +74,19 @@ impl Harness {
             Harness::Claude => "Claude Code (claude)",
             Harness::Codex => "Codex CLI (codex)",
             Harness::Antigravity => "Google Antigravity (agy)",
+            Harness::OpenCode => "OpenCode (opencode)",
+        }
+    }
+
+    /// The opening message of an interactive session, as the harness
+    /// takes it: a positional prompt on Claude Code and Codex, agy's
+    /// `--prompt-interactive`, OpenCode's `--prompt` (its positional is a
+    /// directory). A one-shot prompt is `LaunchOptions::one_shot`.
+    pub fn opening_args(self, message: String) -> Vec<String> {
+        match self {
+            Harness::Claude | Harness::Codex => vec![message],
+            Harness::Antigravity => vec!["--prompt-interactive".into(), message],
+            Harness::OpenCode => vec!["--prompt".into(), message],
         }
     }
 
@@ -76,6 +109,7 @@ impl std::str::FromStr for Harness {
             "claude" => Ok(Harness::Claude),
             "codex" => Ok(Harness::Codex),
             "agy" | "antigravity" => Ok(Harness::Antigravity),
+            "opencode" | "open-code" => Ok(Harness::OpenCode),
             other => Err(format!("unknown harness '{other}'")),
         }
     }
@@ -113,7 +147,9 @@ pub enum Resume {
     /// as it is: Claude Code `--resume <id> --fork-session`, Codex
     /// `codex fork <id>` (probed on Claude Code 2.1.284, codex-cli
     /// 0.158.0). Antigravity has none and renders nothing (`handoff`
-    /// hands its transcript over instead).
+    /// hands its transcript over instead); OpenCode forks only in its
+    /// one-shot form (`opencode run --session <id> --fork`), so an
+    /// interactive fork renders nothing there too.
     Fork(String),
 }
 
@@ -233,6 +269,42 @@ impl LaunchOptions {
                     out.trailing.push(prompt.to_string());
                 }
             }
+            Harness::OpenCode => {
+                // `run` is the one-shot subcommand; the interactive
+                // command has no model flag at all (`--model` rendered
+                // here is moved into the environment by
+                // `opencode::adapt_launch`)
+                if prompt.is_some() {
+                    out.leading.push("run".into());
+                }
+                match &self.resume {
+                    Resume::Off => {}
+                    Resume::Last => out.trailing.push("--continue".into()),
+                    Resume::Id(id) => {
+                        out.trailing.push("--session".into());
+                        out.trailing.push(id.clone());
+                    }
+                    Resume::Fork(id) if prompt.is_some() => {
+                        out.trailing.push("--session".into());
+                        out.trailing.push(id.clone());
+                        out.trailing.push("--fork".into());
+                    }
+                    Resume::Fork(_) => {}
+                }
+                if let Some(model) = self.model() {
+                    out.trailing.push("--model".into());
+                    out.trailing.push(model.to_string());
+                }
+                if self.bypass_approvals {
+                    // "auto-approve permissions that are not explicitly
+                    // denied", on both forms
+                    out.trailing.push("--auto".into());
+                }
+                if let Some(prompt) = prompt {
+                    // positional, and last (flags after it are still read)
+                    out.trailing.push(prompt.to_string());
+                }
+            }
         }
         out
     }
@@ -271,8 +343,9 @@ pub fn restore_args(harness: Harness, saved: &[String], conversation: &str) -> V
 
 /// `args` minus every spelling of resume `harness` accepts: Claude's
 /// `--continue`/`-c`, `--resume`/`-r` with its value, Antigravity's
-/// `--continue`/`-c` and `--conversation` with its value, and Codex's
-/// leading `resume` subcommand with `--last` or the id after it.
+/// `--continue`/`-c` and `--conversation` with its value, OpenCode's
+/// `--continue`/`-c`, `--session`/`-s` with its value and `--fork`, and
+/// Codex's leading `resume` subcommand with `--last` or the id after it.
 fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
     if harness == Harness::Codex {
         // a fork is a resume that copies: restoring one must not fork again
@@ -283,12 +356,13 @@ fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
     }
     let valued: &[&str] = match harness {
         Harness::Claude => &["--resume", "-r"],
+        Harness::OpenCode => &["--session", "-s"],
         _ => &["--conversation"],
     };
     let mut out = Vec::with_capacity(args.len());
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
-        if arg == "--continue" || arg == "-c" || arg == "--fork-session" {
+        if arg == "--continue" || arg == "-c" || arg == "--fork-session" || arg == "--fork" {
             continue;
         }
         if valued.contains(&arg.as_str()) {
@@ -421,6 +495,7 @@ mod tests {
         assert_eq!(Harness::detect("claude"), Some(Harness::Claude));
         assert_eq!(Harness::detect("codex"), Some(Harness::Codex));
         assert_eq!(Harness::detect("agy"), Some(Harness::Antigravity));
+        assert_eq!(Harness::detect("opencode"), Some(Harness::OpenCode));
         assert_eq!(
             Harness::detect("/home/me/.local/bin/claude"),
             Some(Harness::Claude)
@@ -438,7 +513,7 @@ mod tests {
     fn nothing_chosen_adds_nothing() {
         let o = opts();
         assert!(o.is_empty());
-        for h in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+        for h in Harness::ALL {
             assert!(rendered(&o, h).is_empty(), "{h:?}");
         }
         // a blank model or prompt is the same as unset: never pass an
@@ -449,7 +524,7 @@ mod tests {
             ..Default::default()
         };
         assert!(blank.is_empty());
-        for h in [Harness::Claude, Harness::Codex, Harness::Antigravity] {
+        for h in Harness::ALL {
             assert!(rendered(&blank, h).is_empty(), "{h:?}");
         }
     }
@@ -473,6 +548,12 @@ mod tests {
             rendered(&o, Harness::Codex),
             vec!["--model", "claude-opus-5", "--yolo"]
         );
+        // opencode's interactive command has no model flag: the spawn
+        // step moves this `--model` into OPENCODE_CONFIG_CONTENT
+        assert_eq!(
+            rendered(&o, Harness::OpenCode),
+            vec!["--model", "claude-opus-5", "--auto"]
+        );
         // the model is trimmed, not quoted or defaulted
         let padded = LaunchOptions {
             model: Some("  gpt-5.6  ".into()),
@@ -493,6 +574,7 @@ mod tests {
         assert_eq!(rendered(&last, Harness::Claude), vec!["--continue"]);
         assert_eq!(rendered(&last, Harness::Antigravity), vec!["--continue"]);
         assert_eq!(rendered(&last, Harness::Codex), vec!["resume", "--last"]);
+        assert_eq!(rendered(&last, Harness::OpenCode), vec!["--continue"]);
 
         let by_id = LaunchOptions {
             resume: Resume::Id("abc-123".into()),
@@ -508,6 +590,10 @@ mod tests {
             "agy's -c means --continue; by id is --conversation"
         );
         assert_eq!(rendered(&by_id, Harness::Codex), vec!["resume", "abc-123"]);
+        assert_eq!(
+            rendered(&by_id, Harness::OpenCode),
+            vec!["--session", "abc-123"]
+        );
     }
 
     #[test]
@@ -524,6 +610,11 @@ mod tests {
             restore_args(Harness::Codex, &codex, "new"),
             ["resume", "new", "--yolo"]
         );
+        let opencode: Vec<String> = ["-c", "--auto", "--session=old"].map(String::from).to_vec();
+        assert_eq!(
+            restore_args(Harness::OpenCode, &opencode, "new"),
+            ["--auto", "--session", "new"]
+        );
     }
 
     #[test]
@@ -538,7 +629,18 @@ mod tests {
         );
         assert_eq!(fork.render(Harness::Codex).leading, ["fork", "abc"]);
         assert_eq!(fork.render(Harness::Antigravity), Rendered::default());
+        // opencode forks in its one-shot form only
+        assert_eq!(fork.render(Harness::OpenCode), Rendered::default());
+        let one_shot = LaunchOptions {
+            one_shot: Some("go".into()),
+            ..fork.clone()
+        };
+        assert_eq!(
+            rendered(&one_shot, Harness::OpenCode),
+            ["run", "--session", "abc", "--fork", "go"]
+        );
         assert!(can_fork(Harness::Codex) && !can_fork(Harness::Antigravity));
+        assert!(!can_fork(Harness::OpenCode));
     }
 
     #[test]
@@ -559,6 +661,13 @@ mod tests {
         // codex spells it as a subcommand, which has to lead
         let r = o.render(Harness::Codex);
         assert_eq!(r.leading, vec!["exec"]);
+        assert_eq!(
+            r.trailing,
+            vec!["--model", "gpt-5.6", "fix the failing test"]
+        );
+        // and so does opencode, whose `run` is the form that takes --model
+        let r = o.render(Harness::OpenCode);
+        assert_eq!(r.leading, vec!["run"]);
         assert_eq!(
             r.trailing,
             vec!["--model", "gpt-5.6", "fix the failing test"]

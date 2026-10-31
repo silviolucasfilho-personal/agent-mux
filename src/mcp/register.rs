@@ -1,7 +1,9 @@
 //! Per-launch MCP registration fragments. Like the hook registrations in
 //! `tracing::hooks::register`, they touch no user file: Claude gets an
-//! inline `--mcp-config` document, Codex two `-c` overrides. Antigravity
-//! has no per-launch flag and relies on the installed entry.
+//! inline `--mcp-config` document, Codex two `-c` overrides, OpenCode an
+//! `OPENCODE_CONFIG_CONTENT` fragment (`crate::opencode`, which also adds
+//! the `--standalone` the fragment needs; probed on opencode 2.0.32).
+//! Antigravity has no per-launch flag and relies on the installed entry.
 
 use crate::harness::Harness;
 use crate::tracing::hooks::register::toml_string;
@@ -59,8 +61,12 @@ pub fn codex_overrides(exe: &Path, argv: &[String]) -> Vec<String> {
 /// How a launch reaches the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Registration {
-    /// Arguments appended to the harness command line.
-    PerLaunch { args: Vec<String> },
+    /// Arguments appended to the harness command line, and variables set
+    /// in its environment.
+    PerLaunch {
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    },
     /// The harness finds the server through its own configuration.
     Installed,
     /// Not reachable for this launch, with the reason.
@@ -96,9 +102,19 @@ pub fn plan(
     match harness {
         Some(Harness::Claude) => Registration::PerLaunch {
             args: vec!["--mcp-config".into(), claude_mcp_config_json(exe, &argv)],
+            env: Vec::new(),
         },
         Some(Harness::Codex) => Registration::PerLaunch {
             args: codex_overrides(exe, &argv),
+            env: Vec::new(),
+        },
+        Some(Harness::OpenCode) => Registration::PerLaunch {
+            args: Vec::new(),
+            env: vec![crate::opencode::config_env(&crate::opencode::mcp_fragment(
+                super::SERVER_NAME,
+                exe,
+                &argv,
+            ))],
         },
         Some(Harness::Antigravity) => {
             let st = super::install::agy_status(home, Some(exe));
@@ -168,8 +184,30 @@ mod tests {
             ws,
             home,
         );
-        assert!(matches!(&claude, Registration::PerLaunch { args } if args[0] == "--mcp-config"));
+        assert!(
+            matches!(&claude, Registration::PerLaunch { args, .. } if args[0] == "--mcp-config")
+        );
         assert_eq!(claude.env_value(), "registered");
+        // opencode: nothing on the command line, one config fragment in
+        // the environment (the spawn step adds --standalone for it)
+        let opencode = plan(
+            Some(Harness::OpenCode),
+            Some(Path::new("/x/agent-mux")),
+            Some(Path::new("/db")),
+            ws,
+            home,
+        );
+        let Registration::PerLaunch { args, env } = &opencode else {
+            panic!("{opencode:?}");
+        };
+        assert!(args.is_empty());
+        assert_eq!(env[0].0, crate::opencode::CONFIG_ENV);
+        let doc: serde_json::Value = serde_json::from_str(&env[0].1).unwrap();
+        assert_eq!(
+            doc["mcp"]["servers"]["agent-mux"]["command"][0],
+            "/x/agent-mux"
+        );
+        assert_eq!(doc["mcp"]["servers"]["agent-mux"]["command"][7], "/ws");
         let agy = plan(
             Some(Harness::Antigravity),
             Some(Path::new("/x/agent-mux")),

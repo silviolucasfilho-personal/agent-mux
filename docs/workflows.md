@@ -117,7 +117,7 @@ To compose a workflow for a task instead: `c` (or "describe it" in the `n` menu)
 `Enter` on **Who**, **Voters** or **Judge** opens the agent picker. It lists the workspace's and the library's agents with their descriptions, tools and models. `n` writes a new agent on the spot:
 - **Its text:** a name, what it is for, and its instructions (`Ctrl+O` opens your editor).
 - **What it may use:** ticked from read files, edit files, run commands, web and MCP servers.
-- **Where it runs:** a model per harness, and the effort for Codex and Antigravity.
+- **Where it runs:** a model per harness, and the effort for Codex and Antigravity (Claude Code and OpenCode take none).
 - **Where it is saved:** the workspace (`.agent-mux/agents/`, committed with the repository) or the library.
 
 The form shows while you type whether the agent fits the step. `Ctrl+S` saves it and puts it on the step. `Esc` steps back one level at a time. With unsaved changes, it asks before it leaves.
@@ -129,7 +129,7 @@ The form shows while you type whether the agent fits the step. `Ctrl+S` saves it
 name = "review-changes"
 description = "Find issues per dimension, refute each one with three votes, report the survivors."
 when_to_use = "Reviewing a diff or the working tree with independent verification."
-harness = "any"            # any | claude | codex | agy | ["claude", "codex"]
+harness = "any"            # any | claude | codex | agy | opencode | ["claude", "codex"]
 output = "report"          # the step whose result is the run's result
 default_isolation = "none" # none | worktree, for steps that omit isolation
 budget_tokens = 400000     # optional ceiling
@@ -300,12 +300,12 @@ Every session is a print-mode run with the harness's own approval prompts bypass
 
 agent-mux validates it against the schema and retries the session once with the errors when it does not match; a second failure makes the item `null`, which the view and the notes report.
 
-| | Claude Code | Codex CLI | Antigravity |
-| --- | --- | --- | --- |
-| Command | `claude -p … --output-format json` | `codex exec … -o <file> --skip-git-repo-check` | `agy -p … --output-format json --print-timeout <s> --mode accept-edits` |
-| Final text | the JSON envelope, then the transcript, then the screen | the last-message file, then the transcript, then the screen | the JSON envelope, then the transcript, then the screen |
-| Path guard | per launch | per launch (after `trace hooks install codex`) | none: rely on isolation and budgets |
-| Worktree isolation | yes | yes | not applied |
+| | Claude Code | Codex CLI | Antigravity | OpenCode |
+| --- | --- | --- | --- | --- |
+| Command | `claude -p … --output-format json` | `codex exec … -o <file> --skip-git-repo-check` | `agy -p … --output-format json --print-timeout <s> --mode accept-edits` | `opencode run … --format json --standalone`, the MCP server and any agent in `OPENCODE_CONFIG_CONTENT` |
+| Final text | the JSON envelope, then the transcript, then the screen | the last-message file, then the transcript, then the screen | the JSON envelope, then the transcript, then the screen | the `text` events of its JSON stream (one event per line; no usage or cost in it), then the screen |
+| Path guard | per launch | per launch (after `trace hooks install codex`) | none: rely on isolation and budgets | none: rely on isolation and budgets |
+| Worktree isolation | yes | yes | not applied | yes |
 
 Step skills are agent-mux packages (`wf-review-dimensions`, `wf-review-find`, `wf-refute`, `wf-synthesize`, `wf-read-map`, `wf-search`, `wf-deep-read`, `wf-critic`, `wf-find`, `wf-attempt`, `wf-judge`, `wf-discover-sites`, `wf-transform`, `wf-verify-site`, `wf-classify`, `wf-triage-bug`, `wf-triage-feature`, `wf-grimoire-brief`, `wf-grimoire-lens`, `wf-grimoire-verdict`) with `hidden = true` in their `skill.toml`, so they stay out of the Agents sidebar. They are installed user-level for the run's harness before the first session. `writes = true` marks a skill that edits files; a step running it must have `isolation = "worktree"`, which the validator enforces.
 
@@ -344,7 +344,7 @@ agent-mux workflow ls [--json]                       workflows, their last run a
 agent-mux workflow show <name>                       the document
 agent-mux workflow check [<name>] [--workspace DIR]  validate documents, step skills and agents; exit 1 on problems
 agent-mux workflow skills                            step skills and where they are installed
-agent-mux workflow run <name> --workspace DIR [--harness claude|codex|agy] [--profile P]
+agent-mux workflow run <name> --workspace DIR [--harness claude|codex|agy|opencode] [--profile P]
     [--arg name=value …] [--budget N] [--max-cost USD] [--isolation none|worktree]
     [--resume RUN_ID] [--json]                       exit 0 finished, 1 failed, 2 cancelled, 3 budget,
                                                      4 a verdict the document does not accept

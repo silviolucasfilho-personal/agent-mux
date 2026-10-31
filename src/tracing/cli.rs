@@ -25,8 +25,8 @@ commands:
                                (--tree: nesting; --timeline: bars over the turn)
   search <fts5 query> [--limit N] [--json]
                                full-text search over content (full mode data)
-  import <path>... | --discover [--provider claude|codex|antigravity] [--content-mode full|metadata]
-                               backfill transcripts (idempotent)
+  import <path>... | --discover [--provider claude|codex|antigravity|opencode] [--content-mode full|metadata]
+                               backfill transcripts and OpenCode's session db (idempotent)
   export [--session ID] [--since 30d] [--out FILE]
                                JSON Lines dump of every table
   export --langfuse [--session ID] [--since 30d] [--dry-run]
@@ -425,17 +425,20 @@ fn provider_key(h: crate::harness::Harness) -> &'static str {
         crate::harness::Harness::Claude => "claude",
         crate::harness::Harness::Codex => "codex",
         crate::harness::Harness::Antigravity => "antigravity",
+        crate::harness::Harness::OpenCode => "opencode",
     }
 }
 
-/// `--harness claude|codex|agy` narrows the inventory.
+/// `--harness claude|codex|agy|opencode` narrows the inventory.
 fn harness_filter(args: &Args) -> anyhow::Result<Option<crate::harness::Harness>> {
     match args.value("harness") {
         None => Ok(None),
         Some(h) => crate::harness::Harness::detect(h)
             .or_else(|| (h == "antigravity").then_some(crate::harness::Harness::Antigravity))
             .map(Some)
-            .ok_or_else(|| anyhow::anyhow!("unknown harness {h:?}: claude, codex or agy")),
+            .ok_or_else(|| {
+                anyhow::anyhow!("unknown harness {h:?}: claude, codex, agy or opencode")
+            }),
     }
 }
 
@@ -558,11 +561,7 @@ fn skills_lint(args: &Args) -> anyhow::Result<()> {
         crate::harness::Harness,
         std::collections::HashSet<String>,
     > = std::collections::HashMap::new();
-    for h in [
-        crate::harness::Harness::Claude,
-        crate::harness::Harness::Codex,
-        crate::harness::Harness::Antigravity,
-    ] {
+    for h in crate::harness::Harness::ALL {
         let seen = conn
             .as_ref()
             .and_then(|c| query::tool_names(c, provider_key(h)).ok())
@@ -1437,6 +1436,27 @@ fn doctor() -> anyhow::Result<()> {
         .map(|d| d.join("brain"));
     let (ok, detail) = dir_status(brain.as_deref());
     check("antigravity brain dir", ok, &detail);
+    check(
+        "opencode on PATH",
+        on_path("opencode").is_some(),
+        &on_path("opencode")
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not found".into()),
+    );
+    let opencode_db = resolved.opencode_db.clone().or_else(|| {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|h| super::opencode_db::default_db_path(Path::new(&h)))
+    });
+    let detail = opencode_db
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "no home".into());
+    check(
+        "opencode session db",
+        opencode_db.as_deref().is_some_and(Path::is_file),
+        &detail,
+    );
 
     println!("\nhooks (mode: {}):", resolved.hooks.as_str());
     if resolved.hooks.registers() {
@@ -1984,6 +2004,61 @@ fn search(args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What `--discover` finds to import.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportSource {
+    /// A transcript file.
+    File(PathBuf, Provider),
+    /// One session in OpenCode's database.
+    OpenCode {
+        db: PathBuf,
+        session: crate::tracing::opencode_db::SessionInfo,
+    },
+}
+
+impl ImportSource {
+    pub fn provider(&self) -> Provider {
+        match self {
+            ImportSource::File(_, p) => *p,
+            ImportSource::OpenCode { .. } => Provider::OpenCode,
+        }
+    }
+
+    /// How the import's output names it.
+    pub fn label(&self) -> String {
+        match self {
+            ImportSource::File(p, _) => p.display().to_string(),
+            ImportSource::OpenCode { db, session } => {
+                format!("{}#{}", db.display(), session.id)
+            }
+        }
+    }
+}
+
+/// Everything `--discover` would import: the transcript files, then every
+/// session with messages in OpenCode's database (`[tracing] opencode_db`,
+/// else `~/.local/share/opencode/opencode.db`).
+pub fn discover_sources(resolved: &ResolvedTracing) -> Vec<ImportSource> {
+    let mut out: Vec<ImportSource> = discover_transcripts(resolved)
+        .into_iter()
+        .map(|(p, prov)| ImportSource::File(p, prov))
+        .collect();
+    let db = resolved.opencode_db.clone().or_else(|| {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|h| crate::tracing::opencode_db::default_db_path(Path::new(&h)))
+    });
+    if let Some(db) = db {
+        for session in crate::tracing::opencode_db::list_sessions(&db) {
+            out.push(ImportSource::OpenCode {
+                db: db.clone(),
+                session,
+            });
+        }
+    }
+    out
+}
+
 /// Files `--discover` would import: every Claude and Antigravity transcript
 /// the history viewer knows plus every Codex rollout.
 pub fn discover_transcripts(resolved: &ResolvedTracing) -> Vec<(PathBuf, Provider)> {
@@ -2103,14 +2178,112 @@ pub fn import_transcript(
     let provider = provider_override.unwrap_or_else(|| transcript::detect_provider(first));
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (session_id, cwd) = identify_transcript(&text, &abs, provider);
+    let rows = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| (import_line_ns(line), transcript::parse_line(provider, line)))
+        .collect();
+    let agy_db = (provider == Provider::Antigravity)
+        .then(|| crate::tracing::agy_usage::conversation_db_for(&abs, &session_id))
+        .flatten();
+    import_rows(
+        store,
+        resolved,
+        ImportInput {
+            provider,
+            session_id,
+            cwd,
+            launch_key: abs.display().to_string(),
+            transcript_path: abs.to_string_lossy().into_owned(),
+            started_ns: import_start_ns(&text, &abs),
+            rows,
+            content_mode,
+        },
+        |assembler| {
+            let mut ops = Vec::new();
+            if let Some(db) = &agy_db {
+                for record in crate::tracing::agy_usage::AgyUsageReader::read_all(db) {
+                    ops.extend(assembler.attach_step_usage(&record));
+                }
+            }
+            ops
+        },
+    )
+}
+
+/// Imports one OpenCode session from its database (`opencode_db`), the
+/// way a live launch reads it: the completed rows in `seq` order. A
+/// session still running imports up to its message in progress, and a
+/// later import picks up the rest. Idempotent: the launch id derives from
+/// the database and the session id.
+pub fn import_opencode_session(
+    store: &mut Store,
+    resolved: &ResolvedTracing,
+    db: &Path,
+    session: &crate::tracing::opencode_db::SessionInfo,
+    content_mode: ContentMode,
+) -> anyhow::Result<ImportSummary> {
+    let rows: Vec<(Option<i128>, Vec<transcript::TranscriptEvent>)> =
+        crate::tracing::opencode_db::OpenCodeReader::new(db.to_path_buf(), &session.id)
+            .poll_rows()
+            .into_iter()
+            .map(|(ms, events)| (ms.map(|ms| i128::from(ms) * 1_000_000), events))
+            .collect();
+    import_rows(
+        store,
+        resolved,
+        ImportInput {
+            provider: Provider::OpenCode,
+            session_id: session.id.clone(),
+            cwd: Some(session.directory.clone()),
+            launch_key: format!("opencode|{}|{}", db.display(), session.id),
+            transcript_path: db.to_string_lossy().into_owned(),
+            started_ns: clamp_import_ns(i128::from(session.time_created) * 1_000_000),
+            rows,
+            content_mode,
+        },
+        |_| Vec::new(),
+    )
+}
+
+/// What `import_rows` imports: one conversation's events, grouped by the
+/// record (line or row) they came from with that record's own time.
+struct ImportInput {
+    provider: Provider,
+    session_id: String,
+    cwd: Option<String>,
+    /// What the deterministic launch id is derived from.
+    launch_key: String,
+    transcript_path: String,
+    started_ns: i64,
+    rows: Vec<(Option<i128>, Vec<transcript::TranscriptEvent>)>,
+    content_mode: ContentMode,
+}
+
+/// The shared core of an import: the events through a fresh assembler,
+/// then `after` (Antigravity's usage side channel) once it is finalized,
+/// into the store.
+fn import_rows(
+    store: &mut Store,
+    resolved: &ResolvedTracing,
+    input: ImportInput,
+    after: impl FnOnce(&mut TurnAssembler) -> Vec<crate::tracing::store::model::StoreOp>,
+) -> anyhow::Result<ImportSummary> {
+    let ImportInput {
+        provider,
+        session_id,
+        cwd,
+        launch_key,
+        transcript_path,
+        started_ns,
+        rows,
+        content_mode,
+    } = input;
     let session_key = map::session_key(provider, &session_id);
     let cwd = cwd.unwrap_or_else(|| ".".into());
-    let launch_id = uuid::Uuid::new_v5(
-        &ids::AMX_NS,
-        format!("amx1|import|{}", abs.display()).as_bytes(),
-    )
-    .to_string();
-    let started_ns = import_start_ns(&text, &abs);
+    let launch_id =
+        uuid::Uuid::new_v5(&ids::AMX_NS, format!("amx1|import|{launch_key}").as_bytes())
+            .to_string();
     let settings = MapSettings {
         provider,
         content_mode,
@@ -2128,6 +2301,7 @@ pub fn import_transcript(
             Provider::Claude => "Claude Code".into(),
             Provider::Codex => "Codex".into(),
             Provider::Antigravity => "Antigravity".into(),
+            Provider::OpenCode => "OpenCode".into(),
         },
         cwd: cwd.clone(),
         project_slug: crate::history::project_slug(Path::new(&cwd)),
@@ -2141,7 +2315,7 @@ pub fn import_transcript(
     };
     let mut assembler =
         TurnAssembler::new(settings.clone(), Some(session_id.clone()), "deterministic");
-    assembler.set_transcript_path(&abs.to_string_lossy());
+    assembler.set_transcript_path(&transcript_path);
     let mut ops = vec![
         crate::tracing::store::model::StoreOp::Launch(map::launch_adopted(
             &settings,
@@ -2152,26 +2326,17 @@ pub fn import_transcript(
     ];
     let mut recv = i128::from(started_ns);
     let mut ended_ns = started_ns;
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            continue;
+    for (row_ns, events) in rows {
+        if let Some(row_ns) = row_ns {
+            recv = row_ns;
+            ended_ns = ended_ns.max(clamp_import_ns(row_ns));
         }
-        if let Some(line_ns) = import_line_ns(line) {
-            recv = line_ns;
-            ended_ns = ended_ns.max(clamp_import_ns(line_ns));
-        }
-        for event in transcript::parse_line(provider, line) {
+        for event in events {
             ops.extend(assembler.feed(event, recv));
         }
     }
     ops.extend(assembler.finalize());
-    if provider == Provider::Antigravity
-        && let Some(db) = crate::tracing::agy_usage::conversation_db_for(&abs, &session_id)
-    {
-        for record in crate::tracing::agy_usage::AgyUsageReader::read_all(&db) {
-            ops.extend(assembler.attach_step_usage(&record));
-        }
-    }
+    ops.extend(after(&mut assembler));
     let turns = ops
         .iter()
         .filter(|op| matches!(op, crate::tracing::store::model::StoreOp::Trace(t) if t.status != crate::tracing::store::model::TraceStatus::Open))
@@ -2279,6 +2444,8 @@ fn identify_transcript(text: &str, path: &Path, provider: Provider) -> (String, 
             });
             (stem(path), cwd)
         }
+        // an export of `session_message` rows as lines: named by its file
+        Provider::OpenCode => (stem(path), None),
     }
 }
 
@@ -2294,6 +2461,7 @@ fn import(args: &Args) -> anyhow::Result<()> {
         Some("claude") => Some(Provider::Claude),
         Some("codex") => Some(Provider::Codex),
         Some("antigravity") | Some("agy") => Some(Provider::Antigravity),
+        Some("opencode") => Some(Provider::OpenCode),
         Some(other) => anyhow::bail!("unknown provider {other:?}"),
         None => None,
     };
@@ -2303,38 +2471,57 @@ fn import(args: &Args) -> anyhow::Result<()> {
         Some(other) => anyhow::bail!("unknown content mode {other:?}"),
         None => resolved.content_mode,
     };
-    let files: Vec<(PathBuf, Option<Provider>)> = if args.has("discover") {
-        discover_transcripts(&resolved)
+    let discover = args.has("discover");
+    let files: Vec<ImportSource> = if discover {
+        // `--provider` narrows the sweep to one provider
+        discover_sources(&resolved)
             .into_iter()
-            .map(|(p, prov)| (p, Some(prov)))
+            .filter(|s| provider.is_none_or(|p| s.provider() == p))
             .collect()
     } else {
+        // a path given by hand is a file; its provider is sniffed unless
+        // `--provider` says (an OpenCode session is imported by discovery)
         args.positional
             .iter()
-            .map(|p| (PathBuf::from(p), provider))
+            .map(|p| ImportSource::File(PathBuf::from(p), provider.unwrap_or(Provider::Claude)))
             .collect()
     };
     if files.is_empty() {
+        if discover {
+            println!("nothing to import: no transcript or OpenCode session was found");
+            return Ok(());
+        }
         anyhow::bail!("usage: agent-mux trace import <path>... | --discover");
     }
     let mut store = open_rw(&resolved)?;
     let mut ok = 0usize;
     let mut empty = 0usize;
-    for (path, prov) in &files {
-        match import_transcript(&mut store, &resolved, path, *prov, content_mode) {
+    for source in &files {
+        let label = source.label();
+        let result = match source {
+            ImportSource::File(path, prov) => import_transcript(
+                &mut store,
+                &resolved,
+                path,
+                (discover || provider.is_some()).then_some(*prov),
+                content_mode,
+            ),
+            ImportSource::OpenCode { db, session } => {
+                import_opencode_session(&mut store, &resolved, db, session, content_mode)
+            }
+        };
+        match result {
             Ok(summary) if summary.empty => {
                 empty += 1;
                 println!(
-                    "skipped {}: no turns in transcript (session {})",
-                    path.display(),
+                    "skipped {label}: no turns in transcript (session {})",
                     summary.session_id
                 );
             }
             Ok(summary) => {
                 ok += 1;
                 println!(
-                    "imported {}: session {} — {} turn(s), {} row(s){}",
-                    path.display(),
+                    "imported {label}: session {} — {} turn(s), {} row(s){}",
                     summary.session_id,
                     summary.turns,
                     summary.ops,
@@ -2345,12 +2532,12 @@ fn import(args: &Args) -> anyhow::Result<()> {
                     }
                 );
             }
-            Err(e) => println!("skipped {}: {e}", path.display()),
+            Err(e) => println!("skipped {label}: {e}"),
         }
     }
     let _ = store.end_run();
     println!(
-        "{ok}/{} file(s) imported into {}{}",
+        "{ok}/{} source(s) imported into {}{}",
         files.len(),
         resolved.db_path.display(),
         if empty > 0 {
@@ -2892,6 +3079,97 @@ mod tests {
         assert!(a.has("full") && a.has("json"));
         assert_eq!(a.value("limit"), Some("5"));
         assert_eq!(a.value("since"), Some("2d"));
+    }
+
+    #[test]
+    fn discovery_backfills_opencode_sessions_from_its_database() {
+        use crate::tracing::opencode_db::fixture;
+        let temp = tempfile::tempdir().unwrap();
+        let oc = temp.path().join("opencode.db");
+        let conn = fixture::create(&oc);
+        fixture::session(&conn, "ses_done", "/repo", 1_700_000_000_000);
+        fixture::message(
+            &conn,
+            "ses_done",
+            1,
+            "user",
+            r#"{"time":{"created":1700000000100},"text":"inspect the repo","files":[]}"#,
+        );
+        fixture::message(
+            &conn,
+            "ses_done",
+            2,
+            "assistant",
+            r##"{"time":{"created":1700000000200,"completed":1700000000900},"model":{"id":"m","providerID":"p"},"content":[{"type":"text","text":"looking"},{"type":"tool","id":"c1","name":"read","state":{"status":"completed","input":{"path":"README.md"},"content":[{"type":"text","text":"# repo"}]},"time":{"created":1700000000300,"completed":1700000000400}}],"cost":0.1,"tokens":{"input":10,"output":3,"reasoning":0,"cache":{"read":50,"write":0}}}"##,
+        );
+        fixture::message(
+            &conn,
+            "ses_done",
+            3,
+            "idle",
+            r#"{"time":{"created":1700000001000},"outcome":"succeeded"}"#,
+        );
+        // opened, never prompted: discovery lists only sessions with rows
+        fixture::session(&conn, "ses_blank", "/repo", 1_700_000_002_000);
+
+        let db_path = temp.path().join("traces.db");
+        let oc_value = oc.to_string_lossy().into_owned();
+        let resolved = config::resolve_tracing(None, &|key| match key {
+            "AGENT_MUX_TRACE_DB" => Some(db_path.to_string_lossy().into_owned()),
+            "HOME" => Some(temp.path().to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .map(|mut r| {
+            r.opencode_db = Some(PathBuf::from(&oc_value));
+            r
+        })
+        .unwrap();
+        let sources: Vec<ImportSource> = discover_sources(&resolved)
+            .into_iter()
+            .filter(|s| s.provider() == Provider::OpenCode)
+            .collect();
+        assert_eq!(sources.len(), 1, "{sources:?}");
+        let ImportSource::OpenCode { db, session } = &sources[0] else {
+            panic!("{:?}", sources[0]);
+        };
+        assert_eq!(session.id, "ses_done");
+        assert!(sources[0].label().ends_with("opencode.db#ses_done"));
+
+        let mut store = open_rw(&resolved).unwrap();
+        for _ in 0..2 {
+            // twice: the second import rewrites the same rows
+            let summary =
+                import_opencode_session(&mut store, &resolved, db, session, ContentMode::Full)
+                    .unwrap();
+            assert_eq!((summary.turns, summary.empty), (1, false));
+        }
+        let conn = store.conn();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM sessions WHERE key = 'opencode:ses_done'"),
+            1
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM launches"), 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM traces WHERE status = 'closed'"),
+            1
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM observations WHERE name = 'read' AND end_ns IS NOT NULL"),
+            1
+        );
+        // dated by opencode's own clock, not the import's
+        assert_eq!(
+            count("SELECT first_seen_ns FROM sessions"),
+            1_700_000_000_000_000_000
+        );
+        let (cwd, path): (String, String) = conn
+            .query_row("SELECT cwd, transcript_path FROM sessions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(cwd, "/repo");
+        assert_eq!(path, oc_value);
     }
 
     #[test]

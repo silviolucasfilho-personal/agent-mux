@@ -17,6 +17,15 @@
 //!   not re-probed on 1.2.10). An unknown name is ignored silently, so the
 //!   file is written before the run. Tool lists are not written: a
 //!   misspelled agy tool name can hang the session.
+//! - OpenCode 2.0.32 (probed 2026-10-31): an agent defined inline in
+//!   `OPENCODE_CONFIG_CONTENT` (`agent.<name>` with `description`,
+//!   `mode: "primary"`, `prompt` and a `tools` map of booleans) is run by
+//!   `opencode run --agent <name>`, or by `default_agent` in the same
+//!   document for the interactive command, which rejects `--agent`
+//!   (`crate::opencode::adapt_launch` makes that move). Both the `tools`
+//!   map and a `permission` map took the shell away from a probe agent;
+//!   the `tools` map is written. No file is written. The document counts
+//!   only with `--standalone`, which the spawn step adds.
 
 use super::{AgentSpec, Tool};
 use crate::harness::Harness;
@@ -34,6 +43,8 @@ pub enum Level {
 pub struct LaunchPlan {
     /// Inserted before the prompt, with the workflow's own arguments.
     pub args: Vec<String>,
+    /// Set in the session's environment (OpenCode's inline agent).
+    pub env: Vec<(String, String)>,
     /// Arguments of the composed command line this plan replaces.
     pub remove: Vec<String>,
     /// The agent's model and effort on this harness; a step's own win.
@@ -52,10 +63,46 @@ pub fn claude_tools(tool: &Tool) -> Vec<String> {
     }
 }
 
-/// The name an agent file carries on Antigravity: prefixed, so it never
-/// collides with an agent of the user's own.
+/// The name an agent carries on Antigravity and OpenCode: prefixed, so it
+/// never collides with an agent of the user's own.
 pub fn agy_name(spec: &AgentSpec) -> String {
     format!("agent-mux-{}", spec.name)
+}
+
+/// OpenCode's tool names for a canonical tool, as its `tools` map keys
+/// them (from its documentation; `bash` was probed).
+pub fn opencode_tools(tool: &Tool) -> Vec<&'static str> {
+    match tool {
+        Tool::Read => vec!["read", "glob", "grep", "list"],
+        Tool::Edit => vec!["edit", "write", "patch"],
+        Tool::Shell => vec!["bash"],
+        Tool::Web => vec!["webfetch", "websearch"],
+        Tool::Mcp(_) => vec![],
+    }
+}
+
+/// The `OPENCODE_CONFIG_CONTENT` fragment defining the agent. A tool
+/// list becomes a `tools` map that switches off every canonical tool the
+/// agent lacks; MCP tools are not mapped (`tool_notes`).
+pub fn opencode_fragment(spec: &AgentSpec) -> serde_json::Value {
+    let mut def = serde_json::Map::new();
+    def.insert(
+        "description".into(),
+        spec.description.replace('\n', " ").into(),
+    );
+    def.insert("mode".into(), "primary".into());
+    def.insert("prompt".into(), spec.instructions.clone().into());
+    if let Some(tools) = &spec.tools {
+        let mut map = serde_json::Map::new();
+        for canonical in [Tool::Read, Tool::Edit, Tool::Shell, Tool::Web] {
+            let on = tools.contains(&canonical);
+            for name in opencode_tools(&canonical) {
+                map.insert(name.into(), on.into());
+            }
+        }
+        def.insert("tools".into(), serde_json::Value::Object(map));
+    }
+    serde_json::json!({ "agent": { agy_name(spec): def } })
 }
 
 /// `~/.gemini/config/agents/agent-mux-<name>/`.
@@ -140,6 +187,16 @@ pub fn tool_notes(spec: &AgentSpec, harness: Harness) -> Vec<(Level, String)> {
                 "agy: the tool list is not enforced (agy tool names are unverified); the session has agy's own tools".to_string(),
             ));
         }
+        Harness::OpenCode => {
+            for t in tools {
+                if let Tool::Mcp(s) = t {
+                    out.push((
+                        Level::Warning,
+                        format!("opencode: mcp:{s} is not mapped; the session has the MCP servers opencode.json configures"),
+                    ));
+                }
+            }
+        }
     }
     out
 }
@@ -185,6 +242,12 @@ pub fn plan(spec: &AgentSpec, harness: Harness) -> LaunchPlan {
         Harness::Antigravity => {
             out.args.push("--agent".into());
             out.args.push(agy_name(spec));
+        }
+        Harness::OpenCode => {
+            out.args.push("--agent".into());
+            out.args.push(agy_name(spec));
+            out.env
+                .push(crate::opencode::config_env(&opencode_fragment(spec)));
         }
     }
     out
@@ -258,6 +321,28 @@ mod tests {
     }
 
     #[test]
+    fn opencode_defines_the_agent_inline_and_selects_it() {
+        let s = spec("tools = [\"read\", \"shell\"]");
+        let p = plan(&s, Harness::OpenCode);
+        assert_eq!(p.args, ["--agent", "agent-mux-reviewer"]);
+        assert_eq!(p.env.len(), 1);
+        assert_eq!(p.env[0].0, crate::opencode::CONFIG_ENV);
+        let v: serde_json::Value = serde_json::from_str(&p.env[0].1).unwrap();
+        let a = &v["agent"]["agent-mux-reviewer"];
+        assert_eq!(a["mode"], "primary");
+        assert_eq!(a["prompt"], "Say \"hi\".\nThen stop.");
+        assert_eq!(a["tools"]["bash"], true);
+        assert_eq!(a["tools"]["read"], true);
+        assert_eq!(a["tools"]["edit"], false);
+        assert_eq!(a["tools"]["webfetch"], false);
+        assert!(p.remove.is_empty());
+        // no tool list: no map, the harness's own tools
+        let all = plan(&spec(""), Harness::OpenCode);
+        let v: serde_json::Value = serde_json::from_str(&all.env[0].1).unwrap();
+        assert!(v["agent"]["agent-mux-reviewer"].get("tools").is_none());
+    }
+
+    #[test]
     fn notes_say_what_is_not_enforced() {
         let s = spec("tools = [\"read\", \"web\", \"mcp:gh\"]");
         assert!(tool_notes(&s, Harness::Claude).is_empty());
@@ -265,5 +350,7 @@ mod tests {
         assert_eq!(codex.len(), 3);
         assert_eq!(tool_notes(&s, Harness::Antigravity).len(), 1);
         assert!(tool_notes(&spec(""), Harness::Antigravity).is_empty());
+        assert_eq!(tool_notes(&s, Harness::OpenCode).len(), 1);
+        assert!(tool_notes(&spec("tools = [\"read\"]"), Harness::OpenCode).is_empty());
     }
 }

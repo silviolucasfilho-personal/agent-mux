@@ -172,10 +172,12 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
             super::USAGE
         ),
         ("status", provider) => {
-            let all = ["claude", "codex", "agy"];
+            let all = ["claude", "codex", "agy", "opencode"];
             let providers: Vec<&str> = match provider {
                 Some(p) if all.contains(&p) => vec![p],
-                Some(p) => anyhow::bail!("unknown provider {p:?}: claude, codex or agy"),
+                Some(p) => {
+                    anyhow::bail!("unknown provider {p:?}: claude, codex, agy or opencode")
+                }
                 None => all.to_vec(),
             };
             let per_launch = match &exe {
@@ -186,6 +188,10 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
                 match p {
                     "claude" => println!("claude: {per_launch} through --mcp-config"),
                     "codex" => println!("codex: {per_launch} through -c mcp_servers.agent-mux.*"),
+                    "opencode" => println!(
+                        "opencode: {per_launch} through {} (with --standalone)",
+                        crate::opencode::CONFIG_ENV
+                    ),
                     _ => {
                         let st = agy_status(&home, exe.as_deref());
                         println!("agy: {}", st.note());

@@ -19,6 +19,10 @@ pub enum Provider {
     Claude,
     Codex,
     Antigravity,
+    /// OpenCode keeps no transcript file: its rows come from its SQLite
+    /// database (`tracing::opencode_db`), one line here being one
+    /// `session_message` row as `{"id", "type", "data"}`.
+    OpenCode,
 }
 
 impl Provider {
@@ -27,6 +31,7 @@ impl Provider {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
             Provider::Antigravity => "antigravity",
+            Provider::OpenCode => "opencode",
         }
     }
 }
@@ -158,6 +163,202 @@ pub enum TranscriptEvent {
     },
 }
 
+/// An OpenCode `session_message` row written as one JSON line
+/// (`{"id": …, "type": …, "data": {…}}`, the shape `opencode_db` hands
+/// over and an export may carry).
+pub fn parse_opencode_line(line: &str) -> Vec<TranscriptEvent> {
+    let Some(v) = parse_json_line(line) else {
+        return Vec::new();
+    };
+    let id = v.get("id").and_then(Value::as_str).unwrap_or("");
+    let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+    let data = v.get("data").cloned().unwrap_or(Value::Null);
+    opencode_row_events(id, kind, &data)
+}
+
+/// Milliseconds since the epoch (OpenCode's `time.*` fields) as the
+/// RFC 3339 string the assembler reads.
+pub fn opencode_ts(ms: Option<i64>) -> Option<String> {
+    let ms = ms?;
+    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+        .ok()?
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
+fn opencode_time(v: &Value, field: &str) -> Option<i64> {
+    v.get("time")?.get(field)?.as_i64()
+}
+
+/// The events of one OpenCode `session_message` row (opencode 2.0.32,
+/// `~/.local/share/opencode/opencode.db`, read 2026-10-31):
+///
+/// - `user`: `{time.created, text, files, agents}` → a prompt.
+/// - `assistant`: `{time.{created,completed}, agent, model.{id,providerID},
+///   content: [reasoning | text | tool], cost, tokens.{input, output,
+///   reasoning, cache.{read, write}}, finish}` → one assistant message
+///   (its text parts joined, its reasoning as thinking, its usage under
+///   `*_tokens` keys, charged once by the row id), then a tool call and a
+///   result per `tool` part (`id`, `name`, `state.{status, input,
+///   content | output | error, metadata}`, `time.{created, ran,
+///   completed}`). The row is rewritten while the message streams;
+///   `opencode_db` hands over only completed rows.
+/// - `idle`: `{time.created, outcome}` → the turn's end (`succeeded`
+///   completes it, anything else aborts it).
+/// - `system`: instruction notices → harness chatter on a user line.
+/// - anything else (`agent-switched`, …) → a record of its kind.
+pub fn opencode_row_events(id: &str, kind: &str, data: &Value) -> Vec<TranscriptEvent> {
+    let created = opencode_ts(opencode_time(data, "created"));
+    match kind {
+        "user" => vec![TranscriptEvent::User {
+            text: data
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            meta: false,
+            ts: created,
+        }],
+        "system" => vec![TranscriptEvent::User {
+            text: data
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            meta: true,
+            ts: created,
+        }],
+        "assistant" => {
+            let parts = data
+                .get("content")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let join = |want: &str| -> String {
+                parts
+                    .iter()
+                    .filter(|p| p.get("type").and_then(Value::as_str) == Some(want))
+                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .filter(|t| !t.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let text = join("text");
+            let thinking = join("reasoning");
+            let model = data.get("model").map(|m| {
+                let provider = m.get("providerID").and_then(Value::as_str).unwrap_or("");
+                let id = m.get("id").and_then(Value::as_str).unwrap_or("");
+                if provider.is_empty() {
+                    id.to_string()
+                } else {
+                    format!("{provider}/{id}")
+                }
+            });
+            let mut usage = Vec::new();
+            if let Some(t) = data.get("tokens") {
+                let mut push = |key: &str, v: Option<&Value>| {
+                    if let Some(n) = v.and_then(Value::as_i64) {
+                        usage.push((key.to_string(), n));
+                    }
+                };
+                push("input_tokens", t.get("input"));
+                push("output_tokens", t.get("output"));
+                push("reasoning_tokens", t.get("reasoning"));
+                push(
+                    "cache_read_tokens",
+                    t.get("cache").and_then(|c| c.get("read")),
+                );
+                push(
+                    "cache_write_tokens",
+                    t.get("cache").and_then(|c| c.get("write")),
+                );
+            }
+            let mut events = vec![TranscriptEvent::Assistant {
+                text,
+                model,
+                thinking: (!thinking.is_empty()).then_some(thinking),
+                usage,
+                msg_id: (!id.is_empty()).then(|| id.to_string()),
+                skill: None,
+                step_index: None,
+                ts: created.clone(),
+            }];
+            for part in parts
+                .iter()
+                .filter(|p| p.get("type").and_then(Value::as_str) == Some("tool"))
+            {
+                let call_id = part
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let name = part
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_string();
+                let state = part.get("state").cloned().unwrap_or(Value::Null);
+                let status = state.get("status").and_then(Value::as_str).unwrap_or("");
+                events.push(TranscriptEvent::ToolUse {
+                    id: call_id.clone(),
+                    name,
+                    args: state.get("input").cloned().unwrap_or(Value::Null),
+                    skill: None,
+                    ts: opencode_ts(opencode_time(part, "created")).or_else(|| created.clone()),
+                });
+                if status == "completed" || status == "error" {
+                    let content = match state.get("content") {
+                        Some(Value::Array(items)) => Value::String(
+                            items
+                                .iter()
+                                .filter_map(|i| i.get("text").and_then(Value::as_str))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        ),
+                        Some(other) => other.clone(),
+                        None => state
+                            .get("output")
+                            .or_else(|| state.get("error"))
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    };
+                    let mut structured = serde_json::Map::new();
+                    structured.insert("status".into(), Value::from(status));
+                    if let Some(m) = state.get("metadata") {
+                        structured.insert("metadata".into(), m.clone());
+                    }
+                    if let Some(t) = part.get("time") {
+                        structured.insert("time".into(), t.clone());
+                    }
+                    events.push(TranscriptEvent::ToolResult {
+                        id: call_id,
+                        content,
+                        is_error: status == "error",
+                        structured: Some(Value::Object(structured)),
+                        ts: opencode_ts(opencode_time(part, "completed"))
+                            .or_else(|| opencode_ts(opencode_time(data, "completed")))
+                            .or_else(|| created.clone()),
+                    });
+                }
+            }
+            events
+        }
+        "idle" => vec![TranscriptEvent::TurnBoundary {
+            kind: if data.get("outcome").and_then(Value::as_str) == Some("succeeded") {
+                TurnBoundaryKind::Complete
+            } else {
+                TurnBoundaryKind::Aborted
+            },
+            ts: created,
+        }],
+        other => vec![TranscriptEvent::Record {
+            kind: other.to_string(),
+            payload: data.clone(),
+            ts: created,
+        }],
+    }
+}
+
 /// Sniffs the provider from a transcript's first line.
 pub fn detect_provider(first_line: &str) -> Provider {
     if first_line.contains("\"step_index\"") || first_line.contains("USER_EXPLICIT") {
@@ -174,6 +375,7 @@ pub fn parse_line(provider: Provider, line: &str) -> Vec<TranscriptEvent> {
         Provider::Claude => parse_claude_line(line),
         Provider::Codex => parse_codex_line(line),
         Provider::Antigravity => parse_antigravity_line(line),
+        Provider::OpenCode => parse_opencode_line(line),
     };
     let Some(v) = parse_json_line(line) else {
         return events;
@@ -1757,5 +1959,147 @@ mod tests {
             dag.iter().find(|event| matches!(event, TranscriptEvent::Record { kind, .. } if kind == "transcript_dag")),
             Some(TranscriptEvent::Record { payload, .. }) if payload["uuid"] == "u1" && payload["parentUuid"] == "p1" && payload["sourceToolAssistantUUID"] == "m1"
         ));
+    }
+}
+
+#[cfg(test)]
+mod opencode_tests {
+    use super::*;
+
+    // rows as opencode 2.0.32 wrote them (trimmed)
+    const USER: &str = r#"{"time":{"created":1793454359013},"text":"explain me this repo","files":[],"agents":[]}"#;
+    const ASSISTANT: &str = r#"{"time":{"created":1793454359025,"streamed":1793454361672,"completed":1793454361768},"agent":"build","model":{"id":"big-pickle","providerID":"opencode","variant":"default"},"content":[{"type":"reasoning","text":"Let me explore.","state":{"reasoningField":"reasoning_content"},"time":{"created":1793454360754,"completed":1793454361663}},{"type":"text","text":"I'll explore the repository."},{"type":"tool","id":"call_66562f7e","name":"shell","executed":false,"state":{"status":"completed","input":{"command":"ls -la"},"content":[{"type":"text","text":"total 776"}],"metadata":{"status":"completed","truncated":false,"exit":0}},"time":{"created":1793454361263,"ran":1793454361667,"completed":1793454361720}}],"finish":"tool-calls","rawFinish":"tool_calls","cost":0,"tokens":{"input":85,"output":2,"reasoning":3,"cache":{"read":16614,"write":0}}}"#;
+    const IDLE: &str = r#"{"time":{"created":1793454550365},"outcome":"succeeded"}"#;
+
+    #[test]
+    fn a_user_row_is_a_prompt_with_its_time() {
+        let events = opencode_row_events("msg_u1", "user", &serde_json::from_str(USER).unwrap());
+        assert_eq!(
+            events,
+            vec![TranscriptEvent::User {
+                text: "explain me this repo".into(),
+                meta: false,
+                ts: Some("2026-10-31T13:45:59.013Z".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_assistant_row_is_a_message_then_its_tool_calls() {
+        let events = opencode_row_events(
+            "msg_a1",
+            "assistant",
+            &serde_json::from_str(ASSISTANT).unwrap(),
+        );
+        assert_eq!(events.len(), 3);
+        let TranscriptEvent::Assistant {
+            text,
+            model,
+            thinking,
+            usage,
+            msg_id,
+            ts,
+            ..
+        } = &events[0]
+        else {
+            panic!("{:?}", events[0]);
+        };
+        assert_eq!(text, "I'll explore the repository.");
+        assert_eq!(model.as_deref(), Some("opencode/big-pickle"));
+        assert_eq!(thinking.as_deref(), Some("Let me explore."));
+        assert_eq!(msg_id.as_deref(), Some("msg_a1"));
+        assert_eq!(ts.as_deref(), Some("2026-10-31T13:45:59.025Z"));
+        assert_eq!(
+            usage,
+            &vec![
+                ("input_tokens".to_string(), 85),
+                ("output_tokens".to_string(), 2),
+                ("reasoning_tokens".to_string(), 3),
+                ("cache_read_tokens".to_string(), 16614),
+                ("cache_write_tokens".to_string(), 0),
+            ]
+        );
+        let TranscriptEvent::ToolUse {
+            id, name, args, ts, ..
+        } = &events[1]
+        else {
+            panic!("{:?}", events[1]);
+        };
+        assert_eq!((id.as_str(), name.as_str()), ("call_66562f7e", "shell"));
+        assert_eq!(args["command"], "ls -la");
+        assert_eq!(ts.as_deref(), Some("2026-10-31T13:46:01.263Z"));
+        let TranscriptEvent::ToolResult {
+            id,
+            content,
+            is_error,
+            structured,
+            ts,
+        } = &events[2]
+        else {
+            panic!("{:?}", events[2]);
+        };
+        assert_eq!(id, "call_66562f7e");
+        assert_eq!(content, "total 776");
+        assert!(!is_error);
+        assert_eq!(structured.as_ref().unwrap()["metadata"]["exit"], 0);
+        // RFC 3339 without trailing zeros, as `time` formats it
+        assert_eq!(ts.as_deref(), Some("2026-10-31T13:46:01.72Z"));
+    }
+
+    #[test]
+    fn errors_idle_and_other_rows() {
+        let failed = r#"{"time":{"created":1},"model":{"id":"m","providerID":"p"},"content":[{"type":"tool","id":"c1","name":"bash","state":{"status":"error","input":{},"error":"boom"}}],"tokens":{"input":1,"output":1,"reasoning":0,"cache":{"read":0,"write":0}}}"#;
+        let events = opencode_row_events(
+            "msg_a2",
+            "assistant",
+            &serde_json::from_str(failed).unwrap(),
+        );
+        assert!(matches!(
+            &events[2],
+            TranscriptEvent::ToolResult { is_error: true, content, .. } if content == "boom"
+        ));
+        // a call still running has no result yet
+        let running = r#"{"time":{"created":1},"content":[{"type":"tool","id":"c2","name":"bash","state":{"status":"running","input":{}}}]}"#;
+        let events = opencode_row_events(
+            "msg_a3",
+            "assistant",
+            &serde_json::from_str(running).unwrap(),
+        );
+        assert_eq!(events.len(), 2);
+        let idle = opencode_row_events("x", "idle", &serde_json::from_str(IDLE).unwrap());
+        assert!(matches!(
+            idle[0],
+            TranscriptEvent::TurnBoundary {
+                kind: TurnBoundaryKind::Complete,
+                ..
+            }
+        ));
+        let interrupted =
+            opencode_row_events("x", "idle", &serde_json::json!({"outcome": "interrupted"}));
+        assert!(matches!(
+            interrupted[0],
+            TranscriptEvent::TurnBoundary {
+                kind: TurnBoundaryKind::Aborted,
+                ..
+            }
+        ));
+        let system = opencode_row_events(
+            "s",
+            "system",
+            &serde_json::json!({"text": "catalog changed"}),
+        );
+        assert!(matches!(
+            &system[0],
+            TranscriptEvent::User { meta: true, .. }
+        ));
+        let switched =
+            opencode_row_events("w", "agent-switched", &serde_json::json!({"agent": "a"}));
+        assert!(
+            matches!(&switched[0], TranscriptEvent::Record { kind, .. } if kind == "agent-switched")
+        );
+        // the line form round-trips the row
+        let line = format!(r#"{{"id":"msg_u1","type":"user","data":{USER}}}"#);
+        assert_eq!(parse_line(Provider::OpenCode, &line).len(), 1);
+        assert!(parse_opencode_line("not json").is_empty());
     }
 }

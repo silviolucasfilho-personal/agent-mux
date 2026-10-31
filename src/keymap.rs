@@ -676,6 +676,7 @@ pub enum ActionId {
     FilterClaude,
     FilterCodex,
     FilterAntigravity,
+    FilterOpenCode,
     FindNext,
     FindPrev,
 }
@@ -776,6 +777,13 @@ pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: ActionId::FilterAntigravity,
         label: "Filter skills: Antigravity",
+        keywords: "harness",
+        key: None,
+        scope: ActionScope::Local,
+    },
+    ActionDef {
+        id: ActionId::FilterOpenCode,
+        label: "Filter skills: OpenCode",
         keywords: "harness",
         key: None,
         scope: ActionScope::Local,

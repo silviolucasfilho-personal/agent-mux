@@ -484,10 +484,7 @@ pub struct ValidatedLoop {
 
 /// The per-harness invocation of a skill in the opening prompt.
 fn invocation(skill: &str, harness: Harness) -> String {
-    match harness {
-        Harness::Claude | Harness::Antigravity => format!("/{skill}"),
-        Harness::Codex => format!("${skill}"),
-    }
+    crate::skill::render::invocation(skill, harness)
 }
 
 impl App {
@@ -866,7 +863,7 @@ impl App {
                 );
                 st.installed && !st.stale
             }
-            Harness::Antigravity => false,
+            Harness::Antigravity | Harness::OpenCode => false,
         }
     }
 
@@ -1442,6 +1439,7 @@ impl App {
             }
             Harness::Codex => {}
             Harness::Antigravity => return Err("Antigravity is not supported for loops".into()),
+            Harness::OpenCode => return Err("OpenCode is not supported for loops".into()),
         }
         if Harness::detect(&profile.command) != Some(harness) {
             profile.command = harness.as_str().to_string();
@@ -1452,7 +1450,7 @@ impl App {
         // MCP registration and environment
         let mut extra_args: Vec<String> = Vec::new();
         let registration = self.ensure_mcp(harness.as_str(), &entry.workspace);
-        if let crate::mcp::register::Registration::PerLaunch { args } = &registration {
+        if let crate::mcp::register::Registration::PerLaunch { args, .. } = &registration {
             extra_args.extend(args.iter().cloned());
         }
         let env: Vec<(String, String)> = vec![

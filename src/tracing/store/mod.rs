@@ -217,14 +217,29 @@ fn migrate(conn: &Connection) -> Result<bool, String> {
         ));
     }
     let fresh = version == 0;
-    for v in version..schema::SCHEMA_VERSION {
-        let sql = schema::MIGRATIONS[v as usize];
-        conn.execute_batch(&format!(
-            "BEGIN;\n{sql}\nPRAGMA user_version = {};\nCOMMIT;",
-            v + 1
-        ))
-        .map_err(|e| format!("migration to v{}: {e}", v + 1))?;
+    if version == schema::SCHEMA_VERSION {
+        return Ok(fresh);
     }
+    // SQLite's recipe for a table rebuild (v20 rebuilds `sessions` under
+    // the rows that reference it): foreign keys off for the migrations,
+    // which a pragma inside their transactions could not do, and back on
+    // after. `open_rw` turned them on before calling here.
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|e| e.to_string())?;
+    let run = (|| {
+        for v in version..schema::SCHEMA_VERSION {
+            let sql = schema::MIGRATIONS[v as usize];
+            conn.execute_batch(&format!(
+                "BEGIN;\n{sql}\nPRAGMA user_version = {};\nCOMMIT;",
+                v + 1
+            ))
+            .map_err(|e| format!("migration to v{}: {e}", v + 1))?;
+        }
+        Ok::<(), String>(())
+    })();
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|e| e.to_string())?;
+    run?;
     Ok(fresh)
 }
 
@@ -1473,6 +1488,71 @@ mod tests {
         .unwrap();
         assert!(err.contains("newer"), "{err}");
         assert!(open_ro(&dir.path().join("t.db")).is_err());
+    }
+
+    #[test]
+    fn v20_rebuilds_sessions_under_its_rows_and_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        {
+            let mut store = open_temp(dir.path());
+            store
+                .apply(&[
+                    StoreOp::Launch(launch("l1")),
+                    StoreOp::Trace(trace("t1", TraceStatus::Open, None)),
+                    StoreOp::Observation(observation("o1", None)),
+                ])
+                .unwrap();
+        }
+        // a v19 store with rows: the rebuild runs under traces and launches
+        // that reference `sessions`, and a second run is harmless
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 19;").unwrap();
+        drop(conn);
+        let store = open_temp(dir.path());
+        let conn = store.conn();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM sessions"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM traces"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM launches"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM session_stats"), 1);
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_trace_changes_sessions_%'"
+            ),
+            3
+        );
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('sessions_last_seen', 'sessions_project')"
+            ),
+            2
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+        let parent: String = conn
+            .query_row(
+                "SELECT \"table\" FROM pragma_foreign_key_list('traces') WHERE \"from\" = 'session_key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            parent, "sessions",
+            "children still point at the rebuilt table"
+        );
+        // the new provider is admitted, an unknown one still refused
+        conn.execute(
+            "INSERT INTO sessions (key, provider, session_id, first_seen_ns, last_seen_ns) VALUES ('opencode:ses_1', 'opencode', 'ses_1', 1, 1)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO sessions (key, provider, session_id, first_seen_ns, last_seen_ns) VALUES ('other:1', 'other', '1', 1, 1)",
+                [],
+            )
+            .is_err()
+        );
     }
 
     #[test]

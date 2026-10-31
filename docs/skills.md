@@ -26,7 +26,7 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 | :--- | :--- | :--- |
 | `name` | id capitalized | Display name in the sidebar and the session name `<name> (<harness>)`. |
 | `icon` | `⚡` | Sidebar icon. |
-| `harnesses` | all | Harnesses offered in the picker: `claude`, `codex`, `agy`. |
+| `harnesses` | all | Harnesses offered in the picker: `claude`, `codex`, `agy`, `opencode`. |
 | `default_harness` | first | Preselected in the picker; must be in `harnesses`. |
 | `capabilities` | none | `trace.read` switches the preview pane to the telemetry dashboard. |
 | `startup_prompt` | none | Appended to the invocation as the session's first message. |
@@ -34,7 +34,7 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 | `[agent] mcp` | `auto` with `trace.read`, else `off` | Recorded on the package, but the server is attached to every session whatever a package says: the store is local, read-only and scoped to the launch's workspace. Claude Code and Codex take it on the command line; Antigravity reads a global entry, which agent-mux writes before the first agy session of a run (what `agent-mux mcp install agy` does). `[agents] mcp = "off"` in profiles.toml is the one switch that turns it off, for every session and every harness. |
 | `hidden` | `false` | Not listed in the Agents sidebar or the Skills view; still installed and launched by workflows (the `wf-*` step skills, `workflow-author`). |
 | `writes` | `false` | The skill edits files; a workflow step running it must be isolated in a worktree (`docs/workflows.md`). |
-| `auto_approve` | `false` | The session launches with every tool permission pre-granted, whichever harness runs it (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex). The package's own demand: it wins over a profile that leaves approvals on, never the other way round. |
+| `auto_approve` | `false` | The session launches with every tool permission pre-granted, whichever harness runs it (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex, `--auto` on OpenCode). The package's own demand: it wins over a profile that leaves approvals on, never the other way round. |
 
 Loop skills (`loops/skills/loop-*`) are **not** packages of this kind: they are installed at project level into a workspace by the loop scaffolder (`<workspace>/.claude/skills/<name>/SKILL.md`, `<workspace>/.codex/skills/<name>/SKILL.md`, plus the `loop-verifier` agent) and never appear in the Agents sidebar. See `docs/loops.md`.
 
@@ -46,13 +46,14 @@ Loop skills (`loops/skills/loop-*`) are **not** packages of this kind: they are 
 
 ## 3. Harness syntax
 
-Verified against the installed CLIs (Claude Code 2.1.x, Codex CLI 0.154.x, Antigravity 1.2.x):
+Verified against the installed CLIs (Claude Code 2.1.x, Codex CLI 0.154.x, Antigravity 1.2.x, OpenCode 2.0.32):
 
 | Harness | Skill directory | Invocation |
 | :--- | :--- | :--- |
 | Claude Code | `~/.claude/skills/<name>/SKILL.md` | `/<name>` as a slash command, including as the opening prompt |
 | Codex CLI | `~/.codex/skills/<name>/SKILL.md` | `$<name>` mentioned in the prompt |
 | Antigravity | `~/.gemini/config/skills/<name>/SKILL.md` | `/<name>` slash expansion, including through `--prompt-interactive` |
+| OpenCode | `~/.config/opencode/skill/<name>/SKILL.md` (`$OPENCODE_CONFIG_DIR/skill/`; project level `.opencode/skill/`) | no syntax: the model loads a skill through its `skill` tool when asked, so the opening prompt says `load skill <name>` (through `--prompt`). OpenCode 2.0.32 also reads `skills/` and `.claude/skills/` at both levels. |
 
 The installed `SKILL.md` is the canonical file with one difference: the description ends with `Invoke with /<name>.` or `Invoke with $<name>.` for that harness. `reference/` files are copied unchanged. A `.agent-mux.json` manifest marks directories agent-mux wrote; a directory without it is never overwritten or removed unless `--force`.
 
@@ -83,7 +84,7 @@ For an agent-mux package, `e` opens its `SKILL.md` in the configured external ed
 ```sh
 agent-mux skill list                          # compiled-in and ~/.agent-mux/skills packages
 agent-mux skill show heimdall --harness codex # SKILL.md as written for that harness
-agent-mux skill install heimdall [--harness claude|codex|agy|all] [--force]
+agent-mux skill install heimdall [--harness claude|codex|agy|opencode|all] [--force]
 agent-mux skill uninstall heimdall [--harness …]
 agent-mux skill status [heimdall]             # installed / stale / not managed, per harness
 agent-mux skill import <dir> [--force]        # bring a package written for one harness into ~/.agent-mux/skills
