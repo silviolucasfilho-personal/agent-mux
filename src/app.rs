@@ -2617,6 +2617,10 @@ pub struct App {
     pub memory_feed: bool,
     /// Optional override for the persistent sessions file path (defaults to ~/.agent-mux/sessions.json).
     pub sessions_file: Option<std::path::PathBuf>,
+    /// Optional override for Claude's storage directory (defaults to ~/.claude).
+    pub claude_dir: Option<std::path::PathBuf>,
+    /// Optional override for Antigravity's brain directory (defaults to ~/.gemini/antigravity-cli/brain).
+    pub antigravity_dir: Option<std::path::PathBuf>,
     /// Whether the sidebar is currently hidden (full-screen harness).
     pub sidebar_hidden: bool,
     /// The Agents list holds only the harnesses and their sessions (no
@@ -2803,6 +2807,8 @@ impl App {
             trace_db_path,
             memory_feed: false,
             sessions_file: None,
+            claude_dir: None,
+            antigravity_dir: None,
             sidebar_hidden: false,
             clean: false,
             collapsed_groups: std::collections::HashSet::new(),
@@ -3510,6 +3516,61 @@ impl App {
         }
     }
 
+    /// Resolves the active conversation for a session, checking for the newest
+    /// conversation on disk for the session's workspace when one is available,
+    /// falling back to the correlated trace launch and what the session recorded.
+    pub fn active_session_conversation(
+        &self,
+        session: &Session,
+        conn: Option<&rusqlite::Connection>,
+    ) -> Option<String> {
+        let harness = crate::harness::Harness::detect(&session.profile.command);
+        let disk_conv = match harness {
+            Some(crate::harness::Harness::Claude) => {
+                let dir = self.claude_dir.clone().or_else(history::default_claude_dir);
+                dir.and_then(|d| history::newest_claude_conversation(&d, &session.dir))
+            }
+            Some(crate::harness::Harness::Antigravity) => history::newest_antigravity_conversation(
+                self.antigravity_dir.as_deref(),
+                &session.dir,
+            ),
+            Some(crate::harness::Harness::OpenCode) => {
+                let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+                let db = crate::tracing::opencode_db::default_db_path(std::path::Path::new(&home));
+                crate::tracing::opencode_db::newest_session_in(&db, &session.dir, 0)
+                    .map(|(id, _)| id)
+            }
+            Some(crate::harness::Harness::Codex) | None => None,
+        };
+
+        let trace_conv = conn.zip(session.trace.as_ref()).and_then(|(c, t)| {
+            crate::tracing::store::query::launch_conversation(c, &t.launch_id)
+                .ok()
+                .flatten()
+        });
+
+        let disk_claimed_by_other = disk_conv.as_ref().is_some_and(|disk_id| {
+            self.sessions.iter().any(|other| {
+                other.id != session.id
+                    && conn
+                        .zip(other.trace.as_ref())
+                        .and_then(|(c, t)| {
+                            crate::tracing::store::query::launch_conversation(c, &t.launch_id)
+                                .ok()
+                                .flatten()
+                        })
+                        .as_deref()
+                        == Some(disk_id)
+            })
+        });
+
+        if !disk_claimed_by_other && disk_conv.is_some() {
+            return disk_conv;
+        }
+
+        trace_conv.or_else(|| session.conversation.clone())
+    }
+
     /// Persists active (non-exited) sessions to disk so they can be restored on restart.
     pub fn save_active_sessions(&self) -> anyhow::Result<()> {
         let Some(path) = self
@@ -3538,15 +3599,7 @@ impl App {
                     // a restore that failed stays saved (`handle_pty_exit`)
                     return s.restored_from.clone();
                 }
-                let conversation = conn
-                    .as_ref()
-                    .zip(s.trace.as_ref())
-                    .and_then(|(c, t)| {
-                        crate::tracing::store::query::launch_conversation(c, &t.launch_id)
-                            .ok()
-                            .flatten()
-                    })
-                    .or_else(|| s.conversation.clone());
+                let conversation = self.active_session_conversation(s, conn.as_ref());
                 Some(persistence::SavedSession {
                     // the first message this launch sent is not sent again
                     profile: {
@@ -6341,7 +6394,10 @@ impl App {
         {
             return None;
         }
-        let claude_dir = history::default_claude_dir()?;
+        let claude_dir = self
+            .claude_dir
+            .clone()
+            .or_else(history::default_claude_dir)?;
         let conversation = history::newest_claude_conversation(&claude_dir, dir)?;
         ClaudeBackgroundCache::default().find(profile, &conversation)
     }

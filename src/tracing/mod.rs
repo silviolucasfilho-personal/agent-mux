@@ -1475,20 +1475,20 @@ impl Pipeline {
         self.hook_events += events.len() as u64;
         let mut ops = Vec::new();
         for ev in &events {
+            if let Some(adopted) = self.adopted.as_ref()
+                && !ev.session_id.trim().is_empty()
+                && adopted.session_id != ev.session_id
+            {
+                self.pending_continuation = Some(PendingContinuation {
+                    session_id: ev.session_id.clone(),
+                    transcript_path: ev.transcript_path.as_deref().map(PathBuf::from),
+                    from_hook: true,
+                });
+                self.send_ops(std::mem::take(&mut ops));
+                self.follow_continuation();
+            }
             match ev.event.as_str() {
                 "SessionStart" => {
-                    if let Some(adopted) = self.adopted.as_ref()
-                        && !ev.session_id.trim().is_empty()
-                        && adopted.session_id != ev.session_id
-                    {
-                        self.pending_continuation = Some(PendingContinuation {
-                            session_id: ev.session_id.clone(),
-                            transcript_path: ev.transcript_path.as_deref().map(PathBuf::from),
-                            from_hook: true,
-                        });
-                        self.send_ops(std::mem::take(&mut ops));
-                        self.follow_continuation();
-                    }
                     let meta = serde_json::json!({
                         "hooks": true,
                         "session_start_source": ev.payload.get("source").cloned().unwrap_or(serde_json::Value::Null),
@@ -1586,6 +1586,15 @@ impl Pipeline {
                 return; // wait for file to appear
             };
             p
+        } else if self.ctx.provider == Provider::Antigravity {
+            let Some(dir) = adopted.path.ancestors().nth(3) else {
+                self.pending_continuation = None;
+                return;
+            };
+            dir.join(&pending.session_id)
+                .join(".system_generated")
+                .join("logs")
+                .join("transcript.jsonl")
         } else {
             // Claude names the successor by id only: it is a sibling file in
             // the same project directory.
@@ -1647,6 +1656,10 @@ impl Pipeline {
         // Re-point everything keyed by session: the claim (dropping the
         // old guard releases the predecessor), the hook feed's session
         // filter, and the launch's session key.
+        if self.ctx.provider == Provider::Antigravity {
+            self.agy_usage =
+                agy_usage::conversation_db_for(&path, &next).map(agy_usage::AgyUsageReader::new);
+        }
         self.claim_guard = Some(correlate::ClaimGuard::new(
             Arc::clone(&self.ctx.claims),
             self.ctx.provider,
