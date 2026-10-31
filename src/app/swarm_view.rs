@@ -1,15 +1,16 @@
-//! Agent Swarm Control Room (`Mode::Swarm`).
+//! Swarm Mission Control (`Mode::Swarm`).
 //!
-//! Provides a 4-quadrant TUI dashboard for orchestrating one Coordinator and
-//! multiple Worker agents sharing a workspace over the Inter-Agent Bus:
-//! - `[1] Agents Roster`: Coordinator (`★ Coord`) + Workers (`W1..Wn`) with live status.
-//! - `[2] Live Preview`: Zero-copy live terminal (`PseudoTerminal`), Task Detail, or Git Diff.
-//! - `[3] Task Board & File Leases`: DAG subtasks (`open`/`claimed`/`running`/`done`/`failed`) and active file globs.
-//! - `[4] Inter-Agent Message Feed`: Chronological message stream (`api-contract`, `question`, `answer`, `blocker`, `handoff`) and composer.
+//! One workspace's swarm as lanes, an agent and the task it holds
+//! (`bus::swarm::Lane`), beside a focus panel on the selected lane with four
+//! tabs: Live (its terminal), Thread (its messages), Changes (its diff) and
+//! Task (its task card). `a` swaps the panel for the whole swarm's Activity.
+//! Design: `docs/superpowers/specs/2026-10-30-swarm-mission-control-ux-design.md`.
 
 use crate::app::text_area::TextArea;
-use crate::bus::swarm::{LiveSwarmSession, SwarmMember, SwarmSnapshot, load_snapshot};
-use crate::bus::{BusMessage, BusTask, FileLease, TaskIsolation, short_id};
+use crate::bus::swarm::{
+    Lane, LaneKind, LaneState, LiveSwarmSession, SwarmSnapshot, load_snapshot,
+};
+use crate::bus::{BusMessage, BusTask, TaskIsolation, short_id};
 use crate::harness::Harness;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rusqlite::Connection;
@@ -18,99 +19,54 @@ use std::process::Command;
 
 pub const HARNESS_CYCLE: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Antigravity];
 
-/// Active quadrant focus inside `Mode::Swarm`.
+/// Which side of the screen has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SwarmPane {
-    Agents,
-    Preview,
-    Board,
-    Messages,
+pub enum Focus {
+    Lanes,
+    Panel,
 }
 
-impl SwarmPane {
-    pub fn next(self) -> Self {
-        match self {
-            SwarmPane::Agents => SwarmPane::Preview,
-            SwarmPane::Preview => SwarmPane::Board,
-            SwarmPane::Board => SwarmPane::Messages,
-            SwarmPane::Messages => SwarmPane::Agents,
-        }
-    }
-
-    pub fn prev(self) -> Self {
-        match self {
-            SwarmPane::Agents => SwarmPane::Messages,
-            SwarmPane::Preview => SwarmPane::Agents,
-            SwarmPane::Board => SwarmPane::Preview,
-            SwarmPane::Messages => SwarmPane::Board,
-        }
-    }
-}
-
-/// Display mode for Quadrant `[2] Live Preview`.
+/// The focus panel's tabs, `1`–`4`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PreviewMode {
-    Terminal,
-    TaskDetail,
-    GitDiff,
+pub enum PanelTab {
+    Live,
+    Thread,
+    Changes,
+    Task,
 }
 
-impl PreviewMode {
-    pub fn next(self) -> Self {
-        match self {
-            PreviewMode::Terminal => PreviewMode::TaskDetail,
-            PreviewMode::TaskDetail => PreviewMode::GitDiff,
-            PreviewMode::GitDiff => PreviewMode::Terminal,
-        }
-    }
+impl PanelTab {
+    pub const ALL: [PanelTab; 4] = [
+        PanelTab::Live,
+        PanelTab::Thread,
+        PanelTab::Changes,
+        PanelTab::Task,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
-            PreviewMode::Terminal => "Terminal",
-            PreviewMode::TaskDetail => "Task Detail",
-            PreviewMode::GitDiff => "Git Diff",
-        }
-    }
-}
-
-/// Sub-tab inside Quadrant `[3] Task Board & File Leases`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BoardMode {
-    Tasks,
-    Leases,
-}
-
-impl BoardMode {
-    pub fn toggle(self) -> Self {
-        match self {
-            BoardMode::Tasks => BoardMode::Leases,
-            BoardMode::Leases => BoardMode::Tasks,
-        }
-    }
-}
-
-/// Filter applied to Quadrant `[4] Inter-Agent Message Feed`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MessageFilter {
-    All,
-    SelectedAgent,
-    QuestionsAndUrgent,
-}
-
-impl MessageFilter {
-    pub fn next(self) -> Self {
-        match self {
-            MessageFilter::All => MessageFilter::SelectedAgent,
-            MessageFilter::SelectedAgent => MessageFilter::QuestionsAndUrgent,
-            MessageFilter::QuestionsAndUrgent => MessageFilter::All,
+            PanelTab::Live => "Live",
+            PanelTab::Thread => "Thread",
+            PanelTab::Changes => "Changes",
+            PanelTab::Task => "Task",
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            MessageFilter::All => "All",
-            MessageFilter::SelectedAgent => "Selected Agent",
-            MessageFilter::QuestionsAndUrgent => "Questions & Urgent",
+    /// The tab a lane opens on: what its state calls for.
+    pub fn for_lane(lane: &Lane) -> PanelTab {
+        match lane.state {
+            LaneState::Waiting => PanelTab::Thread,
+            LaneState::Failed | LaneState::Lost | LaneState::Queued => PanelTab::Task,
+            LaneState::Done
+                if lane
+                    .task
+                    .as_ref()
+                    .is_some_and(|t| t.isolation == TaskIsolation::Worktree) =>
+            {
+                PanelTab::Changes
+            }
+            _ if lane.session_idx.is_none() => PanelTab::Thread,
+            _ => PanelTab::Live,
         }
     }
 }
@@ -278,13 +234,6 @@ pub enum Modal {
         isolation: TaskIsolation,
         field: WorkerField,
     },
-    NewTask {
-        title: TextArea,
-        instructions: TextArea,
-        files: TextArea,
-        isolation: TaskIsolation,
-        field: TaskField,
-    },
     EditTask {
         task_id: String,
         title: TextArea,
@@ -295,6 +244,8 @@ pub enum Modal {
     ComposeMessage {
         to_launch: Option<String>,
         to_label: String,
+        /// The message this answers, when it is a reply.
+        reply_to: Option<String>,
         topic_idx: usize,
         body: TextArea,
         urgent: bool,
@@ -311,8 +262,9 @@ pub enum Confirm {
     RelaunchSwarm {
         coordinator: String,
     },
-    ReleaseLease {
-        pattern: String,
+    ReleaseLeases {
+        lane: String,
+        patterns: Vec<String>,
     },
     CancelTask {
         task_id: String,
@@ -354,12 +306,6 @@ pub enum Outcome {
     WakeAgent {
         launch_id: String,
     },
-    CreateTask {
-        title: String,
-        instructions: String,
-        files: Vec<String>,
-        isolation: TaskIsolation,
-    },
     UpdateTask {
         task_id: String,
         title: String,
@@ -367,10 +313,11 @@ pub enum Outcome {
         files: Vec<String>,
     },
     CancelTask(String),
-    ReleaseLease(String),
+    ReleaseLeases(Vec<String>),
     StopSession(usize),
     SendMessage {
         to_launch: Option<String>,
+        reply_to: Option<String>,
         topic: String,
         body: String,
         urgent: bool,
@@ -382,20 +329,27 @@ pub enum Outcome {
 pub struct SwarmView {
     pub workspace: PathBuf,
     pub snapshot: SwarmSnapshot,
-    pub pane: SwarmPane,
-    pub preview_mode: PreviewMode,
-    pub board_mode: BoardMode,
-    pub message_filter: MessageFilter,
-    pub selected_agent: usize,
-    pub selected_task: usize,
-    pub selected_lease: usize,
+    /// The lanes as of the last read (`SwarmSnapshot::lanes`).
+    pub lanes: Vec<Lane>,
+    pub selected_lane: usize,
+    pub focus: Focus,
+    /// A tab the operator chose, for the lane it was chosen on; any other
+    /// lane opens on its own default (`PanelTab::for_lane`).
+    pub chosen_tab: Option<(String, PanelTab)>,
+    /// The panel shows the whole swarm's messages instead of one lane.
+    pub activity: bool,
+    /// The chosen message in Thread or Activity.
     pub selected_message: usize,
-    pub preview_scroll: usize,
+    pub panel_scroll: usize,
     pub coordinator_override: Option<String>,
     pub diff_lines: Vec<String>,
+    /// The lane `diff_lines` was read for.
+    diff_for: Option<String>,
     pub modal: Option<Modal>,
     pub confirm: Option<Confirm>,
     pub status_msg: Option<String>,
+    /// The time of the last read, in nanoseconds (lane ages).
+    pub now_ns: i64,
     /// The store, held for the screen's lifetime: one connection, not one
     /// per tick.
     conn: Option<Connection>,
@@ -405,7 +359,7 @@ pub struct SwarmView {
     last_change_seq: Option<i64>,
     /// What the live sessions looked like at the last read (state, turns,
     /// tokens, running tool), so a session turning idle or finishing a turn
-    /// refreshes the roster without a store write.
+    /// refreshes the lanes without a store write.
     live_fingerprint: u64,
     /// When the tick last asked whether a refresh is due.
     last_check: Option<std::time::Instant>,
@@ -438,30 +392,31 @@ impl SwarmView {
     ) -> Self {
         let snapshot = load_snapshot(conn.as_ref(), &workspace, live_sessions, None, now);
         let last_change_seq = conn.as_ref().and_then(Self::change_seq);
-        let msg_count = snapshot.messages.len();
+        let lanes = snapshot.lanes(now);
         let mut view = Self {
             workspace,
             snapshot,
-            pane: SwarmPane::Agents,
-            preview_mode: PreviewMode::Terminal,
-            board_mode: BoardMode::Tasks,
-            message_filter: MessageFilter::All,
-            selected_agent: 0,
-            selected_task: 0,
-            selected_lease: 0,
-            selected_message: msg_count.saturating_sub(1),
-            preview_scroll: 0,
+            lanes,
+            selected_lane: 0,
+            focus: Focus::Lanes,
+            chosen_tab: None,
+            activity: false,
+            selected_message: 0,
+            panel_scroll: 0,
             coordinator_override: None,
             diff_lines: Vec::new(),
+            diff_for: None,
             modal: None,
             confirm: None,
             status_msg: None,
+            now_ns: now,
             conn,
             last_change_seq,
             live_fingerprint: live_fingerprint(live_sessions),
             last_check: None,
         };
-        view.clamp_selections();
+        view.selected_message = view.panel_messages().len().saturating_sub(1);
+        view.after_lane_change();
         view
     }
 
@@ -506,10 +461,13 @@ impl SwarmView {
         }
     }
 
-    /// Re-reads the store and the live sessions. `now` is in nanoseconds.
+    /// Re-reads the store and the live sessions, keeping the selected lane
+    /// by its key and the message cursor on the newest message when it was
+    /// there. `now` is in nanoseconds.
     pub fn refresh(&mut self, live_sessions: &[LiveSwarmSession], now: i64) {
-        let prev_msg_len = self.filtered_messages().len();
-        let was_at_bottom = prev_msg_len == 0 || self.selected_message + 1 >= prev_msg_len;
+        let key = self.selected().map(|l| l.key.clone());
+        let prev_len = self.panel_messages().len();
+        let was_at_bottom = prev_len == 0 || self.selected_message + 1 >= prev_len;
         self.snapshot = load_snapshot(
             self.conn.as_ref(),
             &self.workspace,
@@ -517,15 +475,23 @@ impl SwarmView {
             self.coordinator_override.as_deref(),
             now,
         );
+        self.now_ns = now;
+        self.lanes = self.snapshot.lanes(now);
         self.last_change_seq = self.conn.as_ref().and_then(Self::change_seq);
         self.live_fingerprint = live_fingerprint(live_sessions);
-        self.clamp_selections();
-        let new_msg_len = self.filtered_messages().len();
-        if was_at_bottom && new_msg_len > 0 {
-            self.selected_message = new_msg_len - 1;
+        if let Some(k) = key
+            && let Some(i) = self.lanes.iter().position(|l| l.key == k)
+        {
+            self.selected_lane = i;
         }
-        if self.preview_mode == PreviewMode::GitDiff {
-            self.refresh_diff();
+        self.selected_lane = self.selected_lane.min(self.lanes.len().saturating_sub(1));
+        let len = self.panel_messages().len();
+        if was_at_bottom || self.selected_message >= len {
+            self.selected_message = len.saturating_sub(1);
+        }
+        if self.tab() == PanelTab::Changes {
+            self.diff_for = None;
+            self.load_diff();
         }
     }
 
@@ -537,92 +503,86 @@ impl SwarmView {
         self.confirm.is_some()
     }
 
-    pub fn selected_member(&self) -> Option<&SwarmMember> {
-        let members = self.snapshot.all_members();
-        members.get(self.selected_agent).copied()
+    pub fn selected(&self) -> Option<&Lane> {
+        self.lanes.get(self.selected_lane)
     }
 
-    pub fn selected_task(&self) -> Option<&BusTask> {
-        self.snapshot.tasks.get(self.selected_task)
+    /// The panel's tab: the one the operator chose on this lane, else the
+    /// lane's default.
+    pub fn tab(&self) -> PanelTab {
+        let Some(lane) = self.selected() else {
+            return PanelTab::Live;
+        };
+        match &self.chosen_tab {
+            Some((key, tab)) if *key == lane.key => *tab,
+            _ => PanelTab::for_lane(lane),
+        }
     }
 
-    pub fn selected_lease(&self) -> Option<&FileLease> {
-        self.snapshot.leases.get(self.selected_lease)
-    }
-
-    pub fn filtered_messages(&self) -> Vec<&BusMessage> {
-        let selected_launch = self.selected_member().map(|m| m.launch_id.as_str());
+    /// The messages the panel lists: the whole swarm's in Activity, else the
+    /// selected lane's (from it, to it, and broadcasts).
+    pub fn panel_messages(&self) -> Vec<&BusMessage> {
+        if self.activity {
+            return self.snapshot.messages.iter().collect();
+        }
+        let Some(launch) = self.selected().and_then(|l| l.launch_id.as_deref()) else {
+            return Vec::new();
+        };
         self.snapshot
             .messages
             .iter()
-            .filter(|m| match self.message_filter {
-                MessageFilter::All => true,
-                MessageFilter::SelectedAgent => match selected_launch {
-                    Some(lid) => {
-                        m.from_launch == lid
-                            || m.to_launch.as_deref() == Some(lid)
-                            || m.to_launch.is_none()
-                    }
-                    None => true,
-                },
-                MessageFilter::QuestionsAndUrgent => {
-                    m.topic == "question"
-                        || m.topic == "blocker"
-                        || m.topic == "api-contract"
-                        || m.acked_ns.is_none()
-                }
+            .filter(|m| {
+                m.from_launch == launch
+                    || m.to_launch.as_deref() == Some(launch)
+                    || m.to_launch.is_none()
             })
             .collect()
     }
 
-    pub fn selected_filtered_message(&self) -> Option<&BusMessage> {
-        let msgs = self.filtered_messages();
-        msgs.get(self.selected_message).copied()
+    pub fn selected_message(&self) -> Option<&BusMessage> {
+        self.panel_messages().get(self.selected_message).copied()
     }
 
-    fn clamp_selections(&mut self) {
-        let member_len = self.snapshot.all_members().len();
-        if member_len == 0 {
-            self.selected_agent = 0;
-        } else if self.selected_agent >= member_len {
-            self.selected_agent = member_len - 1;
-        }
-
-        let task_len = self.snapshot.tasks.len();
-        if task_len == 0 {
-            self.selected_task = 0;
-        } else if self.selected_task >= task_len {
-            self.selected_task = task_len - 1;
-        }
-
-        let lease_len = self.snapshot.leases.len();
-        if lease_len == 0 {
-            self.selected_lease = 0;
-        } else if self.selected_lease >= lease_len {
-            self.selected_lease = lease_len - 1;
-        }
-
-        let msg_len = self.filtered_messages().len();
-        if msg_len == 0 {
-            self.selected_message = 0;
-        } else if self.selected_message >= msg_len {
-            self.selected_message = msg_len - 1;
+    /// The lane changed (or the screen opened): back to the lane's default
+    /// tab, the newest message and the top of the panel.
+    fn after_lane_change(&mut self) {
+        self.panel_scroll = 0;
+        self.selected_message = self.panel_messages().len().saturating_sub(1);
+        if self.tab() == PanelTab::Changes {
+            self.load_diff();
         }
     }
 
-    pub fn refresh_diff(&mut self) {
-        let target_dir = self
-            .selected_member()
-            .and_then(|m| m.worktree.as_deref())
+    fn set_tab(&mut self, tab: PanelTab) {
+        let Some(key) = self.selected().map(|l| l.key.clone()) else {
+            return;
+        };
+        self.activity = false;
+        self.chosen_tab = Some((key, tab));
+        self.panel_scroll = 0;
+        self.selected_message = self.panel_messages().len().saturating_sub(1);
+        if tab == PanelTab::Changes {
+            self.load_diff();
+        }
+    }
+
+    /// Reads the selected lane's diff, once per lane: its worktree, or the
+    /// workspace for a shared lane.
+    fn load_diff(&mut self) {
+        let Some(lane) = self.selected() else {
+            return;
+        };
+        if self.diff_for.as_deref() == Some(lane.key.as_str()) {
+            return;
+        }
+        let dir = lane
+            .task
+            .as_ref()
+            .and_then(|t| t.worktree.as_deref())
             .map(PathBuf::from)
-            .or_else(|| {
-                self.selected_task()
-                    .and_then(|t| t.worktree.as_deref())
-                    .map(PathBuf::from)
-            })
             .unwrap_or_else(|| self.workspace.clone());
-
-        self.diff_lines = compute_git_diff(&target_dir);
+        self.diff_for = Some(lane.key.clone());
+        self.diff_lines = compute_git_diff(&dir);
     }
 
     pub fn open_launch_modal(&mut self) {
@@ -652,16 +612,6 @@ impl SwarmView {
         });
     }
 
-    pub fn open_new_task_modal(&mut self) {
-        self.modal = Some(Modal::NewTask {
-            title: TextArea::new(""),
-            instructions: TextArea::new(""),
-            files: TextArea::new(""),
-            isolation: TaskIsolation::Shared,
-            field: TaskField::Title,
-        });
-    }
-
     pub fn open_edit_task_modal(&mut self, task: &BusTask) {
         let mut title = TextArea::new("");
         title.set(&task.title);
@@ -684,9 +634,20 @@ impl SwarmView {
         to_label: String,
         topic_idx: usize,
     ) {
+        self.open_compose(to_launch, to_label, None, topic_idx);
+    }
+
+    fn open_compose(
+        &mut self,
+        to_launch: Option<String>,
+        to_label: String,
+        reply_to: Option<String>,
+        topic_idx: usize,
+    ) {
         self.modal = Some(Modal::ComposeMessage {
             to_launch,
             to_label,
+            reply_to,
             topic_idx,
             body: TextArea::new(""),
             urgent: false,
@@ -695,34 +656,30 @@ impl SwarmView {
         });
     }
 
-    /// Opens the selected feed message in full.
+    /// Opens a message in full.
     pub fn open_view_message(&mut self, message: BusMessage) {
         self.modal = Some(Modal::ViewMessage { message, scroll: 0 });
     }
 
-    /// The composer addressed to a message's sender, with a fitting topic.
+    /// The composer addressed to a message's sender, answering it, with a
+    /// fitting topic.
     fn open_reply(&mut self, message: &BusMessage) {
         let sender = message.from_launch.clone();
         let label = self.snapshot.member_label(&sender);
         let topic_idx = if message.topic == "question" { 1 } else { 0 };
-        self.open_compose_message(Some(sender), label, topic_idx);
+        self.open_compose(Some(sender), label, Some(message.id.clone()), topic_idx);
     }
 
-    /// The task the preview's Task Detail shows: the board's selection when
-    /// the board has focus, else the selected agent's latest task, else the
-    /// board's selection.
-    pub fn detail_task(&self) -> Option<&BusTask> {
-        if self.pane == SwarmPane::Board {
-            return self.selected_task();
+    /// The launch form, or a confirmation first when a coordinator is live
+    /// (a second launch would replace it).
+    fn start_swarm(&mut self) {
+        if let Some(c) = self.snapshot.coordinator.as_ref().filter(|c| c.is_active()) {
+            self.confirm = Some(Confirm::RelaunchSwarm {
+                coordinator: c.label.clone(),
+            });
+        } else {
+            self.open_launch_modal();
         }
-        let agent_task = self.selected_member().and_then(|m| {
-            self.snapshot
-                .tasks
-                .iter()
-                .rev()
-                .find(|t| t.assigned_to.as_deref() == Some(m.launch_id.as_str()))
-        });
-        agent_task.or_else(|| self.selected_task())
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
@@ -734,286 +691,152 @@ impl SwarmView {
         }
 
         self.status_msg = None;
+        let lanes_focused = self.focus == Focus::Lanes;
+        let lists_messages = self.activity || self.tab() == PanelTab::Thread;
 
         match (key.code, key.modifiers) {
             (KeyCode::Esc, KeyModifiers::NONE) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                Outcome::Close
+                if lanes_focused {
+                    return Outcome::Close;
+                }
+                self.focus = Focus::Lanes;
             }
-            (KeyCode::Tab, KeyModifiers::NONE) => {
-                self.pane = self.pane.next();
-                Outcome::None
+            (KeyCode::Tab, KeyModifiers::NONE) | (KeyCode::BackTab, _) => {
+                self.focus = match self.focus {
+                    Focus::Lanes => Focus::Panel,
+                    Focus::Panel => Focus::Lanes,
+                };
             }
-            (KeyCode::BackTab, _) => {
-                self.pane = self.pane.prev();
-                Outcome::None
+            (KeyCode::Char(c @ '1'..='4'), KeyModifiers::NONE) => {
+                let tab = PanelTab::ALL[(c as usize) - ('1' as usize)];
+                self.set_tab(tab);
             }
-            (KeyCode::Char('1'), KeyModifiers::NONE) => {
-                self.pane = SwarmPane::Agents;
-                Outcome::None
+            (KeyCode::Char('a'), KeyModifiers::NONE) => {
+                self.activity = !self.activity;
+                self.panel_scroll = 0;
+                self.selected_message = self.panel_messages().len().saturating_sub(1);
             }
-            (KeyCode::Char('2'), KeyModifiers::NONE) => {
-                self.pane = SwarmPane::Preview;
-                Outcome::None
+            (KeyCode::Char('r'), m) if m.contains(KeyModifiers::CONTROL) => {
+                return Outcome::Reload;
             }
-            (KeyCode::Char('3'), KeyModifiers::NONE) => {
-                self.pane = SwarmPane::Board;
-                Outcome::None
-            }
-            (KeyCode::Char('4'), KeyModifiers::NONE) => {
-                self.pane = SwarmPane::Messages;
-                Outcome::None
-            }
-            (KeyCode::Char('r'), m) if m.contains(KeyModifiers::CONTROL) => Outcome::Reload,
-
-            // Vertical navigation in active quadrant
             (KeyCode::Down, KeyModifiers::NONE) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                 self.move_cursor(1);
-                Outcome::None
             }
             (KeyCode::Up, KeyModifiers::NONE) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                 self.move_cursor(-1);
-                Outcome::None
             }
+            (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => self.move_cursor(8),
+            (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => self.move_cursor(-8),
             (KeyCode::Char('g'), KeyModifiers::NONE) | (KeyCode::Home, KeyModifiers::NONE) => {
-                self.move_to_top();
-                Outcome::None
+                self.move_cursor(isize::MIN / 2);
             }
-            (KeyCode::Char('G'), KeyModifiers::SHIFT)
-            | (KeyCode::Char('G'), KeyModifiers::NONE)
-            | (KeyCode::End, KeyModifiers::NONE) => {
-                self.move_to_bottom();
-                Outcome::None
-            }
-            (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => {
-                self.move_cursor(8);
-                Outcome::None
-            }
-            (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => {
-                self.move_cursor(-8);
-                Outcome::None
+            (KeyCode::Char('G'), _) | (KeyCode::End, KeyModifiers::NONE) => {
+                self.move_cursor(isize::MAX / 2);
             }
 
-            // Sub-mode toggles (`v`, `l`, `f`, `←/→`)
-            (KeyCode::Char('v'), KeyModifiers::NONE) => {
-                self.preview_mode = self.preview_mode.next();
-                self.preview_scroll = 0;
-                if self.preview_mode == PreviewMode::GitDiff {
-                    self.refresh_diff();
-                }
-                Outcome::None
-            }
-            (KeyCode::Char('l'), KeyModifiers::NONE) => {
-                self.board_mode = self.board_mode.toggle();
-                Outcome::None
-            }
-            (KeyCode::Char('f'), KeyModifiers::NONE) => {
-                self.message_filter = self.message_filter.next();
-                self.clamp_selections();
-                Outcome::None
-            }
-            (KeyCode::Left, KeyModifiers::NONE) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
-                match self.pane {
-                    SwarmPane::Preview => {
-                        self.preview_mode = match self.preview_mode {
-                            PreviewMode::Terminal => PreviewMode::GitDiff,
-                            PreviewMode::TaskDetail => PreviewMode::Terminal,
-                            PreviewMode::GitDiff => PreviewMode::TaskDetail,
-                        };
-                        self.preview_scroll = 0;
-                        if self.preview_mode == PreviewMode::GitDiff {
-                            self.refresh_diff();
-                        }
-                    }
-                    SwarmPane::Board => self.board_mode = self.board_mode.toggle(),
-                    SwarmPane::Messages => {
-                        self.message_filter = self.message_filter.next();
-                        self.clamp_selections();
-                    }
-                    SwarmPane::Agents => {}
-                }
-                Outcome::None
-            }
-            (KeyCode::Right, KeyModifiers::NONE) => {
-                match self.pane {
-                    SwarmPane::Preview => {
-                        self.preview_mode = self.preview_mode.next();
-                        self.preview_scroll = 0;
-                        if self.preview_mode == PreviewMode::GitDiff {
-                            self.refresh_diff();
-                        }
-                    }
-                    SwarmPane::Board => self.board_mode = self.board_mode.toggle(),
-                    SwarmPane::Messages => {
-                        self.message_filter = self.message_filter.next();
-                        self.clamp_selections();
-                    }
-                    SwarmPane::Agents => {}
-                }
-                Outcome::None
-            }
-
-            // `Enter`: Attach to selected agent's live terminal or inspect task
-            (KeyCode::Enter, KeyModifiers::NONE) => match self.pane {
-                SwarmPane::Agents | SwarmPane::Preview => {
-                    if let Some(member) = self.selected_member()
-                        && let Some(idx) = member.session_idx
-                    {
-                        return Outcome::AttachSession(idx);
-                    }
-                    self.status_msg = Some(
-                        "Selected peer does not have a live TUI session in this window.".into(),
-                    );
-                    Outcome::None
-                }
-                SwarmPane::Board => {
-                    self.preview_mode = PreviewMode::TaskDetail;
-                    self.preview_scroll = 0;
-                    Outcome::None
-                }
-                SwarmPane::Messages => {
-                    if let Some(msg) = self.selected_filtered_message().cloned() {
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                if !lanes_focused && lists_messages {
+                    if let Some(msg) = self.selected_message().cloned() {
                         self.open_view_message(msg);
                     }
-                    Outcome::None
+                } else if let Some(idx) = self.selected().and_then(|l| l.session_idx) {
+                    return Outcome::AttachSession(idx);
+                } else if self.lanes.is_empty() {
+                    self.start_swarm();
+                } else {
+                    self.status_msg =
+                        Some("This lane has no session in this window to attach to.".into());
                 }
-            },
+            }
 
-            // `r`: Run / Launch Swarm (or delegate selected open task in Board)
+            (KeyCode::Char('m'), KeyModifiers::NONE) => {
+                if !lanes_focused
+                    && lists_messages
+                    && let Some(msg) = self.selected_message().cloned()
+                {
+                    self.open_reply(&msg);
+                } else if let Some(lane) = self.selected()
+                    && let Some(launch) = lane.launch_id.clone()
+                {
+                    let label = lane.name.clone();
+                    self.open_compose_message(Some(launch), label, 0);
+                } else {
+                    self.open_compose_message(None, "everyone".into(), 0);
+                }
+            }
+            (KeyCode::Char('b'), KeyModifiers::NONE) => {
+                self.open_compose_message(None, "everyone".into(), 0);
+            }
+
+            (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                if self.lanes.is_empty() {
+                    self.open_launch_modal();
+                } else {
+                    self.open_new_worker_modal();
+                }
+            }
+            (KeyCode::Char('e'), KeyModifiers::NONE) => {
+                match self.selected().and_then(|l| l.task.clone()) {
+                    Some(task) => self.open_edit_task_modal(&task),
+                    None => self.status_msg = Some("This lane holds no task to edit.".into()),
+                }
+            }
             (KeyCode::Char('r'), KeyModifiers::NONE) => {
-                if self.pane == SwarmPane::Board
-                    && self.board_mode == BoardMode::Tasks
-                    && let Some(task) = self.selected_task()
-                    && !task.status.is_terminal()
-                    && task.assigned_to.is_none()
+                if let Some(lane) = self.selected()
+                    && lane.kind == LaneKind::Queued
+                    && let Some(task) = &lane.task
                 {
                     return Outcome::DelegateTask {
                         task_id: task.id.clone(),
                     };
                 }
-                if let Some(c) = self.snapshot.coordinator.as_ref().filter(|c| c.is_active()) {
-                    self.confirm = Some(Confirm::RelaunchSwarm {
-                        coordinator: format!("{} ({})", c.label, c.provider),
-                    });
+                self.start_swarm();
+            }
+            (KeyCode::Char('x'), KeyModifiers::NONE) => {
+                let Some(lane) = self.selected() else {
                     return Outcome::None;
-                }
-                self.open_launch_modal();
-                Outcome::None
-            }
-
-            // `n`: New Worker (in Agents/Preview) or New Task (in Board) or New Message (in Messages)
-            (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                match self.pane {
-                    SwarmPane::Board => self.open_new_task_modal(),
-                    SwarmPane::Messages => {
-                        self.open_compose_message(None, "* (All Swarm Peers)".into(), 0);
-                    }
-                    SwarmPane::Agents | SwarmPane::Preview => {
-                        if self.snapshot.coordinator.is_none() && self.snapshot.workers.is_empty() {
-                            self.open_launch_modal();
-                        } else {
-                            self.open_new_worker_modal();
-                        }
-                    }
-                }
-                Outcome::None
-            }
-
-            // `e`: Edit selected task in Board
-            (KeyCode::Char('e'), KeyModifiers::NONE) => {
-                if let Some(task) = self.selected_task().cloned() {
-                    self.open_edit_task_modal(&task);
-                } else {
-                    self.status_msg = Some("No task on the board to edit.".into());
-                }
-                Outcome::None
-            }
-
-            // `c`: Promote selected agent to Coordinator
-            (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                if let Some(member) = self.selected_member() {
-                    let lid = member.launch_id.clone();
-                    self.coordinator_override = Some(lid.clone());
-                    return Outcome::PromoteCoordinator { launch_id: lid };
-                }
-                Outcome::None
-            }
-
-            // `w`: Wake selected agent
-            (KeyCode::Char('w'), KeyModifiers::NONE) => {
-                if let Some(member) = self.selected_member() {
-                    return Outcome::WakeAgent {
-                        launch_id: member.launch_id.clone(),
-                    };
-                }
-                Outcome::None
-            }
-
-            // `m`: Direct message to selected agent (or reply in Messages pane)
-            (KeyCode::Char('m'), KeyModifiers::NONE) => {
-                if self.pane == SwarmPane::Messages
-                    && let Some(msg) = self.selected_filtered_message().cloned()
+                };
+                if let Some(idx) = lane.session_idx
+                    && !matches!(lane.state, LaneState::Exited | LaneState::Lost)
                 {
-                    self.open_reply(&msg);
-                    return Outcome::None;
-                }
-                if let Some(member) = self.selected_member() {
-                    let lid = member.launch_id.clone();
-                    let label = self.snapshot.member_label(&lid);
-                    self.open_compose_message(Some(lid), label, 0);
+                    self.confirm = Some(Confirm::StopSession {
+                        session_idx: idx,
+                        label: lane.name.clone(),
+                    });
+                } else if let Some(task) = lane.task.as_ref().filter(|t| !t.status.is_terminal()) {
+                    self.confirm = Some(Confirm::CancelTask {
+                        task_id: task.id.clone(),
+                        title: task.title.clone(),
+                    });
                 } else {
-                    self.open_compose_message(None, "* (Broadcast to All)".into(), 0);
-                }
-                Outcome::None
-            }
-
-            // `b`: Broadcast message to `*`
-            (KeyCode::Char('b'), KeyModifiers::NONE) => {
-                self.open_compose_message(None, "* (Broadcast to All)".into(), 0);
-                Outcome::None
-            }
-
-            // `x` / `d`: Stop agent, cancel task, or force-release lease
-            (KeyCode::Char('x'), KeyModifiers::NONE) | (KeyCode::Char('d'), KeyModifiers::NONE) => {
-                match self.pane {
-                    SwarmPane::Agents | SwarmPane::Preview => {
-                        if let Some(member) = self.selected_member()
-                            && let Some(idx) = member.session_idx
-                            && member.is_active()
-                        {
-                            self.confirm = Some(Confirm::StopSession {
-                                session_idx: idx,
-                                label: format!("{} ({})", member.label, member.provider),
-                            });
-                        }
-                        Outcome::None
-                    }
-                    SwarmPane::Board => match self.board_mode {
-                        BoardMode::Tasks => {
-                            if let Some(task) = self.selected_task()
-                                && !task.status.is_terminal()
-                            {
-                                self.confirm = Some(Confirm::CancelTask {
-                                    task_id: task.id.clone(),
-                                    title: task.title.clone(),
-                                });
-                            }
-                            Outcome::None
-                        }
-                        BoardMode::Leases => {
-                            if let Some(lease) = self.selected_lease() {
-                                self.confirm = Some(Confirm::ReleaseLease {
-                                    pattern: lease.pattern.clone(),
-                                });
-                            }
-                            Outcome::None
-                        }
-                    },
-                    SwarmPane::Messages => Outcome::None,
+                    self.status_msg = Some("Nothing to stop on this lane.".into());
                 }
             }
+            (KeyCode::Char('d'), KeyModifiers::NONE) => match self.selected() {
+                Some(lane) if !lane.leases.is_empty() => {
+                    self.confirm = Some(Confirm::ReleaseLeases {
+                        lane: lane.name.clone(),
+                        patterns: lane.leases.clone(),
+                    });
+                }
+                _ => self.status_msg = Some("This lane holds no leases.".into()),
+            },
 
-            _ => Outcome::None,
+            // Rare: not in the footer, still here.
+            (KeyCode::Char('c'), KeyModifiers::NONE) => {
+                if let Some(launch) = self.selected().and_then(|l| l.launch_id.clone()) {
+                    self.coordinator_override = Some(launch.clone());
+                    return Outcome::PromoteCoordinator { launch_id: launch };
+                }
+            }
+            (KeyCode::Char('w'), KeyModifiers::NONE) => {
+                if let Some(launch) = self.selected().and_then(|l| l.launch_id.clone()) {
+                    return Outcome::WakeAgent { launch_id: launch };
+                }
+            }
+            _ => {}
         }
+        Outcome::None
     }
 
     /// `y` approves; Enter does not (`docs/keyboard.md`: a destructive
@@ -1029,7 +852,7 @@ impl SwarmView {
                         self.open_launch_modal();
                         Outcome::None
                     }
-                    Confirm::ReleaseLease { pattern } => Outcome::ReleaseLease(pattern),
+                    Confirm::ReleaseLeases { patterns, .. } => Outcome::ReleaseLeases(patterns),
                     Confirm::CancelTask { task_id, .. } => Outcome::CancelTask(task_id),
                     Confirm::StopSession { session_idx, .. } => Outcome::StopSession(session_idx),
                 }
@@ -1078,9 +901,6 @@ impl SwarmView {
                         ..
                     }) | Some(Modal::NewWorker {
                         field: WorkerField::Instructions,
-                        ..
-                    }) | Some(Modal::NewTask {
-                        field: TaskField::Instructions,
                         ..
                     }) | Some(Modal::EditTask {
                         field: TaskField::Instructions,
@@ -1197,41 +1017,6 @@ impl SwarmView {
                         crate::keymap::apply_text(agent, &key);
                     }
                     WorkerField::Isolation => match key.code {
-                        KeyCode::Left
-                        | KeyCode::Right
-                        | KeyCode::Char('h')
-                        | KeyCode::Char('l')
-                        | KeyCode::Char(' ') => {
-                            *isolation = match isolation {
-                                TaskIsolation::Shared => TaskIsolation::Worktree,
-                                TaskIsolation::Worktree => TaskIsolation::Shared,
-                            };
-                        }
-                        _ => {}
-                    },
-                },
-            },
-
-            Modal::NewTask {
-                title,
-                instructions,
-                files,
-                isolation,
-                field,
-            } => match (key.code, key.modifiers) {
-                (KeyCode::Tab, KeyModifiers::NONE) => *field = field.next(true),
-                (KeyCode::BackTab, _) => *field = field.prev(true),
-                _ => match field {
-                    TaskField::Title => {
-                        crate::keymap::apply_text(title, &key);
-                    }
-                    TaskField::Instructions => {
-                        crate::keymap::apply_text(instructions, &key);
-                    }
-                    TaskField::Files => {
-                        crate::keymap::apply_text(files, &key);
-                    }
-                    TaskField::Isolation => match key.code {
                         KeyCode::Left
                         | KeyCode::Right
                         | KeyCode::Char('h')
@@ -1376,25 +1161,6 @@ impl SwarmView {
                     isolation,
                 }
             }
-            Modal::NewTask {
-                title,
-                instructions,
-                files,
-                isolation,
-                ..
-            } => {
-                let t = title.text.trim().to_string();
-                if t.is_empty() {
-                    self.status_msg = Some("Task title cannot be empty.".into());
-                    return Outcome::None;
-                }
-                Outcome::CreateTask {
-                    title: t,
-                    instructions: instructions.text.trim().to_string(),
-                    files: parse_csv_files(&files.text),
-                    isolation,
-                }
-            }
             Modal::EditTask {
                 task_id,
                 title,
@@ -1417,6 +1183,7 @@ impl SwarmView {
             Modal::ViewMessage { .. } => Outcome::None,
             Modal::ComposeMessage {
                 to_launch,
+                reply_to,
                 topic_idx,
                 body,
                 urgent,
@@ -1430,6 +1197,7 @@ impl SwarmView {
                 }
                 Outcome::SendMessage {
                     to_launch,
+                    reply_to,
                     topic: MESSAGE_TOPICS[topic_idx % MESSAGE_TOPICS.len()].to_string(),
                     body: b,
                     urgent,
@@ -1439,73 +1207,27 @@ impl SwarmView {
         }
     }
 
+    /// Moves within the focused side: the lanes, the panel's message list,
+    /// or the panel's scroll.
     fn move_cursor(&mut self, delta: isize) {
-        match self.pane {
-            SwarmPane::Agents => {
-                let len = self.snapshot.all_members().len();
-                self.selected_agent = step_index(self.selected_agent, len, delta);
-                if self.preview_mode == PreviewMode::GitDiff {
-                    self.refresh_diff();
+        match self.focus {
+            Focus::Lanes => {
+                let before = self.selected_lane;
+                self.selected_lane = step_index(self.selected_lane, self.lanes.len(), delta);
+                if self.selected_lane != before {
+                    self.after_lane_change();
                 }
             }
-            SwarmPane::Preview => {
-                if delta < 0 {
-                    self.preview_scroll = self.preview_scroll.saturating_sub(delta.unsigned_abs());
-                } else {
-                    self.preview_scroll = self.preview_scroll.saturating_add(delta as usize);
-                }
-            }
-            SwarmPane::Board => match self.board_mode {
-                BoardMode::Tasks => {
-                    let len = self.snapshot.tasks.len();
-                    self.selected_task = step_index(self.selected_task, len, delta);
-                }
-                BoardMode::Leases => {
-                    let len = self.snapshot.leases.len();
-                    self.selected_lease = step_index(self.selected_lease, len, delta);
-                }
-            },
-            SwarmPane::Messages => {
-                let len = self.filtered_messages().len();
+            Focus::Panel if self.activity || self.tab() == PanelTab::Thread => {
+                let len = self.panel_messages().len();
                 self.selected_message = step_index(self.selected_message, len, delta);
             }
-        }
-    }
-
-    fn move_to_top(&mut self) {
-        match self.pane {
-            SwarmPane::Agents => self.selected_agent = 0,
-            SwarmPane::Preview => self.preview_scroll = 0,
-            SwarmPane::Board => match self.board_mode {
-                BoardMode::Tasks => self.selected_task = 0,
-                BoardMode::Leases => self.selected_lease = 0,
-            },
-            SwarmPane::Messages => self.selected_message = 0,
-        }
-    }
-
-    fn move_to_bottom(&mut self) {
-        match self.pane {
-            SwarmPane::Agents => {
-                let len = self.snapshot.all_members().len();
-                self.selected_agent = len.saturating_sub(1);
-            }
-            SwarmPane::Preview => {
-                self.preview_scroll = 500;
-            }
-            SwarmPane::Board => match self.board_mode {
-                BoardMode::Tasks => {
-                    let len = self.snapshot.tasks.len();
-                    self.selected_task = len.saturating_sub(1);
-                }
-                BoardMode::Leases => {
-                    let len = self.snapshot.leases.len();
-                    self.selected_lease = len.saturating_sub(1);
-                }
-            },
-            SwarmPane::Messages => {
-                let len = self.filtered_messages().len();
-                self.selected_message = len.saturating_sub(1);
+            Focus::Panel => {
+                self.panel_scroll = if delta < 0 {
+                    self.panel_scroll.saturating_sub(delta.unsigned_abs())
+                } else {
+                    self.panel_scroll.saturating_add(delta as usize).min(10_000)
+                };
             }
         }
     }
@@ -1642,80 +1364,144 @@ mod tests {
     }
 
     #[test]
-    fn swarm_view_quadrant_navigation_and_modals() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = dir.path().join("traces.db");
-        let _ = open_rw(
-            &db,
-            OpenOptions {
-                prices: PriceTable::builtin(),
-                run_id: "r1".into(),
-                retention_days: 0,
-                agent_mux_version: "test".into(),
-            },
-        )
-        .unwrap();
+    fn the_lanes_and_the_panel_share_the_keyboard_and_tabs_stick_per_lane() {
+        let (dir, db) = store();
         let conn = open_aux(&db).unwrap();
         let ws = bstore::normalize_workspace(dir.path());
         bstore::split_tasks(
             &conn,
             Some(&db),
             &ws,
-            "user",
-            &[NewTaskSpec {
-                title: "Write API".into(),
-                instructions: "Build endpoints".into(),
-                files: vec!["src/api.rs".into()],
-                ..Default::default()
-            }],
+            "coord-1",
+            &[
+                NewTaskSpec {
+                    title: "Wire bus".into(),
+                    instructions: "…".into(),
+                    assigned_to: Some("w-1".into()),
+                    ..Default::default()
+                },
+                NewTaskSpec {
+                    title: "Write API".into(),
+                    instructions: "Build endpoints".into(),
+                    files: vec!["src/api.rs".into()],
+                    ..Default::default()
+                },
+            ],
             1_000,
         )
         .unwrap();
-
+        let mut worker = coordinator_live(&ws, "working");
+        worker.session_idx = 1;
+        worker.launch_id = "w-1".into();
+        worker.agent_persona = Some("implementer".into());
+        let live = vec![coordinator_live(&ws, "working"), worker];
         let mut view = SwarmView::open(
             dir.path().to_path_buf(),
             Some(open_aux(&db).unwrap()),
-            &[],
+            &live,
             2_000,
         );
-        assert_eq!(view.pane, SwarmPane::Agents);
-        assert_eq!(view.snapshot.tasks.len(), 1);
+        let names: Vec<_> = view.lanes.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["coordinator·claude", "implementer·claude", "queued"]
+        );
+        assert_eq!(view.focus, Focus::Lanes);
+        assert_eq!(
+            view.tab(),
+            PanelTab::Live,
+            "a live session opens on its terminal"
+        );
 
-        // Number keys 1..4 switch quadrants
-        view.handle_key(key(KeyCode::Char('3')));
-        assert_eq!(view.pane, SwarmPane::Board);
-        view.handle_key(key(KeyCode::Char('4')));
-        assert_eq!(view.pane, SwarmPane::Messages);
+        // Enter attaches; Tab moves to the panel and Esc comes back.
+        assert_eq!(
+            view.handle_key(key(KeyCode::Enter)),
+            Outcome::AttachSession(0)
+        );
         view.handle_key(key(KeyCode::Tab));
-        assert_eq!(view.pane, SwarmPane::Agents);
+        assert_eq!(view.focus, Focus::Panel);
+        assert_eq!(view.handle_key(key(KeyCode::Esc)), Outcome::None);
+        assert_eq!(view.focus, Focus::Lanes);
 
-        // `r` opens LaunchSwarm modal
-        view.handle_key(key(KeyCode::Char('r')));
-        assert!(view.text_entry_active());
-        assert!(matches!(view.modal, Some(Modal::LaunchSwarm { .. })));
+        // A chosen tab sticks to its lane; another lane opens on its own.
+        view.handle_key(key(KeyCode::Char('4')));
+        assert_eq!(view.tab(), PanelTab::Task);
+        view.handle_key(key(KeyCode::Down));
+        assert_eq!(view.selected().unwrap().name, "implementer·claude");
+        assert_eq!(view.tab(), PanelTab::Live);
+        view.handle_key(key(KeyCode::Up));
+        assert_eq!(view.tab(), PanelTab::Task);
 
-        // Esc closes modal
-        view.handle_key(key(KeyCode::Esc));
-        assert!(!view.text_entry_active());
+        // The queued lane opens on its task; r delegates it, x cancels it (y).
+        view.handle_key(key(KeyCode::Char('G')));
+        let lane = view.selected().unwrap().clone();
+        assert_eq!(lane.kind, LaneKind::Queued);
+        assert_eq!(view.tab(), PanelTab::Task);
+        let task_id = lane.task.unwrap().id;
+        assert_eq!(
+            view.handle_key(key(KeyCode::Char('r'))),
+            Outcome::DelegateTask {
+                task_id: task_id.clone()
+            }
+        );
+        view.handle_key(key(KeyCode::Char('x')));
+        assert!(matches!(view.confirm, Some(Confirm::CancelTask { .. })));
+        assert_eq!(view.handle_key(key(KeyCode::Enter)), Outcome::None);
+        assert_eq!(
+            view.handle_key(key(KeyCode::Char('y'))),
+            Outcome::CancelTask(task_id)
+        );
 
-        // `b` opens broadcast message composer
-        view.handle_key(key(KeyCode::Char('b')));
-        assert!(matches!(
-            view.modal,
-            Some(Modal::ComposeMessage {
-                to_launch: None,
-                ..
-            })
-        ));
-        view.handle_key(key(KeyCode::Char('H')));
-        view.handle_key(key(KeyCode::Char('i')));
+        // `a` swaps the panel for the swarm's Activity and back.
+        view.handle_key(key(KeyCode::Char('a')));
+        assert!(view.activity);
+        view.handle_key(key(KeyCode::Char('a')));
+        assert!(!view.activity);
+    }
+
+    #[test]
+    fn a_reply_from_the_thread_answers_the_question_it_was_written_for() {
+        let (dir, db) = store();
+        let conn = open_aux(&db).unwrap();
+        let ws = bstore::normalize_workspace(dir.path());
+        let q = bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "coord-1",
+            Some("user"),
+            "question",
+            "Ship on Friday?",
+            None,
+            1_000,
+        )
+        .unwrap();
+        let live = vec![coordinator_live(&ws, "idle")];
+        let mut view = SwarmView::open(
+            dir.path().to_path_buf(),
+            Some(open_aux(&db).unwrap()),
+            &live,
+            2_000,
+        );
+        assert_eq!(view.lanes[0].state, LaneState::Waiting);
+        assert_eq!(
+            view.tab(),
+            PanelTab::Thread,
+            "a waiting lane opens on its thread"
+        );
+        view.handle_key(key(KeyCode::Tab));
+        view.handle_key(key(KeyCode::Char('m')));
+        for c in "yes".chars() {
+            view.handle_key(key(KeyCode::Char(c)));
+        }
         let out = view.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert_eq!(
             out,
             Outcome::SendMessage {
-                to_launch: None,
-                topic: "directive".into(),
-                body: "Hi".into(),
+                to_launch: Some("coord-1".into()),
+                reply_to: Some(q.id),
+                topic: "answer".into(),
+                body: "yes".into(),
                 urgent: false,
                 wake: true,
             }
@@ -1780,7 +1566,7 @@ mod tests {
             &[],
             2_000,
         );
-        view.pane = SwarmPane::Board;
+        assert_eq!(view.selected().unwrap().kind, LaneKind::Queued);
         view.handle_key(key(KeyCode::Char('x')));
         assert!(matches!(view.confirm, Some(Confirm::CancelTask { .. })));
         assert_eq!(view.handle_key(key(KeyCode::Enter)), Outcome::None);
@@ -1877,6 +1663,7 @@ mod tests {
             out,
             Outcome::SendMessage {
                 to_launch: None,
+                reply_to: None,
                 topic: "answer".into(),
                 body: "one \nx".into(),
                 urgent: true,

@@ -2,7 +2,10 @@
 //!
 //! Aggregates the workspace's active Coordinator, Workers, Task Board,
 //! Cooperative File Leases, and Inter-Agent Message Feed from `traces.db`
-//! and live `App` sessions into a single [`SwarmSnapshot`].
+//! and live `App` sessions into a single [`SwarmSnapshot`], and derives the
+//! Mission Control view of it: [`Lane`]s with stable names and states, open
+//! questions and the swarm's [`Phase`]
+//! (`docs/superpowers/specs/2026-10-30-swarm-mission-control-ux-design.md`).
 
 use super::{
     BusMessage, BusTask, FileLease, PeerInfo, TaskIsolation, TaskStatus, short_id, store as bstore,
@@ -92,6 +95,9 @@ pub struct SwarmSnapshot {
     /// The default task isolation the swarm was started with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<TaskIsolation>,
+    /// When the swarm was started (`swarm_state.started_ns`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ns: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<SwarmMember>,
     pub workers: Vec<SwarmMember>,
@@ -115,22 +121,18 @@ impl SwarmSnapshot {
         out
     }
 
-    /// Friendly display label for any launch ID in the message feed or task board.
+    /// The name a launch goes by everywhere on the screen: a member's stable
+    /// lane name (`implementer·codex`), `User` for the operator, else the
+    /// launch's short id.
     pub fn member_label(&self, launch_id: &str) -> String {
         if launch_id == "user" || launch_id == "operator" || launch_id == "cli" {
             return "User".to_string();
         }
-        if let Some(c) = &self.coordinator
-            && c.launch_id == launch_id
-        {
-            return format!("★ Coord ({})", c.provider);
-        }
-        for w in &self.workers {
-            if w.launch_id == launch_id {
-                return format!("{} ({})", w.label, w.provider);
-            }
-        }
-        short_id(launch_id).to_string()
+        self.all_members()
+            .into_iter()
+            .find(|m| m.launch_id == launch_id)
+            .map(|m| m.label.clone())
+            .unwrap_or_else(|| short_id(launch_id).to_string())
     }
 
     /// Counts tasks by status category: `(running, open_or_claimed, done, failed_or_cancelled)`.
@@ -330,15 +332,28 @@ pub fn load_snapshot(
     let mut workers: Vec<SwarmMember> = Vec::new();
     for mut m in raw_members {
         if m.role == SwarmRole::Coordinator && coordinator.is_none() {
-            m.label = "★ Coord".into();
             coordinator = Some(m);
         } else {
             m.role = SwarmRole::Worker;
-            let idx = workers.len() + 1;
-            m.label = format!("W{idx}");
             workers.push(m);
         }
     }
+    // Workers in the order they joined: their first task, then launch id.
+    // Neither changes while the swarm runs, so neither does the order.
+    let joined = |launch: &str| {
+        tasks
+            .iter()
+            .filter(|t| t.assigned_to.as_deref() == Some(launch))
+            .map(|t| t.created_ns)
+            .min()
+            .unwrap_or(i64::MAX)
+    };
+    workers.sort_by(|a, b| {
+        joined(&a.launch_id)
+            .cmp(&joined(&b.launch_id))
+            .then_with(|| a.launch_id.cmp(&b.launch_id))
+    });
+    assign_names(coordinator.as_mut(), &mut workers);
 
     let mut total_turns = 0usize;
     let mut total_tokens = 0i64;
@@ -359,6 +374,7 @@ pub fn load_snapshot(
         goal: state.as_ref().and_then(|st| st.goal.clone()),
         max_workers: state.as_ref().and_then(|st| st.max_workers),
         isolation: state.as_ref().and_then(|st| st.isolation),
+        started_ns: state.as_ref().map(|st| st.started_ns),
         coordinator,
         workers,
         tasks,
@@ -367,6 +383,357 @@ pub fn load_snapshot(
         total_turns,
         total_tokens,
         total_cost_usd,
+    }
+}
+
+/// Names every member `persona·harness` (the coordinator `coordinator·harness`),
+/// adding the launch id's first four characters where two names collide. A
+/// name depends on the member itself, never on its position, so it never
+/// passes to another agent (as `W2` did when `W1` left); a suffix only drops
+/// once its twin is gone.
+fn assign_names(coordinator: Option<&mut SwarmMember>, workers: &mut [SwarmMember]) {
+    let base = |m: &SwarmMember| {
+        let persona = match m.role {
+            SwarmRole::Coordinator => "coordinator",
+            SwarmRole::Worker => m.agent_persona.as_deref().unwrap_or("worker"),
+        };
+        format!("{persona}·{}", m.provider)
+    };
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for w in workers.iter() {
+        *counts.entry(base(w)).or_default() += 1;
+    }
+    for w in workers.iter_mut() {
+        let name = base(w);
+        w.label = if counts.get(&name).copied().unwrap_or(0) > 1 {
+            let id = short_id(&w.launch_id);
+            format!("{name} {}", &id[..id.len().min(4)])
+        } else {
+            name
+        };
+    }
+    if let Some(c) = coordinator {
+        c.label = base(c);
+    }
+}
+
+/// How long a question may go unanswered, or a lane sit idle on a task,
+/// before it needs the operator (decided 2026-10-30).
+pub const STUCK_AFTER_NS: i64 = 5 * 60 * 1_000_000_000;
+
+/// Where a swarm is in its life, from its tasks and its coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Phase {
+    NotStarted,
+    Planning,
+    Executing,
+    WrappingUp,
+    Done,
+}
+
+impl Phase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Phase::NotStarted => "not started",
+            Phase::Planning => "planning",
+            Phase::Executing => "executing",
+            Phase::WrappingUp => "wrapping up",
+            Phase::Done => "done",
+        }
+    }
+}
+
+/// What a lane is: the coordinator's, an agent's, or a task nobody holds yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneKind {
+    Coordinator,
+    Agent,
+    Queued,
+}
+
+/// A lane's state, in the order [`SwarmSnapshot::lanes`] decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneState {
+    /// Its task failed.
+    Failed,
+    /// Its task is still open but its session exited.
+    Lost,
+    /// Its session waits for the operator (a permission prompt).
+    Attention,
+    /// It asked a question nobody has answered.
+    Waiting,
+    Working,
+    Done,
+    /// Idle with a task that is not finished.
+    Idle,
+    /// Live with no task.
+    Ready,
+    Exited,
+    Queued,
+}
+
+impl LaneState {
+    pub fn glyph(self) -> &'static str {
+        match self {
+            LaneState::Failed => "✗",
+            LaneState::Lost => "!",
+            LaneState::Attention => "⚑",
+            LaneState::Waiting => "◷",
+            LaneState::Working => "●",
+            LaneState::Done => "✓",
+            LaneState::Idle => "○",
+            LaneState::Ready | LaneState::Queued => "◦",
+            LaneState::Exited => "·",
+        }
+    }
+}
+
+/// One row of Mission Control: an agent and the task it holds, the
+/// coordinator, or a queued task.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lane {
+    /// The launch id, or the task id of a queued lane: what the selection
+    /// follows across refreshes.
+    pub key: String,
+    pub kind: LaneKind,
+    pub name: String,
+    pub launch_id: Option<String>,
+    pub session_idx: Option<usize>,
+    pub provider: Option<String>,
+    pub task: Option<BusTask>,
+    pub state: LaneState,
+    /// What it is doing now, in a few words.
+    pub activity: String,
+    /// Where its task works: `shared · 2 leases`, `wt <branch>`.
+    pub placement: String,
+    pub leases: Vec<String>,
+    /// When its oldest unanswered question was asked.
+    pub waiting_since_ns: Option<i64>,
+    pub unread: usize,
+}
+
+fn first_line(s: &str, max: usize) -> String {
+    let line = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if line.chars().count() > max {
+        let cut: String = line.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    } else {
+        line.to_string()
+    }
+}
+
+fn result_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// `4m`, `2h`, `35s`: a short age for activity lines.
+pub fn short_age(ns: i64) -> String {
+    let s = (ns / 1_000_000_000).max(0);
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3_600 {
+        format!("{}m", s / 60)
+    } else {
+        format!("{}h", s / 3_600)
+    }
+}
+
+impl SwarmSnapshot {
+    /// Questions nobody has answered: a `question` is answered by a later
+    /// message that names it in `reply_to`, or by a later message to its
+    /// sender from its addressee (from anyone, for a broadcast question).
+    pub fn open_questions(&self) -> Vec<&BusMessage> {
+        self.messages
+            .iter()
+            .filter(|q| q.topic == "question")
+            .filter(|q| {
+                !self.messages.iter().any(|m| {
+                    m.created_ns >= q.created_ns
+                        && m.id != q.id
+                        && (m.reply_to.as_deref() == Some(q.id.as_str())
+                            || (m.to_launch.as_deref() == Some(q.from_launch.as_str())
+                                && q.to_launch.as_ref().is_none_or(|to| *to == m.from_launch)))
+                })
+            })
+            .collect()
+    }
+
+    /// Where the swarm is: see [`Phase`].
+    pub fn phase(&self) -> Phase {
+        let coordinator_live = self.coordinator.as_ref().is_some_and(|c| c.is_active());
+        if self.tasks.is_empty() {
+            return if coordinator_live {
+                Phase::Planning
+            } else {
+                Phase::NotStarted
+            };
+        }
+        if self.tasks.iter().any(|t| !t.status.is_terminal()) {
+            Phase::Executing
+        } else if coordinator_live {
+            Phase::WrappingUp
+        } else {
+            Phase::Done
+        }
+    }
+
+    /// The lanes, coordinator first, then agents in the order they joined,
+    /// then queued tasks oldest first. `now` is in nanoseconds.
+    pub fn lanes(&self, now: i64) -> Vec<Lane> {
+        let open = self.open_questions();
+        let mut out = Vec::new();
+        if let Some(c) = &self.coordinator {
+            let tasks = self.tasks.len();
+            let done = self
+                .tasks
+                .iter()
+                .filter(|t| t.status == TaskStatus::Done)
+                .count();
+            let mut lane = self.member_lane(c, LaneKind::Coordinator, &open, now);
+            lane.placement = match (tasks, open.len()) {
+                (0, _) => "plan: no tasks yet".into(),
+                (n, 0) => format!("plan: {done}/{n} tasks done"),
+                (n, q) => format!(
+                    "plan: {done}/{n} tasks done · {q} open question{}",
+                    if q == 1 { "" } else { "s" }
+                ),
+            };
+            out.push(lane);
+        }
+        for w in &self.workers {
+            out.push(self.member_lane(w, LaneKind::Agent, &open, now));
+        }
+        let mut queued: Vec<&BusTask> = self
+            .tasks
+            .iter()
+            .filter(|t| !t.status.is_terminal() && t.assigned_to.is_none())
+            .collect();
+        queued.sort_by_key(|t| t.created_ns);
+        for t in queued {
+            out.push(Lane {
+                key: t.id.clone(),
+                kind: LaneKind::Queued,
+                name: "queued".into(),
+                launch_id: None,
+                session_idx: None,
+                provider: t.target_harness.clone(),
+                task: Some(t.clone()),
+                state: LaneState::Queued,
+                activity: match (&t.target_agent, &t.target_harness) {
+                    (Some(a), Some(h)) => format!("for {a}·{h}"),
+                    (Some(a), None) => format!("for {a}"),
+                    (None, Some(h)) => format!("for {h}"),
+                    (None, None) => "waiting for a worker".into(),
+                },
+                placement: placement(t, 0),
+                leases: Vec::new(),
+                waiting_since_ns: None,
+                unread: 0,
+            });
+        }
+        out
+    }
+
+    fn member_lane(&self, m: &SwarmMember, kind: LaneKind, open: &[&BusMessage], now: i64) -> Lane {
+        let held: Vec<&BusTask> = self
+            .tasks
+            .iter()
+            .filter(|t| t.assigned_to.as_deref() == Some(m.launch_id.as_str()))
+            .collect();
+        let task = held
+            .iter()
+            .rev()
+            .find(|t| !t.status.is_terminal())
+            .or_else(|| held.last())
+            .copied();
+        let waiting = open
+            .iter()
+            .filter(|q| q.from_launch == m.launch_id)
+            .min_by_key(|q| q.created_ns);
+        let live = m.is_active();
+        let status = task.map(|t| t.status);
+        let state = match status {
+            Some(TaskStatus::Failed) => LaneState::Failed,
+            Some(s) if !s.is_terminal() && !live => LaneState::Lost,
+            _ if live && m.state == "attention" => LaneState::Attention,
+            _ if waiting.is_some() => LaneState::Waiting,
+            _ if live && m.state == "working" => LaneState::Working,
+            Some(TaskStatus::Done) => LaneState::Done,
+            Some(s) if !s.is_terminal() => LaneState::Idle,
+            _ if live => LaneState::Ready,
+            _ => LaneState::Exited,
+        };
+        let activity = match state {
+            LaneState::Failed => match task.and_then(|t| t.error.as_deref()) {
+                Some(e) if !e.trim().is_empty() => format!("failed · {}", first_line(e, 48)),
+                _ => "failed".into(),
+            },
+            LaneState::Lost => "session exited mid-task".into(),
+            LaneState::Attention => "needs you in its terminal".into(),
+            LaneState::Waiting => {
+                let q = waiting.expect("waiting has a question");
+                let to = q
+                    .to_launch
+                    .as_deref()
+                    .map(|t| self.member_label(t))
+                    .unwrap_or_else(|| "everyone".into());
+                format!("waiting {} on {to}", short_age(now - q.created_ns))
+            }
+            LaneState::Working => match &m.running_tool {
+                Some(tool) => format!("running {tool}"),
+                None => "working".into(),
+            },
+            LaneState::Done => match task.and_then(|t| t.result.as_ref()).map(result_text) {
+                Some(r) if !r.trim().is_empty() => format!("done · {}", first_line(&r, 48)),
+                _ => "done".into(),
+            },
+            LaneState::Idle => "idle".into(),
+            LaneState::Ready => "ready, no task".into(),
+            LaneState::Exited => "session exited".into(),
+            LaneState::Queued => unreachable!("an agent lane is never queued"),
+        };
+        let leases: Vec<String> = self
+            .leases
+            .iter()
+            .filter(|l| l.owner_launch == m.launch_id)
+            .map(|l| l.pattern.clone())
+            .collect();
+        Lane {
+            key: m.launch_id.clone(),
+            kind,
+            name: m.label.clone(),
+            launch_id: Some(m.launch_id.clone()),
+            session_idx: m.session_idx,
+            provider: Some(m.provider.clone()),
+            task: task.cloned(),
+            state,
+            activity,
+            placement: task.map(|t| placement(t, leases.len())).unwrap_or_default(),
+            leases,
+            waiting_since_ns: waiting.map(|q| q.created_ns),
+            unread: m.unread_messages,
+        }
+    }
+}
+
+fn placement(t: &BusTask, leases: usize) -> String {
+    match (t.isolation, &t.branch) {
+        (TaskIsolation::Worktree, Some(b)) => format!("wt {b}"),
+        (TaskIsolation::Worktree, None) => "worktree".into(),
+        (TaskIsolation::Shared, _) if leases > 0 => format!(
+            "shared · {leases} lease{}",
+            if leases == 1 { "" } else { "s" }
+        ),
+        (TaskIsolation::Shared, _) => "shared".into(),
     }
 }
 
@@ -537,7 +904,7 @@ mod tests {
         assert_eq!(coord.launch_id, "coord-11112222");
         assert_eq!(coord.unread_messages, 1);
         assert_eq!(snap.workers.len(), 1);
-        assert_eq!(snap.workers[0].label, "W1");
+        assert_eq!(snap.workers[0].label, "reviewer·codex");
         assert_eq!(snap.workers[0].leased_files, vec!["src/auth/**"]);
         assert_eq!(snap.leases.len(), 1);
         // Recording the coordinator posts nothing on the bus: the feed holds
@@ -545,7 +912,318 @@ mod tests {
         assert_eq!(snap.messages.len(), 1);
         assert_eq!(snap.total_turns, 6);
         assert_eq!(snap.total_tokens, 17_000);
-        assert_eq!(snap.member_label("coord-11112222"), "★ Coord (claude)");
-        assert_eq!(snap.member_label("worker-aaaa1111"), "W1 (codex)");
+        assert_eq!(snap.member_label("coord-11112222"), "coordinator·claude");
+        assert_eq!(snap.member_label("worker-aaaa1111"), "reviewer·codex");
+    }
+
+    fn live(
+        idx: usize,
+        launch: &str,
+        persona: Option<&str>,
+        provider: &str,
+        state: &str,
+        ws: &str,
+    ) -> LiveSwarmSession {
+        LiveSwarmSession {
+            session_idx: idx,
+            session_id: idx + 1,
+            launch_id: launch.into(),
+            provider: provider.into(),
+            profile_name: provider.into(),
+            agent_persona: persona.map(str::to_string),
+            state: state.into(),
+            workspace: ws.into(),
+            is_delegated_worker: persona != Some("coordinator"),
+            turns: 0,
+            tokens: 0,
+            cost_usd: 0.0,
+            running_tool: None,
+        }
+    }
+
+    fn store() -> (tempfile::TempDir, std::path::PathBuf, Connection, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("traces.db");
+        let _ = open_rw(
+            &db,
+            OpenOptions {
+                prices: PriceTable::builtin(),
+                run_id: "run-lanes".into(),
+                retention_days: 0,
+                agent_mux_version: "test".into(),
+            },
+        )
+        .unwrap();
+        let conn = open_aux(&db).unwrap();
+        let ws = bstore::normalize_workspace(dir.path());
+        (dir, db, conn, ws)
+    }
+
+    fn task(
+        conn: &Connection,
+        db: &Path,
+        ws: &str,
+        title: &str,
+        to: Option<&str>,
+        at: i64,
+    ) -> String {
+        bstore::split_tasks(
+            conn,
+            Some(db),
+            ws,
+            "coord-1",
+            &[NewTaskSpec {
+                title: title.into(),
+                instructions: "…".into(),
+                assigned_to: to.map(str::to_string),
+                ..Default::default()
+            }],
+            at,
+        )
+        .unwrap()
+        .remove(0)
+        .id
+    }
+
+    #[test]
+    fn names_are_stable_and_disambiguated_not_positional() {
+        let (dir, db, conn, ws) = store();
+        task(&conn, &db, &ws, "a", Some("aaaa1111"), 1);
+        task(&conn, &db, &ws, "b", Some("bbbb2222"), 2);
+        task(&conn, &db, &ws, "c", Some("cccc3333"), 3);
+        let all = vec![
+            live(0, "coord-1", Some("coordinator"), "claude", "working", &ws),
+            live(1, "cccc3333", Some("tester"), "agy", "working", &ws),
+            live(2, "aaaa1111", Some("implementer"), "codex", "working", &ws),
+            live(3, "bbbb2222", Some("implementer"), "codex", "working", &ws),
+        ];
+        let snap = load_snapshot(Some(&conn), dir.path(), &all, None, 10);
+        let names: Vec<_> = snap.workers.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "implementer·codex aaaa",
+                "implementer·codex bbbb",
+                "tester·agy"
+            ],
+            "joined order, duplicates get an id"
+        );
+        assert_eq!(snap.member_label("coord-1"), "coordinator·claude");
+
+        // The first implementer leaves. No name passes to another agent: the
+        // tester keeps its own, the twin drops a suffix it no longer needs,
+        // and the one who left is its short id.
+        let fewer: Vec<_> = all
+            .iter()
+            .filter(|s| s.launch_id != "aaaa1111")
+            .cloned()
+            .collect();
+        let _ = bstore::update_task(
+            &conn,
+            Some(&db),
+            &snap.tasks[0].id,
+            "aaaa1111",
+            TaskStatus::Cancelled,
+            None,
+            None,
+            None,
+            None,
+            11,
+        );
+        let snap = load_snapshot(Some(&conn), dir.path(), &fewer, None, 12);
+        assert_eq!(snap.member_label("cccc3333"), "tester·agy");
+        assert_eq!(snap.member_label("bbbb2222"), "implementer·codex");
+        assert_eq!(snap.member_label("aaaa1111"), "aaaa1111");
+    }
+
+    #[test]
+    fn a_question_is_open_until_answered_by_reply_or_by_the_addressee() {
+        let (dir, db, conn, ws) = store();
+        let q = bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "w-1",
+            Some("coord-1"),
+            "question",
+            "TTL?",
+            None,
+            1,
+        )
+        .unwrap();
+        let snap = load_snapshot(Some(&conn), dir.path(), &[], None, 2);
+        assert_eq!(snap.open_questions().len(), 1);
+
+        // A message from someone else to the asker does not answer it.
+        bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "w-2",
+            Some("w-1"),
+            "message",
+            "hi",
+            None,
+            3,
+        )
+        .unwrap();
+        let snap = load_snapshot(Some(&conn), dir.path(), &[], None, 4);
+        assert_eq!(snap.open_questions().len(), 1);
+
+        // The addressee writing back does.
+        bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "coord-1",
+            Some("w-1"),
+            "answer",
+            "1h",
+            None,
+            5,
+        )
+        .unwrap();
+        let snap = load_snapshot(Some(&conn), dir.path(), &[], None, 6);
+        assert!(snap.open_questions().is_empty());
+
+        // A reply naming the question answers it, whoever sends it.
+        let q2 = bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "w-1",
+            None,
+            "question",
+            "anyone?",
+            None,
+            7,
+        )
+        .unwrap();
+        bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "user",
+            None,
+            "answer",
+            "me",
+            Some(&q2.id),
+            8,
+        )
+        .unwrap();
+        let snap = load_snapshot(Some(&conn), dir.path(), &[], None, 9);
+        assert!(snap.open_questions().is_empty(), "{:?}", q.id);
+    }
+
+    #[test]
+    fn lanes_carry_state_activity_and_queued_tasks_and_the_phase_follows_the_tasks() {
+        let (dir, db, conn, ws) = store();
+        let min = 60 * 1_000_000_000i64;
+        let snap = load_snapshot(Some(&conn), dir.path(), &[], None, 0);
+        assert_eq!(snap.phase(), Phase::NotStarted);
+        let coord = live(0, "coord-1", Some("coordinator"), "claude", "working", &ws);
+        let snap = load_snapshot(
+            Some(&conn),
+            dir.path(),
+            std::slice::from_ref(&coord),
+            None,
+            0,
+        );
+        assert_eq!(snap.phase(), Phase::Planning);
+
+        task(&conn, &db, &ws, "wire bus", Some("w-1"), 1);
+        task(&conn, &db, &ws, "ui tests", Some("w-2"), 2);
+        task(&conn, &db, &ws, "migration", None, 3);
+        bstore::send_message(
+            &conn,
+            Some(&db),
+            &ws,
+            "w-1",
+            Some("coord-1"),
+            "question",
+            "TTL?",
+            None,
+            min,
+        )
+        .unwrap();
+        let mut w1 = live(1, "w-1", Some("implementer"), "codex", "idle", &ws);
+        w1.running_tool = None;
+        let mut w2 = live(2, "w-2", Some("tester"), "agy", "working", &ws);
+        w2.running_tool = Some("Bash".into());
+        let sessions = vec![coord.clone(), w1, w2];
+        let snap = load_snapshot(Some(&conn), dir.path(), &sessions, None, 5 * min);
+        assert_eq!(snap.phase(), Phase::Executing);
+
+        let lanes = snap.lanes(5 * min);
+        let summary: Vec<_> = lanes
+            .iter()
+            .map(|l| (l.kind, l.name.as_str(), l.state, l.activity.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    LaneKind::Coordinator,
+                    "coordinator·claude",
+                    LaneState::Working,
+                    "working"
+                ),
+                (
+                    LaneKind::Agent,
+                    "implementer·codex",
+                    LaneState::Waiting,
+                    "waiting 4m on coordinator·claude"
+                ),
+                (
+                    LaneKind::Agent,
+                    "tester·agy",
+                    LaneState::Working,
+                    "running Bash"
+                ),
+                (
+                    LaneKind::Queued,
+                    "queued",
+                    LaneState::Queued,
+                    "waiting for a worker"
+                ),
+            ]
+        );
+        assert_eq!(lanes[0].placement, "plan: 0/3 tasks done · 1 open question");
+        assert_eq!(lanes[1].waiting_since_ns, Some(min));
+        assert_eq!(lanes[3].task.as_ref().unwrap().title, "migration");
+
+        // The tester's session exits mid-task: lost. Its task fails: failed.
+        let gone: Vec<_> = sessions
+            .iter()
+            .cloned()
+            .map(|mut s| {
+                if s.launch_id == "w-2" {
+                    s.state = "exited".into();
+                }
+                s
+            })
+            .collect();
+        let snap = load_snapshot(Some(&conn), dir.path(), &gone, None, 6 * min);
+        assert_eq!(snap.lanes(6 * min)[2].state, LaneState::Lost);
+        let tid = snap.lanes(6 * min)[2].task.as_ref().unwrap().id.clone();
+        bstore::update_task(
+            &conn,
+            Some(&db),
+            &tid,
+            "w-2",
+            TaskStatus::Failed,
+            None,
+            Some("cargo test exit 101".into()),
+            None,
+            None,
+            7 * min,
+        )
+        .unwrap();
+        let snap = load_snapshot(Some(&conn), dir.path(), &gone, None, 8 * min);
+        let lane = &snap.lanes(8 * min)[2];
+        assert_eq!(
+            (lane.state, lane.activity.as_str()),
+            (LaneState::Failed, "failed · cargo test exit 101")
+        );
     }
 }

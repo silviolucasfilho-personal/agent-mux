@@ -1,13 +1,16 @@
-//! Drawing the Agent Swarm Control Room (`crate::app::swarm_view`).
+//! Drawing Swarm Mission Control (`crate::app::swarm_view`): the mission
+//! strip, the lanes, the focus panel (Live, Thread, Changes, Task) or the
+//! swarm's Activity, and the footer.
 
 use super::flow::{dim, head, hints};
 use crate::app::App;
 use crate::app::swarm_view::{
-    BoardMode, ComposeField, Confirm, HARNESS_CYCLE, LaunchField, MESSAGE_TOPICS, Modal,
-    PreviewMode, SwarmPane, SwarmView, TaskField, WorkerField, format_task_detail_lines,
+    ComposeField, Confirm, Focus, HARNESS_CYCLE, LaunchField, MESSAGE_TOPICS, Modal, PanelTab,
+    SwarmView, TaskField, WorkerField, format_task_detail_lines,
 };
 use crate::app::workspaces_view::tilde_path;
-use crate::bus::{TaskStatus, short_id};
+use crate::bus::swarm::{Lane, LaneKind, LaneState, Phase};
+use crate::bus::{BusMessage, TaskStatus, short_id};
 use crate::tracing::cli::{fmt_cost, fmt_tokens};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -19,70 +22,27 @@ use tui_term::widget::PseudoTerminal;
 pub fn draw(f: &mut Frame, area: Rect, v: &SwarmView, app: &App) {
     f.render_widget(Clear, area);
 
-    let (running_tasks, open_tasks, done_tasks, failed_tasks) = v.snapshot.task_counts();
-    let total_tasks = v.snapshot.tasks.len();
-    let coord_tag = match &v.snapshot.coordinator {
-        Some(c) => format!("★ Coord: {} ({})", c.provider, c.state),
-        None => "★ Coord: none (press r to launch)".to_string(),
-    };
-    let workers = match v.snapshot.max_workers {
-        Some(cap) => format!("{}/{cap} Workers", v.snapshot.workers.len()),
-        None if v.snapshot.workers.len() == 1 => "1 Worker".to_string(),
-        None => format!("{} Workers", v.snapshot.workers.len()),
-    };
-    let title = format!(
-        " Swarm · {} · {} · {} · Tasks {}/{} done ({} ●, {} ○{}) · {} Lease{} · {} tok ({}) ",
-        tilde_path(&v.workspace),
-        coord_tag,
-        workers,
-        done_tasks,
-        total_tasks,
-        running_tasks,
-        open_tasks,
-        if failed_tasks > 0 {
-            format!(", {failed_tasks} ✗")
-        } else {
-            String::new()
-        },
-        v.snapshot.leases.len(),
-        if v.snapshot.leases.len() == 1 {
-            ""
-        } else {
-            "s"
-        },
-        fmt_tokens(Some(v.snapshot.total_tokens)),
-        fmt_cost(Some(v.snapshot.total_cost_usd)),
-    );
-
     let outer = Block::default()
         .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .title(title);
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(mission_strip(v, area.width.saturating_sub(4) as usize));
     let inner = outer.inner(area);
     f.render_widget(outer, area);
 
     let [body, foot] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
-    let top_h = (body.height * 54 / 100)
-        .max(8)
-        .min(body.height.saturating_sub(6));
-    let [top_row, bot_row] =
-        Layout::vertical([Constraint::Length(top_h), Constraint::Min(0)]).areas(body);
+    let lanes_w = (body.width * 44 / 100).clamp(36.min(body.width), 64);
+    let [lanes_area, panel_area] =
+        Layout::horizontal([Constraint::Length(lanes_w), Constraint::Min(0)]).areas(body);
 
-    let left_w = (body.width * 42 / 100).clamp(32, 62);
-    let [q1_area, q2_area] =
-        Layout::horizontal([Constraint::Length(left_w), Constraint::Min(0)]).areas(top_row);
-    let [q3_area, q4_area] =
-        Layout::horizontal([Constraint::Length(left_w), Constraint::Min(0)]).areas(bot_row);
-
-    draw_agents_pane(f, q1_area, v);
-    draw_preview_pane(f, q2_area, v, app);
-    draw_board_pane(f, q3_area, v);
-    draw_messages_pane(f, q4_area, v);
-    draw_footer_bar(f, foot, v);
+    draw_lanes(f, lanes_area, v);
+    if v.activity {
+        draw_activity(f, panel_area, v);
+    } else if let Some(lane) = v.selected() {
+        draw_panel(f, panel_area, v, lane, app);
+    } else {
+        draw_launch_card(f, panel_area);
+    }
+    draw_footer(f, foot, v);
 
     if let Some(modal) = &v.modal {
         draw_modal(f, area, modal, v);
@@ -92,7 +52,101 @@ pub fn draw(f: &mut Frame, area: Rect, v: &SwarmView, app: &App) {
     }
 }
 
-fn pane_border_style(focused: bool) -> Style {
+/// The top border: goal, phase, progress, workers against the cap, elapsed,
+/// tokens and cost. The goal gives way first when the line is too long.
+fn mission_strip(v: &SwarmView, width: usize) -> Line<'static> {
+    let snap = &v.snapshot;
+    let phase = snap.phase();
+    let total = snap.tasks.len();
+    let done = snap
+        .tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Done)
+        .count();
+    let failed = snap
+        .tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Failed)
+        .count();
+    let mut facts: Vec<Span<'static>> = vec![Span::styled(
+        phase.label().to_string(),
+        Style::default()
+            .fg(match phase {
+                Phase::Executing => Color::Green,
+                Phase::Planning | Phase::WrappingUp => Color::Yellow,
+                Phase::Done => Color::Cyan,
+                Phase::NotStarted => Color::Gray,
+            })
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(filled) = (done * 10).checked_div(total) {
+        let cells = 10usize;
+        facts.push(Span::styled(format!(" · {done}/{total} done "), dim()));
+        facts.push(Span::styled(
+            "█".repeat(filled),
+            Style::default().fg(Color::Green),
+        ));
+        facts.push(Span::styled("░".repeat(cells - filled), dim()));
+        if failed > 0 {
+            facts.push(Span::styled(
+                format!(" {failed} failed"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+    }
+    let workers = snap.workers.iter().filter(|w| w.is_active()).count();
+    let mut tail = match snap.max_workers {
+        Some(cap) => format!(" · {workers}/{cap} workers"),
+        None => format!(" · {workers} worker{}", if workers == 1 { "" } else { "s" }),
+    };
+    if let Some(start) = snap.started_ns {
+        tail.push_str(&format!(
+            " · {}",
+            crate::bus::swarm::short_age(v.now_ns - start)
+        ));
+    }
+    let len = |spans: &[Span<'static>]| -> usize {
+        spans
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+            .sum()
+    };
+    // Spend is the first fact to go when the line is short: the goal keeps
+    // at least 16 cells.
+    if snap.total_tokens > 0 {
+        let spend = format!(
+            " · {} tok {}",
+            fmt_tokens(Some(snap.total_tokens)),
+            fmt_cost(Some(snap.total_cost_usd))
+        );
+        if len(&facts) + tail.len() + spend.len() + 16 + 8 <= width {
+            tail.push_str(&spend);
+        }
+    }
+    facts.push(Span::styled(tail, dim()));
+
+    let facts_len = len(&facts);
+    let goal = snap
+        .goal
+        .clone()
+        .unwrap_or_else(|| format!("Swarm · {}", tilde_path(&v.workspace)));
+    let room = width.saturating_sub(facts_len + 8).max(8);
+    let mut spans = vec![
+        Span::styled(" ◆ ", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            truncate_str(goal.lines().next().unwrap_or(""), room),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · ", dim()),
+    ];
+    spans.extend(facts);
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+fn focus_border(focused: bool) -> Style {
     if focused {
         Style::default()
             .fg(Color::Cyan)
@@ -102,180 +156,135 @@ fn pane_border_style(focused: bool) -> Style {
     }
 }
 
-fn state_badge(state: &str) -> (&'static str, Style) {
+fn state_style(state: LaneState) -> Style {
     match state {
-        "working" | "running" => ("● working", Style::default().fg(Color::Green)),
-        "attention" => (
-            "◆ attention",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        "idle" => ("○ idle", Style::default().fg(Color::Gray)),
-        "exited" | "disconnected" => ("◌ exited", Style::default().fg(Color::DarkGray)),
-        _ => ("• active", Style::default().fg(Color::Cyan)),
+        LaneState::Failed | LaneState::Lost => {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        }
+        LaneState::Attention | LaneState::Waiting => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        LaneState::Working => Style::default().fg(Color::Green),
+        LaneState::Done => Style::default().fg(Color::Green),
+        LaneState::Ready => Style::default().fg(Color::Cyan),
+        LaneState::Idle | LaneState::Queued => Style::default().fg(Color::Gray),
+        LaneState::Exited => Style::default().fg(Color::DarkGray),
     }
 }
 
-fn draw_agents_pane(f: &mut Frame, area: Rect, v: &SwarmView) {
-    let focused = v.pane == SwarmPane::Agents;
+/// One color per agent, the same wherever its name appears.
+fn agent_color(key: &str) -> Color {
+    const PALETTE: [Color; 6] = [
+        Color::LightCyan,
+        Color::LightMagenta,
+        Color::LightBlue,
+        Color::LightGreen,
+        Color::LightYellow,
+        Color::LightRed,
+    ];
+    let h = key
+        .bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
+    PALETTE[(h as usize) % PALETTE.len()]
+}
+
+fn draw_lanes(f: &mut Frame, area: Rect, v: &SwarmView) {
+    let focused = v.focus == Focus::Lanes;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(pane_border_style(focused))
+        .border_style(focus_border(focused))
         .title(Span::styled(
-            " [1] Swarm Agents (Coordinator & Workers) ",
-            if focused {
-                head()
-            } else {
-                Style::default().fg(Color::Gray)
-            },
+            format!(" Lanes ({}) ", v.lanes.len()),
+            if focused { head() } else { dim() },
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    if let Some(goal) = &v.snapshot.goal {
-        let max_g = (inner.width as usize).saturating_sub(8).max(12);
-        lines.push(Line::from(vec![
-            Span::styled(" Goal: ", Style::default().fg(Color::Yellow)),
-            Span::styled(truncate_str(goal, max_g), Style::default().fg(Color::White)),
-        ]));
-    }
-
-    let members = v.snapshot.all_members();
-    if members.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::styled(
-            "  No swarm sessions active in this workspace.",
-            dim(),
-        ));
-        lines.push(Line::from(vec![
-            Span::raw("  Press "),
-            Span::styled(
-                "r",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to launch a Coordinator + Swarm, or ", dim()),
-            Span::styled(
-                "n",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to spawn a Worker.", dim()),
-        ]));
-        f.render_widget(Paragraph::new(lines), inner);
+    if v.lanes.is_empty() {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::raw(""),
+                Line::styled("  No agents in this workspace's swarm.", dim()),
+            ]),
+            inner,
+        );
         return;
     }
 
-    let header_lines = lines.len();
-    let avail_rows = (inner.height as usize).saturating_sub(header_lines).max(1);
-    let rows_per_item = 2usize;
-    let visible_items = (avail_rows / rows_per_item).max(1);
-    let start = super::sidebar_window(v.selected_agent, members.len(), visible_items);
-
-    for (idx, m) in members.iter().enumerate().skip(start).take(visible_items) {
-        let is_sel = idx == v.selected_agent;
-        let marker = if is_sel { "▸ " } else { "  " };
-        let (st_label, st_style) = state_badge(&m.state);
-        let role_style = match m.role {
-            crate::bus::swarm::SwarmRole::Coordinator => Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-            crate::bus::swarm::SwarmRole::Worker => Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        };
-        let row_bg = if is_sel && focused {
-            Style::default().bg(Color::Rgb(24, 38, 52))
+    let width = inner.width as usize;
+    let per = 2usize;
+    let room = (inner.height as usize / per).max(1);
+    let start = super::sidebar_window(v.selected_lane, v.lanes.len(), room);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, lane) in v.lanes.iter().enumerate().skip(start).take(room) {
+        let selected = i == v.selected_lane;
+        let bg = if selected {
+            Style::default().bg(if focused {
+                Color::Rgb(24, 38, 52)
+            } else {
+                Color::Rgb(30, 30, 30)
+            })
         } else {
             Style::default()
         };
-
-        let persona_tag = m
-            .agent_persona
-            .as_deref()
-            .map(|p| format!(" · {p}"))
-            .unwrap_or_default();
-        let unread_tag = if m.unread_messages > 0 {
-            format!(" ✉ {}", m.unread_messages)
-        } else {
-            String::new()
+        let marker = if selected { "▸" } else { " " };
+        let name = match lane.kind {
+            LaneKind::Coordinator => format!("★ {}", lane.name),
+            _ => lane.name.clone(),
         };
-
+        let name_style = match lane.kind {
+            LaneKind::Queued => dim(),
+            _ => Style::default()
+                .fg(agent_color(&lane.key))
+                .add_modifier(Modifier::BOLD),
+        };
+        let used = 4 + unicode_width::UnicodeWidthStr::width(name.as_str()) + 2;
+        let activity = truncate_str(&lane.activity, width.saturating_sub(used).max(6));
         lines.push(
             Line::from(vec![
-                Span::styled(
-                    marker,
-                    if is_sel {
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        dim()
-                    },
-                ),
-                Span::styled(format!("{:<7}", m.label), role_style),
-                Span::raw(" "),
-                Span::styled(
-                    format!("{}{}", m.provider, persona_tag),
-                    Style::default().fg(Color::White),
-                ),
-                Span::raw("  "),
-                Span::styled(st_label, st_style),
-                Span::styled(
-                    unread_tag,
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(format!("{marker} "), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{} ", lane.state.glyph()), state_style(lane.state)),
+                Span::styled(name, name_style),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{}t · {}", m.turns, fmt_tokens(Some(m.tokens))),
-                    dim(),
+                    activity,
+                    state_style(lane.state).remove_modifier(Modifier::BOLD),
                 ),
             ])
-            .style(row_bg),
+            .style(bg),
         );
-
-        // Second line: active task / tool / leased files / worktree
-        let detail = if let Some(tool) = &m.running_tool {
-            format!("    ⚙ {tool}")
-        } else if let Some(task) = m.active_tasks.first() {
-            format!("    ↳ {task}")
-        } else if !m.leased_files.is_empty() {
-            format!("    🔒 {}", m.leased_files.join(", "))
-        } else if let Some(br) = &m.branch {
-            format!("    ⎇ {br}")
-        } else {
-            format!("    id: {}", short_id(&m.launch_id))
+        let second = match (lane.kind, &lane.task) {
+            (LaneKind::Coordinator, _) => lane.placement.clone(),
+            (_, Some(t)) if lane.placement.is_empty() => t.title.clone(),
+            (_, Some(t)) => format!("{} · {}", t.title, lane.placement),
+            (_, None) => String::new(),
         };
-        let max_w = (inner.width as usize).saturating_sub(2).max(10);
-        lines.push(Line::from(Span::styled(truncate_str(&detail, max_w), dim())).style(row_bg));
+        lines.push(
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    truncate_str(&second, width.saturating_sub(5).max(6)),
+                    Style::default().fg(Color::Gray),
+                ),
+            ])
+            .style(bg),
+        );
     }
-
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_preview_pane(f: &mut Frame, area: Rect, v: &SwarmView, app: &App) {
-    let focused = v.pane == SwarmPane::Preview;
-    let member_tag = v
-        .selected_member()
-        .map(|m| format!("{} ({})", m.label, m.provider))
-        .unwrap_or_else(|| "no agent".into());
-    let title = format!(
-        " [2] Preview · {} · mode: {} (v) ",
-        member_tag,
-        v.preview_mode.label()
-    );
-
+fn draw_panel(f: &mut Frame, area: Rect, v: &SwarmView, lane: &Lane, app: &App) {
+    let focused = v.focus == Focus::Panel;
+    let title = match &lane.task {
+        Some(t) if lane.kind != LaneKind::Queued => format!(" {} · {} ", lane.name, t.title),
+        Some(t) => format!(" queued · {} ", t.title),
+        None => format!(" {} ", lane.name),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(pane_border_style(focused))
+        .border_style(focus_border(focused))
         .title(Span::styled(
-            title,
+            truncate_str(&title, area.width.saturating_sub(4) as usize),
             if focused {
                 head()
             } else {
@@ -285,77 +294,79 @@ fn draw_preview_pane(f: &mut Frame, area: Rect, v: &SwarmView, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    match v.preview_mode {
-        PreviewMode::Terminal => {
-            if let Some(m) = v.selected_member()
-                && let Some(idx) = m.session_idx
-                && let Some(session) = app.sessions.get(idx)
-            {
-                let term = PseudoTerminal::new(session.parser.screen());
-                f.render_widget(term, inner);
-                return;
+    let [tabs_area, content] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+    let current = v.tab();
+    let thread_len = v.panel_messages().len();
+    // Narrow panels drop the padding and the thread count, never a tab.
+    let compact = inner.width < 52;
+    let pad = if compact { "" } else { " " };
+    let mut tabs: Vec<Span<'static>> = vec![Span::raw(pad)];
+    for (n, tab) in PanelTab::ALL.iter().enumerate() {
+        let label = match tab {
+            PanelTab::Thread if thread_len > 0 && !compact => {
+                format!("{} {} ({thread_len})", n + 1, tab.label())
             }
-            // Fallback when peer is external or no session exists
-            let mut lines = Vec::new();
-            lines.push(Line::raw(""));
-            if let Some(m) = v.selected_member() {
-                lines.push(Line::styled(
-                    format!(
-                        "  Peer {} ({}) is connected via traces.db (external process).",
-                        m.label,
-                        short_id(&m.launch_id)
+            _ => format!("{} {}", n + 1, tab.label()),
+        };
+        tabs.push(if *tab == current {
+            Span::styled(
+                format!("{pad}{label}{pad}"),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!("{pad}{label}{pad}"), dim())
+        });
+        tabs.push(Span::raw(" "));
+    }
+    f.render_widget(Paragraph::new(Line::from(tabs)), tabs_area);
+
+    match current {
+        PanelTab::Live => match lane.session_idx.and_then(|i| app.sessions.get(i)) {
+            Some(session) => {
+                f.render_widget(PseudoTerminal::new(session.parser.screen()), content);
+            }
+            None => f.render_widget(
+                Paragraph::new(vec![
+                    Line::raw(""),
+                    Line::styled(
+                        match lane.kind {
+                            LaneKind::Queued => "No agent holds this task yet: r delegates it.",
+                            _ => "No terminal here: this agent runs outside this window.",
+                        },
+                        dim(),
                     ),
-                    dim(),
-                ));
-                lines.push(Line::styled(
-                    "  Press v to view its Task Detail or Git Diff.",
-                    dim(),
-                ));
-            } else {
-                lines.push(Line::styled(
-                    "  No active agent selected. Press r to start a Swarm.",
-                    dim(),
-                ));
-            }
-            f.render_widget(Paragraph::new(lines), inner);
-        }
-        PreviewMode::TaskDetail => {
-            let Some(task) = v.detail_task() else {
+                    Line::styled("2 Thread shows its messages, 4 Task its task.", dim()),
+                ])
+                .wrap(Wrap { trim: true }),
+                indented(content),
+            ),
+        },
+        PanelTab::Thread => {
+            let msgs = v.panel_messages();
+            if msgs.is_empty() {
+                let hint = if lane.launch_id.is_some() {
+                    "  No messages yet. m writes to this lane."
+                } else {
+                    "  A queued task has no conversation yet."
+                };
                 f.render_widget(
-                    Paragraph::new(vec![
-                        Line::raw(""),
-                        Line::styled("  No task selected on the Task Board.", dim()),
-                    ]),
-                    inner,
+                    Paragraph::new(vec![Line::raw(""), Line::styled(hint, dim())]),
+                    content,
                 );
-                return;
-            };
-            let raw_lines = format_task_detail_lines(task, &v.snapshot);
-            let lines: Vec<Line<'static>> = raw_lines
-                .into_iter()
-                .skip(v.preview_scroll)
-                .take(inner.height as usize)
-                .map(|l| {
-                    if l.starts_with("Task [") || l.starts_with("── ") {
-                        Line::styled(
-                            l,
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        )
-                    } else {
-                        Line::raw(l)
-                    }
-                })
-                .collect();
-            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+            } else {
+                draw_messages(f, content, v, &msgs, focused);
+            }
         }
-        PreviewMode::GitDiff => {
+        PanelTab::Changes => {
             let lines: Vec<Line<'static>> = v
                 .diff_lines
                 .iter()
-                .skip(v.preview_scroll)
-                .take(inner.height as usize)
+                .skip(v.panel_scroll)
+                .take(content.height as usize)
                 .map(|l| {
                     let style = if l.starts_with('+') && !l.starts_with("+++") {
                         Style::default().fg(Color::Green)
@@ -369,50 +380,57 @@ fn draw_preview_pane(f: &mut Frame, area: Rect, v: &SwarmView, app: &App) {
                     Line::styled(l.clone(), style)
                 })
                 .collect();
-            f.render_widget(Paragraph::new(lines), inner);
+            f.render_widget(Paragraph::new(lines), content);
+        }
+        PanelTab::Task => {
+            let Some(task) = &lane.task else {
+                f.render_widget(
+                    Paragraph::new(vec![
+                        Line::raw(""),
+                        Line::styled("  This lane holds no task.", dim()),
+                    ]),
+                    content,
+                );
+                return;
+            };
+            let mut raw = format_task_detail_lines(task, &v.snapshot);
+            if !lane.leases.is_empty() {
+                raw.push(String::new());
+                raw.push("── Leases held ──".into());
+                raw.extend(lane.leases.iter().map(|l| format!("{l}   (d releases)")));
+            }
+            let lines: Vec<Line<'static>> = raw
+                .into_iter()
+                .skip(v.panel_scroll)
+                .map(|l| {
+                    if l.starts_with("Task [") || l.starts_with("── ") {
+                        Line::styled(
+                            l,
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Line::raw(l)
+                    }
+                })
+                .collect();
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), content);
         }
     }
 }
 
-fn task_status_span(status: TaskStatus) -> Span<'static> {
-    match status {
-        TaskStatus::Open => Span::styled("○ open   ", Style::default().fg(Color::Gray)),
-        TaskStatus::Claimed => Span::styled("◐ claimed", Style::default().fg(Color::Cyan)),
-        TaskStatus::Running => Span::styled(
-            "● running",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        TaskStatus::Done => Span::styled("✓ done   ", Style::default().fg(Color::Green)),
-        TaskStatus::Failed => Span::styled(
-            "✗ failed ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        TaskStatus::Cancelled => Span::styled("⊘ cancel ", Style::default().fg(Color::DarkGray)),
-    }
-}
-
-fn draw_board_pane(f: &mut Frame, area: Rect, v: &SwarmView) {
-    let focused = v.pane == SwarmPane::Board;
-    let tab_label = match v.board_mode {
-        BoardMode::Tasks => format!(
-            " [3] Task Board ({}) · File Leases ({}) (l) ",
-            v.snapshot.tasks.len(),
-            v.snapshot.leases.len()
-        ),
-        BoardMode::Leases => format!(
-            " [3] File Leases ({}) · Task Board ({}) (l) ",
-            v.snapshot.leases.len(),
-            v.snapshot.tasks.len()
-        ),
-    };
-
+fn draw_activity(f: &mut Frame, area: Rect, v: &SwarmView) {
+    let focused = v.focus == Focus::Panel;
+    let msgs = v.panel_messages();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(pane_border_style(focused))
+        .border_style(focus_border(focused))
         .title(Span::styled(
-            tab_label,
+            format!(
+                " Activity · whole swarm ({}) · a back to the lane ",
+                msgs.len()
+            ),
             if focused {
                 head()
             } else {
@@ -421,133 +439,162 @@ fn draw_board_pane(f: &mut Frame, area: Rect, v: &SwarmView) {
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
+    if msgs.is_empty() {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::raw(""),
+                Line::styled("  Nothing said yet. b writes to everyone.", dim()),
+            ]),
+            inner,
+        );
+        return;
+    }
+    draw_messages(f, inner, v, &msgs, focused);
+}
 
+/// Messages as a conversation: a header line (time, sender → recipient,
+/// topic) and the body, wrapped, up to six lines; the chosen one is kept in
+/// view and marked.
+fn draw_messages(f: &mut Frame, area: Rect, v: &SwarmView, msgs: &[&BusMessage], focused: bool) {
+    let width = (area.width as usize).saturating_sub(4).max(16);
+    let open: Vec<&str> = v
+        .snapshot
+        .open_questions()
+        .into_iter()
+        .map(|q| q.id.as_str())
+        .collect();
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let room = (inner.height as usize).max(1);
-    let max_w = (inner.width as usize).saturating_sub(2).max(12);
-
-    match v.board_mode {
-        BoardMode::Tasks => {
-            if v.snapshot.tasks.is_empty() {
-                lines.push(Line::raw(""));
-                lines.push(Line::styled("  No tasks on the shared board yet.", dim()));
-                lines.push(Line::styled(
-                    "  Press n to add a task, or r to launch a Coordinator.",
-                    dim(),
-                ));
-                f.render_widget(Paragraph::new(lines), inner);
-                return;
-            }
-            let start = super::sidebar_window(v.selected_task, v.snapshot.tasks.len(), room);
-            for (idx, t) in v.snapshot.tasks.iter().enumerate().skip(start).take(room) {
-                let is_sel = idx == v.selected_task;
-                let marker = if is_sel { "▸ " } else { "  " };
-                let owner = t
-                    .assigned_to
-                    .as_deref()
-                    .map(|a| v.snapshot.member_label(a))
-                    .unwrap_or_else(|| "unclaimed".into());
-                let iso_badge = match t.isolation {
-                    crate::bus::TaskIsolation::Worktree => " [wt]",
-                    crate::bus::TaskIsolation::Shared => "",
-                };
-                let files_hint = if t.files.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", t.files.join(","))
-                };
-                let title_budget = max_w.saturating_sub(30);
-                let row_bg = if is_sel && focused {
-                    Style::default().bg(Color::Rgb(24, 38, 52))
-                } else {
+    let mut sel_range = (0usize, 0usize);
+    for (i, m) in msgs.iter().enumerate() {
+        let selected = i == v.selected_message;
+        let first = lines.len();
+        let from = v.snapshot.member_label(&m.from_launch);
+        let to = m
+            .to_launch
+            .as_deref()
+            .map(|t| v.snapshot.member_label(t))
+            .unwrap_or_else(|| "everyone".into());
+        let head = vec![
+            Span::styled(
+                if selected && focused { "▸ " } else { "  " },
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(format!("{} ", fmt_clock(m.created_ns)), dim()),
+            Span::styled(
+                from,
+                Style::default()
+                    .fg(agent_color(&m.from_launch))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" → ", dim()),
+            Span::styled(to, Style::default().fg(Color::White)),
+            Span::raw("  "),
+            if open.contains(&m.id.as_str()) {
+                Span::styled(
+                    "open question",
                     Style::default()
-                };
-
-                lines.push(
-                    Line::from(vec![
-                        Span::styled(
-                            marker,
-                            if is_sel {
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                dim()
-                            },
-                        ),
-                        task_status_span(t.status),
-                        Span::raw(" "),
-                        Span::styled(
-                            format!("[{}] ", short_id(&t.id)),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(
-                            truncate_str(
-                                &format!("{}{iso_badge}{files_hint}", t.title),
-                                title_budget,
-                            ),
-                            Style::default().fg(Color::White),
-                        ),
-                        Span::raw(" → "),
-                        Span::styled(owner, Style::default().fg(Color::Cyan)),
-                    ])
-                    .style(row_bg),
-                );
-            }
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(m.topic.clone(), topic_style(&m.topic))
+            },
+        ];
+        lines.push(Line::from(head));
+        let body: Vec<String> = m.body.lines().flat_map(|l| wrap(l, width)).collect();
+        let shown = body.len().min(6);
+        for l in body.iter().take(shown) {
+            lines.push(Line::from(vec![Span::raw("    "), Span::raw(l.clone())]));
         }
-        BoardMode::Leases => {
-            if v.snapshot.leases.is_empty() {
-                lines.push(Line::raw(""));
-                lines.push(Line::styled("  No active cooperative file leases.", dim()));
-                f.render_widget(Paragraph::new(lines), inner);
-                return;
-            }
-            let start = super::sidebar_window(v.selected_lease, v.snapshot.leases.len(), room);
-            for (idx, l) in v.snapshot.leases.iter().enumerate().skip(start).take(room) {
-                let is_sel = idx == v.selected_lease;
-                let marker = if is_sel { "▸ " } else { "  " };
-                let owner = v.snapshot.member_label(&l.owner_launch);
-                let task_tag = l
-                    .task_id
-                    .as_deref()
-                    .map(|tid| format!(" task:{}", short_id(tid)))
-                    .unwrap_or_default();
-                let row_bg = if is_sel && focused {
-                    Style::default().bg(Color::Rgb(24, 38, 52))
-                } else {
-                    Style::default()
-                };
-
-                lines.push(
-                    Line::from(vec![
-                        Span::styled(
-                            marker,
-                            if is_sel {
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                dim()
-                            },
-                        ),
-                        Span::styled("🔒 ", Style::default().fg(Color::Yellow)),
-                        Span::styled(
-                            l.pattern.clone(),
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw("  ← "),
-                        Span::styled(owner, Style::default().fg(Color::Cyan)),
-                        Span::styled(task_tag, dim()),
-                    ])
-                    .style(row_bg),
-                );
-            }
+        if body.len() > shown {
+            lines.push(Line::styled("    … Enter reads it all", dim()));
+        }
+        lines.push(Line::raw(""));
+        if selected {
+            sel_range = (first, lines.len());
         }
     }
+    let height = area.height as usize;
+    let start = sel_range.1.saturating_sub(height).min(sel_range.0);
+    let visible: Vec<Line<'static>> = lines.into_iter().skip(start).take(height).collect();
+    f.render_widget(Paragraph::new(visible), area);
+}
 
-    f.render_widget(Paragraph::new(lines), inner);
+fn wrap(line: &str, width: usize) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in line.split(' ') {
+        let need = cur.chars().count() + usize::from(!cur.is_empty()) + word.chars().count();
+        if need > width && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+        while cur.chars().count() > width {
+            let head: String = cur.chars().take(width).collect();
+            cur = cur.chars().skip(width).collect();
+            out.push(head);
+        }
+    }
+    out.push(cur);
+    out
+}
+
+fn draw_launch_card(f: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let key = |k: &'static str| {
+        Span::styled(
+            k,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let lines = vec![
+        Line::raw(""),
+        Line::styled(
+            "No swarm in this workspace yet.",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+        Line::styled(
+            "A swarm is a coordinator that splits a goal into tasks and hands each \
+             to a worker agent, in parallel.",
+            dim(),
+        ),
+        Line::raw(""),
+        Line::from(vec![
+            key("r"),
+            Span::raw(
+                " start one: the goal, the coordinator's harness, how many workers \
+                 at most, shared files or worktrees.",
+            ),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: true }),
+        indented(inner),
+    );
+}
+
+/// `r` less two cells on each side, so wrapped text keeps its margin.
+fn indented(r: Rect) -> Rect {
+    Rect {
+        x: r.x + 2.min(r.width),
+        width: r.width.saturating_sub(4),
+        ..r
+    }
 }
 
 fn topic_style(topic: &str) -> Style {
@@ -565,98 +612,7 @@ fn topic_style(topic: &str) -> Style {
     }
 }
 
-fn draw_messages_pane(f: &mut Frame, area: Rect, v: &SwarmView) {
-    let focused = v.pane == SwarmPane::Messages;
-    let filtered = v.filtered_messages();
-    let title = format!(
-        " [4] Inter-Agent Message Feed ({}) · filter: {} (f) ",
-        filtered.len(),
-        v.message_filter.label()
-    );
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(pane_border_style(focused))
-        .title(Span::styled(
-            title,
-            if focused {
-                head()
-            } else {
-                Style::default().fg(Color::Gray)
-            },
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if filtered.is_empty() {
-        let lines = vec![
-            Line::raw(""),
-            Line::styled("  No inter-agent messages matching filter.", dim()),
-            Line::styled(
-                "  Press m to message the selected agent, or b to broadcast to all.",
-                dim(),
-            ),
-        ];
-        f.render_widget(Paragraph::new(lines), inner);
-        return;
-    }
-
-    let room = (inner.height as usize).max(1);
-    let start = super::sidebar_window(v.selected_message, filtered.len(), room);
-    let max_w = (inner.width as usize).saturating_sub(2).max(16);
-
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(room);
-    for (idx, msg) in filtered.iter().enumerate().skip(start).take(room) {
-        let is_sel = idx == v.selected_message;
-        let marker = if is_sel { "▸ " } else { "  " };
-        let from_lbl = v.snapshot.member_label(&msg.from_launch);
-        let to_lbl = msg
-            .to_launch
-            .as_deref()
-            .map(|r| v.snapshot.member_label(r))
-            .unwrap_or_else(|| "* (all)".into());
-        let time_str = fmt_clock(msg.created_ns);
-        let single_line_body = msg.body.lines().next().unwrap_or("");
-        let prefix_len = 18 + from_lbl.len() + to_lbl.len() + msg.topic.len();
-        let body_budget = max_w.saturating_sub(prefix_len).max(12);
-        let row_bg = if is_sel && focused {
-            Style::default().bg(Color::Rgb(24, 38, 52))
-        } else {
-            Style::default()
-        };
-
-        lines.push(
-            Line::from(vec![
-                Span::styled(
-                    marker,
-                    if is_sel {
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        dim()
-                    },
-                ),
-                Span::styled(format!("{time_str} "), dim()),
-                Span::styled(from_lbl, Style::default().fg(Color::Cyan)),
-                Span::styled(" → ", dim()),
-                Span::styled(to_lbl, Style::default().fg(Color::White)),
-                Span::raw(" "),
-                Span::styled(format!("[{}]", msg.topic), topic_style(&msg.topic)),
-                Span::raw(" "),
-                Span::styled(
-                    truncate_str(single_line_body, body_budget),
-                    Style::default().fg(Color::Gray),
-                ),
-            ])
-            .style(row_bg),
-        );
-    }
-
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn draw_footer_bar(f: &mut Frame, area: Rect, v: &SwarmView) {
+fn draw_footer(f: &mut Frame, area: Rect, v: &SwarmView) {
     if let Some(msg) = &v.status_msg {
         f.render_widget(
             Paragraph::new(Line::styled(
@@ -667,49 +623,52 @@ fn draw_footer_bar(f: &mut Frame, area: Rect, v: &SwarmView) {
         );
         return;
     }
-
-    let pairs: &[(&str, &str)] = match v.pane {
-        SwarmPane::Agents => &[
-            ("1-4/Tab", "pane"),
-            ("r", "launch swarm"),
-            ("n", "new worker"),
-            ("Enter", "attach"),
-            ("c", "set coord"),
-            ("w", "wake"),
-            ("m", "message"),
-            ("b", "broadcast"),
-            ("x", "stop"),
-            ("Esc", "back"),
-        ],
-        SwarmPane::Preview => &[
-            ("1-4/Tab", "pane"),
-            ("v/←/→", "mode (Term/Task/Diff)"),
-            ("j/k", "scroll"),
-            ("Enter", "attach"),
-            ("m", "message"),
-            ("Esc", "back"),
-        ],
-        SwarmPane::Board => &[
-            ("1-4/Tab", "pane"),
-            ("l/←/→", "Tasks/Leases"),
-            ("n", "new task"),
-            ("e", "edit"),
-            ("r", "delegate task"),
-            ("d/x", "cancel/unlease"),
-            ("Enter", "inspect"),
-            ("Esc", "back"),
-        ],
-        SwarmPane::Messages => &[
-            ("1-4/Tab", "pane"),
-            ("f/←/→", "filter"),
+    let lists_messages = v.activity || v.tab() == PanelTab::Thread;
+    let queued = v.selected().is_some_and(|l| l.kind == LaneKind::Queued);
+    let pairs: &[(&str, &str)] = if v.lanes.is_empty() {
+        &[("r", "start a swarm"), ("Esc", "close")]
+    } else if v.focus == Focus::Panel && lists_messages {
+        &[
+            ("↑↓", "message"),
             ("Enter", "read"),
             ("m", "reply"),
-            ("b/n", "broadcast"),
-            ("j/k", "scroll"),
-            ("Esc", "back"),
-        ],
+            ("1-4", "view"),
+            ("a", "activity"),
+            ("Tab/Esc", "lanes"),
+        ]
+    } else if v.focus == Focus::Panel {
+        &[
+            ("↑↓", "scroll"),
+            ("1-4", "view"),
+            ("a", "activity"),
+            ("Tab/Esc", "lanes"),
+        ]
+    } else if queued {
+        &[
+            ("↑↓", "lane"),
+            ("r", "delegate"),
+            ("e", "edit"),
+            ("x", "cancel"),
+            ("Tab", "panel"),
+            ("1-4", "view"),
+            ("n", "worker"),
+            ("a", "activity"),
+            ("Esc", "close"),
+        ]
+    } else {
+        &[
+            ("↑↓", "lane"),
+            ("Tab", "panel"),
+            ("1-4", "view"),
+            ("Enter", "attach"),
+            ("m", "message"),
+            ("b", "all"),
+            ("n", "worker"),
+            ("x", "stop"),
+            ("a", "activity"),
+            ("Esc", "close"),
+        ]
     };
-
     f.render_widget(Paragraph::new(hints(pairs)), area);
 }
 
@@ -879,61 +838,6 @@ fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, v: &SwarmView) {
             lines.push(hints(&[
                 ("Tab", "next field"),
                 ("Ctrl+S", "spawn worker"),
-                ("Esc", "cancel"),
-            ]));
-            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-        }
-
-        Modal::NewTask {
-            title,
-            instructions,
-            files,
-            isolation,
-            field,
-        } => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .title(" New Shared Board Task ");
-            let inner = block.inner(popup);
-            f.render_widget(block, popup);
-
-            let mut lines = Vec::new();
-            lines.push(Line::from(vec![
-                field_span("Task Title: ", *field == TaskField::Title),
-                Span::styled(title.text.clone(), Style::default().fg(Color::White)),
-            ]));
-            lines.push(field_header(
-                "Instructions:",
-                *field == TaskField::Instructions,
-            ));
-            for l in instructions.text.lines().take(4) {
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(l.to_string(), Style::default().fg(Color::White)),
-                ]));
-            }
-            lines.push(Line::from(vec![
-                field_span("File Globs (comma): ", *field == TaskField::Files),
-                Span::styled(files.text.clone(), Style::default().fg(Color::White)),
-            ]));
-            lines.push(Line::from(vec![
-                field_span("Isolation: ", *field == TaskField::Isolation),
-                Span::styled(
-                    format!("◀ {} ▶", isolation.as_str()),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            lines.push(Line::raw(""));
-            lines.push(hints(&[
-                ("Tab", "next field"),
-                ("Ctrl+S", "create task"),
                 ("Esc", "cancel"),
             ]));
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -1141,14 +1045,14 @@ fn draw_confirm(f: &mut Frame, area: Rect, confirm: &Confirm) {
                 "A swarm is running under {coordinator}. Launch a new one and replace it as coordinator?"
             )
         }
-        Confirm::ReleaseLease { pattern } => {
-            format!("Force-release cooperative file lease `{pattern}`?")
+        Confirm::ReleaseLeases { lane, patterns } => {
+            format!("Release {lane}'s leases on {}?", patterns.join(", "))
         }
         Confirm::CancelTask { task_id, title } => {
             format!("Cancel task [{}] \"{title}\"?", short_id(task_id))
         }
         Confirm::StopSession { label, .. } => {
-            format!("Stop swarm session {label}?")
+            format!("Stop {label}'s session? Its task stays on the board.")
         }
     };
 
@@ -1192,11 +1096,22 @@ fn fmt_clock(ns: i64) -> String {
     }
 }
 
+/// Cuts `s` to `max` terminal cells (wide glyphs count twice), ending in `…`.
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let keep: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{keep}…")
-    } else {
-        s.to_string()
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if s.width() <= max {
+        return s.to_string();
     }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w + 1 > max {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
 }
