@@ -48,6 +48,9 @@ pub struct TracingConfig {
     pub claude_dir: Option<String>,
     pub codex_dir: Option<String>,
     pub antigravity_dir: Option<String>,
+    /// OpenCode's session database (default
+    /// `~/.local/share/opencode/opencode.db`).
+    pub opencode_db: Option<String>,
     /// Price overrides / additions (`[[tracing.models]]`).
     #[serde(default)]
     pub models: Vec<ModelPriceConfig>,
@@ -106,8 +109,9 @@ pub struct ModelPriceConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct ProfileTracing {
     pub enabled: Option<bool>,
-    /// "claude" | "codex" | "antigravity" | "none" — forces CLI-kind
-    /// detection for wrapper commands; "none" disables tracing entirely.
+    /// "claude" | "codex" | "antigravity" | "opencode" | "none" — forces
+    /// CLI-kind detection for wrapper commands; "none" disables tracing
+    /// entirely.
     pub provider: Option<String>,
     pub content_mode: Option<String>,
     pub inject_session_id: Option<bool>,
@@ -542,6 +546,7 @@ pub struct ResolvedTracing {
     pub claude_dir: Option<PathBuf>,
     pub codex_dir: Option<PathBuf>,
     pub antigravity_dir: Option<PathBuf>,
+    pub opencode_db: Option<PathBuf>,
     pub models: Vec<ModelPriceConfig>,
     pub hooks: HookMode,
     pub loops: crate::tracing::loops::LoopThresholds,
@@ -629,6 +634,7 @@ pub fn resolve_tracing(
         claude_dir: lf.claude_dir.clone().map(PathBuf::from),
         codex_dir: lf.codex_dir.clone().map(PathBuf::from),
         antigravity_dir: lf.antigravity_dir.clone().map(PathBuf::from),
+        opencode_db: lf.opencode_db.clone().map(PathBuf::from),
         models: lf
             .models
             .iter()
@@ -686,6 +692,15 @@ impl Config {
             Profile {
                 name: "Antigravity".into(),
                 command: "agy".into(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            },
+            Profile {
+                name: "OpenCode".into(),
+                command: "opencode".into(),
                 args: vec![],
                 default_dir: None,
                 tracing: None,
@@ -851,6 +866,7 @@ mod tests {
         assert!(profiles.iter().any(|p| p.command == "claude"));
         assert!(profiles.iter().any(|p| p.command == "codex"));
         assert!(profiles.iter().any(|p| p.command == "agy"));
+        assert!(profiles.iter().any(|p| p.command == "opencode"));
     }
 
     fn no_env(_: &str) -> Option<String> {

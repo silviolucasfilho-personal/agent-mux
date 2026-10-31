@@ -991,6 +991,9 @@ pub struct DialogLaunch {
     /// A `--continue` whose conversation runs in Claude Code's
     /// background: opened with `claude attach` instead.
     attach: Option<crate::harness::ClaudeBackground>,
+    /// Variables the launch sets in the session's environment (an
+    /// agent's OpenCode fragment).
+    env: Vec<(String, String)>,
 }
 
 impl DialogState {
@@ -2937,7 +2940,7 @@ impl App {
                     plan.full_content()
                         && crate::tracing::hooks::install::codex_status(&home, None).installed
                 }
-                Harness::Antigravity => false,
+                Harness::Antigravity | Harness::OpenCode => false,
             };
         if !feed::should_own(&home, harness, complete) {
             return Vec::new();
@@ -3790,8 +3793,9 @@ impl App {
             } else {
                 crate::mcp::register::Registration::Unavailable("mcp is off".into())
             };
-            if let crate::mcp::register::Registration::PerLaunch { args } = &registration {
+            if let crate::mcp::register::Registration::PerLaunch { args, env } = &registration {
                 extra_args.extend(args.iter().cloned());
+                extra_env.extend(env.iter().cloned());
             }
             // Only an agent launch is told; an ordinary session has no
             // skill reading the variable to report to.
@@ -3812,9 +3816,20 @@ impl App {
                 sock.to_string_lossy().into_owned(),
             ));
         }
+        // OpenCode reads its per-launch configuration from one
+        // environment variable, with `--standalone`: the fragments above
+        // become that document here, and an interactive command line
+        // loses the `--model` its TUI rejects. The session keeps the
+        // profile as composed, so a restart re-adapts it the same way.
+        let mut spawn_profile = profile.clone();
+        if crate::harness::Harness::detect(&profile.command)
+            == Some(crate::harness::Harness::OpenCode)
+        {
+            crate::opencode::adapt_launch(&mut spawn_profile.args, &mut extra_args, &mut extra_env);
+        }
         let mut session = Session::spawn(
             id,
-            profile,
+            spawn_profile,
             dir,
             rows,
             cols,
@@ -3822,6 +3837,7 @@ impl App {
             &extra_args,
             &extra_env,
         )?;
+        session.profile = profile;
         session.briefing_path = briefing_path;
         session.group = group;
         if let (Some(rt), Some(plan)) = (self.tracing.as_mut(), plan) {
@@ -4506,6 +4522,7 @@ impl App {
                         agent: None,
                         link: None,
                         attach: None,
+                        env: Vec::new(),
                     }) {
                         self.notice = Some(Notice::error(e));
                     }
@@ -4533,6 +4550,7 @@ impl App {
                     "claude" => crate::harness::Harness::Claude,
                     "codex" => crate::harness::Harness::Codex,
                     "antigravity" | "agy" => crate::harness::Harness::Antigravity,
+                    "opencode" => crate::harness::Harness::OpenCode,
                     other => {
                         self.notice = Some(Notice::warn(format!(
                             "resume is not supported for {other} sessions"
@@ -5391,10 +5409,7 @@ impl App {
             .find(|p| crate::harness::Harness::detect(&p.command) == Some(harness))
             .cloned()
             .ok_or_else(|| format!("no profile runs {}", harness.as_str()))?;
-        let opening = match harness {
-            crate::harness::Harness::Antigravity => vec!["--prompt-interactive".into(), message],
-            _ => vec![message],
-        };
+        let opening = harness.opening_args(message);
         profile.args.extend(opening.iter().cloned());
         self.finish_dialog_launch(DialogLaunch {
             profile,
@@ -5404,6 +5419,7 @@ impl App {
             agent: None,
             link: None,
             attach: None,
+            env: Vec::new(),
         })
     }
 
@@ -6248,6 +6264,10 @@ impl App {
                 };
                 let attach =
                     self.resume_last_attach(&dialog, &profile, &dir, agent.is_some(), &handoff);
+                let env: Vec<(String, String)> = agent
+                    .as_ref()
+                    .map(|(plan, _)| plan.env.clone())
+                    .unwrap_or_default();
                 if let Some(harness) = dialog.harness {
                     let mut options = dialog.launch_options();
                     if options.model.is_none() {
@@ -6286,6 +6306,7 @@ impl App {
                     agent: dialog.agent.clone(),
                     link: dialog.experiment_link(),
                     attach,
+                    env,
                 };
                 if let Err(e) = self.finish_dialog_launch(launch) {
                     let Mode::NewSession(dialog) = &mut self.mode else {
@@ -6329,7 +6350,7 @@ impl App {
         let id = self.next_id;
         let spawned = match &l.attach {
             Some(background) => self.spawn_attached(id, &l.profile, background, l.dir),
-            None => self.spawn_traced(id, l.profile, l.dir),
+            None => self.spawn_traced_with_env(id, l.profile, l.dir, &l.env, None),
         };
         let mut session = spawned.map_err(|e| e.to_string())?;
         session.agent = l.agent;
@@ -6539,6 +6560,7 @@ impl App {
             "claude" => crate::harness::Harness::Claude,
             "codex" => crate::harness::Harness::Codex,
             "antigravity" => crate::harness::Harness::Antigravity,
+            "opencode" => crate::harness::Harness::OpenCode,
             other => {
                 self.notice = Some(Notice::warn(format!(
                     "resume is not supported for {other} sessions"
@@ -7542,6 +7564,7 @@ impl App {
             crate::harness::Harness::Claude => "claude",
             crate::harness::Harness::Codex => "codex",
             crate::harness::Harness::Antigravity => "antigravity",
+            crate::harness::Harness::OpenCode => "opencode",
         };
         let mut profile = self
             .profiles
@@ -8130,16 +8153,14 @@ impl App {
                     &task_files,
                     parent_launch.as_deref(),
                 );
-                let opening_args = match target_harness {
-                    crate::harness::Harness::Antigravity => {
-                        vec!["--prompt-interactive".to_string(), prompt]
-                    }
-                    _ => vec![prompt],
-                };
+                let opening_args = target_harness.opening_args(prompt);
                 profile.args.extend(opening_args.iter().cloned());
 
                 let id = self.next_id;
-                let extra_env = vec![("AGENT_MUX_TASK_ID".to_string(), task_id.clone())];
+                let mut extra_env = vec![("AGENT_MUX_TASK_ID".to_string(), task_id.clone())];
+                if let Some((plan, _)) = &agent_prep {
+                    extra_env.extend(plan.env.iter().cloned());
+                }
                 let mut session = match self.spawn_traced_full(
                     id,
                     profile,
@@ -8324,22 +8345,20 @@ impl App {
                     isolation,
                     plan_gate,
                 );
-                let opening_args = match target_harness {
-                    crate::harness::Harness::Antigravity => {
-                        vec!["--prompt-interactive".to_string(), prompt]
-                    }
-                    _ => vec![prompt],
-                };
+                let opening_args = target_harness.opening_args(prompt);
                 profile.args.extend(opening_args.iter().cloned());
 
                 let id = self.next_id;
-                let extra_env = vec![
+                let mut extra_env = vec![
                     (
                         "AGENT_MUX_SWARM_ROLE".to_string(),
                         "coordinator".to_string(),
                     ),
                     ("AGENT_MUX_SWARM_GOAL".to_string(), goal.clone()),
                 ];
+                if let Some((plan, _)) = &agent_prep {
+                    extra_env.extend(plan.env.iter().cloned());
+                }
                 let mut session = match self.spawn_traced_full(
                     id,
                     profile,

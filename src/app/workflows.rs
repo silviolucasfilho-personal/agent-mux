@@ -870,10 +870,18 @@ impl App {
         // MCP registration and environment
         let mut extra_args: Vec<String> = Vec::new();
         let registration = self.ensure_mcp(harness.as_str(), &workspace);
-        if let crate::mcp::register::Registration::PerLaunch { args } = &registration {
+        // the agent's environment (OpenCode's inline agent) and the
+        // registration's, then the run's own variables
+        let mut env: Vec<(String, String)> = agent_plan.env.clone();
+        if let crate::mcp::register::Registration::PerLaunch {
+            args,
+            env: registration_env,
+        } = &registration
+        {
             extra_args.extend(args.iter().cloned());
+            env.extend(registration_env.iter().cloned());
         }
-        let env: Vec<(String, String)> = vec![
+        env.extend([
             (
                 "AGENT_MUX_WORKFLOW_CONTEXT".into(),
                 context_path.to_string_lossy().into_owned(),
@@ -889,7 +897,7 @@ impl App {
                 "AGENT_MUX_WORKSPACE".into(),
                 workspace.to_string_lossy().into_owned(),
             ),
-        ];
+        ]);
         let launch = crate::workflows::WorkflowLaunch {
             run_id: run_id.clone(),
             workflow: self.live_workflow_runs[ri].name.clone(),

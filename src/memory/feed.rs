@@ -115,7 +115,7 @@ fn ownership(agent_mux_home: &Path, launch_id: &str) -> Option<Ownership> {
 pub fn should_own(home: &Path, harness: Harness, complete: bool) -> bool {
     enabled()
         && complete
-        && harness != Harness::Antigravity
+        && !matches!(harness, Harness::Antigravity | Harness::OpenCode)
         && super::find_binary(home).is_some()
         && super::wiring(home, harness, true).hooks
 }

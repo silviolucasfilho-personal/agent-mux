@@ -350,6 +350,7 @@ fn table_driven_harness_launch_construction() {
         agent_mux::harness::Harness::Claude,
         agent_mux::harness::Harness::Codex,
         agent_mux::harness::Harness::Antigravity,
+        agent_mux::harness::Harness::OpenCode,
     ] {
         let launch =
             agent_mux::skill::launch::build_skill_launch(&def, harness, &base, ws).unwrap();
@@ -359,6 +360,13 @@ fn table_driven_harness_launch_construction() {
             "prompt should contain hint for {harness:?}: {prompt}"
         );
         match harness {
+            agent_mux::harness::Harness::OpenCode => {
+                assert_eq!(launch.profile.command, "opencode");
+                assert!(launch.profile.args.contains(&"--auto".to_string()));
+                // the opening message is `--prompt <text>` on opencode
+                let n = launch.profile.args.len();
+                assert_eq!(launch.profile.args[n - 2], "--prompt");
+            }
             agent_mux::harness::Harness::Claude => {
                 assert_eq!(launch.profile.command, "claude");
                 assert!(
@@ -429,7 +437,7 @@ fn every_harness_has_a_way_to_reach_the_server() {
 
     let claude = plan(Some(Harness::Claude), Some(&exe), Some(&db), ws, &home);
     match claude {
-        Registration::PerLaunch { args } => {
+        Registration::PerLaunch { args, .. } => {
             assert_eq!(args[0], "--mcp-config");
             assert!(args[1].contains("agent-mux"), "{args:?}");
         }
@@ -437,7 +445,7 @@ fn every_harness_has_a_way_to_reach_the_server() {
     }
     let codex = plan(Some(Harness::Codex), Some(&exe), Some(&db), ws, &home);
     match codex {
-        Registration::PerLaunch { args } => {
+        Registration::PerLaunch { args, .. } => {
             assert!(args.iter().any(|a| a.contains("mcp_servers")), "{args:?}");
         }
         other => panic!("codex takes the server per launch: {other:?}"),

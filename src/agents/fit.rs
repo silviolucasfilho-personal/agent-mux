@@ -30,7 +30,7 @@ impl Diagnostic {
 fn candidates(named: Option<&str>, filter: &HarnessFilter) -> Vec<Harness> {
     match named.and_then(Harness::detect) {
         Some(h) => vec![h],
-        None => [Harness::Claude, Harness::Codex, Harness::Antigravity]
+        None => Harness::ALL
             .into_iter()
             .filter(|h| filter.allows(h.as_str()))
             .collect(),

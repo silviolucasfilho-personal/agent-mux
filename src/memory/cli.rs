@@ -137,7 +137,8 @@ fn parse_harness(word: &str) -> anyhow::Result<Harness> {
         "claude" | "claude-code" => Ok(Harness::Claude),
         "codex" => Ok(Harness::Codex),
         "agy" | "antigravity" | "antigravity-cli" => Ok(Harness::Antigravity),
-        w => anyhow::bail!("unknown harness {w:?}: claude, codex or agy"),
+        "opencode" | "open-code" | "opencode2" => Ok(Harness::OpenCode),
+        w => anyhow::bail!("unknown harness {w:?}: claude, codex, agy or opencode"),
     }
 }
 
@@ -214,7 +215,7 @@ pub fn notes(s: &State) -> Vec<String> {
         out.push("Antigravity has no session-end event: `ai-memory finalize-session --agent antigravity-cli` closes its last session.".into());
     }
     if s.harnesses.iter().any(|w| w.mcp) {
-        out.push("Restart running Claude Code, Codex and Antigravity sessions so they load the MCP server.".into());
+        out.push("Restart running Claude Code, Codex, Antigravity and OpenCode sessions so they load the MCP server.".into());
     }
     if s.server {
         out.push(format!(

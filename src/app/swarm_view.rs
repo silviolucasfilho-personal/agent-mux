@@ -23,7 +23,7 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const HARNESS_CYCLE: [Harness; 3] = [Harness::Claude, Harness::Codex, Harness::Antigravity];
+pub const HARNESS_CYCLE: [Harness; 4] = Harness::ALL;
 
 /// Which side of the screen has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

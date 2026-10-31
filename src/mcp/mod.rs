@@ -1,12 +1,14 @@
 //! The agent-mux MCP surface: a read-only stdio server over
 //! `TraceService` (`agent-mux mcp serve --stdio`), the per-launch
-//! registration fragments for Claude Code and Codex, and the opt-in
-//! installer for Antigravity (`agent-mux mcp install agy`).
+//! registration fragments for Claude Code, Codex and OpenCode, and the
+//! opt-in installer for Antigravity (`agent-mux mcp install agy`).
 //!
 //! Probed on 2026-09-15: Claude Code 2.1.273 `--mcp-config <configs...>`
 //! (JSON strings or files); Codex 0.154.0 `-c mcp_servers.<name>.command=…`
 //! / `.args=[…]`; agy 1.2.3 `agy mcp add <name> <cmd> -- <args…>` writing
-//! `~/.gemini/config/mcp_config.json`, no per-launch flag.
+//! `~/.gemini/config/mcp_config.json`, no per-launch flag; opencode 2.0.32
+//! (2026-10-31) `mcp.servers.<name>` in `OPENCODE_CONFIG_CONTENT`, read by a
+//! `--standalone` launch (`crate::opencode`).
 
 pub mod install;
 pub mod register;
@@ -23,10 +25,11 @@ pub const USAGE: &str = "agent-mux mcp <command>
                                 serve the ten read-only trace tools over stdio
   install agy                   register this binary with `agy mcp add` (no per-launch flag exists)
   uninstall agy                 remove it with `agy mcp remove`
-  status [claude|codex|agy]     how each harness reaches the server
+  status [claude|codex|agy|opencode]
+                                how each harness reaches the server
 
-Claude Code and Codex are registered per launch by the Agents sidebar; nothing
-under ~/.claude or ~/.codex is modified.";
+Claude Code, Codex and OpenCode are registered per launch by the Agents sidebar;
+nothing under ~/.claude, ~/.codex or ~/.config/opencode is modified.";
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {

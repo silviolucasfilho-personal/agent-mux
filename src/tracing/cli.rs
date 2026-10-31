@@ -425,17 +425,20 @@ fn provider_key(h: crate::harness::Harness) -> &'static str {
         crate::harness::Harness::Claude => "claude",
         crate::harness::Harness::Codex => "codex",
         crate::harness::Harness::Antigravity => "antigravity",
+        crate::harness::Harness::OpenCode => "opencode",
     }
 }
 
-/// `--harness claude|codex|agy` narrows the inventory.
+/// `--harness claude|codex|agy|opencode` narrows the inventory.
 fn harness_filter(args: &Args) -> anyhow::Result<Option<crate::harness::Harness>> {
     match args.value("harness") {
         None => Ok(None),
         Some(h) => crate::harness::Harness::detect(h)
             .or_else(|| (h == "antigravity").then_some(crate::harness::Harness::Antigravity))
             .map(Some)
-            .ok_or_else(|| anyhow::anyhow!("unknown harness {h:?}: claude, codex or agy")),
+            .ok_or_else(|| {
+                anyhow::anyhow!("unknown harness {h:?}: claude, codex, agy or opencode")
+            }),
     }
 }
 
@@ -558,11 +561,7 @@ fn skills_lint(args: &Args) -> anyhow::Result<()> {
         crate::harness::Harness,
         std::collections::HashSet<String>,
     > = std::collections::HashMap::new();
-    for h in [
-        crate::harness::Harness::Claude,
-        crate::harness::Harness::Codex,
-        crate::harness::Harness::Antigravity,
-    ] {
+    for h in crate::harness::Harness::ALL {
         let seen = conn
             .as_ref()
             .and_then(|c| query::tool_names(c, provider_key(h)).ok())
@@ -1437,6 +1436,27 @@ fn doctor() -> anyhow::Result<()> {
         .map(|d| d.join("brain"));
     let (ok, detail) = dir_status(brain.as_deref());
     check("antigravity brain dir", ok, &detail);
+    check(
+        "opencode on PATH",
+        on_path("opencode").is_some(),
+        &on_path("opencode")
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not found".into()),
+    );
+    let opencode_db = resolved.opencode_db.clone().or_else(|| {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|h| super::opencode_db::default_db_path(Path::new(&h)))
+    });
+    let detail = opencode_db
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "no home".into());
+    check(
+        "opencode session db",
+        opencode_db.as_deref().is_some_and(Path::is_file),
+        &detail,
+    );
 
     println!("\nhooks (mode: {}):", resolved.hooks.as_str());
     if resolved.hooks.registers() {
@@ -2128,6 +2148,7 @@ pub fn import_transcript(
             Provider::Claude => "Claude Code".into(),
             Provider::Codex => "Codex".into(),
             Provider::Antigravity => "Antigravity".into(),
+            Provider::OpenCode => "OpenCode".into(),
         },
         cwd: cwd.clone(),
         project_slug: crate::history::project_slug(Path::new(&cwd)),
@@ -2279,6 +2300,8 @@ fn identify_transcript(text: &str, path: &Path, provider: Provider) -> (String, 
             });
             (stem(path), cwd)
         }
+        // an export of `session_message` rows as lines: named by its file
+        Provider::OpenCode => (stem(path), None),
     }
 }
 
@@ -2294,6 +2317,7 @@ fn import(args: &Args) -> anyhow::Result<()> {
         Some("claude") => Some(Provider::Claude),
         Some("codex") => Some(Provider::Codex),
         Some("antigravity") | Some("agy") => Some(Provider::Antigravity),
+        Some("opencode") => Some(Provider::OpenCode),
         Some(other) => anyhow::bail!("unknown provider {other:?}"),
         None => None,
     };

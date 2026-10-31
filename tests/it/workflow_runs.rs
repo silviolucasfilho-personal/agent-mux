@@ -64,6 +64,14 @@ fn fake_harness(
   printf 'codex printed something else\n'
 }"#
         }
+        Harness::OpenCode => {
+            // one `text` event per line, as `opencode run --format json`
+            r#"emit() {
+  esc=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{ORS="\\n"} {print}' | sed 's/\\n$//')
+  printf '{"type":"step_start","sessionID":"ses_fake","part":{"type":"step-start"}}\n'
+  printf '{"type":"text","sessionID":"ses_fake","part":{"type":"text","text":"%s"}}\n' "$esc"
+}"#
+        }
     };
     let find_out = if harness == Harness::Codex {
         r#"OUT_FILE=""; prev=""

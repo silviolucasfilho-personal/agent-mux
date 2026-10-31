@@ -283,19 +283,15 @@ impl App {
                     crate::skill::install::install(&pkg, harness, &self.skill_home(), false)
                         .map_err(|e| format!("skill {skill}: {e}"))?;
                 }
-                Some(match harness {
-                    Harness::Codex => format!("${skill}"),
-                    _ => format!("/{skill}"),
-                })
+                Some(crate::skill::render::invocation(&skill, harness))
             }
             Some(TaskBody::Pattern(p)) => {
                 return Err(format!("{name} runs the {p} loop on its schedule"));
             }
         };
-        let opening = match (text, harness) {
-            (None, _) => Vec::new(),
-            (Some(t), Harness::Antigravity) => vec!["--prompt-interactive".into(), t],
-            (Some(t), _) => vec![t],
+        let opening = match text {
+            None => Vec::new(),
+            Some(t) => harness.opening_args(t),
         };
         Ok((plan, opening))
     }
@@ -398,10 +394,7 @@ impl App {
         )
         .map_err(|e| format!("handoff: {e}"))?;
         let message = handoff::opening_message(source.provider, dir, &file);
-        Ok(Continue::Transcript(match harness {
-            Harness::Antigravity => vec!["--prompt-interactive".into(), message],
-            _ => vec![message],
-        }))
+        Ok(Continue::Transcript(harness.opening_args(message)))
     }
 
     /// The New session dialog, on harness profile `profile` when given.

@@ -761,7 +761,9 @@ pub fn parse_run_args(raw: &[String]) -> anyhow::Result<RunSpec> {
         None => Harness::Claude,
         Some(h) => Harness::detect(&h)
             .or_else(|| (h == "antigravity").then_some(Harness::Antigravity))
-            .ok_or_else(|| anyhow::anyhow!("unknown harness {h:?}: claude, codex or agy"))?,
+            .ok_or_else(|| {
+                anyhow::anyhow!("unknown harness {h:?}: claude, codex, agy or opencode")
+            })?,
     };
     let cwd = values
         .get("cwd")

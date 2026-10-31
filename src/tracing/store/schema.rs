@@ -1,10 +1,10 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 19;
+pub const SCHEMA_VERSION: i32 = 20;
 
 pub const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -975,5 +975,85 @@ AFTER INSERT ON swarm_reviews
 BEGIN
   INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
   VALUES ('swarm_review', NEW.task_id, NULL, NULL, 'insert');
+END;
+"#;
+
+// v20: OpenCode as a fourth provider. `sessions.provider` is a CHECK
+// constraint, which SQLite cannot alter in place, so the table is rebuilt
+// with the same columns and `'opencode'` admitted; the rows, the two
+// indexes, the three `trace_changes` triggers and the `session_stats` view
+// (which SQLite validates on every schema change, so it has to go first
+// and come back last, as defined in v1) are restored as they were. The
+// migration runner (`store::migrate`) switches foreign keys off around the
+// migrations, so dropping the table under the `traces` and `launches` rows
+// that reference `sessions (key)` is allowed, and since they reference it
+// by name they point at the rebuilt table afterwards. Replay-safe: a second run copies the rows into a
+// fresh `sessions_v20`, swaps again, and every index, trigger and view is
+// dropped before it is created.
+const V20: &str = r#"
+CREATE TABLE IF NOT EXISTS sessions_v20 (
+  key             TEXT PRIMARY KEY,
+  provider        TEXT NOT NULL CHECK (provider IN ('claude','codex','antigravity','opencode')),
+  session_id      TEXT NOT NULL,
+  user_id         TEXT,
+  cwd             TEXT,
+  project_slug    TEXT,
+  transcript_path TEXT,
+  title           TEXT,
+  first_seen_ns   INTEGER NOT NULL,
+  last_seen_ns    INTEGER NOT NULL,
+  extra           TEXT NOT NULL DEFAULT '{}',
+  UNIQUE (provider, session_id)
+);
+INSERT OR IGNORE INTO sessions_v20 SELECT key, provider, session_id, user_id, cwd, project_slug, transcript_path, title, first_seen_ns, last_seen_ns, extra FROM sessions;
+DROP VIEW IF EXISTS session_stats;
+DROP TRIGGER IF EXISTS trg_trace_changes_sessions_insert;
+DROP TRIGGER IF EXISTS trg_trace_changes_sessions_update;
+DROP TRIGGER IF EXISTS trg_trace_changes_sessions_delete;
+DROP INDEX IF EXISTS sessions_last_seen;
+DROP INDEX IF EXISTS sessions_project;
+DROP TABLE sessions;
+ALTER TABLE sessions_v20 RENAME TO sessions;
+CREATE INDEX IF NOT EXISTS sessions_last_seen ON sessions (last_seen_ns DESC);
+CREATE INDEX IF NOT EXISTS sessions_project   ON sessions (project_slug, last_seen_ns DESC);
+CREATE VIEW session_stats AS
+SELECT s.*,
+       datetime(s.last_seen_ns / 1000000000, 'unixepoch', 'localtime') AS last_seen_at,
+       COUNT(ts.rid)                                  AS turn_count,
+       COALESCE(SUM(ts.status = 'open'), 0)           AS open_turns,
+       MIN(ts.start_ns)                               AS first_turn_ns,
+       MAX(COALESCE(ts.end_ns, ts.start_ns))          AS last_turn_ns,
+       (MAX(COALESCE(ts.end_ns, ts.start_ns)) - MIN(ts.start_ns)) / 1000000 AS duration_ms,
+       COALESCE(SUM(ts.observation_count), 0)         AS observation_count,
+       COALESCE(SUM(ts.tool_count), 0)                AS tool_count,
+       COALESCE(SUM(ts.error_count), 0)               AS error_count,
+       SUM(ts.input_tokens)                           AS input_tokens,
+       SUM(ts.output_tokens)                          AS output_tokens,
+       SUM(ts.cache_read_tokens)                      AS cache_read_tokens,
+       SUM(ts.cache_write_tokens)                     AS cache_write_tokens,
+       SUM(ts.total_tokens)                           AS total_tokens,
+       SUM(ts.total_cost_usd)                         AS total_cost_usd,
+       COALESCE(SUM(ts.unpriced_generations), 0)      AS unpriced_generations,
+       (SELECT MAX(reported_cost_usd) FROM launches l WHERE l.session_key = s.key) AS reported_cost_usd
+FROM sessions s LEFT JOIN trace_stats ts ON ts.session_key = s.key
+GROUP BY s.key;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_sessions_insert
+AFTER INSERT ON sessions
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('session', NEW.key, NEW.key, NULL, 'insert');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_sessions_update
+AFTER UPDATE ON sessions
+WHEN NEW.last_seen_ns IS NOT OLD.last_seen_ns OR NEW.provider IS NOT OLD.provider OR NEW.cwd IS NOT OLD.cwd
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('session', NEW.key, NEW.key, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_sessions_delete
+AFTER DELETE ON sessions
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('session', OLD.key, OLD.key, NULL, 'delete');
 END;
 "#;

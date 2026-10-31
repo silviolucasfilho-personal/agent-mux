@@ -1,6 +1,6 @@
 # agent-mux
 
-A terminal multiplexer for AI coding harnesses, with local trace capture, a SQLite analysis store, and portable skills. Run Claude Code (`claude`), Codex CLI (`codex`), and Google Antigravity (`agy`) in separate pseudo-terminals, switch between them, resume provider sessions, inspect turns and tool calls, and compare recorded work.
+A terminal multiplexer for AI coding harnesses, with local trace capture, a SQLite analysis store, and portable skills. Run Claude Code (`claude`), Codex CLI (`codex`), Google Antigravity (`agy`), and OpenCode (`opencode`) in separate pseudo-terminals, switch between them, resume provider sessions, inspect turns and tool calls, and compare recorded work.
 
 This README is the developer onboarding guide to the **implemented code in this checkout**. Every screen, panel, query, capture step, hook and SQL statement below was read from the source at the time of writing; file paths are given so you can verify and extend. Design documents under `docs/superpowers/` record development history and are not a guarantee that a proposed feature shipped.
 
@@ -42,7 +42,7 @@ agent-mux
 agent-mux --hide-sidebar      # --full-screen and -b do the same
 ```
 
-The sidebar starts with the harnesses (Claude Code, Codex, Antigravity), their sessions and History; press `m` in the list to show scheduled agents, flows, skills and personas, and `m` again to hide them.
+The sidebar starts with the harnesses (Claude Code, Codex, Antigravity, OpenCode), their sessions and History; press `m` in the list to show scheduled agents, flows, skills and personas, and `m` again to hide them.
 
 One-shot commands are dispatched in [src/main.rs](src/main.rs) before any terminal setup:
 
@@ -53,7 +53,7 @@ agent-mux trace doctor        # config, store health, provider readiness, hooks
 agent-mux trace path          # where the SQLite store is
 agent-mux skill list
 agent-mux md README.md        # Markdown viewer and editor, Mermaid drawn as text (docs/markdown.md)
-agent-mux memory install      # shared memory for Claude, Codex and agy through ai-memory (docs/memory.md)
+agent-mux memory install      # shared memory for Claude, Codex, agy and opencode through ai-memory (docs/memory.md)
 agent-mux run --help
 ```
 
@@ -86,7 +86,7 @@ The version is `<major>.<minor>.<build>`: the crate's major and minor from `Carg
 
 | Term | Meaning |
 | --- | --- |
-| Harness / provider | The external CLI and its data format. The Antigravity command is `agy`; stored provider names are `claude`, `codex`, `antigravity`. |
+| Harness / provider | The external CLI and its data format. The Antigravity command is `agy`; stored provider names are `claude`, `codex`, `antigravity`. OpenCode (`opencode`) is traced from its own SQLite database (`~/.local/share/opencode/opencode.db`, stored provider name `opencode`; `docs/tracing.md`). |
 | Live session | An in-memory PTY child, VT100 parser, scrollback, status tracker and optional trace handle, owned by `App` (`src/session.rs`). |
 | Provider session | A conversation identity owned by the harness (Claude session UUID, Codex thread id, Antigravity conversation id). Resumable across launches. |
 | Run | One lifetime of a trace-store owner process, recorded in the `runs` table. |
@@ -221,6 +221,10 @@ command = "codex"
 name = "Antigravity"
 command = "agy"
 
+[[profiles]]
+name = "OpenCode"
+command = "opencode"
+
 [tracing]
 enabled = true
 content_mode = "full"
@@ -249,8 +253,8 @@ mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 
 | Setting | Resolution (`config::resolve_tracing`) |
 | --- | --- |
-| Profile `name`, `command` | Required. The command is launched as an argument vector, never through a shell. Provider detection uses the file stem of `command` (`claude`, `codex`, `agy`; `.exe` stripped). |
-| Profile `args`, `default_dir`, `model`, `bypass_approvals` | Empty args; optional initial directory; an unset model passes no flag. Approvals are bypassed unless the profile or the top-level `bypass_approvals` says otherwise (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex). The launch dialog can override per launch. |
+| Profile `name`, `command` | Required. The command is launched as an argument vector, never through a shell. Provider detection uses the file stem of `command` (`claude`, `codex`, `agy`, `opencode`; `.exe` stripped). |
+| Profile `args`, `default_dir`, `model`, `bypass_approvals` | Empty args; optional initial directory; an unset model passes no flag. Approvals are bypassed unless the profile or the top-level `bypass_approvals` says otherwise (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex, `--auto` on OpenCode). The launch dialog can override per launch. |
 | `tracing.enabled` | Absent or `true` traces; only `false` turns the TUI runtime off. `trace` CLI commands re-resolve with `enabled = true` so the store stays readable. |
 | `db_path` | Config value (trimmed, `~` expanded) → `AGENT_MUX_TRACE_DB` → `~/.agent-mux/traces.db` → `traces.db`. Only `db_path` gets tilde expansion. |
 | `content_mode` | `"metadata"` selects metadata-only; any other value, including typos, is `full`. |
@@ -262,7 +266,7 @@ mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 | `flush_interval_ms` | 250 ms store batch cadence, floored to 20 ms. |
 | `shutdown_flush_ms` | 1,000 ms resolver default; the TUI floors its use at 1,500 ms. |
 | `retention_days` | `0` keeps forever. Positive values prune at TUI store open. CLI writers pass `0`. |
-| `claude_dir`, `codex_dir`, `antigravity_dir` | Optional discovery roots used as given, **without** tilde expansion. |
+| `claude_dir`, `codex_dir`, `antigravity_dir`, `opencode_db` | Optional discovery roots (and OpenCode's session database file) used as given, **without** tilde expansion. |
 | `hooks` | `"off"` → Off; `"installed"` → Installed; anything else → Auto. Auto and Installed behave identically at runtime; only Off suppresses per-launch registration. |
 | `backend` | `local` (alias `sqlite`), `langfuse`, `both`; unknown → local. |
 | `tracing.loops` | Warning thresholds (25 / 6 / 3); `0` disables one. |
@@ -453,7 +457,7 @@ Opened by `n`. State is `DialogState`; the visible field list is computed by `Di
 | Tracing | always | `[●] Enabled` / `[○] Disabled`; `Space`, `t`, `←/→` toggle. |
 | Backend | always | Local SQLite → Langfuse → Both; cycles only when Langfuse credentials resolved, otherwise shows `(Langfuse: not configured — see agent-mux trace doctor)`. |
 | Content Mode | always | `[Full]` prompts, tool I/O, skills and subagents, or `[Metadata]` timings, tokens and cost only. |
-| Model, Approvals, Resume, One-shot prompt | command stem is exactly `claude`, `codex` or `agy` | Rendered by `harness::render`: Claude/Antigravity use `--model`, `--dangerously-skip-permissions`, `--continue`, `-p <prompt>`; Codex uses `--model`, `--yolo`, the `resume --last` subcommand, and `exec <prompt>`. `compose()` places Codex subcommands before profile args and everything else after. |
+| Model, Approvals, Resume, One-shot prompt | command stem is exactly `claude`, `codex`, `agy` or `opencode` | Rendered by `harness::render`: Claude/Antigravity use `--model`, `--dangerously-skip-permissions`, `--continue`, `-p <prompt>`; Codex uses `--model`, `--yolo`, the `resume --last` subcommand, and `exec <prompt>`; OpenCode uses `--auto`, `--continue`, `--session <id>` and `run <prompt>`, with `--model` only under `run` (its TUI rejects the flag, so `opencode::adapt_launch` moves an interactive session's model into `OPENCODE_CONFIG_CONTENT` at spawn, with `--standalone`). `compose()` places Codex and OpenCode subcommands before profile args and everything else after. |
 | Max cost (USD), Max turns | tracing enabled and harness is Claude or Codex | Budget guard. Must be positive; invalid values stay in the dialog as red error text. |
 | Experiment, Variant | tracing enabled and a local trace runtime exists | Records the launch as an experiment run when the process exits (variant defaults to `interactive`). |
 
@@ -676,7 +680,7 @@ The plan (`LaunchPlan`) carries `launch_id` (a fresh UUIDv4), `extra_args`, `ext
 | Codex | none injected | `-c notify=[…]` when hooks are wanted. | `WatchCodex { sessions_dir: <codex_dir>/sessions, cwd, t0: now }`, label `watched` |
 | Antigravity | `--conversation <id>` in args → `KnownAntigravity`, label `deterministic`; otherwise `WatchAntigravity { root, cwd, t0 }`, label `watched` | none; agy loads hooks only from its plugin directory | `<root>/brain/<conversation>/…` |
 
-A skill launch also sets `plan.skill = (id, harness)`, which `start_session` records as `launches.metadata.skill_id` and `skill_harness`. Every plan sets `AGENT_MUX=1` and `AGENT_MUX_SESSION_ID=<launch_id>` on the child; `AGENT_MUX_EXE=<binary>` is added when hooks are registered. Provider roots: `claude_dir` config → `CLAUDE_CONFIG_DIR` → `~/.claude`; `codex_dir` → `~/.codex`; `antigravity_dir` → `~/.gemini/antigravity-cli`. `hooks_wanted` requires the global mode not `off`, the profile not `hooks = "off"`, and the profile not on the fast-failure latch. The budget guard (`max_cost_usd`/`max_turns`) is stored on the launch row's metadata; when it cannot be enforced (Claude with hooks off, Codex without `~/.codex/hooks.json`, any Antigravity launch) a status notice explains why. A Langfuse backend without credentials downgrades to local and records the request in `backend_requested`. The launch row's `correlation_plan` is `announced+<label>` when hooks were registered, else the bare label.
+A skill launch also sets `plan.skill = (id, harness)`, which `start_session` records as `launches.metadata.skill_id` and `skill_harness`. Every plan sets `AGENT_MUX=1` and `AGENT_MUX_SESSION_ID=<launch_id>` on the child; `AGENT_MUX_EXE=<binary>` is added when hooks are registered. Provider roots: `claude_dir` config → `CLAUDE_CONFIG_DIR` → `~/.claude`; `codex_dir` → `~/.codex`; `antigravity_dir` → `~/.gemini/antigravity-cli`; `opencode_db` → `$XDG_DATA_HOME/opencode/opencode.db`, else `~/.local/share/opencode/opencode.db`. `hooks_wanted` requires the global mode not `off`, the profile not `hooks = "off"`, and the profile not on the fast-failure latch. The budget guard (`max_cost_usd`/`max_turns`) is stored on the launch row's metadata; when it cannot be enforced (Claude with hooks off, Codex without `~/.codex/hooks.json`, any Antigravity launch) a status notice explains why. A Langfuse backend without credentials downgrades to local and records the request in `backend_requested`. The launch row's `correlation_plan` is `announced+<label>` when hooks were registered, else the bare label.
 
 `plan_attach` (the `t` key on a running session) ignores `enabled = false`, still honours `provider = "none"`, injects nothing, sets `attached = true`, and back-dates the watch window by one hour.
 
@@ -1528,7 +1532,7 @@ The remaining analysis-service requests are listed in section 10.
 | `config ls [--json] \| show <id> [--builtin] \| path [<id>] \| edit <id> \| reset <id> \| new skill\|loop-skill\|loop-agent\|workflow <name> \| check \| push [--dry-run]` | The configuration library (section 16): `edit` and `new` write under `~/.agent-mux` and run the editor; `push` rewrites loop skills and agents in registered loop workspaces; `check` exits 1 on an invalid item. |
 | `workflow ls [--json] \| show <name> \| check [<name>] \| skills \| run <name> --workspace DIR [--harness H] [--profile P] [--arg k=v …] [--budget N] [--max-cost USD] [--isolation none\|worktree] [--resume RUN] [--json] \| plan "<task>" --workspace DIR [--harness H] [--run] [--save NAME] [--json] \| runs [--json] \| status <run> [--json] \| save <run> <name>` | Workflows (section 17). `run` and `plan` drive a private App headlessly; `run` exits 0 finished, 1 failed, 2 cancelled, 3 budget exhausted. |
 | `mcp serve --stdio [--db PATH] [--workspace DIR \| --all-workspaces \| --workspace-from-env]` | The read-only MCP server (section 6.7); started by harnesses, usable by hand for debugging. |
-| `mcp install \| uninstall agy`, `mcp status [claude\|codex\|agy]` | Antigravity's installed entry through `agy mcp add|remove`; how each harness reaches the server. |
+| `mcp install \| uninstall agy`, `mcp status [claude\|codex\|agy\|opencode]` | Antigravity's installed entry through `agy mcp add|remove`; how each harness reaches the server (OpenCode: per launch through `OPENCODE_CONFIG_CONTENT` with `--standalone`). |
 | `run --experiment <name> --variant <label> --prompt <text> [--harness H] [--profile P] [--model M] [--bypass] [--cwd DIR] [--check CMD] [--repeat N] [--timeout SECS] [--max-cost USD] [--max-turns N]` | Section 12. |
 | `loop ls [--json]`, `loop add --workspace DIR --pattern ID [--profile P] [--harness claude\|codex] [--every 1d] [--level L1] [--max-runs-per-day N] [--max-tokens-per-day N] [--max-cost USD] [--no-scaffold]`, `loop rm ID`, `loop run ID [--now]`, `loop pause [ID\|--all]`, `loop resume [ID\|--all]`, `loop init DIR --pattern ID --harness H`, `loop audit DIR [--json]`, `loop status [ID] [--json]`, `loop cost --pattern ID [--every 15m] [--level L2] [--with-caching] [--json]`, `loop inbox [--json]`, `loop decide RUN applied\|rejected` | Section 15. `loop run` exits 0 report-only/no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. |
 

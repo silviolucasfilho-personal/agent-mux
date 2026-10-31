@@ -256,6 +256,11 @@ fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
             "heimdall@codex",
             "# agy",
             "heimdall@agy",
+            // opencode reads the project's .claude/skills too
+            "# opencode",
+            "heimdall@opencode",
+            "native deploy",
+            "native silent",
         ]
     );
     assert_eq!(view.selected, 1, "the first selectable row, never a header");
@@ -319,12 +324,12 @@ fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
         Some(("heimdall", Harness::Codex))
     );
     assert!(view.clear_filter());
-    assert_eq!(view.rows.len(), 8);
+    assert_eq!(view.rows.len(), 12);
     assert!(!view.clear_filter());
 
     // without a store the view still lists what is on disk
     let bare = SkillsViewState::new(None, &cwd, &home, &home, Some(&skills_dir));
-    assert_eq!(bare.rows.len(), 8);
+    assert_eq!(bare.rows.len(), 12);
     assert!(bare.turns.is_empty());
     assert!(bare.error.as_deref().unwrap().contains("tracing is off"));
 }

@@ -7,6 +7,13 @@
 //! all three and are deliberately not used: the fenced `workflow-result`
 //! block keeps a result independent of the harness. agy `--sandbox` is not
 //! passed: its terminal restrictions are unverified against step skills.
+//!
+//! OpenCode 2.0.32 (probed 2026-10-31): `opencode run --format json
+//! <message>` prints one JSON event per line (`step_start`, `text`,
+//! `tool_use`, `step_finish`, `error`), each with `sessionID` and a
+//! `part`; the answer is the `text` parts' `part.text`, and there is no
+//! final envelope with usage or cost (its session row in
+//! `~/.local/share/opencode/opencode.db` has them). It has no budget flag.
 
 use crate::harness::Harness;
 use std::path::Path;
@@ -42,6 +49,10 @@ pub fn extra_args(
             v.push("--mode".into());
             v.push("accept-edits".into());
         }
+        Harness::OpenCode => {
+            v.push("--format".into());
+            v.push("json".into());
+        }
     }
     v
 }
@@ -50,7 +61,9 @@ pub fn extra_args(
 /// its config (`-c model_reasoning_effort="high"`, accepted by codex
 /// 0.154.0); agy 1.2.10 has `--effort low|medium|high|max` (its `--help`,
 /// 2026-09-25), so another value is not passed. Claude Code 2.1.277 has no
-/// such flag. `None` means the effort is ignored, with a run note.
+/// such flag, and neither has opencode 2.0.32 (a `#variant` suffix on its
+/// `--model` is the closest thing and is left to the model name). `None`
+/// means the effort is ignored, with a run note.
 pub fn effort_args(harness: Harness, effort: &str) -> Option<Vec<String>> {
     match harness {
         Harness::Codex => Some(vec![
@@ -60,17 +73,17 @@ pub fn effort_args(harness: Harness, effort: &str) -> Option<Vec<String>> {
         Harness::Antigravity => ["low", "medium", "high", "max"]
             .contains(&effort)
             .then(|| vec!["--effort".into(), effort.to_string()]),
-        Harness::Claude => None,
+        Harness::Claude | Harness::OpenCode => None,
     }
 }
 
 /// Inserts `extra` before the trailing prompt of a composed command line
 /// (`-p <prompt>` on Claude and Antigravity, the positional prompt on
-/// Codex).
+/// Codex and OpenCode).
 pub fn insert_before_prompt(args: &mut Vec<String>, harness: Harness, extra: Vec<String>) {
     let tail = match harness {
         Harness::Claude | Harness::Antigravity => 2,
-        Harness::Codex => 1,
+        Harness::Codex | Harness::OpenCode => 1,
     };
     let at = args.len().saturating_sub(tail);
     for (i, a) in extra.into_iter().enumerate() {
@@ -179,10 +192,28 @@ fn text_of(v: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// The text of an OpenCode `--format json` stream: every `text` event's
+/// `part.text`, in order.
+fn opencode_text(cleaned: &str) -> Option<String> {
+    let parts: Vec<String> = cleaned
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .filter_map(|v| v.get("part")?.get("text")?.as_str().map(str::to_string))
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
 /// Reads the envelope of a finished session: the JSON on stdout (Claude
-/// Code, Antigravity) or the last-message file (Codex).
+/// Code, Antigravity), the event stream on stdout (OpenCode) or the
+/// last-message file (Codex).
 pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
     match harness {
+        Harness::OpenCode => Envelope {
+            text: opencode_text(&clean_terminal(stdout)),
+            ..Default::default()
+        },
         Harness::Codex => Envelope {
             text: std::fs::read_to_string(out_file)
                 .ok()
@@ -232,6 +263,7 @@ mod tests {
         // agy takes only its own four values
         assert_eq!(effort_args(Harness::Antigravity, "minimal"), None);
         assert_eq!(effort_args(Harness::Claude, "high"), None);
+        assert_eq!(effort_args(Harness::OpenCode, "high"), None);
     }
 
     #[test]
@@ -291,6 +323,33 @@ mod tests {
                 "-p",
                 "hi"
             ]
+        );
+        let mut opencode = vec!["run".into(), "--auto".into(), "hi".into()];
+        insert_before_prompt(
+            &mut opencode,
+            Harness::OpenCode,
+            extra_args(Harness::OpenCode, Some(1.5), 60, out),
+        );
+        assert_eq!(opencode, vec!["run", "--auto", "--format", "json", "hi"]);
+    }
+
+    #[test]
+    fn an_opencode_stream_yields_its_text_parts() {
+        // two lines as `opencode run --format json` printed them (2.0.32)
+        let stream = b"{\"type\":\"step_start\",\"timestamp\":1,\"sessionID\":\"ses_1\",\"part\":{\"type\":\"step-start\"}}\n{\"type\":\"text\",\"timestamp\":2,\"sessionID\":\"ses_1\",\"part\":{\"type\":\"text\",\"text\":\"first\"}}\r\n{\"type\":\"tool_use\",\"part\":{\"tool\":\"bash\"}}\n{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"```workflow-result\\n{}\\n```\"}}\n";
+        let e = envelope(Harness::OpenCode, stream, Path::new("/x"));
+        assert_eq!(
+            e.text.as_deref(),
+            Some("first\n\n```workflow-result\n{}\n```")
+        );
+        assert_eq!(e.tokens, None);
+        assert_eq!(
+            envelope(
+                Harness::OpenCode,
+                b"{\"type\":\"error\",\"error\":{}}\n",
+                Path::new("/x")
+            ),
+            Envelope::default()
         );
     }
 
