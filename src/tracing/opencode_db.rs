@@ -17,8 +17,14 @@
 
 use crate::transcript::{TranscriptEvent, opencode_row_events};
 use rusqlite::{Connection, OpenFlags, params};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+static LAST_TIME_MS: AtomicU64 = AtomicU64::new(0);
+static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// `~/.local/share/opencode/opencode.db` (`$XDG_DATA_HOME/opencode/`).
 pub fn default_db_path(home: &Path) -> PathBuf {
@@ -30,12 +36,40 @@ pub fn default_db_path(home: &Path) -> PathBuf {
         .join("opencode.db")
 }
 
-/// A fresh session id in OpenCode's spelling (`ses_` and 26 characters;
-/// `opencode --session <id>` creates the session under the id it is
-/// given, probed on 2.0.32).
+/// A fresh session id in OpenCode's native spelling (`ses_` and 26 characters:
+/// 12 hex chars encoding the bitwise-inverted timestamp for descending order,
+/// plus 14 base62 random characters; OpenCode's upstream API requires this
+/// format to permit free-tier models).
 pub fn new_session_id() -> String {
-    let hex = uuid::Uuid::new_v4().simple().to_string();
-    format!("ses_{}", &hex[..26])
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let prev = LAST_TIME_MS.swap(now, Ordering::Relaxed);
+    let seq = if prev == now {
+        COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+    } else {
+        COUNTER.store(1, Ordering::Relaxed);
+        1
+    };
+
+    let count_bits = ((seq as u64) & 0x0fff).max(1);
+    let o = (now * 0x1000) | count_bits;
+    let a = !o;
+
+    let mut out = String::with_capacity(30);
+    out.push_str("ses_");
+    for i in 0..6 {
+        let byte = ((a >> (40 - 8 * i)) & 0xff) as u8;
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+
+    let rnd = uuid::Uuid::new_v4();
+    for &b in &rnd.as_bytes()[..14] {
+        out.push(BASE62[(b % 62) as usize] as char);
+    }
+    out
 }
 
 fn open(db: &Path) -> Option<Connection> {
@@ -375,5 +409,31 @@ mod tests {
         let id = new_session_id();
         assert!(id.starts_with("ses_") && id.len() == 30, "{id}");
         assert_ne!(id, new_session_id());
+
+        // Decodes the 12-character inverted timestamp prefix (36 bits of timestamp)
+        let hex_prefix = &id[4..16];
+        let a = u64::from_str_radix(hex_prefix, 16).expect("12 hex digits");
+        let o = !a & 0x0000_ffff_ffff_ffff;
+        let ts_low36 = o >> 12;
+        let now_low36 = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64)
+            & 0x000f_ffff_ffff;
+        assert!(
+            now_low36 >= ts_low36 && now_low36 - ts_low36 < 5000,
+            "timestamp in id should match lower 36 bits of now: id ts={ts_low36}, now={now_low36}"
+        );
+
+        // Suffix is 14 base62 characters
+        let suffix = &id[16..30];
+        assert!(suffix.chars().all(|c| c.is_ascii_alphanumeric()));
+
+        // Consecutive IDs sort in descending order (newer ID sorts earlier)
+        let id2 = new_session_id();
+        assert!(
+            id2 < id,
+            "newer id ({id2}) should sort before older id ({id})"
+        );
     }
 }
