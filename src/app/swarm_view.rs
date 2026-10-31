@@ -5,7 +5,10 @@
 //! tabs: Live (its terminal), Thread (its messages), Changes (its diff) and
 //! Task (its task card), under the Needs-you strip (`bus::swarm::Need`:
 //! what only the operator can resolve, `!` to act). `a` swaps the panel for
-//! the whole swarm's Activity (messages and task and lease events).
+//! the whole swarm's Activity (messages and task and lease events). Messages
+//! are written on the `>` command line: `@coord`, `@all` or `@<lane>`
+//! (the selected lane when none is named), a leading `!` for urgent, a
+//! `#topic` if the inferred one will not do (`parse_command`).
 //! Design: `docs/superpowers/specs/2026-10-30-swarm-mission-control-ux-design.md`.
 
 use crate::app::text_area::TextArea;
@@ -181,44 +184,200 @@ impl TaskField {
     }
 }
 
-/// The composer's fields: the body is text, the rest are options Tab
-/// reaches, so no text-editing key (Ctrl+U, Ctrl+W) is taken from the body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposeField {
-    Body,
-    Topic,
-    Urgent,
-    Wake,
+/// The `>` command line: one message to one lane, the coordinator or
+/// everyone.
+#[derive(Debug, Clone)]
+pub struct CommandLine {
+    pub text: TextArea,
+    /// The message this answers, when it was opened as a reply.
+    pub reply_to: Option<BusMessage>,
+    /// The completion `Tab` last offered, to cycle through the next one.
+    completion: Option<(String, usize)>,
 }
 
-impl ComposeField {
-    pub fn next(self) -> Self {
-        match self {
-            ComposeField::Body => ComposeField::Topic,
-            ComposeField::Topic => ComposeField::Urgent,
-            ComposeField::Urgent => ComposeField::Wake,
-            ComposeField::Wake => ComposeField::Body,
-        }
-    }
-
-    pub fn prev(self) -> Self {
-        match self {
-            ComposeField::Body => ComposeField::Wake,
-            ComposeField::Topic => ComposeField::Body,
-            ComposeField::Urgent => ComposeField::Topic,
-            ComposeField::Wake => ComposeField::Urgent,
-        }
-    }
+/// Who a command line message goes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recipient {
+    Everyone,
+    Launch { launch: String, name: String },
 }
 
-pub const MESSAGE_TOPICS: [&str; 6] = [
-    "directive",
-    "answer",
-    "question",
-    "api-contract",
-    "blocker",
-    "handoff",
-];
+/// A command line read against the swarm: what would be sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    pub to: Recipient,
+    pub urgent: bool,
+    pub topic: String,
+    pub body: String,
+    pub reply_to: Option<String>,
+}
+
+fn squash(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Reads `text`: leading `!` (urgent), `@who` and `#topic` tokens in any
+/// order, then the body. `@who` is `coord`, `all` or a lane's name, matched
+/// without its separators and by prefix (`@impl` for `implementer·codex`)
+/// or by launch id; with none, the reply's sender, else `fallback`. The
+/// topic, unless named: `urgent` for `!` (the hook delivers it mid-turn),
+/// `answer` for a reply to a question, else `directive`.
+pub fn parse_command(
+    text: &str,
+    snapshot: &SwarmSnapshot,
+    lanes: &[Lane],
+    reply_to: Option<&BusMessage>,
+    fallback: Option<&Lane>,
+) -> Result<Outgoing, String> {
+    let mut rest = text.trim_start();
+    let mut urgent = false;
+    let mut who: Option<&str> = None;
+    let mut topic: Option<&str> = None;
+    loop {
+        if let Some(r) = rest.strip_prefix('!') {
+            urgent = true;
+            rest = r.trim_start();
+            continue;
+        }
+        let token_end = |r: &str| r.find(char::is_whitespace).unwrap_or(r.len());
+        if let Some(r) = rest.strip_prefix('@') {
+            if who.is_some() {
+                return Err("one recipient per message: @all writes to everyone".into());
+            }
+            let end = token_end(r);
+            who = Some(&r[..end]);
+            rest = r[end..].trim_start();
+            continue;
+        }
+        if let Some(r) = rest.strip_prefix('#') {
+            let end = token_end(r);
+            topic = Some(&r[..end]).filter(|t| !t.is_empty());
+            rest = r[end..].trim_start();
+            continue;
+        }
+        break;
+    }
+    let body = rest.trim().to_string();
+    let to = match who {
+        Some(who) => resolve(who, snapshot, lanes, reply_to)?,
+        None => match (reply_to, fallback) {
+            (Some(m), _) => Recipient::Launch {
+                launch: m.from_launch.clone(),
+                name: snapshot.member_label(&m.from_launch),
+            },
+            (None, Some(lane)) if lane.launch_id.is_some() => Recipient::Launch {
+                launch: lane.launch_id.clone().unwrap_or_default(),
+                name: lane.name.clone(),
+            },
+            _ => return Err("say who: @coord, @all or @<lane>".into()),
+        },
+    };
+    if body.is_empty() {
+        return Err("write the message after the address".into());
+    }
+    // A reply re-addressed to someone else is a new message.
+    let reply_to = reply_to.filter(|m| match &to {
+        Recipient::Launch { launch, .. } => *launch == m.from_launch,
+        Recipient::Everyone => m.to_launch.is_none(),
+    });
+    let topic = if urgent {
+        "urgent".to_string()
+    } else if let Some(t) = topic {
+        t.to_string()
+    } else if reply_to.is_some_and(|m| m.topic == "question") {
+        "answer".to_string()
+    } else {
+        "directive".to_string()
+    };
+    Ok(Outgoing {
+        to,
+        urgent,
+        topic,
+        body,
+        reply_to: reply_to.map(|m| m.id.clone()),
+    })
+}
+
+/// A lane's name as one `@` word: a disambiguated `implementer·codex 8f31`
+/// becomes `implementer·codex·8f31`, which resolves to the same lane.
+pub fn address_token(name: &str) -> String {
+    name.replace(' ', "·")
+}
+
+/// The addresses `@` can name: `coord`, `all`, and every agent lane.
+fn addresses(lanes: &[Lane]) -> Vec<String> {
+    let mut out = vec!["coord".to_string(), "all".to_string()];
+    out.extend(
+        lanes
+            .iter()
+            .filter(|l| l.launch_id.is_some() && l.kind == LaneKind::Agent)
+            .map(|l| address_token(&l.name)),
+    );
+    out
+}
+
+fn resolve(
+    who: &str,
+    snapshot: &SwarmSnapshot,
+    lanes: &[Lane],
+    reply_to: Option<&BusMessage>,
+) -> Result<Recipient, String> {
+    let key = squash(who);
+    if key.is_empty() {
+        return Err("@ names someone: @coord, @all or @<lane>".into());
+    }
+    if matches!(key.as_str(), "all" | "everyone") {
+        return Ok(Recipient::Everyone);
+    }
+    if "coordinator".starts_with(&key) || key == "lead" {
+        return match &snapshot.coordinator {
+            Some(c) => Ok(Recipient::Launch {
+                launch: c.launch_id.clone(),
+                name: c.label.clone(),
+            }),
+            None => Err("this swarm has no coordinator".into()),
+        };
+    }
+    let agents: Vec<&Lane> = lanes
+        .iter()
+        .filter(|l| l.launch_id.is_some() && l.kind == LaneKind::Agent)
+        .collect();
+    let launch_of = |l: &Lane| l.launch_id.clone().unwrap_or_default();
+    if let Some(l) = agents.iter().find(|l| squash(&l.name) == key) {
+        return Ok(Recipient::Launch {
+            launch: launch_of(l),
+            name: l.name.clone(),
+        });
+    }
+    let matches: Vec<&&Lane> = agents
+        .iter()
+        .filter(|l| squash(&l.name).starts_with(&key) || launch_of(l).starts_with(who))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(Recipient::Launch {
+            launch: launch_of(one),
+            name: one.name.clone(),
+        }),
+        [] => match reply_to {
+            // The asker may have left the swarm: its short id still answers it.
+            Some(m) if m.from_launch.starts_with(who) => Ok(Recipient::Launch {
+                launch: m.from_launch.clone(),
+                name: snapshot.member_label(&m.from_launch),
+            }),
+            _ => Err(format!("nobody here is called @{who}")),
+        },
+        many => Err(format!(
+            "@{who} could be {}",
+            many.iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Modal {
@@ -245,17 +404,6 @@ pub enum Modal {
         instructions: TextArea,
         files: TextArea,
         field: TaskField,
-    },
-    ComposeMessage {
-        to_launch: Option<String>,
-        to_label: String,
-        /// The message this answers, when it is a reply.
-        reply_to: Option<String>,
-        topic_idx: usize,
-        body: TextArea,
-        urgent: bool,
-        wake: bool,
-        field: ComposeField,
     },
     /// One message in full: the feed shows a line of it; `Enter` opens this.
     ViewMessage { message: BusMessage, scroll: usize },
@@ -362,6 +510,8 @@ pub struct SwarmView {
     diff_for: Option<String>,
     pub modal: Option<Modal>,
     pub confirm: Option<Confirm>,
+    /// The `>` command line, while it is open.
+    pub command: Option<CommandLine>,
     pub status_msg: Option<String>,
     /// The time of the last read, in nanoseconds (lane ages).
     pub now_ns: i64,
@@ -431,6 +581,7 @@ impl SwarmView {
             diff_for: None,
             modal: None,
             confirm: None,
+            command: None,
             status_msg: None,
             now_ns: now,
             conn,
@@ -534,7 +685,7 @@ impl SwarmView {
     }
 
     pub fn text_entry_active(&self) -> bool {
-        self.modal.is_some()
+        self.modal.is_some() || self.command.is_some()
     }
 
     pub fn confirmation_active(&self) -> bool {
@@ -701,32 +852,22 @@ impl SwarmView {
         });
     }
 
-    pub fn open_compose_message(
-        &mut self,
-        to_launch: Option<String>,
-        to_label: String,
-        topic_idx: usize,
-    ) {
-        self.open_compose(to_launch, to_label, None, topic_idx);
+    /// Opens the command line with `prefill` (an address, usually).
+    pub fn open_command(&mut self, prefill: &str, reply_to: Option<BusMessage>) {
+        self.modal = None;
+        self.command = Some(CommandLine {
+            text: TextArea::new(prefill),
+            reply_to,
+            completion: None,
+        });
     }
 
-    fn open_compose(
-        &mut self,
-        to_launch: Option<String>,
-        to_label: String,
-        reply_to: Option<String>,
-        topic_idx: usize,
-    ) {
-        self.modal = Some(Modal::ComposeMessage {
-            to_launch,
-            to_label,
-            reply_to,
-            topic_idx,
-            body: TextArea::new(""),
-            urgent: false,
-            wake: true,
-            field: ComposeField::Body,
-        });
+    /// The `@` address for a lane, as the command line writes it.
+    fn address_of(lane: &Lane) -> String {
+        match lane.kind {
+            LaneKind::Coordinator => "@coord ".into(),
+            _ => format!("@{} ", address_token(&lane.name)),
+        }
     }
 
     /// Opens a message in full.
@@ -734,13 +875,81 @@ impl SwarmView {
         self.modal = Some(Modal::ViewMessage { message, scroll: 0 });
     }
 
-    /// The composer addressed to a message's sender, answering it, with a
-    /// fitting topic.
+    /// The command line addressed to a message's sender, answering it.
     fn open_reply(&mut self, message: &BusMessage) {
         let sender = message.from_launch.clone();
-        let label = self.snapshot.member_label(&sender);
-        let topic_idx = if message.topic == "question" { 1 } else { 0 };
-        self.open_compose(Some(sender), label, Some(message.id.clone()), topic_idx);
+        let address = match self
+            .lanes
+            .iter()
+            .find(|l| l.launch_id.as_deref() == Some(&sender))
+        {
+            Some(lane) => Self::address_of(lane),
+            None => format!("@{} ", short_id(&sender)),
+        };
+        self.open_command(&address, Some(message.clone()));
+    }
+
+    /// What the command line would send now, or why it cannot.
+    pub fn command_preview(&self) -> Option<Result<Outgoing, String>> {
+        let line = self.command.as_ref()?;
+        Some(parse_command(
+            &line.text.text,
+            &self.snapshot,
+            &self.lanes,
+            line.reply_to.as_ref(),
+            self.selected(),
+        ))
+    }
+
+    /// Text pasted while the command line is open goes into it.
+    pub fn paste(&mut self, text: &str) {
+        if let Some(line) = &mut self.command {
+            line.text.insert_str(text);
+            line.completion = None;
+        }
+    }
+
+    fn handle_command_key(&mut self, key: KeyEvent) -> Outcome {
+        let Some(line) = &mut self.command else {
+            return Outcome::None;
+        };
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => {
+                self.command = None;
+                Outcome::None
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) => match self.command_preview() {
+                Some(Ok(cmd)) => {
+                    self.command = None;
+                    let to = match &cmd.to {
+                        Recipient::Everyone => None,
+                        Recipient::Launch { launch, .. } => Some(launch.clone()),
+                    };
+                    Outcome::SendMessage {
+                        to_launch: to,
+                        reply_to: cmd.reply_to,
+                        topic: cmd.topic,
+                        body: cmd.body,
+                        urgent: cmd.urgent,
+                        wake: true,
+                    }
+                }
+                Some(Err(why)) => {
+                    self.status_msg = Some(why);
+                    Outcome::None
+                }
+                None => Outcome::None,
+            },
+            (KeyCode::Tab, KeyModifiers::NONE) => {
+                complete_address(line, &self.lanes);
+                Outcome::None
+            }
+            _ => {
+                crate::keymap::apply_text(&mut line.text, &key);
+                line.completion = None;
+                Outcome::None
+            }
+        }
     }
 
     /// The launch form, or a confirmation first when a coordinator is live
@@ -758,6 +967,9 @@ impl SwarmView {
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
         if self.confirm.is_some() {
             return self.handle_confirm_key(key);
+        }
+        if self.command.is_some() {
+            return self.handle_command_key(key);
         }
         if self.modal.is_some() {
             return self.handle_modal_key(key);
@@ -848,19 +1060,13 @@ impl SwarmView {
                     && let Some(msg) = self.selected_message().cloned()
                 {
                     self.open_reply(&msg);
-                } else if let Some(lane) = self.selected()
-                    && let Some(launch) = lane.launch_id.clone()
-                {
-                    let label = lane.name.clone();
-                    self.open_compose_message(Some(launch), label, 0);
                 } else {
-                    self.open_compose_message(None, "everyone".into(), 0);
+                    let address = self.selected().map(Self::address_of).unwrap_or_default();
+                    self.open_command(&address, None);
                 }
             }
-            (KeyCode::Char('b'), KeyModifiers::NONE) => {
-                self.open_compose_message(None, "everyone".into(), 0);
-            }
-
+            (KeyCode::Char('b'), KeyModifiers::NONE) => self.open_command("@all ", None),
+            (KeyCode::Char('>'), _) => self.open_command("", None),
             (KeyCode::Char('n'), KeyModifiers::NONE) => {
                 if self.lanes.is_empty() {
                     self.open_launch_modal();
@@ -1062,13 +1268,9 @@ impl SwarmView {
         }
 
         // Ctrl+S submits every form; Enter submits from a single-line field
-        // and is a newline in a multi-line one (the composer's body too,
-        // where Ctrl+Enter submits).
+        // and is a newline in a multi-line one.
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let submit = (key.code == KeyCode::Char('s') && ctrl)
-            || (key.code == KeyCode::Enter
-                && ctrl
-                && matches!(self.modal, Some(Modal::ComposeMessage { .. })))
             || (key.code == KeyCode::Enter
                 && !ctrl
                 && !matches!(
@@ -1081,9 +1283,6 @@ impl SwarmView {
                         ..
                     }) | Some(Modal::EditTask {
                         field: TaskField::Instructions,
-                        ..
-                    }) | Some(Modal::ComposeMessage {
-                        field: ComposeField::Body,
                         ..
                     })
                 ));
@@ -1231,52 +1430,6 @@ impl SwarmView {
                 },
             },
 
-            Modal::ComposeMessage {
-                topic_idx,
-                body,
-                urgent,
-                wake,
-                field,
-                ..
-            } => match (key.code, key.modifiers) {
-                (KeyCode::Tab, KeyModifiers::NONE) => *field = field.next(),
-                (KeyCode::BackTab, _) => *field = field.prev(),
-                _ => match field {
-                    ComposeField::Body => {
-                        if key.code == KeyCode::Enter {
-                            body.newline();
-                        } else {
-                            crate::keymap::apply_text(body, &key);
-                        }
-                    }
-                    ComposeField::Topic => match key.code {
-                        KeyCode::Left | KeyCode::Char('h') => {
-                            *topic_idx =
-                                (*topic_idx + MESSAGE_TOPICS.len() - 1) % MESSAGE_TOPICS.len();
-                        }
-                        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
-                            *topic_idx = (*topic_idx + 1) % MESSAGE_TOPICS.len();
-                        }
-                        _ => {}
-                    },
-                    ComposeField::Urgent => {
-                        if matches!(
-                            key.code,
-                            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter
-                        ) {
-                            *urgent = !*urgent;
-                        }
-                    }
-                    ComposeField::Wake => {
-                        if matches!(
-                            key.code,
-                            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') | KeyCode::Enter
-                        ) {
-                            *wake = !*wake;
-                        }
-                    }
-                },
-            },
             Modal::ViewMessage { .. } => {}
         }
 
@@ -1358,29 +1511,6 @@ impl SwarmView {
                 }
             }
             Modal::ViewMessage { .. } => Outcome::None,
-            Modal::ComposeMessage {
-                to_launch,
-                reply_to,
-                topic_idx,
-                body,
-                urgent,
-                wake,
-                ..
-            } => {
-                let b = body.text.trim().to_string();
-                if b.is_empty() {
-                    self.status_msg = Some("Message body cannot be empty.".into());
-                    return Outcome::None;
-                }
-                Outcome::SendMessage {
-                    to_launch,
-                    reply_to,
-                    topic: MESSAGE_TOPICS[topic_idx % MESSAGE_TOPICS.len()].to_string(),
-                    body: b,
-                    urgent,
-                    wake,
-                }
-            }
         }
     }
 
@@ -1411,6 +1541,47 @@ impl SwarmView {
             }
         }
     }
+}
+
+/// `Tab` on the command line: completes the `@` word under the cursor to
+/// the next address it could be, cycling on repeat.
+fn complete_address(line: &mut CommandLine, lanes: &[Lane]) {
+    let text = line.text.text.clone();
+    let cursor = line.text.cursor();
+    // Right after a completion the word is the one just inserted, before
+    // the space that follows it.
+    let end = if line.completion.is_some() && text[..cursor].ends_with(' ') {
+        cursor - 1
+    } else {
+        cursor
+    };
+    let start = text[..end].rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    let word = &text[start..end];
+    let Some(at) = word
+        .find('@')
+        .filter(|&i| word[..i].chars().all(|c| c == '!'))
+    else {
+        return;
+    };
+    let at = start + at;
+    let (prefix, next) = match &line.completion {
+        Some((p, i)) => (p.clone(), i + 1),
+        None => (squash(&text[at + 1..end]), 0),
+    };
+    let candidates: Vec<String> = addresses(lanes)
+        .into_iter()
+        .filter(|name| squash(name).starts_with(&prefix))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let index = next % candidates.len();
+    let mut new = format!("{}@{} ", &text[..at], candidates[index]);
+    let caret = new.len();
+    new.push_str(text[cursor..].trim_start());
+    line.text.set(new);
+    line.text.set_cursor(caret);
+    line.completion = Some((prefix, index));
 }
 
 fn step_index(cur: usize, len: usize, delta: isize) -> usize {
@@ -1674,7 +1845,12 @@ mod tests {
         for c in "yes".chars() {
             view.handle_key(key(KeyCode::Char(c)));
         }
-        let out = view.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(
+            view.command.as_ref().map(|c| c.text.text.as_str()),
+            Some("@coord yes")
+        );
+        let out = view.handle_key(key(KeyCode::Enter));
+        assert!(view.command.is_none());
         assert_eq!(
             out,
             Outcome::SendMessage {
@@ -1846,64 +2022,220 @@ mod tests {
         assert!(matches!(view.modal, Some(Modal::LaunchSwarm { .. })));
     }
 
-    #[test]
-    fn the_composer_keeps_text_keys_for_the_body_and_tabs_to_its_options() {
+    /// A swarm with a coordinator, two codex implementers and a tester.
+    fn crowd() -> (tempfile::TempDir, SwarmView) {
         let (dir, db) = store();
-        let mut view = SwarmView::open(
+        let conn = open_aux(&db).unwrap();
+        let ws = bstore::normalize_workspace(dir.path());
+        for (who, at) in [("aaaa1111", 1), ("bbbb2222", 2), ("cccc3333", 3)] {
+            bstore::split_tasks(
+                &conn,
+                Some(&db),
+                &ws,
+                "coord-1",
+                &[NewTaskSpec {
+                    title: format!("task {who}"),
+                    instructions: "…".into(),
+                    assigned_to: Some(who.into()),
+                    ..Default::default()
+                }],
+                at,
+            )
+            .unwrap();
+        }
+        let worker = |idx: usize, launch: &str, persona: &str, provider: &str| {
+            let mut s = coordinator_live(&ws, "working");
+            s.session_idx = idx;
+            s.launch_id = launch.into();
+            s.agent_persona = Some(persona.into());
+            s.provider = provider.into();
+            s
+        };
+        let live = vec![
+            coordinator_live(&ws, "working"),
+            worker(1, "aaaa1111", "implementer", "codex"),
+            worker(2, "bbbb2222", "implementer", "codex"),
+            worker(3, "cccc3333", "tester", "agy"),
+        ];
+        let view = SwarmView::open(
             dir.path().to_path_buf(),
             Some(open_aux(&db).unwrap()),
-            &[],
-            2_000,
+            &live,
+            10,
         );
-        view.handle_key(key(KeyCode::Char('b')));
+        (dir, view)
+    }
+
+    fn parse(view: &SwarmView, text: &str) -> Result<Outgoing, String> {
+        parse_command(text, &view.snapshot, &view.lanes, None, view.selected())
+    }
+
+    #[test]
+    fn the_command_line_reads_who_how_and_what() {
+        let (_dir, view) = crowd();
+        let to = |r: Result<Outgoing, String>| match r {
+            Ok(o) => (
+                match o.to {
+                    Recipient::Everyone => "everyone".to_string(),
+                    Recipient::Launch { name, .. } => name,
+                },
+                o.topic,
+                o.body,
+                o.urgent,
+            ),
+            Err(e) => (format!("error: {e}"), String::new(), String::new(), false),
+        };
+        let row =
+            |a: &str, b: &str, c: &str, d: bool| (a.to_string(), b.to_string(), c.to_string(), d);
+        assert_eq!(
+            to(parse(&view, "@coord ship it")),
+            row("coordinator·claude", "directive", "ship it", false)
+        );
+        assert_eq!(
+            to(parse(&view, "@all stop editing src/")),
+            row("everyone", "directive", "stop editing src/", false)
+        );
+        assert_eq!(
+            to(parse(&view, "@tester run it")),
+            row("tester·agy", "directive", "run it", false)
+        );
+        assert_eq!(
+            to(parse(&view, "@tester.agy run it")),
+            row("tester·agy", "directive", "run it", false)
+        );
+        assert_eq!(
+            to(parse(&view, "! @tester stop now")),
+            row("tester·agy", "urgent", "stop now", true)
+        );
+        assert_eq!(
+            to(parse(&view, "!@tester stop now")),
+            row("tester·agy", "urgent", "stop now", true)
+        );
+        assert_eq!(
+            to(parse(&view, "@tester #api-contract v2 is final")),
+            row("tester·agy", "api-contract", "v2 is final", false)
+        );
+        assert_eq!(
+            to(parse(&view, "@bbbb please")),
+            row("implementer·codex bbbb", "directive", "please", false)
+        );
+        assert_eq!(
+            to(parse(&view, "@implementer·codex·bbbb please")),
+            row("implementer·codex bbbb", "directive", "please", false),
+            "a completed address is one word"
+        );
+        // No address: the selected lane (the coordinator, first).
+        assert_eq!(
+            to(parse(&view, "hello")),
+            row("coordinator·claude", "directive", "hello", false)
+        );
+        for (text, why) in [
+            (
+                "@impl go",
+                "@impl could be implementer·codex aaaa or implementer·codex bbbb",
+            ),
+            ("@nobody go", "nobody here is called @nobody"),
+            ("@tester", "write the message after the address"),
+            (
+                "@tester @coord hi",
+                "one recipient per message: @all writes to everyone",
+            ),
+        ] {
+            assert_eq!(parse(&view, text), Err(why.to_string()), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_reply_answers_its_question_unless_readdressed() {
+        let (_dir, view) = crowd();
+        let q = BusMessage {
+            id: "msg-1".into(),
+            workspace: String::new(),
+            from_launch: "cccc3333".into(),
+            to_launch: Some("user".into()),
+            topic: "question".into(),
+            body: "drop the trigger?".into(),
+            reply_to: None,
+            created_ns: 5,
+            delivered_ns: None,
+            acked_ns: None,
+        };
+        let reply =
+            parse_command("@tester yes", &view.snapshot, &view.lanes, Some(&q), None).unwrap();
+        assert_eq!(
+            (reply.topic.as_str(), reply.reply_to.as_deref()),
+            ("answer", Some("msg-1"))
+        );
+        let bare = parse_command("yes", &view.snapshot, &view.lanes, Some(&q), None).unwrap();
+        assert_eq!(
+            bare.reply_to.as_deref(),
+            Some("msg-1"),
+            "no address: the asker"
+        );
+        let other =
+            parse_command("@coord fyi", &view.snapshot, &view.lanes, Some(&q), None).unwrap();
+        assert_eq!((other.topic.as_str(), other.reply_to), ("directive", None));
+    }
+
+    #[test]
+    fn the_command_line_completes_addresses_and_keeps_text_keys() {
+        let (_dir, mut view) = crowd();
+        view.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT));
+        assert!(view.text_entry_active());
+        for c in "@te".chars() {
+            view.handle_key(key(KeyCode::Char(c)));
+        }
+        view.handle_key(key(KeyCode::Tab));
+        assert_eq!(view.command.as_ref().unwrap().text.text, "@tester·agy ");
+        // `@i` cycles through both implementers.
+        view.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        view.handle_key(key(KeyCode::Char('@')));
+        view.handle_key(key(KeyCode::Char('i')));
+        view.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            view.command.as_ref().unwrap().text.text,
+            "@implementer·codex·aaaa "
+        );
+        view.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            view.command.as_ref().unwrap().text.text,
+            "@implementer·codex·bbbb "
+        );
+        // Text keys stay text keys: Ctrl+W deletes a word, Alt+Enter a new line.
         for c in "one two".chars() {
             view.handle_key(key(KeyCode::Char(c)));
         }
-        // Ctrl+W deletes a word in the body, Enter adds a line.
         view.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-        view.handle_key(key(KeyCode::Enter));
+        view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
         view.handle_key(key(KeyCode::Char('x')));
-        match &view.modal {
-            Some(Modal::ComposeMessage { body, wake, .. }) => {
-                assert_eq!(body.text, "one \nx");
-                assert!(*wake);
-            }
-            other => panic!("{other:?}"),
-        }
-        // Tab reaches the options; Space changes them.
-        view.handle_key(key(KeyCode::Tab));
-        view.handle_key(key(KeyCode::Char(' ')));
-        view.handle_key(key(KeyCode::Tab));
-        view.handle_key(key(KeyCode::Char(' ')));
-        view.handle_key(key(KeyCode::Tab));
-        view.handle_key(key(KeyCode::Char(' ')));
-        match &view.modal {
-            Some(Modal::ComposeMessage {
-                topic_idx,
-                urgent,
-                wake,
-                field,
-                ..
-            }) => {
-                assert_eq!(*topic_idx, 1);
-                assert!(*urgent);
-                assert!(!*wake);
-                assert_eq!(*field, ComposeField::Wake);
-            }
-            other => panic!("{other:?}"),
-        }
-        // Ctrl+Enter sends from any field.
-        let out = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(
+            view.command.as_ref().unwrap().text.text,
+            "@implementer·codex·bbbb one \nx"
+        );
+        view.paste(" pasted");
+        let out = view.handle_key(key(KeyCode::Enter));
         assert_eq!(
             out,
             Outcome::SendMessage {
-                to_launch: None,
+                to_launch: Some("bbbb2222".into()),
                 reply_to: None,
-                topic: "answer".into(),
-                body: "one \nx".into(),
-                urgent: true,
-                wake: false,
+                topic: "directive".into(),
+                body: "one \nx pasted".into(),
+                urgent: false,
+                wake: true,
             }
         );
+
+        // An error keeps the line open; Esc drops it.
+        view.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(view.command.as_ref().unwrap().text.text, "@all ");
+        view.handle_key(key(KeyCode::Enter));
+        assert!(view.command.is_some());
+        assert_eq!(
+            view.command_preview(),
+            Some(Err("write the message after the address".into()))
+        );
+        view.handle_key(key(KeyCode::Esc));
+        assert!(view.command.is_none() && !view.text_entry_active());
     }
 }

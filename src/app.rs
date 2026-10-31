@@ -3086,6 +3086,10 @@ impl App {
             view.paste(text);
             return;
         }
+        if let Mode::Swarm(view) = &mut self.mode {
+            view.paste(text);
+            return;
+        }
         if !matches!(self.mode, Mode::Main) {
             return;
         }
@@ -5050,7 +5054,7 @@ impl App {
                 }
                 if wake {
                     let prompt = if urgent {
-                        format!("[URGENT message on {topic}]: {body}")
+                        format!("[URGENT from the operator]: {body}")
                     } else {
                         format!("[Message on {topic}]: {body}")
                     };

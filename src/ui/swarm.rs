@@ -1,12 +1,13 @@
 //! Drawing Swarm Mission Control (`crate::app::swarm_view`): the mission
 //! strip, the Needs-you strip, the lanes, the focus panel (Live, Thread,
-//! Changes, Task) or the swarm's Activity, and the footer.
+//! Changes, Task) or the swarm's Activity, and the footer or the `>`
+//! command line.
 
 use super::flow::{dim, head, hints};
 use crate::app::App;
 use crate::app::swarm_view::{
-    ComposeField, Confirm, Focus, HARNESS_CYCLE, LaunchField, MESSAGE_TOPICS, Modal, PanelTab,
-    SwarmView, TaskField, WorkerField, format_task_detail_lines,
+    Confirm, Focus, HARNESS_CYCLE, LaunchField, Modal, PanelTab, Recipient, SwarmView, TaskField,
+    WorkerField, format_task_detail_lines,
 };
 use crate::app::workspaces_view::tilde_path;
 use crate::bus::swarm::{ActivityItem, Lane, LaneKind, LaneState, NeedKind, Phase};
@@ -40,10 +41,11 @@ pub fn draw(f: &mut Frame, area: Rect, v: &SwarmView, app: &App) {
     } else {
         1 + shown as u16
     };
+    let foot_h = if v.command.is_some() { 2 } else { 1 };
     let [needs_area, body, foot] = Layout::vertical([
         Constraint::Length(needs_h.min(inner.height.saturating_sub(4))),
         Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(foot_h),
     ])
     .areas(inner);
     draw_needs(f, needs_area, v, shown);
@@ -753,7 +755,82 @@ fn topic_style(topic: &str) -> Style {
     }
 }
 
+/// The command line: what the message would do (or why it cannot), then
+/// the input with its cursor, its tail kept in view.
+fn draw_command(f: &mut Frame, area: Rect, v: &SwarmView) {
+    let Some(line) = &v.command else {
+        return;
+    };
+    let width = area.width as usize;
+    let preview = match v.command_preview() {
+        Some(Ok(out)) => {
+            let to = match &out.to {
+                Recipient::Everyone => "everyone".to_string(),
+                Recipient::Launch { name, .. } => name.clone(),
+            };
+            let everyone = out.to == Recipient::Everyone;
+            let how = match (out.urgent, everyone) {
+                (true, false) => "delivered at its next tool call, or wakes it",
+                (true, true) => "delivered to each at its next tool call, or wakes it",
+                (false, false) => "wakes it if idle",
+                (false, true) => "wakes every idle session",
+            };
+            let mut spans = vec![
+                Span::styled(" → ", Style::default().fg(Color::Green)),
+                Span::styled(
+                    to,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!(" · {}", out.topic), topic_style(&out.topic)),
+                Span::styled(format!(" · {how}"), dim()),
+            ];
+            if out.reply_to.is_some() {
+                spans.push(Span::styled(" · answers its message", dim()));
+            }
+            spans.push(Span::styled(
+                "   Enter send · Tab complete @ · Esc cancel",
+                dim(),
+            ));
+            Line::from(spans)
+        }
+        Some(Err(why)) => Line::from(vec![
+            Span::styled(" ✗ ", Style::default().fg(Color::Red)),
+            Span::styled(why, Style::default().fg(Color::Red)),
+            Span::styled(
+                "   @coord @all @<lane> · ! urgent · #topic · Esc cancel",
+                dim(),
+            ),
+        ]),
+        None => Line::raw(""),
+    };
+    let text = &line.text.text;
+    let cursor = line.text.cursor();
+    let shown = format!("{}▏{}", &text[..cursor], &text[cursor..]).replace('\n', " ⏎ ");
+    let room = width.saturating_sub(3);
+    let tail: String = {
+        let chars: Vec<char> = shown.chars().collect();
+        let skip = chars.len().saturating_sub(room);
+        chars[skip..].iter().collect()
+    };
+    let input = Line::from(vec![
+        Span::styled(
+            " > ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(tail, Style::default().fg(Color::White)),
+    ]);
+    f.render_widget(Paragraph::new(vec![preview, input]), area);
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, v: &SwarmView) {
+    if v.command.is_some() {
+        draw_command(f, area, v);
+        return;
+    }
     if let Some(msg) = &v.status_msg {
         f.render_widget(
             Paragraph::new(Line::styled(
@@ -812,7 +889,7 @@ fn draw_footer(f: &mut Frame, area: Rect, v: &SwarmView) {
             ("1-4", "view"),
             ("Enter", "attach"),
             ("m", "message"),
-            ("b", "all"),
+            (">", "command"),
             ("n", "worker"),
             ("x", "stop"),
             ("a", "activity"),
@@ -1034,81 +1111,6 @@ fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, v: &SwarmView) {
             lines.push(hints(&[
                 ("Tab", "next field"),
                 ("Ctrl+S", "save task"),
-                ("Esc", "cancel"),
-            ]));
-            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-        }
-
-        Modal::ComposeMessage {
-            to_label,
-            topic_idx,
-            body,
-            urgent,
-            wake,
-            field,
-            ..
-        } => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .title(format!(" Send Bus Message → {to_label} "));
-            let inner = block.inner(popup);
-            f.render_widget(block, popup);
-
-            let topic = MESSAGE_TOPICS[*topic_idx % MESSAGE_TOPICS.len()];
-            let on_off = |on: bool| if on { "[x]" } else { "[ ]" };
-            let mut lines = Vec::new();
-            lines.push(field_header("Message Body:", *field == ComposeField::Body));
-            for l in body.text.lines().take(6) {
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(l.to_string(), Style::default().fg(Color::White)),
-                ]));
-            }
-            if body.text.is_empty() {
-                lines.push(Line::styled("  (Enter adds a line)", dim()));
-            }
-            lines.push(Line::raw(""));
-            lines.push(Line::from(vec![
-                field_span("Topic: ", *field == ComposeField::Topic),
-                Span::styled(format!("◀ {topic} ▶"), topic_style(topic)),
-            ]));
-            lines.push(Line::from(vec![
-                field_span(
-                    "Urgent (injected mid-turn): ",
-                    *field == ComposeField::Urgent,
-                ),
-                Span::styled(
-                    on_off(*urgent),
-                    if *urgent {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    } else {
-                        dim()
-                    },
-                ),
-            ]));
-            lines.push(Line::from(vec![
-                field_span("Wake idle session: ", *field == ComposeField::Wake),
-                Span::styled(
-                    on_off(*wake),
-                    if *wake {
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        dim()
-                    },
-                ),
-            ]));
-            lines.push(Line::raw(""));
-            lines.push(hints(&[
-                ("Tab", "field"),
-                ("←/→/Space", "change"),
-                ("Ctrl+Enter", "send"),
                 ("Esc", "cancel"),
             ]));
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
