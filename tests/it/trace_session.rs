@@ -565,3 +565,183 @@ sleep 30
         rt.shutdown(Duration::from_secs(5)).await;
     }
 }
+
+/// An in-session `/clear` or `/resume` fires a `SessionStart` hook event with
+/// the new session id and transcript path. The pipeline must follow the continuation,
+/// re-point the launch's `session_key` to the new session, and `save_active_sessions`
+/// must save the newest conversation so a subsequent restart restores the last session,
+/// not the penultimate one.
+#[tokio::test]
+async fn a_session_cleared_or_resumed_via_hook_follows_continuation_and_persists_latest() {
+    use agent_mux::tracing::hooks::{ContentPolicy, HookSource, parse};
+    use agent_mux::tracing::store::{insert_hook_event, open_hook_sink, poke_wake};
+
+    const NEXT: &str = "b2d35ace-0000-4000-8000-000000000099";
+    let temp = tempfile::tempdir().unwrap();
+    let claude_dir = temp.path().join("claude-home");
+    let workdir = temp.path().join("proj");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let db_path = temp.path().join("store").join("traces.db");
+    let projects_dir = claude_dir
+        .join("projects")
+        .join(agent_mux::history::project_slug(&workdir));
+    std::fs::create_dir_all(&projects_dir).unwrap();
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script_path = bin_dir.join("claude");
+
+    // Fake claude starts with an initial session and stays alive waiting
+    let script = format!(
+        r#"#!/bin/sh
+sid=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--session-id" ]; then sid="$a"; fi
+  prev="$a"
+done
+[ -n "$sid" ] || exit 3
+printf '%s\n' '{{"type":"user","timestamp":"2026-09-01T10:00:00Z","cwd":"{cwd}","message":{{"role":"user","content":[{{"type":"text","text":"hello"}}]}}}}' >> "{proj}/$sid.jsonl"
+printf '%s\n' '{{"type":"assistant","timestamp":"2026-09-01T10:00:01Z","message":{{"role":"assistant","model":"claude-haiku-4-5-20251001","usage":{{"input_tokens":10,"output_tokens":2}},"content":[{{"type":"text","text":"hi"}}]}}}}' >> "{proj}/$sid.jsonl"
+sleep 30
+"#,
+        proj = projects_dir.display(),
+        cwd = workdir.display(),
+    );
+    std::fs::write(&script_path, script).unwrap();
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let toml = format!(
+        r#"
+        [tracing]
+        db_path = "{db}"
+        content_mode = "full"
+        poll_interval_ms = 50
+        flush_interval_ms = 30
+        claude_dir = "{claude}"
+
+        [[profiles]]
+        name = "Claude Code"
+        command = "{cmd}"
+        args = []
+        default_dir = "{dir}"
+        "#,
+        db = db_path.display(),
+        claude = claude_dir.display(),
+        cmd = script_path.display(),
+        dir = workdir.display(),
+    );
+    let cfg = config::parse(&toml).unwrap();
+    let resolved = config::resolve_tracing(cfg.tracing.as_ref(), &|_| None).unwrap();
+    let (tx, mut rx) = mpsc::channel(1024);
+    let runtime = TraceRuntime::new(resolved, tx.clone()).unwrap();
+    let mut app = App::new(cfg.profiles.clone(), Some(runtime), tx);
+    app.clipboard_enabled = false;
+    let sessions_path = temp.path().join("sessions.json");
+    app.set_sessions_file(&sessions_path);
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert_eq!(app.sessions.len(), 1, "spawn failed: {:?}", app.notice);
+
+    let launch_id = app.sessions[0].trace.as_ref().unwrap().launch_id.clone();
+
+    // Wait for the pipeline to correlate the initial session
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut initial_sid: Option<String> = None;
+    while Instant::now() < deadline && initial_sid.is_none() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        initial_sid = open_ro(&db_path).ok().and_then(|c| {
+            c.query_row(
+                "SELECT session_key FROM launches WHERE id = ?1 AND session_key IS NOT NULL",
+                [&launch_id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        });
+    }
+    let initial_key = initial_sid.expect("initial session was not correlated");
+    let initial_id = initial_key.strip_prefix("claude:").unwrap().to_string();
+    assert_ne!(initial_id, NEXT);
+
+    // Now write the successor transcript (as Claude does on /clear or /resume)
+    let next_transcript = projects_dir.join(format!("{NEXT}.jsonl"));
+    std::fs::write(
+        &next_transcript,
+        format!(
+            "{{\"type\":\"user\",\"timestamp\":\"2026-09-01T10:05:00Z\",\"cwd\":\"{}\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"resumed work\"}}]}}}}\n{{\"type\":\"assistant\",\"timestamp\":\"2026-09-01T10:05:01Z\",\"message\":{{\"role\":\"assistant\",\"model\":\"claude-haiku-4-5-20251001\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":2}},\"content\":[{{\"type\":\"text\",\"text\":\"resumed response\"}}]}}}}\n",
+            workdir.display()
+        ),
+    )
+    .unwrap();
+
+    // Fire the SessionStart hook announcing NEXT (with source "clear")
+    let sink = open_hook_sink(&db_path, Duration::from_millis(500)).unwrap();
+    let policy = ContentPolicy::full();
+    let start_event = parse(
+        HookSource::Claude,
+        None,
+        &serde_json::json!({
+            "session_id": NEXT,
+            "hook_event_name": "SessionStart",
+            "source": "clear",
+            "cwd": workdir.to_string_lossy(),
+            "transcript_path": next_transcript.to_string_lossy(),
+        }),
+        &policy,
+        agent_mux::tracing::store::now_ns(),
+        Some(launch_id.clone()),
+    )
+    .unwrap();
+    insert_hook_event(&sink, &start_event).unwrap();
+    drop(sink);
+    poke_wake(&db_path);
+
+    // Pump events until launches.session_key points to claude:NEXT
+    let followed = pump_until(&mut rx, &mut app, Duration::from_secs(10), |_| {
+        open_ro(&db_path)
+            .ok()
+            .and_then(|c| {
+                c.query_row(
+                    "SELECT session_key FROM launches WHERE id = ?1",
+                    [&launch_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+            })
+            .as_deref()
+            == Some(&format!("claude:{NEXT}"))
+    })
+    .await;
+    assert!(followed, "pipeline did not follow continuation into NEXT");
+
+    // Save active sessions: must record NEXT, not initial_id
+    app.save_active_sessions().unwrap();
+    let saved = agent_mux::persistence::load_saved_sessions(&sessions_path);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        saved[0].conversation.as_deref(),
+        Some(NEXT),
+        "persisted conversation must be NEXT (latest), not initial_id (anti-last)"
+    );
+
+    // Kill app1 and restore in app2
+    app.kill_all();
+    if let Some(rt) = app.take_tracing() {
+        rt.shutdown(Duration::from_secs(5)).await;
+    }
+
+    let (tx2, _rx2) = mpsc::channel(1024);
+    let mut app2 = App::new(cfg.profiles, None, tx2);
+    app2.set_sessions_file(&sessions_path);
+    app2.restore_saved_sessions();
+
+    assert_eq!(app2.sessions.len(), 1);
+    assert_eq!(
+        app2.sessions[0].profile.args,
+        vec!["--dangerously-skip-permissions", "--resume", NEXT],
+        "restored session must resume NEXT (latest), not initial_id (anti-last)"
+    );
+    app2.kill_all();
+}
