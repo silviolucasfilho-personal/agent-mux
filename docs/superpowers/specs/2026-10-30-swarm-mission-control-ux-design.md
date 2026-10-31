@@ -1,6 +1,6 @@
 # Swarm Mission Control (`Mode::Swarm`, second layout) — design
 
-Status: P1 and P2 implemented, 2026-10-30. Replaces the four-quadrant layout of
+Status: P1, P2 and P3 implemented, 2026-10-30. Replaces the four-quadrant layout of
 `2026-10-29-agent-swarm-screen-design.md` section 3; the data model, the bus
 and the CLI of that spec stay.
 
@@ -168,7 +168,7 @@ gone: the panel's tabs, the lanes' leases and the Thread replace them.
 | --- | --- |
 | **P1** | Lanes with stable names and states, the mission strip, the focus panel with its four tabs, Activity, the keys above, replies carry `reply_to`. |
 | **P2** | **Needs you**: a session waiting on a prompt, questions to the operator (at once) or unanswered for `STUCK_AFTER`, failed tasks (`r` retries: re-open and delegate, reusing the task's worktree), lost tasks (session exited mid-task, also retryable), stuck lanes (a non-terminal task whose session has printed nothing for `STUCK_AFTER` with no tool running), the cap reached while tasks are queued, finished worktree lanes waiting for review. `!` focuses the strip, `Enter` acts, `d` dismisses for the screen's lifetime. Activity gains task and lease events. Spawns refused by the cap are not events: the refusal is not recorded anywhere but the response, and the cap need covers it. |
-| **P3** | A `>` command line replaces the composer form: `@coord`, `@all`, `@<lane>` (default: the selected lane), a leading `!` marks it urgent, wake is always on, the topic is inferred (a reply to a question is `answer`, `@all` is `directive`). |
+| **P3** | A `>` command line replaces the composer form: `@coord`, `@all`, `@<lane>` (separator-blind prefix or launch id; default: the selected lane, or the asker for a reply), `Tab` completes `@`, a leading `!` marks it urgent and sends it with topic `urgent` (the form's Urgent toggle only changed the wake prompt, so the hook never delivered it mid-turn), wake is always on, the topic is inferred (a reply to a question is `answer`, else `directive`) unless `#topic` names one, and a preview line says what Enter will do or why it cannot. |
 | **P4** | Phases become behaviour: the **plan gate** (the coordinator publishes its plan and waits; the operator approves, edits or rejects it before any worker spawns), an *integrating* phase listing finished worktree branches to review and merge, and a done summary with stop or keep. |
 
 ### Decisions

@@ -282,19 +282,37 @@ fn enter_opens_a_message_in_full_and_m_answers_it() {
         unreachable!()
     };
     view.handle_key(key(KeyCode::Char('m')));
-    match &view.modal {
-        Some(Modal::ComposeMessage {
-            to_launch,
-            reply_to,
-            topic_idx,
-            ..
-        }) => {
-            assert_eq!(to_launch.as_deref(), Some("worker-bbbb"));
-            assert_eq!(reply_to.as_deref(), Some(question.as_str()));
-            assert_eq!(*topic_idx, 1, "a question gets an answer");
-        }
-        other => panic!("expected the composer, got {other:?}"),
+    assert!(view.modal.is_none(), "the reply replaces the message view");
+    for c in "yes, unless dirty".chars() {
+        view.handle_key(key(KeyCode::Char(c)));
     }
+    app.mode = Mode::Swarm(view);
+    let screen = render(&app, 120, 36);
+    let lines: Vec<&str> = screen.lines().collect();
+    let input = lines
+        .iter()
+        .position(|l| l.contains("> @worker·codex yes, unless dirty▏"))
+        .unwrap_or_else(|| panic!("no command line:\n{screen}"));
+    assert!(
+        lines[input - 1]
+            .contains("→ worker·codex · answer · wakes it if idle · answers its message"),
+        "{}",
+        lines[input - 1]
+    );
+    let Mode::Swarm(mut view) = app.mode else {
+        unreachable!()
+    };
+    assert_eq!(
+        view.handle_key(key(KeyCode::Enter)),
+        Outcome::SendMessage {
+            to_launch: Some("worker-bbbb".into()),
+            reply_to: Some(question),
+            topic: "answer".into(),
+            body: "yes, unless dirty".into(),
+            urgent: false,
+            wake: true,
+        }
+    );
 }
 
 /// The fixture plus a question to the operator and a failed task.
@@ -391,18 +409,14 @@ fn the_strip_lists_what_needs_you_and_bang_acts_on_it() {
     view.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT));
     assert_eq!(view.focus, Focus::Needs);
     view.handle_key(key(KeyCode::Enter));
-    match &view.modal {
-        Some(Modal::ComposeMessage {
-            to_launch,
-            reply_to,
-            ..
-        }) => {
-            assert_eq!(to_launch.as_deref(), Some("worker-aaaa"));
-            assert_eq!(reply_to.as_deref(), Some(question.as_str()));
-        }
-        other => panic!("expected the composer, got {other:?}"),
-    }
+    let line = view.command.as_ref().expect("the command line opens");
+    assert_eq!(line.text.text, "@worker·claude ");
+    assert_eq!(
+        line.reply_to.as_ref().map(|m| m.id.as_str()),
+        Some(question.as_str())
+    );
     view.handle_key(key(KeyCode::Esc));
+    assert!(view.command.is_none());
 
     // `r` retries the failed task; `d` dismisses it.
     view.handle_key(key(KeyCode::Down));
