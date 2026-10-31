@@ -1237,6 +1237,13 @@ fn spawn_wake_listener(_db_path: &Path, _wake: Arc<tokio::sync::Notify>) -> Opti
     None
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingContinuation {
+    session_id: String,
+    transcript_path: Option<PathBuf>,
+    from_hook: bool,
+}
+
 struct Pipeline {
     ctx: PipelineCtx,
     assembler: TurnAssembler,
@@ -1255,9 +1262,9 @@ struct Pipeline {
     started: Instant,
     /// Warning kinds already put on the status bar for this launch.
     warned: HashSet<&'static str>,
-    /// A successor session named by `continued-in` that has not been
-    /// followed yet: the file usually appears a tick or two later.
-    pending_continuation: Option<String>,
+    /// A successor session named by `continued-in` or a `SessionStart` hook
+    /// that has not been followed yet: the file usually appears a tick or two later.
+    pending_continuation: Option<PendingContinuation>,
     /// Sessions this launch has already followed into, so a chain that
     /// loops back cannot make the pipeline ping-pong between two files.
     followed: HashSet<String>,
@@ -1470,6 +1477,18 @@ impl Pipeline {
         for ev in &events {
             match ev.event.as_str() {
                 "SessionStart" => {
+                    if let Some(adopted) = self.adopted.as_ref()
+                        && !ev.session_id.trim().is_empty()
+                        && adopted.session_id != ev.session_id
+                    {
+                        self.pending_continuation = Some(PendingContinuation {
+                            session_id: ev.session_id.clone(),
+                            transcript_path: ev.transcript_path.as_deref().map(PathBuf::from),
+                            from_hook: true,
+                        });
+                        self.send_ops(std::mem::take(&mut ops));
+                        self.follow_continuation();
+                    }
                     let meta = serde_json::json!({
                         "hooks": true,
                         "session_start_source": ev.payload.get("source").cloned().unwrap_or(serde_json::Value::Null),
@@ -1523,7 +1542,9 @@ impl Pipeline {
     }
 
     /// Claude ends a forked or continued session with a `continued-in`
-    /// line and writes every later message to the successor's transcript.
+    /// line and writes every later message to the successor's transcript;
+    /// similarly, an in-session `/clear` or `/resume` fires a `SessionStart`
+    /// hook with the new session id.
     /// Without following it the launch stays "live" while its transcript
     /// is finished: turns never close, tool rows never appear, and the
     /// hook pins for the successor's calls pile up against rows that will
@@ -1531,31 +1552,54 @@ impl Pipeline {
     /// feed and the launch's session key at the successor.
     fn follow_continuation(&mut self) {
         if let Some(next) = self.assembler.take_continuation() {
-            self.pending_continuation = Some(next);
+            self.pending_continuation = Some(PendingContinuation {
+                session_id: next,
+                transcript_path: None,
+                from_hook: false,
+            });
         }
-        let Some(next) = self.pending_continuation.clone() else {
+        let Some(pending) = self.pending_continuation.clone() else {
             return;
         };
         let Some(adopted) = self.adopted.as_ref() else {
             return;
         };
-        // A successor already visited means the chain looped; stop rather
-        // than swap back and forth re-priming both files forever.
-        if self.followed.contains(&next) {
+        if adopted.session_id == pending.session_id {
             self.pending_continuation = None;
             return;
         }
-        // Claude names the successor by id only: it is a sibling file in
-        // the same project directory.
-        let Some(dir) = adopted.path.parent() else {
+        // A successor already visited via compaction handoff means the chain looped; stop rather
+        // than swap back and forth re-priming both files forever.
+        // Hook-announced transitions (user /clear or /resume) are explicit and intentional.
+        if !pending.from_hook && self.followed.contains(&pending.session_id) {
             self.pending_continuation = None;
             return;
+        }
+        let path = if let Some(p) = pending.transcript_path {
+            p
+        } else if self.ctx.provider == Provider::Codex {
+            let Some(dir) = self.ctx.codex_sessions_dir.as_deref() else {
+                self.pending_continuation = None;
+                return;
+            };
+            let Some(p) = correlate::codex_rollout_by_thread(dir, &pending.session_id) else {
+                return; // wait for file to appear
+            };
+            p
+        } else {
+            // Claude names the successor by id only: it is a sibling file in
+            // the same project directory.
+            let Some(dir) = adopted.path.parent() else {
+                self.pending_continuation = None;
+                return;
+            };
+            dir.join(format!("{}.jsonl", pending.session_id))
         };
-        let path = dir.join(format!("{next}.jsonl"));
         if !path.is_file() {
             // written a moment after the hand-off: retry on the next tick
             return;
         }
+        let next = pending.session_id;
         if !correlate::try_claim(&self.ctx.claims, self.ctx.provider, &next) {
             // another pipeline is already recording the successor
             self.pending_continuation = None;

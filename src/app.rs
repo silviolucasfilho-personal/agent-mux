@@ -3538,6 +3538,15 @@ impl App {
                     // a restore that failed stays saved (`handle_pty_exit`)
                     return s.restored_from.clone();
                 }
+                let conversation = conn
+                    .as_ref()
+                    .zip(s.trace.as_ref())
+                    .and_then(|(c, t)| {
+                        crate::tracing::store::query::launch_conversation(c, &t.launch_id)
+                            .ok()
+                            .flatten()
+                    })
+                    .or_else(|| s.conversation.clone());
                 Some(persistence::SavedSession {
                     // the first message this launch sent is not sent again
                     profile: {
@@ -3550,15 +3559,7 @@ impl App {
                     continued_from: s.continued_from.clone(),
                     dir: s.dir.clone(),
                     skill_id: s.skill_id.clone(),
-                    conversation: conn
-                        .as_ref()
-                        .zip(s.trace.as_ref())
-                        .and_then(|(c, t)| {
-                            crate::tracing::store::query::launch_conversation(c, &t.launch_id)
-                                .ok()
-                                .flatten()
-                        })
-                        .or_else(|| s.conversation.clone()),
+                    conversation,
                 })
             })
             .collect();
