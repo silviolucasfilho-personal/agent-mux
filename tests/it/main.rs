@@ -37,6 +37,7 @@ mod trace_guard;
 mod trace_hooks;
 mod trace_inventory;
 mod trace_langfuse;
+mod trace_opencode;
 mod trace_provider_matrix;
 mod trace_scores;
 mod trace_service;

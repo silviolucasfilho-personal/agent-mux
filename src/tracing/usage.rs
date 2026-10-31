@@ -132,6 +132,26 @@ pub fn normalize(provider: Provider, raw: &[(String, i64)]) -> NormalizedUsage {
                 total,
             }
         }
+        // OpenCode's per-message `tokens` (`transcript::opencode_row_events`):
+        // `input` is the uncached input, `cache.read`/`cache.write` the
+        // prefix cache, `reasoning` inside `output`'s bill.
+        Provider::OpenCode => {
+            let input = get(raw, "input_tokens");
+            let output = get(raw, "output_tokens");
+            let reasoning = get(raw, "reasoning_tokens");
+            let cache_read = get(raw, "cache_read_tokens");
+            let cache_write = get(raw, "cache_write_tokens");
+            let total = sum_present([input, cache_read, cache_write, output]);
+            NormalizedUsage {
+                input,
+                output,
+                cache_read,
+                cache_write,
+                cache_write_1h: None,
+                reasoning,
+                total,
+            }
+        }
         // Anthropic semantics; Antigravity `-p` shapes are not modeled.
         Provider::Claude | Provider::Antigravity => {
             let input = get(raw, "input_tokens");

@@ -98,7 +98,7 @@ arrive masked and truncated the way the trace store keeps them.
 | Claude Code, with agent-mux's per-launch hooks at the `standard` or `strict` profile and `full` content mode | agent-mux |
 | Codex, when agent-mux's Codex trace hooks are installed | agent-mux |
 | Antigravity | ai-memory's own hooks (agent-mux records only an Antigravity session's first model call) |
-| OpenCode | ai-memory's own plugin (agent-mux does not trace OpenCode sessions yet) |
+| OpenCode | ai-memory's own plugin (agent-mux traces OpenCode from its database, without the tool-call hooks the feed needs) |
 | Loop and workflow runs | Nobody: agent-mux owns their capture and sends nothing, so headless runs stay out of the memory |
 | Sessions started outside agent-mux | ai-memory's own hooks |
 

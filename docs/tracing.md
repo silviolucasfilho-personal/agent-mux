@@ -1,6 +1,6 @@
 # How tracing works
 
-`agent-mux` traces the agent sessions it launches for three provider
+`agent-mux` traces the agent sessions it launches for four provider
 implementations:
 
 | Provider | Profile command | Primary transcript source |
@@ -8,7 +8,7 @@ implementations:
 | Claude Code | `claude` | `~/.claude/projects/<project>/<session>.jsonl` |
 | Codex | `codex` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
 | Antigravity | `agy` | `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript_full.jsonl` (falling back to `transcript.jsonl`) |
-| OpenCode | `opencode` | not traced yet: OpenCode 2 keeps sessions and messages in `~/.local/share/opencode/opencode.db` (tables `session_v2`, `session_message`, with tokens and cost per message) and has plugins instead of hooks; an OpenCode launch gets no trace plan and the sidebar says `not traced` |
+| OpenCode | `opencode` | `~/.local/share/opencode/opencode.db` (`[tracing] opencode_db`): the session's rows in `session_message`, read in place |
 
 Tracing is enabled by default. It is deliberately *fail-open*: a missing
 transcript, unavailable database, malformed line, full queue, or failed
@@ -19,8 +19,8 @@ remote exporter must not block, slow, or prevent the agent session itself.
 At application startup, `TraceRuntime` resolves `[tracing]` configuration and
 opens the local SQLite trace store (by default
 `~/.agent-mux/traces.db`). A profile launch is recognized as traceable from
-its command name (`claude`, `codex`, or `agy`; `opencode` is launched but not
-traced yet), or from `[profiles.tracing].provider` for wrapper commands.
+its command name (`claude`, `codex`, `agy`, or `opencode`), or from
+`[profiles.tracing].provider` for wrapper commands.
 
 For each traceable launch, agent-mux:
 
@@ -222,6 +222,53 @@ customization roots. They are available as an explicit opt-in installation:
 ```text
 agent-mux trace hooks install agy
 ```
+
+## OpenCode (`opencode`)
+
+OpenCode 2 writes no transcript file. Every session is a row of
+`session_v2` and every message a row of `session_message` (`type` in
+`user`, `assistant`, `idle`, `system`, `agent-switched`; `seq` increasing
+per session; `data` JSON) in one SQLite database shared by every OpenCode
+process, `~/.local/share/opencode/opencode.db` (`opencode debug paths`;
+`[tracing] opencode_db` overrides it). `tracing::opencode_db` reads it
+read-only and fails open; `transcript::opencode_row_events` turns one row
+into transcript events, so the assembler is the same as for the file
+providers (probed on opencode 2.0.32, 2026-10-31).
+
+**Correlation.** `opencode --session <id>` names the conversation on both
+command forms and creates it when it does not exist, so a fresh launch is
+`deterministic` the way Claude's is: the plan injects `--session ses_…`
+(an id in OpenCode's spelling) and adopts the session once its row exists
+(`CorrelationSpec::KnownOpenCode`). A `--session <id>` the profile or a
+resume already carries is a known resume: the rows so far are primed,
+never re-recorded. `--continue`, `-c` or a `run … --fork` cannot name the
+session up front: the pipeline watches for the newest top-level session of
+the launch folder created since the launch (`WatchOpenCode`, `watched`).
+`inject_session_id = false` disables the injection and leaves the watch.
+
+**Rows to events.** A `user` row is the prompt; a `system` row (instruction
+notices) is harness chatter on a user line; an `assistant` row is one
+assistant message — its `text` parts joined, its `reasoning` parts as
+thinking, `model` as `<providerID>/<id>`, `tokens.{input, output,
+reasoning, cache.{read, write}}` as its usage (charged once by the row
+id; `usage::normalize` keeps `cache_read` apart from `input`), then a
+tool call and a result per `tool` part (`state.{status, input, content |
+output | error, metadata}`; the part's `time.{created, completed}` date
+them; `status = "error"` fails the result). An assistant row is rewritten
+while its message streams and gets `time.completed` when done: the reader
+hands rows over in `seq` order and stops at the first unfinished one until
+the next poll. An `idle` row closes the turn (`outcome = succeeded`
+completes it, anything else aborts it). The message `cost` OpenCode
+reports is summed into the turn's `provided_cost` (`$` in the sidebar,
+not `≈$`), so a free model shows `$0.00`.
+
+**No hooks.** OpenCode has plugins, not hooks; on 2.0.32 a plugin file in
+its `plugins/` directory is not loaded by a standalone server and hangs
+`opencode run --standalone`, so agent-mux registers none: the write guard,
+the budget guard and the urgent-message injection do not reach OpenCode
+(`trace doctor` lists `opencode on PATH` and `opencode session db`). Its
+`parent_id` on subagent sessions and its `session_pending` (compaction)
+rows are not read yet.
 
 ## Content, privacy, and destinations
 

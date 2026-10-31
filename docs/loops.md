@@ -210,7 +210,7 @@ The **Setup** tab (`3`) is everything about the loop that is not a run: what it 
 
 ## 10. Antigravity and OpenCode
 
-OpenCode is not supported for loops either: it has plugins, not hooks, so no `PreToolUse` guard can be registered, and agent-mux does not trace its sessions yet, so a run's facts (tokens, files touched) could not be computed. The loop dialog and `agent-mux loop` refuse an OpenCode profile.
+OpenCode is not supported for loops either: it has plugins, not hooks, so no `PreToolUse` guard can be registered (its sessions are traced from its database, which gives a run its tokens but no guard). The loop dialog and `agent-mux loop` refuse an OpenCode profile.
 
 Not supported for loops in this version. agy 1.2.3 requires a `decision` in every `PreToolUse` reply and each value changes permission behaviour, so no selective path guard can be registered; its hooks and MCP entry are global installs, its skills and agents are user-level only, and sub-agent spawning is unverified. The spec's section 16 lists the probes and the two deliveries that bring it in.
 

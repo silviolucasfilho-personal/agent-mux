@@ -86,7 +86,7 @@ The version is `<major>.<minor>.<build>`: the crate's major and minor from `Carg
 
 | Term | Meaning |
 | --- | --- |
-| Harness / provider | The external CLI and its data format. The Antigravity command is `agy`; stored provider names are `claude`, `codex`, `antigravity`. OpenCode (`opencode`) is launched, resumed and given skills, agents and the MCP server like the others, but its sessions are not traced yet (it keeps its transcripts in a SQLite database, `~/.local/share/opencode/opencode.db`; a reader is a follow-up), so the sidebar says `not traced` for them. |
+| Harness / provider | The external CLI and its data format. The Antigravity command is `agy`; stored provider names are `claude`, `codex`, `antigravity`. OpenCode (`opencode`) is traced from its own SQLite database (`~/.local/share/opencode/opencode.db`, stored provider name `opencode`; `docs/tracing.md`). |
 | Live session | An in-memory PTY child, VT100 parser, scrollback, status tracker and optional trace handle, owned by `App` (`src/session.rs`). |
 | Provider session | A conversation identity owned by the harness (Claude session UUID, Codex thread id, Antigravity conversation id). Resumable across launches. |
 | Run | One lifetime of a trace-store owner process, recorded in the `runs` table. |
@@ -266,7 +266,7 @@ mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 | `flush_interval_ms` | 250 ms store batch cadence, floored to 20 ms. |
 | `shutdown_flush_ms` | 1,000 ms resolver default; the TUI floors its use at 1,500 ms. |
 | `retention_days` | `0` keeps forever. Positive values prune at TUI store open. CLI writers pass `0`. |
-| `claude_dir`, `codex_dir`, `antigravity_dir` | Optional discovery roots used as given, **without** tilde expansion. |
+| `claude_dir`, `codex_dir`, `antigravity_dir`, `opencode_db` | Optional discovery roots (and OpenCode's session database file) used as given, **without** tilde expansion. |
 | `hooks` | `"off"` → Off; `"installed"` → Installed; anything else → Auto. Auto and Installed behave identically at runtime; only Off suppresses per-launch registration. |
 | `backend` | `local` (alias `sqlite`), `langfuse`, `both`; unknown → local. |
 | `tracing.loops` | Warning thresholds (25 / 6 / 3); `0` disables one. |
@@ -680,7 +680,7 @@ The plan (`LaunchPlan`) carries `launch_id` (a fresh UUIDv4), `extra_args`, `ext
 | Codex | none injected | `-c notify=[…]` when hooks are wanted. | `WatchCodex { sessions_dir: <codex_dir>/sessions, cwd, t0: now }`, label `watched` |
 | Antigravity | `--conversation <id>` in args → `KnownAntigravity`, label `deterministic`; otherwise `WatchAntigravity { root, cwd, t0 }`, label `watched` | none; agy loads hooks only from its plugin directory | `<root>/brain/<conversation>/…` |
 
-A skill launch also sets `plan.skill = (id, harness)`, which `start_session` records as `launches.metadata.skill_id` and `skill_harness`. Every plan sets `AGENT_MUX=1` and `AGENT_MUX_SESSION_ID=<launch_id>` on the child; `AGENT_MUX_EXE=<binary>` is added when hooks are registered. Provider roots: `claude_dir` config → `CLAUDE_CONFIG_DIR` → `~/.claude`; `codex_dir` → `~/.codex`; `antigravity_dir` → `~/.gemini/antigravity-cli`. `hooks_wanted` requires the global mode not `off`, the profile not `hooks = "off"`, and the profile not on the fast-failure latch. The budget guard (`max_cost_usd`/`max_turns`) is stored on the launch row's metadata; when it cannot be enforced (Claude with hooks off, Codex without `~/.codex/hooks.json`, any Antigravity launch) a status notice explains why. A Langfuse backend without credentials downgrades to local and records the request in `backend_requested`. The launch row's `correlation_plan` is `announced+<label>` when hooks were registered, else the bare label.
+A skill launch also sets `plan.skill = (id, harness)`, which `start_session` records as `launches.metadata.skill_id` and `skill_harness`. Every plan sets `AGENT_MUX=1` and `AGENT_MUX_SESSION_ID=<launch_id>` on the child; `AGENT_MUX_EXE=<binary>` is added when hooks are registered. Provider roots: `claude_dir` config → `CLAUDE_CONFIG_DIR` → `~/.claude`; `codex_dir` → `~/.codex`; `antigravity_dir` → `~/.gemini/antigravity-cli`; `opencode_db` → `$XDG_DATA_HOME/opencode/opencode.db`, else `~/.local/share/opencode/opencode.db`. `hooks_wanted` requires the global mode not `off`, the profile not `hooks = "off"`, and the profile not on the fast-failure latch. The budget guard (`max_cost_usd`/`max_turns`) is stored on the launch row's metadata; when it cannot be enforced (Claude with hooks off, Codex without `~/.codex/hooks.json`, any Antigravity launch) a status notice explains why. A Langfuse backend without credentials downgrades to local and records the request in `backend_requested`. The launch row's `correlation_plan` is `announced+<label>` when hooks were registered, else the bare label.
 
 `plan_attach` (the `t` key on a running session) ignores `enabled = false`, still honours `provider = "none"`, injects nothing, sets `attached = true`, and back-dates the watch window by one hour.
 
