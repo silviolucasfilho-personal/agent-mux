@@ -585,7 +585,7 @@ fn trace_from_observations(trace_id: &str, mut all: Vec<ObservationV2>) -> Langf
                 name: o.name,
                 start_time: o.start_time.unwrap_or_default(),
                 end_time: o.end_time,
-                model: o.model,
+                model: o.model.filter(|m| !m.is_empty()), // v2 serves "" on spans
                 model_parameters: o.model_parameters,
                 input: decode_io(o.input),
                 output: decode_io(o.output),
@@ -728,7 +728,8 @@ mod tests {
                 { "id": "root", "traceId": "t-1", "startTime": "2026-11-01T10:00:00Z",
                   "endTime": "2026-11-01T10:00:05Z", "projectId": "p", "type": "SPAN",
                   "isRootObservation": true, "name": "turn", "traceName": "run test",
-                  "sessionId": "claude:s1", "input": "{\"task\":\"run\"}", "totalCost": 0.005 }
+                  "sessionId": "claude:s1", "input": "{\"task\":\"run\"}", "totalCost": 0.005,
+                  "model": "" }
             ],
             "meta": {}
         }"#,
@@ -743,6 +744,7 @@ mod tests {
         assert_eq!(d.input, Some(serde_json::json!({ "task": "run" })));
         assert_eq!(d.observations.len(), 2);
         assert_eq!(d.observations[0].id, "root", "sorted by start time");
+        assert_eq!(d.observations[0].model, None, "an empty model is no model");
         let generation = &d.observations[1];
         assert_eq!(generation.observation_type, "GENERATION");
         assert_eq!(generation.parent_observation_id.as_deref(), Some("root"));
