@@ -32,6 +32,7 @@ pub mod new_agent;
 pub mod runs_view;
 pub mod shortcut_probe;
 pub use config_view::*;
+pub mod langfuse_view;
 pub mod loops;
 pub mod loops_view;
 pub mod markdown_view;
@@ -87,6 +88,8 @@ pub enum Mode {
     Workspaces(Box<workspaces_view::WorkspacesView>),
     /// The Agent Swarm Control Room screen: Coordinator, Workers, Board, Leases and Feed.
     Swarm(Box<swarm_view::SwarmView>),
+    /// The Langfuse screen: remote traces, observation trees, and web links.
+    Langfuse(Box<langfuse_view::LangfuseView>),
 }
 
 /// An external editor the main loop must run for the App: it leaves the
@@ -229,6 +232,7 @@ pub enum Action {
     MemoryKey,
     WorkspacesKey,
     SwarmKey,
+    LangfuseKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
     /// `C`: the Configuration view.
     OpenConfigView,
@@ -814,6 +818,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::Memory(_) => Action::MemoryKey,
         Mode::Workspaces(_) => Action::WorkspacesKey,
         Mode::Swarm(_) => Action::SwarmKey,
+        Mode::Langfuse(_) => Action::LangfuseKey,
         Mode::ConfirmRemoveLoop => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => Action::EnterConfirmRemoveLoop,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
@@ -3319,6 +3324,9 @@ impl App {
         if let Mode::Workspaces(view) = &mut self.mode {
             view.poll();
         }
+        if let Mode::Langfuse(view) = &mut self.mode {
+            view.poll();
+        }
         self.refresh_swarm_if_needed(now);
         self.resync_workflow_selection();
         self.refresh_strip_if_needed(now);
@@ -4614,6 +4622,41 @@ impl App {
         let dir = resolve_working_dir(&self.skill_launcher_workspace());
         let pages = self.workflows_runtime_dir().join("memory-pages");
         self.mode = Mode::Memory(Box::new(memory_view::MemoryView::open(dir, pages)));
+    }
+
+    /// Resolves Langfuse credentials from the active trace runtime if configured.
+    pub fn resolved_langfuse(&self) -> Option<crate::config::ResolvedLangfuse> {
+        self.tracing.as_ref().and_then(|rt| rt.langfuse().cloned())
+    }
+
+    /// The Langfuse screen: browses remote traces, observations, and deep links into the web UI.
+    pub fn open_langfuse_view(&mut self) {
+        let langfuse = self.resolved_langfuse();
+        self.mode = Mode::Langfuse(Box::new(langfuse_view::LangfuseView::new(langfuse, None)));
+    }
+
+    /// Launches the Langfuse Web UI in the default browser.
+    pub fn open_langfuse_web(&mut self) {
+        if let Some(lf) = self.resolved_langfuse() {
+            let url = crate::tracing::langfuse::api::resolve_web_url(
+                &lf.host,
+                lf.project_id.as_deref(),
+                None,
+                None,
+            );
+            self.open_url(&url);
+        } else {
+            self.notice = Some(Notice::warn("Langfuse is not configured"));
+        }
+    }
+
+    fn langfuse_outcome(&mut self, outcome: langfuse_view::Outcome) {
+        use langfuse_view::Outcome;
+        match outcome {
+            Outcome::None => {}
+            Outcome::Close => self.mode = Mode::Main,
+            Outcome::OpenUrl(url) => self.open_url(&url),
+        }
     }
 
     /// Opens the Workspaces Explorer rooted at the launch directory (or
@@ -6122,6 +6165,12 @@ impl App {
                     self.swarm_outcome(outcome, _now);
                 }
             }
+            Action::LangfuseKey => {
+                if let Mode::Langfuse(view) = &mut self.mode {
+                    let outcome = view.handle_key(key);
+                    self.langfuse_outcome(outcome);
+                }
+            }
             Action::MarkdownKey => {
                 if let Mode::Markdown(view) = &mut self.mode {
                     let outcome = view.handle_key(key);
@@ -6602,6 +6651,41 @@ impl App {
         let page = browser.viewport_rows.get().max(1) as isize;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // the same everywhere in the browser
+        if !ctrl && matches!(key.code, KeyCode::Char('w') | KeyCode::Char('o')) {
+            let session_key = browser
+                .sessions
+                .get(browser.selected_session)
+                .map(|s| s.key.clone());
+            let trace_id = browser
+                .turns
+                .get(browser.selected_turn)
+                .map(|t| t.id.clone());
+            let lf = browser.langfuse.clone();
+            if let Some(lf) = lf {
+                let url = crate::tracing::langfuse::api::resolve_web_url(
+                    &lf.host,
+                    lf.project_id.as_deref(),
+                    trace_id.as_deref(),
+                    session_key.as_deref(),
+                );
+                self.open_url(&url);
+            } else {
+                self.notice = Some(Notice::warn("Langfuse is not configured"));
+            }
+            return;
+        }
+        if key.code == KeyCode::Char('L') {
+            let session_key = browser
+                .sessions
+                .get(browser.selected_session)
+                .map(|s| s.key.clone());
+            let langfuse = browser.langfuse.clone();
+            self.mode = Mode::Langfuse(Box::new(langfuse_view::LangfuseView::new(
+                langfuse,
+                session_key,
+            )));
+            return;
+        }
         match key.code {
             KeyCode::Char('b') | KeyCode::Char('B') => {
                 browser.with_sidebar = !browser.with_sidebar;

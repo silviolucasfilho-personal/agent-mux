@@ -17,6 +17,8 @@
 //! open. Being an OS thread, the post-`kill_all` flush has a join point
 //! that survives tokio runtime teardown.
 
+pub mod api;
+pub mod cli;
 pub mod map;
 
 use crate::config::ResolvedLangfuse;

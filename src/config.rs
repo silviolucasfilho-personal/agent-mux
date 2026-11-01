@@ -81,6 +81,7 @@ pub struct LangfuseConfig {
     pub host: Option<String>,
     pub public_key: Option<String>,
     pub secret_key: Option<String>,
+    pub project_id: Option<String>,
     pub flush_interval_ms: Option<u64>,
 }
 
@@ -458,6 +459,7 @@ pub struct ResolvedLangfuse {
     pub host: String,
     pub public_key: String,
     pub secret_key: String,
+    pub project_id: Option<String>,
     pub flush_interval_ms: u64,
     /// The secret came from the config file rather than the environment:
     /// drives the commit-hazard warning.
@@ -503,10 +505,14 @@ pub fn resolve_langfuse(
     if let Some(stripped) = host.strip_suffix("/api/public") {
         host = stripped.to_string();
     }
+    let project_id = section
+        .and_then(|c| non_empty(&c.project_id))
+        .or_else(|| env("LANGFUSE_PROJECT_ID").filter(|s| !s.trim().is_empty()));
     Some(ResolvedLangfuse {
         host,
         public_key: public_key.trim().to_string(),
         secret_key: secret_key.trim().to_string(),
+        project_id,
         flush_interval_ms: section
             .and_then(|c| c.flush_interval_ms)
             .unwrap_or(3000)
@@ -1029,12 +1035,14 @@ mod tests {
         let env = |k: &str| match k {
             "LANGFUSE_PUBLIC_KEY" => Some("pk-env".to_string()),
             "LANGFUSE_SECRET_KEY" => Some("sk-env".to_string()),
+            "LANGFUSE_PROJECT_ID" => Some("proj-env-123".to_string()),
             _ => None,
         };
         let resolved = resolve_tracing(None, &env).unwrap();
         assert_eq!(resolved.backend, Backend::Local);
         let lf = resolved.langfuse.unwrap();
         assert_eq!(lf.host, "https://cloud.langfuse.com");
+        assert_eq!(lf.project_id.as_deref(), Some("proj-env-123"));
         assert!(!lf.secret_from_file);
         // a missing key means no backend, never an error
         let half = |k: &str| (k == "LANGFUSE_PUBLIC_KEY").then(|| "pk".to_string());

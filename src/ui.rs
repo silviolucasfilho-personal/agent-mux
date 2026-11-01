@@ -2,6 +2,7 @@ use crate::app::about::{AboutRow, AboutState};
 mod agent_editor;
 mod commands;
 mod flow;
+pub mod langfuse;
 mod loop_builder;
 pub mod markdown;
 pub mod memory;
@@ -361,6 +362,11 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
             let full = f.area();
             let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
             swarm::draw(f, area, view, app);
+        }
+        Mode::Langfuse(view) => {
+            let full = f.area();
+            let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
+            langfuse::draw(f, area, view);
         }
         Mode::ConfirmRemoveLoop => draw_confirm(
             f,
