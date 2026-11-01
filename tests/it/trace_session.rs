@@ -954,3 +954,68 @@ async fn a_claude_session_persists_newest_conversation_on_disk_across_restart() 
     );
     app2.kill_all();
 }
+
+/// A sessions file saved by an older agent-mux may name one agy
+/// conversation for several panes; resuming it in each made every pane
+/// after the first say "Conversation already open". The first resumes it,
+/// the rest start a new conversation, and the next save keeps them apart.
+#[tokio::test]
+async fn sessions_sharing_one_conversation_restore_only_one_onto_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let workdir = temp.path().join("workspace");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let agy_bin = bin_dir.join("agy");
+    std::fs::write(&agy_bin, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&agy_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let conv = "3dab1569-3974-4883-880f-efa63cff9272";
+    let profile = Profile {
+        name: "Antigravity".into(),
+        command: agy_bin.to_string_lossy().into_owned(),
+        args: vec![
+            "--dangerously-skip-permissions".into(),
+            "--conversation".into(),
+            conv.into(),
+        ],
+        default_dir: None,
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    };
+    let entry = agent_mux::persistence::SavedSession {
+        profile,
+        dir: workdir.clone(),
+        skill_id: None,
+        conversation: Some(conv.into()),
+        continued_from: None,
+    };
+    let sessions_path = temp.path().join("sessions.json");
+    agent_mux::persistence::save_sessions(&sessions_path, &vec![entry; 3]).unwrap();
+
+    let (tx, _rx) = mpsc::channel(1024);
+    let mut app = App::new(vec![], None, tx);
+    app.antigravity_dir = Some(temp.path().join("brain"));
+    app.set_sessions_file(&sessions_path);
+    app.restore_saved_sessions();
+
+    assert_eq!(app.sessions.len(), 3);
+    assert_eq!(
+        app.sessions[0].profile.args,
+        vec!["--dangerously-skip-permissions", "--conversation", conv]
+    );
+    for s in &app.sessions[1..] {
+        assert_eq!(
+            s.profile.args,
+            vec!["--dangerously-skip-permissions"],
+            "a second pane must not resume a conversation another holds"
+        );
+        assert_eq!(s.conversation, None);
+    }
+
+    let saved = agent_mux::persistence::load_saved_sessions(&sessions_path);
+    let convs: Vec<_> = saved.iter().map(|s| s.conversation.as_deref()).collect();
+    assert_eq!(convs, vec![Some(conv), None, None]);
+    app.kill_all();
+}

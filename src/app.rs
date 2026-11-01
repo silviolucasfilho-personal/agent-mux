@@ -3561,18 +3561,21 @@ impl App {
             Some(crate::harness::Harness::Codex) | None => None,
         };
 
+        // a conversation another session holds (by its trace or what it
+        // recorded) is not this one's to guess from disk
         let disk_claimed_by_other = disk_conv.as_ref().is_some_and(|disk_id| {
             self.sessions.iter().any(|other| {
                 other.id != session.id
-                    && conn
-                        .zip(other.trace.as_ref())
-                        .and_then(|(c, t)| {
-                            crate::tracing::store::query::launch_conversation(c, &t.launch_id)
-                                .ok()
-                                .flatten()
-                        })
-                        .as_deref()
-                        == Some(disk_id)
+                    && (other.conversation.as_deref() == Some(disk_id)
+                        || conn
+                            .zip(other.trace.as_ref())
+                            .and_then(|(c, t)| {
+                                crate::tracing::store::query::launch_conversation(c, &t.launch_id)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .as_deref()
+                            == Some(disk_id))
             })
         });
 
@@ -3603,21 +3606,42 @@ impl App {
             .then_some(self.trace_db_path.as_deref())
             .flatten()
             .and_then(|p| crate::tracing::store::open_ro(p).ok());
+        // one conversation is resumed by one session: a second pane on it
+        // (agy says "Conversation already open") comes back as a new one
+        let mut claimed = std::collections::HashSet::new();
         let saved: Vec<persistence::SavedSession> = self
             .sessions
             .iter()
             .filter_map(|s| {
                 if matches!(s.status(now), Status::Exited(_)) {
                     // a restore that failed stays saved (`handle_pty_exit`)
-                    return s.restored_from.clone();
+                    let mut entry = s.restored_from.clone()?;
+                    if let Some(c) = &entry.conversation
+                        && !claimed.insert(c.clone())
+                    {
+                        entry.conversation = None;
+                        if let Some(h) = crate::harness::Harness::detect(&entry.profile.command) {
+                            entry.profile.args = crate::harness::fresh_args(h, &entry.profile.args);
+                        }
+                    }
+                    return Some(entry);
                 }
-                let conversation = self.active_session_conversation(s, conn.as_ref());
+                let mut conversation = self.active_session_conversation(s, conn.as_ref());
+                let duplicate = conversation
+                    .as_ref()
+                    .is_some_and(|c| !claimed.insert(c.clone()));
+                if duplicate {
+                    conversation = None;
+                }
                 Some(persistence::SavedSession {
                     // the first message this launch sent is not sent again
                     profile: {
                         let mut p = s.profile.clone();
                         if !s.opening_args.is_empty() && p.args.ends_with(&s.opening_args) {
                             p.args.truncate(p.args.len() - s.opening_args.len());
+                        }
+                        if duplicate && let Some(h) = crate::harness::Harness::detect(&p.command) {
+                            p.args = crate::harness::fresh_args(h, &p.args);
                         }
                         p
                     },
@@ -3704,8 +3728,11 @@ impl App {
             return;
         }
         let mut background = ClaudeBackgroundCache::default();
+        // a file saved before conversations were kept apart may name one
+        // for several sessions: the first resumes it, the rest start anew
+        let mut claimed = std::collections::HashSet::new();
         for s in saved {
-            let entry = s.clone();
+            let mut entry = s.clone();
             let dir = if s.dir.is_dir() {
                 s.dir
             } else if let Ok(cwd) = std::env::current_dir() {
@@ -3716,11 +3743,20 @@ impl App {
             // a session that held a conversation comes back as it; one
             // that never had one known starts as it was first launched
             let mut profile = s.profile;
-            let conversation = s.conversation.filter(|c| !c.trim().is_empty());
-            if let (Some(conv), Some(harness)) = (
-                conversation.as_deref(),
-                crate::harness::Harness::detect(&profile.command),
-            ) {
+            let mut conversation = s.conversation.filter(|c| !c.trim().is_empty());
+            let harness = crate::harness::Harness::detect(&profile.command);
+            if conversation
+                .as_ref()
+                .is_some_and(|c| !claimed.insert(c.clone()))
+            {
+                conversation = None;
+                if let Some(h) = harness {
+                    profile.args = crate::harness::fresh_args(h, &profile.args);
+                }
+                entry.conversation = None;
+                entry.profile.args = profile.args.clone();
+            }
+            if let (Some(conv), Some(harness)) = (conversation.as_deref(), harness) {
                 profile.args = crate::harness::restore_args(harness, &profile.args, conv);
             }
             let attach = conversation
