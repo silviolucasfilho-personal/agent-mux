@@ -308,3 +308,47 @@ async fn quit_asks_for_confirmation_while_working() {
     assert!(app.should_quit);
     app.kill_all();
 }
+
+#[tokio::test]
+async fn close_all_sessions_kills_every_session_and_empties_the_list() {
+    use agent_mux::keymap::ActionId;
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut app = App::new(shell_profiles(), None, tx);
+    let now = Instant::now();
+    // with nothing open the command is unavailable
+    app.execute_command(ActionId::CloseAllSessions, now);
+    assert!(matches!(app.mode, Mode::Main));
+    app.focus_list();
+    create_session_via_dialog(&mut app);
+    app.focus_list();
+    create_session_via_dialog(&mut app);
+    app.focus_list();
+    create_session_via_dialog(&mut app);
+    assert_eq!(app.sessions.len(), 3);
+    // one has already exited: it leaves at once
+    app.sessions[2].kill();
+    let ok = pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {
+        matches!(a.sessions[2].status(Instant::now()), Status::Exited(_))
+    })
+    .await;
+    assert!(ok);
+
+    app.execute_command(ActionId::CloseAllSessions, Instant::now());
+    assert!(matches!(app.mode, Mode::ConfirmCloseAll));
+    // n backs out and nothing changes
+    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    assert!(matches!(app.mode, Mode::Main));
+    assert_eq!(app.sessions.len(), 3);
+
+    app.execute_command(ActionId::CloseAllSessions, Instant::now());
+    app.handle_key(&key(KeyCode::Char('y')), Instant::now());
+    assert!(matches!(app.mode, Mode::Main));
+    assert_eq!(app.sessions.len(), 2, "the exited one leaves at once");
+    // the live ones leave once their exit is recorded
+    let ok = pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {
+        a.sessions.is_empty()
+    })
+    .await;
+    assert!(ok, "killed sessions never left the list");
+    assert!(app.closing_sessions.is_empty());
+}

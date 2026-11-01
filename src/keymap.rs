@@ -679,6 +679,7 @@ pub enum ActionId {
     FilterOpenCode,
     FindNext,
     FindPrev,
+    CloseAllSessions,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -925,6 +926,13 @@ pub const ACTIONS: &[ActionDef] = &[
         id: ActionId::TestShortcuts,
         label: "Test shortcuts",
         keywords: "keyboard terminal verify",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::CloseAllSessions,
+        label: "Close all sessions",
+        keywords: "kill stop harness every",
         key: None,
         scope: ActionScope::Global,
     },
