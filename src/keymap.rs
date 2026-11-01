@@ -680,6 +680,7 @@ pub enum ActionId {
     FindNext,
     FindPrev,
     CloseAllSessions,
+    Restart,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -933,6 +934,13 @@ pub const ACTIONS: &[ActionDef] = &[
         id: ActionId::CloseAllSessions,
         label: "Close all sessions",
         keywords: "kill stop harness every Q",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::Restart,
+        label: "Restart agent-mux",
+        keywords: "relaunch reopen reload update new build",
         key: None,
         scope: ActionScope::Global,
     },

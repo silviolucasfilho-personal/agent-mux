@@ -51,6 +51,7 @@ impl App {
             ReturnToSession => self.return_session_id().is_some(),
             PrevSession | NextSession => session.is_some(),
             CloseAllSessions => !self.sessions.is_empty(),
+            Restart => true,
             ToggleSidebar => matches!(self.mode, Mode::Main | Mode::TraceBrowser(_)),
             Traces => true,
             SetVerdict => matches!(&self.mode, Mode::TraceBrowser(b) if !b.turns.is_empty()),
@@ -211,6 +212,7 @@ impl App {
             NextSession => self.select_adjacent_session(1),
             Quit => self.request_navigation(NavigationTarget::Quit, now),
             CloseAllSessions => self.mode = Mode::ConfirmCloseAll,
+            Restart => self.request_restart(),
             SubmitDialog => {
                 self.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), now)
             }
@@ -640,6 +642,7 @@ impl App {
             Mode::Swarm(v) => v.confirmation_active(),
             Mode::ConfirmKill
             | Mode::ConfirmCloseAll
+            | Mode::ConfirmRestart
             | Mode::ConfirmQuit
             | Mode::ConfirmRemoveLoop => true,
             Mode::AgentEditor(st) => {

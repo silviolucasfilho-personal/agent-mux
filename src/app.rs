@@ -55,6 +55,9 @@ pub enum Mode {
     ConfirmKill,
     /// "Close all sessions" (F1): kill every session and clear the list.
     ConfirmCloseAll,
+    /// "Restart agent-mux" (F1) with live sessions: they stop now and
+    /// are restored by the new process.
+    ConfirmRestart,
     ConfirmQuit,
     Help,
     SkillsView(Box<SkillsViewState>),
@@ -182,6 +185,7 @@ pub enum Action {
     EnterConfirmKill,
     EnterConfirmCloseAll,
     CloseAllSessions,
+    Restart,
     RemoveSelected,
     RemoveExited,
     /// `m` in the list: the scheduled, flows, skills, on demand and
@@ -822,6 +826,11 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         },
         Mode::ConfirmCloseAll => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => Action::CloseAllSessions,
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
+            _ => Action::None,
+        },
+        Mode::ConfirmRestart => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => Action::Restart,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
             _ => Action::None,
         },
@@ -2563,6 +2572,10 @@ pub struct App {
     pub history_all_projects: bool,
     pub mode: Mode,
     pub should_quit: bool,
+    /// Set with `should_quit` by "Restart agent-mux": `main` shuts down as
+    /// on quit (sessions saved, then stopped) and runs its own binary
+    /// again, which restores them.
+    pub restart_requested: bool,
     /// Sessions "Close all sessions" killed: each leaves the list once
     /// its exit is recorded (`handle_pty_exit`), so its trace, loop or
     /// workflow run still finishes the normal way.
@@ -2792,6 +2805,7 @@ impl App {
             history_all_projects: false,
             mode: Mode::Main,
             should_quit: false,
+            restart_requested: false,
             closing_sessions: std::collections::HashSet::new(),
             notice: None,
             profiles,
@@ -6262,6 +6276,11 @@ impl App {
                 self.mode = Mode::Main;
                 let _ = self.save_active_sessions();
             }
+            Action::Restart => {
+                self.mode = Mode::Main;
+                self.restart_requested = true;
+                self.should_quit = true;
+            }
             Action::EnterConfirmCloseAll => {
                 if self.sessions.is_empty() {
                     self.notice = Some(Notice::info("No session available"));
@@ -6720,6 +6739,22 @@ impl App {
     /// while any session does. A key that can be hit while typing into a
     /// harness asks more readily than the list's `q`, which asks only
     /// while a session is working.
+    /// "Restart agent-mux": asks first when sessions are live (they stop
+    /// and come back through the saved sessions file), else restarts.
+    pub fn request_restart(&mut self) {
+        let now = Instant::now();
+        if self
+            .sessions
+            .iter()
+            .any(|s| !matches!(s.status(now), Status::Exited(_)))
+        {
+            self.mode = Mode::ConfirmRestart;
+        } else {
+            self.restart_requested = true;
+            self.should_quit = true;
+        }
+    }
+
     fn quit_from_chord(&mut self) {
         let now = Instant::now();
         if self
@@ -9006,6 +9041,14 @@ mod confirm_modes {
         ));
         assert!(matches!(
             dispatch(&Mode::ConfirmQuit, &key(KeyCode::Esc), &c),
+            Action::BackToMain
+        ));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmRestart, &key(KeyCode::Char('y')), &c),
+            Action::Restart
+        ));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmRestart, &key(KeyCode::Esc), &c),
             Action::BackToMain
         ));
         assert!(matches!(
