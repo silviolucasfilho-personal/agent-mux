@@ -2615,7 +2615,10 @@ pub struct App {
     /// can (`memory::feed`). Off in an App built by a test; `main` turns
     /// it on.
     pub memory_feed: bool,
-    /// Optional override for the persistent sessions file path (defaults to ~/.agent-mux/sessions.json).
+    /// Where active sessions are saved and restored from. None (an App
+    /// built by a test) saves nothing: `main` sets the user's file
+    /// (`persistence::sessions_file_path`), so a test that launches a
+    /// session never overwrites `~/.agent-mux/sessions.json`.
     pub sessions_file: Option<std::path::PathBuf>,
     /// Optional override for Claude's storage directory (defaults to ~/.claude).
     pub claude_dir: Option<std::path::PathBuf>,
@@ -3618,11 +3621,7 @@ impl App {
 
     /// Persists active (non-exited) sessions to disk so they can be restored on restart.
     pub fn save_active_sessions(&self) -> anyhow::Result<()> {
-        let Some(path) = self
-            .sessions_file
-            .clone()
-            .or_else(persistence::sessions_file_path)
-        else {
+        let Some(path) = self.sessions_file.clone() else {
             return Ok(());
         };
         let now = Instant::now();
@@ -3746,11 +3745,7 @@ impl App {
 
     /// Restores saved sessions from disk upon application startup.
     pub fn restore_saved_sessions(&mut self) {
-        let Some(path) = self
-            .sessions_file
-            .clone()
-            .or_else(persistence::sessions_file_path)
-        else {
+        let Some(path) = self.sessions_file.clone() else {
             return;
         };
         let saved = persistence::load_saved_sessions(&path);

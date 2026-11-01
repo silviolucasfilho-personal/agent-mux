@@ -288,6 +288,7 @@ async fn main() -> Result<()> {
     app.editor = cfg.editor.clone();
     // agent-mux feeds ai-memory from its trace store (`memory::feed`)
     app.memory_feed = true;
+    app.sessions_file = agent_mux::persistence::sessions_file_path();
     if let Some(db) = app.trace_db_path.clone() {
         agent_mux::memory::feed::spawn(agent_mux::memory::home(), agent_mux::assets::root(), db);
     }
