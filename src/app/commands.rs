@@ -440,6 +440,10 @@ impl App {
         if id == ActionId::Commands {
             return Some("F1".into());
         }
+        if id == ActionId::CloseAllSessions {
+            return (matches!(self.mode, Mode::Main) && self.focus != Focus::Pane)
+                .then(|| "Q".into());
+        }
         self.local_key_label(id)
     }
 

@@ -340,7 +340,10 @@ async fn close_all_sessions_kills_every_session_and_empties_the_list() {
     assert!(matches!(app.mode, Mode::Main));
     assert_eq!(app.sessions.len(), 3);
 
-    app.execute_command(ActionId::CloseAllSessions, Instant::now());
+    // Q in the Agents list asks the same question
+    app.focus_list();
+    app.handle_key(&key(KeyCode::Char('Q')), Instant::now());
+    assert!(matches!(app.mode, Mode::ConfirmCloseAll));
     app.handle_key(&key(KeyCode::Char('y')), Instant::now());
     assert!(matches!(app.mode, Mode::Main));
     assert_eq!(app.sessions.len(), 2, "the exited one leaves at once");

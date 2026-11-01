@@ -429,6 +429,7 @@ Every screen shares one keymap (`src/keymap.rs`, `docs/keyboard.md`): `n` new, `
 | `T` | Trace Browser (any section). |
 | `x`, `d` | Active focused or sidebar hidden: `x` stops (asks before killing) a running session; `d` removes an exited one (a running one asks to be killed first). |
 | `X` | Active focused or sidebar hidden: remove all exited sessions, leaving running sessions untouched. |
+| `Q` | Close all sessions: after a `y`, kill every session of every harness and clear the list (also F1 → Close all sessions). |
 | `a` | History focused: toggle current-project / all-projects scope. |
 | `b`, `Ctrl+Shift+B` | Toggle the sidebar. |
 | `?`, `F1` | Help overlay (closes with `Esc`, `q`, `?`, `Enter`, `F1`). |

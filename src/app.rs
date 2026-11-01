@@ -180,6 +180,7 @@ pub enum Action {
     OpenSkillLauncher,
     KillSelected,
     EnterConfirmKill,
+    EnterConfirmCloseAll,
     CloseAllSessions,
     RemoveSelected,
     RemoveExited,
@@ -721,6 +722,8 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 KeyCode::Char('I') => Action::OpenInbox,
                 KeyCode::Char('v') | KeyCode::Char('V') => Action::OpenAbout,
                 KeyCode::Char('K') => Action::ToggleKillSwitch,
+                // Close all sessions (also F1 → Commands); asks first.
+                KeyCode::Char('Q') => Action::EnterConfirmCloseAll,
                 KeyCode::Char('E') => Action::OpenRunsView,
                 KeyCode::Char('h') | KeyCode::Char('H')
                     if !ctx.sidebar_hidden && ctx.sidebar_section == SidebarSection::Agents =>
@@ -6259,6 +6262,13 @@ impl App {
                 self.mode = Mode::Main;
                 let _ = self.save_active_sessions();
             }
+            Action::EnterConfirmCloseAll => {
+                if self.sessions.is_empty() {
+                    self.notice = Some(Notice::info("No session available"));
+                } else {
+                    self.mode = Mode::ConfirmCloseAll;
+                }
+            }
             Action::CloseAllSessions => {
                 self.mode = Mode::Main;
                 self.close_all_sessions();
@@ -8836,6 +8846,16 @@ mod dispatch_tests {
             dispatch(&Mode::Main, &key(KeyCode::Char('d')), &running),
             Action::EnterConfirmKill
         ));
+    }
+
+    #[test]
+    fn uppercase_q_in_the_list_asks_to_close_all_sessions() {
+        for status in [Some(Status::Working), None] {
+            assert!(matches!(
+                dispatch(&Mode::Main, &key(KeyCode::Char('Q')), &ctx(status)),
+                Action::EnterConfirmCloseAll
+            ));
+        }
     }
 
     #[test]
