@@ -36,7 +36,7 @@ fn print_usage() {
         Commands:\n  \
           web       Open Langfuse Web in your default browser\n  \
           status    Verify credentials and reachability\n  \
-          traces    List remote traces from Langfuse REST API\n\n\
+          traces    List recent traces (last 30 days, newest first)\n\n\
         Options:\n  \
           --session <id>   Target a session (e.g. claude:s1)\n  \
           --trace <id>     Target a trace ID\n  \
@@ -100,20 +100,26 @@ fn run_status(lf: Option<&crate::config::ResolvedLangfuse>) -> Result<(), String
         "  public_key: {}...",
         &lf.public_key[..lf.public_key.len().min(8)]
     );
-    if let Some(proj) = &lf.project_id {
-        println!("  project_id: {proj}");
-    } else {
-        println!("  project_id: (auto-detected from traces)");
+    match &lf.project_id {
+        Some(proj) => println!("  project_id: {proj}"),
+        None => println!("  project_id: (from the key)"),
     }
 
     print!("Checking connectivity and credentials... ");
     match check_health(lf) {
-        Ok(()) => {
-            println!("● OK (connected & authenticated)");
+        Ok(project) => {
+            let name = project.name.as_deref().unwrap_or("unnamed");
+            println!("● OK (authenticated to project {name}, {})", project.id);
+            if let Some(configured) = lf.project_id.as_deref().filter(|p| *p != project.id) {
+                println!(
+                    "  warning: project_id {configured} is not the key's project ({}); web links will point at the wrong project",
+                    project.id
+                );
+            }
             Ok(())
         }
         Err(e) => {
-            println!("✗ Failed\n  Error: {e}");
+            println!("✗ Failed"); // main prints the error
             Err(e)
         }
     }
@@ -149,11 +155,17 @@ fn run_traces(args: &[String], lf: Option<&crate::config::ResolvedLangfuse>) -> 
     let params = ListTracesParams {
         limit: Some(limit),
         session_id,
-        order_by: Some("timestamp.desc".into()),
         ..Default::default()
     };
 
     let resp = list_traces(lf, &params)?;
+    if resp.data.is_empty() {
+        println!(
+            "No traces in the last {} days.",
+            crate::tracing::langfuse::api::DEFAULT_LOOKBACK_DAYS
+        );
+        return Ok(());
+    }
     println!(
         "{:<20} {:<24} {:<16} {:<8} {:<8}",
         "TIMESTAMP", "NAME", "SESSION", "LATENCY", "COST"

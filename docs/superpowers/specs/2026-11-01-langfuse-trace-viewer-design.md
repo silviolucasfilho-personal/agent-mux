@@ -114,6 +114,16 @@ Browser launches reuse `App::open_url` and `(self.link_opener)(url)`, maintainin
 
 ### 4.1 Endpoints Used
 
+> **Superseded (2026-11-01, after implementation).** The table below is the
+> original plan. Langfuse Cloud removes the v1 trace reads on 2026-11-16 and
+> the current OpenAPI spec no longer lists `GET /api/public/traces` or
+> `GET /api/public/traces/{id}`; `/api/public/health` answers without
+> credentials, so it cannot check a key. The client now uses
+> `GET /api/public/projects` for the credential check and
+> `GET /api/public/v2/observations` (root observations for the list, all of a
+> trace's observations for the detail, cursor paging) for reads. See the
+> module docs of `src/tracing/langfuse/api.rs` and `docs/tracing.md`.
+
 | Endpoint | Method | Purpose | Query Parameters |
 |---|---|---|---|
 | `/api/public/health` | `GET` | Instant connectivity & health verification | None |
