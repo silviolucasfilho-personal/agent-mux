@@ -53,6 +53,8 @@ pub enum Mode {
     SessionHistory(HistoryState),
     TraceBrowser(Box<TraceBrowserState>),
     ConfirmKill,
+    /// "Close all sessions" (F1): kill every session and clear the list.
+    ConfirmCloseAll,
     ConfirmQuit,
     Help,
     SkillsView(Box<SkillsViewState>),
@@ -178,6 +180,7 @@ pub enum Action {
     OpenSkillLauncher,
     KillSelected,
     EnterConfirmKill,
+    CloseAllSessions,
     RemoveSelected,
     RemoveExited,
     /// `m` in the list: the scheduled, flows, skills, on demand and
@@ -811,6 +814,11 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         },
         Mode::ConfirmKill => match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => Action::KillSelected,
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
+            _ => Action::None,
+        },
+        Mode::ConfirmCloseAll => match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => Action::CloseAllSessions,
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Action::BackToMain,
             _ => Action::None,
         },
@@ -2552,6 +2560,10 @@ pub struct App {
     pub history_all_projects: bool,
     pub mode: Mode,
     pub should_quit: bool,
+    /// Sessions "Close all sessions" killed: each leaves the list once
+    /// its exit is recorded (`handle_pty_exit`), so its trace, loop or
+    /// workflow run still finishes the normal way.
+    pub closing_sessions: std::collections::HashSet<usize>,
     pub notice: Option<Notice>,
     pub profiles: Vec<Profile>,
     pub pane_size: (u16, u16), // (rows, cols)
@@ -2777,6 +2789,7 @@ impl App {
             history_all_projects: false,
             mode: Mode::Main,
             should_quit: false,
+            closing_sessions: std::collections::HashSet::new(),
             notice: None,
             profiles,
             pane_size: (24, 80),
@@ -6246,6 +6259,10 @@ impl App {
                 self.mode = Mode::Main;
                 let _ = self.save_active_sessions();
             }
+            Action::CloseAllSessions => {
+                self.mode = Mode::Main;
+                self.close_all_sessions();
+            }
             Action::RemoveSelected => {
                 self.selection = None;
                 if self.selected < self.sessions.len() {
@@ -7912,7 +7929,55 @@ impl App {
             if self.sessions[i].group.is_none() {
                 self.reload_history_sessions_async();
             }
+            if self.closing_sessions.remove(&id) {
+                self.remove_session_at(i);
+            }
             let _ = self.save_active_sessions();
+        }
+    }
+
+    /// "Close all sessions": kills every session in the list. One that has
+    /// already exited leaves at once; a live one leaves when its exit
+    /// arrives, after `handle_pty_exit` has recorded it.
+    pub fn close_all_sessions(&mut self) {
+        let now = Instant::now();
+        let (mut live, mut exited) = (0usize, 0usize);
+        for s in &mut self.sessions {
+            if matches!(s.status(now), Status::Exited(_)) {
+                exited += 1;
+                continue;
+            }
+            // closed on purpose: not a restore that failed
+            s.restored_from = None;
+            s.kill();
+            self.closing_sessions.insert(s.id);
+            live += 1;
+        }
+        self.sessions
+            .retain(|s| !matches!(s.status(now), Status::Exited(_)));
+        self.selection = None;
+        self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+        self.focus = Focus::List;
+        if self.sessions.is_empty() && !self.history_sessions.is_empty() {
+            self.sidebar_section = SidebarSection::History;
+        }
+        let _ = self.save_active_sessions();
+        self.notice = Some(Notice::info(match (live, exited) {
+            (0, n) => format!("closed {n} exited session(s)"),
+            (n, 0) => format!("closing {n} session(s)"),
+            (n, m) => format!("closing {n} session(s), removed {m} exited"),
+        }));
+    }
+
+    fn remove_session_at(&mut self, i: usize) {
+        self.sessions.remove(i);
+        self.selection = None;
+        if self.selected > i || self.selected >= self.sessions.len() {
+            self.selected = self.selected.saturating_sub(1);
+        }
+        self.selected = self.selected.min(self.sessions.len().saturating_sub(1));
+        if self.sessions.is_empty() && !self.history_sessions.is_empty() {
+            self.sidebar_section = SidebarSection::History;
         }
     }
 
@@ -8921,6 +8986,18 @@ mod confirm_modes {
         ));
         assert!(matches!(
             dispatch(&Mode::ConfirmQuit, &key(KeyCode::Esc), &c),
+            Action::BackToMain
+        ));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmCloseAll, &key(KeyCode::Char('y')), &c),
+            Action::CloseAllSessions
+        ));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmCloseAll, &key(KeyCode::Enter), &c),
+            Action::None
+        ));
+        assert!(matches!(
+            dispatch(&Mode::ConfirmCloseAll, &key(KeyCode::Esc), &c),
             Action::BackToMain
         ));
     }

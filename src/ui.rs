@@ -329,6 +329,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::NewSession(dialog) => draw_new_session_dialog(f, dialog, app),
         Mode::SessionHistory(history) => draw_session_history(f, history, app),
         Mode::ConfirmKill => draw_confirm(f, "Kill this session? [y/n]"),
+        Mode::ConfirmCloseAll => draw_confirm(f, &close_all_question(app, now)),
         Mode::ConfirmQuit => draw_confirm(f, &quit_question(app, now)),
         Mode::Help => draw_help(f),
         Mode::SkillsView(view) => draw_skills_view(f, view, app),
@@ -5088,6 +5089,27 @@ fn quit_question(app: &App, now: Instant) -> String {
     }
 }
 
+fn close_all_question(app: &App, now: Instant) -> String {
+    let running = app
+        .sessions
+        .iter()
+        .filter(|s| !matches!(s.status(now), Status::Exited(_)))
+        .count();
+    let working = app
+        .sessions
+        .iter()
+        .filter(|s| matches!(s.status(now), Status::Working))
+        .count();
+    let total = app.sessions.len();
+    match (running, working) {
+        (0, _) => format!("Remove all {total} exited session(s)? [y/n]"),
+        (n, 0) => format!("Close all {total} session(s)? {n} running stop. [y/n]"),
+        (n, w) => {
+            format!("Close all {total} session(s)? {n} running stop, {w} still working. [y/n]")
+        }
+    }
+}
+
 fn draw_confirm(f: &mut Frame, message: &str) {
     let width = (message.chars().count() as u16 + 4).min(f.area().width);
     let area = centered(f.area(), width, 3);
@@ -6382,6 +6404,7 @@ mod tests {
         for mode in [
             crate::app::Mode::Help,
             crate::app::Mode::ConfirmKill,
+            crate::app::Mode::ConfirmCloseAll,
             crate::app::Mode::ConfirmQuit,
             crate::app::Mode::ConfirmRemoveLoop,
             crate::app::Mode::TraceBrowser(Box::new(crate::app::TraceBrowserState::new(

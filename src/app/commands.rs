@@ -50,6 +50,7 @@ impl App {
             | Configuration | Memory | Workspaces | Swarm | Inbox | History => true,
             ReturnToSession => self.return_session_id().is_some(),
             PrevSession | NextSession => session.is_some(),
+            CloseAllSessions => !self.sessions.is_empty(),
             ToggleSidebar => matches!(self.mode, Mode::Main | Mode::TraceBrowser(_)),
             Traces => true,
             SetVerdict => matches!(&self.mode, Mode::TraceBrowser(b) if !b.turns.is_empty()),
@@ -173,7 +174,9 @@ impl App {
         } else {
             Availability::Disabled(
                 match id {
-                    ReturnToSession | PrevSession | NextSession => "No session available",
+                    ReturnToSession | PrevSession | NextSession | CloseAllSessions => {
+                        "No session available"
+                    }
                     ToggleSidebar => "This screen has no sidebar control",
                     _ => "Unavailable for this screen or selection",
                 }
@@ -207,6 +210,7 @@ impl App {
             PrevSession => self.select_adjacent_session(-1),
             NextSession => self.select_adjacent_session(1),
             Quit => self.request_navigation(NavigationTarget::Quit, now),
+            CloseAllSessions => self.mode = Mode::ConfirmCloseAll,
             SubmitDialog => {
                 self.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), now)
             }
@@ -630,7 +634,10 @@ impl App {
         match &self.mode {
             Mode::Memory(v) => v.pending.is_some(),
             Mode::Swarm(v) => v.confirmation_active(),
-            Mode::ConfirmKill | Mode::ConfirmQuit | Mode::ConfirmRemoveLoop => true,
+            Mode::ConfirmKill
+            | Mode::ConfirmCloseAll
+            | Mode::ConfirmQuit
+            | Mode::ConfirmRemoveLoop => true,
             Mode::AgentEditor(st) => {
                 st.confirm_discard
                     || st.confirm_restore
