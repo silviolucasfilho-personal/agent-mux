@@ -69,6 +69,14 @@ impl Harness {
         }
     }
 
+    /// The trace store's `sessions.provider` for this harness.
+    pub fn store_provider(&self) -> &'static str {
+        match self {
+            Harness::Antigravity => "antigravity",
+            other => other.as_str(),
+        }
+    }
+
     pub fn display_name(&self) -> &'static str {
         match self {
             Harness::Claude => "Claude Code (claude)",

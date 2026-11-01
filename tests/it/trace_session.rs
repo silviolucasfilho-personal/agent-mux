@@ -1019,3 +1019,138 @@ async fn sessions_sharing_one_conversation_restore_only_one_onto_it() {
     assert_eq!(convs, vec![Some(conv), None, None]);
     app.kill_all();
 }
+
+/// What the store says each workspace held wins over a dropped or missing
+/// conversation: a pane in another folder that was saved onto one agy
+/// conversation (the guess from disk matched a transcript that only
+/// mentioned its folder) comes back as the newest conversation launched in
+/// its own folder, and so does one saved without any.
+#[tokio::test]
+async fn restored_agy_sessions_take_their_own_workspace_conversation_from_the_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let bin_dir = temp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let agy_bin = bin_dir.join("agy");
+    std::fs::write(&agy_bin, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&agy_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ws = |n: &str| {
+        let d = temp.path().join(n);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    };
+    let (a, b, c) = (ws("explorable"), ws("shareable"), ws("langfuse"));
+
+    let db = temp.path().join("traces.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        for m in agent_mux::tracing::store::schema::MIGRATIONS {
+            conn.execute_batch(m).unwrap();
+        }
+        conn.pragma_update(
+            None,
+            "user_version",
+            agent_mux::tracing::store::schema::SCHEMA_VERSION,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO runs (id, pid, agent_mux_version, started_ns, heartbeat_ns)
+             VALUES ('r', 1, '0', 1, 1)",
+            [],
+        )
+        .unwrap();
+        let session = |conv: &str, cwd: &std::path::Path, seen: i64| {
+            conn.execute(
+                "INSERT INTO sessions (key, provider, session_id, cwd, first_seen_ns, last_seen_ns)
+                 VALUES (?1, 'antigravity', ?2, ?3, ?4, ?4)",
+                rusqlite::params![
+                    format!("antigravity:{conv}"),
+                    conv,
+                    cwd.to_str().unwrap(),
+                    seen
+                ],
+            )
+            .unwrap();
+        };
+        let launch = |id: &str, cwd: &std::path::Path, conv: &str| {
+            conn.execute(
+                "INSERT INTO launches (id, run_id, agent_mux_session, profile, provider, cwd,
+                   project_slug, content_mode, correlation_plan, session_key, started_ns,
+                   agent_mux_version)
+                 VALUES (?1, 'r', 1, 'agy', 'antigravity', ?2, 'p', 'full', 'none', ?3, 1, '0')",
+                rusqlite::params![id, cwd.to_str().unwrap(), format!("antigravity:{conv}")],
+            )
+            .unwrap();
+        };
+        session("conv-a", &a, 30);
+        session("conv-b", &b, 10);
+        session("conv-c", &c, 10);
+        session("conv-c-older", &c, 5);
+        launch("la", &a, "conv-a");
+        launch("lb", &b, "conv-b");
+        launch("lc", &c, "conv-c");
+        launch("lc0", &c, "conv-c-older");
+        // the bad restore: shareable's pane launched onto explorable's conversation
+        launch("lb-bad", &b, "conv-a");
+    }
+
+    let entry = |dir: &std::path::Path, conv: Option<&str>| {
+        let mut args = vec!["--dangerously-skip-permissions".to_string()];
+        if let Some(conv) = conv {
+            args.extend(["--conversation".into(), conv.into()]);
+        }
+        agent_mux::persistence::SavedSession {
+            profile: Profile {
+                name: "Antigravity".into(),
+                command: agy_bin.to_string_lossy().into_owned(),
+                args,
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            },
+            dir: dir.to_path_buf(),
+            skill_id: None,
+            conversation: conv.map(Into::into),
+            continued_from: None,
+        }
+    };
+    let sessions_path = temp.path().join("sessions.json");
+    agent_mux::persistence::save_sessions(
+        &sessions_path,
+        &[
+            entry(&a, Some("conv-a")),
+            entry(&b, Some("conv-a")),
+            entry(&c, None),
+        ],
+    )
+    .unwrap();
+
+    let (tx, _rx) = mpsc::channel(1024);
+    let mut app = App::new(vec![], None, tx);
+    app.antigravity_dir = Some(temp.path().join("brain"));
+    app.trace_db_path = Some(db);
+    app.set_sessions_file(&sessions_path);
+    app.restore_saved_sessions();
+
+    let args: Vec<_> = app
+        .sessions
+        .iter()
+        .map(|s| s.profile.args.clone())
+        .collect();
+    let resumed = |conv: &str| -> Vec<String> {
+        vec![
+            "--dangerously-skip-permissions".into(),
+            "--conversation".into(),
+            conv.into(),
+        ]
+    };
+    assert_eq!(
+        args,
+        vec![resumed("conv-a"), resumed("conv-b"), resumed("conv-c")]
+    );
+
+    let saved = agent_mux::persistence::load_saved_sessions(&sessions_path);
+    let convs: Vec<_> = saved.iter().map(|s| s.conversation.as_deref()).collect();
+    assert_eq!(convs, vec![Some("conv-a"), Some("conv-b"), Some("conv-c")]);
+    app.kill_all();
+}
