@@ -183,6 +183,7 @@ fn a_score_is_posted_to_langfuse_as_a_score_create_batch() {
         host: addr,
         public_key: "pk-lf".into(),
         secret_key: "sk-lf".into(),
+        project_id: None,
         flush_interval_ms: 100,
         secret_from_file: false,
         legacy_keys: false,

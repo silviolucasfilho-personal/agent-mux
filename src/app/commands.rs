@@ -45,6 +45,13 @@ impl App {
         };
         let in_swarm = matches!(self.mode, Mode::Swarm(_));
         let supported = match id {
+            Langfuse | OpenLangfuseWeb => {
+                if self.resolved_langfuse().is_some() {
+                    return Availability::Enabled;
+                } else {
+                    return Availability::Disabled("Langfuse credentials not configured".into());
+                }
+            }
             SubmitDialog => matches!(self.mode, Mode::NewSession(_) | Mode::WorkflowDialog(_)),
             Commands | Help | FocusAgents | TestShortcuts | Quit | Runs | Skills
             | Configuration | Memory | Workspaces | Swarm | Inbox | History => true,
@@ -143,6 +150,7 @@ impl App {
                     | Mode::Memory(_)
                     | Mode::Workspaces(_)
                     | Mode::Swarm(_)
+                    | Mode::Langfuse(_)
             ),
             Restore => {
                 editor_library
@@ -223,6 +231,8 @@ impl App {
             Swarm => self.request_navigation(NavigationTarget::Swarm, now),
             Inbox => self.request_navigation(NavigationTarget::Inbox, now),
             History => self.request_navigation(NavigationTarget::History, now),
+            Langfuse => self.request_navigation(NavigationTarget::Langfuse, now),
+            OpenLangfuseWeb => self.request_navigation(NavigationTarget::LangfuseWeb, now),
             FilterClaude | FilterCodex | FilterAntigravity | FilterOpenCode => {
                 if let Mode::SkillsView(v) = &mut self.mode {
                     v.toggle_filter(match id {
@@ -319,6 +329,8 @@ pub enum NavigationTarget {
     Swarm,
     Inbox,
     History,
+    Langfuse,
+    LangfuseWeb,
 }
 
 impl App {
@@ -548,6 +560,8 @@ impl App {
             NavigationTarget::Workspaces => self.open_workspaces_view(),
             NavigationTarget::Swarm => self.open_swarm_view(),
             NavigationTarget::Inbox => self.open_inbox(),
+            NavigationTarget::Langfuse => self.open_langfuse_view(),
+            NavigationTarget::LangfuseWeb => self.open_langfuse_web(),
             NavigationTarget::History => self.apply(
                 super::Action::OpenSessionHistory,
                 &KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
@@ -571,6 +585,7 @@ impl App {
             Mode::Memory(_) => "Memory",
             Mode::Workspaces(_) => "Workspaces",
             Mode::Swarm(_) => "Swarm",
+            Mode::Langfuse(_) => "Langfuse",
             _ => "Dialog",
         }
     }
@@ -633,6 +648,7 @@ impl App {
             Mode::Memory(v) => v.input.is_some(),
             Mode::Workspaces(v) => v.filtering,
             Mode::Swarm(v) => v.text_entry_active(),
+            Mode::Langfuse(v) => v.text_entry_active(),
             _ => false,
         }
     }

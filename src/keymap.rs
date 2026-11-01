@@ -681,6 +681,8 @@ pub enum ActionId {
     FindPrev,
     CloseAllSessions,
     Restart,
+    Langfuse,
+    OpenLangfuseWeb,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -829,6 +831,20 @@ pub const ACTIONS: &[ActionDef] = &[
         id: ActionId::Traces,
         label: "Open traces",
         keywords: "trace browser",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::Langfuse,
+        label: "Open Langfuse traces",
+        keywords: "langfuse cloud traces observations remote otel",
+        key: None,
+        scope: ActionScope::Global,
+    },
+    ActionDef {
+        id: ActionId::OpenLangfuseWeb,
+        label: "Open Langfuse Web",
+        keywords: "langfuse browser dashboard web ui",
         key: None,
         scope: ActionScope::Global,
     },

@@ -51,3 +51,4 @@ mod workflow_ui;
 mod zz_sub;
 
 mod keyboard_ux;
+mod langfuse_ui;

@@ -109,10 +109,10 @@ async fn main() -> Result<()> {
                 return agent_mux::workspace::cli::run(&args[2..]);
             }
             Some("langfuse") => {
-                eprintln!(
-                    "`agent-mux langfuse …` was replaced by `agent-mux trace …` (local SQLite store).\n\
-                     Try `agent-mux trace doctor`."
-                );
+                if let Err(err) = agent_mux::tracing::langfuse::cli::run(&args[2..]) {
+                    eprintln!("{err}");
+                    std::process::exit(1);
+                }
                 return Ok(());
             }
             Some("--version") | Some("-V") | Some("version") => {
