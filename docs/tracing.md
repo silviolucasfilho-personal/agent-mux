@@ -304,6 +304,30 @@ agent-mux trace show <trace-id> --tree
 agent-mux trace show <trace-id> --timeline
 ```
 
+### Reading traces back from Langfuse
+
+When credentials resolve, F1 → "Open Langfuse traces" opens the Langfuse
+screen (traces of the last 30 days, newest first; `n`/`p` page, `/` filters by
+trace name, `w` opens the selected trace in Langfuse Web) and F1 → "Open
+Langfuse Web" opens the project. The same reads are on the command line:
+
+```text
+agent-mux langfuse status          # checks the key pair and names its project
+agent-mux langfuse traces [-s <session>] [-n <limit>]
+agent-mux langfuse web [-t <trace> | -s <session> | -p <project>]
+```
+
+`status` calls `GET /api/public/projects`, which needs the key pair, so a
+rejected key fails it with Langfuse's own message (the `/api/public/health`
+endpoint answers any caller and cannot tell). Reads go through
+`GET /api/public/v2/observations`, the only trace read Langfuse Cloud serves
+after the v1 trace endpoints are removed on 2026-11-16: a trace is listed by
+its root observation and read as all observations with its `traceId`, paged by
+cursor. The list shows no trace cost (v2 has no trace totals; the detail sums
+its observations) and no scores. `LANGFUSE_PROJECT_ID` or `project_id` in
+`[tracing.langfuse]` sets the project for web links; otherwise it is taken
+from the traces.
+
 See `profiles.example.toml` for the complete configuration surface, including
 custom storage locations, provider directories, hook controls, price overrides,
 and retention.

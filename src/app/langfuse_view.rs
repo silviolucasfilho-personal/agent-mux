@@ -66,7 +66,7 @@ pub enum WorkerEvent {
     TracesLoaded {
         page: u64,
         traces: Vec<LangfuseTraceSummary>,
-        total: Option<u64>,
+        next_cursor: Option<String>,
         project_id: Option<String>,
     },
     TraceDetailLoaded {
@@ -106,9 +106,12 @@ pub struct LangfuseView {
     pub active_filter: Option<String>,
     pub session_filter: Option<String>,
 
+    /// 1-based page shown. Langfuse pages by cursor, so the total is unknown.
     pub page: u64,
-    pub total_pages: u64,
-    pub total_items: Option<u64>,
+    /// The cursor that fetches page `i + 1`; the first page has none.
+    pub page_cursors: Vec<Option<String>>,
+    /// Set when there is a page after this one.
+    pub next_cursor: Option<String>,
 
     worker_rx: Option<Receiver<WorkerEvent>>,
     worker_tx: Sender<WorkerEvent>,
@@ -149,8 +152,8 @@ impl LangfuseView {
             active_filter: None,
             session_filter,
             page: 1,
-            total_pages: 1,
-            total_items: None,
+            page_cursors: vec![None],
+            next_cursor: None,
             worker_rx: Some(rx),
             worker_tx: tx,
         };
@@ -176,15 +179,14 @@ impl LangfuseView {
                 WorkerEvent::TracesLoaded {
                     page,
                     traces,
-                    total,
+                    next_cursor,
                     project_id,
                 } => {
-                    self.status = FetchStatus::Idle;
-                    self.page = page;
-                    self.total_items = total;
-                    if let Some(t) = total {
-                        self.total_pages = t.div_ceil(50);
+                    if page != self.page {
+                        continue; // an answer for a page the user has left
                     }
+                    self.status = FetchStatus::Idle;
+                    self.next_cursor = next_cursor;
                     if self.project_id.is_none() && project_id.is_some() {
                         self.project_id = project_id;
                     }
@@ -214,6 +216,14 @@ impl LangfuseView {
         }
     }
 
+    /// Back to the first page, as after a new filter or a reload: cursors are
+    /// only valid for the query that produced them.
+    fn reset_paging(&mut self) {
+        self.page = 1;
+        self.page_cursors = vec![None];
+        self.next_cursor = None;
+    }
+
     /// Triggers a fresh load of traces matching current filters and page.
     pub fn refresh(&mut self) {
         let Some(lf) = self.langfuse.clone() else {
@@ -224,16 +234,20 @@ impl LangfuseView {
         self.status = FetchStatus::Loading("Fetching traces...".into());
         let tx = self.worker_tx.clone();
         let page = self.page;
+        let cursor = self
+            .page_cursors
+            .get(page.saturating_sub(1) as usize)
+            .cloned()
+            .flatten();
         let session_id = self.session_filter.clone();
         let query = self.active_filter.clone();
 
         thread::spawn(move || {
             let params = ListTracesParams {
-                page: Some(page),
+                cursor,
                 limit: Some(50),
                 session_id,
                 name: query,
-                order_by: Some("timestamp.desc".into()),
                 ..Default::default()
             };
 
@@ -241,9 +255,9 @@ impl LangfuseView {
                 Ok(resp) => {
                     let first_project_id = resp.data.iter().find_map(|t| t.project_id.clone());
                     let _ = tx.send(WorkerEvent::TracesLoaded {
-                        page: resp.meta.page,
+                        page,
                         traces: resp.data,
-                        total: resp.meta.total_items,
+                        next_cursor: resp.next_cursor,
                         project_id: first_project_id,
                     });
                 }
@@ -398,7 +412,7 @@ impl LangfuseView {
                     let text = input.trim().to_string();
                     self.active_filter = if text.is_empty() { None } else { Some(text) };
                     self.filter_input = None;
-                    self.page = 1;
+                    self.reset_paging();
                     self.refresh();
                     return Outcome::None;
                 }
@@ -437,6 +451,7 @@ impl LangfuseView {
             }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.cached_details.clear();
+                self.reset_paging();
                 self.refresh();
                 Outcome::None
             }
@@ -445,7 +460,9 @@ impl LangfuseView {
                 Outcome::None
             }
             KeyCode::Char('n') => {
-                if self.page < self.total_pages {
+                if let Some(cursor) = self.next_cursor.take() {
+                    self.page_cursors.truncate(self.page as usize);
+                    self.page_cursors.push(Some(cursor));
                     self.page += 1;
                     self.refresh();
                 }
@@ -454,6 +471,7 @@ impl LangfuseView {
             KeyCode::Char('p') => {
                 if self.page > 1 {
                     self.page -= 1;
+                    self.next_cursor = None;
                     self.refresh();
                 }
                 Outcome::None

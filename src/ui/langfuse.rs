@@ -120,7 +120,15 @@ fn draw_traces_pane(f: &mut Frame, area: Rect, v: &LangfuseView) {
         } else {
             dim()
         })
-        .title(format!(" Traces (p. {}/{}) ", v.page, v.total_pages.max(1)));
+        .title(format!(
+            " Traces (p. {}{}) ",
+            v.page,
+            if v.next_cursor.is_some() {
+                ", n: more"
+            } else {
+                ""
+            }
+        ));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
