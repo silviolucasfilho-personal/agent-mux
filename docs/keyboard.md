@@ -34,7 +34,7 @@ The terminal may intercept a key or collapse its modifiers. Protocol support alo
 | Previous / next session | Command+Up / Down, Ctrl+Shift+Up / Down |
 | Quit | F10, Ctrl+Shift+Q |
 
-**Close all sessions** (F1 only, no shortcut) kills every session in the Agents list, whatever its harness, after a `y` on the confirmation. An exited session leaves the list at once; a live one leaves once its exit is recorded, so its trace, loop or workflow run finishes the normal way, and none of them is restored at the next start.
+**Close all sessions** (`Q` in the Agents list, or F1 → Commands) kills every session in the Agents list, whatever its harness, after a `y` on the confirmation. An exited session leaves the list at once; a live one leaves once its exit is recorded, so its trace, loop or workflow run finishes the normal way, and none of them is restored at the next start.
 
 `agent-mux keys` is the raw terminal event diagnostic. F1 now opens Commands instead of opening Help directly. Existing Command+E / Ctrl+Shift+E and F2 retain their Main focus-toggle meaning.
 

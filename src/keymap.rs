@@ -932,7 +932,7 @@ pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: ActionId::CloseAllSessions,
         label: "Close all sessions",
-        keywords: "kill stop harness every",
+        keywords: "kill stop harness every Q",
         key: None,
         scope: ActionScope::Global,
     },
