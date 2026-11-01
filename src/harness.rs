@@ -341,6 +341,14 @@ pub fn restore_args(harness: Harness, saved: &[String], conversation: &str) -> V
     compose(&without_resume(harness, saved), &options.render(harness))
 }
 
+/// The arguments that bring a saved session back as a new conversation:
+/// the profile's own arguments with any resume taken out. Used when the
+/// conversation it held belongs to another session being restored (two
+/// panes resuming one agy conversation get "Conversation already open").
+pub fn fresh_args(harness: Harness, saved: &[String]) -> Vec<String> {
+    without_resume(harness, saved)
+}
+
 /// `args` minus every spelling of resume `harness` accepts: Claude's
 /// `--continue`/`-c`, `--resume`/`-r` with its value, Antigravity's
 /// `--continue`/`-c` and `--conversation` with its value, OpenCode's
