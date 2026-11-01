@@ -355,3 +355,35 @@ async fn close_all_sessions_kills_every_session_and_empties_the_list() {
     assert!(ok, "killed sessions never left the list");
     assert!(app.closing_sessions.is_empty());
 }
+
+#[tokio::test]
+async fn restart_asks_while_sessions_run_then_quits_for_a_restart() {
+    use agent_mux::keymap::ActionId;
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut app = App::new(shell_profiles(), None, tx);
+    create_session_via_dialog(&mut app);
+    app.execute_command(ActionId::Restart, Instant::now());
+    assert!(matches!(app.mode, Mode::ConfirmRestart));
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    assert!(matches!(app.mode, Mode::Main));
+    assert!(!app.should_quit && !app.restart_requested);
+
+    app.execute_command(ActionId::Restart, Instant::now());
+    app.handle_key(&key(KeyCode::Char('y')), Instant::now());
+    assert!(app.should_quit && app.restart_requested);
+    // sessions are left to main's shutdown, which saves them first
+    assert_eq!(app.sessions.len(), 1);
+
+    // with nothing running it restarts without asking
+    app.kill_all();
+    let ok = pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {
+        matches!(a.sessions[0].status(Instant::now()), Status::Exited(_))
+    })
+    .await;
+    assert!(ok);
+    app.should_quit = false;
+    app.restart_requested = false;
+    app.execute_command(ActionId::Restart, Instant::now());
+    assert!(matches!(app.mode, Mode::Main));
+    assert!(app.should_quit && app.restart_requested);
+}

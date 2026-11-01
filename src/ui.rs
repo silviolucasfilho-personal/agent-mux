@@ -330,6 +330,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::SessionHistory(history) => draw_session_history(f, history, app),
         Mode::ConfirmKill => draw_confirm(f, "Kill this session? [y/n]"),
         Mode::ConfirmCloseAll => draw_confirm(f, &close_all_question(app, now)),
+        Mode::ConfirmRestart => draw_confirm(f, &restart_question(app, now)),
         Mode::ConfirmQuit => draw_confirm(f, &quit_question(app, now)),
         Mode::Help => draw_help(f),
         Mode::SkillsView(view) => draw_skills_view(f, view, app),
@@ -5089,6 +5090,28 @@ fn quit_question(app: &App, now: Instant) -> String {
     }
 }
 
+fn restart_question(app: &App, now: Instant) -> String {
+    let running = app
+        .sessions
+        .iter()
+        .filter(|s| !matches!(s.status(now), Status::Exited(_)))
+        .count();
+    let working = app
+        .sessions
+        .iter()
+        .any(|s| matches!(s.status(now), Status::Working));
+    let what = if running == 1 {
+        "1 running session stops and resumes".to_string()
+    } else {
+        format!("{running} running sessions stop and resume")
+    };
+    if working {
+        format!("Restart agent-mux? {what}; some are still working. [y/n]")
+    } else {
+        format!("Restart agent-mux? {what}. [y/n]")
+    }
+}
+
 fn close_all_question(app: &App, now: Instant) -> String {
     let running = app
         .sessions
@@ -6405,6 +6428,7 @@ mod tests {
             crate::app::Mode::Help,
             crate::app::Mode::ConfirmKill,
             crate::app::Mode::ConfirmCloseAll,
+            crate::app::Mode::ConfirmRestart,
             crate::app::Mode::ConfirmQuit,
             crate::app::Mode::ConfirmRemoveLoop,
             crate::app::Mode::TraceBrowser(Box::new(crate::app::TraceBrowserState::new(

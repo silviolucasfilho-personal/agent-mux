@@ -36,6 +36,8 @@ The terminal may intercept a key or collapse its modifiers. Protocol support alo
 
 **Close all sessions** (`Q` in the Agents list, or F1 → Commands) kills every session in the Agents list, whatever its harness, after a `y` on the confirmation. An exited session leaves the list at once; a live one leaves once its exit is recorded, so its trace, loop or workflow run finishes the normal way, and none of them is restored at the next start.
 
+**Restart agent-mux** (F1 → Commands) shuts down as Quit does (sessions saved, then stopped, traces flushed) and runs the same binary again with the same arguments in the same terminal, which restores the sessions. Since it starts the file at the launched path, it is how a build installed with `cargo install` takes over. With live sessions it asks first (`y`/`n`).
+
 `agent-mux keys` is the raw terminal event diagnostic. F1 now opens Commands instead of opening Help directly. Existing Command+E / Ctrl+Shift+E and F2 retain their Main focus-toggle meaning.
 
 ## Application screens

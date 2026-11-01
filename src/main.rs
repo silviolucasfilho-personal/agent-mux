@@ -387,7 +387,40 @@ async fn main() -> Result<()> {
     if let Some(e) = draw_err {
         return Err(e.into());
     }
+    if app.restart_requested {
+        restore_terminal();
+        return Err(restart_self().into());
+    }
     Ok(())
+}
+
+/// "Restart agent-mux": runs this binary again with the same arguments, in
+/// the same terminal. The path is the one launched, so a build installed
+/// over it since (`cargo install`) is the one that starts. Returns only
+/// on failure.
+fn restart_self() -> std::io::Error {
+    let exe = match std::env::current_exe() {
+        // Linux names a replaced binary "<path> (deleted)"
+        Ok(p) => match p.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+            Some(live) => std::path::PathBuf::from(live),
+            None => p,
+        },
+        Err(e) => return e,
+    };
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(std::env::args_os().skip(1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.exec()
+    }
+    #[cfg(not(unix))]
+    {
+        match cmd.status() {
+            Ok(st) => std::process::exit(st.code().unwrap_or(0)),
+            Err(e) => e,
+        }
+    }
 }
 
 /// Hands the terminal to an external editor and takes it back: the input
