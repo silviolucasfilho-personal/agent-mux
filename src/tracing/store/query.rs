@@ -662,6 +662,30 @@ pub fn launch_conversation(conn: &Connection, launch_id: &str) -> rusqlite::Resu
     }))
 }
 
+/// The conversations of `provider` that agent-mux launched in exactly
+/// `dir`, newest first: a launch there correlated to them, and the
+/// harness did not place them in another folder. The store knows every
+/// correlated launch, so this names a workspace's own conversation where
+/// a scan of the harness's files can only guess (an agy transcript that
+/// mentions a folder is not a conversation held in it).
+pub fn conversations_launched_in(
+    conn: &Connection,
+    provider: &str,
+    dir: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.session_id FROM sessions s
+         WHERE s.provider = ?1
+           AND (s.cwd IS NULL OR s.cwd = ?2)
+           AND s.key IN (SELECT session_key FROM launches
+                         WHERE cwd = ?2 AND session_key IS NOT NULL)
+         ORDER BY s.last_seen_ns DESC
+         LIMIT 50",
+    )?;
+    stmt.query_map(params![provider, dir], |r| r.get(0))?
+        .collect()
+}
+
 /// The conversation a launch was correlated to: its provider, its id and
 /// the harness's transcript file, when the store knows them.
 pub fn launch_transcript(

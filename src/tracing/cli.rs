@@ -423,12 +423,7 @@ fn loops(args: &Args) -> anyhow::Result<()> {
 
 /// The store's provider key for a harness.
 fn provider_key(h: crate::harness::Harness) -> &'static str {
-    match h {
-        crate::harness::Harness::Claude => "claude",
-        crate::harness::Harness::Codex => "codex",
-        crate::harness::Harness::Antigravity => "antigravity",
-        crate::harness::Harness::OpenCode => "opencode",
-    }
+    h.store_provider()
 }
 
 /// `--harness claude|codex|agy|opencode` narrows the inventory.

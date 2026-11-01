@@ -3543,6 +3543,34 @@ impl App {
             return Some(conv);
         }
 
+        // a conversation another session holds (by its trace or what it
+        // recorded) is not this one's to guess
+        let held_by_other = |id: &str| {
+            self.sessions.iter().any(|other| {
+                other.id != session.id
+                    && (other.conversation.as_deref() == Some(id)
+                        || conn
+                            .zip(other.trace.as_ref())
+                            .and_then(|(c, t)| {
+                                crate::tracing::store::query::launch_conversation(c, &t.launch_id)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .as_deref()
+                            == Some(id))
+            })
+        };
+
+        // the store knows which conversations were launched in this very
+        // folder; a scan of agy's files only knows which ones mention it
+        if let Some(h) = harness.filter(|h| *h != crate::harness::Harness::Claude)
+            && let Some(conv) = conn.and_then(|c| {
+                Self::conversation_launched_in(c, h, &session.dir, |id| held_by_other(id))
+            })
+        {
+            return Some(conv);
+        }
+
         let disk_conv = match harness {
             Some(crate::harness::Harness::Claude) => {
                 let dir = self.claude_dir.clone().or_else(history::default_claude_dir);
@@ -3561,29 +3589,31 @@ impl App {
             Some(crate::harness::Harness::Codex) | None => None,
         };
 
-        // a conversation another session holds (by its trace or what it
-        // recorded) is not this one's to guess from disk
-        let disk_claimed_by_other = disk_conv.as_ref().is_some_and(|disk_id| {
-            self.sessions.iter().any(|other| {
-                other.id != session.id
-                    && (other.conversation.as_deref() == Some(disk_id)
-                        || conn
-                            .zip(other.trace.as_ref())
-                            .and_then(|(c, t)| {
-                                crate::tracing::store::query::launch_conversation(c, &t.launch_id)
-                                    .ok()
-                                    .flatten()
-                            })
-                            .as_deref()
-                            == Some(disk_id))
-            })
-        });
+        let disk_claimed_by_other = disk_conv.as_deref().is_some_and(held_by_other);
 
         if !disk_claimed_by_other && disk_conv.is_some() {
             return disk_conv;
         }
 
         trace_conv.or_else(|| session.conversation.clone())
+    }
+
+    /// The newest conversation of `harness` agent-mux launched in `dir`
+    /// that `taken` does not rule out, from the trace store.
+    fn conversation_launched_in(
+        conn: &rusqlite::Connection,
+        harness: crate::harness::Harness,
+        dir: &std::path::Path,
+        taken: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        crate::tracing::store::query::conversations_launched_in(
+            conn,
+            harness.store_provider(),
+            &dir.to_string_lossy(),
+        )
+        .ok()?
+        .into_iter()
+        .find(|id| !taken(id))
     }
 
     /// Persists active (non-exited) sessions to disk so they can be restored on restart.
@@ -3729,9 +3759,24 @@ impl App {
         }
         let mut background = ClaudeBackgroundCache::default();
         // a file saved before conversations were kept apart may name one
-        // for several sessions: the first resumes it, the rest start anew
-        let mut claimed = std::collections::HashSet::new();
-        for s in saved {
+        // for several sessions: the first resumes it; the rest, and a
+        // session of a harness other than Claude that never had one known,
+        // take the newest conversation launched in their own folder that
+        // no other session holds, else start anew
+        let conn = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|p| crate::tracing::store::open_ro(p).ok());
+        let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut owners = std::collections::HashSet::new();
+        for (i, s) in saved.iter().enumerate() {
+            if let Some(c) = s.conversation.as_ref().filter(|c| !c.trim().is_empty())
+                && claimed.insert(c.clone())
+            {
+                owners.insert(i);
+            }
+        }
+        for (i, s) in saved.into_iter().enumerate() {
             let mut entry = s.clone();
             let dir = if s.dir.is_dir() {
                 s.dir
@@ -3745,16 +3790,24 @@ impl App {
             let mut profile = s.profile;
             let mut conversation = s.conversation.filter(|c| !c.trim().is_empty());
             let harness = crate::harness::Harness::detect(&profile.command);
-            if conversation
-                .as_ref()
-                .is_some_and(|c| !claimed.insert(c.clone()))
-            {
-                conversation = None;
-                if let Some(h) = harness {
-                    profile.args = crate::harness::fresh_args(h, &profile.args);
+            if !owners.contains(&i) {
+                let replacement = harness
+                    .filter(|h| *h != crate::harness::Harness::Claude)
+                    .zip(conn.as_ref())
+                    .and_then(|(h, c)| {
+                        Self::conversation_launched_in(c, h, &dir, |id| claimed.contains(id))
+                    });
+                if conversation.is_some() || replacement.is_some() {
+                    if let Some(h) = harness {
+                        profile.args = crate::harness::fresh_args(h, &profile.args);
+                    }
+                    if let Some(r) = &replacement {
+                        claimed.insert(r.clone());
+                    }
+                    conversation = replacement;
+                    entry.conversation = conversation.clone();
+                    entry.profile.args = profile.args.clone();
                 }
-                entry.conversation = None;
-                entry.profile.args = profile.args.clone();
             }
             if let (Some(conv), Some(harness)) = (conversation.as_deref(), harness) {
                 profile.args = crate::harness::restore_args(harness, &profile.args, conv);
