@@ -5,17 +5,15 @@
 //! operator's verbs. A swarm is dispatched by the TUI that started it
 //! (`swarms.owner_run`); another TUI adopts it once that one is gone.
 
-use crate::app::workflows::LivePlan;
 use crate::app::{App, Notice};
 use crate::bus::TaskIsolation;
 use crate::bus::control::{ControlRequest, ControlResponse};
 use crate::bus::swarm::engine::{self, Action, Worker, WorkerState};
-use crate::bus::swarm::plan::{self, CheckEnv};
+use crate::bus::swarm::plan::CheckEnv;
 use crate::bus::swarm::prompt::{self, AgentInfo, PlannerContext, Replan, ReplanTask};
 use crate::bus::swarm::record::{self, NewSwarm, SwarmRun, SwarmStatus, SwarmVerb};
-use crate::harness::{Harness, LaunchOptions, Resume, compose};
+use crate::harness::{Harness, LaunchOptions, compose};
 use crate::status::Status;
-use crate::workflows::harness as wfh;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -121,13 +119,13 @@ impl App {
             },
             crate::tracing::store::now_ns(),
         )?;
-        if let Err(e) = self.start_swarm_planner(&swarm, None) {
+        if let Err(e) = self.start_swarm_coordinator(&swarm, None, None) {
             let _ = record::set_plan_result(
                 &conn,
                 Some(&db),
                 &swarm.id,
                 None,
-                Some(&format!("the planner did not start: {e}")),
+                Some(&format!("the coordinator did not start: {e}")),
                 SwarmStatus::Review,
                 crate::tracing::store::now_ns(),
             );
@@ -136,22 +134,15 @@ impl App {
         Ok(swarm)
     }
 
-    /// Launches the headless planner on `swarm`'s goal (and, on a re-plan,
-    /// the board and the operator's notes), the way `start_workflow_plan`
-    /// launches the workflow planner.
-    fn start_swarm_planner(
-        &mut self,
+    /// Writes the coordinator's planner context (`$AGENT_MUX_SWARM_PLAN`):
+    /// the goal, the workspace's inventory, the harnesses and agents, and on
+    /// a re-plan the board and the operator's notes.
+    fn write_planner_context(
+        &self,
         swarm: &SwarmRun,
         replan: Option<Replan>,
-    ) -> Result<(), String> {
-        let harness: Harness = swarm.planner_harness.parse()?;
+    ) -> Result<PathBuf, String> {
         let workspace = PathBuf::from(&swarm.workspace);
-        let def = self
-            .find_skill(SWARM_PLAN_SKILL)
-            .cloned()
-            .ok_or("the swarm-plan skill is not available")?;
-        crate::skill::install::install(&def, harness, &self.skill_home(), false)
-            .map_err(|e| format!("installing swarm-plan for {}: {e}", harness.as_str()))?;
         let catalog = crate::agents::Catalog::load(&self.library_root(), Some(&workspace));
         let ctx = PlannerContext {
             goal: swarm.goal.clone(),
@@ -181,174 +172,180 @@ impl App {
         let dir = self.workflows_runtime_dir().join("swarms").join(&swarm.id);
         std::fs::create_dir_all(&dir).map_err(|e| format!("planner context: {e}"))?;
         let n = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
-        let ctx_path = dir.join(format!("plan-{n}.json"));
+        let path = dir.join(format!("plan-{n}.json"));
         std::fs::write(
-            &ctx_path,
+            &path,
             serde_json::to_vec_pretty(&ctx).map_err(|e| e.to_string())?,
         )
         .map_err(|e| format!("planner context: {e}"))?;
-        let out_file = dir.join(format!("plan-{n}.last.md"));
-        let mut profile = self.workflow_profile(None, harness);
+        Ok(path)
+    }
+
+    /// The board as the coordinator's context sees it on a re-plan or a
+    /// restart.
+    fn replan_board(&self, swarm: &SwarmRun, notes: &str) -> Replan {
+        let board = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|db| crate::tracing::store::open_ro(db).ok())
+            .and_then(|c| record::board(&c, &swarm.id).ok())
+            .unwrap_or_default();
+        Replan {
+            notes: notes.trim().to_string(),
+            board: board
+                .iter()
+                .map(|t| ReplanTask {
+                    key: t.ext.plan_key.clone(),
+                    title: t.task.title.clone(),
+                    status: t.task.status.as_str().to_string(),
+                    started: t.ext.attempts > 0,
+                })
+                .collect(),
+        }
+    }
+
+    /// Starts the swarm's coordinator agent: an interactive session in the
+    /// workspace on the swarm's coordinator harness, whose opening prompt is
+    /// its role and the planner context (§3 of the layout spec). It plans by
+    /// calling `agent_mux_swarm_plan`, then advises: agent-mux keeps
+    /// dispatching whatever it does. `restart` is the board summary for a
+    /// coordinator that replaces one that exited.
+    pub fn start_swarm_coordinator(
+        &mut self,
+        swarm: &SwarmRun,
+        replan: Option<Replan>,
+        restart: Option<String>,
+    ) -> Result<String, String> {
+        let harness: Harness = swarm.planner_harness.parse()?;
+        let workspace = PathBuf::from(&swarm.workspace);
+        let def = self
+            .find_skill(SWARM_PLAN_SKILL)
+            .cloned()
+            .ok_or("the swarm-plan skill is not available")?;
+        crate::skill::install::install(&def, harness, &self.skill_home(), false)
+            .map_err(|e| format!("installing swarm-plan for {}: {e}", harness.as_str()))?;
+        let ctx_path = self.write_planner_context(swarm, replan)?;
         let prompts = crate::prompts::Prompts::current();
-        let prompt_text = crate::prompts::render_workflow(
-            &prompts.swarm_plan,
+        let opening = prompt::coordinator_prompt(
+            swarm,
             &crate::skill::render::invocation(SWARM_PLAN_SKILL, harness),
-            "swarm",
-            "plan",
-            "",
             &ctx_path.display().to_string(),
+            &prompts.swarm_plan,
+            restart.as_deref(),
         );
+        let mut profile = self
+            .profiles
+            .iter()
+            .find(|p| Harness::detect(&p.command) == Some(harness))
+            .cloned()
+            .unwrap_or_else(|| crate::config::Profile {
+                name: harness.as_str().to_string(),
+                command: harness.as_str().to_string(),
+                args: Vec::new(),
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: Some(self.bypass_approvals_default),
+            });
+        profile.name = format!("{} · coordinator", harness.as_str());
         let options = LaunchOptions {
             model: profile.model.clone(),
-            bypass_approvals: true,
-            resume: Resume::Off,
-            one_shot: Some(prompt_text),
+            bypass_approvals: profile
+                .bypass_approvals
+                .unwrap_or(self.bypass_approvals_default),
+            ..Default::default()
         };
-        let mut args = compose(&profile.args, &options.render(harness));
-        let timeout_s = self.workflows.session_timeout_s;
-        wfh::insert_before_prompt(
-            &mut args,
-            harness,
-            wfh::extra_args(harness, None, timeout_s, &out_file),
-        );
-        if Harness::detect(&profile.command) != Some(harness) {
-            profile.command = harness.as_str().to_string();
+        if !options.is_empty() {
+            profile.args = compose(&profile.args, &options.render(harness));
         }
-        profile.args = args;
-        profile.name = format!(
-            "swarm plan ▸ {}",
-            crate::app::workflows::short_task(&swarm.goal)
-        );
+        let opening_args = harness.opening_args(opening);
+        profile.args.extend(opening_args.iter().cloned());
         let env: Vec<(String, String)> = vec![
             (
                 "AGENT_MUX_SWARM_PLAN".into(),
                 ctx_path.to_string_lossy().into_owned(),
             ),
+            ("AGENT_MUX_SWARM_ID".into(), swarm.id.clone()),
             ("AGENT_MUX_WORKSPACE".into(), swarm.workspace.clone()),
         ];
-        let launch = crate::workflows::WorkflowLaunch {
-            run_id: swarm.id.clone(),
-            workflow: "swarm".into(),
-            step: "plan".into(),
-            phase: "Plan".into(),
-            agent: None,
-        };
-        let sid = self.next_id;
-        let session = self
+        let id = self.next_id;
+        let mut session = self
             .spawn_traced_full(
-                sid,
+                id,
                 profile,
-                workspace.clone(),
+                workspace,
                 &env,
                 Some(SWARM_PLAN_SKILL),
                 None,
-                Some(launch),
+                None,
                 &[],
             )
             .map_err(|e| format!("spawn: {e}"))?;
-        self.next_id += 1;
-        let launch_id = session.trace.as_ref().map(|t| t.launch_id.clone());
-        self.sessions.push(session);
-        self.live_workflow_plans.push(LivePlan {
+        session.opening_args = opening_args;
+        session.group = Some(crate::tree::GroupRef {
+            kind: crate::tree::GroupKind::Bus,
             id: swarm.id.clone(),
-            session_id: sid,
-            task: swarm.goal.clone(),
-            workspace,
-            harness,
-            profile: None,
-            budget_tokens: None,
-            started: Instant::now(),
-            timeout: Duration::from_secs(timeout_s),
-            exited_at: None,
-            stdout: Vec::new(),
-            out_file,
-            launch_id: launch_id.clone(),
-            auto_run: false,
-            swarm: Some(swarm.id.clone()),
+            title: "swarm".into(),
+            detail: crate::bus::short_id(&swarm.id).to_string(),
+            label: "coordinator".into(),
         });
-        if let Some(db) = self.trace_db_path.as_deref()
-            && let Ok(conn) = crate::tracing::store::open_aux(db)
+        let launch = session
+            .trace
+            .as_ref()
+            .map(|t| t.launch_id.clone())
+            .unwrap_or_else(|| format!("session-{id}"));
+        self.next_id += 1;
+        self.sessions.push(session);
+        let _ = self.save_active_sessions();
+        if let Some(db) = self.trace_db_path.clone()
+            && let Ok(conn) = crate::tracing::store::open_aux(&db)
         {
-            let _ = record::set_planner(
+            let now = crate::tracing::store::now_ns();
+            let _ = record::set_coordinator_launch(&conn, Some(&db), &swarm.id, &launch, now);
+        }
+        Ok(launch)
+    }
+
+    /// The coordinator's launch while its session is open here.
+    fn live_coordinator(&self, swarm: &SwarmRun) -> Option<String> {
+        let launch = swarm.planner_launch.clone()?;
+        self.sessions
+            .iter()
+            .any(|s| {
+                s.trace.as_ref().is_some_and(|t| t.launch_id == launch)
+                    && !matches!(s.status(Instant::now()), Status::Exited(_))
+            })
+            .then_some(launch)
+    }
+
+    /// Writes to the coordinator on the bus and wakes it with `wake`.
+    fn tell_coordinator(&mut self, swarm: &SwarmRun, topic: &str, body: &str, wake: &str) -> bool {
+        let Some(launch) = self.live_coordinator(swarm) else {
+            return false;
+        };
+        if let Some(db) = self.trace_db_path.clone()
+            && let Ok(conn) = crate::tracing::store::open_aux(&db)
+        {
+            let _ = crate::bus::store::send_message(
                 &conn,
-                Some(db),
-                &swarm.id,
-                launch_id.as_deref(),
+                Some(&db),
+                &swarm.workspace,
+                "user",
+                Some(&launch),
+                topic,
+                body,
+                None,
                 crate::tracing::store::now_ns(),
             );
         }
-        Ok(())
-    }
-
-    /// The planner answered: its plan goes on the board (the tasks that ran
-    /// stay) and the swarm waits for review, or runs at once when the gate
-    /// is off and the plan has no errors. A broken answer leaves the board
-    /// as it was and says why.
-    pub(crate) fn complete_swarm_plan(&mut self, swarm_id: &str, text: &str) {
-        let Some(db) = self.trace_db_path.clone() else {
-            return;
-        };
-        let Ok(conn) = crate::tracing::store::open_aux(&db) else {
-            return;
-        };
-        let now = crate::tracing::store::now_ns();
-        let Some(swarm) = record::get_swarm(&conn, swarm_id).ok().flatten() else {
-            return;
-        };
-        if swarm.ended_ns.is_some() {
-            return;
-        }
-        let parsed = plan::parse(text)
-            .and_then(|p| record::replace_draft(&conn, Some(&db), &swarm, &p, now).map(|_| p));
-        match parsed {
-            Err(e) => {
-                let _ = record::set_plan_result(
-                    &conn,
-                    Some(&db),
-                    &swarm.id,
-                    None,
-                    Some(&e),
-                    SwarmStatus::Review,
-                    now,
-                );
-                self.notice = Some(Notice::error(format!(
-                    "swarm planner: {e} · re-plan with `agent-mux swarm replan`"
-                )));
-            }
-            Ok(p) => {
-                let env = self.swarm_check_env(Path::new(&swarm.workspace), swarm.isolation);
-                let board = record::board(&conn, &swarm.id).unwrap_or_default();
-                let problems = plan::check(&record::board_plan(&swarm, &board), &env);
-                let next = if !swarm.gate && problems.is_ok() {
-                    SwarmStatus::Running
-                } else {
-                    SwarmStatus::Review
-                };
-                let _ = record::set_plan_result(
-                    &conn,
-                    Some(&db),
-                    &swarm.id,
-                    Some(&p.summary),
-                    None,
-                    next,
-                    now,
-                );
-                self.notice = Some(Notice::info(match next {
-                    SwarmStatus::Running => {
-                        format!("swarm: {} task(s) planned, starting", board.len())
-                    }
-                    _ => format!(
-                        "swarm: {} task(s) planned{} · review it, then `agent-mux swarm approve`",
-                        board.len(),
-                        if problems.is_ok() {
-                            String::new()
-                        } else {
-                            format!(", {} error(s) to fix", problems.errors.len())
-                        }
-                    ),
-                }));
-            }
-        }
+        let _ = self.handle_bus_control(
+            ControlRequest::WakeSession {
+                launch_id: launch,
+                prompt: wake.to_string(),
+            },
+            Instant::now(),
+        );
+        true
     }
 
     /// Carries out an operator verb on `workspace`'s swarm.
@@ -375,27 +372,68 @@ impl App {
                 ))
             }
             SwarmVerb::Replan => {
-                if swarm.status != SwarmStatus::Review {
+                if !matches!(swarm.status, SwarmStatus::Review | SwarmStatus::Planning) {
                     return Err(format!(
                         "re-plan from review only (the swarm is {})",
                         swarm.status.as_str()
                     ));
                 }
-                let board = record::board(&conn, &swarm.id).map_err(|e| e.to_string())?;
-                let replan = Replan {
-                    notes: notes.unwrap_or_default().trim().to_string(),
-                    board: board
-                        .iter()
-                        .map(|t| ReplanTask {
-                            key: t.ext.plan_key.clone(),
-                            title: t.task.title.clone(),
-                            status: t.task.status.as_str().to_string(),
-                            started: t.ext.attempts > 0,
-                        })
-                        .collect(),
-                };
-                self.start_swarm_planner(&swarm, Some(replan))?;
-                Ok("re-planning".into())
+                let notes = notes.unwrap_or_default().trim().to_string();
+                let told = self.tell_coordinator(
+                    &swarm,
+                    "plan-changes",
+                    &format!("The operator sent the plan back: {notes}"),
+                    &format!(
+                        "[agent-mux swarm] The operator sent your plan back: {notes} Revise it and call agent_mux_swarm_plan again."
+                    ),
+                );
+                let _ = record::set_planner(
+                    &conn,
+                    Some(&db),
+                    &swarm.id,
+                    swarm.planner_launch.as_deref(),
+                    now,
+                );
+                if told {
+                    Ok("sent back to the coordinator".into())
+                } else {
+                    let replan = self.replan_board(&swarm, &notes);
+                    self.start_swarm_coordinator(&swarm, Some(replan), None)?;
+                    Ok("the coordinator had exited: a new one re-plans".into())
+                }
+            }
+            SwarmVerb::Restart => {
+                if self.live_coordinator(&swarm).is_some() {
+                    return Err("the coordinator is still running: x stops it first".into());
+                }
+                let summary = record::board(&conn, &swarm.id)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|t| {
+                        format!(
+                            "- {} ({}): {}",
+                            t.ext.plan_key,
+                            t.task.status.as_str(),
+                            t.task.title
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let replan = self.replan_board(&swarm, "");
+                self.start_swarm_coordinator(&swarm, Some(replan), Some(summary))?;
+                Ok("a new coordinator started".into())
+            }
+            SwarmVerb::Approve => {
+                let env = self.swarm_check_env(Path::new(&swarm.workspace), swarm.isolation);
+                let done = record::apply(&conn, Some(&db), &swarm, verb, task, &env, now)?;
+                self.tell_coordinator(
+                    &swarm,
+                    "plan-approved",
+                    "The operator approved the plan. agent-mux starts the workers now.",
+                    "[agent-mux swarm] The operator approved your plan: agent-mux starts the workers. Wait for questions and events; do not start workers yourself.",
+                );
+                self.last_swarm_engine_pass = None;
+                Ok(done)
             }
             _ => {
                 let env = self.swarm_check_env(Path::new(&swarm.workspace), swarm.isolation);
@@ -681,5 +719,115 @@ impl App {
                 }
             }
         }
+        self.tell_coordinator_events(conn, db, swarm, &board, &workers);
     }
+
+    /// Tells the coordinator what happened on the board since it was last
+    /// told: tasks done, failed or cancelled, and proposals. One bus message
+    /// and one wake for all of them, at most every [`EVENTS_EVERY_NS`], and
+    /// only while it is idle and the swarm is not paused (decision 2).
+    fn tell_coordinator_events(
+        &mut self,
+        conn: &rusqlite::Connection,
+        db: &Path,
+        swarm: &SwarmRun,
+        board: &[record::BoardTask],
+        workers: &HashMap<String, Worker>,
+    ) {
+        // a finished swarm's last events are told too, before it closes
+        if !matches!(
+            swarm.status,
+            SwarmStatus::Running | SwarmStatus::Integrating | SwarmStatus::Finished
+        ) {
+            return;
+        }
+        let Some(c) = record::coordinator(conn, &swarm.id).ok().flatten() else {
+            return;
+        };
+        let Some(launch) = c.launch.clone() else {
+            return;
+        };
+        if !workers
+            .get(&launch)
+            .is_some_and(|w| w.state == WorkerState::Idle)
+        {
+            return;
+        }
+        let now_ns = crate::tracing::store::now_ns();
+        if c.last_wake_ns.is_some_and(|t| now_ns - t < EVENTS_EVERY_NS) {
+            return;
+        }
+        let mut events = Vec::new();
+        let mut newest = c.events_seen_ns;
+        for t in board {
+            let key = &t.ext.plan_key;
+            if let Some(ended) = t.task.ended_ns
+                && ended > c.events_seen_ns
+            {
+                let what = match (&t.task.result, &t.task.error) {
+                    (_, Some(e)) => {
+                        format!("{} {}: {}", key, t.task.status.as_str(), first_line(e))
+                    }
+                    (Some(serde_json::Value::String(r)), _) => {
+                        format!("{} {}: {}", key, t.task.status.as_str(), first_line(r))
+                    }
+                    _ => format!("{} {}", key, t.task.status.as_str()),
+                };
+                events.push(what);
+                newest = newest.max(ended);
+            }
+            if t.ext.proposed && t.task.created_ns > c.events_seen_ns {
+                events.push(format!("{key} proposed by a worker: {}", t.task.title));
+                newest = newest.max(t.task.created_ns);
+            }
+        }
+        if events.is_empty() {
+            return;
+        }
+        let body = format!(
+            "{} event(s) in swarm {}:\n{}",
+            events.len(),
+            swarm.id,
+            events
+                .iter()
+                .map(|e| format!("- {e}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let _ = crate::bus::store::send_message(
+            conn,
+            Some(db),
+            &swarm.workspace,
+            "agent-mux",
+            Some(&launch),
+            "swarm-events",
+            &body,
+            None,
+            now_ns,
+        );
+        let _ = self.handle_bus_control(
+            ControlRequest::WakeSession {
+                launch_id: launch,
+                prompt: format!(
+                    "[agent-mux swarm] {} event(s) in your swarm: read them with agent_mux_recv_messages. Advise the operator or propose tasks if something should change; do not start workers.",
+                    events.len()
+                ),
+            },
+            Instant::now(),
+        );
+        let _ = record::mark_events_told(conn, &swarm.id, newest, now_ns);
+    }
+}
+
+/// At most one wake of the coordinator for events per minute (decision 2).
+pub const EVENTS_EVERY_NS: i64 = 60 * 1_000_000_000;
+
+fn first_line(s: &str) -> String {
+    s.lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(160)
+        .collect()
 }

@@ -1,12 +1,12 @@
 # Swarms: one goal, many agents
 
-A **swarm** splits one goal into tasks that agents work on in parallel in the same workspace. agent-mux runs it: a planner writes the plan, you review and approve it, and agent-mux starts one worker per task, in order, up to the number of workers you allow. Workers can be Claude Code, Codex, Antigravity or OpenCode sessions, in any mix. You watch and steer the swarm from the **Swarm** screen. This guide shows how to use it. How it works inside (tables, control requests, the dispatcher) is in [bus.md](bus.md#swarm-mission-control-modeswarm-agent-mux-swarm-), and the design is in the specs for [the orchestrator](superpowers/specs/2026-11-02-swarm-orchestrator-design.md) and [the screen](superpowers/specs/2026-11-02-swarm-agents-layout-design.md).
+A **swarm** splits one goal into tasks that agents work on in parallel in the same workspace. Each swarm has a **coordinator**, an agent session you can watch and talk to, which writes the plan and answers the workers' questions. You review and approve the plan, and agent-mux starts one worker per task, in order, up to the number of workers you allow. agent-mux runs the swarm itself, so a quiet coordinator never stalls it. Workers can be Claude Code, Codex, Antigravity or OpenCode sessions, in any mix. You watch and steer the swarm from the **Swarm** screen. This guide shows how to use it. How it works inside (tables, control requests, the dispatcher) is in [bus.md](bus.md#swarm-mission-control-modeswarm-agent-mux-swarm-), and the design is in the specs for [the orchestrator](superpowers/specs/2026-11-02-swarm-orchestrator-design.md) and [the screen](superpowers/specs/2026-11-02-swarm-agents-layout-design.md).
 
 ## In one minute
 
 1. Select a session in the folder you want to work on, press `F1` and choose **Open swarm**.
 2. Press `n` (or `Enter` on the empty screen), write the goal, and press `Ctrl+S`.
-3. The planner writes the plan: its `★` row shows its terminal. When the swarm's card says the plan waits for you, look over the tasks, edit what you want, and press `y` then `y` to approve it.
+3. The coordinator writes the plan in its own terminal (the `★` row; `Enter` there to talk to it). When the swarm's card says the plan waits for you, look over the tasks, edit what you want, and press `y` then `y` to approve it.
 4. Workers start, each on one task. Select a task to see its worker's terminal, and press `Enter` to type into it. `!` jumps to whatever needs you, and `>` writes to workers.
 5. When a worker finishes in its own git worktree, `y` on its row merges its branch.
 6. When the swarm is finished, `y` on its row closes it.
@@ -27,13 +27,13 @@ Press `n` on a swarm row (or `Enter` on the empty screen). The form asks for:
 | Field | Meaning | Default |
 | --- | --- | --- |
 | Goal | What the swarm should achieve. Be concrete: what done looks like, and what's out of scope. | — |
-| Planner | Which harness writes the plan. Tasks that don't name a harness also run on it. | the selected session's |
+| Coordinator | Which harness the coordinator runs on. Tasks that don't name a harness also run on it. | the selected session's |
 | Max parallel workers | How many tasks run at once. A finished worker no longer counts. | 3 (up to 8) |
 | Default isolation | `shared` (leases on files) or `worktree` (one branch per task). | `shared` |
 | Approve the plan before workers start | The **plan gate**. With it off, workers start as soon as the plan passes its checks. | yes |
 | Check when done | An optional command, such as `cargo test`. agent-mux runs it in the workspace once every task is settled and every branch reviewed, before the swarm reads `finished`. | — |
 
-`Tab` moves between fields, `←`/`→` change an option, `Alt+Enter` adds a line to the goal, and `Ctrl+S` starts. The planner runs in the background, and its output shows in the panel while it works (`Enter` attaches to it).
+`Tab` moves between fields, `←`/`→` change an option, `Alt+Enter` adds a line to the goal, and `Ctrl+S` starts. The coordinator starts at once: select its `★` row to watch it plan.
 
 ## The screen
 
@@ -42,7 +42,7 @@ The Swarm screen has the Agents screen's layout: a tree on the left, and the sel
 ```
 ┌ Swarms • Keyboard focus ───┐┌ grok-spec · asking · Design specification ─────────────────────┐
 │>▾ ◆ add grok to agent… ⚑2  ││  1 Task   2 Live   3 Thread (1)   4 Changes                      │
-│     ★ planner·claude    ○  ││                                                                 │
+│     ★ coordinator·claude ○ ││                                                                 │
 │     ◷ 1 grok-spec       !  ││  12:35 grok-spec → you #question                                │
 │     ⇡ 2 harness-core    !  ││    Should the spec cover ~/.grok sessions?                      │
 │     ⋯ 3 workflows-and-… sh ││                                                                 │
@@ -53,13 +53,13 @@ The Swarm screen has the Agents screen's layout: a tree on the left, and the sel
 ```
 
 - **The tree** lists every swarm: live ones first (the one in your folder at the top), then those that ended in the last week, folded. Under each `◆` swarm:
-  - **`★` planner:** the coordinator's row. It shows the planner's terminal while it plans.
+  - **`★` coordinator:** the coordinator agent's row and its session state.
   - **Tasks:** one row per task, in plan order, with its state symbol, number and key. On the right is its harness, `!` when it needs you, or `✗` when the plan has an error on it.
 
   A swarm shows `⚑n` when it needs you, `done/total` otherwise, and `✓` once it's closed.
 - **The main pane** shows the selected row:
   - **A swarm** shows its card: state, done/total, workers against your limit, elapsed time, tokens and cost, then everything that needs you, the plan, the check and the keys that apply now.
-  - **The planner** shows its terminal.
+  - **The coordinator** shows its terminal; `Enter` there to talk to it.
   - **A task** shows its worker's terminal while it has one. This is the same pane as the Agents screen, at full size. Its tabs are `1 Task` (the card: instructions, done-when, files, dependencies, result or error, branch, and the plan's problems), `2 Live` (the terminal), `3 Thread` (its messages) and `4 Changes` (its diff). The pane opens on the tab that matters: Thread when the worker asked something, Live while it works, Changes when its branch waits for review, Task otherwise.
 - **`Enter` on a terminal** gives it the keyboard, as on the Agents screen: the pane's title says `Keyboard goes to …`. `⌘L` (`Ctrl+Shift+L`) brings the keyboard back to the tree.
 - **`a`** shows **Activity**, every message of the swarm.
@@ -81,7 +81,7 @@ A task that depends on a worktree task starts only once that task's branch is me
 
 ## The plan
 
-The planner reads the goal and the workspace and answers with tasks, each with a key, instructions, a done-when line, files and dependencies. agent-mux checks the plan:
+The coordinator reads the goal and the workspace and submits tasks, each with a key, instructions, a done-when line, files and dependencies, with the `agent_mux_swarm_plan` tool. agent-mux checks the plan, and answers the coordinator with any errors so it fixes them itself; only a plan without errors goes on the board:
 
 - **Errors block approval:** a key used twice, a dependency that isn't in the plan or forms a cycle, a harness that isn't installed, an unknown agent, or a worktree outside a git repository.
 - **Warnings don't:** two tasks that may run at the same time and touch the same files in a shared workspace, or more than 12 tasks.
@@ -93,7 +93,7 @@ In **review** you can change the plan before approving it:
 | `e` (or `Enter`) | edit the selected task: title, instructions, done-when, files, dependencies |
 | `n` | add a task |
 | `d` | delete the selected task |
-| `p` | re-plan: write what should change, `Enter`, and the planner runs again. Tasks that already ran are kept. |
+| `p` | re-plan: write what should change and press `Enter`. The coordinator gets your notes and submits a new plan. Tasks that already ran are kept. |
 | `y` | approve. Refused while the plan has errors: the status line names the first one. |
 
 With the gate on, nothing starts before you approve, and workers can't claim tasks.
@@ -104,10 +104,10 @@ Each task that needs you carries `!` on its row, and its swarm carries `⚑n`. T
 
 | Item | When | On its row |
 | --- | --- | --- |
-| `question` | a worker asked you something | `m` answers it |
+| `question` | a worker or the coordinator asked you something, or a worker's question to the coordinator went unanswered for 5 minutes | `m` answers it |
 | `prompt` | a worker waits on a prompt in its terminal (usually a permission) | `Enter` types into its terminal |
 | `plan` | the plan waits for your approval | on the swarm: `y` approve · `p` re-plan |
-| `planner` | the planner gave no usable plan | on the swarm: `p` re-plan · `n` add tasks by hand |
+| `coordinator` | the coordinator has not submitted a plan after 15 minutes | on the swarm: `p` nudges it with notes · on `★`: `x` stops it, `r` starts a new one |
 | `failed` | a task failed | `r` retry |
 | `lost` | a worker's session exited mid-task | `r` retry |
 | `stalled` | a worker stopped without reporting, even after a reminder | `Enter` types into its terminal · `r` stops it, then `r` retries |
@@ -151,7 +151,7 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | `1`–`4` | a task's tab |
 | `y` | approve the plan · merge a branch · accept a proposal · close a finished swarm |
 | `space` | pause or resume: while paused, running workers continue but nothing new starts |
-| `n` | a new swarm (on a swarm row) · a new task (on a task or the planner) |
+| `n` | a new swarm (on a swarm row) · a new task (on a task or the coordinator) |
 | `e` / `d` | edit or delete a task (delete only a task that never started) |
 | `r` | retry a failed, lost, cancelled or stalled task |
 | `x` | stop the task's worker · cancel a task · set a branch aside · drop a proposal |
@@ -177,7 +177,7 @@ Confirmations take `y` only. `Enter` never confirms. What an action did shows in
 ## From the command line
 
 ```sh
-agent-mux swarm start "Add OAuth login" --planner claude --workers 4 --isolation worktree
+agent-mux swarm start "Add OAuth login" --planner claude --workers 4 --isolation worktree   # --planner: the coordinator's harness
 agent-mux swarm status                  # the swarm and its board, each task's state (--json for scripts)
 agent-mux swarm plan                    # the board with the plan's errors and warnings
 agent-mux swarm approve                 # workers start
@@ -187,20 +187,32 @@ agent-mux swarm retry <task>            # a failed, lost or cancelled task, agai
 agent-mux swarm merge <task>            # or: set-aside <task>
 agent-mux swarm accept <task>           # or: drop <task>, for a task a worker proposed
 agent-mux swarm close                   # stops its sessions, cancels open tasks, releases leases
+agent-mux swarm restart                 # a new coordinator in place of one that exited
+agent-mux swarm submit-plan --file plan.json   # what agent_mux_swarm_plan does, from a shell
 agent-mux swarm broadcast "Freeze src/api/" --urgent --wake
 ```
 
 - **`<task>`** is a plan key (`bus-fix`), a task id, or a unique prefix of either.
-- **Without the TUI:** `start`, `replan` and `close` need the agent-mux TUI running. `approve`, `pause`, `resume`, `retry`, `merge`, `set-aside`, `accept` and `drop` also work without it: they update the records, and the workers start when a TUI runs.
+- **Without the TUI:** `start`, `replan`, `restart` and `close` need the agent-mux TUI running. `approve`, `pause`, `resume`, `retry`, `merge`, `set-aside`, `accept` and `drop` also work without it: they update the records, and the workers start when a TUI runs.
 - **`stop`** is like `close`. Without a TUI, it only updates the records and says so.
 - **Options:** every command takes `--workspace DIR` (default: the current folder) and `--json`. `--no-plan-gate` starts the workers as soon as the plan passes its checks.
+
+## The coordinator
+
+The coordinator is an interactive session on the coordinator harness, in the swarm's workspace. Its opening prompt is its role and the planner context (`$AGENT_MUX_SWARM_PLAN`).
+
+- **It plans** with `agent_mux_swarm_plan`. With errors, the tool answers them and nothing changes; the coordinator fixes them and submits again. A sound plan goes on the board for you to review.
+- **It answers** the workers' questions, or forwards them to you with its recommendation.
+- **It is told** when you approve the plan or send it back, and, batched at most once a minute while it is idle, which tasks finished, failed or were proposed. It may propose follow-up tasks (`agent_mux_task_split`), which land on the board as proposals.
+- **It cannot** approve its own plan, start workers, merge or close the swarm. agent-mux does those, at your word.
+- **If it stops,** the swarm keeps running. Its `★` row shows it, and `r` there starts a new coordinator with the board as it stands (`x` stops a running one first).
 
 ## What the workers use
 
 Each worker starts with its whole task as its opening message: the instructions, the done-when line, its files, what the tasks before it reported, and how to finish. It uses the bus:
 
 - **`agent_mux_task_update`** with `done` (and a result) or `fail` (and the reason) reports the task. Until it does, the task isn't over.
-- **`agent_mux_send_message`** to `user` with topic `question` asks you something. It lands in Needs you.
+- **`agent_mux_send_message`** to `coordinator` with topic `question` asks the coordinator first. It answers, or asks you with its recommendation. A question the coordinator leaves unanswered for 5 minutes lands in your Needs you.
 - **`agent_mux_task_split`** (or `agent_mux_delegate`) from a worker doesn't start anything. It puts the task on the board as a **proposal**: with the plan gate on, it waits for you (`y` accepts, `x` drops); with the gate off, it is scheduled like the others. The worker is told so and carries on with its own task.
 - **File leases** stop two workers in a shared workspace from editing the same file. A blocked edit names the worker that holds the lease.
 
@@ -208,7 +220,7 @@ The full list and the matching `agent-mux bus …` commands are in [bus.md](bus.
 
 ## Tips
 
-- **Write the goal like a ticket.** Say what done looks like, the constraints, and what not to touch. The planner splits better with clear edges.
+- **Write the goal like a ticket.** Say what done looks like, the constraints, and what not to touch. The coordinator splits better with clear edges.
 - **Read the plan's files and dependencies before approving.** Tasks that run at the same time on the same files are the most common cause of a swarm stepping on itself; the plan warns about them.
 - **Use worktree isolation for broad changes** and shared isolation for small, well-separated files. Worktrees cost a merge per task; shared costs lease contention.
 - **Merge as tasks finish.** A task that depends on a worktree task waits for that merge.
@@ -220,7 +232,7 @@ The full list and the matching `agent-mux bus …` commands are in [bus.md](bus.
 | Symptom | Cause and fix |
 | --- | --- |
 | `y` says "fix the plan first: …" | The plan has an error. Select the task marked `!`, read its card, and `e` edit or `d` delete it, or `p` re-plan. |
-| "the planner gave no plan" | Its answer had no usable `swarm-plan` block. `p` re-plans with notes, or `n` adds tasks by hand. |
+| "the coordinator has not submitted a plan" | Select `★` to see what it is doing, and `Enter` to talk to it. `p` sends it notes; `x` then `r` on `★` starts a new one. |
 | A task stays `⋯` blocked | A task it depends on isn't done, or its branch isn't merged. The card says which. A failed dependency needs `r`. |
 | A task shows `!` lost | Its session exited mid-task. `r` retries it with a new worker. |
 | A task shows `○` stalled | The worker stopped without reporting, even after a reminder. Attach (`Enter`) to see why, message it, or `r` to stop it and `r` again to retry. |

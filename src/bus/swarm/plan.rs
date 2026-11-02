@@ -14,7 +14,7 @@ pub const MANY_TASKS: usize = 12;
 /// The fence tag of the planner's answer.
 pub const FENCE: &str = "swarm-plan";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct Plan {
     #[serde(default)]
     pub summary: String,
@@ -22,7 +22,7 @@ pub struct Plan {
     pub tasks: Vec<PlannedTask>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct PlannedTask {
     /// Short, unique within the plan; dependencies name it.
     pub key: String,
@@ -114,6 +114,32 @@ pub struct Problems {
     /// `(task key or "", message)`; any error blocks approval.
     pub errors: Vec<(String, String)>,
     pub warnings: Vec<(String, String)>,
+}
+
+impl CheckEnv {
+    /// The checks for `workspace` from this machine: the harnesses on
+    /// `PATH` (or where their installers put them), the agent catalog of
+    /// the library and the workspace, and whether it is a git repository.
+    /// The TUI's `App::swarm_check_env` also counts its profiles' commands.
+    pub fn for_workspace(
+        workspace: &std::path::Path,
+        default_isolation: TaskIsolation,
+    ) -> CheckEnv {
+        CheckEnv {
+            harnesses: crate::harness::Harness::ALL
+                .iter()
+                .filter(|h| crate::session::command_available(h.as_str()))
+                .map(|h| h.as_str().to_string())
+                .collect(),
+            agents: crate::agents::Catalog::load(&crate::assets::root(), Some(workspace))
+                .entries
+                .iter()
+                .map(|e| e.name.clone())
+                .collect(),
+            git_repo: crate::loops::worktree::is_git_repo(workspace),
+            default_isolation,
+        }
+    }
 }
 
 impl Problems {

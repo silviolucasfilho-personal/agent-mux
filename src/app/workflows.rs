@@ -1336,9 +1336,6 @@ pub struct LivePlan {
     pub launch_id: Option<String>,
     /// Start the run as soon as the document validates.
     pub auto_run: bool,
-    /// A swarm planner's run (`swarm_engine`): its answer is a plan for
-    /// this swarm, not a workflow document.
-    pub swarm: Option<String>,
 }
 
 /// A document the planner produced, waiting on the user (or already run).
@@ -1504,7 +1501,6 @@ impl App {
             out_file,
             launch_id,
             auto_run: req.auto_run,
-            swarm: None,
         });
         Ok(id)
     }
@@ -1561,10 +1557,6 @@ impl App {
             .text
             .or(stored)
             .unwrap_or_else(|| screen.trim().to_string());
-        if let Some(swarm_id) = &plan.swarm {
-            self.complete_swarm_plan(swarm_id, &text);
-            return;
-        }
         let infos = self.all_skill_infos();
         // one agent rather than a flow: a draft for the agent editor
         if let Some(draft) = crate::workflows::planner::extract_agent_draft(&text) {

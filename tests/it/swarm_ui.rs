@@ -391,7 +391,7 @@ fn with_no_swarm_the_screen_offers_one_and_the_form_starts_it() {
     for want in [
         "Start a swarm",
         "Goal: what done looks like",
-        "Planner: claude",
+        "Coordinator: claude",
         "Max parallel workers: 3",
         "Approve the plan before workers start: yes",
     ] {

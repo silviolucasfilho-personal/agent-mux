@@ -32,9 +32,10 @@ inline = "You are session {step} of the {workflow} workflow, run by agent-mux. R
 plan = "{invocation} Describe an agent for the task in the planner context at {plan} (also in $AGENT_MUX_WORKFLOW_PLAN). Answer with one fenced agent-toml block when one session can do the task, or with a fenced workflow-toml block when it needs a flow of several."
 
 [swarm]
-# The swarm planner's opening prompt. {invocation} is the swarm-plan skill,
-# {plan} the planner context file (also in $AGENT_MUX_SWARM_PLAN).
-plan = "{invocation} Plan the swarm whose goal is in the planner context at {plan} (also in $AGENT_MUX_SWARM_PLAN). Do not change any file. Answer with exactly one fenced swarm-plan block of JSON, as the skill describes, and nothing after it."
+# The planning part of the swarm coordinator's opening prompt (the role
+# around it is agent-mux's). {invocation} is the swarm-plan skill, {plan}
+# the planner context file (also in $AGENT_MUX_SWARM_PLAN).
+plan = "{invocation} Read the planner context at {plan} (also in $AGENT_MUX_SWARM_PLAN) and look at the code the goal touches. Then submit the plan with agent_mux_swarm_plan(plan = {summary, tasks}). If it answers errors, fix them and call it again. Do not change any file."
 
 [agent]
 # Inserted as a "## Baseline" section right after the frontmatter of every

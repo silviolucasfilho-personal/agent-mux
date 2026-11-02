@@ -1,12 +1,12 @@
 ---
 name: swarm-plan
-description: Use when agent-mux asks for a swarm to be planned, or the user asks to "plan a swarm", "split this goal for parallel agents" or "re-plan the swarm". Reads the planner context, splits the goal into independent tasks with files, dependencies and a done-when line, and answers with one swarm-plan block that agent-mux checks, shows to the operator and dispatches. Does not change any file.
+description: Use when you coordinate an agent-mux swarm and must plan it, or the user asks to "plan a swarm", "split this goal for parallel agents" or "re-plan the swarm". Reads the planner context, splits the goal into independent tasks with files, dependencies and a done-when line, and submits them with agent_mux_swarm_plan, which agent-mux checks, shows to the operator and dispatches. Does not change any file.
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
 # swarm-plan — split one goal into tasks for parallel workers
 
-agent-mux runs a swarm: you write the plan, the operator reviews it, and agent-mux starts one worker session per task, each with only its task to go on. You do not do the work, start workers or message anyone, and you change no file.
+agent-mux runs a swarm: you, its coordinator, write the plan, the operator reviews it, and agent-mux starts one worker session per task, each with only its task to go on. You do not do the work or start workers, and you change no file.
 
 ## Setup
 
@@ -31,38 +31,39 @@ agent-mux runs a swarm: you write the plan, the operator reviews it, and agent-m
 - **Harness and agent.** Leave them out unless a task clearly suits another installed harness or a listed agent.
 - **Re-plan.** Tasks with `started: true` stay as they are; do not repeat them. Plan only what is still needed, following the operator's notes. Reuse a key only for the same task.
 
-## Answer
+## Submit
 
-End with exactly one fenced block and nothing after it:
+Call `agent_mux_swarm_plan` with the plan:
 
-````
-```swarm-plan
+```json
 {
-  "summary": "Why this split, in one or two sentences.",
-  "tasks": [
-    {
-      "key": "store-queries",
-      "title": "Bus store: list peers across workspaces",
-      "instructions": "In src/bus/store.rs, … Keep the signature of list_peers; add …",
-      "acceptance": "cargo test bus::store passes; a new test covers all_workspaces",
-      "files": ["src/bus/store.rs"],
-      "depends_on": []
-    },
-    {
-      "key": "mcp-flag",
-      "title": "MCP: wire all_workspaces to the new query",
-      "instructions": "…",
-      "acceptance": "…",
-      "files": ["src/mcp/server.rs"],
-      "depends_on": ["store-queries"],
-      "harness": "codex",
-      "isolation": "worktree"
-    }
-  ]
+  "plan": {
+    "summary": "Why this split, in one or two sentences.",
+    "tasks": [
+      {
+        "key": "store-queries",
+        "title": "Bus store: list peers across workspaces",
+        "instructions": "In src/bus/store.rs, … Keep the signature of list_peers; add …",
+        "acceptance": "cargo test bus::store passes; a new test covers all_workspaces",
+        "files": ["src/bus/store.rs"],
+        "depends_on": []
+      },
+      {
+        "key": "mcp-flag",
+        "title": "MCP: wire all_workspaces to the new query",
+        "instructions": "…",
+        "acceptance": "…",
+        "files": ["src/mcp/server.rs"],
+        "depends_on": ["store-queries"],
+        "harness": "codex",
+        "isolation": "worktree"
+      }
+    ]
+  }
 }
 ```
-````
 
 - `key`: letters, digits, `-` and `_`, unique in the plan.
 - `title` and `instructions` are required. `files` are paths or globs relative to the workspace.
-- agent-mux rejects the plan if a key repeats, a dependency is unknown or forms a cycle, a harness is not installed, an agent is unknown, or a worktree is asked for outside a git repository. It warns when tasks that may run at once touch the same files in a shared workspace.
+- The tool answers **errors** when a key repeats, a dependency is unknown or forms a cycle, a harness is not installed, an agent is unknown, or a worktree is asked for outside a git repository. Nothing changes then: fix them and call it again. It also lists **warnings**, for tasks that may run at once and touch the same files in a shared workspace.
+- Without the MCP tools: write the same JSON (the `plan` object) to a file and run `agent-mux swarm submit-plan --file <path>`.
