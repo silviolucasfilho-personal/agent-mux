@@ -1096,6 +1096,7 @@ fn bus_delegate_result(service: &TraceService, arguments: Value) -> Value {
         harness: args.harness,
         agent: args.agent,
         isolation: args.isolation,
+        opening_prompt: None,
     };
     let spawn = match crate::bus::control::send_request(
         None,

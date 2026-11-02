@@ -160,6 +160,12 @@ fn swarm_start_without_a_tui_refuses_instead_of_recording_a_phantom() {
     let ws = bstore::normalize_workspace(dir.path());
     assert!(bstore::swarm_state(&conn, &ws).unwrap().is_none());
     assert!(
+        agent_mux::bus::swarm::record::live_swarm(&conn, &ws)
+            .unwrap()
+            .is_none(),
+        "no swarm is recorded without a TUI to run it"
+    );
+    assert!(
         bstore::list_workspace_messages(&conn, &ws, 10)
             .unwrap()
             .is_empty()
@@ -651,6 +657,7 @@ async fn max_workers_refuses_the_spawn_past_the_cap_without_counting_the_coordin
         harness: Some("claude".into()),
         agent: None,
         isolation: TaskIsolation::Shared,
+        opening_prompt: None,
     };
     let resp = app.handle_bus_control(spawn.clone(), now);
     assert!(!resp.ok);

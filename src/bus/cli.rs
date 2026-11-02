@@ -58,7 +58,10 @@ impl Args {
             if let Some(name) = a.strip_prefix("--") {
                 if let Some((k, v)) = name.split_once('=') {
                     flags.insert(k.to_string(), Some(v.to_string()));
-                } else if matches!(name, "all" | "json" | "wake" | "no-ack" | "help") {
+                } else if matches!(
+                    name,
+                    "all" | "json" | "wake" | "no-ack" | "help" | "no-plan-gate" | "urgent"
+                ) {
                     flags.insert(name.to_string(), None);
                 } else {
                     let value = raw.get(i + 1).cloned();
@@ -533,6 +536,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
                         .map(str::to_string)
                         .or_else(|| task.target_agent.clone()),
                     isolation: task.isolation,
+                    opening_prompt: None,
                 },
                 Duration::from_secs(10),
             )
@@ -614,17 +618,243 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
 
 pub const SWARM_USAGE: &str = "usage: agent-mux swarm <command> [options]
 
+A swarm is run by agent-mux: a headless planner splits the goal into tasks,
+you approve the plan, and agent-mux starts one worker per task.
+
 commands:
+  start <goal...> [--planner claude|codex|agy|opencode] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--check CMD] [--workspace DIR]
+                                start a swarm in the running TUI: plan, then wait for approval (unless --no-plan-gate)
   status [--workspace DIR] [--db PATH] [--json]
-                                inspect workspace swarm coordinator, workers, board, leases, messages
-  start <goal...> [--coordinator claude|codex|agy] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--workspace DIR]
-                                launch a Swarm Coordinator in the running TUI; its plan waits for your approval unless --no-plan-gate
+                                the swarm, its board (each task's state) and what waits for you
+  plan [--workspace DIR] [--db PATH] [--json]
+                                the board with the plan's errors and warnings
+  approve                       approve the plan: workers start
+  replan <notes...>             run the planner again with your notes (in review)
+  pause | resume                stop starting new workers / start them again
+  retry <task>                  put a failed, lost or cancelled task back on the board
+  merge <task> | set-aside <task>
+                                merge a finished task's branch into the workspace, or keep it unmerged
+  accept <task> | drop <task>   accept or drop a task a worker proposed
+  close                         end the swarm: stop its sessions, cancel open tasks, release leases
   broadcast <message...> [--urgent] [--wake] [--workspace DIR] [--db PATH] [--json]
-                                broadcast a directive or blocker message to all swarm workers
+                                send a message to every agent of the workspace
   stop [--workspace DIR] [--db PATH] [--json]
-                                stop the swarm's sessions (through the running TUI), cancel its open tasks, release its leases";
+                                like close; without a running TUI only the records are updated
+
+<task> is a plan key (`bus-fix`), a task id or a unique prefix of either.
+The verbs take --workspace DIR (default: the current folder) and --json.";
+
+/// What the CLI knows of live sessions without a TUI: the published
+/// snapshots of running agent-mux TUIs.
+fn snapshot_workers() -> HashMap<String, super::swarm::engine::Worker> {
+    use super::swarm::engine::{Worker, WorkerState};
+    use crate::tracing::analysis::RuntimeState;
+    let root = crate::tracing::analysis::default_snapshot_dir();
+    crate::tracing::analysis::read_snapshots(&root, now_ns())
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|s| s.sessions)
+        .map(|s| {
+            let state = match s.state {
+                RuntimeState::Working => WorkerState::Working,
+                RuntimeState::WaitingForUser => WorkerState::Prompt,
+                RuntimeState::Idle | RuntimeState::Unknown => WorkerState::Idle,
+                RuntimeState::Exited | RuntimeState::Disconnected => WorkerState::Exited,
+            };
+            (s.launch_id, Worker { state, quiet_ns: 0 })
+        })
+        .collect()
+}
+
+/// The checks `approve` re-runs, from this machine and the workspace.
+fn cli_check_env(workspace: &str, isolation: TaskIsolation) -> super::swarm::plan::CheckEnv {
+    super::swarm::plan::CheckEnv {
+        harnesses: crate::harness::Harness::ALL
+            .iter()
+            .filter(|h| crate::session::resolve_command(h.as_str()).is_some())
+            .map(|h| h.as_str().to_string())
+            .collect(),
+        agents: crate::agents::Catalog::load(&crate::assets::root(), Some(Path::new(workspace)))
+            .entries
+            .iter()
+            .map(|e| e.name.clone())
+            .collect(),
+        git_repo: crate::loops::worktree::is_git_repo(Path::new(workspace)),
+        default_isolation: isolation,
+    }
+}
+
+/// `swarm status` / `swarm plan` for an orchestrated swarm.
+fn print_board(
+    conn: &rusqlite::Connection,
+    swarm: &super::swarm::record::SwarmRun,
+    with_problems: bool,
+    json_out: bool,
+) -> anyhow::Result<()> {
+    use super::swarm::{engine, plan, record};
+    let board = record::board(conn, &swarm.id)?;
+    let workers = snapshot_workers();
+    let messages = bstore::list_workspace_messages(conn, &swarm.workspace, 500)?;
+    let asking: std::collections::HashSet<String> = super::swarm::open_questions(&messages)
+        .into_iter()
+        .map(|m| m.from_launch.clone())
+        .collect();
+    let input = engine::Input {
+        swarm,
+        board: &board,
+        workers: &workers,
+        asking: &asking,
+    };
+    let problems = with_problems.then(|| {
+        plan::check(
+            &record::board_plan(swarm, &board),
+            &cli_check_env(&swarm.workspace, swarm.isolation),
+        )
+    });
+    if json_out {
+        let tasks: Vec<Value> = board
+            .iter()
+            .map(|t| {
+                json!({
+                    "key": t.ext.plan_key,
+                    "id": t.task.id,
+                    "title": t.task.title,
+                    "state": engine::shown(t, &input).as_str(),
+                    "depends_on": t.ext.depends_on,
+                    "harness": t.task.target_harness,
+                    "isolation": t.task.isolation.as_str(),
+                    "assigned_to": t.task.assigned_to,
+                    "branch": t.task.branch,
+                    "review": t.review,
+                    "attempts": t.ext.attempts,
+                    "result": t.task.result,
+                    "error": t.task.error,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "swarm": swarm,
+                "busy_workers": engine::busy_workers(&input),
+                "tasks": tasks,
+                "problems": problems,
+            }))?
+        );
+        return Ok(());
+    }
+    let done = board
+        .iter()
+        .filter(|t| t.task.status == TaskStatus::Done)
+        .count();
+    println!(
+        "{} · {} · {done}/{} done · {}/{} workers",
+        swarm.id,
+        swarm.status.as_str(),
+        board.len(),
+        engine::busy_workers(&input),
+        swarm.max_workers
+    );
+    println!("Goal: {}", swarm.goal);
+    println!("Workspace: {}", swarm.workspace);
+    println!(
+        "Planner: {}{}",
+        swarm.planner_harness,
+        swarm
+            .plan_summary
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| format!(" · {s}"))
+            .unwrap_or_default()
+    );
+    if let Some(e) = &swarm.plan_error {
+        println!("Planner error: {e}");
+    }
+    if board.is_empty() {
+        println!("(no tasks yet)");
+    }
+    for (i, t) in board.iter().enumerate() {
+        let st = engine::shown(t, &input);
+        let deps = if t.ext.depends_on.is_empty() {
+            String::new()
+        } else {
+            format!(" ← {}", t.ext.depends_on.join(","))
+        };
+        println!(
+            "{} {:>2} {:<16} {:<9} {}{} [{} · {}]",
+            st.glyph(),
+            i + 1,
+            t.ext.plan_key,
+            st.as_str(),
+            t.task.title,
+            deps,
+            t.task.target_harness.as_deref().unwrap_or("?"),
+            t.task.isolation.as_str(),
+        );
+        if st == engine::Shown::Blocked {
+            println!(
+                "        waits for: {}",
+                engine::unmet_dependencies(t, &board).join(", ")
+            );
+        }
+        if let Some(e) = &t.task.error {
+            println!("        error: {e}");
+        }
+        if let Some(b) = &t.task.branch {
+            println!(
+                "        branch: {b}{}",
+                t.review
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            );
+        }
+        if let Some(p) = &problems {
+            for (is_err, m) in p.for_task(&t.ext.plan_key) {
+                println!("        {} {m}", if is_err { "error:" } else { "warning:" });
+            }
+        }
+    }
+    if let Some(p) = &problems {
+        for (k, m) in p
+            .errors
+            .iter()
+            .chain(p.warnings.iter())
+            .filter(|(k, _)| k.is_empty())
+        {
+            let _ = k;
+            println!("plan: {m}");
+        }
+        if p.is_ok() {
+            println!(
+                "The plan has no errors{}.",
+                if p.warnings.is_empty() {
+                    ""
+                } else {
+                    " (see the warnings)"
+                }
+            );
+        }
+    }
+    let next = match swarm.status {
+        record::SwarmStatus::Planning => "the planner is working",
+        record::SwarmStatus::Review => {
+            "next: `agent-mux swarm approve`, or `agent-mux swarm replan <notes>`"
+        }
+        record::SwarmStatus::Integrating => {
+            "next: `agent-mux swarm merge <task>` or `set-aside <task>` for each branch"
+        }
+        record::SwarmStatus::Finished => "finished: `agent-mux swarm close` ends it",
+        _ => "",
+    };
+    if !next.is_empty() {
+        println!("{next}");
+    }
+    Ok(())
+}
 
 pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
+    use super::swarm::record::{self, SwarmVerb};
     let cmd = raw.first().map(String::as_str).unwrap_or("status");
     if matches!(cmd, "--help" | "-h" | "help") {
         println!("{SWARM_USAGE}");
@@ -636,40 +866,75 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
     let db_path = resolve_db(&args);
     let now = now_ns();
 
+    if let Some(verb) = SwarmVerb::parse(cmd).filter(|v| *v != SwarmVerb::Close || cmd == "close") {
+        let task = verb
+            .takes_task()
+            .then(|| args.positional.first().cloned())
+            .flatten();
+        if verb.takes_task() && task.is_none() {
+            anyhow::bail!("swarm {cmd} needs a task (its key or id)\n\n{SWARM_USAGE}");
+        }
+        let notes = (verb == SwarmVerb::Replan).then(|| args.positional.join(" "));
+        let req = ControlRequest::SwarmAction {
+            workspace: workspace.clone(),
+            verb,
+            task: task.clone(),
+            notes,
+        };
+        let done = match control::send_request(None, &req, Duration::from_secs(10)) {
+            Ok(resp) if resp.ok => resp.detail.unwrap_or_default(),
+            Ok(resp) => anyhow::bail!("{}", resp.error.unwrap_or_default()),
+            Err(e) if verb.needs_tui() => {
+                anyhow::bail!("swarm {cmd} needs the running agent-mux TUI: {e}")
+            }
+            Err(_) => {
+                let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+                let swarm = record::live_swarm(&conn, &workspace)?
+                    .ok_or_else(|| anyhow::anyhow!("no swarm runs in {workspace}"))?;
+                let env = cli_check_env(&swarm.workspace, swarm.isolation);
+                let d = record::apply(
+                    &conn,
+                    Some(&db_path),
+                    &swarm,
+                    verb,
+                    task.as_deref(),
+                    &env,
+                    now,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+                format!("{d} (no agent-mux TUI is running: workers start when one does)")
+            }
+        };
+        if args.has("json") {
+            println!("{}", json!({ "ok": true, "detail": done }));
+        } else {
+            println!("{done}");
+        }
+        return Ok(());
+    }
+
     match cmd {
-        "status" => {
+        "status" | "plan" => {
             let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+            if let Some(swarm) = record::live_swarm(&conn, &workspace)? {
+                return print_board(&conn, &swarm, cmd == "plan", args.has("json"));
+            }
+            if cmd == "plan" {
+                anyhow::bail!("no swarm runs in {workspace}");
+            }
             let snap =
                 super::swarm::load_snapshot(Some(&conn), Path::new(&workspace), &[], None, now);
             if args.has("json") {
                 println!("{}", serde_json::to_string_pretty(&snap)?);
-            } else {
-                println!("Workspace: {}", snap.workspace);
-                if let Some(g) = &snap.goal {
-                    println!("Mission Goal: {g}");
-                }
+            } else if snap.tasks.is_empty() && snap.coordinator.is_none() {
                 println!(
-                    "Coordinator: {}",
-                    match &snap.coordinator {
-                        Some(c) => format!(
-                            "★ Coord ({}, state: {}, launch: {})",
-                            c.provider,
-                            c.state,
-                            crate::bus::short_id(&c.launch_id)
-                        ),
-                        None => "(none)".to_string(),
-                    }
+                    "No swarm runs in {workspace}. Start one with `agent-mux swarm start <goal>`."
                 );
-                println!("Workers ({}):", snap.workers.len());
-                for w in &snap.workers {
-                    println!(
-                        "  - {} ({}, state: {}, tasks: {})",
-                        w.label,
-                        w.provider,
-                        w.state,
-                        w.active_tasks.join(", ")
-                    );
-                }
+            } else {
+                println!(
+                    "Workspace: {} (no swarm; the board as it stands)",
+                    snap.workspace
+                );
                 let (running, open, done, failed) = snap.task_counts();
                 println!(
                     "Tasks: {} total ({} running, {} open/claimed, {} done, {} failed)",
@@ -680,17 +945,6 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                     failed
                 );
                 println!("File Leases: {}", snap.leases.len());
-                for l in &snap.leases {
-                    println!(
-                        "  - 🔒 {} ← {}",
-                        l.pattern,
-                        snap.member_label(&l.owner_launch)
-                    );
-                }
-                println!(
-                    "Total Tokens: {}   Cost: ${:.4}",
-                    snap.total_tokens, snap.total_cost_usd
-                );
             }
         }
         "start" => {
@@ -699,41 +953,40 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                 anyhow::bail!("swarm start requires a goal description\n\n{SWARM_USAGE}");
             }
             let goal = goal_words.join(" ");
-            let harness = args.value("coordinator").map(str::to_string);
+            let planner = args
+                .value("planner")
+                .or_else(|| args.value("coordinator"))
+                .map(str::to_string);
             let max_workers = args
                 .value("workers")
                 .and_then(|w| w.parse::<usize>().ok())
                 .unwrap_or(3);
             let isolation = match args.value("isolation") {
                 Some("worktree") => TaskIsolation::Worktree,
-                _ => TaskIsolation::Shared,
+                Some("shared") | None => TaskIsolation::Shared,
+                Some(other) => anyhow::bail!("--isolation is shared or worktree, not {other}"),
             };
-            let req = ControlRequest::SpawnCoordinator {
+            let req = ControlRequest::StartSwarm {
                 workspace: workspace.clone(),
-                goal: goal.clone(),
-                harness: harness.clone(),
+                goal,
+                planner,
                 max_workers,
                 isolation,
-                plan_gate: Some(!args.has("no-plan-gate")),
+                gate: Some(!args.has("no-plan-gate")),
+                check: args.value("check").map(str::to_string),
             };
-            match control::send_request(None, &req, Duration::from_millis(1500)) {
+            match control::send_request(None, &req, Duration::from_secs(10)) {
                 Ok(resp) if resp.ok => {
-                    println!(
-                        "Swarm Coordinator spawned: launch_id={}",
-                        resp.launch_id.as_deref().unwrap_or("?")
-                    );
+                    println!("{}", resp.detail.unwrap_or_default());
+                    println!("Follow it with `agent-mux swarm status`.");
                 }
-                Ok(resp) => {
-                    anyhow::bail!(
-                        "Failed to spawn coordinator: {}",
-                        resp.error.unwrap_or_default()
-                    );
-                }
-                Err(err) => {
-                    anyhow::bail!(
-                        "a coordinator is a live session, which only the running agent-mux TUI can start: {err}"
-                    );
-                }
+                Ok(resp) => anyhow::bail!(
+                    "could not start the swarm: {}",
+                    resp.error.unwrap_or_default()
+                ),
+                Err(err) => anyhow::bail!(
+                    "a swarm runs inside the running agent-mux TUI, and none answered: {err}"
+                ),
             }
         }
         "broadcast" => {
@@ -802,9 +1055,11 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                 ),
                 Err(_) => {
                     let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
-                    let (cancelled, released) =
-                        bstore::stop_swarm(&conn, Some(&db_path), &norm_ws, now)
-                            .map_err(|e| anyhow::anyhow!(e))?;
+                    let (cancelled, released) = match record::live_swarm(&conn, &norm_ws)? {
+                        Some(sw) => record::end_swarm(&conn, Some(&db_path), &sw, now),
+                        None => bstore::stop_swarm(&conn, Some(&db_path), &norm_ws, now),
+                    }
+                    .map_err(|e| anyhow::anyhow!(e))?;
                     format!(
                         "cancelled {cancelled} task(s), released {released} lease(s); no agent-mux TUI is running, so no session was stopped"
                     )

@@ -1169,9 +1169,23 @@ pub fn decide_plan(
         .ok_or_else(|| "the plan disappeared".into())
 }
 
-/// Why work may not start yet in `workspace`: the gate is on and the plan
-/// is not approved. `None` when nothing holds it back.
+/// Why work may not start yet in `workspace`: its orchestrated swarm
+/// (schema v21) is not past review, or (a coordinator-session swarm) the
+/// gate is on and the plan is not approved. `None` when nothing holds it
+/// back.
 pub fn plan_blocks(conn: &Connection, workspace: &str) -> Option<String> {
+    if let Some(swarm) = crate::bus::swarm::record::live_swarm(conn, workspace)
+        .ok()
+        .flatten()
+    {
+        return (!swarm.status.approved()).then(|| {
+            format!(
+                "the swarm's plan is not approved yet ({}): agent-mux starts the workers itself once \
+                 the operator approves it",
+                swarm.status.as_str()
+            )
+        });
+    }
     let plan = plan_gate(conn, workspace).ok().flatten()?;
     (plan.gate && plan.status != PlanStatus::Approved).then(|| {
         "the swarm's plan awaits the operator's approval: put the tasks on the board, \

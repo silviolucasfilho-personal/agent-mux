@@ -1,5 +1,7 @@
 # Swarms: one goal, many agents
 
+> **Changing (2026-11).** agent-mux now runs the swarm itself: a headless planner splits the goal, you approve the plan, and agent-mux starts one worker per task, with no coordinator session ([the design](superpowers/specs/2026-11-02-swarm-orchestrator-design.md)). The engine and the command line below work today. The screen described further down still shows the coordinator-era layout until it's rebuilt around the task board; approve plans from the command line meanwhile.
+
 A **swarm** is a coordinator agent that splits one goal into tasks and hands each to a worker agent, all working in parallel in the same workspace. They can be Claude Code, Codex, Antigravity or OpenCode sessions, in any mix. You watch and steer the swarm from one screen, **Swarm Mission Control**. This guide shows how to use it. How it works inside (tables, control requests, schema) is in [bus.md](bus.md#swarm-mission-control-modeswarm-agent-mux-swarm-), and the design is in [the spec](superpowers/specs/2026-10-30-swarm-mission-control-ux-design.md).
 
 ## In one minute
@@ -148,15 +150,30 @@ Confirmations take `y` only. `Enter` never confirms a destructive action.
 ## From the command line
 
 ```sh
-agent-mux swarm start "Add OAuth login" --coordinator claude --workers 4 --isolation worktree
-agent-mux swarm status                  # coordinator, workers, tasks, leases, spend (--json for scripts)
+agent-mux swarm start "Add OAuth login" --planner claude --workers 4 --isolation worktree
+agent-mux swarm status                  # the swarm, its board with each task's state (--json for scripts)
+agent-mux swarm plan                    # the board with the plan's errors and warnings
+agent-mux swarm approve                 # workers start
+agent-mux swarm replan "split the API task in two"
+agent-mux swarm pause | resume
+agent-mux swarm retry <task>            # a failed, lost or cancelled task, again
+agent-mux swarm merge <task>            # or: set-aside <task>
+agent-mux swarm accept <task>           # or: drop <task>, for a task a worker proposed
+agent-mux swarm close                   # stops its sessions, cancels open tasks, releases leases
 agent-mux swarm broadcast "Freeze src/api/" --urgent --wake
-agent-mux swarm stop                    # stops sessions, cancels open tasks, releases leases
 ```
 
-- **`start`** needs the agent-mux TUI running, because the coordinator is a live session. It refuses otherwise. `--no-plan-gate` skips plan approval.
-- **`stop`** goes through the running TUI to stop sessions. Without a TUI, it only updates the records and says so.
-- **All four** take `--workspace DIR` (default: the current folder).
+- **How a swarm runs:**
+  1. `start` creates the swarm and runs the planner, headless, with the `swarm-plan` skill. The planner uses the harness of the selected session unless `--planner` names one.
+  2. The planner's tasks (each with a key, files, dependencies and a done-when line) go on the board, and the swarm waits in `review`.
+  3. `approve` re-checks the plan, then agent-mux starts each ready task's worker, up to `--workers` at a time. A task is ready when its dependencies are done, and, for a dependency that worked in a worktree, when its branch is merged.
+  4. Each worker starts with its whole task as its opening prompt and reports with `agent_mux_task_update`. A worker that sits idle without reporting gets one reminder after 90 seconds.
+  5. A finished worker stays open, so you can ask it follow-ups, but stops counting against the worker limit.
+  6. When every task is settled and every branch reviewed, the swarm is `finished`, and `close` ends it.
+- **`<task>`** is a plan key (`bus-fix`), a task id, or a unique prefix of either.
+- **Without the TUI:** `start`, `replan` and `close` need the agent-mux TUI running. `approve`, `pause`, `resume`, `retry`, `merge`, `set-aside`, `accept` and `drop` also work without it: they update the records, and the workers start when a TUI runs.
+- **`stop`** is like `close`. Without a TUI, it only updates the records and says so.
+- **Options:** every command takes `--workspace DIR` (default: the current folder) and `--json`. `--no-plan-gate` starts the workers as soon as the plan passes its checks.
 
 ## What the agents use
 

@@ -48,6 +48,37 @@ pub enum ControlRequest {
         harness: Option<String>,
         agent: Option<String>,
         isolation: TaskIsolation,
+        /// The worker's whole opening message, instead of the one composed
+        /// from `title` and `instructions` (the swarm dispatcher's worker
+        /// prompt, `bus::swarm::prompt::worker_prompt`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opening_prompt: Option<String>,
+    },
+    /// Start an orchestrated swarm for `workspace` (schema v21): agent-mux
+    /// runs a headless planner on `goal`, shows the plan for approval (or
+    /// approves it itself when `gate` is off) and dispatches the workers.
+    /// `planner` defaults to the selected session's harness.
+    StartSwarm {
+        workspace: String,
+        goal: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        planner: Option<String>,
+        max_workers: usize,
+        isolation: TaskIsolation,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gate: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        check: Option<String>,
+    },
+    /// One operator decision on `workspace`'s orchestrated swarm; `task` is
+    /// a task id, id prefix or plan key, `notes` a re-plan's notes.
+    SwarmAction {
+        workspace: String,
+        verb: crate::bus::swarm::record::SwarmVerb,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notes: Option<String>,
     },
     /// Spawn a new Swarm Coordinator session in `App` for `workspace`.
     SpawnCoordinator {
