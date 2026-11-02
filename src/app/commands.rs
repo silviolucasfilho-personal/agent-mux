@@ -1,7 +1,7 @@
 //! Context-sensitive application actions. The menu and key dispatch use
 //! the same availability checks, including after the selection changes.
 use super::{App, Focus, Mode, Notice};
-use crate::keymap::{ACTIONS, ActionId};
+use crate::keymap::{ACTIONS, ActionDef, ActionId, ActionTheme};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
 
@@ -333,20 +333,53 @@ pub enum NavigationTarget {
     LangfuseWeb,
 }
 
+/// One theme's commands in the Commands overlay: only the matches, in
+/// registration order.
+#[derive(Debug, Clone)]
+pub struct CommandSection {
+    pub theme: ActionTheme,
+    pub actions: Vec<&'static ActionDef>,
+}
+
+/// Group commands into the overlay's sections in `ActionTheme::ALL` order,
+/// dropping themes with no match so a search hides empty sections.
+pub fn group_commands(actions: &[&'static ActionDef]) -> Vec<CommandSection> {
+    ActionTheme::ALL
+        .iter()
+        .filter_map(|theme| {
+            let actions: Vec<&'static ActionDef> = actions
+                .iter()
+                .copied()
+                .filter(|a| a.theme == *theme)
+                .collect();
+            (!actions.is_empty()).then_some(CommandSection {
+                theme: *theme,
+                actions,
+            })
+        })
+        .collect()
+}
+
 impl App {
-    pub fn filtered_commands(&self) -> Vec<&'static crate::keymap::ActionDef> {
+    /// Commands matching the query, in the order the overlay draws them:
+    /// grouped by theme (`ActionTheme::ALL`), registration order within a
+    /// theme. Selection indexes this list, so arrows and Enter follow the
+    /// visible sections.
+    pub fn filtered_commands(&self) -> Vec<&'static ActionDef> {
         let query = match &self.command_overlay {
             Some(Overlay::Commands(m)) => m.query.to_lowercase(),
             _ => String::new(),
         };
-        ACTIONS
-            .iter()
-            .filter(|a| {
-                query
-                    .split_whitespace()
-                    .all(|word| a.label.to_lowercase().contains(word) || a.keywords.contains(word))
-            })
-            .collect()
+        let mut ordered = Vec::with_capacity(ACTIONS.len());
+        for theme in ActionTheme::ALL {
+            ordered.extend(ACTIONS.iter().filter(|a| {
+                a.theme == *theme
+                    && query.split_whitespace().all(|word| {
+                        a.label.to_lowercase().contains(word) || a.keywords.contains(word)
+                    })
+            }));
+        }
+        ordered
     }
 
     /// Global overlay entry runs before text/search handlers. Underlying
