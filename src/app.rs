@@ -2774,9 +2774,37 @@ pub struct App {
     /// Unix domain socket path for inter-agent bus control (`WakeSession`, `SpawnWorker`).
     pub bus_control_sock: Option<std::path::PathBuf>,
     bus_control_guard: Option<crate::bus::control::ControlListenerGuard>,
-    /// Bus wake prompts queued while their target session is `Working`.
-    pub pending_bus_wakes: Vec<(String, String)>,
+    /// Bus wake prompts queued until their target session is `Idle`.
+    pub pending_bus_wakes: Vec<PendingWake>,
+    /// Wakes whose text is in a session's input box and whose Enter is due:
+    /// (launch id as queued, when to press it). See [`WAKE_SUBMIT_DELAY`].
+    pub pending_wake_submits: Vec<(String, Instant)>,
 }
+
+/// A bus wake waiting for its session to turn idle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWake {
+    pub launch_id: String,
+    pub prompt: String,
+    pub queued_at: Instant,
+}
+
+/// How long a wake's text sits in the session's input box before its Enter
+/// is written, as a write of its own (flushed on the next tick, so 150 to
+/// 400 ms in practice).
+///
+/// Probed 2026-11-02 with a 114-byte prompt written to an idle TUI:
+/// Claude Code 2.1.316 and Codex 0.166.0 take one `text\r` burst over about
+/// 100 bytes as a paste, so the `\r` becomes part of the text and nothing is
+/// submitted (the prompt stays in the input box). The same text as a
+/// bracketed paste, or typed, followed by a separate `\r` 150 ms later,
+/// submits on all four of Claude Code, Codex, OpenCode 2.0.32 and agy 1.4.12.
+pub const WAKE_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// A queued wake not delivered within this long (its session kept working,
+/// or waited on a prompt in its terminal) is dropped rather than typed in
+/// late; the message it announced stays unread on the bus.
+pub const WAKE_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 impl App {
     pub fn new(
@@ -2904,6 +2932,7 @@ impl App {
             bus_control_sock: None,
             bus_control_guard: None,
             pending_bus_wakes: Vec::new(),
+            pending_wake_submits: Vec::new(),
         };
         if let Some(sock_dir) = app.trace_db_path.as_deref().and_then(|p| p.parent()) {
             let sock = sock_dir.join("bus.sock");
@@ -8200,27 +8229,79 @@ impl App {
         }
     }
 
-    /// Flushes any bus wake prompts whose target session has transitioned to `Idle`.
+    /// Writes a wake's text into session `idx`'s input box as one paste
+    /// (bracketed when the child asked for it) and schedules its Enter
+    /// [`WAKE_SUBMIT_DELAY`] later, as a separate write. Newlines become
+    /// spaces: a wake is one line.
+    fn inject_wake(
+        &mut self,
+        idx: usize,
+        launch_id: &str,
+        prompt: &str,
+        now: Instant,
+    ) -> std::io::Result<()> {
+        let text = prompt.replace(['\r', '\n'], " ");
+        let bracketed = self.sessions[idx].parser.screen().bracketed_paste();
+        self.sessions[idx].write_bytes(&paste_bytes(&text, bracketed))?;
+        self.pending_wake_submits
+            .push((launch_id.to_string(), now + WAKE_SUBMIT_DELAY));
+        Ok(())
+    }
+
+    /// Whether a wake's text is in this session's input box, its Enter not
+    /// yet written: another wake waits so the two don't merge.
+    fn wake_submit_pending(&self, idx: usize) -> bool {
+        self.pending_wake_submits
+            .iter()
+            .any(|(id, _)| self.find_session_by_launch(id) == Some(idx))
+    }
+
+    /// Presses Enter for wakes whose text is in place, then delivers queued
+    /// wakes whose session is idle, and drops those older than [`WAKE_TTL`].
     pub fn flush_pending_bus_wakes(&mut self, now: Instant) {
+        if !self.pending_wake_submits.is_empty() {
+            let submits = std::mem::take(&mut self.pending_wake_submits);
+            for (launch_id, due) in submits {
+                if due > now {
+                    self.pending_wake_submits.push((launch_id, due));
+                } else if let Some(idx) = self.find_session_by_launch(&launch_id) {
+                    let _ = self.sessions[idx].write_bytes(b"\r");
+                }
+            }
+        }
         if self.pending_bus_wakes.is_empty() {
             return;
         }
         let pending = std::mem::take(&mut self.pending_bus_wakes);
-        for (launch_id, prompt) in pending {
-            let Some(idx) = self.find_session_by_launch(&launch_id) else {
+        for wake in pending {
+            let Some(idx) = self.find_session_by_launch(&wake.launch_id) else {
                 continue;
             };
-            let st = self.sessions[idx].status(now);
-            match st {
-                Status::Idle => {
-                    let line = format!("{}\r", prompt.replace(['\r', '\n'], " "));
-                    let _ = self.sessions[idx].write_bytes(line.as_bytes());
-                }
-                Status::Working | Status::NeedsAttention => {
-                    self.pending_bus_wakes.push((launch_id, prompt));
+            if now.saturating_duration_since(wake.queued_at) >= WAKE_TTL {
+                continue;
+            }
+            match self.sessions[idx].status(now) {
+                Status::Idle if !self.wake_submit_pending(idx) => {
+                    let _ = self.inject_wake(idx, &wake.launch_id, &wake.prompt, now);
                 }
                 Status::Exited(_) => {}
+                _ => self.pending_bus_wakes.push(wake),
             }
+        }
+    }
+
+    /// Queues a wake for `launch_id` unless one is already queued for it.
+    fn queue_wake(&mut self, launch_id: &str, prompt: String, now: Instant) {
+        if !self
+            .pending_bus_wakes
+            .iter()
+            .any(|w| w.launch_id == launch_id)
+        {
+            self.pending_bus_wakes.push(PendingWake {
+                launch_id: launch_id.to_string(),
+                prompt,
+                queued_at: now,
+            });
         }
     }
 
@@ -8291,9 +8372,8 @@ impl App {
                     Status::Exited(_) => {
                         ControlResponse::err(format!("session '{resolved_id}' has exited"))
                     }
-                    Status::Idle => {
-                        let line = format!("{}\r", prompt.replace(['\r', '\n'], " "));
-                        match self.sessions[idx].write_bytes(line.as_bytes()) {
+                    Status::Idle if !self.wake_submit_pending(idx) => {
+                        match self.inject_wake(idx, &resolved_id, &prompt, now) {
                             Ok(()) => ControlResponse {
                                 ok: true,
                                 launch_id: Some(resolved_id),
@@ -8307,14 +8387,8 @@ impl App {
                             Err(e) => ControlResponse::err(format!("PTY write failed: {e}")),
                         }
                     }
-                    Status::Working | Status::NeedsAttention => {
-                        if !self
-                            .pending_bus_wakes
-                            .iter()
-                            .any(|(id, _)| id == &resolved_id)
-                        {
-                            self.pending_bus_wakes.push((resolved_id.clone(), prompt));
-                        }
+                    Status::Idle | Status::Working | Status::NeedsAttention => {
+                        self.queue_wake(&resolved_id, prompt, now);
                         ControlResponse {
                             ok: true,
                             launch_id: Some(resolved_id),

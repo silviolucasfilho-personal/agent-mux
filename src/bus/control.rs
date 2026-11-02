@@ -23,8 +23,10 @@ pub const ENV_CONTROL_SOCK: &str = "AGENT_MUX_CONTROL_SOCK";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
-    /// Wake a peer session by injecting `prompt` + `\r` into its PTY if idle,
-    /// or queueing it until the session becomes idle.
+    /// Wake a peer session: if idle, paste `prompt` into its PTY and press
+    /// Enter as a separate write shortly after (`app::WAKE_SUBMIT_DELAY`);
+    /// otherwise queue it until the session becomes idle, for at most
+    /// `app::WAKE_TTL`.
     WakeSession { launch_id: String, prompt: String },
     /// Wake every active session of `workspace` (and of the worktrees its
     /// tasks run in) the way `WakeSession` wakes one, except `exclude`: the

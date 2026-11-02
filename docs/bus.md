@@ -12,6 +12,7 @@ It supports two workflows simultaneously:
 - `AGENT_MUX_SESSION_ID`: the session's unique `launch_id` in `traces.db`.
 - `AGENT_MUX_WORKSPACE`: the canonical workspace path of the session.
 - `AGENT_MUX_CONTROL_SOCK`: the Unix domain socket path where the running `agent-mux` TUI listens for `WakeSession` and `SpawnWorker` requests.
+- **How a wake is delivered** (`WakeSession`): to an idle session, the prompt (one line) is pasted into its input box, bracketed when the child enabled bracketed paste, and Enter follows as a separate write about 150 ms later (`app::WAKE_SUBMIT_DELAY`). Claude Code and Codex take a single burst over about 100 bytes as a paste and would leave `prompt\r` unsubmitted (probed 2026-11-02 on Claude Code 2.1.316, Codex 0.166.0, OpenCode 2.0.32 and agy 1.4.12). A session that is working, or waiting on a prompt in its terminal, gets the wake queued (`App::pending_bus_wakes`, one per session) until it turns idle; a wake not delivered within 10 minutes (`app::WAKE_TTL`) is dropped, and the message stays unread on the bus.
 
 ## MCP tools (`agent-mux mcp serve`)
 
