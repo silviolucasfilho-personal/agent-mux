@@ -1,6 +1,7 @@
 # Swarm Mission Control (`Mode::Swarm`, second layout) — design
 
-Status: P1–P4 implemented, 2026-10-30. Replaces the four-quadrant layout of
+Status: P1–P4 implemented, 2026-10-30. Superseded (orchestration, layout and keys) by
+`2026-11-02-swarm-orchestrator-design.md`; kept for history. Replaces the four-quadrant layout of
 `2026-10-29-agent-swarm-screen-design.md` section 3; the data model, the bus
 and the CLI of that spec stay.
 
