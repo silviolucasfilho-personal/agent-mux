@@ -39,6 +39,8 @@ pub struct StartSwarm {
     pub isolation: TaskIsolation,
     pub gate: bool,
     pub check: Option<String>,
+    /// The harness of tasks that name none; `None`: the coordinator's.
+    pub workers: Option<String>,
 }
 
 impl App {
@@ -56,29 +58,32 @@ impl App {
             .collect()
     }
 
-    /// The planner's harness when none is named: the selected session's,
-    /// else the first installed (decision 4 of the spec).
+    /// The coordinator's harness when none is named: Claude when it is
+    /// installed, else the selected session's, else the first installed
+    /// (layout spec §4.1: agy's agents lost their tools in the first run).
     pub fn default_swarm_harness(&self) -> Harness {
+        let installed = self.installed_harnesses();
+        if installed.contains(&Harness::Claude) {
+            return Harness::Claude;
+        }
         self.sessions
             .get(self.selected)
             .and_then(|s| Harness::detect(&s.profile.command))
-            .or_else(|| self.installed_harnesses().into_iter().next())
+            .or_else(|| installed.into_iter().next())
             .unwrap_or(Harness::Claude)
     }
 
     /// What `plan::check` needs for this workspace.
     pub fn swarm_check_env(&self, workspace: &Path, isolation: TaskIsolation) -> CheckEnv {
+        let catalog = crate::agents::Catalog::load(&self.library_root(), Some(workspace));
         CheckEnv {
             harnesses: self
                 .installed_harnesses()
                 .iter()
                 .map(|h| h.as_str().to_string())
                 .collect(),
-            agents: crate::agents::Catalog::load(&self.library_root(), Some(workspace))
-                .entries
-                .iter()
-                .map(|e| e.name.clone())
-                .collect(),
+            agents: catalog.entries.iter().map(|e| e.name.clone()).collect(),
+            writing_agents: crate::bus::swarm::plan::writing_agents(&catalog),
             git_repo: crate::loops::worktree::is_git_repo(workspace),
             default_isolation: isolation,
         }
@@ -116,6 +121,10 @@ impl App {
                 gate: req.gate,
                 check_cmd: req.check.clone(),
                 owner_run: Some(self.app_run_id.clone()),
+                worker_harness: match req.workers.as_deref().map(str::trim) {
+                    Some(h) if !h.is_empty() => Some(h.parse::<Harness>()?.as_str().to_string()),
+                    _ => None,
+                },
             },
             crate::tracing::store::now_ns(),
         )?;
@@ -154,7 +163,12 @@ impl App {
                 .iter()
                 .map(|h| h.as_str().to_string())
                 .collect(),
-            default_harness: swarm.planner_harness.clone(),
+            default_harness: self
+                .trace_db_path
+                .as_deref()
+                .and_then(|db| crate::tracing::store::open_ro(db).ok())
+                .map(|c| record::worker_harness(&c, swarm))
+                .unwrap_or_else(|| swarm.planner_harness.clone()),
             agents: catalog
                 .entries
                 .iter()
@@ -465,6 +479,7 @@ impl App {
                 isolation,
                 gate,
                 check,
+                workers,
             } => match self.start_orchestrated_swarm(StartSwarm {
                 workspace: PathBuf::from(workspace),
                 goal,
@@ -473,6 +488,7 @@ impl App {
                 isolation,
                 gate: gate.unwrap_or(true),
                 check,
+                workers,
             }) {
                 Ok(s) => ok(
                     format!("{} started: {} is planning", s.id, s.planner_harness),

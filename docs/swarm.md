@@ -27,7 +27,8 @@ Press `n` on a swarm row (or `Enter` on the empty screen). The form asks for:
 | Field | Meaning | Default |
 | --- | --- | --- |
 | Goal | What the swarm should achieve. Be concrete: what done looks like, and what's out of scope. | — |
-| Coordinator | Which harness the coordinator runs on. Tasks that don't name a harness also run on it. | the selected session's |
+| Coordinator | Which harness the coordinator runs on. | Claude when installed, else the selected session's |
+| Workers' harness | The harness of tasks that don't name one. It follows the coordinator's until you change it. | the coordinator's |
 | Max parallel workers | How many tasks run at once. A finished worker no longer counts. | 3 (up to 8) |
 | Default isolation | `shared` (leases on files) or `worktree` (one branch per task). | `shared` |
 | Approve the plan before workers start | The **plan gate**. With it off, workers start as soon as the plan passes its checks. | yes |
@@ -83,7 +84,7 @@ A task that depends on a worktree task starts only once that task's branch is me
 
 The coordinator reads the goal and the workspace and submits tasks, each with a key, instructions, a done-when line, files and dependencies, with the `agent_mux_swarm_plan` tool. agent-mux checks the plan, and answers the coordinator with any errors so it fixes them itself; only a plan without errors goes on the board:
 
-- **Errors block approval:** a key used twice, a dependency that isn't in the plan or forms a cycle, a harness that isn't installed, an unknown agent, or a worktree outside a git repository.
+- **Errors block approval:** a key used twice, a dependency that isn't in the plan or forms a cycle, a harness that isn't installed, an unknown agent, a worktree outside a git repository, or an **agy task with an agent that edits or runs commands**. agy runs a custom agent with read-only tools, so such a task can't do its work; drop the agent or pick another harness.
 - **Warnings don't:** two tasks that may run at the same time and touch the same files in a shared workspace, or more than 12 tasks.
 
 In **review** you can change the plan before approving it:
@@ -118,7 +119,7 @@ Each task that needs you carries `!` on its row, and its swarm carries `⚑n`. T
 
 A worker that goes idle on an unfinished task gets one reminder after 90 seconds. Only if it stays idle does it show up as `stalled`.
 
-**Retry** (`r`) puts the task back on the board, and agent-mux starts a new worker for it. A worktree task keeps its worktree, so the new worker continues the work already there.
+**Retry** (`r`) opens the task's form on its harness, agent and isolation, so a task that got stuck on one harness can move to another. Saving it stops its worker if it still has one and puts the task back on the board, and agent-mux starts a new worker. A worktree task keeps its worktree, so the new worker continues the work already there.
 
 ## Writing to workers
 
@@ -152,7 +153,7 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | `y` | approve the plan · merge a branch · accept a proposal · close a finished swarm |
 | `space` | pause or resume: while paused, running workers continue but nothing new starts |
 | `n` | a new swarm (on a swarm row) · a new task (on a task or the coordinator) |
-| `e` / `d` | edit or delete a task (delete only a task that never started) |
+| `e` / `d` | edit or delete a task. Its harness, agent and isolation change only before it starts or on a retry; delete only a task that never started. |
 | `r` | retry a failed, lost, cancelled or stalled task |
 | `x` | stop the task's worker · cancel a task · set a branch aside · drop a proposal |
 | `p` | re-plan (in review) |
@@ -177,7 +178,8 @@ Confirmations take `y` only. `Enter` never confirms. What an action did shows in
 ## From the command line
 
 ```sh
-agent-mux swarm start "Add OAuth login" --planner claude --workers 4 --isolation worktree   # --planner: the coordinator's harness
+agent-mux swarm start "Add OAuth login" --planner claude --worker-harness codex --workers 4 --isolation worktree
+#   --planner: the coordinator's harness · --worker-harness: tasks that name none
 agent-mux swarm status                  # the swarm and its board, each task's state (--json for scripts)
 agent-mux swarm plan                    # the board with the plan's errors and warnings
 agent-mux swarm approve                 # workers start

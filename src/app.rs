@@ -5140,6 +5140,7 @@ impl App {
             Outcome::Start {
                 goal,
                 planner,
+                workers,
                 max_workers,
                 isolation,
                 gate,
@@ -5153,6 +5154,7 @@ impl App {
                     isolation,
                     gate,
                     check,
+                    workers: Some(workers.as_str().to_string()),
                 })
                 .map(|s| format!("{} is planning with {}", s.id, s.planner_harness)),
             ),
@@ -5169,6 +5171,40 @@ impl App {
                 crate::bus::swarm::record::update_plan_task(conn, Some(db), &task_id, &task, now_ns)
                     .map(|_| format!("saved `{}`", task.key))
             })),
+            Outcome::RetryTask {
+                task_id,
+                task,
+                stop,
+            } => {
+                // its worker first, then the card, then back on the board
+                if let Some(s) = stop.and_then(|i| self.sessions.get_mut(i)) {
+                    s.kill();
+                }
+                let saved = with_conn(&|conn, db| {
+                    crate::bus::swarm::record::update_plan_task(
+                        conn,
+                        Some(db),
+                        &task_id,
+                        &task,
+                        now_ns,
+                    )
+                    .map(|_| String::new())
+                });
+                Some(saved.and_then(|_| {
+                    self.swarm_action(
+                        &ws_path,
+                        crate::bus::swarm::record::SwarmVerb::Retry,
+                        Some(&task_id),
+                        None,
+                    )
+                    .map(|done| {
+                        format!(
+                            "{done} on {}",
+                            task.harness.as_deref().unwrap_or("the workers' harness")
+                        )
+                    })
+                }))
+            }
             Outcome::DeleteTask(task_id) => Some(with_conn(&|conn, db| {
                 crate::bus::swarm::record::delete_task(conn, &task_id)
                     .map_err(|e| e.to_string())?;

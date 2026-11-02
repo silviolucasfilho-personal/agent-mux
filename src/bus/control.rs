@@ -69,6 +69,9 @@ pub enum ControlRequest {
         gate: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         check: Option<String>,
+        /// The harness of tasks that name none; absent: the coordinator's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workers: Option<String>,
     },
     /// One operator decision on `workspace`'s orchestrated swarm; `task` is
     /// a task id, id prefix or plan key, `notes` a re-plan's notes.

@@ -1225,11 +1225,12 @@ async fn steps_run_as_agents_on_every_harness() {
         "{:?} {:?}",
         recent.error, recent.notes
     );
-    // what a harness cannot enforce is noted: the reviewer's tool list on
-    // agy (wrap names no harness); the skeptic has no list, so no note
+    // what a harness cannot enforce is noted: agy runs the reviewer (which
+    // asks for a shell) read-only (wrap names no harness); the skeptic has
+    // no list, so no note
     assert!(
         recent.notes.iter().any(
-            |n| n.contains("step wrap: agent \"reviewer\": agy: the tool list is not enforced")
+            |n| n.contains("step wrap: agent \"reviewer\": agy: under a custom agent the session gets read-only tools")
         ),
         "{:?}",
         recent.notes

@@ -668,7 +668,9 @@ A swarm is run by agent-mux: a headless planner splits the goal into tasks,
 you approve the plan, and agent-mux starts one worker per task.
 
 commands:
-  start <goal...> [--planner claude|codex|agy|opencode] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--check CMD] [--workspace DIR]
+  start <goal...> [--planner claude|codex|agy|opencode] [--worker-harness H] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--check CMD] [--workspace DIR]
+                                --planner: the coordinator's harness (default claude when installed);
+                                --worker-harness: the harness of tasks that name none (default: the coordinator's)
                                 start a swarm in the running TUI: plan, then wait for approval (unless --no-plan-gate)
   status [--workspace DIR] [--db PATH] [--json]
                                 the swarm, its board (each task's state) and what waits for you
@@ -1039,6 +1041,7 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                 isolation,
                 gate: Some(!args.has("no-plan-gate")),
                 check: args.value("check").map(str::to_string),
+                workers: args.value("worker-harness").map(str::to_string),
             };
             match control::send_request(None, &req, Duration::from_secs(10)) {
                 Ok(resp) if resp.ok => {

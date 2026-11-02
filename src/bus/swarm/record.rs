@@ -94,6 +94,8 @@ pub struct NewSwarm {
     pub gate: bool,
     pub check_cmd: Option<String>,
     pub owner_run: Option<String>,
+    /// The harness of tasks that name none (`None`: the coordinator's).
+    pub worker_harness: Option<String>,
 }
 
 /// The plan's side of one board task.
@@ -187,10 +189,33 @@ pub fn create_swarm(
         ],
     )
     .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO swarm_coordinators (swarm_id, worker_harness, updated_ns) VALUES (?1, ?2, ?3)
+         ON CONFLICT (swarm_id) DO UPDATE SET worker_harness = excluded.worker_harness",
+        params![
+            id,
+            new.worker_harness
+                .as_deref()
+                .map(str::trim)
+                .filter(|h| !h.is_empty()),
+            now
+        ],
+    )
+    .map_err(|e| e.to_string())?;
     poke(db);
     get_swarm(conn, &id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "the swarm disappeared".into())
+}
+
+/// The harness of the swarm's tasks that name none: the workers' harness
+/// chosen at the start, else the coordinator's.
+pub fn worker_harness(conn: &Connection, swarm: &SwarmRun) -> String {
+    coordinator(conn, &swarm.id)
+        .ok()
+        .flatten()
+        .and_then(|c| c.worker_harness)
+        .unwrap_or_else(|| swarm.planner_harness.clone())
 }
 
 pub fn get_swarm(conn: &Connection, id: &str) -> rusqlite::Result<Option<SwarmRun>> {
@@ -409,7 +434,7 @@ fn insert_task(
         target_harness: Some(
             pt.harness
                 .clone()
-                .unwrap_or_else(|| swarm.planner_harness.clone()),
+                .unwrap_or_else(|| worker_harness(conn, swarm)),
         ),
         target_agent: pt.agent.clone(),
         isolation: pt.isolation_or(swarm.isolation),
@@ -815,6 +840,32 @@ pub fn update_plan_task(
         &pt.files,
         now,
     )?;
+    // the harness, agent and isolation the card names (a harness of none
+    // is the swarm's workers' harness)
+    let harness = match &pt.harness {
+        Some(h) => Some(h.clone()),
+        None => conn
+            .query_row(
+                "SELECT swarm_id FROM swarm_tasks WHERE task_id = ?1",
+                params![task_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .and_then(|id| get_swarm(conn, &id).ok().flatten())
+            .map(|s| worker_harness(conn, &s)),
+    };
+    let isolation = pt
+        .isolation
+        .as_deref()
+        .and_then(TaskIsolation::parse)
+        .unwrap_or_default();
+    conn.execute(
+        "UPDATE agent_tasks SET target_harness = COALESCE(?1, target_harness), target_agent = ?2,
+                                isolation = ?3 WHERE id = ?4",
+        params![harness, pt.agent, isolation.as_str(), task_id],
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE swarm_tasks SET depends_on_json = ?1, acceptance = ?2 WHERE task_id = ?3",
         params![
@@ -1157,6 +1208,7 @@ mod tests {
             gate: true,
             check_cmd: Some("  ".into()),
             owner_run: Some("run-1".into()),
+            worker_harness: None,
         }
     }
 
@@ -1168,6 +1220,58 @@ mod tests {
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn tasks_that_name_no_harness_run_on_the_workers_harness() {
+        let (dir, conn) = store();
+        let ws = dir.path().to_string_lossy().into_owned();
+        let mut n = new_swarm(&ws);
+        n.worker_harness = Some("codex".into());
+        let s = create_swarm(&conn, None, &n, 1).unwrap();
+        assert_eq!(worker_harness(&conn, &s), "codex");
+        let mut named = pt("b", &[]);
+        named.harness = Some("agy".into());
+        let b = replace_draft(
+            &conn,
+            None,
+            &s,
+            &Plan {
+                summary: String::new(),
+                tasks: vec![pt("a", &[]), named],
+            },
+            2,
+        )
+        .unwrap();
+        let harness: Vec<Option<&str>> =
+            b.iter().map(|t| t.task.target_harness.as_deref()).collect();
+        assert_eq!(harness, [Some("codex"), Some("agy")]);
+        // An edit moves a task to another harness, agent and isolation.
+        let mut moved = pt("b", &[]);
+        moved.harness = Some("claude".into());
+        moved.agent = Some("reviewer".into());
+        moved.isolation = Some("worktree".into());
+        update_plan_task(&conn, None, &b[1].task.id, &moved, 3).unwrap();
+        let t = bstore::get_task(&conn, &b[1].task.id).unwrap().unwrap();
+        assert_eq!(
+            (
+                t.target_harness.as_deref(),
+                t.target_agent.as_deref(),
+                t.isolation
+            ),
+            (Some("claude"), Some("reviewer"), TaskIsolation::Worktree)
+        );
+        // Without a harness of its own, back to the workers'.
+        update_plan_task(&conn, None, &b[1].task.id, &pt("b", &[]), 4).unwrap();
+        let t = bstore::get_task(&conn, &b[1].task.id).unwrap().unwrap();
+        assert_eq!(
+            (t.target_harness.as_deref(), t.target_agent.as_deref()),
+            (Some("codex"), None)
+        );
+        // Without a workers' harness, the coordinator's.
+        let other = tempfile::tempdir().unwrap();
+        let s2 = create_swarm(&conn, None, &new_swarm(&other.path().to_string_lossy()), 5).unwrap();
+        assert_eq!(worker_harness(&conn, &s2), "claude");
     }
 
     #[test]
@@ -1267,6 +1371,7 @@ mod tests {
         let env = super::super::plan::CheckEnv {
             harnesses: vec!["claude".into()],
             agents: vec![],
+            writing_agents: vec![],
             git_repo: false,
             default_isolation: TaskIsolation::Shared,
         };
