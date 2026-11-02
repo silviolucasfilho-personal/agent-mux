@@ -691,6 +691,45 @@ pub enum ActionScope {
     Local,
 }
 
+/// The theme a command is listed under in the Commands overlay. Themes are
+/// data on each action, so adding an action forces a choice; the overlay
+/// draws one section per theme, in `ActionTheme::ALL` order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ActionTheme {
+    Navigation,
+    Sessions,
+    Screens,
+    Tracing,
+    Items,
+    Filters,
+    App,
+}
+
+impl ActionTheme {
+    /// Section order in the Commands overlay.
+    pub const ALL: &'static [ActionTheme] = &[
+        ActionTheme::Navigation,
+        ActionTheme::Sessions,
+        ActionTheme::Screens,
+        ActionTheme::Tracing,
+        ActionTheme::Items,
+        ActionTheme::Filters,
+        ActionTheme::App,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            ActionTheme::Navigation => "Navigation",
+            ActionTheme::Sessions => "Sessions",
+            ActionTheme::Screens => "Screens",
+            ActionTheme::Tracing => "Tracing & Langfuse",
+            ActionTheme::Items => "Items & editing",
+            ActionTheme::Filters => "Skills filters",
+            ActionTheme::App => "App",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ActionDef {
     pub id: ActionId,
@@ -698,11 +737,13 @@ pub struct ActionDef {
     pub keywords: &'static str,
     pub key: Option<char>,
     pub scope: ActionScope,
+    pub theme: ActionTheme,
 }
 
 pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: ActionId::Help,
+        theme: ActionTheme::App,
         label: "Help for this screen",
         keywords: "keyboard shortcuts",
         key: None,
@@ -710,6 +751,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::SubmitDialog,
+        theme: ActionTheme::Sessions,
         label: "Submit dialog",
         keywords: "start compose launch",
         key: None,
@@ -717,6 +759,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Skills,
+        theme: ActionTheme::Screens,
         label: "Open skills",
         keywords: "library",
         key: None,
@@ -724,6 +767,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Configuration,
+        theme: ActionTheme::Screens,
         label: "Open configuration",
         keywords: "settings prompts",
         key: None,
@@ -731,6 +775,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Memory,
+        theme: ActionTheme::Screens,
         label: "Open memory (ai-memory)",
         keywords: "memory ai-memory install setup hooks mcp shared",
         key: None,
@@ -738,6 +783,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Workspaces,
+        theme: ActionTheme::Screens,
         label: "Open workspaces",
         keywords: "workspaces projects folders subfolders stack explorer resume summary",
         key: None,
@@ -745,6 +791,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Swarm,
+        theme: ActionTheme::Screens,
         label: "Open swarm",
         keywords: "swarm coordinator workers bus tasks leases messages multi-agent",
         key: None,
@@ -752,6 +799,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Inbox,
+        theme: ActionTheme::Screens,
         label: "Open inbox",
         keywords: "review pending",
         key: None,
@@ -759,6 +807,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::History,
+        theme: ActionTheme::Screens,
         label: "Open session history",
         keywords: "logs past",
         key: None,
@@ -766,6 +815,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::FilterClaude,
+        theme: ActionTheme::Filters,
         label: "Filter skills: Claude",
         keywords: "harness",
         key: None,
@@ -773,6 +823,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::FilterCodex,
+        theme: ActionTheme::Filters,
         label: "Filter skills: Codex",
         keywords: "harness",
         key: None,
@@ -780,6 +831,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::FilterAntigravity,
+        theme: ActionTheme::Filters,
         label: "Filter skills: Antigravity",
         keywords: "harness",
         key: None,
@@ -787,6 +839,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::FilterOpenCode,
+        theme: ActionTheme::Filters,
         label: "Filter skills: OpenCode",
         keywords: "harness",
         key: None,
@@ -794,6 +847,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::FindNext,
+        theme: ActionTheme::Tracing,
         label: "Next search match",
         keywords: "find trace",
         key: None,
@@ -801,6 +855,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::FindPrev,
+        theme: ActionTheme::Tracing,
         label: "Previous search match",
         keywords: "find trace",
         key: None,
@@ -808,6 +863,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::FocusAgents,
+        theme: ActionTheme::Navigation,
         label: "Focus Agents",
         keywords: "sidebar list navigation",
         key: None,
@@ -815,6 +871,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::ReturnToSession,
+        theme: ActionTheme::Navigation,
         label: "Return to session",
         keywords: "pane harness terminal",
         key: None,
@@ -822,6 +879,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::ToggleSidebar,
+        theme: ActionTheme::Navigation,
         label: "Show/hide sidebar",
         keywords: "layout",
         key: None,
@@ -829,6 +887,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Traces,
+        theme: ActionTheme::Tracing,
         label: "Open traces",
         keywords: "trace browser",
         key: None,
@@ -836,6 +895,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Langfuse,
+        theme: ActionTheme::Tracing,
         label: "Open Langfuse traces",
         keywords: "langfuse cloud traces observations remote otel",
         key: None,
@@ -843,6 +903,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::OpenLangfuseWeb,
+        theme: ActionTheme::Tracing,
         label: "Open Langfuse Web",
         keywords: "langfuse browser dashboard web ui",
         key: None,
@@ -850,6 +911,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Runs,
+        theme: ActionTheme::Screens,
         label: "Open runs",
         keywords: "history workflow loop",
         key: None,
@@ -857,6 +919,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::PrevSession,
+        theme: ActionTheme::Sessions,
         label: "Previous session",
         keywords: "switch",
         key: None,
@@ -864,6 +927,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::NextSession,
+        theme: ActionTheme::Sessions,
         label: "Next session",
         keywords: "switch",
         key: None,
@@ -871,6 +935,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::New,
+        theme: ActionTheme::Items,
         label: "New",
         keywords: "create",
         key: Some('n'),
@@ -878,6 +943,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Edit,
+        theme: ActionTheme::Items,
         label: "Edit selected item",
         keywords: "change",
         key: Some('e'),
@@ -885,6 +951,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Delete,
+        theme: ActionTheme::Items,
         label: "Delete/remove selected item",
         keywords: "dismiss",
         key: Some('d'),
@@ -892,6 +959,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Run,
+        theme: ActionTheme::Items,
         label: "Run/resume",
         keywords: "launch",
         key: Some('r'),
@@ -899,6 +967,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Stop,
+        theme: ActionTheme::Items,
         label: "Stop selected run",
         keywords: "kill cancel",
         key: Some('x'),
@@ -906,6 +975,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Save,
+        theme: ActionTheme::Items,
         label: "Save",
         keywords: "write",
         key: Some('s'),
@@ -913,6 +983,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Reload,
+        theme: ActionTheme::Items,
         label: "Reload",
         keywords: "rescan refresh",
         key: Some('r'),
@@ -920,6 +991,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Restore,
+        theme: ActionTheme::Items,
         label: "Restore built-in",
         keywords: "reset",
         key: Some('R'),
@@ -927,6 +999,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Editor,
+        theme: ActionTheme::Items,
         label: "Open in editor",
         keywords: "compose external",
         key: Some('o'),
@@ -934,6 +1007,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::SetVerdict,
+        theme: ActionTheme::Tracing,
         label: "Change verdict",
         keywords: "score trace",
         key: None,
@@ -941,6 +1015,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::TestShortcuts,
+        theme: ActionTheme::App,
         label: "Test shortcuts",
         keywords: "keyboard terminal verify",
         key: None,
@@ -948,6 +1023,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::CloseAllSessions,
+        theme: ActionTheme::Sessions,
         label: "Close all sessions",
         keywords: "kill stop harness every Q",
         key: None,
@@ -955,6 +1031,7 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Restart,
+        theme: ActionTheme::App,
         label: "Restart agent-mux",
         keywords: "relaunch reopen reload update new build",
         key: None,
@@ -962,9 +1039,41 @@ pub const ACTIONS: &[ActionDef] = &[
     },
     ActionDef {
         id: ActionId::Quit,
+        theme: ActionTheme::App,
         label: "Quit agent-mux",
         keywords: "exit",
         key: None,
         scope: ActionScope::Global,
     },
 ];
+
+#[cfg(test)]
+mod action_theme_tests {
+    use super::*;
+
+    #[test]
+    fn every_action_belongs_to_exactly_one_theme() {
+        for action in ACTIONS {
+            let groups = ActionTheme::ALL
+                .iter()
+                .filter(|theme| **theme == action.theme)
+                .count();
+            assert_eq!(groups, 1, "{} is not grouped exactly once", action.label);
+        }
+        // Themes are sections of the Commands overlay: none may be empty.
+        for theme in ActionTheme::ALL {
+            assert!(
+                ACTIONS.iter().any(|action| action.theme == *theme),
+                "theme {} has no actions",
+                theme.title()
+            );
+            assert!(!theme.title().is_empty());
+            assert_eq!(
+                ActionTheme::ALL.iter().filter(|t| *t == theme).count(),
+                1,
+                "duplicate theme {}",
+                theme.title()
+            );
+        }
+    }
+}

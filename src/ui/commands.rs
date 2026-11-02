@@ -53,10 +53,26 @@ pub(super) fn draw(f: &mut Frame, app: &App) {
             use unicode_width::UnicodeWidthStr;
             // borders and the highlight symbol
             let inner = usize::from(width.saturating_sub(4));
-            let rows = app
-                .filtered_commands()
-                .iter()
-                .map(|a| {
+            let sections = crate::app::commands::group_commands(&app.filtered_commands());
+            let total_actions: usize = sections.iter().map(|s| s.actions.len()).sum();
+            let selected_action = (total_actions > 0).then(|| menu.selected.min(total_actions - 1));
+            let mut rows: Vec<ListItem> = Vec::new();
+            let mut action_index = 0usize;
+            // Headers occupy list rows but never become the selection: the
+            // highlight follows the action under the cursor, skipping them.
+            let mut selected_row = None;
+            for section in sections {
+                rows.push(ListItem::new(Line::from(Span::styled(
+                    format!(" {} ", section.theme.title()),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ))));
+                for a in section.actions {
+                    if Some(action_index) == selected_action {
+                        selected_row = Some(rows.len());
+                    }
+                    action_index += 1;
                     let available = app.command_availability(a.id);
                     let suffix = available
                         .reason()
@@ -85,19 +101,25 @@ pub(super) fn draw(f: &mut Frame, app: &App) {
                         (true, true) => Color::Cyan,
                         (true, false) => Color::Gray,
                     };
-                    ListItem::new(Line::from(vec![
+                    rows.push(ListItem::new(Line::from(vec![
                         Span::styled(left, Style::default().fg(color)),
                         Span::raw(" ".repeat(pad)),
                         Span::styled(key, Style::default().fg(key_color)),
-                    ]))
-                })
-                .collect();
+                    ])));
+                }
+            }
+            if rows.is_empty() {
+                rows.push(ListItem::new(Line::from(Span::styled(
+                    " No matching commands",
+                    Style::default().fg(Color::DarkGray),
+                ))));
+            }
             (
                 format!(
                     "Commands: {}  • ↑↓ choose · Enter run · Esc close",
                     menu.query
                 ),
-                Some(menu.selected),
+                selected_row,
                 rows,
             )
         }

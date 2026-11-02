@@ -565,3 +565,117 @@ fn commands_list_each_shortcut_beside_its_command() {
     let observed = a.command_shortcut(ActionId::FocusAgents);
     assert_eq!(observed, Some((chord("⌘L", "Ctrl+Shift+L"), false)));
 }
+
+fn highlighted_row(a: &App) -> String {
+    screen(a, 100)
+        .lines()
+        .find(|line| line.contains('›'))
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn commands_group_by_theme_and_hide_empty_sections() {
+    use agent_mux::app::commands::{Overlay, group_commands};
+    use agent_mux::keymap::{ACTIONS, ActionTheme};
+
+    let mut a = app();
+    a.handle_key(&key(KeyCode::F(1)), Instant::now());
+
+    // Every action appears exactly once, sections follow the theme order and
+    // none is empty when the query is empty.
+    let sections = group_commands(&a.filtered_commands());
+    let got: Vec<ActionTheme> = sections.iter().map(|s| s.theme).collect();
+    let want: Vec<ActionTheme> = ActionTheme::ALL
+        .iter()
+        .copied()
+        .filter(|theme| ACTIONS.iter().any(|action| action.theme == *theme))
+        .collect();
+    assert_eq!(got, want);
+    assert!(sections.iter().all(|section| !section.actions.is_empty()));
+    assert_eq!(
+        sections.iter().map(|s| s.actions.len()).sum::<usize>(),
+        ACTIONS.len()
+    );
+    let Some(Overlay::Commands(menu)) = &a.command_overlay else {
+        panic!("commands not open")
+    };
+    assert_eq!(menu.selected, 0);
+    assert_eq!(a.filtered_commands()[0].id, ActionId::FocusAgents);
+
+    // A search keeps matches under their headers and drops empty sections.
+    for c in "open".chars() {
+        a.handle_key(&key(KeyCode::Char(c)), Instant::now());
+    }
+    let matches = a.filtered_commands();
+    let sections = group_commands(&matches);
+    let got: Vec<ActionTheme> = sections.iter().map(|s| s.theme).collect();
+    let want: Vec<ActionTheme> = ActionTheme::ALL
+        .iter()
+        .copied()
+        .filter(|theme| matches.iter().any(|action| action.theme == *theme))
+        .collect();
+    assert_eq!(got, want);
+    assert!(got.contains(&ActionTheme::Screens));
+    assert!(got.contains(&ActionTheme::Tracing));
+    assert!(!got.contains(&ActionTheme::Navigation));
+    assert!(!got.contains(&ActionTheme::Sessions));
+
+    // Nothing matches: the overlay says so and offers nothing to select.
+    for _ in 0.."open".len() {
+        a.handle_key(&key(KeyCode::Backspace), Instant::now());
+    }
+    for c in "zzzzzz".chars() {
+        a.handle_key(&key(KeyCode::Char(c)), Instant::now());
+    }
+    assert!(a.filtered_commands().is_empty());
+    assert!(group_commands(&a.filtered_commands()).is_empty());
+    let text = screen(&a, 100);
+    assert!(text.contains("No matching commands"), "{text}");
+    assert!(highlighted_row(&a).is_empty(), "nothing to highlight");
+}
+
+#[test]
+fn arrows_and_enter_walk_actions_not_section_headers() {
+    use agent_mux::keymap::ActionTheme;
+
+    let mut a = app();
+    a.handle_key(&key(KeyCode::F(1)), Instant::now());
+    let headers: Vec<&str> = ActionTheme::ALL.iter().map(|theme| theme.title()).collect();
+
+    // Down moves one action at a time; the highlight never lands on a header,
+    // even where a section boundary sits between two actions.
+    let labels: Vec<&'static str> = a.filtered_commands().iter().map(|a| a.label).collect();
+    for (step, label) in labels.iter().enumerate().take(10) {
+        let row = highlighted_row(&a);
+        assert!(row.contains(label), "step {step}: {row:?}");
+        assert!(
+            !headers
+                .iter()
+                .any(|header| row.contains(&format!(" {header} "))),
+            "step {step} highlighted a header: {row:?}"
+        );
+        a.handle_key(&key(KeyCode::Down), Instant::now());
+    }
+
+    // Enter runs the action under the highlight in section order, not the
+    // registration order of ACTIONS.
+    let mut a = app();
+    a.handle_key(&key(KeyCode::F(1)), Instant::now());
+    for c in "open".chars() {
+        a.handle_key(&key(KeyCode::Char(c)), Instant::now());
+    }
+    let items = a.filtered_commands();
+    assert_eq!(items[0].id, ActionId::Skills);
+    assert_eq!(items[1].id, ActionId::Configuration);
+    a.handle_key(&key(KeyCode::Down), Instant::now());
+    let row = highlighted_row(&a);
+    assert!(row.contains("Open configuration"), "{row:?}");
+    a.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(a.command_overlay.is_none());
+    assert!(
+        matches!(a.mode, Mode::ConfigView(_)),
+        "Enter ran the wrong section entry: {:?}",
+        a.mode
+    );
+}
