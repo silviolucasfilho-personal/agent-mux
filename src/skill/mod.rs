@@ -83,8 +83,8 @@ macro_rules! wf_skill {
     };
 }
 
-/// Every compiled-in package: Heimdall, the workflow planner and the
-/// workflow step skills.
+/// Every compiled-in package: Heimdall, the workflow planner, the swarm
+/// planner and the workflow step skills.
 pub fn builtin_packages() -> Vec<BuiltinPackage> {
     vec![
         BuiltinPackage {
@@ -109,6 +109,13 @@ pub fn builtin_packages() -> Vec<BuiltinPackage> {
                     include_str!("../../skills/workflow-author/reference/patterns.md"),
                 ),
             ],
+        },
+        BuiltinPackage {
+            id: "swarm-plan",
+            repo_dir: "skills/swarm-plan/",
+            skill_md: include_str!("../../skills/swarm-plan/SKILL.md"),
+            skill_toml: Some(include_str!("../../skills/swarm-plan/skill.toml")),
+            files: &[],
         },
         wf_skill!("wf-review-find"),
         wf_skill!("wf-refute"),

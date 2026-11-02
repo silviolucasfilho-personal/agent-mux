@@ -39,6 +39,8 @@ pub struct Prompts {
     /// `[agent] preamble`: the baseline section the scaffolder inserts
     /// into every installed loop agent.
     pub agent_preamble: String,
+    /// `[swarm] plan`: the swarm planner's opening prompt.
+    pub swarm_plan: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -51,6 +53,13 @@ struct Doc {
     workflow: WorkflowDoc,
     #[serde(default)]
     agent: AgentDoc,
+    #[serde(default)]
+    swarm: SwarmDoc,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SwarmDoc {
+    plan: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -97,6 +106,7 @@ impl Prompts {
             workflow_inline: doc.workflow.inline.unwrap_or_default(),
             workflow_plan: doc.workflow.plan.unwrap_or_default(),
             agent_preamble: doc.agent.preamble.unwrap_or_default(),
+            swarm_plan: doc.swarm.plan.unwrap_or_default(),
         }
     }
 
@@ -121,6 +131,9 @@ impl Prompts {
         }
         if let Some(a) = doc.agent.preamble {
             p.agent_preamble = a;
+        }
+        if let Some(sp) = doc.swarm.plan {
+            p.swarm_plan = sp;
         }
         Ok(p)
     }

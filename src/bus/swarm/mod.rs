@@ -1,4 +1,10 @@
-//! Swarm snapshot and orchestration model (`src/bus/swarm.rs`).
+//! Swarm snapshot and orchestration model (`src/bus/swarm/`).
+//!
+//! Since schema v21 agent-mux itself runs a swarm
+//! (`docs/superpowers/specs/2026-11-02-swarm-orchestrator-design.md`): a
+//! headless planner's answer becomes a checked [`plan::Plan`] on the board
+//! ([`record`]), and the dispatcher ([`engine::next_actions`]) starts
+//! workers whose opening prompt is their whole task ([`prompt`]).
 //!
 //! Aggregates the workspace's active Coordinator, Workers, Task Board,
 //! Cooperative File Leases, and Inter-Agent Message Feed from `traces.db`
@@ -7,6 +13,11 @@
 //! questions and the swarm's [`Phase`]
 //! (`docs/superpowers/specs/2026-10-30-swarm-mission-control-ux-design.md`).
 
+pub mod engine;
+pub mod plan;
+pub mod prompt;
+pub mod record;
+
 use super::{
     BusMessage, BusTask, FileLease, PeerInfo, TaskIsolation, TaskStatus, short_id, store as bstore,
 };
@@ -14,6 +25,25 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+/// The `question` messages nobody answered: no later message names one in
+/// `reply_to`, and its asker got nothing back from whom it asked (anyone,
+/// for a broadcast question).
+pub fn open_questions(messages: &[BusMessage]) -> Vec<&BusMessage> {
+    messages
+        .iter()
+        .filter(|q| q.topic == "question")
+        .filter(|q| {
+            !messages.iter().any(|m| {
+                m.created_ns >= q.created_ns
+                    && m.id != q.id
+                    && (m.reply_to.as_deref() == Some(q.id.as_str())
+                        || (m.to_launch.as_deref() == Some(q.from_launch.as_str())
+                            && q.to_launch.as_ref().is_none_or(|to| *to == m.from_launch)))
+            })
+        })
+        .collect()
+}
 
 /// Role of an agent session inside a workspace swarm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -578,19 +608,7 @@ impl SwarmSnapshot {
     /// message that names it in `reply_to`, or by a later message to its
     /// sender from its addressee (from anyone, for a broadcast question).
     pub fn open_questions(&self) -> Vec<&BusMessage> {
-        self.messages
-            .iter()
-            .filter(|q| q.topic == "question")
-            .filter(|q| {
-                !self.messages.iter().any(|m| {
-                    m.created_ns >= q.created_ns
-                        && m.id != q.id
-                        && (m.reply_to.as_deref() == Some(q.id.as_str())
-                            || (m.to_launch.as_deref() == Some(q.from_launch.as_str())
-                                && q.to_launch.as_ref().is_none_or(|to| *to == m.from_launch)))
-                })
-            })
-            .collect()
+        open_questions(&self.messages)
     }
 
     /// Where the swarm is: see [`Phase`].

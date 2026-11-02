@@ -72,11 +72,19 @@ How to use it: [swarm.md](swarm.md). The swarm screen (`F1` → "Open swarm", `s
 - **Broadcast wakes.** `ControlRequest::WakeWorkspace { workspace, prompt, exclude }` wakes every live session of the workspace (and of the worktrees its tasks run in) the way `WakeSession` wakes one, except the sender; the response's `detail` counts how many were woken and how many queued until idle. The screen's `@all` (`b`), `agent-mux swarm broadcast --wake`, `agent-mux bus send --wake` without `--to` and `agent_mux_send_message(to = "*", wake = true)` all send it.
 - **`max_workers` is enforced.** `SpawnWorker` (the screen's `n`/`r`, `agent_mux_delegate`, `agent-mux bus delegate`) refuses when the swarm's `max_workers` delegated workers are already live in the workspace (sessions in a bus group; the coordinator is not counted), with `worker cap reached: N/N …`; the task stays on the board for `r` later, and the title shows `N/cap Workers`. A swarm without a recorded cap has none.
 - **The screen refreshes on change, not on a timer.** `SwarmView` keeps one store connection and, at most every 500 ms, asks whether anything moved: the `trace_changes` feed (schema `v18` adds triggers for `agent_messages`, `agent_tasks`, `agent_leases` and `swarm_state`), a live session's state or telemetry (a fingerprint, no store read), or a lease it shows expiring (`SwarmView::refresh_due`). `Ctrl+R` and every action refresh at once. `load_snapshot` is a read: expired leases are left out, pruning stays with the writers (`acquire_leases`, `split_tasks`). Timestamps handed to it are nanoseconds, like the rest of the store.
-- **`agent-mux swarm start`** needs the running TUI: a coordinator is a live session, so without the control socket the command refuses rather than recording a coordinator that does not exist.
+- **The orchestrated swarm (schema v21).** Design: `docs/superpowers/specs/2026-11-02-swarm-orchestrator-design.md`.
+  - **Tables:** `swarms` holds one swarm's run (`planning` → `review` → `running`/`paused` → `integrating` → `finished`; one live per workspace; `owner_run` is the TUI that dispatches it). `swarm_tasks` extends `agent_tasks` with the plan's key, position, `depends_on`, acceptance, `proposed`, attempts and `nudged_ns`. The migration ends every coordinator-era swarm (`swarm_state`, `swarm_plans`).
+  - **Code:** `bus::swarm::plan` parses and checks the planner's fenced `swarm-plan` answer, `bus::swarm::record` reads and writes the rows and applies the operator's `SwarmVerb`s, and `bus::swarm::engine::next_actions` is the dispatcher (`Spawn`, `Nudge`, `Advance`), a pure function. `bus::swarm::prompt` holds the worker's opening prompt and the nudge. `app::swarm_engine` launches the planner (a `LivePlan` with `swarm` set), turns its answer into the board and runs the dispatcher every second from `on_tick`. Spawns go through `SpawnWorker` with `opening_prompt`.
+  - **Gate:** `plan_blocks` refuses claims until the swarm is past `review`.
+  - **Control requests:** `StartSwarm { workspace, goal, planner, max_workers, isolation, gate, check }` and `SwarmAction { workspace, verb, task, notes }`.
+  - **`agent-mux swarm start`** needs the running TUI. Without the control socket it refuses rather than recording a swarm nobody runs.
 
 ```
-agent-mux swarm status [--workspace DIR] [--db PATH] [--json]
-agent-mux swarm start <goal...> [--coordinator claude|codex|agy] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--workspace DIR]
+agent-mux swarm start <goal...> [--planner claude|codex|agy|opencode] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--check CMD] [--workspace DIR]
+agent-mux swarm status|plan [--workspace DIR] [--db PATH] [--json]
+agent-mux swarm approve|pause|resume|close [--workspace DIR] [--json]
+agent-mux swarm replan <notes...>
+agent-mux swarm retry|merge|set-aside|accept|drop <task> [--workspace DIR] [--json]
 agent-mux swarm broadcast <message...> [--urgent] [--wake] [--workspace DIR] [--db PATH] [--json]
 agent-mux swarm stop [--workspace DIR] [--db PATH] [--json]
 ```

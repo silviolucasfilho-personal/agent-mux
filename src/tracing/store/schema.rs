@@ -1,10 +1,10 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 20;
+pub const SCHEMA_VERSION: i32 = 21;
 
 pub const MIGRATIONS: &[&str] = &[
-    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20,
+    V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -1056,4 +1056,93 @@ BEGIN
   INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
   VALUES ('session', OLD.key, OLD.key, NULL, 'delete');
 END;
+"#;
+
+// v21: agent-mux as the swarm's orchestrator
+// (`docs/superpowers/specs/2026-11-02-swarm-orchestrator-design.md`).
+// `swarms` is one swarm's run (a workspace has at most one live: ended_ns
+// NULL), `swarm_tasks` extends the board's `agent_tasks` rows with the
+// plan's key, order, dependencies and acceptance. The coordinator-session
+// swarms of v17/v19 (`swarm_state`, `swarm_plans`) are ended: their open
+// tasks cancelled, their leases released, their rows deleted; the tables
+// stay, unused. Replay-safe: every statement is idempotent.
+const V21: &str = r#"
+CREATE TABLE IF NOT EXISTS swarms (
+  id              TEXT PRIMARY KEY,
+  workspace       TEXT NOT NULL,
+  goal            TEXT NOT NULL,
+  status          TEXT NOT NULL CHECK (status IN
+                  ('planning','review','running','paused','integrating','finished')),
+  planner_harness TEXT NOT NULL,
+  planner_launch  TEXT,
+  plan_summary    TEXT,
+  plan_error      TEXT,
+  max_workers     INTEGER NOT NULL,
+  isolation       TEXT NOT NULL CHECK (isolation IN ('shared','worktree')),
+  gate            INTEGER NOT NULL DEFAULT 1,
+  check_cmd       TEXT,
+  check_result    TEXT,
+  owner_run       TEXT,
+  started_ns      INTEGER NOT NULL,
+  updated_ns      INTEGER NOT NULL,
+  ended_ns        INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS swarms_live ON swarms (workspace) WHERE ended_ns IS NULL;
+
+CREATE TABLE IF NOT EXISTS swarm_tasks (
+  task_id         TEXT PRIMARY KEY REFERENCES agent_tasks (id) ON DELETE CASCADE,
+  swarm_id        TEXT NOT NULL REFERENCES swarms (id) ON DELETE CASCADE,
+  plan_key        TEXT NOT NULL,
+  position        INTEGER NOT NULL,
+  depends_on_json TEXT NOT NULL DEFAULT '[]',
+  acceptance      TEXT,
+  proposed        INTEGER NOT NULL DEFAULT 0,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  nudged_ns       INTEGER,
+  UNIQUE (swarm_id, plan_key)
+);
+CREATE INDEX IF NOT EXISTS swarm_tasks_swarm ON swarm_tasks (swarm_id, position);
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarms_insert
+AFTER INSERT ON swarms
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_run', NEW.id, NULL, NULL, 'insert');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarms_update
+AFTER UPDATE ON swarms
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_run', NEW.id, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_tasks_insert
+AFTER INSERT ON swarm_tasks
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'insert');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_tasks_update
+AFTER UPDATE ON swarm_tasks
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_tasks_delete
+AFTER DELETE ON swarm_tasks
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', OLD.task_id, NULL, NULL, 'delete');
+END;
+
+UPDATE agent_tasks
+   SET status = 'cancelled',
+       error = COALESCE(error, 'ended by the v21 migration: swarms are now run by agent-mux'),
+       updated_ns = CAST((julianday('now') - 2440587.5) * 86400000000000 AS INTEGER),
+       ended_ns = CAST((julianday('now') - 2440587.5) * 86400000000000 AS INTEGER)
+ WHERE status IN ('open','claimed','running')
+   AND workspace IN (SELECT workspace FROM swarm_state UNION SELECT workspace FROM swarm_plans);
+DELETE FROM agent_leases
+ WHERE workspace IN (SELECT workspace FROM swarm_state UNION SELECT workspace FROM swarm_plans);
+DELETE FROM swarm_state;
+DELETE FROM swarm_plans;
 "#;

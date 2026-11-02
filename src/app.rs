@@ -38,6 +38,7 @@ pub mod loops_view;
 pub mod markdown_view;
 pub mod memory_view;
 mod skills_view;
+pub mod swarm_engine;
 pub mod swarm_view;
 pub mod text_area;
 pub mod workflows;
@@ -2779,6 +2780,10 @@ pub struct App {
     /// Wakes whose text is in a session's input box and whose Enter is due:
     /// (launch id as queued, when to press it). See [`WAKE_SUBMIT_DELAY`].
     pub pending_wake_submits: Vec<(String, Instant)>,
+    /// When the swarm dispatcher last looked (`swarm_engine`).
+    pub last_swarm_engine_pass: Option<Instant>,
+    /// When it last checked for swarms whose TUI is gone.
+    pub last_swarm_adopt_check: Option<Instant>,
 }
 
 /// A bus wake waiting for its session to turn idle.
@@ -2933,6 +2938,8 @@ impl App {
             bus_control_guard: None,
             pending_bus_wakes: Vec::new(),
             pending_wake_submits: Vec::new(),
+            last_swarm_engine_pass: None,
+            last_swarm_adopt_check: None,
         };
         if let Some(sock_dir) = app.trace_db_path.as_deref().and_then(|p| p.parent()) {
             let sock = sock_dir.join("bus.sock");
@@ -3367,6 +3374,7 @@ impl App {
         self.workflow_pass(now);
         self.workflow_plan_pass(now);
         self.refresh_runs_view(now);
+        self.swarm_engine_pass(now);
         self.flush_pending_bus_wakes(now);
     }
 
@@ -5006,12 +5014,16 @@ impl App {
         }
         let records = match self.trace_db_path.as_deref() {
             Some(db) => crate::tracing::store::open_aux(db).and_then(|conn| {
-                crate::bus::store::stop_swarm(
-                    &conn,
-                    Some(db),
-                    &crate::bus::store::normalize_workspace(workspace),
-                    crate::tracing::store::now_ns(),
-                )
+                let norm = crate::bus::store::normalize_workspace(workspace);
+                let now = crate::tracing::store::now_ns();
+                // An orchestrated swarm (schema v21) ends its row too.
+                match crate::bus::swarm::record::live_swarm(&conn, &norm)
+                    .ok()
+                    .flatten()
+                {
+                    Some(s) => crate::bus::swarm::record::end_swarm(&conn, Some(db), &s, now),
+                    None => crate::bus::store::stop_swarm(&conn, Some(db), &norm, now),
+                }
             }),
             None => Err("no trace store".into()),
         };
@@ -5114,6 +5126,7 @@ impl App {
                     harness: Some(harness.to_string()),
                     agent: None,
                     isolation,
+                    opening_prompt: None,
                 },
                 now,
             );
@@ -5154,49 +5167,31 @@ impl App {
                 max_workers,
                 isolation,
                 plan_gate,
-                prewarm_workers,
+                prewarm_workers: _,
             } => {
+                // Since schema v21 agent-mux runs the swarm itself: the
+                // form's harness plans it; standby workers are gone.
                 let ws_path = if let Mode::Swarm(v) = &self.mode {
                     v.workspace.clone()
                 } else {
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
                 };
-                let resp = self.handle_bus_control(
-                    crate::bus::control::ControlRequest::SpawnCoordinator {
-                        workspace: ws_path.to_string_lossy().into_owned(),
-                        goal: goal.clone(),
-                        harness: Some(harness.as_str().to_string()),
-                        max_workers,
-                        isolation,
-                        plan_gate: Some(plan_gate),
-                    },
-                    now,
-                );
-                let coord_launch = resp.launch_id.clone();
-                if plan_gate {
-                    // Standby workers wait for the approved plan, like every
-                    // other worker (`DecidePlan` spawns them).
-                    if let Some(db) = self.trace_db_path.as_deref()
-                        && let Ok(conn) = crate::tracing::store::open_aux(db)
-                    {
-                        let _ = crate::bus::store::set_plan_gate(
-                            &conn,
-                            Some(db),
-                            &crate::bus::store::normalize_workspace(&ws_path),
-                            true,
-                            prewarm_workers,
-                            crate::tracing::store::now_ns(),
-                        );
+                match self.start_orchestrated_swarm(swarm_engine::StartSwarm {
+                    workspace: ws_path,
+                    goal,
+                    planner: Some(harness.as_str().to_string()),
+                    max_workers,
+                    isolation,
+                    gate: plan_gate,
+                    check: None,
+                }) {
+                    Ok(swarm) => {
+                        self.notice = Some(Notice::info(format!(
+                            "{} planning with {}: the plan waits for `agent-mux swarm approve`",
+                            swarm.id, swarm.planner_harness
+                        )));
                     }
-                } else {
-                    self.spawn_standby(
-                        &ws_path,
-                        coord_launch.as_deref(),
-                        harness.as_str(),
-                        isolation,
-                        prewarm_workers,
-                        now,
-                    );
+                    Err(e) => self.notice = Some(Notice::error(format!("swarm: {e}"))),
                 }
                 needs_refresh = true;
             }
@@ -5390,6 +5385,7 @@ impl App {
                         harness: Some(harness.as_str().to_string()),
                         agent,
                         isolation,
+                        opening_prompt: None,
                     },
                     now,
                 );
@@ -5431,6 +5427,7 @@ impl App {
                             harness: task.target_harness,
                             agent: task.target_agent,
                             isolation: task.isolation,
+                            opening_prompt: None,
                         },
                         now,
                     );
@@ -8314,6 +8311,9 @@ impl App {
     ) -> crate::bus::control::ControlResponse {
         use crate::bus::control::{ControlRequest, ControlResponse};
         match req {
+            req @ (ControlRequest::StartSwarm { .. } | ControlRequest::SwarmAction { .. }) => {
+                self.handle_swarm_control(req)
+            }
             ControlRequest::WakeWorkspace {
                 workspace,
                 prompt,
@@ -8411,6 +8411,7 @@ impl App {
                 harness,
                 agent,
                 isolation,
+                opening_prompt,
             } => {
                 let target_harness = match harness.as_deref() {
                     Some(h) if !h.trim().is_empty() => match h.parse::<crate::harness::Harness>() {
@@ -8567,13 +8568,15 @@ impl App {
                     }
                 }
 
-                let prompt = crate::bus::control::compose_worker_prompt(
-                    &task_id,
-                    &title,
-                    &instructions,
-                    &task_files,
-                    parent_launch.as_deref(),
-                );
+                let prompt = opening_prompt.unwrap_or_else(|| {
+                    crate::bus::control::compose_worker_prompt(
+                        &task_id,
+                        &title,
+                        &instructions,
+                        &task_files,
+                        parent_launch.as_deref(),
+                    )
+                });
                 let opening_args = target_harness.opening_args(prompt);
                 profile.args.extend(opening_args.iter().cloned());
 
