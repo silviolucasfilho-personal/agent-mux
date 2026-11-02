@@ -1,6 +1,6 @@
 # Swarm: agent-mux as the orchestrator — design
 
-Status: draft for review, 2026-11-02. Replaces the coordinator-session model of
+Status: approved for implementation, 2026-11-02 (decisions in §12). Replaces the coordinator-session model of
 `2026-10-29-agent-swarm-screen-design.md` and the lane layout of
 `2026-10-30-swarm-mission-control-ux-design.md`. The bus (messages, tasks,
 leases, the `PreToolUse` guard, the MCP tools) stays.
@@ -94,8 +94,10 @@ match wins:
 starts a **headless one-shot planner**. It's built the same way as
 `App::start_workflow_plan`: `LaunchOptions::one_shot`, `bypass_approvals`, an
 output file, and `spawn_traced_full`, so its tokens and cost are traced. The
-planner harness is chosen in the launch form (default: the first installed
-of claude, codex, opencode, agy).
+planner harness is chosen in the launch form (default: the harness of the
+session selected when the screen opened; with none selected, the first
+installed of claude, codex, opencode, agy). It is also the default worker
+harness for tasks that name none.
 
 - **Skill:** `swarm-plan`, compiled in, `hidden = true`, read-only. Registered
   in `skill::builtin_packages` and `Catalog::load`, so it can be shadowed and
@@ -182,7 +184,8 @@ tests cover them with table-driven snapshots and no PTY.
 - **Spawn:**
   - the task is `open`, its dependencies are satisfied, and the swarm is
     `running`
-  - the number of live workers is below `max_workers`
+  - the number of *busy* workers is below `max_workers`. A worker whose
+    task is terminal stays open (§5.3) but does not hold a slot.
   - tasks start in plan order
   - spawning goes through one function, `App::spawn_swarm_worker`. It is the
     current `SpawnWorker` body, extracted: worktree creation and reuse,
@@ -212,7 +215,7 @@ terminal. It contains:
 
 | Signal | Action |
 | --- | --- |
-| `done`/`fail` through the bus | the task is terminal, the session is stopped after `STOP_AFTER_DONE` (30 s, which leaves its last output readable), and the slot frees |
+| `done`/`fail` through the bus | the task is terminal and its slot frees. The session stays open until the swarm closes, so the operator can attach or message it with follow-ups; `x` stops it earlier. Closing the swarm stops every worker |
 | the session exits with the task not terminal | `MarkLost` → Needs you `lost` (`r` retries, reusing the worktree) |
 | session `Idle` with the task unfinished for `STALL_GRACE` (90 s) | one `Nudge`: a fixed wake (§5.5) saying "You stopped before finishing: call `agent_mux_task_update` with done or fail, or ask the user a question." `swarm_tasks.nudged_ns` records it |
 | still idle `STALL_GRACE` after the nudge, or the nudge couldn't be delivered | Needs you `stalled`: attach, message, mark it done or failed for the worker (`y`/`f` on the item), or retry |
@@ -444,12 +447,12 @@ a swarm.
 harness scripts like the existing fake-claude ones. The engine is tested
 with pure snapshot tables, never with real CLIs.
 
-## 12. Open questions
+## 12. Decisions (operator, 2026-11-02)
 
-1. **Worktree dependencies:** wait for the merge (§5.4, proposed) or stack
-   branches?
-2. **Nudges:** one, then Needs you (proposed), or none?
-3. **Stopping a finished worker:** after 30 s (proposed), or keep it until
-   the swarm closes so it can still be asked follow-ups?
-4. **Planner harness default:** the first installed CLI (proposed), or
-   always the harness of the selected session?
+1. **Worktree dependencies** wait until the dependency's branch is merged
+   (§5.4); branches are not stacked.
+2. **A stalled worker gets one nudge**, then is listed in Needs you (§5.3).
+3. **A finished worker stays open until the swarm closes**, for follow-ups;
+   it no longer holds a worker slot (§5.1, §5.3).
+4. **The planner's harness defaults to the selected session's harness**
+   (§4.1), falling back to the first installed CLI.
