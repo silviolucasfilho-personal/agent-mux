@@ -360,6 +360,40 @@ pub fn group_commands(actions: &[&'static ActionDef]) -> Vec<CommandSection> {
         .collect()
 }
 
+/// The Help overlay's three unthemed intro lines, above the sections.
+pub const HELP_INTRO: [&str; 3] = [
+    "F1 Commands · Esc back · Tab next control · 1–9 numbered tabs",
+    "Session pane: ordinary keys go to the harness",
+    "Use Test shortcuts to verify modifier bindings in this terminal",
+];
+
+/// One row of the Help overlay. Help is a reader, not a picker: the cursor
+/// scrolls these rows, so a header or an intro line may sit under it.
+#[derive(Debug, Clone, Copy)]
+pub enum HelpRow {
+    Intro(&'static str),
+    Header(ActionTheme),
+    Action(&'static ActionDef),
+}
+
+/// Every Help row, in drawing order: the intro lines, then the same themed
+/// sections the Commands overlay uses (`group_commands`, `ActionTheme::ALL`
+/// order). The renderer and the scroll bounds both read this.
+pub fn help_rows() -> Vec<HelpRow> {
+    let actions: Vec<&'static ActionDef> = ACTIONS.iter().collect();
+    let mut rows: Vec<HelpRow> = HELP_INTRO.iter().copied().map(HelpRow::Intro).collect();
+    for section in group_commands(&actions) {
+        rows.push(HelpRow::Header(section.theme));
+        rows.extend(section.actions.into_iter().map(HelpRow::Action));
+    }
+    rows
+}
+
+/// Number of rows Help scrolls, derived from [`help_rows`].
+pub fn help_row_count() -> usize {
+    help_rows().len()
+}
+
 impl App {
     /// Commands matching the query, in the order the overlay draws them:
     /// grouped by theme (`ActionTheme::ALL`), registration order within a
@@ -409,19 +443,26 @@ impl App {
                     }
                     _ => {}
                 },
-                Some(Overlay::Help(selected)) => match key.code {
-                    KeyCode::Esc | KeyCode::Char('q' | '?') => close = true,
-                    KeyCode::Up => *selected = selected.saturating_sub(1),
-                    KeyCode::Down => *selected = (*selected + 1).min(ACTIONS.len() + 2),
-                    KeyCode::Home => *selected = 0,
-                    KeyCode::End => *selected = ACTIONS.len() + 2,
-                    KeyCode::PageDown => *selected = (*selected + 10).min(ACTIONS.len() + 2),
-                    KeyCode::PageUp => *selected = selected.saturating_sub(10),
-                    KeyCode::F(1) => {
-                        self.command_overlay = Some(Overlay::Commands(CommandMenu::default()))
+                Some(Overlay::Help(selected)) => {
+                    // Help scrolls every row it draws (intro lines, theme
+                    // headers and actions); `help_row_count` is the one place
+                    // that count lives, so End and PageDown can reach the
+                    // last row and never go past it.
+                    let last = help_row_count().saturating_sub(1);
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q' | '?') => close = true,
+                        KeyCode::Up => *selected = selected.saturating_sub(1),
+                        KeyCode::Down => *selected = (*selected + 1).min(last),
+                        KeyCode::Home => *selected = 0,
+                        KeyCode::End => *selected = last,
+                        KeyCode::PageDown => *selected = (*selected + 10).min(last),
+                        KeyCode::PageUp => *selected = selected.saturating_sub(10),
+                        KeyCode::F(1) => {
+                            self.command_overlay = Some(Overlay::Commands(CommandMenu::default()))
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 Some(Overlay::DeleteSession(id)) => {
                     if key.code == KeyCode::Char('y') && key.modifiers.is_empty() {
                         let id = *id;

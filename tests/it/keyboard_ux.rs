@@ -367,12 +367,124 @@ fn destructive_confirmation_requires_y() {
 }
 
 #[test]
-fn help_scrolls_to_the_last_action() {
+fn help_rows_use_the_shared_theme_sections() {
+    use agent_mux::app::commands::{HELP_INTRO, HelpRow, help_row_count, help_rows};
+    use agent_mux::keymap::{ACTIONS, ActionId, ActionTheme};
+
+    let rows = help_rows();
+    assert_eq!(help_row_count(), rows.len());
+    let (intro, mut rest) = rows.split_at(HELP_INTRO.len());
+    for (row, line) in intro.iter().zip(HELP_INTRO) {
+        match row {
+            HelpRow::Intro(got) => assert_eq!(*got, line),
+            other => panic!("intro line expected, got {other:?}"),
+        }
+    }
+
+    // The sections are the Commands overlay's, in the same order, with every
+    // action under its own theme and registration order inside it.
+    let mut listed: Vec<ActionId> = Vec::new();
+    for theme in ActionTheme::ALL.iter().copied() {
+        let want: Vec<ActionId> = ACTIONS
+            .iter()
+            .filter(|action| action.theme == theme)
+            .map(|action| action.id)
+            .collect();
+        if want.is_empty() {
+            continue;
+        }
+        match rest.first() {
+            Some(HelpRow::Header(got)) => assert_eq!(*got, theme),
+            other => panic!("{theme:?} header expected, got {other:?}"),
+        }
+        rest = &rest[1..];
+        for id in want {
+            match rest.first() {
+                Some(HelpRow::Action(action)) => assert_eq!(action.id, id),
+                other => panic!("{id:?} expected under {theme:?}, got {other:?}"),
+            }
+            listed.push(id);
+            rest = &rest[1..];
+        }
+    }
+    assert!(rest.is_empty(), "unexpected trailing rows: {rest:?}");
+    assert_eq!(listed.len(), ACTIONS.len());
+    for action in ACTIONS {
+        assert_eq!(
+            listed.iter().filter(|id| **id == action.id).count(),
+            1,
+            "{:?} listed once",
+            action.id
+        );
+    }
+}
+
+fn help_selection(a: &App) -> usize {
+    let Some(agent_mux::app::commands::Overlay::Help(selected)) = &a.command_overlay else {
+        panic!("help not open")
+    };
+    *selected
+}
+
+#[test]
+fn help_scrolls_its_whole_row_list_and_stops_at_the_edges() {
+    use agent_mux::app::commands::help_row_count;
+    use agent_mux::keymap::{ACTIONS, ActionTheme};
+
     let mut a = app();
     a.execute_command(ActionId::Help, Instant::now());
+    let last = help_row_count() - 1;
+
+    // Intro lines come first; the cursor cannot scroll above them.
+    assert_eq!(help_selection(&a), 0);
+    let text = screen(&a, 100);
+    assert!(text.contains("F1 Commands"), "{text}");
+    assert!(text.contains(" Navigation "), "{text}");
+    a.handle_key(&key(KeyCode::Up), Instant::now());
+    a.handle_key(&key(KeyCode::PageUp), Instant::now());
+    assert_eq!(help_selection(&a), 0);
+
+    // End reaches the last row and Down/PageDown stop there.
     a.handle_key(&key(KeyCode::End), Instant::now());
-    let last = agent_mux::keymap::ACTIONS.last().unwrap().label;
-    assert!(screen(&a, 100).contains(last));
+    assert_eq!(help_selection(&a), last);
+    let text = screen(&a, 100);
+    assert!(text.contains("Quit agent-mux"), "{text}");
+    assert!(text.contains(" App "), "{text}");
+    a.handle_key(&key(KeyCode::Down), Instant::now());
+    a.handle_key(&key(KeyCode::PageDown), Instant::now());
+    assert_eq!(help_selection(&a), last);
+
+    // Paging down from Home reaches the same last row.
+    a.handle_key(&key(KeyCode::Home), Instant::now());
+    assert_eq!(help_selection(&a), 0);
+    for _ in 0..last / 10 + 2 {
+        a.handle_key(&key(KeyCode::PageDown), Instant::now());
+    }
+    assert_eq!(help_selection(&a), last);
+
+    // Every header is drawn, in ActionTheme::ALL order, as the list scrolls.
+    // Help is a reader, so a header may scroll under the cursor.
+    let want: Vec<ActionTheme> = ActionTheme::ALL
+        .iter()
+        .copied()
+        .filter(|theme| ACTIONS.iter().any(|action| action.theme == *theme))
+        .collect();
+    let mut seen: Vec<ActionTheme> = Vec::new();
+    a.handle_key(&key(KeyCode::Home), Instant::now());
+    for step in 0..=last {
+        let text = screen(&a, 100);
+        for theme in want.iter().copied() {
+            if text.contains(&format!(" {} ", theme.title())) && !seen.contains(&theme) {
+                seen.push(theme);
+            }
+        }
+        let selected = help_selection(&a);
+        assert_eq!(selected, step.min(last));
+        a.handle_key(&key(KeyCode::Down), Instant::now());
+    }
+    assert_eq!(seen, want);
+    assert_eq!(help_selection(&a), last);
+
     a.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(a.command_overlay.is_none());
 }
