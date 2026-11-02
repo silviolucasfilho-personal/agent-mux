@@ -29,7 +29,7 @@ Press `r` (or `Enter` on the empty screen). The form asks for:
 | Max parallel workers | How many tasks run at once. A finished worker no longer counts. | 3 (up to 8) |
 | Default isolation | `shared` (leases on files) or `worktree` (one branch per task). | `shared` |
 | Approve the plan before workers start | The **plan gate**. With it off, workers start as soon as the plan passes its checks. | yes |
-| Check when done | An optional command, such as `cargo test`. It's saved with the swarm but not run yet. | — |
+| Check when done | An optional command, such as `cargo test`. agent-mux runs it in the workspace once every task is settled and every branch reviewed, before the swarm reads `finished`. | — |
 
 `Tab` moves between fields, `←`/`→` change an option, `Alt+Enter` adds a line to the goal, and `Ctrl+S` starts. The planner runs in the background, and its output shows in the panel while it works (`Enter` attaches to it).
 
@@ -110,7 +110,8 @@ Press `!` to focus the strip, `↑`/`↓` to choose an item, `Enter` to act, `d`
 | `lost` | a worker's session exited mid-task | show its card | `r` retry |
 | `stalled` | a worker stopped without reporting, even after a reminder | attach to it | `r` stops it, then `r` retries |
 | `review` | a worktree task finished | show its Changes | `y` merge · `x` set aside |
-| `proposed` | a worker proposed a new task (not yet: workers can't propose tasks yet) | show its card | `y` accept · `x` drop |
+| `proposed` | a worker proposed a new task | show its card | `y` accept · `x` drop |
+| `check` | the final check failed | read its output | `r` retry a task |
 | `finished` | everything is settled | | `y` close the swarm |
 
 A worker that goes idle on an unfinished task gets one reminder after 90 seconds. Only if it stays idle does it show up as `stalled`.
@@ -165,7 +166,8 @@ Confirmations take `y` only. `Enter` never confirms.
   - `y` **merges** the branch into the branch your workspace has checked out, with a merge commit, after asking first. Git refuses if your uncommitted changes would be overwritten. A conflict aborts the merge and leaves your workspace as it was: resolve it by hand, then merge again.
   - `x` **sets the branch aside** without merging it. The branch is kept. Tasks that depend on it stay blocked.
 - **Finished workers stay open.** You can attach to one or message it with follow-ups until the swarm closes.
-- **Finished:** when every task is settled and every branch reviewed, the swarm is `finished` and Needs you offers to close it. `y` closes the swarm: its sessions stop, open tasks are cancelled, and leases are released.
+- **The check:** when every task is settled and every branch reviewed, agent-mux runs the swarm's check command, if it has one, in the workspace (`sh -c`, at most 30 minutes). The top line reads `check running`, then `check ✓` or `check ✗`. A failed check lands in Needs you with the end of its output. The swarm still finishes, because whether to fix it is your call.
+- **Finished:** once every task is settled, every branch reviewed and the check run, the swarm is `finished` and Needs you offers to close it. `y` closes the swarm: its sessions stop, open tasks are cancelled, and leases are released.
 
 ## From the command line
 
@@ -194,6 +196,7 @@ Each worker starts with its whole task as its opening message: the instructions,
 
 - **`agent_mux_task_update`** with `done` (and a result) or `fail` (and the reason) reports the task. Until it does, the task isn't over.
 - **`agent_mux_send_message`** to `user` with topic `question` asks you something. It lands in Needs you.
+- **`agent_mux_task_split`** (or `agent_mux_delegate`) from a worker doesn't start anything. It puts the task on the board as a **proposal**: with the plan gate on, it waits for you (`y` accepts, `x` drops); with the gate off, it is scheduled like the others. The worker is told so and carries on with its own task.
 - **File leases** stop two workers in a shared workspace from editing the same file. A blocked edit names the worker that holds the lease.
 
 The full list and the matching `agent-mux bus …` commands are in [bus.md](bus.md).

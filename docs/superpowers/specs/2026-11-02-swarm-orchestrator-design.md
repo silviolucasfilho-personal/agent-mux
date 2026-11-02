@@ -1,6 +1,6 @@
 # Swarm: agent-mux as the orchestrator — design
 
-Status: approved for implementation, 2026-11-02 (decisions in §12). Replaces the coordinator-session model of
+Status: implemented, 2026-11-02 (decisions in §12): wake fix #102, model and engine #103, screen #104, proposals, the final check and the coordinator-era removal in PR 4. Replaces the coordinator-session model of
 `2026-10-29-agent-swarm-screen-design.md` and the lane layout of
 `2026-10-30-swarm-mission-control-ux-design.md`. The bus (messages, tasks,
 leases, the `PreToolUse` guard, the MCP tools) stays.

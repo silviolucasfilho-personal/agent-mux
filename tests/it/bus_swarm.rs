@@ -1,24 +1,20 @@
-//! The swarm's state and wakes: a coordinator is recorded in `swarm_state`,
-//! not as a bus message, so workers get no phantom mail and promoting another
-//! session keeps the goal; a broadcast wake (`WakeWorkspace`) reaches every
-//! live session of the workspace but the sender; and `agent-mux swarm start`
-//! without a running TUI refuses instead of inventing a coordinator. The
-//! screen refreshes only when the bus's change feed, a live session or a
-//! lease's expiry says so, and a swarm's `max_workers` refuses the spawn
-//! that would exceed it. A wake is pasted, and its Enter written apart, so a
-//! TUI that takes a burst as a paste still submits it.
+//! The bus around a swarm: a broadcast wake (`WakeWorkspace`) reaches
+//! every live session of the workspace but the sender; a wake is pasted and
+//! its Enter written apart, so a TUI that takes a burst as a paste still
+//! submits it, and a queued wake expires; `agent-mux swarm start` without a
+//! running TUI refuses instead of recording a swarm nobody runs; bus and
+//! swarm writes advance the change feed; a finished branch is merged with a
+//! merge commit, and a conflict changes nothing.
 
 use agent_mux::app::{App, Mode, PendingWake, WAKE_TTL};
 use agent_mux::bus::control::ControlRequest;
 use agent_mux::bus::store as bstore;
-use agent_mux::bus::swarm::{LiveSwarmSession, load_snapshot};
 use agent_mux::bus::{NewTaskSpec, TaskIsolation};
 use agent_mux::config::Profile;
 use agent_mux::events::AppEvent;
 use agent_mux::status::Status;
 use agent_mux::tracing::pricing::PriceTable;
 use agent_mux::tracing::store::{OpenOptions, latest_change_seq, open_aux, open_rw};
-use agent_mux::tree::{GroupKind, GroupRef};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::Path;
 use std::process::Command;
@@ -38,100 +34,6 @@ fn open_store(dir: &Path) -> std::path::PathBuf {
     )
     .unwrap();
     db
-}
-
-#[test]
-fn promoting_a_coordinator_keeps_the_goal_and_posts_no_message() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = open_store(dir.path());
-    let conn = open_aux(&db).unwrap();
-    let ws = bstore::normalize_workspace(dir.path());
-
-    let first = bstore::set_coordinator(
-        &conn,
-        Some(&db),
-        &ws,
-        "coord-aaaa0001",
-        Some("Ship the swarm"),
-        Some(3),
-        Some(TaskIsolation::Worktree),
-        1_000,
-    )
-    .unwrap();
-    assert_eq!(first.goal.as_deref(), Some("Ship the swarm"));
-    assert_eq!(first.max_workers, Some(3));
-    assert_eq!(first.isolation, Some(TaskIsolation::Worktree));
-
-    // A worker on the board: it must not see the coordinator record as mail.
-    bstore::split_tasks(
-        &conn,
-        Some(&db),
-        &ws,
-        "coord-aaaa0001",
-        &[NewTaskSpec {
-            title: "Wire the feed".into(),
-            instructions: "…".into(),
-            assigned_to: Some("worker-bbbb0001".into()),
-            ..Default::default()
-        }],
-        2_000,
-    )
-    .unwrap();
-
-    // Promote another session without a goal: the goal and parameters stay.
-    let promoted = bstore::set_coordinator(
-        &conn,
-        Some(&db),
-        &ws,
-        "coord-cccc0002",
-        None,
-        None,
-        None,
-        3_000,
-    )
-    .unwrap();
-    assert_eq!(promoted.coordinator_launch, "coord-cccc0002");
-    assert_eq!(promoted.goal.as_deref(), Some("Ship the swarm"));
-    assert_eq!(promoted.max_workers, Some(3));
-    assert_eq!(promoted.started_ns, 1_000);
-    assert_eq!(promoted.updated_ns, 3_000);
-
-    // The snapshot names a member only for a session it can see: the promoted
-    // one is live here, the first coordinator is gone.
-    let live = vec![LiveSwarmSession {
-        session_idx: 0,
-        session_id: 1,
-        launch_id: "coord-cccc0002".into(),
-        provider: "claude".into(),
-        profile_name: "Claude Code".into(),
-        agent_persona: None,
-        state: "idle".into(),
-        workspace: ws.clone(),
-        is_delegated_worker: false,
-        turns: 0,
-        tokens: 0,
-        cost_usd: 0.0,
-        running_tool: None,
-        quiet_ns: None,
-    }];
-    let snap = load_snapshot(Some(&conn), dir.path(), &live, None, 4);
-    assert_eq!(
-        snap.coordinator.as_ref().map(|c| c.launch_id.as_str()),
-        Some("coord-cccc0002")
-    );
-    assert!(snap.workers.is_empty());
-    assert_eq!(snap.goal.as_deref(), Some("Ship the swarm"));
-    assert_eq!(snap.max_workers, Some(3));
-    assert!(snap.messages.is_empty(), "the registry is not a message");
-    assert_eq!(
-        bstore::count_unread_messages(&conn, &ws, "worker-bbbb0001").unwrap(),
-        0
-    );
-
-    assert_eq!(bstore::clear_swarm(&conn, Some(&db), &ws).unwrap(), 1);
-    assert!(bstore::swarm_state(&conn, &ws).unwrap().is_none());
-    let snap = load_snapshot(Some(&conn), dir.path(), &[], None, 5);
-    assert!(snap.goal.is_none());
 }
 
 #[test]
@@ -157,7 +59,6 @@ fn swarm_start_without_a_tui_refuses_instead_of_recording_a_phantom() {
     assert!(stderr.contains("running agent-mux TUI"), "{stderr}");
     let conn = open_aux(&db).unwrap();
     let ws = bstore::normalize_workspace(dir.path());
-    assert!(bstore::swarm_state(&conn, &ws).unwrap().is_none());
     assert!(
         agent_mux::bus::swarm::record::live_swarm(&conn, &ws)
             .unwrap()
@@ -513,151 +414,32 @@ fn bus_writes_advance_the_change_feed() {
     advanced("claim_task (task update + lease)");
     bstore::release_leases(&conn, &ws, "b", Some(&created[0].id), &[]).unwrap();
     advanced("release_leases");
-    bstore::set_coordinator(&conn, Some(&db), &ws, "c", Some("g"), None, None, 4_000).unwrap();
-    advanced("set_coordinator");
-    bstore::clear_swarm(&conn, Some(&db), &ws).unwrap();
-    advanced("clear_swarm");
-}
-
-fn bus_group(label: &str) -> GroupRef {
-    GroupRef {
-        kind: GroupKind::Bus,
-        id: "swarm".into(),
-        title: "swarm".into(),
-        detail: String::new(),
-        label: label.into(),
-    }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn max_workers_refuses_the_spawn_past_the_cap_without_counting_the_coordinator() {
-    let dir = tempfile::tempdir().unwrap();
-    let ws = dir.path().canonicalize().unwrap();
-    let db = open_store(&ws);
-    let (tx, _rx) = mpsc::channel(256);
-    let mut app = App::new(shell_profiles(&ws), None, tx);
-    app.trace_db_path = Some(db.clone());
-    let now = Instant::now();
-    for _ in 0..2 {
-        app.focus_list();
-        app.handle_key(&key(KeyCode::Char('n')), now);
-        app.handle_key(&key(KeyCode::Enter), now);
-        app.handle_key(&key(KeyCode::Enter), now);
-    }
-    assert_eq!(app.sessions.len(), 2);
-    // Session 0 is the coordinator, session 1 a delegated worker: both sit in a bus group.
-    let coordinator = format!("session-{}", app.sessions[0].id);
-    app.sessions[0].group = Some(bus_group("coordinator"));
-    app.sessions[1].group = Some(bus_group("worker"));
-    let conn = open_aux(&db).unwrap();
-    let norm = bstore::normalize_workspace(&ws);
-    bstore::set_coordinator(
+    let swarm = agent_mux::bus::swarm::record::create_swarm(
         &conn,
         Some(&db),
-        &norm,
-        &coordinator,
-        Some("g"),
-        Some(1),
-        None,
-        1,
+        &agent_mux::bus::swarm::record::NewSwarm {
+            workspace: ws.clone(),
+            goal: "g".into(),
+            planner_harness: "claude".into(),
+            max_workers: 2,
+            isolation: TaskIsolation::Shared,
+            gate: true,
+            check_cmd: None,
+            owner_run: None,
+        },
+        4_000,
     )
     .unwrap();
-
-    let spawn = ControlRequest::SpawnWorker {
-        parent_launch: Some(coordinator.clone()),
-        workspace: ws.to_string_lossy().into_owned(),
-        task_id: "task-x".into(),
-        title: "one more".into(),
-        instructions: "…".into(),
-        harness: Some("claude".into()),
-        agent: None,
-        isolation: TaskIsolation::Shared,
-        opening_prompt: None,
-    };
-    let resp = app.handle_bus_control(spawn.clone(), now);
-    assert!(!resp.ok);
-    let err = resp.error.unwrap_or_default();
-    assert!(err.contains("worker cap reached: 1/1"), "{err}");
-    assert_eq!(app.sessions.len(), 2, "nothing was spawned");
-
-    // A cap of 0 refuses before counting anyone.
-    bstore::set_coordinator(
+    advanced("create_swarm");
+    agent_mux::bus::swarm::record::set_status(
         &conn,
         Some(&db),
-        &norm,
-        &coordinator,
-        None,
-        Some(0),
-        None,
-        2,
+        &swarm.id,
+        agent_mux::bus::swarm::record::SwarmStatus::Running,
+        5_000,
     )
     .unwrap();
-    let resp = app.handle_bus_control(spawn, now);
-    let err = resp.error.unwrap_or_default();
-    assert!(err.contains("worker cap reached: 1/0"), "{err}");
-    app.kill_all();
-}
-
-#[test]
-fn the_plan_gate_holds_claims_until_the_operator_approves() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = open_store(dir.path());
-    let conn = open_aux(&db).unwrap();
-    let ws = bstore::normalize_workspace(dir.path());
-    let task = bstore::split_tasks(
-        &conn,
-        Some(&db),
-        &ws,
-        "coord-1",
-        &[NewTaskSpec {
-            title: "wire bus".into(),
-            instructions: "…".into(),
-            ..Default::default()
-        }],
-        1,
-    )
-    .unwrap()
-    .remove(0);
-
-    // No plan row: nothing holds work back.
-    assert!(bstore::plan_blocks(&conn, &ws).is_none());
-
-    let seq = latest_change_seq(&conn).unwrap();
-    bstore::set_plan_gate(&conn, Some(&db), &ws, true, 2, 2).unwrap();
-    assert!(
-        latest_change_seq(&conn).unwrap() > seq,
-        "the gate feeds the change feed"
-    );
-    let plan = bstore::plan_gate(&conn, &ws).unwrap().unwrap();
-    assert_eq!(
-        (plan.gate, plan.status, plan.standby),
-        (true, bstore::PlanStatus::Drafting, 2)
-    );
-    let err = bstore::claim_task(&conn, Some(&db), &task.id, "w-1", 3).unwrap_err();
-    assert!(err.contains("awaits the operator's approval"), "{err}");
-
-    // Sent back: still held.
-    bstore::decide_plan(&conn, Some(&db), &ws, false, 4).unwrap();
-    assert!(bstore::claim_task(&conn, Some(&db), &task.id, "w-1", 5).is_err());
-    // Approved: work starts.
-    let plan = bstore::decide_plan(&conn, Some(&db), &ws, true, 6).unwrap();
-    assert_eq!(
-        (plan.status, plan.decided_ns),
-        (bstore::PlanStatus::Approved, Some(6))
-    );
-    assert!(bstore::plan_blocks(&conn, &ws).is_none());
-    bstore::claim_task(&conn, Some(&db), &task.id, "w-1", 7).unwrap();
-
-    // A gate turned off never holds anything.
-    bstore::set_plan_gate(&conn, Some(&db), &ws, false, 0, 8).unwrap();
-    assert!(bstore::plan_blocks(&conn, &ws).is_none());
-
-    // Closing the swarm forgets the plan too.
-    bstore::set_coordinator(&conn, Some(&db), &ws, "coord-1", Some("g"), None, None, 9).unwrap();
-    bstore::clear_swarm(&conn, Some(&db), &ws).unwrap();
-    assert!(bstore::plan_gate(&conn, &ws).unwrap().is_none());
-    assert!(bstore::decide_plan(&conn, Some(&db), &ws, true, 10).is_err());
+    advanced("set_status");
 }
 
 #[test]

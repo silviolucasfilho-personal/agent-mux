@@ -793,7 +793,7 @@ pub const ACTIONS: &[ActionDef] = &[
         id: ActionId::Swarm,
         theme: ActionTheme::Screens,
         label: "Open swarm",
-        keywords: "swarm coordinator workers bus tasks leases messages multi-agent",
+        keywords: "swarm plan board tasks workers bus leases messages multi-agent parallel",
         key: None,
         scope: ActionScope::Global,
     },

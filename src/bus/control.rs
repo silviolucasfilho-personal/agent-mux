@@ -80,20 +80,8 @@ pub enum ControlRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         notes: Option<String>,
     },
-    /// Spawn a new Swarm Coordinator session in `App` for `workspace`.
-    SpawnCoordinator {
-        workspace: String,
-        goal: String,
-        harness: Option<String>,
-        max_workers: usize,
-        isolation: TaskIsolation,
-        /// The plan gate: workers wait for the operator to approve the
-        /// coordinator's plan. Absent means on.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        plan_gate: Option<bool>,
-    },
-    /// End `workspace`'s swarm: stop its coordinator and worker sessions,
-    /// cancel its open tasks, release its leases, forget it.
+    /// End `workspace`'s swarm: stop its worker sessions, cancel its open
+    /// tasks, release its leases, end its row.
     StopSwarm { workspace: String },
 }
 

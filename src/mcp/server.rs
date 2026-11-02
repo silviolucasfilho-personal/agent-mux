@@ -797,6 +797,33 @@ fn bus_task_board_result(service: &TraceService, arguments: Value) -> Value {
     )
 }
 
+/// A swarm worker's `task_split`/`delegate`: proposed on its swarm's board
+/// (`record::propose`) instead of created or spawned. `None` when the
+/// caller is not a swarm worker.
+fn swarm_worker_proposal(
+    conn: &rusqlite::Connection,
+    db: &Path,
+    ws: &Path,
+    caller: &str,
+    specs: &[crate::bus::NewTaskSpec],
+    now_ns: i64,
+) -> Option<Value> {
+    use crate::bus::swarm::record;
+    let (swarm, _) = record::swarm_of_worker(conn, caller).ok().flatten()?;
+    Some(
+        match record::propose(conn, Some(db), &swarm, specs, now_ns) {
+            Ok(made) => bus_ok_envelope(
+                ws,
+                json!({
+                    "proposed": made.iter().map(|(k, id)| json!({ "key": k, "id": id })).collect::<Vec<_>>(),
+                    "note": record::proposal_note(&swarm, &made),
+                }),
+            ),
+            Err(e) => tool_error(&ServiceError::InvalidArgument(e)),
+        },
+    )
+}
+
 fn bus_task_split_result(service: &TraceService, arguments: Value) -> Value {
     let args: BusTaskSplitArgs = match serde_json::from_value(arguments) {
         Ok(a) => a,
@@ -822,6 +849,9 @@ fn bus_task_split_result(service: &TraceService, arguments: Value) -> Value {
                 s.parent_task_id = Some(pid.clone());
             }
         }
+    }
+    if let Some(v) = swarm_worker_proposal(&conn, &config.db_path, &ws, &creator, &specs, now_ns) {
+        return v;
     }
     let created = match crate::bus::store::split_tasks(
         &conn,
@@ -1072,6 +1102,16 @@ fn bus_delegate_result(service: &TraceService, arguments: Value) -> Value {
         target_agent: args.agent.clone(),
         isolation: args.isolation,
     };
+    if let Some(v) = swarm_worker_proposal(
+        &conn,
+        &config.db_path,
+        &ws,
+        &caller,
+        std::slice::from_ref(&spec),
+        now_ns,
+    ) {
+        return v;
+    }
     let created = match crate::bus::store::split_tasks(
         &conn,
         Some(&config.db_path),

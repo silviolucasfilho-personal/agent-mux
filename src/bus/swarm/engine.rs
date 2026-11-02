@@ -37,6 +37,8 @@ pub struct Input<'a> {
     pub workers: &'a HashMap<String, Worker>,
     /// Launches with an unanswered question.
     pub asking: &'a HashSet<String>,
+    /// Now, in nanoseconds (an abandoned check's age).
+    pub now_ns: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +49,8 @@ pub enum Action {
     Nudge { task_id: String, launch_id: String },
     /// Move the swarm to its next state.
     Advance(SwarmStatus),
+    /// Run the swarm's final check (`check_cmd`) before it is finished.
+    RunCheck,
 }
 
 /// A task's state as the board shows it (§3.2), first match wins.
@@ -247,7 +251,21 @@ pub fn next_actions(input: &Input<'_>) -> Vec<Action> {
     } else if input.board.iter().any(awaits_review) {
         (status != SwarmStatus::Integrating).then_some(SwarmStatus::Integrating)
     } else {
-        Some(SwarmStatus::Finished)
+        match (&input.swarm.check_cmd, &input.swarm.check_result) {
+            (None, _) => Some(SwarmStatus::Finished),
+            (Some(_), None) => {
+                out.push(Action::RunCheck);
+                None
+            }
+            (Some(_), Some(raw)) => match super::check::CheckResult::parse(raw) {
+                Some(r) if r.running && !r.abandoned(input.now_ns) => None,
+                Some(r) if !r.running => Some(SwarmStatus::Finished),
+                _ => {
+                    out.push(Action::RunCheck);
+                    None
+                }
+            },
+        }
     };
     if let Some(n) = next {
         out.push(Action::Advance(n));
@@ -344,6 +362,7 @@ mod tests {
             board,
             workers: &workers,
             asking: &asking,
+            now_ns: 0,
         })
     }
 
@@ -500,6 +519,25 @@ mod tests {
     }
 
     #[test]
+    fn a_final_check_runs_once_before_the_swarm_is_finished() {
+        let mut s = swarm(SwarmStatus::Running, 2);
+        s.check_cmd = Some("cargo test".into());
+        let done = [task("a", TaskStatus::Done, &[])];
+        assert_eq!(run(&s, &done, &[], &[]), [Action::RunCheck]);
+        s.check_result = Some(super::super::check::CheckResult::started(0).to_json());
+        assert_eq!(run(&s, &done, &[], &[]), [], "it is running");
+        let mut r = super::super::check::CheckResult::started(0);
+        r.running = false;
+        r.exit = Some(1);
+        s.check_result = Some(r.to_json());
+        assert_eq!(
+            run(&s, &done, &[], &[]),
+            [Action::Advance(SwarmStatus::Finished)],
+            "a failed check still finishes the swarm; the operator reads it"
+        );
+    }
+
+    #[test]
     fn the_board_shows_each_task_by_its_state() {
         let mut wt = task("r", TaskStatus::Done, &[]);
         wt.task.branch = Some("loop/bus-r".into());
@@ -533,6 +571,7 @@ mod tests {
             board: &board,
             workers: &workers,
             asking: &asking,
+            now_ns: 0,
         };
         let got: Vec<&str> = board.iter().map(|t| shown(t, &input).as_str()).collect();
         assert_eq!(
@@ -548,6 +587,7 @@ mod tests {
             board: &board[..2],
             workers: &workers,
             asking: &asking,
+            now_ns: 0,
         };
         assert_eq!(shown(&board[1], &input), Shown::Draft);
     }

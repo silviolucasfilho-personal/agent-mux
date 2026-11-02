@@ -345,6 +345,9 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
                 isolation,
             };
             let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+            if propose_for_swarm_worker(&conn, &db_path, &caller, &spec, args.has("json"), now)? {
+                return Ok(());
+            }
             let created =
                 bstore::split_tasks(&conn, Some(&db_path), &workspace, &caller, &[spec], now)
                     .map_err(|e| anyhow::anyhow!(e))?;
@@ -513,6 +516,10 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
                     target_agent: args.value("agent").map(str::to_string),
                     isolation,
                 };
+                if propose_for_swarm_worker(&conn, &db_path, &caller, &spec, args.has("json"), now)?
+                {
+                    return Ok(());
+                }
                 bstore::split_tasks(&conn, Some(&db_path), &workspace, &caller, &[spec], now)
                     .map_err(|e| anyhow::anyhow!(e))?
                     .into_iter()
@@ -616,6 +623,34 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A swarm worker's `split`/`delegate`: proposed on its swarm's board
+/// instead (`record::propose`). `None` when the caller is not a worker.
+fn propose_for_swarm_worker(
+    conn: &rusqlite::Connection,
+    db: &Path,
+    caller: &str,
+    spec: &NewTaskSpec,
+    json_out: bool,
+    now: i64,
+) -> anyhow::Result<bool> {
+    use super::swarm::record;
+    let Some((swarm, _)) = record::swarm_of_worker(conn, caller)? else {
+        return Ok(false);
+    };
+    let made = record::propose(conn, Some(db), &swarm, std::slice::from_ref(spec), now)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let note = record::proposal_note(&swarm, &made);
+    if json_out {
+        println!(
+            "{}",
+            json!({ "proposed": made.iter().map(|(k, id)| json!({"key": k, "id": id})).collect::<Vec<_>>(), "note": note })
+        );
+    } else {
+        println!("{note}");
+    }
+    Ok(true)
+}
+
 pub const SWARM_USAGE: &str = "usage: agent-mux swarm <command> [options]
 
 A swarm is run by agent-mux: a headless planner splits the goal into tasks,
@@ -704,6 +739,7 @@ fn print_board(
         board: &board,
         workers: &workers,
         asking: &asking,
+        now_ns: now_ns(),
     };
     let problems = with_problems.then(|| {
         plan::check(
@@ -769,6 +805,23 @@ fn print_board(
     );
     if let Some(e) = &swarm.plan_error {
         println!("Planner error: {e}");
+    }
+    if let Some(cmd) = &swarm.check_cmd {
+        match swarm
+            .check_result
+            .as_deref()
+            .and_then(super::swarm::check::CheckResult::parse)
+        {
+            Some(r) => {
+                println!("{}", r.summary(cmd));
+                if !r.running && !r.passed && !r.tail.is_empty() {
+                    for l in r.tail.lines() {
+                        println!("    {l}");
+                    }
+                }
+            }
+            None => println!("Check when done: {cmd}"),
+        }
     }
     if board.is_empty() {
         println!("(no tasks yet)");
@@ -922,29 +975,12 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             if cmd == "plan" {
                 anyhow::bail!("no swarm runs in {workspace}");
             }
-            let snap =
-                super::swarm::load_snapshot(Some(&conn), Path::new(&workspace), &[], None, now);
             if args.has("json") {
-                println!("{}", serde_json::to_string_pretty(&snap)?);
-            } else if snap.tasks.is_empty() && snap.coordinator.is_none() {
+                println!("{}", json!({ "workspace": workspace, "swarm": null }));
+            } else {
                 println!(
                     "No swarm runs in {workspace}. Start one with `agent-mux swarm start <goal>`."
                 );
-            } else {
-                println!(
-                    "Workspace: {} (no swarm; the board as it stands)",
-                    snap.workspace
-                );
-                let (running, open, done, failed) = snap.task_counts();
-                println!(
-                    "Tasks: {} total ({} running, {} open/claimed, {} done, {} failed)",
-                    snap.tasks.len(),
-                    running,
-                    open,
-                    done,
-                    failed
-                );
-                println!("File Leases: {}", snap.leases.len());
             }
         }
         "start" => {
@@ -953,10 +989,7 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                 anyhow::bail!("swarm start requires a goal description\n\n{SWARM_USAGE}");
             }
             let goal = goal_words.join(" ");
-            let planner = args
-                .value("planner")
-                .or_else(|| args.value("coordinator"))
-                .map(str::to_string);
+            let planner = args.value("planner").map(str::to_string);
             let max_workers = args
                 .value("workers")
                 .and_then(|w| w.parse::<usize>().ok())

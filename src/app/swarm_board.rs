@@ -82,6 +82,7 @@ pub enum NeedKind {
     Stalled,
     Review,
     Proposed,
+    CheckFailed,
     Finished,
 }
 
@@ -97,6 +98,7 @@ impl NeedKind {
             NeedKind::Stalled => "stalled",
             NeedKind::Review => "review",
             NeedKind::Proposed => "proposed",
+            NeedKind::CheckFailed => "check",
             NeedKind::Finished => "finished",
         }
     }
@@ -111,6 +113,7 @@ impl NeedKind {
             NeedKind::Failed | NeedKind::Lost => "r retry",
             NeedKind::Review => "y merge · x set aside",
             NeedKind::Proposed => "y accept · x drop",
+            NeedKind::CheckFailed => "Enter read it · r retry a task",
             NeedKind::Finished => "y close",
         }
     }
@@ -581,6 +584,7 @@ impl SwarmBoard {
             board: &self.board,
             workers: &self.workers,
             asking: &self.asking,
+            now_ns: self.now_ns,
         })
     }
 
@@ -1239,6 +1243,35 @@ impl SwarmBoard {
                 self.confirm = Some(Confirm::Close);
                 Outcome::None
             }
+            NeedKind::CheckFailed => {
+                if let Some(s) = &self.swarm
+                    && let Some(r) = s
+                        .check_result
+                        .as_deref()
+                        .and_then(crate::bus::swarm::check::CheckResult::parse)
+                {
+                    self.modal = Some(Modal::Message {
+                        message: BusMessage {
+                            id: "check".into(),
+                            workspace: s.workspace.clone(),
+                            from_launch: "agent-mux".into(),
+                            to_launch: Some("user".into()),
+                            topic: "check".into(),
+                            body: format!(
+                                "{}\n\n{}",
+                                r.summary(s.check_cmd.as_deref().unwrap_or_default()),
+                                r.tail
+                            ),
+                            reply_to: None,
+                            created_ns: r.started_ns,
+                            delivered_ns: None,
+                            acked_ns: None,
+                        },
+                        scroll: 0,
+                    });
+                }
+                Outcome::None
+            }
         }
     }
 
@@ -1689,6 +1722,26 @@ pub fn compute_needs(v: &SwarmBoard) -> Vec<Need> {
             task_id: Some(t.task.id.clone()),
             message: None,
             text,
+        });
+    }
+    if let Some(cmd) = &swarm.check_cmd
+        && let Some(r) = swarm
+            .check_result
+            .as_deref()
+            .and_then(crate::bus::swarm::check::CheckResult::parse)
+        && !r.running
+        && !r.passed
+    {
+        out.push(Need {
+            kind: NeedKind::CheckFailed,
+            key: format!("check:{}", r.started_ns),
+            task_id: None,
+            message: None,
+            text: format!(
+                "{} · {}",
+                r.summary(cmd),
+                r.tail.lines().last().unwrap_or_default().trim()
+            ),
         });
     }
     if swarm.status == SwarmStatus::Finished {

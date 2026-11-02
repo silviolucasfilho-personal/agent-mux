@@ -82,7 +82,10 @@ pub fn worker_prompt(swarm: &SwarmRun, t: &BoardTask, board: &[BoardTask]) -> St
          If you cannot do it, call `agent_mux_task_update(action = \"fail\", task_id = \"{id}\", workspace = \"{ws}\", result = \"<why>\")`. \
          If you need a decision you cannot make yourself, ask the operator with \
          `agent_mux_send_message(to = \"user\", topic = \"question\", workspace = \"{ws}\", body = \"<the question>\")` \
-         and wait for the answer. Without the MCP tools: `agent-mux bus done {id} --workspace {ws} --result '<summary>'`."
+         and wait for the answer. If you find work outside your task, propose it with \
+         `agent_mux_task_split(workspace = \"{ws}\", tasks = [...])`: agent-mux puts it on the board \
+         for the operator, and you carry on with your own task; never start other agents yourself. \
+         Without the MCP tools: `agent-mux bus done {id} --workspace {ws} --result '<summary>'`."
     ));
     p
 }

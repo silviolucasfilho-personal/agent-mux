@@ -559,6 +559,7 @@ impl App {
             board: &board,
             workers: &workers,
             asking: &asking,
+            now_ns: crate::tracing::store::now_ns(),
         });
         for action in actions {
             let now_ns = crate::tracing::store::now_ns();
@@ -611,11 +612,57 @@ impl App {
                     );
                     let _ = record::mark_nudged(conn, &task_id, now_ns);
                 }
+                Action::RunCheck => {
+                    let Some(cmd) = swarm.check_cmd.clone() else {
+                        continue;
+                    };
+                    let marker = crate::bus::swarm::check::CheckResult::started(now_ns);
+                    let _ = record::set_check_result(
+                        conn,
+                        Some(db),
+                        &swarm.id,
+                        &marker.to_json(),
+                        now_ns,
+                    );
+                    let (db, id, ws) =
+                        (db.to_path_buf(), swarm.id.clone(), swarm.workspace.clone());
+                    std::thread::spawn(move || {
+                        let r = crate::bus::swarm::check::run(
+                            Path::new(&ws),
+                            &cmd,
+                            crate::bus::swarm::check::CHECK_TIMEOUT,
+                            now_ns,
+                        );
+                        if let Ok(conn) = crate::tracing::store::open_aux(&db) {
+                            let _ = record::set_check_result(
+                                &conn,
+                                Some(&db),
+                                &id,
+                                &r.to_json(),
+                                crate::tracing::store::now_ns(),
+                            );
+                        }
+                    });
+                    self.notice = Some(Notice::info(format!(
+                        "swarm: running the check `{}`",
+                        crate::app::workflows::short_task(
+                            swarm.check_cmd.as_deref().unwrap_or_default()
+                        )
+                    )));
+                }
                 Action::Advance(status) => {
                     let _ = record::set_status(conn, Some(db), &swarm.id, status, now_ns);
                     if status == SwarmStatus::Finished {
+                        let check = match (&swarm.check_cmd, &swarm.check_result) {
+                            (Some(cmd), Some(raw)) => {
+                                crate::bus::swarm::check::CheckResult::parse(raw)
+                                    .map(|r| format!(" · {}", r.summary(cmd)))
+                                    .unwrap_or_default()
+                            }
+                            _ => String::new(),
+                        };
                         self.notice = Some(Notice::info(format!(
-                            "swarm finished: {} · `agent-mux swarm close` ends it",
+                            "swarm finished: {}{check} · y on the Swarm screen closes it",
                             crate::app::workflows::short_task(&swarm.goal)
                         )));
                     }
