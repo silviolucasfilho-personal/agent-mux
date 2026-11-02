@@ -1,4 +1,5 @@
 //! Overlays retain the underlying screen and present its available actions.
+use crate::app::commands::{HelpRow, help_rows};
 use crate::app::{App, commands::Overlay};
 use crate::keymap::ACTIONS;
 use ratatui::{
@@ -136,27 +137,34 @@ pub(super) fn draw(f: &mut Frame, app: &App) {
             )],
         ),
         Overlay::Help(selected) => {
-            let mut rows = vec![
-                ListItem::new("F1 Commands · Esc back · Tab next control · 1–9 numbered tabs"),
-                ListItem::new("Session pane: ordinary keys go to the harness"),
-                ListItem::new("Use Test shortcuts to verify modifier bindings in this terminal"),
-            ];
-            rows.extend(ACTIONS.iter().map(|a| {
-                let availability = app.command_availability(a.id);
-                let label = app.command_label(a.id).unwrap_or_else(|| "Commands".into());
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{label:18}"), Style::default().fg(Color::Cyan)),
-                    Span::raw(format!(
-                        "{} (candidates: {}){}",
-                        a.label,
-                        crate::app::shortcut_probe::candidates(a.id),
-                        availability
-                            .reason()
-                            .map(|r| format!(" — {r}"))
-                            .unwrap_or_default()
-                    )),
-                ]))
-            }));
+            let rows = help_rows()
+                .into_iter()
+                .map(|row| match row {
+                    HelpRow::Intro(line) => ListItem::new(line),
+                    HelpRow::Header(theme) => ListItem::new(Line::from(Span::styled(
+                        format!(" {} ", theme.title()),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ))),
+                    HelpRow::Action(a) => {
+                        let availability = app.command_availability(a.id);
+                        let label = app.command_label(a.id).unwrap_or_else(|| "Commands".into());
+                        ListItem::new(Line::from(vec![
+                            Span::styled(format!("{label:18}"), Style::default().fg(Color::Cyan)),
+                            Span::raw(format!(
+                                "{} (candidates: {}){}",
+                                a.label,
+                                crate::app::shortcut_probe::candidates(a.id),
+                                availability
+                                    .reason()
+                                    .map(|r| format!(" — {r}"))
+                                    .unwrap_or_default()
+                            )),
+                        ]))
+                    }
+                })
+                .collect();
             (
                 "Help · ↑↓/PgUp/PgDn scroll · Esc close".into(),
                 Some(*selected),
