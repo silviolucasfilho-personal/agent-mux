@@ -58,6 +58,10 @@ pub struct LiveSwarmSession {
     pub quiet_ns: Option<i64>,
 }
 
+/// How long a question to the coordinator may go unanswered before it is
+/// the operator's (5 minutes, operator decision 2026-10-30).
+pub const STUCK_AFTER_NS: i64 = 5 * 60 * 1_000_000_000;
+
 /// A duration in nanoseconds as `42s`, `5m` or `3h`.
 pub fn short_age(ns: i64) -> String {
     let s = (ns / 1_000_000_000).max(0);

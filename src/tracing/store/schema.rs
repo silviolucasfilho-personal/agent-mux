@@ -1,10 +1,11 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 21;
+pub const SCHEMA_VERSION: i32 = 22;
 
 pub const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
+    V22,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -1145,4 +1146,33 @@ DELETE FROM agent_leases
  WHERE workspace IN (SELECT workspace FROM swarm_state UNION SELECT workspace FROM swarm_plans);
 DELETE FROM swarm_state;
 DELETE FROM swarm_plans;
+"#;
+
+// v22: the swarm's coordinator agent
+// (`docs/superpowers/specs/2026-11-02-swarm-agents-layout-design.md` §3, §7).
+// A side table rather than columns on `swarms`, so the migration stays
+// replay-safe (no `ADD COLUMN IF NOT EXISTS` in SQLite): the coordinator's
+// live launch, the workers' default harness (`swarms.planner_harness` is
+// the coordinator's), and the batching of the events it is told about.
+const V22: &str = r#"
+CREATE TABLE IF NOT EXISTS swarm_coordinators (
+  swarm_id        TEXT PRIMARY KEY REFERENCES swarms (id) ON DELETE CASCADE,
+  launch          TEXT,
+  worker_harness  TEXT,
+  events_seen_ns  INTEGER NOT NULL DEFAULT 0,
+  last_wake_ns    INTEGER,
+  updated_ns      INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_coordinators_insert
+AFTER INSERT ON swarm_coordinators
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_coordinator', NEW.swarm_id, NULL, NEW.launch, 'insert');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_coordinators_update
+AFTER UPDATE ON swarm_coordinators
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_coordinator', NEW.swarm_id, NULL, NEW.launch, 'update');
+END;
 "#;

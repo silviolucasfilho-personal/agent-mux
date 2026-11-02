@@ -182,7 +182,7 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                     })
                     .unwrap_or(("·", dim()));
                 (
-                    format!("    ★ planner·{}", d.run.planner_harness),
+                    format!("    ★ coordinator·{}", d.run.planner_harness),
                     Style::default().fg(Color::Gray),
                     state.0.to_string(),
                     state.1,
@@ -361,7 +361,7 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
         ]),
         Line::styled(
             format!(
-                "{} · {} · planner {}",
+                "{} · {} · coordinator {}",
                 s.id,
                 crate::app::workspaces_view::tilde_path(std::path::Path::new(&s.workspace)),
                 s.planner_harness
@@ -374,7 +374,7 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
         let since = crate::bus::swarm::short_age(v.now_ns - s.updated_ns);
         out.push(Line::styled(
             format!(
-                "◌ {} has been planning for {since} (it gives up after 15m). Its terminal is the ★ row.",
+                "◌ the coordinator ({}) has been planning for {since}. Its terminal is the ★ row: watch it, or Enter there to talk to it.",
                 s.planner_harness
             ),
             Style::default().fg(Color::Yellow),
@@ -489,7 +489,7 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
             (_, SwarmStatus::Paused) => "space resume · > message · ! next need",
             (_, SwarmStatus::Finished) => "y close the swarm",
             (_, SwarmStatus::Integrating) => "↓ a branch: y merge, x set aside",
-            (_, SwarmStatus::Planning) => "p re-plan once it answers · x then r on ★ restarts it",
+            (_, SwarmStatus::Planning) => "p sends it notes · on ★: x stops it, r starts a new one",
         },
         dim(),
     ));
@@ -989,7 +989,7 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
             l.extend(text_lines(goal, *field == LaunchField::Goal, 6));
             l.push(Line::raw(""));
             l.push(choice(
-                "Planner",
+                "Coordinator",
                 v.harnesses
                     .get(*planner)
                     .map(|h| h.as_str().to_string())

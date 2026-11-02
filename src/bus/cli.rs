@@ -188,7 +188,18 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
                 .unwrap_or_else(|| args.positional.join(" "));
             anyhow::ensure!(!body.trim().is_empty(), "send requires a message body");
             let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
-            let to = args.value("to");
+            // a swarm worker's `--to coordinator`: its swarm's coordinator
+            let coordinator = match args.value("to") {
+                Some(t) if t.eq_ignore_ascii_case("coordinator") => Some(
+                    super::swarm::record::coordinator_address(&conn, &caller).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "you are not a worker of a swarm with a live coordinator: write to user"
+                        )
+                    })?,
+                ),
+                _ => None,
+            };
+            let to = coordinator.as_deref().or(args.value("to"));
             let topic = args.value("topic").unwrap_or("message");
             let msg = bstore::send_message(
                 &conn,
@@ -671,6 +682,10 @@ commands:
                                 merge a finished task's branch into the workspace, or keep it unmerged
   accept <task> | drop <task>   accept or drop a task a worker proposed
   close                         end the swarm: stop its sessions, cancel open tasks, release leases
+  restart                       start a new coordinator in place of one that exited
+  submit-plan --file PLAN.json [--from LAUNCH_ID]
+                                submit a plan as the coordinator does (agent_mux_swarm_plan): checked,
+                                and on the board only without errors
   broadcast <message...> [--urgent] [--wake] [--workspace DIR] [--db PATH] [--json]
                                 send a message to every agent of the workspace
   stop [--workspace DIR] [--db PATH] [--json]
@@ -703,20 +718,7 @@ fn snapshot_workers() -> HashMap<String, super::swarm::engine::Worker> {
 
 /// The checks `approve` re-runs, from this machine and the workspace.
 fn cli_check_env(workspace: &str, isolation: TaskIsolation) -> super::swarm::plan::CheckEnv {
-    super::swarm::plan::CheckEnv {
-        harnesses: crate::harness::Harness::ALL
-            .iter()
-            .filter(|h| crate::session::command_available(h.as_str()))
-            .map(|h| h.as_str().to_string())
-            .collect(),
-        agents: crate::agents::Catalog::load(&crate::assets::root(), Some(Path::new(workspace)))
-            .entries
-            .iter()
-            .map(|e| e.name.clone())
-            .collect(),
-        git_repo: crate::loops::worktree::is_git_repo(Path::new(workspace)),
-        default_isolation: isolation,
-    }
+    super::swarm::plan::CheckEnv::for_workspace(Path::new(workspace), isolation)
 }
 
 /// `swarm status` / `swarm plan` for an orchestrated swarm.
@@ -967,6 +969,36 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
     }
 
     match cmd {
+        "submit-plan" => {
+            let file = args
+                .value("file")
+                .ok_or_else(|| anyhow::anyhow!("--file PLAN.json is required"))?;
+            let text = std::fs::read_to_string(file)?;
+            let value: Value = serde_json::from_str(&text)?;
+            // the tool's argument shape ({"plan": …}) or the plan itself
+            let plan: super::swarm::plan::Plan =
+                serde_json::from_value(value.get("plan").cloned().unwrap_or(value))?;
+            let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+            let caller = bstore::resolve_caller_launch(args.value("from"));
+            let swarm = caller
+                .as_deref()
+                .and_then(|c| record::swarm_of_coordinator(&conn, c).ok().flatten())
+                .or_else(|| record::live_swarm(&conn, &workspace).ok().flatten())
+                .ok_or_else(|| anyhow::anyhow!("no swarm to plan in {workspace}"))?;
+            let env = cli_check_env(&swarm.workspace, swarm.isolation);
+            let done = record::submit_plan(&conn, Some(&db_path), &swarm, &plan, &env, now)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let note = record::submitted_note(&swarm, &done);
+            let accepted = matches!(done, record::Submitted::Accepted { .. });
+            if args.has("json") {
+                println!("{}", json!({ "accepted": accepted, "note": note }));
+            } else {
+                println!("{note}");
+            }
+            if !accepted {
+                std::process::exit(2);
+            }
+        }
         "status" | "plan" => {
             let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
             if let Some(swarm) = record::live_swarm(&conn, &workspace)? {

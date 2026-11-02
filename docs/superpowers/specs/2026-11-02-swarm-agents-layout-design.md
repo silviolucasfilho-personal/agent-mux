@@ -1,6 +1,11 @@
 # Swarm: the Agents layout and a coordinator agent — design
 
-Status: approved for implementation, 2026-11-02 (decisions in §9). Replaces §8 (the screen) of
+Status: approved for implementation, 2026-11-02 (decisions in §9). The screen and Needs you are in #107. The coordinator agent is in PR B, which departs from §3 and §7 in three ways:
+- **Side table:** v22 is a side table, `swarm_coordinators`, rather than columns on `swarms`, so the migration stays replay-safe.
+- **No rename:** `swarms.planner_harness` keeps its name and holds the coordinator's harness.
+- **No built-in agent:** the coordinator's role travels in its opening prompt (`bus::swarm::prompt::coordinator_prompt`) rather than in a built-in `coordinator` agent, which would hit the agy tools problem of §5.
+
+`worker_harness` is in the table for PR C. Replaces §8 (the screen) of
 `2026-11-02-swarm-orchestrator-design.md` and amends its §4 (planning) and
 §5.6 (questions). The engine (§5), the store (§7) and the CLI (§9) stay.
 

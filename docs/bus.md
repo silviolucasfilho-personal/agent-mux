@@ -27,6 +27,7 @@ Every harness session wired with the `agent-mux` MCP server can call these tools
 | `agent_mux_task_split` | Publishes one or more subtasks (`title`, `instructions`, `files`, `target_harness`, `target_agent`, `isolation`) onto the workspace task board. |
 | `agent_mux_task_update` | Performs an atomic task or lease action: `"claim"`, `"running"`, `"complete"` / `"done"`, `"fail"`, `"cancel"`, `"wait"`, `"lease"`, or `"unlease"`. |
 | `agent_mux_delegate` | Creates a task on the workspace board and asks the live `agent-mux` TUI over `$AGENT_MUX_CONTROL_SOCK` to spawn a worker session (`isolation = "shared" \| "worktree"`), optionally waiting (`wait_ms`) for completion. |
+| `agent_mux_swarm_plan` | The swarm coordinator submits its plan (`plan = {summary, tasks}`). agent-mux checks it (`record::submit_plan`, `plan::check` against `CheckEnv::for_workspace`): with errors nothing changes and the errors are answered, without them the tasks go on the board (`review`, or `running` with the gate off). Refused once the plan is approved. CLI: `agent-mux swarm submit-plan --file`. |
 
 ## CLI (`agent-mux bus …`)
 
@@ -71,6 +72,14 @@ How to use it: [swarm.md](swarm.md). The Swarm screen (`F1` → "Open swarm", `M
 - **Cost:** a live session carries `priced` (`LiveSwarmSession`), so an unpriced harness shows `—` and a partly priced total `≥$x` (`ui::swarm_board::spend`).
 - **Writing:** `>` opens the command line, `m` addresses it to the selected task's worker (or answers its open question), and `b` addresses it to everyone (`swarm_board::parse_command`).
 - **Refresh:** only when `trace_changes` advances or a live session changes (`SwarmBoard::refresh_due`), at most every 500 ms.
+- **The coordinator agent** (schema v22, `swarm_coordinators`):
+  - **Launch:** `App::start_swarm_coordinator` starts an interactive session on the swarm's coordinator harness (`swarms.planner_harness`) in the workspace, under the bus group with label `coordinator`. Its opening prompt is `bus::swarm::prompt::coordinator_prompt` (the role, then `[swarm] plan` with the `swarm-plan` skill), with `$AGENT_MUX_SWARM_PLAN`, `$AGENT_MUX_SWARM_ID` and `$AGENT_MUX_WORKSPACE` set. `record::set_coordinator_launch` records it, also as `swarms.planner_launch`, so the `★` row draws its terminal.
+  - **Re-plan:** `p` messages it the notes (topic `plan-changes`) and wakes it. If it is gone, a new one starts with the board and the notes in its context.
+  - **Approve:** approving tells it (`plan-approved`).
+  - **Restart:** `SwarmVerb::Restart` (`r` on `★`, `agent-mux swarm restart`) starts a new one once the old one exited.
+  - **Questions:** a worker's `to = "coordinator"` (MCP `agent_mux_send_message`, CLI `bus send --to coordinator`) resolves to its swarm's coordinator (`record::coordinator_address`). Such a question becomes the operator's need only after `STUCK_AFTER_NS` (5 min) unanswered.
+  - **Events:** `App::tell_coordinator_events` batches task ends and proposals since `events_seen_ns` into one `swarm-events` message and one wake, at most every `EVENTS_EVERY_NS` (1 min), while the coordinator is idle and the swarm is running, integrating or finished.
+  - **Slow plan:** a swarm still `planning` after `PLAN_TIMEOUT_NS` (15 min) lists a `coordinator` need.
 - **Broadcast wakes.** `ControlRequest::WakeWorkspace { workspace, prompt, exclude }` wakes every live session of the workspace (and of the worktrees its tasks run in) the way `WakeSession` wakes one, except the sender; the response's `detail` counts how many were woken and how many queued until idle. The screen's `@all` (`b`), `agent-mux swarm broadcast --wake`, `agent-mux bus send --wake` without `--to` and `agent_mux_send_message(to = "*", wake = true)` all send it.
 - **The orchestrated swarm (schema v21).** Design: `docs/superpowers/specs/2026-11-02-swarm-orchestrator-design.md`.
   - **Tables:** `swarms` holds one swarm's run (`planning` → `review` → `running`/`paused` → `integrating` → `finished`; one live per workspace; `owner_run` is the TUI that dispatches it). `swarm_tasks` extends `agent_tasks` with the plan's key, position, `depends_on`, acceptance, `proposed`, attempts and `nudged_ns`. The migration ends every coordinator-era swarm (`swarm_state`, `swarm_plans`).

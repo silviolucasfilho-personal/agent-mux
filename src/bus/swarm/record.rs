@@ -451,6 +451,213 @@ fn insert_task(
     Ok(task.id)
 }
 
+/// A swarm's coordinator agent (schema v22).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Coordinator {
+    pub swarm_id: String,
+    /// Its live session, if one was started.
+    pub launch: Option<String>,
+    /// The workers' default harness (`None`: the coordinator's).
+    pub worker_harness: Option<String>,
+    /// Events up to here were told to it.
+    pub events_seen_ns: i64,
+    pub last_wake_ns: Option<i64>,
+}
+
+pub fn coordinator(conn: &Connection, swarm_id: &str) -> rusqlite::Result<Option<Coordinator>> {
+    conn.query_row(
+        "SELECT swarm_id, launch, worker_harness, events_seen_ns, last_wake_ns
+         FROM swarm_coordinators WHERE swarm_id = ?1",
+        params![swarm_id],
+        |r| {
+            Ok(Coordinator {
+                swarm_id: r.get(0)?,
+                launch: r.get(1)?,
+                worker_harness: r.get(2)?,
+                events_seen_ns: r.get(3)?,
+                last_wake_ns: r.get(4)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Records the coordinator's session (and the swarm's `planner_launch`, so
+/// the tree's `★` row shows it). A new coordinator starts with no events
+/// seen but those before `now`.
+pub fn set_coordinator_launch(
+    conn: &Connection,
+    db: Option<&Path>,
+    swarm_id: &str,
+    launch: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO swarm_coordinators (swarm_id, launch, events_seen_ns, updated_ns)
+         VALUES (?1, ?2, ?3, ?3)
+         ON CONFLICT (swarm_id) DO UPDATE SET launch = excluded.launch,
+             events_seen_ns = excluded.events_seen_ns, updated_ns = excluded.updated_ns",
+        params![swarm_id, launch, now],
+    )?;
+    conn.execute(
+        "UPDATE swarms SET planner_launch = ?1, updated_ns = ?2 WHERE id = ?3",
+        params![launch, now, swarm_id],
+    )?;
+    poke(db);
+    Ok(())
+}
+
+/// The events up to `seen_ns` were told to the coordinator, at `wake_ns`.
+pub fn mark_events_told(
+    conn: &Connection,
+    swarm_id: &str,
+    seen_ns: i64,
+    wake_ns: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE swarm_coordinators SET events_seen_ns = ?1, last_wake_ns = ?2, updated_ns = ?2
+         WHERE swarm_id = ?3",
+        params![seen_ns, wake_ns, swarm_id],
+    )?;
+    Ok(())
+}
+
+/// The live swarm whose coordinator is `launch`.
+pub fn swarm_of_coordinator(conn: &Connection, launch: &str) -> rusqlite::Result<Option<SwarmRun>> {
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT c.swarm_id FROM swarm_coordinators c JOIN swarms s ON s.id = c.swarm_id
+             WHERE c.launch = ?1 AND s.ended_ns IS NULL",
+            params![launch],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match id {
+        Some(id) => get_swarm(conn, &id),
+        None => Ok(None),
+    }
+}
+
+/// Where a message `to = "coordinator"` from `sender` goes: the live
+/// coordinator of the swarm `sender` works for.
+pub fn coordinator_address(conn: &Connection, sender: &str) -> Option<String> {
+    let (swarm, _) = swarm_of_worker(conn, sender).ok().flatten()?;
+    coordinator(conn, &swarm.id).ok().flatten()?.launch
+}
+
+/// What submitting a plan did.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Submitted {
+    /// On the board; the swarm now waits for the operator (`review`) or,
+    /// with the gate off, runs.
+    Accepted {
+        tasks: usize,
+        status: SwarmStatus,
+        warnings: Vec<(String, String)>,
+    },
+    /// Nothing changed: these errors must be fixed first.
+    Rejected(super::plan::Problems),
+}
+
+/// The coordinator's `agent_mux_swarm_plan` (and `agent-mux swarm
+/// submit-plan`): the plan is checked, and only a plan without errors goes
+/// on the board, in place of the tasks that never started. Allowed while
+/// the swarm is planning or in review.
+pub fn submit_plan(
+    conn: &Connection,
+    db: Option<&Path>,
+    swarm: &SwarmRun,
+    plan: &Plan,
+    env: &super::plan::CheckEnv,
+    now: i64,
+) -> Result<Submitted, String> {
+    if !matches!(swarm.status, SwarmStatus::Planning | SwarmStatus::Review) {
+        return Err(format!(
+            "the plan of {} is already approved ({}): propose new tasks with agent_mux_task_split",
+            swarm.id,
+            swarm.status.as_str()
+        ));
+    }
+    // Check the whole plan as it would stand: the tasks that ran stay.
+    let before = board(conn, &swarm.id).map_err(|e| e.to_string())?;
+    let mut merged = plan.clone();
+    for t in before.iter().filter(|t| started(t)) {
+        if !merged.tasks.iter().any(|p| p.key == t.ext.plan_key) {
+            merged
+                .tasks
+                .push(board_plan(swarm, std::slice::from_ref(t)).tasks.remove(0));
+        }
+    }
+    let problems = super::plan::check(&merged, env);
+    if !problems.is_ok() {
+        return Ok(Submitted::Rejected(problems));
+    }
+    let board = replace_draft(conn, db, swarm, plan, now)?;
+    let status = if swarm.gate {
+        SwarmStatus::Review
+    } else {
+        SwarmStatus::Running
+    };
+    set_plan_result(conn, db, &swarm.id, Some(&plan.summary), None, status, now)
+        .map_err(|e| e.to_string())?;
+    Ok(Submitted::Accepted {
+        tasks: board.len(),
+        status,
+        warnings: problems.warnings,
+    })
+}
+
+/// A submission's answer, in the coordinator's words.
+pub fn submitted_note(swarm: &SwarmRun, s: &Submitted) -> String {
+    match s {
+        Submitted::Accepted {
+            tasks,
+            status,
+            warnings,
+        } => {
+            let mut out = match status {
+                SwarmStatus::Running => format!(
+                    "Plan accepted: {tasks} task(s) on the board of {}; workers start now.",
+                    swarm.id
+                ),
+                _ => format!(
+                    "Plan accepted: {tasks} task(s) on the board of {}. The operator reviews it; \
+                     you will be told when it is approved or sent back.",
+                    swarm.id
+                ),
+            };
+            for (k, m) in warnings {
+                out.push_str(&format!(
+                    "\nwarning{}: {m}",
+                    if k.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({k})")
+                    }
+                ));
+            }
+            out
+        }
+        Submitted::Rejected(p) => {
+            let mut out = format!(
+                "Plan rejected: {} error(s). Fix them and call agent_mux_swarm_plan again.",
+                p.errors.len()
+            );
+            for (k, m) in &p.errors {
+                out.push_str(&format!(
+                    "\nerror{}: {m}",
+                    if k.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({k})")
+                    }
+                ));
+            }
+            out
+        }
+    }
+}
+
 /// The live swarm `launch` works for and the task it holds, if it is one
 /// of a swarm's workers (its task not yet terminal).
 pub fn swarm_of_worker(
@@ -732,6 +939,8 @@ pub enum SwarmVerb {
     Drop,
     /// End the swarm: stop its sessions (needs the TUI to stop them).
     Close,
+    /// Start a new coordinator in place of one that exited (needs the TUI).
+    Restart,
 }
 
 impl SwarmVerb {
@@ -747,6 +956,7 @@ impl SwarmVerb {
             "accept" => SwarmVerb::Accept,
             "drop" => SwarmVerb::Drop,
             "close" | "stop" => SwarmVerb::Close,
+            "restart" | "restart-coordinator" => SwarmVerb::Restart,
             _ => return None,
         })
     }
@@ -764,7 +974,10 @@ impl SwarmVerb {
     /// Whether only the running TUI can carry it out (it starts or stops
     /// sessions).
     pub fn needs_tui(self) -> bool {
-        matches!(self, SwarmVerb::Replan | SwarmVerb::Close)
+        matches!(
+            self,
+            SwarmVerb::Replan | SwarmVerb::Close | SwarmVerb::Restart
+        )
     }
 }
 
@@ -915,7 +1128,9 @@ pub fn apply(
                 Ok(format!("dropped `{}`", t.ext.plan_key))
             }
         }
-        SwarmVerb::Replan | SwarmVerb::Close => unreachable!("needs the TUI"),
+        SwarmVerb::Replan | SwarmVerb::Close | SwarmVerb::Restart => {
+            unreachable!("needs the TUI")
+        }
     }
 }
 
@@ -1026,6 +1241,94 @@ mod tests {
             "the gate is on: proposals"
         );
         assert!(proposal_note(&sw, &made).contains("as a proposal for the operator"));
+
+        // The coordinator: found by its launch, and the address a worker's
+        // `to = "coordinator"` resolves to.
+        set_coordinator_launch(&conn, None, &s.id, "coord-L", 4).unwrap();
+        assert_eq!(
+            swarm_of_coordinator(&conn, "coord-L").unwrap().unwrap().id,
+            s.id
+        );
+        assert_eq!(
+            coordinator_address(&conn, "worker-L").as_deref(),
+            Some("coord-L")
+        );
+        assert_eq!(coordinator_address(&conn, "someone-else"), None);
+        assert_eq!(
+            get_swarm(&conn, &s.id)
+                .unwrap()
+                .unwrap()
+                .planner_launch
+                .as_deref(),
+            Some("coord-L")
+        );
+
+        // A plan with errors changes nothing; a sound one replaces the draft.
+        let env = super::super::plan::CheckEnv {
+            harnesses: vec!["claude".into()],
+            agents: vec![],
+            git_repo: false,
+            default_isolation: TaskIsolation::Shared,
+        };
+        let live = get_swarm(&conn, &s.id).unwrap().unwrap();
+        let before = board(&conn, &s.id).unwrap().len();
+        let bad = Plan {
+            summary: "x".into(),
+            tasks: vec![pt("z", &["nope"])],
+        };
+        match submit_plan(&conn, None, &live, &bad, &env, 4).unwrap() {
+            Submitted::Rejected(p) => {
+                assert!(
+                    p.errors
+                        .iter()
+                        .any(|(_, m)| m.contains("depends on `nope`")),
+                    "{p:?}"
+                );
+                assert!(
+                    submitted_note(&live, &Submitted::Rejected(p))
+                        .starts_with("Plan rejected: 1 error(s)")
+                );
+            }
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+        assert_eq!(
+            board(&conn, &s.id).unwrap().len(),
+            before,
+            "nothing changed"
+        );
+        let good = Plan {
+            summary: "two".into(),
+            tasks: vec![pt("y", &[]), pt("z", &["y"])],
+        };
+        match submit_plan(&conn, None, &live, &good, &env, 4).unwrap() {
+            Submitted::Accepted { status, .. } => assert_eq!(status, SwarmStatus::Review),
+            other => panic!("expected an acceptance, got {other:?}"),
+        }
+        let after = get_swarm(&conn, &s.id).unwrap().unwrap();
+        assert_eq!(
+            (after.status, after.plan_summary.as_deref()),
+            (SwarmStatus::Review, Some("two"))
+        );
+        let keys: Vec<String> = board(&conn, &s.id)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.ext.plan_key)
+            .collect();
+        assert!(
+            keys.contains(&"b".to_string()),
+            "the task that ran stays: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"y".to_string()) && keys.contains(&"z".to_string()),
+            "{keys:?}"
+        );
+        let mut running = after.clone();
+        running.status = SwarmStatus::Running;
+        assert!(
+            submit_plan(&conn, None, &running, &good, &env, 4)
+                .unwrap_err()
+                .contains("already approved")
+        );
 
         let (cancelled, _) = end_swarm(&conn, None, &s, 5).unwrap();
         assert_eq!(cancelled, 4);

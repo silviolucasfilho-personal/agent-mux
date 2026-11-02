@@ -80,12 +80,60 @@ pub fn worker_prompt(swarm: &SwarmRun, t: &BoardTask, board: &[BoardTask]) -> St
          Your task is not over until you report it. When it is done, call \
          `agent_mux_task_update(action = \"done\", task_id = \"{id}\", workspace = \"{ws}\", result = \"<what you changed and how you checked it>\")`. \
          If you cannot do it, call `agent_mux_task_update(action = \"fail\", task_id = \"{id}\", workspace = \"{ws}\", result = \"<why>\")`. \
-         If you need a decision you cannot make yourself, ask the operator with \
-         `agent_mux_send_message(to = \"user\", topic = \"question\", workspace = \"{ws}\", body = \"<the question itself on the first line, then any context>\")` \
-         and wait for the answer. If you find work outside your task, propose it with \
+         If you need a decision you cannot make yourself, ask the swarm's coordinator with \
+         `agent_mux_send_message(to = \"coordinator\", topic = \"question\", wake = true, workspace = \"{ws}\", body = \"<the question itself on the first line, then any context>\")` \
+         and wait for the answer; it asks the operator when only they can decide. If you find work outside your task, propose it with \
          `agent_mux_task_split(workspace = \"{ws}\", tasks = [...])`: agent-mux puts it on the board \
          for the operator, and you carry on with your own task; never start other agents yourself. \
          Without the MCP tools: `agent-mux bus done {id} --workspace {ws} --result '<summary>'`."
+    ));
+    p
+}
+
+/// The coordinator agent's opening prompt (§3 of the layout spec): its
+/// role, what it may and may not do, and how it plans. `template` is the
+/// library's `[swarm] plan` (with `{invocation}` and `{plan}`); `restart`
+/// is the board summary for a coordinator that replaces one that exited.
+pub fn coordinator_prompt(
+    swarm: &SwarmRun,
+    invocation: &str,
+    context: &str,
+    template: &str,
+    restart: Option<&str>,
+) -> String {
+    let id = &swarm.id;
+    let ws = &swarm.workspace;
+    let mut p = format!(
+        "You are the coordinator of the agent-mux swarm {id}. Its goal: {goal}\n\n\
+         agent-mux runs the swarm: once the operator approves your plan it starts one worker \
+         per task, in order, and tracks them. You plan, advise and answer. You never start \
+         workers, merge branches, approve the plan or close the swarm, and you do not edit files.\n\n",
+        goal = swarm.goal,
+    );
+    match restart {
+        Some(board) => p.push_str(&format!(
+            "You replace a coordinator that exited. The board as it stands:\n{board}\n\n\
+             Read the board with agent_mux_task_board(workspace = \"{ws}\") and your messages with \
+             agent_mux_recv_messages, then wait for questions and events.\n\n"
+        )),
+        None => {
+            let planning = template
+                .replace("{invocation}", invocation)
+                .replace("{plan}", context);
+            p.push_str(&format!("## 1. Plan\n{planning}\n\n"));
+        }
+    }
+    p.push_str(&format!(
+        "## 2. Then wait, and answer when woken\n\
+         - The operator approves the plan, or sends it back with notes: revise it and call \
+         agent_mux_swarm_plan again.\n\
+         - A worker asks you something (topic question): answer it with \
+         agent_mux_send_message(to = <its launch id>, reply_to = <the message id>, wake = true, workspace = \"{ws}\"). \
+         If only the operator can decide, forward it to \"user\" with your recommendation.\n\
+         - Tasks finish, fail or are proposed (topic swarm-events): look at the board with \
+         agent_mux_task_board, and propose follow-up tasks with agent_mux_task_split, or tell the \
+         user what you would change.\n\
+         Keep each turn short: read, answer, stop."
     ));
     p
 }
@@ -215,7 +263,7 @@ mod tests {
             "your own git worktree",
             "- `a` Title a: added the parser (branch `loop/bus-a`, merged into the workspace)",
             "action = \"done\", task_id = \"task-b\", workspace = \"/ws\"",
-            "to = \"user\", topic = \"question\"",
+            "to = \"coordinator\", topic = \"question\", wake = true",
         ] {
             assert!(p.contains(want), "missing {want:?} in:\n{p}");
         }

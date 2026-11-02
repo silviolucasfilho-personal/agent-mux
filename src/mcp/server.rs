@@ -133,6 +133,12 @@ pub fn tool_catalog() -> Vec<ToolSpec> {
             read_only: false,
         },
         ToolSpec {
+            name: "agent_mux_swarm_plan",
+            description: "Submit (or resubmit) the plan of the agent-mux swarm you coordinate: a summary and the tasks (key, title, instructions, acceptance, files, depends_on, optional harness/agent/isolation). agent-mux checks it; with errors nothing changes and the errors are answered so you can fix them and call again; without errors the tasks go on the board for the operator to approve. You never start workers yourself: agent-mux does, once the plan is approved.",
+            input_schema: schema_of::<SwarmPlanArgs>(),
+            read_only: false,
+        },
+        ToolSpec {
             name: "agent_mux_delegate",
             description: "Dynamically spawn a new worker CLI session (Claude Code, Codex or Antigravity) in the running agent-mux TUI to execute a delegated task (in the shared workspace or an isolated git worktree).",
             input_schema: schema_of::<BusDelegateArgs>(),
@@ -606,6 +612,17 @@ fn bus_send_message_result(service: &TraceService, arguments: Value) -> Value {
     let now_ns = crate::tracing::store::now_ns();
     let target = if args.to.trim() == "*" {
         "*".to_string()
+    } else if args.to.trim().eq_ignore_ascii_case("coordinator") {
+        // a swarm worker asks its coordinator, whatever its launch id
+        match crate::bus::swarm::record::coordinator_address(&conn, &sender) {
+            Some(l) => l,
+            None => {
+                return tool_error(&ServiceError::InvalidArgument(
+                    "you are not a worker of a swarm with a live coordinator: write to \"user\""
+                        .into(),
+                ));
+            }
+        }
     } else {
         let q = args.to.trim();
         let peers =
@@ -1069,6 +1086,81 @@ fn bus_task_update_result(service: &TraceService, arguments: Value) -> Value {
     }
 }
 
+/// Arguments of `agent_mux_swarm_plan`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SwarmPlanArgs {
+    /// The plan: a short summary of why this split, and the tasks.
+    pub plan: crate::bus::swarm::plan::Plan,
+    /// The swarm's workspace; defaults to the session's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// The calling coordinator's launch id; defaults to `$AGENT_MUX_SESSION_ID`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+fn swarm_plan_result(service: &TraceService, arguments: Value) -> Value {
+    use crate::bus::swarm::record;
+    let args: SwarmPlanArgs = match serde_json::from_value(arguments) {
+        Ok(a) => a,
+        Err(e) => {
+            return tool_error(&ServiceError::InvalidArgument(format!(
+                "invalid arguments for swarm_plan: {e}"
+            )));
+        }
+    };
+    let ws = bus_workspace(service, args.workspace.as_deref());
+    let caller = bus_caller_id(args.session_id.as_deref());
+    let config = service.config();
+    let conn = match crate::tracing::store::open_aux(&config.db_path) {
+        Ok(c) => c,
+        Err(e) => return tool_error(&ServiceError::DbUnavailable(e)),
+    };
+    let swarm = match record::swarm_of_coordinator(&conn, &caller)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            record::live_swarm(&conn, &ws.to_string_lossy())
+                .ok()
+                .flatten()
+        }) {
+        Some(s) => s,
+        None => {
+            return tool_error(&ServiceError::InvalidArgument(
+                "no swarm to plan: you are not a swarm's coordinator and this workspace runs none"
+                    .into(),
+            ));
+        }
+    };
+    let env = crate::bus::swarm::plan::CheckEnv::for_workspace(
+        Path::new(&swarm.workspace),
+        swarm.isolation,
+    );
+    let now_ns = crate::tracing::store::now_ns();
+    match record::submit_plan(
+        &conn,
+        Some(&config.db_path),
+        &swarm,
+        &args.plan,
+        &env,
+        now_ns,
+    ) {
+        Ok(done) => {
+            let note = record::submitted_note(&swarm, &done);
+            let accepted = matches!(done, record::Submitted::Accepted { .. });
+            let mut v = bus_ok_envelope(&ws, json!({ "accepted": accepted, "note": note }));
+            if let Some(content) = v.get_mut("content")
+                && let Some(first) = content.as_array_mut().and_then(|a| a.first_mut())
+            {
+                first["text"] = Value::String(note);
+            }
+            v
+        }
+        Err(e) => tool_error(&ServiceError::InvalidArgument(e)),
+    }
+}
+
 fn bus_delegate_result(service: &TraceService, arguments: Value) -> Value {
     let args: BusDelegateArgs = match serde_json::from_value(arguments) {
         Ok(a) => a,
@@ -1295,6 +1387,9 @@ pub fn handle_message(service: &TraceService, line: &str) -> Option<Value> {
                 "agent_mux_delegate" => {
                     return Some(rpc_result(id, bus_delegate_result(service, arguments)));
                 }
+                "agent_mux_swarm_plan" => {
+                    return Some(rpc_result(id, swarm_plan_result(service, arguments)));
+                }
                 _ => {}
             }
             match Request::from_tool_call(name, arguments) {
@@ -1480,7 +1575,8 @@ mod tests {
     #[test]
     fn catalog_contains_trace_and_bus_tools() {
         let names = tool_names();
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 18);
+        assert!(names.contains(&"agent_mux_swarm_plan"));
         assert!(names.contains(&"agent_mux_get_loop_context"));
         assert!(names.contains(&"agent_mux_get_workflow_run"));
         assert!(names.contains(&"agent_mux_get_briefing"));
@@ -1499,7 +1595,7 @@ mod tests {
         );
         let list = tools_list_value();
         let tools = list["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 18);
         for t in tools {
             assert_eq!(t["annotations"]["destructiveHint"], false);
             assert_eq!(t["inputSchema"]["type"], "object");

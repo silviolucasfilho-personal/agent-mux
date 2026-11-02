@@ -94,7 +94,7 @@ impl NeedKind {
             NeedKind::Question => "question",
             NeedKind::Prompt => "prompt",
             NeedKind::Plan => "plan",
-            NeedKind::PlannerFailed => "planner",
+            NeedKind::PlannerFailed => "coordinator",
             NeedKind::Failed => "failed",
             NeedKind::Lost => "lost",
             NeedKind::Stalled => "stalled",
@@ -282,6 +282,10 @@ impl Confirm {
             }
             Confirm::Delete { key, .. } => format!("Delete `{key}` from the plan?"),
             Confirm::Cancel { key, .. } => format!("Cancel `{key}`? It will not run."),
+            Confirm::Stop { key, .. } if key == "the coordinator" => {
+                "Stop the coordinator? The swarm keeps running; r on its row starts a new one."
+                    .into()
+            }
             Confirm::Stop { key, .. } => {
                 format!("Stop the worker of `{key}`? Its task is then lost (r retries it).")
             }
@@ -383,6 +387,10 @@ pub enum PaneView {
     /// No swarm at all: how to start one.
     Launch,
 }
+
+/// A coordinator that has not submitted a plan this long after starting
+/// (or being sent back) is listed in Needs you.
+pub const PLAN_TIMEOUT_NS: i64 = 15 * 60 * 1_000_000_000;
 
 /// Swarms that ended within this long stay in the tree, folded.
 pub const RECENT_NS: i64 = 7 * 24 * 3_600 * 1_000_000_000;
@@ -1281,11 +1289,9 @@ impl SwarmBoard {
             },
             KeyCode::Char('y') => self.yes(),
             KeyCode::Char('p') => {
-                if self
-                    .swarm
-                    .as_ref()
-                    .is_some_and(|s| s.status == SwarmStatus::Review)
-                {
+                if self.swarm.as_ref().is_some_and(|s| {
+                    matches!(s.status, SwarmStatus::Review | SwarmStatus::Planning)
+                }) {
                     self.open_notes();
                 } else {
                     self.status_msg = Some("Re-plan from review: the plan is not open now.".into());
@@ -1435,6 +1441,14 @@ impl SwarmBoard {
     }
 
     fn retry_or_launch(&mut self) -> Outcome {
+        if let Some(Row::Coordinator(_)) = self.rows.get(self.cursor) {
+            if self.coordinator_session().is_some() {
+                self.status_msg =
+                    Some("The coordinator is running: x stops it, then r restarts it.".into());
+                return Outcome::None;
+            }
+            return self.verb(SwarmVerb::Restart, None);
+        }
         if let Some(t) = self.selected_task() {
             let st = self.shown(t);
             if matches!(
@@ -1460,6 +1474,21 @@ impl SwarmBoard {
     }
 
     fn x_on_selected(&mut self) -> Outcome {
+        if let Some(Row::Coordinator(_)) = self.rows.get(self.cursor) {
+            match self.coordinator_session() {
+                Some(w) => {
+                    self.confirm = Some(Confirm::Stop {
+                        session_idx: w.session_idx,
+                        key: "the coordinator".into(),
+                    })
+                }
+                None => {
+                    self.status_msg =
+                        Some("The coordinator is not running: r starts a new one.".into())
+                }
+            }
+            return Outcome::None;
+        }
         let Some(t) = self.selected_task().cloned() else {
             return Outcome::None;
         };
@@ -1888,9 +1917,18 @@ pub fn needs_for(d: &SwarmData, workers: &HashMap<String, Worker>, now_ns: i64) 
         .iter()
         .filter_map(|t| t.task.assigned_to.as_deref())
         .collect();
+    let coordinator = swarm.planner_launch.as_deref();
     for q in open_questions(v.messages) {
         let to_operator = matches!(q.to_launch.as_deref(), None | Some("user"));
-        if !to_operator && !board_launches.contains(q.from_launch.as_str()) {
+        // a question to the coordinator is the operator's only once it went
+        // unanswered for STUCK_AFTER (§3.2)
+        let to_coordinator = q.to_launch.is_some() && q.to_launch.as_deref() == coordinator;
+        let escalated =
+            to_coordinator && now_ns - q.created_ns >= crate::bus::swarm::STUCK_AFTER_NS;
+        if to_coordinator && !escalated {
+            continue;
+        }
+        if !to_operator && !escalated && !board_launches.contains(q.from_launch.as_str()) {
             continue;
         }
         let task_id = v
@@ -1903,14 +1941,35 @@ pub fn needs_for(d: &SwarmData, workers: &HashMap<String, Worker>, now_ns: i64) 
             key: format!("q:{}", q.id),
             task_id,
             message: Some(q.clone()),
-            text: format!(
-                "{} asks: {}",
-                name_of(&q.from_launch),
-                question_line(&q.body)
-            ),
+            text: if escalated {
+                format!(
+                    "{} asked the coordinator {} ago: {}",
+                    name_of(&q.from_launch),
+                    crate::bus::swarm::short_age(now_ns - q.created_ns),
+                    question_line(&q.body)
+                )
+            } else {
+                format!(
+                    "{} asks: {}",
+                    name_of(&q.from_launch),
+                    question_line(&q.body)
+                )
+            },
         });
     }
     match swarm.status {
+        SwarmStatus::Planning if now_ns - swarm.updated_ns >= PLAN_TIMEOUT_NS => {
+            out.push(Need {
+                kind: NeedKind::PlannerFailed,
+                key: format!("planning:{}", swarm.updated_ns),
+                task_id: None,
+                message: None,
+                text: format!(
+                    "the coordinator has not submitted a plan in {}: p nudges it, x then r on ★ restarts it",
+                    crate::bus::swarm::short_age(now_ns - swarm.updated_ns)
+                ),
+            });
+        }
         SwarmStatus::Review if swarm.plan_error.is_some() && v.board.is_empty() => {
             out.push(Need {
                 kind: NeedKind::PlannerFailed,
@@ -2517,6 +2576,34 @@ mod tests {
         assert_eq!(v.rows, [Row::Swarm(0)]);
         v.handle_key(key(KeyCode::Right));
         assert_eq!(v.rows.len(), 4);
+    }
+
+    #[test]
+    fn a_question_to_the_coordinator_is_yours_only_after_five_minutes() {
+        let mut v = board(
+            SwarmStatus::Running,
+            vec![task("a", TaskStatus::Running, Some("L1"))],
+            &[("L1", "idle"), ("C", "idle")],
+        );
+        let mut run = v.swarm.clone().unwrap();
+        run.planner_launch = Some("C".into());
+        let tasks = v.board.clone();
+        let q = msg("q1", "L1", Some("C"), "question", "Which table?", 0);
+        v.now_ns = 60 * 1_000_000_000;
+        set_data(&mut v, run.clone(), tasks.clone(), vec![q.clone()]);
+        assert!(
+            v.needs.iter().all(|n| n.kind != NeedKind::Question),
+            "the coordinator has it: {:?}",
+            v.needs
+        );
+        v.now_ns = 6 * 60 * 1_000_000_000;
+        set_data(&mut v, run, tasks, vec![q]);
+        let n = v
+            .needs
+            .iter()
+            .find(|n| n.kind == NeedKind::Question)
+            .unwrap();
+        assert_eq!(n.text, "a asked the coordinator 6m ago: Which table?");
     }
 
     #[test]
