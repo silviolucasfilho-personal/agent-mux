@@ -671,7 +671,7 @@ fn cli_check_env(workspace: &str, isolation: TaskIsolation) -> super::swarm::pla
     super::swarm::plan::CheckEnv {
         harnesses: crate::harness::Harness::ALL
             .iter()
-            .filter(|h| crate::session::resolve_command(h.as_str()).is_some())
+            .filter(|h| crate::session::command_available(h.as_str()))
             .map(|h| h.as_str().to_string())
             .collect(),
         agents: crate::agents::Catalog::load(&crate::assets::root(), Some(Path::new(workspace)))

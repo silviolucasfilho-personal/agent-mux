@@ -441,6 +441,37 @@ fn insert_task(
     Ok(task.id)
 }
 
+/// Edits a task's card: title, instructions and files on the board row,
+/// dependencies and acceptance on its plan extension.
+pub fn update_plan_task(
+    conn: &Connection,
+    db: Option<&Path>,
+    task_id: &str,
+    pt: &PlannedTask,
+    now: i64,
+) -> Result<(), String> {
+    bstore::update_task_spec(
+        conn,
+        None,
+        task_id,
+        &pt.title,
+        &pt.instructions,
+        &pt.files,
+        now,
+    )?;
+    conn.execute(
+        "UPDATE swarm_tasks SET depends_on_json = ?1, acceptance = ?2 WHERE task_id = ?3",
+        params![
+            serde_json::to_string(&pt.depends_on).unwrap_or_else(|_| "[]".into()),
+            pt.acceptance,
+            task_id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    poke(db);
+    Ok(())
+}
+
 /// Removes a task that never started from the board.
 pub fn delete_task(conn: &Connection, task_id: &str) -> rusqlite::Result<()> {
     conn.execute(
