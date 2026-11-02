@@ -980,199 +980,8 @@ pub fn list_workspace_messages(
     Ok(out)
 }
 
-/// The swarm a workspace is running: who leads it and what it was started with.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SwarmState {
-    pub workspace: String,
-    pub coordinator_launch: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_workers: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub isolation: Option<TaskIsolation>,
-    pub started_ns: i64,
-    pub updated_ns: i64,
-}
-
-/// Makes `coordinator_launch` the Swarm Coordinator of `workspace`. A `goal`
-/// (and `max_workers`, `isolation`) given here replaces what was recorded;
-/// `None` keeps it, so promoting another session keeps the swarm's goal.
-#[allow(clippy::too_many_arguments)]
-pub fn set_coordinator(
-    conn: &Connection,
-    db_path: Option<&Path>,
-    workspace: &str,
-    coordinator_launch: &str,
-    goal: Option<&str>,
-    max_workers: Option<usize>,
-    isolation: Option<TaskIsolation>,
-    now: i64,
-) -> rusqlite::Result<SwarmState> {
-    let goal = goal.map(str::trim).filter(|g| !g.is_empty());
-    conn.execute(
-        "INSERT INTO swarm_state (workspace, coordinator_launch, goal, max_workers, isolation, started_ns, updated_ns)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-         ON CONFLICT (workspace) DO UPDATE SET
-             coordinator_launch = excluded.coordinator_launch,
-             goal = COALESCE(excluded.goal, swarm_state.goal),
-             max_workers = COALESCE(excluded.max_workers, swarm_state.max_workers),
-             isolation = COALESCE(excluded.isolation, swarm_state.isolation),
-             updated_ns = excluded.updated_ns",
-        params![
-            workspace,
-            coordinator_launch,
-            goal,
-            max_workers.map(|n| n as i64),
-            isolation.map(TaskIsolation::as_str),
-            now
-        ],
-    )?;
-    if let Some(p) = db_path {
-        crate::tracing::store::poke_wake(p);
-    }
-    Ok(swarm_state(conn, workspace)?.expect("row written above"))
-}
-
-/// The swarm recorded for `workspace`, if one was started or a coordinator promoted.
-pub fn swarm_state(conn: &Connection, workspace: &str) -> rusqlite::Result<Option<SwarmState>> {
-    conn.query_row(
-        "SELECT workspace, coordinator_launch, goal, max_workers, isolation, started_ns, updated_ns
-         FROM swarm_state WHERE workspace = ?1",
-        params![workspace],
-        |r| {
-            Ok(SwarmState {
-                workspace: r.get(0)?,
-                coordinator_launch: r.get(1)?,
-                goal: r.get(2)?,
-                max_workers: r.get::<_, Option<i64>>(3)?.map(|n| n.max(0) as usize),
-                isolation: r
-                    .get::<_, Option<String>>(4)?
-                    .and_then(|s| TaskIsolation::parse(&s)),
-                started_ns: r.get(5)?,
-                updated_ns: r.get(6)?,
-            })
-        },
-    )
-    .optional()
-}
-
-/// Where a swarm's plan stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum PlanStatus {
-    /// Being written, or proposed and not decided yet.
-    Drafting,
-    Approved,
-    /// The operator sent it back for changes.
-    SentBack,
-}
-
-impl PlanStatus {
-    fn parse(s: &str) -> PlanStatus {
-        match s {
-            "approved" => PlanStatus::Approved,
-            "sent-back" => PlanStatus::SentBack,
-            _ => PlanStatus::Drafting,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PlanStatus::Drafting => "drafting",
-            PlanStatus::Approved => "approved",
-            PlanStatus::SentBack => "sent-back",
-        }
-    }
-}
-
-/// A swarm's plan gate (`swarm_plans`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PlanGate {
-    pub gate: bool,
-    pub status: PlanStatus,
-    /// Standby workers to spawn once the plan is approved.
-    pub standby: usize,
-    pub decided_ns: Option<i64>,
-}
-
-/// Starts (or restarts) `workspace`'s plan: drafting, with or without the
-/// gate, and `standby` workers to spawn on approval.
-pub fn set_plan_gate(
-    conn: &Connection,
-    db_path: Option<&Path>,
-    workspace: &str,
-    gate: bool,
-    standby: usize,
-    now: i64,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO swarm_plans (workspace, gate, status, standby, decided_ns, updated_ns)
-         VALUES (?1, ?2, 'drafting', ?3, NULL, ?4)
-         ON CONFLICT (workspace) DO UPDATE SET
-             gate = excluded.gate,
-             status = 'drafting',
-             standby = excluded.standby,
-             decided_ns = NULL,
-             updated_ns = excluded.updated_ns",
-        params![workspace, gate, standby as i64, now],
-    )?;
-    if let Some(p) = db_path {
-        crate::tracing::store::poke_wake(p);
-    }
-    Ok(())
-}
-
-pub fn plan_gate(conn: &Connection, workspace: &str) -> rusqlite::Result<Option<PlanGate>> {
-    conn.query_row(
-        "SELECT gate, status, standby, decided_ns FROM swarm_plans WHERE workspace = ?1",
-        params![workspace],
-        |r| {
-            Ok(PlanGate {
-                gate: r.get::<_, i64>(0)? != 0,
-                status: PlanStatus::parse(&r.get::<_, String>(1)?),
-                standby: r.get::<_, i64>(2)?.max(0) as usize,
-                decided_ns: r.get(3)?,
-            })
-        },
-    )
-    .optional()
-}
-
-/// Records the operator's decision on `workspace`'s plan.
-pub fn decide_plan(
-    conn: &Connection,
-    db_path: Option<&Path>,
-    workspace: &str,
-    approved: bool,
-    now: i64,
-) -> Result<PlanGate, String> {
-    let n = conn
-        .execute(
-            "UPDATE swarm_plans SET status = ?1, decided_ns = ?2, updated_ns = ?2
-             WHERE workspace = ?3",
-            params![
-                if approved { "approved" } else { "sent-back" },
-                now,
-                workspace
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Err("this swarm has no plan to decide on".into());
-    }
-    if let Some(p) = db_path {
-        crate::tracing::store::poke_wake(p);
-    }
-    plan_gate(conn, workspace)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "the plan disappeared".into())
-}
-
-/// Why work may not start yet in `workspace`: its orchestrated swarm
-/// (schema v21) is not past review, or (a coordinator-session swarm) the
-/// gate is on and the plan is not approved. `None` when nothing holds it
-/// back.
+/// Why work may not start yet in `workspace`: its swarm's plan is not past
+/// review. `None` when nothing holds it back.
 pub fn plan_blocks(conn: &Connection, workspace: &str) -> Option<String> {
     if let Some(swarm) = crate::bus::swarm::record::live_swarm(conn, workspace)
         .ok()
@@ -1186,12 +995,7 @@ pub fn plan_blocks(conn: &Connection, workspace: &str) -> Option<String> {
             )
         });
     }
-    let plan = plan_gate(conn, workspace).ok().flatten()?;
-    (plan.gate && plan.status != PlanStatus::Approved).then(|| {
-        "the swarm's plan awaits the operator's approval: put the tasks on the board, \
-         send the plan to `user` with topic `plan`, and wait for `plan-approved`"
-            .to_string()
-    })
+    None
 }
 
 /// What the operator did with a finished worktree branch.
@@ -1288,28 +1092,10 @@ pub fn stop_swarm(
             params![workspace],
         )
         .map_err(|e| e.to_string())?;
-    clear_swarm(conn, db_path, workspace).map_err(|e| e.to_string())?;
-    Ok((cancelled, released))
-}
-
-/// Forgets the swarm recorded for `workspace` (`agent-mux swarm stop`).
-pub fn clear_swarm(
-    conn: &Connection,
-    db_path: Option<&Path>,
-    workspace: &str,
-) -> rusqlite::Result<usize> {
-    let n = conn.execute(
-        "DELETE FROM swarm_state WHERE workspace = ?1",
-        params![workspace],
-    )?;
-    conn.execute(
-        "DELETE FROM swarm_plans WHERE workspace = ?1",
-        params![workspace],
-    )?;
     if let Some(p) = db_path {
         crate::tracing::store::poke_wake(p);
     }
-    Ok(n)
+    Ok((cancelled, released))
 }
 
 /// Puts a failed or abandoned task back on the board for another try: open,

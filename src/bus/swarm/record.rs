@@ -441,6 +441,145 @@ fn insert_task(
     Ok(task.id)
 }
 
+/// The live swarm `launch` works for and the task it holds, if it is one
+/// of a swarm's workers (its task not yet terminal).
+pub fn swarm_of_worker(
+    conn: &Connection,
+    launch: &str,
+) -> rusqlite::Result<Option<(SwarmRun, BoardTask)>> {
+    let found: Option<(String, String)> = conn
+        .query_row(
+            "SELECT st.swarm_id, st.task_id FROM swarm_tasks st
+             JOIN agent_tasks t ON t.id = st.task_id
+             JOIN swarms s ON s.id = st.swarm_id
+             WHERE t.assigned_to = ?1 AND s.ended_ns IS NULL
+               AND t.status IN ('open','claimed','running')
+             ORDER BY t.updated_ns DESC LIMIT 1",
+            params![launch],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((swarm_id, task_id)) = found else {
+        return Ok(None);
+    };
+    let Some(swarm) = get_swarm(conn, &swarm_id)? else {
+        return Ok(None);
+    };
+    let task = board(conn, &swarm_id)?
+        .into_iter()
+        .find(|t| t.task.id == task_id);
+    Ok(task.map(|t| (swarm, t)))
+}
+
+/// A key for a task a worker proposes: its title as a slug, unique on the
+/// board.
+fn proposal_key(conn: &Connection, swarm_id: &str, title: &str) -> String {
+    let mut slug: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|w| !w.is_empty())
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        slug = "task".into();
+    }
+    let taken = |k: &str| -> bool {
+        conn.query_row(
+            "SELECT 1 FROM swarm_tasks WHERE swarm_id = ?1 AND plan_key = ?2",
+            params![swarm_id, k],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some()
+    };
+    if !taken(&slug) {
+        return slug;
+    }
+    (2..)
+        .map(|n| format!("{slug}-{n}"))
+        .find(|k| !taken(k))
+        .expect("an unused key")
+}
+
+/// What a swarm worker's `task_split` or `delegate` becomes (§5.6): new
+/// tasks on its swarm's board that wait for the operator (`proposed`), or,
+/// with the plan gate off, tasks the dispatcher schedules at once. Nothing
+/// is spawned by the worker. Answers each new task's key and id.
+pub fn propose(
+    conn: &Connection,
+    db: Option<&Path>,
+    swarm: &SwarmRun,
+    specs: &[NewTaskSpec],
+    now: i64,
+) -> Result<Vec<(String, String)>, String> {
+    if specs.is_empty() {
+        return Err("at least one task spec is required".into());
+    }
+    let mut out = Vec::new();
+    for spec in specs {
+        if spec.title.trim().is_empty() {
+            return Err("task title cannot be empty".into());
+        }
+        let key = proposal_key(conn, &swarm.id, &spec.title);
+        let pt = PlannedTask {
+            key: key.clone(),
+            title: spec.title.trim().to_string(),
+            instructions: spec.instructions.trim().to_string(),
+            acceptance: None,
+            files: spec.files.clone(),
+            depends_on: Vec::new(),
+            harness: spec.target_harness.clone(),
+            agent: spec.target_agent.clone(),
+            isolation: Some(spec.isolation.as_str().to_string()),
+        };
+        let id = add_task(conn, db, swarm, &pt, swarm.gate, now)?;
+        out.push((key, id));
+    }
+    Ok(out)
+}
+
+/// A worker's answer for [`propose`]: what happened, in its words.
+pub fn proposal_note(swarm: &SwarmRun, created: &[(String, String)]) -> String {
+    let keys = created
+        .iter()
+        .map(|(k, _)| format!("`{k}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if swarm.gate {
+        format!(
+            "You are a worker of swarm {}: agent-mux runs its tasks, so nothing was spawned. \
+             {keys} went on the board as a proposal for the operator to accept; carry on with your own task.",
+            swarm.id
+        )
+    } else {
+        format!(
+            "You are a worker of swarm {}: agent-mux runs its tasks, so nothing was spawned. \
+             {keys} went on the board and will start when a worker is free; carry on with your own task.",
+            swarm.id
+        )
+    }
+}
+
+/// Clears the final check's outcome (a retried task makes it stale).
+pub fn clear_check(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE swarms SET check_result = NULL WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
 /// Edits a task's card: title, instructions and files on the board row,
 /// dependencies and acceptance on its plan extension.
 pub fn update_plan_task(
@@ -714,6 +853,7 @@ pub fn apply(
         SwarmVerb::Retry => {
             let t = target.expect("takes a task");
             bstore::reopen_task(conn, db, &t.task.id, now)?;
+            clear_check(conn, &swarm.id).map_err(|e| e.to_string())?;
             if matches!(status, SwarmStatus::Integrating | SwarmStatus::Finished) {
                 set_status(conn, db, &swarm.id, SwarmStatus::Running, now)
                     .map_err(|e| e.to_string())?;
@@ -842,8 +982,43 @@ mod tests {
         assert_eq!(b2[0].task.id, b[0].task.id, "the started task is kept");
         assert!(bstore::get_task(&conn, &b[1].task.id).unwrap().is_none());
 
+        // A worker's task_split becomes a proposal on its swarm's board.
+        let held = b2[1].task.id.clone();
+        conn.execute(
+            "UPDATE agent_tasks SET status = 'running', assigned_to = 'worker-L' WHERE id = ?1",
+            params![held],
+        )
+        .unwrap();
+        let (sw, t) = swarm_of_worker(&conn, "worker-L").unwrap().unwrap();
+        assert_eq!(
+            (sw.id.as_str(), t.task.id.as_str()),
+            (s.id.as_str(), held.as_str())
+        );
+        assert!(swarm_of_worker(&conn, "someone-else").unwrap().is_none());
+        let spec = |title: &str| NewTaskSpec {
+            title: title.into(),
+            instructions: "found while working".into(),
+            ..Default::default()
+        };
+        let made = propose(
+            &conn,
+            None,
+            &sw,
+            &[spec("Fix the flaky test!"), spec("Fix the flaky test")],
+            4,
+        )
+        .unwrap();
+        let keys: Vec<&str> = made.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["fix-the-flaky-test", "fix-the-flaky-test-2"]);
+        let b3 = board(&conn, &s.id).unwrap();
+        assert!(
+            b3.iter().filter(|t| t.ext.proposed).count() == 2,
+            "the gate is on: proposals"
+        );
+        assert!(proposal_note(&sw, &made).contains("as a proposal for the operator"));
+
         let (cancelled, _) = end_swarm(&conn, None, &s, 5).unwrap();
-        assert_eq!(cancelled, 2);
+        assert_eq!(cancelled, 4);
         assert!(live_swarm(&conn, &s.workspace).unwrap().is_none());
         create_swarm(&conn, None, &new_swarm(&ws), 6).expect("a new swarm after the end");
     }

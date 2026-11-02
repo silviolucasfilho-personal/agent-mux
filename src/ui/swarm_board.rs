@@ -117,8 +117,18 @@ fn mission_strip(v: &SwarmBoard, width: usize) -> Line<'static> {
     } else {
         ""
     };
+    let check_state = s
+        .check_result
+        .as_deref()
+        .and_then(crate::bus::swarm::check::CheckResult::parse);
+    let check = match (&s.check_cmd, check_state) {
+        (Some(_), Some(r)) if r.running => " · check running",
+        (Some(_), Some(r)) if r.passed => " · check ✓",
+        (Some(_), Some(_)) => " · check ✗",
+        _ => "",
+    };
     let tail = format!(
-        " · {}{ended} · {done}/{total} done {bar} · {}/{} workers · {elapsed} · {} tok {} ",
+        " · {}{ended}{check} · {done}/{total} done {bar} · {}/{} workers · {elapsed} · {} tok {} ",
         state_label(s.status),
         v.busy_workers(),
         s.max_workers,
@@ -197,7 +207,7 @@ fn draw_needs(f: &mut Frame, area: Rect, v: &SwarmBoard, shown: usize) {
     for (i, need) in v.needs.iter().enumerate().skip(start).take(shown) {
         let selected = focused && i == v.selected_need;
         let kind_style = match need.kind {
-            NeedKind::Failed | NeedKind::Lost | NeedKind::PlannerFailed => {
+            NeedKind::Failed | NeedKind::Lost | NeedKind::PlannerFailed | NeedKind::CheckFailed => {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             }
             NeedKind::Question | NeedKind::Prompt | NeedKind::Plan | NeedKind::Stalled => {

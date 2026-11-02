@@ -52,6 +52,10 @@ if [ -n "$AGENT_MUX_SWARM_PLAN" ]; then
 fi
 if [ -n "$AGENT_MUX_TASK_ID" ]; then
   printf '%s\n' "$@" > "$r/worker-$AGENT_MUX_TASK_ID.txt"
+  if [ -f '{bin}/propose' ] && [ ! -f "$r/proposed-once" ]; then
+    touch "$r/proposed-once"
+    '{mux}' bus split --title "Follow-up found by the worker" --instructions "Tidy it." --workspace '{ws}' --db '{db}' > "$r/split.txt" 2>&1
+  fi
   '{mux}' bus done "$AGENT_MUX_TASK_ID" --workspace '{ws}' --db '{db}' --result "did $AGENT_MUX_TASK_ID" > "$r/done-$AGENT_MUX_TASK_ID.txt" 2>&1
   echo "worker finished"
   sleep 600
@@ -59,6 +63,7 @@ fi
 exit 0
 "#,
             calls = bin.join("calls").display(),
+            bin = bin.display(),
             plan = plan_file.display(),
             mux = env!("CARGO_BIN_EXE_agent-mux"),
             ws = ws.display(),
@@ -176,6 +181,10 @@ fn status_of(f: &Fixture, key: &str) -> Option<TaskStatus> {
 }
 
 fn start(f: &mut Fixture, gate: bool) {
+    start_with(f, gate, None);
+}
+
+fn start_with(f: &mut Fixture, gate: bool, check: Option<&str>) {
     f.app
         .start_orchestrated_swarm(StartSwarm {
             workspace: f.ws.clone(),
@@ -184,7 +193,7 @@ fn start(f: &mut Fixture, gate: bool) {
             max_workers: 2,
             isolation: TaskIsolation::Shared,
             gate,
-            check: None,
+            check: check.map(str::to_string),
         })
         .unwrap_or_else(|e| panic!("the swarm did not start: {e}"));
 }
@@ -334,5 +343,73 @@ async fn a_broken_plan_stays_in_review_with_the_planners_error() {
         .swarm_action(&f.ws, SwarmVerb::Approve, None, None)
         .unwrap_err();
     assert!(err.contains("the plan has no tasks"), "{err}");
+    f.app.kill_all();
+}
+
+#[tokio::test]
+async fn a_workers_proposal_waits_for_the_operator_and_the_check_runs_before_finishing() {
+    let mut f = fixture(PLAN);
+    std::fs::write(f.bin.join("propose"), "").unwrap();
+    start_with(&mut f, true, Some("echo checked-ok"));
+    assert!(
+        pump_until(&mut f, Duration::from_secs(60), |f| {
+            swarm(f).is_some_and(|s| s.status == SwarmStatus::Review)
+        })
+        .await
+    );
+    f.app
+        .swarm_action(&f.ws, SwarmVerb::Approve, None, None)
+        .unwrap();
+
+    // The first worker proposes a task instead of starting an agent.
+    assert!(
+        pump_until(&mut f, Duration::from_secs(60), |f| {
+            board(f).iter().any(|t| t.ext.proposed)
+        })
+        .await,
+        "no proposal: {:?}",
+        std::fs::read_to_string(f.bin.join("calls/split.txt"))
+    );
+    let said = std::fs::read_to_string(f.bin.join("calls/split.txt")).unwrap();
+    assert!(said.contains("as a proposal for the operator"), "{said}");
+    let proposal = board(&f).into_iter().find(|t| t.ext.proposed).unwrap();
+    assert_eq!(proposal.ext.plan_key, "follow-up-found-by");
+    assert_eq!(
+        proposal.task.created_by,
+        record::creator(&swarm(&f).unwrap().id)
+    );
+
+    // Both planned tasks finish; the proposal holds the swarm until decided.
+    assert!(
+        pump_until(&mut f, Duration::from_secs(60), |f| {
+            status_of(f, "queries") == Some(TaskStatus::Done)
+        })
+        .await
+    );
+    pump_until(&mut f, Duration::from_millis(1500), |_| false).await;
+    assert_eq!(swarm(&f).unwrap().status, SwarmStatus::Running);
+    assert_eq!(proposal.task.status, TaskStatus::Open);
+    let accepted = f
+        .app
+        .swarm_action(&f.ws, SwarmVerb::Accept, Some("follow-up"), None)
+        .unwrap();
+    assert_eq!(accepted, "accepted `follow-up-found-by`");
+
+    // It runs, then the check, then the swarm is finished.
+    assert!(
+        pump_until(&mut f, Duration::from_secs(60), |f| {
+            swarm(f).is_some_and(|s| s.status == SwarmStatus::Finished)
+        })
+        .await,
+        "{:?}",
+        swarm(&f)
+    );
+    assert_eq!(status_of(&f, "follow-up-found-by"), Some(TaskStatus::Done));
+    let r = agent_mux::bus::swarm::check::CheckResult::parse(
+        swarm(&f).unwrap().check_result.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert!(r.passed && !r.running, "{r:?}");
+    assert_eq!(r.tail, "checked-ok");
     f.app.kill_all();
 }

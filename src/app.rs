@@ -87,7 +87,7 @@ pub enum Mode {
     Memory(Box<memory_view::MemoryView>),
     /// The Workspaces Explorer screen: folders, sub-folders, stacks and agents.
     Workspaces(Box<workspaces_view::WorkspacesView>),
-    /// The Agent Swarm Control Room screen: Coordinator, Workers, Board, Leases and Feed.
+    /// The Swarm screen: one workspace's swarm as its plan's task board.
     Swarm(Box<swarm_board::SwarmBoard>),
     /// The Langfuse screen: remote traces, observation trees, and web links.
     Langfuse(Box<langfuse_view::LangfuseView>),
@@ -4953,36 +4953,9 @@ impl App {
             .collect()
     }
 
-    /// `Some((active, cap))` when `workspace`'s swarm has a `max_workers`
-    /// and that many delegated workers are already live there (sessions in
-    /// a bus group, the coordinator not counted).
-    fn swarm_worker_cap_reached(&self, workspace: &std::path::Path) -> Option<(usize, usize)> {
-        let db = self.trace_db_path.as_deref()?;
-        let conn = crate::tracing::store::open_ro(db).ok()?;
-        let norm = crate::bus::store::normalize_workspace(workspace);
-        let state = crate::bus::store::swarm_state(&conn, &norm)
-            .ok()
-            .flatten()?;
-        let cap = state.max_workers?;
-        let active = self
-            .swarm_live_sessions(workspace)
-            .iter()
-            .filter(|s| {
-                s.is_delegated_worker
-                    && s.state != "exited"
-                    && s.launch_id != state.coordinator_launch
-            })
-            .count();
-        (active >= cap).then_some((active, cap))
-    }
-
-    /// Refreshes the swarm screen when something it shows changed: the
-    /// store's change feed, a live session's state, a lease's expiry
-    /// (`SwarmView::refresh_due`). A quiet swarm costs one `MAX(seq)` every
-    /// half second.
-    /// Ends `workspace`'s swarm: stops its live coordinator and worker
-    /// sessions (bus-group sessions there and in its task worktrees), then
-    /// `bus::store::stop_swarm`. Answers the sessions stopped and the
+    /// Ends `workspace`'s swarm: stops its worker sessions (bus-group
+    /// sessions there and in its task worktrees), then `record::end_swarm`
+    /// (or `bus::store::stop_swarm` when no swarm row is live). Answers the sessions stopped and the
     /// store's result.
     pub fn stop_swarm(
         &mut self,
@@ -8056,12 +8029,6 @@ impl App {
                         ws_path.display()
                     ));
                 }
-                if let Some((active, cap)) = self.swarm_worker_cap_reached(&ws_path) {
-                    return ControlResponse::err(format!(
-                        "worker cap reached: {active}/{cap} workers active in this workspace; \
-                         the task stays on the board until one finishes (or raise max_workers)"
-                    ));
-                }
                 if let Some(why) = self
                     .trace_db_path
                     .as_deref()
@@ -8302,176 +8269,6 @@ impl App {
                         error: None,
                     },
                     Err(e) => ControlResponse::err(e),
-                }
-            }
-            ControlRequest::SpawnCoordinator {
-                workspace,
-                goal,
-                harness,
-                max_workers,
-                isolation,
-                plan_gate,
-            } => {
-                let plan_gate = plan_gate.unwrap_or(true);
-                let target_harness = match harness.as_deref() {
-                    Some(h) if !h.trim().is_empty() => match h.parse::<crate::harness::Harness>() {
-                        Ok(parsed) => parsed,
-                        Err(e) => return ControlResponse::err(e),
-                    },
-                    _ => self
-                        .profiles
-                        .iter()
-                        .find_map(|p| crate::harness::Harness::detect(&p.command))
-                        .unwrap_or(crate::harness::Harness::Claude),
-                };
-
-                let ws_path = std::path::PathBuf::from(&workspace);
-                if !ws_path.is_dir() {
-                    return ControlResponse::err(format!(
-                        "workspace '{}' does not exist",
-                        ws_path.display()
-                    ));
-                }
-
-                let mut profile = self
-                    .profiles
-                    .iter()
-                    .find(|p| crate::harness::Harness::detect(&p.command) == Some(target_harness))
-                    .cloned()
-                    .unwrap_or_else(|| Profile {
-                        name: format!("coordinator · {}", target_harness.as_str()),
-                        command: target_harness.as_str().to_string(),
-                        args: Vec::new(),
-                        default_dir: None,
-                        tracing: None,
-                        model: None,
-                        bypass_approvals: Some(self.bypass_approvals_default),
-                    });
-                profile.name = format!("★ Coord ({})", target_harness.as_str());
-                let bypass = profile
-                    .bypass_approvals
-                    .unwrap_or(self.bypass_approvals_default);
-                let mut options = crate::harness::LaunchOptions {
-                    model: profile.model.clone(),
-                    bypass_approvals: bypass,
-                    ..Default::default()
-                };
-
-                let agent_prep =
-                    match self.session_agent("coordinator", Some(target_harness), &ws_path) {
-                        Ok(prep) => Some(prep),
-                        Err(e) => return ControlResponse::err(e),
-                    };
-                if options.model.is_none() {
-                    options.model = agent_prep.as_ref().and_then(|a| a.0.model.clone());
-                }
-                if !options.is_empty() {
-                    profile.args =
-                        crate::harness::compose(&profile.args, &options.render(target_harness));
-                }
-                if let Some((plan, _)) = &agent_prep {
-                    profile.args.retain(|a| !plan.remove.contains(a));
-                    profile.args.extend(plan.args.iter().cloned());
-                    if let Some(e) = plan.effort.as_deref()
-                        && let Some(mut a) =
-                            crate::workflows::harness::effort_args(target_harness, e)
-                    {
-                        profile.args.append(&mut a);
-                    }
-                }
-
-                let prompt = crate::bus::swarm::compose_coordinator_prompt(
-                    &goal,
-                    max_workers,
-                    isolation,
-                    plan_gate,
-                );
-                let opening_args = target_harness.opening_args(prompt);
-                profile.args.extend(opening_args.iter().cloned());
-
-                let id = self.next_id;
-                let mut extra_env = vec![
-                    (
-                        "AGENT_MUX_SWARM_ROLE".to_string(),
-                        "coordinator".to_string(),
-                    ),
-                    ("AGENT_MUX_SWARM_GOAL".to_string(), goal.clone()),
-                ];
-                if let Some((plan, _)) = &agent_prep {
-                    extra_env.extend(plan.env.iter().cloned());
-                }
-                let mut session = match self.spawn_traced_full(
-                    id,
-                    profile,
-                    ws_path.clone(),
-                    &extra_env,
-                    None,
-                    None,
-                    None,
-                    &[],
-                ) {
-                    Ok(s) => s,
-                    Err(e) => return ControlResponse::err(format!("spawn failed: {e}")),
-                };
-                session.agent = Some("coordinator".to_string());
-                session.opening_args = opening_args;
-                session.group = Some(crate::tree::GroupRef {
-                    kind: crate::tree::GroupKind::Bus,
-                    id: format!("swarm-coord-{id}"),
-                    title: "coordinator".into(),
-                    detail: target_harness.as_str().into(),
-                    label: "Swarm Coordinator".into(),
-                });
-                let new_launch_id = session
-                    .trace
-                    .as_ref()
-                    .map(|t| t.launch_id.clone())
-                    .unwrap_or_else(|| format!("session-{id}"));
-                let session_id = session.id;
-                self.next_id += 1;
-                self.sessions.push(session);
-                let _ = self.save_active_sessions();
-
-                if let Some(db) = self.trace_db_path.as_deref()
-                    && let Ok(conn) = crate::tracing::store::open_aux(db)
-                {
-                    let now_ns = crate::tracing::store::now_ns();
-                    let norm_ws = crate::bus::store::normalize_workspace(&ws_path);
-                    let _ = crate::bus::store::set_coordinator(
-                        &conn,
-                        Some(db),
-                        &norm_ws,
-                        &new_launch_id,
-                        Some(&goal),
-                        Some(max_workers),
-                        Some(isolation),
-                        now_ns,
-                    );
-                    let _ = crate::bus::store::set_plan_gate(
-                        &conn,
-                        Some(db),
-                        &norm_ws,
-                        plan_gate,
-                        0,
-                        now_ns,
-                    );
-                }
-
-                self.notice = Some(Notice::info(format!(
-                    "launched Swarm Coordinator on {} ({})",
-                    target_harness.as_str(),
-                    crate::bus::short_id(&new_launch_id)
-                )));
-
-                ControlResponse {
-                    ok: true,
-                    launch_id: Some(new_launch_id),
-                    session_id: Some(session_id),
-                    harness: Some(target_harness.as_str().to_string()),
-                    worktree: None,
-                    branch: None,
-                    detail: Some("spawned Swarm Coordinator session".into()),
-                    error: None,
                 }
             }
         }

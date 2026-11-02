@@ -59,7 +59,7 @@ Live peer-to-peer coordination and lead-to-worker task delegation across Claude 
 - **Messages** are written on the `>` command line (`swarm_board::parse_command`; `@all` or `@<task key>`; `!` sends topic `urgent`).
 - **Refresh:** only when `trace_changes` advances or a live session changes (`SwarmBoard::refresh_due`).
 
-`WakeWorkspace` wakes every live session of a workspace but the sender, which is how a broadcast with `wake` reaches the swarm. `SpawnWorker` refuses past a coordinator-era swarm's `max_workers` (`App::swarm_worker_cap_reached`). The orchestrated dispatcher keeps its own cap.
+`WakeWorkspace` wakes every live session of a workspace but the sender, which is how a broadcast with `wake` reaches the swarm. The dispatcher keeps the swarm's `max_workers`, and `SpawnWorker` itself has no cap.
 
 Since schema v21 agent-mux runs a swarm itself, without a coordinator session:
 1. A headless planner run (skill `skills/swarm-plan`, `$AGENT_MUX_SWARM_PLAN`, prompt `[swarm] plan`) answers a `swarm-plan` block.
@@ -70,7 +70,10 @@ Since schema v21 agent-mux runs a swarm itself, without a coordinator session:
    - nudges a worker idle on its task once
    - advances the swarm
 
-The coordinator-era code (`swarm_state`, `swarm_plans`, `SpawnCoordinator`, `SwarmSnapshot` lanes and needs) remains only until its removal.
+5. A worker's `task_split` or `delegate` becomes a proposal on its board (`record::swarm_of_worker`, `record::propose`).
+6. The swarm's optional check command runs (`bus::swarm::check`, `Action::RunCheck`) before it reads `finished`.
+
+The coordinator-era tables `swarm_state` and `swarm_plans` (v17, v19) are left in the schema, unused.
 Guide: `docs/bus.md`; how to use swarms: `docs/swarm.md`.
 
 ## OpenCode (`src/opencode.rs`, `Harness::OpenCode`)
