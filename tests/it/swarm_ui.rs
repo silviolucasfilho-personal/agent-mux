@@ -1,20 +1,28 @@
-//! Swarm Mission Control drawn into a test terminal: the mission strip and
-//! the lanes, a waiting lane's thread with its clock and whole question, the
-//! task tab, a message opened in full and a reply that answers it.
+//! The Swarm screen drawn into a test terminal and driven through the App
+//! (`app::swarm_board`, `ui::swarm_board`): a plan in review drawn as a
+//! board with what needs the operator, `y` approving only a plan without
+//! errors, `d` deleting a draft task, `y` merging a finished branch, the
+//! launch card and form, and a refresh only when the store moved.
 
-use agent_mux::app::swarm_view::{Focus, Modal, Outcome, PanelTab, SwarmView};
+#![cfg(unix)]
+
+use agent_mux::app::swarm_board::{Modal, SwarmBoard};
 use agent_mux::app::{App, Mode};
+use agent_mux::bus::TaskIsolation;
+use agent_mux::bus::TaskStatus;
 use agent_mux::bus::store as bstore;
-use agent_mux::bus::swarm::{LaneState, LiveSwarmSession};
-use agent_mux::bus::{NewTaskSpec, TaskIsolation, TaskStatus};
+use agent_mux::bus::swarm::plan::{Plan, PlannedTask};
+use agent_mux::bus::swarm::record::{self, NewSwarm, SwarmRun, SwarmStatus};
 use agent_mux::config::Profile;
+use agent_mux::harness::Harness;
 use agent_mux::tracing::pricing::PriceTable;
-use agent_mux::tracing::store::{OpenOptions, open_aux, open_rw};
+use agent_mux::tracing::store::{OpenOptions, now_ns, open_aux, open_rw};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::process::Command;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -38,29 +46,19 @@ fn render(app: &App, width: u16, height: u16) -> String {
     out
 }
 
-fn live(idx: usize, launch: &str, provider: &str, state: &str, ws: &str) -> LiveSwarmSession {
-    LiveSwarmSession {
-        session_idx: idx,
-        session_id: idx + 1,
-        launch_id: launch.into(),
-        provider: provider.into(),
-        profile_name: format!("{provider} profile"),
-        agent_persona: (idx == 0).then(|| "coordinator".to_string()),
-        state: state.into(),
-        workspace: ws.into(),
-        is_delegated_worker: idx > 0,
-        turns: 1,
-        tokens: 1_000,
-        cost_usd: 0.01,
-        running_tool: None,
-        quiet_ns: None,
-    }
+struct Fixture {
+    _dir: tempfile::TempDir,
+    ws: PathBuf,
+    db: PathBuf,
+    app: App,
 }
 
-/// A store with a coordinator, two workers, a task per worker and a
-/// two-paragraph question on the feed; answers the workspace and the DB.
-fn swarm_fixture(dir: &Path) -> (PathBuf, PathBuf, Vec<LiveSwarmSession>, i64) {
-    let db = dir.join("traces.db");
+/// A store, a workspace and an App whose only harness is a fake `claude`
+/// given by its absolute path (installed, whatever this machine has).
+fn fixture() -> Fixture {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("traces.db");
     let _ = open_rw(
         &db,
         OpenOptions {
@@ -71,400 +69,372 @@ fn swarm_fixture(dir: &Path) -> (PathBuf, PathBuf, Vec<LiveSwarmSession>, i64) {
         },
     )
     .unwrap();
-    let conn = open_aux(&db).unwrap();
-    let ws_path = dir.join("my-project");
-    std::fs::create_dir_all(&ws_path).unwrap();
-    let ws = bstore::normalize_workspace(&ws_path);
-    // 2026-10-30 14:05:09 UTC, as nanoseconds.
-    let now = 1_793_455_509_000_000_000i64;
-
-    bstore::set_coordinator(
-        &conn,
-        Some(&db),
-        &ws,
-        "coord-1111",
-        Some("Ship it"),
-        Some(4),
-        Some(TaskIsolation::Shared),
-        now - 600_000_000_000,
-    )
-    .unwrap();
-    let tasks = bstore::split_tasks(
-        &conn,
-        Some(&db),
-        &ws,
-        "coord-1111",
-        &[
-            NewTaskSpec {
-                title: "Add swarm view state machine".into(),
-                instructions: "the view".into(),
-                assigned_to: Some("worker-aaaa".into()),
-                ..Default::default()
-            },
-            NewTaskSpec {
-                title: "Wire bus store queries".into(),
-                instructions: "the store".into(),
-                assigned_to: Some("worker-bbbb".into()),
-                ..Default::default()
-            },
-        ],
-        now - 500_000_000_000,
-    )
-    .unwrap();
-    for (t, who) in tasks.iter().zip(["worker-aaaa", "worker-bbbb"]) {
-        bstore::update_task(
-            &conn,
-            Some(&db),
-            &t.id,
-            who,
-            TaskStatus::Running,
-            None,
-            None,
-            None,
-            None,
-            now - 400_000_000_000,
-        )
-        .unwrap();
-    }
-    bstore::send_message(
-        &conn,
-        Some(&db),
-        &ws,
-        "worker-bbbb",
-        Some("coord-1111"),
-        "question",
-        "Should cancelled tasks release their worktrees immediately?\n\nContext: the scaffolder prunes on cancel unless the tree is dirty.",
-        None,
-        now - 200_000_000_000,
-    )
-    .unwrap();
-
-    let sessions = vec![
-        live(0, "coord-1111", "claude", "working", &ws),
-        live(1, "worker-aaaa", "claude", "working", &ws),
-        live(2, "worker-bbbb", "codex", "idle", &ws),
-    ];
-    (ws_path, db, sessions, now)
-}
-
-fn app() -> App {
-    let (tx, _rx) = mpsc::channel(16);
-    App::new(
+    let ws = dir.path().join("my-project");
+    std::fs::create_dir_all(&ws).unwrap();
+    let ws = ws.canonicalize().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (tx, _rx) = mpsc::channel(256);
+    let mut app = App::new(
         vec![Profile {
-            name: "shell".into(),
-            command: "sh".into(),
+            name: "Claude Code".into(),
+            command: claude.to_string_lossy().into_owned(),
             args: vec![],
-            default_dir: None,
+            default_dir: Some(ws.to_string_lossy().into_owned()),
             tracing: None,
             model: None,
             bypass_approvals: None,
         }],
         None,
         tx,
-    )
-}
-
-fn open(ws: &Path, db: &Path, sessions: &[LiveSwarmSession], now: i64) -> SwarmView {
-    SwarmView::open(ws.to_path_buf(), Some(open_aux(db).unwrap()), sessions, now)
-}
-
-fn select(view: &mut SwarmView, name: &str) {
-    view.selected_lane = view
-        .lanes
-        .iter()
-        .position(|l| l.name == name)
-        .unwrap_or_else(|| panic!("no lane {name}: {:?}", view.lanes));
-}
-
-#[test]
-fn the_mission_strip_and_the_lanes_say_what_is_happening() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ws, db, sessions, now) = swarm_fixture(dir.path());
-    let mut app = app();
-    app.mode = Mode::Swarm(Box::new(open(&ws, &db, &sessions, now)));
-    let screen = render(&app, 120, 36);
-    let strip = screen.lines().next().unwrap();
-    for fact in ["Ship it", "executing", "0/2 done", "2/4 workers", "10m"] {
-        assert!(
-            strip.contains(fact),
-            "{fact:?} missing from the strip: {strip}"
-        );
+    );
+    app.trace_db_path = Some(db.clone());
+    app.library_root = Some(dir.path().join("library"));
+    Fixture {
+        _dir: dir,
+        ws,
+        db,
+        app,
     }
-    assert!(!strip.contains(&*dir.path().to_string_lossy()), "{strip}");
-    for row in [
-        "★ coordinator·claude",
-        "worker·claude",
-        "Add swarm view state machine",
-        "worker·codex",
-        "waiting 3m on coordinator",
-        "plan: 0/2 tasks done · 1 open question",
-    ] {
-        assert!(screen.contains(row), "{row:?} missing:\n{screen}");
+}
+
+fn task(key: &str, deps: &[&str]) -> PlannedTask {
+    PlannedTask {
+        key: key.into(),
+        title: format!("Do {key}"),
+        instructions: format!("Instructions for {key}."),
+        acceptance: Some(format!("{key} works")),
+        files: vec![format!("src/{key}.rs")],
+        depends_on: deps.iter().map(|s| s.to_string()).collect(),
+        harness: Some("claude".into()),
+        ..Default::default()
     }
-    assert!(
-        !screen.contains("W2") && !screen.contains("1969"),
-        "{screen}"
-    );
-
-    // A narrow terminal still draws.
-    let narrow = render(&app, 80, 24);
-    assert!(narrow.contains("coordinator·claude"), "{narrow}");
 }
 
-#[test]
-fn a_waiting_lane_opens_on_its_thread_with_a_clock_and_the_whole_question() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ws, db, sessions, now) = swarm_fixture(dir.path());
-    let mut view = open(&ws, &db, &sessions, now);
-    select(&mut view, "worker·codex");
-    assert_eq!(view.selected().unwrap().state, LaneState::Waiting);
-    assert_eq!(view.tab(), PanelTab::Thread);
-    let mut app = app();
-    app.mode = Mode::Swarm(Box::new(view));
-    let screen = render(&app, 120, 36);
-    assert!(
-        screen.contains("Context: the scaffolder prunes on cancel"),
-        "the whole question is in the thread:\n{screen}"
-    );
-    assert!(screen.contains("open question"), "{screen}");
-    let header = screen
-        .lines()
-        .find(|l| l.contains("worker·codex → coordinator·claude"))
-        .filter(|l| l.contains("open question"))
-        .unwrap_or_else(|| panic!("no message header:\n{screen}"));
-    let cell = header
-        .split('│')
-        .find(|c| c.contains("→"))
-        .unwrap()
-        .trim_start();
-    let clock = cell.trim_start_matches("▸ ").trim_start().as_bytes();
-    assert!(
-        clock.len() > 8 && clock[2] == b':' && clock[5] == b':',
-        "expected HH:MM:SS first: {header:?}"
-    );
-    assert!(!header.contains("2026-"), "{header}");
-}
-
-#[test]
-fn the_task_tab_shows_the_selected_lanes_task() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ws, db, sessions, now) = swarm_fixture(dir.path());
-    let mut view = open(&ws, &db, &sessions, now);
-    select(&mut view, "worker·claude");
-    view.handle_key(key(KeyCode::Char('4')));
-    assert_eq!(view.tab(), PanelTab::Task);
-    let mut app = app();
-    app.mode = Mode::Swarm(Box::new(view));
-    let screen = render(&app, 120, 36);
-    assert!(
-        screen.contains("── Instructions ──") && screen.contains("the view"),
-        "{screen}"
-    );
-}
-
-#[test]
-fn enter_opens_a_message_in_full_and_m_answers_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ws, db, sessions, now) = swarm_fixture(dir.path());
-    let mut view = open(&ws, &db, &sessions, now);
-    select(&mut view, "worker·codex");
-    view.handle_key(key(KeyCode::Tab));
-    assert_eq!(view.focus, Focus::Panel);
-    let question = view.selected_message().unwrap().id.clone();
-    view.handle_key(key(KeyCode::Enter));
-    assert!(matches!(view.modal, Some(Modal::ViewMessage { .. })));
-    let mut app = app();
-    app.mode = Mode::Swarm(Box::new(view));
-    let screen = render(&app, 120, 36);
-    assert!(screen.contains("worker·codex") && screen.contains("coordinator·claude"));
-
-    let Mode::Swarm(mut view) = app.mode else {
-        unreachable!()
-    };
-    view.handle_key(key(KeyCode::Char('m')));
-    assert!(view.modal.is_none(), "the reply replaces the message view");
-    for c in "yes, unless dirty".chars() {
-        view.handle_key(key(KeyCode::Char(c)));
-    }
-    app.mode = Mode::Swarm(view);
-    let screen = render(&app, 120, 36);
-    let lines: Vec<&str> = screen.lines().collect();
-    let input = lines
-        .iter()
-        .position(|l| l.contains("> @worker·codex yes, unless dirty▏"))
-        .unwrap_or_else(|| panic!("no command line:\n{screen}"));
-    assert!(
-        lines[input - 1]
-            .contains("→ worker·codex · answer · wakes it if idle · answers its message"),
-        "{}",
-        lines[input - 1]
-    );
-    let Mode::Swarm(mut view) = app.mode else {
-        unreachable!()
-    };
-    assert_eq!(
-        view.handle_key(key(KeyCode::Enter)),
-        Outcome::SendMessage {
-            to_launch: Some("worker-bbbb".into()),
-            reply_to: Some(question),
-            topic: "answer".into(),
-            body: "yes, unless dirty".into(),
-            urgent: false,
-            wake: true,
-        }
-    );
-}
-
-/// The fixture plus a question to the operator and a failed task.
-fn needs_fixture(dir: &Path) -> (PathBuf, PathBuf, Vec<LiveSwarmSession>, i64, String, String) {
-    let (ws, db, sessions, now) = swarm_fixture(dir);
-    let conn = open_aux(&db).unwrap();
-    let norm = bstore::normalize_workspace(&ws);
-    let q = bstore::send_message(
+/// A swarm in `status` with `tasks` on its board (another TUI's, so this
+/// App's dispatcher leaves it alone).
+fn seed(f: &Fixture, status: SwarmStatus, tasks: Vec<PlannedTask>) -> SwarmRun {
+    let conn = open_aux(&f.db).unwrap();
+    let swarm = record::create_swarm(
         &conn,
-        Some(&db),
-        &norm,
-        "worker-aaaa",
-        Some("user"),
-        "question",
-        "May I drop the v15 trigger while migrating?",
         None,
-        now - 60_000_000_000,
+        &NewSwarm {
+            workspace: f.ws.to_string_lossy().into_owned(),
+            goal: "Ship the follow-ups".into(),
+            planner_harness: "claude".into(),
+            max_workers: 2,
+            isolation: TaskIsolation::Shared,
+            gate: true,
+            check_cmd: None,
+            owner_run: Some("another-tui".into()),
+        },
+        now_ns(),
     )
     .unwrap();
-    let failed = bstore::split_tasks(
+    record::replace_draft(
         &conn,
-        Some(&db),
-        &norm,
-        "coord-1111",
-        &[NewTaskSpec {
-            title: "UI tests".into(),
-            instructions: "the tests".into(),
-            assigned_to: Some("worker-cccc".into()),
-            ..Default::default()
-        }],
-        now - 300_000_000_000,
+        None,
+        &swarm,
+        &Plan {
+            summary: "one task per subsystem".into(),
+            tasks,
+        },
+        now_ns(),
     )
-    .unwrap()
-    .remove(0);
+    .unwrap();
+    record::set_plan_result(
+        &conn,
+        None,
+        &swarm.id,
+        Some("one task per subsystem"),
+        None,
+        status,
+        now_ns(),
+    )
+    .unwrap();
+    record::get_swarm(&conn, &swarm.id).unwrap().unwrap()
+}
+
+fn open_screen(f: &mut Fixture) {
+    f.app.sessions.clear();
+    let conn = open_aux(&f.db).unwrap();
+    let view = SwarmBoard::open(
+        f.ws.clone(),
+        Some(conn),
+        &[],
+        None,
+        vec![Harness::Claude],
+        Harness::Claude,
+        now_ns(),
+    );
+    f.app.mode = Mode::Swarm(Box::new(view));
+    // As `open_swarm_view` does: a second read, with the plan's checks.
+    f.app.handle_key(
+        &KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+        Instant::now(),
+    );
+}
+
+fn view(app: &App) -> &SwarmBoard {
+    match &app.mode {
+        Mode::Swarm(v) => v,
+        other => panic!("not on the Swarm screen: {other:?}"),
+    }
+}
+
+fn press(f: &mut Fixture, c: KeyCode) {
+    f.app.handle_key(&key(c), Instant::now());
+}
+
+#[test]
+fn a_plan_in_review_is_drawn_as_a_board_with_what_needs_you() {
+    let mut f = fixture();
+    let mut bad = task("docs", &[]);
+    bad.harness = Some("gemini".into());
+    seed(
+        &f,
+        SwarmStatus::Review,
+        vec![task("schema", &[]), task("queries", &["schema"]), bad],
+    );
+    open_screen(&mut f);
+    let out = render(&f.app, 140, 32);
+    for want in [
+        "◆ Ship the follow-ups",
+        "· review · 0/3 done",
+        "0/2 workers",
+        "⚑ NEEDS YOU (1)",
+        "the plan waits for you: 3 task(s), 1 error(s) to fix first",
+        "Plan (3) · planner: claude · \"one task per subsystem\"",
+        "schema",
+        "queries ",
+        "← schema",
+        "schema · draft · Do schema",
+        "1 Task",
+        "Instructions for schema.",
+        "── Done when ──",
+        "y approve",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
+    }
+    if std::env::var_os("SWARM_UI_PRINT").is_some() {
+        println!("{out}");
+    }
+    for width in [80u16, 120, 180] {
+        let out = render(&f.app, width, 24);
+        for want in [
+            "◆ Ship",
+            "NEEDS YOU (1)",
+            "Plan (3)",
+            "schema",
+            "queries",
+            "1 Task",
+            "y approve",
+        ] {
+            assert!(
+                out.contains(want),
+                "{width} columns: missing {want:?} in:\n{out}"
+            );
+        }
+        if width == 80 && std::env::var_os("SWARM_UI_PRINT").is_some() {
+            println!("{out}");
+        }
+    }
+    // The task with an error is marked on the board and explains itself.
+    let docs_row = out.lines().find(|l| l.contains("Do docs")).unwrap();
+    assert!(docs_row.contains("!·"), "{docs_row}");
+    press(&mut f, KeyCode::Char('G'));
+    let out = render(&f.app, 140, 32);
+    assert!(
+        out.contains("✗ error: harness `gemini` is not installed"),
+        "{out}"
+    );
+}
+
+#[test]
+fn y_approves_only_a_plan_without_errors_and_d_deletes_a_draft_task() {
+    let mut f = fixture();
+    let mut bad = task("docs", &[]);
+    bad.harness = Some("gemini".into());
+    let swarm = seed(&f, SwarmStatus::Review, vec![task("schema", &[]), bad]);
+    open_screen(&mut f);
+
+    press(&mut f, KeyCode::Char('y'));
+    assert!(view(&f.app).confirm.is_none());
+    assert_eq!(
+        view(&f.app).status_msg.as_deref(),
+        Some("fix the plan first: docs: harness `gemini` is not installed")
+    );
+
+    press(&mut f, KeyCode::Char('G'));
+    press(&mut f, KeyCode::Char('d'));
+    let out = render(&f.app, 120, 30);
+    assert!(out.contains("Delete `docs` from the plan?"), "{out}");
+    press(&mut f, KeyCode::Char('y'));
+    assert_eq!(view(&f.app).board.len(), 1);
+
+    press(&mut f, KeyCode::Char('y'));
+    let out = render(&f.app, 120, 30);
+    assert!(
+        out.contains("Approve the plan? 1 task(s); workers start now."),
+        "{out}"
+    );
+    press(&mut f, KeyCode::Char('y'));
+    let conn = open_aux(&f.db).unwrap();
+    assert_eq!(
+        record::get_swarm(&conn, &swarm.id).unwrap().unwrap().status,
+        SwarmStatus::Running
+    );
+    assert_eq!(
+        view(&f.app).status_msg.as_deref(),
+        Some("plan approved: 1 task(s); workers start now")
+    );
+    assert!(bstore::plan_blocks(&conn, &swarm.workspace).is_none());
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn y_merges_a_finished_branch_into_the_workspace() {
+    let mut f = fixture();
+    git(&f.ws, &["init", "-q", "-b", "main"]);
+    std::fs::write(f.ws.join("a.txt"), "one\n").unwrap();
+    git(&f.ws, &["add", "."]);
+    git(&f.ws, &["commit", "-qm", "init"]);
+    git(&f.ws, &["checkout", "-qb", "loop/bus-a"]);
+    std::fs::write(f.ws.join("b.txt"), "two\n").unwrap();
+    git(&f.ws, &["add", "."]);
+    git(&f.ws, &["commit", "-qm", "the work"]);
+    git(&f.ws, &["checkout", "-q", "main"]);
+
+    let swarm = seed(&f, SwarmStatus::Integrating, vec![task("a", &[])]);
+    let conn = open_aux(&f.db).unwrap();
+    let board = record::board(&conn, &swarm.id).unwrap();
     bstore::update_task(
         &conn,
-        Some(&db),
-        &failed.id,
-        "worker-cccc",
-        TaskStatus::Failed,
         None,
-        Some("cargo test exit 101".into()),
+        &board[0].task.id,
+        "worker-1",
+        TaskStatus::Done,
+        Some(serde_json::json!("added b")),
         None,
         None,
-        now - 120_000_000_000,
+        Some("loop/bus-a".into()),
+        now_ns(),
     )
     .unwrap();
-    (ws, db, sessions, now, q.id, failed.id)
+    open_screen(&mut f);
+    let out = render(&f.app, 120, 30);
+    assert!(out.contains("review    a finished on loop/bus-a"), "{out}");
+    assert!(out.contains("⇡"), "{out}");
+
+    press(&mut f, KeyCode::Char('y'));
+    let out = render(&f.app, 120, 30);
+    assert!(
+        out.contains("Merge loop/bus-a into the workspace's branch"),
+        "{out}"
+    );
+    press(&mut f, KeyCode::Char('y'));
+    assert!(
+        view(&f.app)
+            .status_msg
+            .as_deref()
+            .is_some_and(|m| m.starts_with("merged loop/bus-a (")),
+        "{:?}",
+        view(&f.app).status_msg
+    );
+    assert!(
+        f.ws.join("b.txt").exists(),
+        "the branch's work is in the workspace"
+    );
+    let reviews = bstore::reviews(&conn, &swarm.workspace).unwrap();
+    assert_eq!(reviews[0].verdict, "merged");
+    assert_eq!(view(&f.app).board[0].review.as_deref(), Some("merged"));
 }
 
 #[test]
-fn nothing_needing_you_is_one_quiet_line() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ws, db, sessions, now) = swarm_fixture(dir.path());
-    let mut app = app();
-    app.mode = Mode::Swarm(Box::new(open(&ws, &db, &sessions, now)));
-    let screen = render(&app, 120, 20);
-    assert!(
-        screen
-            .lines()
-            .nth(1)
-            .unwrap()
-            .contains("Nothing needs you."),
-        "{screen}"
-    );
-}
-
-#[test]
-fn the_strip_lists_what_needs_you_and_bang_acts_on_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ws, db, sessions, now, question, failed) = needs_fixture(dir.path());
-    let view = open(&ws, &db, &sessions, now);
-    assert_eq!(view.needs.len(), 2, "{:#?}", view.needs);
-    let mut app = app();
-    app.mode = Mode::Swarm(Box::new(view));
-    let screen = render(&app, 120, 20);
-    let strip: Vec<&str> = screen.lines().skip(1).take(3).collect();
-    assert!(strip[0].contains("NEEDS YOU (2)"), "{screen}");
-    assert!(
-        strip[1].contains("question  worker·claude asks you: \"May I drop the v15 trigger"),
-        "{screen}"
-    );
-    assert!(
-        strip[2].contains("failed    worker-c failed \"UI tests\": cargo test exit 101"),
-        "{screen}"
-    );
-    assert!(screen.contains("waiting 1m on you"), "{screen}");
-
-    let Mode::Swarm(view) = app.mode else {
-        unreachable!()
-    };
-    let mut view = *view;
-    // `!` focuses the strip; Enter on a question answers it.
-    view.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::SHIFT));
-    assert_eq!(view.focus, Focus::Needs);
-    view.handle_key(key(KeyCode::Enter));
-    let line = view.command.as_ref().expect("the command line opens");
-    assert_eq!(line.text.text, "@worker·claude ");
-    assert_eq!(
-        line.reply_to.as_ref().map(|m| m.id.as_str()),
-        Some(question.as_str())
-    );
-    view.handle_key(key(KeyCode::Esc));
-    assert!(view.command.is_none());
-
-    // `r` retries the failed task; `d` dismisses it.
-    view.handle_key(key(KeyCode::Down));
-    assert_eq!(
-        view.handle_key(key(KeyCode::Char('r'))),
-        Outcome::RetryTask {
-            task_id: failed.clone()
-        }
-    );
-    view.handle_key(key(KeyCode::Char('d')));
-    assert_eq!(view.needs.len(), 1);
-    assert!(
-        view.needs
-            .iter()
-            .all(|n| n.task_id.as_deref() != Some(&failed))
-    );
-
-    // A refresh does not bring the dismissed failure back.
-    view.refresh(&sessions, now + 1);
-    assert_eq!(view.needs.len(), 1);
-}
-
-#[test]
-fn activity_tells_the_story_with_task_events() {
-    let dir = tempfile::tempdir().unwrap();
-    let (ws, db, sessions, now, _, _) = needs_fixture(dir.path());
-    let mut view = open(&ws, &db, &sessions, now);
-    view.handle_key(key(KeyCode::Char('a')));
-    view.handle_key(key(KeyCode::Tab));
-    // It opens on the newest line; `g` goes back to how it began.
-    view.handle_key(key(KeyCode::Char('g')));
-    let mut app = app();
-    app.mode = Mode::Swarm(Box::new(view));
-    let screen = render(&app, 120, 40);
-    for line in [
-        "coordinator·claude planned \"Add swarm view state",
-        "worker-c failed \"UI tests\"",
+fn with_no_swarm_the_screen_offers_one_and_the_form_starts_it() {
+    let mut f = fixture();
+    open_screen(&mut f);
+    let out = render(&f.app, 120, 30);
+    assert!(out.contains("No swarm in this workspace."), "{out}");
+    assert!(out.contains("Nothing needs you."), "{out}");
+    press(&mut f, KeyCode::Enter);
+    assert!(matches!(view(&f.app).modal, Some(Modal::Launch { .. })));
+    let out = render(&f.app, 120, 30);
+    for want in [
+        "Start a swarm",
+        "Goal: what done looks like",
+        "Planner: claude",
+        "Max parallel workers: 3",
+        "Approve the plan before workers start: yes",
     ] {
-        assert!(screen.contains(line), "{line:?} missing:\n{screen}");
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
     }
-    let Mode::Swarm(mut view) = app.mode else {
-        unreachable!()
-    };
-    view.handle_key(key(KeyCode::Char('G')));
-    app.mode = Mode::Swarm(view);
-    let screen = render(&app, 120, 40);
-    assert!(
-        screen.contains("worker·claude → User  open question"),
-        "{screen}"
+    press(&mut f, KeyCode::Esc);
+    assert!(view(&f.app).modal.is_none());
+}
+
+#[test]
+fn the_screen_refreshes_only_when_the_store_or_a_session_moved() {
+    let f = fixture();
+    let swarm = seed(&f, SwarmStatus::Review, vec![task("a", &[])]);
+    let conn = open_aux(&f.db).unwrap();
+    let mut v = SwarmBoard::open(
+        f.ws.clone(),
+        Some(open_aux(&f.db).unwrap()),
+        &[],
+        None,
+        vec![Harness::Claude],
+        Harness::Claude,
+        now_ns(),
     );
+    let t0 = Instant::now();
+    assert!(!v.refresh_due(&[], t0), "nothing moved");
+    assert!(
+        !v.refresh_due(&[], t0 + Duration::from_secs(1)),
+        "still nothing"
+    );
+    bstore::send_message(
+        &conn,
+        None,
+        &swarm.workspace,
+        "user",
+        None,
+        "directive",
+        "hello",
+        None,
+        now_ns(),
+    )
+    .unwrap();
+    assert!(
+        !v.refresh_due(&[], t0 + Duration::from_millis(1200)),
+        "at most one look per half second"
+    );
+    assert!(
+        v.refresh_due(&[], t0 + Duration::from_secs(2)),
+        "a message moved the store"
+    );
+    v.refresh(&[], None, now_ns());
+    assert_eq!(v.messages.len(), 1);
+    assert!(!v.refresh_due(&[], t0 + Duration::from_secs(3)));
 }

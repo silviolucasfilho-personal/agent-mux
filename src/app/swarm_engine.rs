@@ -52,8 +52,8 @@ impl App {
             .filter(|h| {
                 self.profiles.iter().any(|p| {
                     Harness::detect(&p.command) == Some(*h)
-                        && crate::session::resolve_command(&p.command).is_some()
-                }) || crate::session::resolve_command(h.as_str()).is_some()
+                        && crate::session::command_available(&p.command)
+                }) || crate::session::command_available(h.as_str())
             })
             .collect()
     }

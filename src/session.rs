@@ -126,6 +126,27 @@ fn resolve_command_with(
     Some((command.to_string(), vec![]))
 }
 
+/// Whether `command` can be launched here: a path that is runnable, or a
+/// bare name found on `PATH` or where its installer puts it
+/// ([`install_fallback`]). `resolve_command` answers a command line even
+/// for a missing program; this says whether the program exists.
+#[cfg(not(windows))]
+pub fn command_available(command: &str) -> bool {
+    if command.contains('/') {
+        return is_runnable(Path::new(command));
+    }
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path_var).any(|d| is_runnable(&d.join(command)))
+        || std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .is_some_and(|h| install_fallback(command, &h).is_some())
+}
+
+#[cfg(windows)]
+pub fn command_available(command: &str) -> bool {
+    resolve_command(command).is_some()
+}
+
 /// Where a harness's own installer puts its binary when that folder is
 /// added to `PATH` only by a shell profile: a terminal opened before the
 /// install (or agent-mux started from one) has no such entry, and the

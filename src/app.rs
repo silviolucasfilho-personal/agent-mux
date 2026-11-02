@@ -38,8 +38,8 @@ pub mod loops_view;
 pub mod markdown_view;
 pub mod memory_view;
 mod skills_view;
+pub mod swarm_board;
 pub mod swarm_engine;
-pub mod swarm_view;
 pub mod text_area;
 pub mod workflows;
 pub mod workflows_view;
@@ -88,7 +88,7 @@ pub enum Mode {
     /// The Workspaces Explorer screen: folders, sub-folders, stacks and agents.
     Workspaces(Box<workspaces_view::WorkspacesView>),
     /// The Agent Swarm Control Room screen: Coordinator, Workers, Board, Leases and Feed.
-    Swarm(Box<swarm_view::SwarmView>),
+    Swarm(Box<swarm_board::SwarmBoard>),
     /// The Langfuse screen: remote traces, observation trees, and web links.
     Langfuse(Box<langfuse_view::LangfuseView>),
 }
@@ -4864,8 +4864,22 @@ impl App {
             .trace_db_path
             .as_deref()
             .and_then(|p| crate::tracing::store::open_aux(p).ok());
-        let view = swarm_view::SwarmView::open(ws, conn, &live, crate::tracing::store::now_ns());
+        let mut harnesses = self.installed_harnesses();
+        if harnesses.is_empty() {
+            harnesses = crate::harness::Harness::ALL.to_vec();
+        }
+        let view = swarm_board::SwarmBoard::open(
+            ws.clone(),
+            conn,
+            &live,
+            None,
+            harnesses,
+            self.default_swarm_harness(),
+            crate::tracing::store::now_ns(),
+        );
         self.mode = Mode::Swarm(Box::new(view));
+        // The plan's checks need the App: a second read with them.
+        self.refresh_swarm_board();
     }
 
     /// Gathers live session telemetry for all active sessions in `workspace` (including worktrees).
@@ -4939,29 +4953,6 @@ impl App {
             .collect()
     }
 
-    /// Puts one task on `workspace`'s board and answers its id, `None` without
-    /// a trace store.
-    fn swarm_create_task(
-        &self,
-        workspace: &std::path::Path,
-        created_by: &str,
-        spec: crate::bus::NewTaskSpec,
-    ) -> Option<String> {
-        let db = self.trace_db_path.as_deref()?;
-        let conn = crate::tracing::store::open_aux(db).ok()?;
-        let norm = crate::bus::store::normalize_workspace(workspace);
-        let created = crate::bus::store::split_tasks(
-            &conn,
-            Some(db),
-            &norm,
-            created_by,
-            &[spec],
-            crate::tracing::store::now_ns(),
-        )
-        .ok()?;
-        created.into_iter().next().map(|t| t.id)
-    }
-
     /// `Some((active, cap))` when `workspace`'s swarm has a `max_workers`
     /// and that many delegated workers are already live there (sessions in
     /// a bus group, the coordinator not counted).
@@ -5030,106 +5021,27 @@ impl App {
         (targets.len(), records)
     }
 
-    /// Merges a finished task's branch into the swarm's workspace (or sets it
-    /// aside), records the verdict and says so on the screen. A failed merge
-    /// records nothing: the branch stays waiting for review.
-    fn review_branch(&mut self, task_id: &str, merge: bool) {
-        let ws_path = match &self.mode {
-            Mode::Swarm(v) => v.workspace.clone(),
-            _ => return,
-        };
-        let norm = crate::bus::store::normalize_workspace(&ws_path);
-        let result = self
-            .trace_db_path
-            .as_deref()
-            .ok_or_else(|| "no trace store".to_string())
-            .and_then(|db| {
-                let conn = crate::tracing::store::open_aux(db)?;
-                let task = crate::bus::store::get_task(&conn, task_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("no task '{task_id}'"))?;
-                let branch = task
-                    .branch
-                    .clone()
-                    .ok_or_else(|| "that task has no branch".to_string())?;
-                let commit = if merge {
-                    Some(crate::bus::swarm::merge_branch(&ws_path, &branch)?)
-                } else {
-                    None
-                };
-                crate::bus::store::record_review(
-                    &conn,
-                    Some(db),
-                    &norm,
-                    task_id,
-                    merge,
-                    Some(&branch),
-                    commit.as_deref(),
-                    crate::tracing::store::now_ns(),
-                )
-                .map_err(|e| e.to_string())?;
-                Ok(match commit {
-                    Some(c) => format!("merged {branch} ({c})"),
-                    None => format!("set {branch} aside; the branch is kept"),
-                })
-            });
-        let msg = match result {
-            Ok(m) => m,
-            Err(e) if merge => format!("not merged: {e}"),
-            Err(e) => format!("could not record it: {e}"),
-        };
-        if let Mode::Swarm(view) = &mut self.mode {
-            view.status_msg = Some(msg);
-        }
-        if let Mode::Swarm(_) = &self.mode {
-            let ws = ws_path;
-            let live = self.swarm_live_sessions(&ws);
-            if let Mode::Swarm(ref mut view) = self.mode {
-                view.refresh(&live, crate::tracing::store::now_ns());
-            }
-        }
+    /// The checks the board shows while a plan is drafted or reviewed.
+    fn swarm_board_env(
+        &self,
+        view: &swarm_board::SwarmBoard,
+    ) -> Option<crate::bus::swarm::plan::CheckEnv> {
+        view.wants_checks().then(|| {
+            let isolation = view.swarm.as_ref().map(|s| s.isolation).unwrap_or_default();
+            self.swarm_check_env(&view.workspace, isolation)
+        })
     }
 
-    /// Spawns `n` standby workers, each holding a real board task so its
-    /// `AGENT_MUX_TASK_ID` resolves and the board shows it busy until the
-    /// coordinator hands it work.
-    fn spawn_standby(
-        &mut self,
-        workspace: &std::path::Path,
-        coordinator: Option<&str>,
-        harness: &str,
-        isolation: crate::bus::TaskIsolation,
-        n: usize,
-        now: Instant,
-    ) {
-        for i in 1..=n {
-            let Some(task_id) = self.swarm_create_task(
-                workspace,
-                coordinator.unwrap_or("user"),
-                crate::bus::NewTaskSpec {
-                    title: format!("Standby worker #{i}"),
-                    instructions: crate::bus::swarm::STANDBY_WORKER_INSTRUCTIONS.into(),
-                    target_harness: Some(harness.to_string()),
-                    isolation,
-                    ..Default::default()
-                },
-            ) else {
-                continue;
-            };
-            let _ = self.handle_bus_control(
-                crate::bus::control::ControlRequest::SpawnWorker {
-                    parent_launch: coordinator.map(str::to_string),
-                    workspace: workspace.to_string_lossy().into_owned(),
-                    task_id,
-                    title: format!("Standby worker #{i}"),
-                    instructions: crate::bus::swarm::STANDBY_WORKER_INSTRUCTIONS.into(),
-                    harness: Some(harness.to_string()),
-                    agent: None,
-                    isolation,
-                    opening_prompt: None,
-                },
-                now,
-            );
+    /// Re-reads the open Swarm screen now.
+    fn refresh_swarm_board(&mut self) {
+        let Mode::Swarm(view) = &self.mode else {
+            return;
+        };
+        let ws = view.workspace.clone();
+        let env = self.swarm_board_env(view);
+        let live = self.swarm_live_sessions(&ws);
+        if let Mode::Swarm(view) = &mut self.mode {
+            view.refresh(&live, env.as_ref(), crate::tracing::store::now_ns());
         }
     }
 
@@ -5139,426 +5051,131 @@ impl App {
             _ => return,
         };
         let live = self.swarm_live_sessions(&ws);
-        let now_ns = crate::tracing::store::now_ns();
-        if let Mode::Swarm(ref mut view) = self.mode
-            && view.refresh_due(&live, now_ns, now)
-        {
-            view.refresh(&live, now_ns);
+        let due = match &mut self.mode {
+            Mode::Swarm(view) => view.refresh_due(&live, now),
+            _ => false,
+        };
+        if due {
+            self.refresh_swarm_board();
         }
     }
 
-    fn swarm_outcome(&mut self, outcome: swarm_view::Outcome, now: Instant) {
-        use swarm_view::Outcome;
-        let mut needs_refresh = false;
-        match outcome {
-            Outcome::None => {}
-            Outcome::Close => self.mode = Mode::Main,
-            Outcome::Reload => {
-                needs_refresh = true;
+    fn set_swarm_status(&mut self, msg: String) {
+        if let Mode::Swarm(view) = &mut self.mode {
+            view.status_msg = Some(msg);
+        }
+    }
+
+    fn swarm_outcome(&mut self, outcome: swarm_board::Outcome, now: Instant) {
+        use swarm_board::Outcome;
+        let ws_path = match &self.mode {
+            Mode::Swarm(v) => v.workspace.clone(),
+            _ => return,
+        };
+        let now_ns = crate::tracing::store::now_ns();
+        let db = self.trace_db_path.clone();
+        let with_conn =
+            |f: &dyn Fn(&rusqlite::Connection, &std::path::Path) -> Result<String, String>| {
+                let db = db.as_deref().ok_or_else(|| "no trace store".to_string())?;
+                let conn = crate::tracing::store::open_aux(db)?;
+                f(&conn, db)
+            };
+        let live_swarm = || -> Result<crate::bus::swarm::record::SwarmRun, String> {
+            let db = self.trace_db_path.as_deref().ok_or("no trace store")?;
+            let conn = crate::tracing::store::open_aux(db)?;
+            crate::bus::swarm::record::live_swarm(
+                &conn,
+                &crate::bus::store::normalize_workspace(&ws_path),
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no swarm runs here".to_string())
+        };
+        let result: Option<Result<String, String>> = match outcome {
+            Outcome::None => return,
+            Outcome::Close => {
+                self.mode = Mode::Main;
+                return;
             }
-            Outcome::AttachSession(idx) => {
+            Outcome::Reload => None,
+            Outcome::Attach(idx) => {
                 if idx < self.sessions.len() {
-                    self.attach_to_session(idx);
+                    self.mode = Mode::Main;
+                    self.selected = idx;
+                    self.focus_pane();
+                    self.notice = Some(Notice::info("F1 → Open swarm returns to the board"));
                 }
+                return;
             }
-            Outcome::StartSwarm {
+            Outcome::Start {
                 goal,
-                harness,
+                planner,
                 max_workers,
                 isolation,
-                plan_gate,
-                prewarm_workers: _,
-            } => {
-                // Since schema v21 agent-mux runs the swarm itself: the
-                // form's harness plans it; standby workers are gone.
-                let ws_path = if let Mode::Swarm(v) = &self.mode {
-                    v.workspace.clone()
-                } else {
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                };
-                match self.start_orchestrated_swarm(swarm_engine::StartSwarm {
-                    workspace: ws_path,
+                gate,
+                check,
+            } => Some(
+                self.start_orchestrated_swarm(swarm_engine::StartSwarm {
+                    workspace: ws_path.clone(),
                     goal,
-                    planner: Some(harness.as_str().to_string()),
+                    planner: Some(planner.as_str().to_string()),
                     max_workers,
                     isolation,
-                    gate: plan_gate,
-                    check: None,
-                }) {
-                    Ok(swarm) => {
-                        self.notice = Some(Notice::info(format!(
-                            "{} planning with {}: the plan waits for `agent-mux swarm approve`",
-                            swarm.id, swarm.planner_harness
-                        )));
-                    }
-                    Err(e) => self.notice = Some(Notice::error(format!("swarm: {e}"))),
-                }
-                needs_refresh = true;
+                    gate,
+                    check,
+                })
+                .map(|s| format!("{} is planning with {}", s.id, s.planner_harness)),
+            ),
+            Outcome::Verb { verb, task, notes } => {
+                Some(self.swarm_action(&ws_path, verb, task.as_deref(), notes.as_deref()))
             }
-            Outcome::DecidePlan { approve } => {
-                let (ws_path, coord, proposal) = match &self.mode {
-                    Mode::Swarm(v) => (
-                        v.workspace.clone(),
-                        v.snapshot.coordinator.clone(),
-                        v.snapshot.plan_proposal().map(|m| m.id.clone()),
-                    ),
-                    _ => return,
-                };
-                let norm = crate::bus::store::normalize_workspace(&ws_path);
-                let decided = self
-                    .trace_db_path
-                    .as_deref()
-                    .ok_or_else(|| "no trace store".to_string())
-                    .and_then(|db| {
-                        let conn = crate::tracing::store::open_aux(db)?;
-                        let now_ns = crate::tracing::store::now_ns();
-                        let plan =
-                            crate::bus::store::decide_plan(&conn, Some(db), &norm, approve, now_ns)?;
-                        if let Some(c) = &coord {
-                            let (topic, body) = if approve {
-                                (
-                                    "plan-approved",
-                                    "The operator approved the plan. Delegate the tasks now.",
-                                )
-                            } else {
-                                (
-                                    "plan-changes",
-                                    "The operator sent the plan back. Their notes follow; revise the board and send a new `plan` message.",
-                                )
-                            };
-                            crate::bus::store::send_message(
-                                &conn,
-                                Some(db),
-                                &norm,
-                                "user",
-                                Some(&c.launch_id),
-                                topic,
-                                body,
-                                proposal.as_deref(),
-                                now_ns,
-                            )
-                            .map_err(|e| e.to_string())?;
-                        }
-                        Ok(plan)
-                    });
-                match decided {
-                    Ok(plan) => {
-                        if let Some(c) = &coord {
-                            let _ = self.handle_bus_control(
-                                crate::bus::control::ControlRequest::WakeSession {
-                                    launch_id: c.launch_id.clone(),
-                                    prompt: if approve {
-                                        "[plan-approved] The operator approved your plan: delegate the tasks now.".into()
-                                    } else {
-                                        "[plan-changes] The operator sent your plan back: read their notes with agent_mux_recv_messages.".into()
-                                    },
-                                },
-                                now,
-                            );
-                        }
-                        if approve && plan.standby > 0 {
-                            let isolation = match &self.mode {
-                                Mode::Swarm(v) => v.snapshot.isolation.unwrap_or_default(),
-                                _ => crate::bus::TaskIsolation::Shared,
-                            };
-                            let harness = coord
-                                .as_ref()
-                                .map(|c| c.provider.clone())
-                                .unwrap_or_else(|| "claude".into());
-                            self.spawn_standby(
-                                &ws_path,
-                                coord.as_ref().map(|c| c.launch_id.as_str()),
-                                &harness,
-                                isolation,
-                                plan.standby,
-                                now,
-                            );
-                        }
-                        if let Mode::Swarm(view) = &mut self.mode
-                            && approve
-                        {
-                            view.status_msg =
-                                Some("plan approved: the coordinator delegates now".into());
-                        }
-                    }
-                    Err(e) => {
-                        if let Mode::Swarm(view) = &mut self.mode {
-                            view.status_msg = Some(format!("could not decide the plan: {e}"));
-                        }
-                    }
-                }
-                needs_refresh = true;
-            }
-            Outcome::MergeBranch { task_id } => self.review_branch(&task_id, true),
-            Outcome::DiscardBranch { task_id } => self.review_branch(&task_id, false),
-            Outcome::CloseSwarm => {
-                let ws_path = match &self.mode {
-                    Mode::Swarm(v) => v.workspace.clone(),
-                    _ => return,
-                };
-                let (stopped, records) = self.stop_swarm(&ws_path);
-                let msg = match records {
-                    Ok((cancelled, released)) => format!(
-                        "swarm closed: stopped {stopped} session(s), cancelled {cancelled} task(s), released {released} lease(s)"
-                    ),
-                    Err(e) => {
-                        format!("swarm sessions stopped ({stopped}), but the store said: {e}")
-                    }
-                };
-                if let Mode::Swarm(view) = &mut self.mode {
-                    view.status_msg = Some(msg);
-                }
-                needs_refresh = true;
-            }
-            Outcome::PromoteCoordinator { launch_id } => {
-                let ws_path = if let Mode::Swarm(v) = &self.mode {
-                    v.workspace.clone()
-                } else {
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                };
-                if let Some(db) = self.trace_db_path.as_deref()
-                    && let Ok(conn) = crate::tracing::store::open_aux(db)
-                {
-                    let now_ns = crate::tracing::store::now_ns();
-                    let norm = crate::bus::store::normalize_workspace(&ws_path);
-                    let _ = crate::bus::store::set_coordinator(
-                        &conn,
-                        Some(db),
-                        &norm,
-                        &launch_id,
-                        None,
-                        None,
-                        None,
-                        now_ns,
-                    );
-                }
-                needs_refresh = true;
-            }
-            Outcome::SpawnWorker {
-                title,
-                instructions,
-                files,
-                harness,
-                agent,
-                isolation,
-            } => {
-                let (ws_path, coord_launch) = if let Mode::Swarm(v) = &self.mode {
-                    (
-                        v.workspace.clone(),
-                        v.snapshot.coordinator.as_ref().map(|c| c.launch_id.clone()),
-                    )
-                } else {
-                    (
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-                        None,
-                    )
-                };
-                // The worker runs the board task just created: same id, so
-                // the spawn claims it and the worker's `AGENT_MUX_TASK_ID`
-                // and scoped files resolve.
-                let Some(task_id) = self.swarm_create_task(
-                    &ws_path,
-                    coord_launch.as_deref().unwrap_or("user"),
-                    crate::bus::NewTaskSpec {
-                        title: title.clone(),
-                        instructions: instructions.clone(),
-                        files: files.clone(),
-                        target_harness: Some(harness.as_str().to_string()),
-                        target_agent: agent.clone(),
-                        isolation,
-                        ..Default::default()
-                    },
-                ) else {
-                    if let Mode::Swarm(view) = &mut self.mode {
-                        view.status_msg =
-                            Some("could not create the task on the board (no trace store)".into());
-                    }
-                    return;
-                };
-                let resp = self.handle_bus_control(
-                    crate::bus::control::ControlRequest::SpawnWorker {
-                        parent_launch: coord_launch,
-                        workspace: ws_path.to_string_lossy().into_owned(),
-                        task_id,
-                        title,
-                        instructions,
-                        harness: Some(harness.as_str().to_string()),
-                        agent,
-                        isolation,
-                        opening_prompt: None,
-                    },
-                    now,
-                );
-                if !resp.ok
-                    && let Mode::Swarm(view) = &mut self.mode
-                {
-                    view.status_msg = Some(format!(
-                        "task is on the board, no worker spawned: {}",
-                        resp.error.unwrap_or_default()
-                    ));
-                }
-                needs_refresh = true;
-            }
-            Outcome::DelegateTask { task_id } => {
-                let (ws_path, coord_launch) = if let Mode::Swarm(v) = &self.mode {
-                    (
-                        v.workspace.clone(),
-                        v.snapshot.coordinator.as_ref().map(|c| c.launch_id.clone()),
-                    )
-                } else {
-                    (
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-                        None,
-                    )
-                };
-                let task_opt = self
-                    .trace_db_path
-                    .as_deref()
-                    .and_then(|db| crate::tracing::store::open_ro(db).ok())
-                    .and_then(|c| crate::bus::store::get_task(&c, &task_id).ok().flatten());
-                if let Some(task) = task_opt {
-                    let resp = self.handle_bus_control(
-                        crate::bus::control::ControlRequest::SpawnWorker {
-                            parent_launch: coord_launch,
-                            workspace: ws_path.to_string_lossy().into_owned(),
-                            task_id: task.id.clone(),
-                            title: task.title,
-                            instructions: task.instructions,
-                            harness: task.target_harness,
-                            agent: task.target_agent,
-                            isolation: task.isolation,
-                            opening_prompt: None,
-                        },
-                        now,
-                    );
-                    if !resp.ok
-                        && let Mode::Swarm(view) = &mut self.mode
-                    {
-                        view.status_msg = Some(format!(
-                            "no worker spawned: {}",
-                            resp.error.unwrap_or_default()
-                        ));
-                    }
-                }
-                needs_refresh = true;
-            }
-            Outcome::RetryTask { task_id } => {
-                let reopened = self
-                    .trace_db_path
-                    .as_deref()
-                    .ok_or_else(|| "no trace store".to_string())
-                    .and_then(|db| {
-                        let conn = crate::tracing::store::open_aux(db)?;
-                        crate::bus::store::reopen_task(
-                            &conn,
-                            Some(db),
-                            &task_id,
-                            crate::tracing::store::now_ns(),
-                        )
-                    });
-                match reopened {
-                    Ok(_) => return self.swarm_outcome(Outcome::DelegateTask { task_id }, now),
-                    Err(e) => {
-                        if let Mode::Swarm(view) = &mut self.mode {
-                            view.status_msg = Some(format!("could not retry: {e}"));
-                        }
-                    }
-                }
-            }
-            Outcome::WakeAgent { launch_id } => {
-                let _ = self.handle_bus_control(
-                    crate::bus::control::ControlRequest::WakeSession {
-                        launch_id,
-                        prompt: "Wakeup check-in from Swarm Mission Control".into(),
-                    },
-                    now,
-                );
-            }
-            Outcome::UpdateTask {
-                task_id,
-                title,
-                instructions,
-                files,
-            } => {
-                if let Some(db) = self.trace_db_path.as_deref()
-                    && let Ok(conn) = crate::tracing::store::open_aux(db)
-                {
-                    let now_ns = crate::tracing::store::now_ns();
-                    let _ = crate::bus::store::update_task_spec(
-                        &conn,
-                        Some(db),
-                        &task_id,
-                        &title,
-                        &instructions,
-                        &files,
-                        now_ns,
-                    );
-                }
-                needs_refresh = true;
-            }
-            Outcome::CancelTask(task_id) => {
-                if let Some(db) = self.trace_db_path.as_deref()
-                    && let Ok(conn) = crate::tracing::store::open_aux(db)
-                {
-                    let now_ns = crate::tracing::store::now_ns();
-                    let _ = crate::bus::store::update_task(
-                        &conn,
-                        Some(db),
-                        &task_id,
-                        "",
-                        crate::bus::TaskStatus::Cancelled,
-                        Some(serde_json::json!("Cancelled by user from Swarm Board")),
-                        None,
-                        None,
-                        None,
-                        now_ns,
-                    );
-                }
-                needs_refresh = true;
-            }
-            Outcome::ReleaseLeases(patterns) => {
-                let ws_path = if let Mode::Swarm(v) = &self.mode {
-                    v.workspace.clone()
-                } else {
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                };
-                if let Some(db) = self.trace_db_path.as_deref()
-                    && let Ok(conn) = crate::tracing::store::open_aux(db)
-                {
-                    let norm = crate::bus::store::normalize_workspace(&ws_path);
-                    for pattern in &patterns {
-                        let _ =
-                            crate::bus::store::force_release_lease(&conn, Some(db), &norm, pattern);
-                    }
-                }
-                needs_refresh = true;
-            }
+            Outcome::AddTask(pt) => Some(live_swarm().and_then(|swarm| {
+                with_conn(&|conn, db| {
+                    crate::bus::swarm::record::add_task(conn, Some(db), &swarm, &pt, false, now_ns)
+                        .map(|_| format!("added `{}`", pt.key))
+                })
+            })),
+            Outcome::EditTask { task_id, task } => Some(with_conn(&|conn, db| {
+                crate::bus::swarm::record::update_plan_task(conn, Some(db), &task_id, &task, now_ns)
+                    .map(|_| format!("saved `{}`", task.key))
+            })),
+            Outcome::DeleteTask(task_id) => Some(with_conn(&|conn, db| {
+                crate::bus::swarm::record::delete_task(conn, &task_id)
+                    .map_err(|e| e.to_string())?;
+                crate::tracing::store::poke_wake(db);
+                Ok("deleted".into())
+            })),
+            Outcome::CancelTask(task_id) => Some(with_conn(&|conn, db| {
+                crate::bus::store::update_task(
+                    conn,
+                    Some(db),
+                    &task_id,
+                    "user",
+                    crate::bus::TaskStatus::Cancelled,
+                    None,
+                    Some("cancelled by the operator".into()),
+                    None,
+                    None,
+                    now_ns,
+                )
+                .map(|t| format!("cancelled `{}`", t.title))
+            })),
             Outcome::StopSession(idx) => {
-                if idx < self.sessions.len() {
-                    self.sessions[idx].kill();
+                if let Some(s) = self.sessions.get_mut(idx) {
+                    s.kill();
                 }
-                needs_refresh = true;
+                Some(Ok("worker stopped; r retries its task".into()))
             }
-            Outcome::SendMessage {
+            Outcome::Send {
                 to_launch,
                 reply_to,
                 topic,
                 body,
                 urgent,
-                wake,
             } => {
-                let ws_path = if let Mode::Swarm(v) = &self.mode {
-                    v.workspace.clone()
-                } else {
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                };
-                if let Some(db) = self.trace_db_path.as_deref()
-                    && let Ok(conn) = crate::tracing::store::open_aux(db)
-                {
-                    let now_ns = crate::tracing::store::now_ns();
-                    let norm = crate::bus::store::normalize_workspace(&ws_path);
-                    let _ = crate::bus::store::send_message(
-                        &conn,
+                let norm = crate::bus::store::normalize_workspace(&ws_path);
+                let sent = with_conn(&|conn, db| {
+                    crate::bus::store::send_message(
+                        conn,
                         Some(db),
                         &norm,
                         "user",
@@ -5567,50 +5184,50 @@ impl App {
                         &body,
                         reply_to.as_deref(),
                         now_ns,
-                    );
-                }
-                if wake {
-                    let prompt = if urgent {
-                        format!("[URGENT from the operator]: {body}")
-                    } else {
-                        format!("[Message on {topic}]: {body}")
-                    };
-                    let req = match to_launch.as_deref() {
-                        Some(target) => crate::bus::control::ControlRequest::WakeSession {
-                            launch_id: target.to_string(),
-                            prompt,
-                        },
-                        None => crate::bus::control::ControlRequest::WakeWorkspace {
-                            workspace: ws_path.to_string_lossy().into_owned(),
-                            prompt,
-                            exclude: None,
-                        },
-                    };
-                    let resp = self.handle_bus_control(req, now);
-                    if let Mode::Swarm(view) = &mut self.mode {
-                        view.status_msg = Some(match (resp.ok, resp.detail, resp.error) {
-                            (true, Some(d), _) => format!("message sent · {d}"),
-                            (true, None, _) => "message sent".into(),
-                            (false, _, e) => {
-                                format!("message sent, wake failed: {}", e.unwrap_or_default())
-                            }
-                        });
+                    )
+                    .map(|_| String::new())
+                    .map_err(|e| e.to_string())
+                });
+                match sent {
+                    Err(e) => Some(Err(e)),
+                    Ok(_) => {
+                        let prompt = if urgent {
+                            format!("[URGENT from the operator]: {body}")
+                        } else {
+                            format!("[Message on {topic}]: {body}")
+                        };
+                        let req = match to_launch.as_deref() {
+                            Some(target) => crate::bus::control::ControlRequest::WakeSession {
+                                launch_id: target.to_string(),
+                                prompt,
+                            },
+                            None => crate::bus::control::ControlRequest::WakeWorkspace {
+                                workspace: norm.clone(),
+                                prompt,
+                                exclude: None,
+                            },
+                        };
+                        let resp = self.handle_bus_control(req, now);
+                        Some(Ok(match (resp.ok, resp.detail) {
+                            (true, Some(d)) => format!("message sent · {d}"),
+                            (true, None) => "message sent".into(),
+                            (false, _) => format!(
+                                "message sent; wake failed: {}",
+                                resp.error.unwrap_or_default()
+                            ),
+                        }))
                     }
                 }
-                needs_refresh = true;
             }
+        };
+        if let Some(r) = result {
+            self.set_swarm_status(match r {
+                Ok(m) => m,
+                Err(e) => format!("✗ {e}"),
+            });
         }
-
-        if needs_refresh {
-            let ws = match &self.mode {
-                Mode::Swarm(v) => v.workspace.clone(),
-                _ => return,
-            };
-            let live = self.swarm_live_sessions(&ws);
-            if let Mode::Swarm(ref mut view) = self.mode {
-                view.refresh(&live, crate::tracing::store::now_ns());
-            }
-        }
+        self.last_swarm_engine_pass = None;
+        self.refresh_swarm_board();
     }
 
     fn open_new_session_in_dir(&mut self, dir: &std::path::Path, agent: Option<String>) {
