@@ -818,6 +818,11 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::Markdown(_) => Action::MarkdownKey,
         Mode::Memory(_) => Action::MemoryKey,
         Mode::Workspaces(_) => Action::WorkspacesKey,
+        // the swarm's pane has the keyboard: the session's, as on Agents
+        Mode::Swarm(v) if v.pane_focused => match encode_key_with_mode(key, ctx.app_cursor) {
+            Some(bytes) => Action::ForwardBytes(bytes),
+            None => Action::None,
+        },
         Mode::Swarm(_) => Action::SwarmKey,
         Mode::Langfuse(_) => Action::LangfuseKey,
         Mode::ConfirmRemoveLoop => match key.code {
@@ -2784,6 +2789,9 @@ pub struct App {
     pub last_swarm_engine_pass: Option<Instant>,
     /// When it last checked for swarms whose TUI is gone.
     pub last_swarm_adopt_check: Option<Instant>,
+    /// What the swarms this TUI dispatches need from the operator, for the
+    /// Agents sidebar and the status bar (`swarm_board::needs_for`).
+    pub swarm_needs: usize,
 }
 
 /// A bus wake waiting for its session to turn idle.
@@ -2940,6 +2948,7 @@ impl App {
             pending_wake_submits: Vec::new(),
             last_swarm_engine_pass: None,
             last_swarm_adopt_check: None,
+            swarm_needs: 0,
         };
         if let Some(sock_dir) = app.trace_db_path.as_deref().and_then(|p| p.parent()) {
             let sock = sock_dir.join("bus.sock");
@@ -3170,7 +3179,15 @@ impl App {
             return;
         }
         if let Mode::Swarm(view) = &mut self.mode {
-            view.paste(text);
+            if !view.pane_focused {
+                view.paste(text);
+                return;
+            }
+            // the pane has the keyboard: the paste is the session's
+            if let Some(s) = self.sessions.get_mut(self.selected) {
+                let bytes = paste_bytes(text, s.parser.screen().bracketed_paste());
+                let _ = s.write_bytes(&bytes);
+            }
             return;
         }
         if !matches!(self.mode, Mode::Main) {
@@ -4217,10 +4234,10 @@ impl App {
 
     /// The session the pane's keyboard goes to, when the pane has it.
     pub fn pane_session(&self) -> Option<usize> {
-        (matches!(self.mode, Mode::Main)
-            && self.focus == Focus::Pane
-            && self.selected < self.sessions.len())
-        .then_some(self.selected)
+        let swarm_pane = matches!(&self.mode, Mode::Swarm(v) if v.pane_focused);
+        ((matches!(self.mode, Mode::Main) && self.focus == Focus::Pane) || swarm_pane)
+            .then_some(self.selected)
+            .filter(|i| *i < self.sessions.len())
     }
 
     fn session_index(&self, id: usize) -> Option<usize> {
@@ -4859,7 +4876,7 @@ impl App {
             .map(|s| s.dir.clone())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let live = self.swarm_live_sessions(&ws);
+        let live = self.live_sessions_in(None);
         let conn = self
             .trace_db_path
             .as_deref()
@@ -4887,27 +4904,44 @@ impl App {
         &self,
         workspace: &std::path::Path,
     ) -> Vec<crate::bus::swarm::LiveSwarmSession> {
+        self.live_sessions_in(Some(workspace))
+    }
+
+    /// Every session's telemetry (`None`), or those in a workspace and its
+    /// worktrees. The Swarm screen lists swarms of every workspace, so it
+    /// takes them all.
+    pub fn live_sessions_in(
+        &self,
+        workspace: Option<&std::path::Path>,
+    ) -> Vec<crate::bus::swarm::LiveSwarmSession> {
         let now = Instant::now();
-        let target_norm = crate::bus::store::normalize_workspace(workspace);
+        let target_norm = workspace.map(crate::bus::store::normalize_workspace);
         self.sessions
             .iter()
             .enumerate()
             .filter_map(|(idx, s)| {
                 let ws_norm = crate::bus::store::normalize_workspace(&s.dir);
-                if ws_norm != target_norm && !s.dir.starts_with(workspace) {
+                if let (Some(target), Some(w)) = (&target_norm, workspace)
+                    && ws_norm != *target
+                    && !s.dir.starts_with(w)
+                {
                     return None;
                 }
-                let (turns, tokens, cost) = s
+                let (turns, tokens, cost, priced) = s
                     .trace_stats
                     .as_ref()
                     .map(|st| {
+                        let reported = st.reported_cost_usd.filter(|c| *c > 0.0);
                         (
                             st.turns.max(0) as usize,
                             st.total_tokens.unwrap_or(0),
-                            st.cost_usd.unwrap_or(0.0),
+                            reported.or(st.cost_usd).unwrap_or(0.0),
+                            reported.is_some()
+                                || (st.unpriced_generations == 0
+                                    && st.cost_usd.is_some_and(|c| c > 0.0)),
                         )
                     })
-                    .unwrap_or((0, 0, 0.0));
+                    .unwrap_or((0, 0, 0.0, false));
                 let running_tool = s
                     .trace_stats
                     .as_ref()
@@ -4944,6 +4978,7 @@ impl App {
                     turns,
                     tokens,
                     cost_usd: cost,
+                    priced,
                     running_tool,
                     quiet_ns: s
                         .quiet_for(now)
@@ -5001,8 +5036,19 @@ impl App {
     ) -> Option<crate::bus::swarm::plan::CheckEnv> {
         view.wants_checks().then(|| {
             let isolation = view.swarm.as_ref().map(|s| s.isolation).unwrap_or_default();
-            self.swarm_check_env(&view.workspace, isolation)
+            self.swarm_check_env(&view.current_workspace(), isolation)
         })
+    }
+
+    /// The Swarm screen's pane draws `App::sessions[selected]` (selection,
+    /// search, key forwarding): keep `selected` on the session it shows.
+    pub(crate) fn sync_swarm_pane_selection(&mut self) {
+        if let Mode::Swarm(view) = &self.mode
+            && let Some(i) = view.pane_session()
+            && i < self.sessions.len()
+        {
+            self.selected = i;
+        }
     }
 
     /// Re-reads the open Swarm screen now.
@@ -5010,20 +5056,19 @@ impl App {
         let Mode::Swarm(view) = &self.mode else {
             return;
         };
-        let ws = view.workspace.clone();
         let env = self.swarm_board_env(view);
-        let live = self.swarm_live_sessions(&ws);
+        let live = self.live_sessions_in(None);
         if let Mode::Swarm(view) = &mut self.mode {
             view.refresh(&live, env.as_ref(), crate::tracing::store::now_ns());
         }
+        self.sync_swarm_pane_selection();
     }
 
     pub fn refresh_swarm_if_needed(&mut self, now: Instant) {
-        let ws = match &self.mode {
-            Mode::Swarm(view) => view.workspace.clone(),
-            _ => return,
-        };
-        let live = self.swarm_live_sessions(&ws);
+        if !matches!(self.mode, Mode::Swarm(_)) {
+            return;
+        }
+        let live = self.live_sessions_in(None);
         let due = match &mut self.mode {
             Mode::Swarm(view) => view.refresh_due(&live, now),
             _ => false,
@@ -5033,10 +5078,14 @@ impl App {
         }
     }
 
+    /// What a Swarm screen action did, in the status bar (the screen has
+    /// no footer of its own).
     fn set_swarm_status(&mut self, msg: String) {
-        if let Mode::Swarm(view) = &mut self.mode {
-            view.status_msg = Some(msg);
-        }
+        self.notice = Some(if msg.starts_with('✗') {
+            Notice::error(msg)
+        } else {
+            Notice::info(msg)
+        });
     }
 
     fn swarm_outcome(&mut self, outcome: swarm_board::Outcome, now: Instant) {
@@ -5070,6 +5119,15 @@ impl App {
                 return;
             }
             Outcome::Reload => None,
+            Outcome::FocusPane(idx) => {
+                if idx < self.sessions.len() {
+                    self.selected = idx;
+                    self.notice = Some(Notice::info(
+                        "keys go to the session · ⌘L (Ctrl+Shift+L) returns to the swarm tree",
+                    ));
+                }
+                return;
+            }
             Outcome::Attach(idx) => {
                 if idx < self.sessions.len() {
                     self.mode = Mode::Main;
@@ -5778,8 +5836,12 @@ impl App {
             Action::SwarmKey => {
                 if let Mode::Swarm(view) = &mut self.mode {
                     let outcome = view.handle_key(*key);
+                    if let Some(msg) = view.status_msg.take() {
+                        self.notice = Some(Notice::info(msg));
+                    }
                     self.swarm_outcome(outcome, _now);
                 }
+                self.sync_swarm_pane_selection();
             }
             Action::LangfuseKey => {
                 if let Mode::Langfuse(view) = &mut self.mode {

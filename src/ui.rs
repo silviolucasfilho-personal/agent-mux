@@ -317,7 +317,14 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
     let [body, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
     // the Trace Browser takes the whole screen unless asked for the sidebar
     let browser_alone = matches!(&app.mode, Mode::TraceBrowser(b) if !b.with_sidebar);
-    if app.sidebar_hidden || browser_alone {
+    if let Mode::Swarm(view) = &app.mode {
+        // the Agents layout: the swarm tree where the Agents list is, the
+        // selected row in the main pane (`ui::swarm_board`)
+        let [side, main] =
+            Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
+        swarm_board::draw_tree(f, side, view);
+        swarm_board::draw_pane(f, main, view, app, now);
+    } else if app.sidebar_hidden || browser_alone {
         draw_main(f, body, app, now);
     } else {
         let [side, main] =
@@ -357,11 +364,6 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
             let full = f.area();
             let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
             workspaces::draw(f, area, view);
-        }
-        Mode::Swarm(view) => {
-            let full = f.area();
-            let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
-            swarm_board::draw(f, area, view, app);
         }
         Mode::Langfuse(view) => {
             let full = f.area();
@@ -717,6 +719,14 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
             item
         });
     }
+    if app.swarm_needs > 0 && items.len() < visible {
+        items.push(ListItem::new(Line::styled(
+            format!(" ⚑ swarm needs you ({})  F1›swarm", app.swarm_needs),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
     if lines.is_empty() {
         items.push(ListItem::new(Line::styled(" no agents: n makes one", dim)));
     } else if end == lines.len() && items.len() < visible {
@@ -1041,9 +1051,23 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         draw_history_preview(f, area, hist, !app.sessions.is_empty());
         return;
     }
-    let Some(session) = app.sessions.get(app.selected) else {
+    if app.sessions.get(app.selected).is_none() {
         draw_welcome(f, area, app);
         return;
+    }
+    draw_session_pane(f, area, app, app.selected, now);
+}
+
+/// A session's terminal in the main pane, with its title, trace strip,
+/// cursor, selection and search marks: the Agents screen's pane, also drawn
+/// by the Swarm screen (`ui::swarm_board`) for a worker or coordinator.
+pub(crate) fn draw_session_pane(f: &mut Frame, area: Rect, app: &App, idx: usize, now: Instant) {
+    let Some(session) = app.sessions.get(idx) else {
+        return;
+    };
+    let focused = match &app.mode {
+        Mode::Swarm(v) => v.pane_focused,
+        _ => app.focus == crate::app::Focus::Pane,
     };
     let (label, _) = status_label_style(session.status(now));
     let (scrollback_len, scroll_offset) = session.scroll_view();
@@ -1076,7 +1100,7 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         session.profile.name,
         session.dir.display()
     );
-    let title = if app.focus == crate::app::Focus::Pane && matches!(app.mode, Mode::Main) {
+    let title = if focused && matches!(app.mode, Mode::Main | Mode::Swarm(_)) {
         format!("{title} • Keyboard goes to {}", session.profile.name)
     } else {
         title
@@ -1084,13 +1108,11 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(
-            Style::default().fg(if app.focus == crate::app::Focus::Pane {
-                Color::Cyan
-            } else {
-                Color::DarkGray
-            }),
-        );
+        .border_style(Style::default().fg(if focused {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        }));
     let whole = block.inner(area);
     f.render_widget(block, area);
     // the strip takes its rows from the bottom of the pane; the pty was

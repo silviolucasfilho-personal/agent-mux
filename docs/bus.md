@@ -55,44 +55,22 @@ agent-mux bus unlease [pattern...] [--task-id ID] [--from LAUNCH_ID] [--workspac
 
 ## Swarm Mission Control (`Mode::Swarm`, `agent-mux swarm …`)
 
-How to use it: [swarm.md](swarm.md). The swarm screen (`F1` → "Open swarm", `Mode::Swarm`) has its state and keys in `src/app/swarm_board.rs` (`SwarmBoard`), its drawing in `src/ui/swarm_board.rs`, and its model in `src/bus/swarm/` (`record`, `engine`, `plan`). It shows one workspace's orchestrated swarm as a **board** of its plan's tasks beside a panel on the selected task. Design: `docs/superpowers/specs/2026-11-02-swarm-orchestrator-design.md` §8; the earlier layouts were `2026-10-30-swarm-mission-control-ux-design.md` (lanes) and `2026-10-29-agent-swarm-screen-design.md` (quadrants).
+How to use it: [swarm.md](swarm.md). The Swarm screen (`F1` → "Open swarm", `Mode::Swarm`) has the Agents layout. Its state and keys are in `src/app/swarm_board.rs` (`SwarmBoard`), its drawing in `src/ui/swarm_board.rs`, and its model in `src/bus/swarm/`. Design: `docs/superpowers/specs/2026-11-02-swarm-agents-layout-design.md` §2.
 
-- **Mission strip** (the top border): the goal, the swarm's state (`swarms.status`), tasks done with a bar, busy workers against `max_workers` (`engine::busy_workers`: a finished worker stays open but holds no slot), time since the swarm started, and tokens and cost of its live workers.
-- **Board:** `record::board` in plan order.
-  - **Row:** a task's shown state (`engine::shown`: draft, proposed, blocked, ready, working, asking, stalled, prompt, done, review, failed, lost, cancelled, each with its glyph), its key and title, `← key` for each dependency, its harness and its worker's cost.
-  - **Marks:** `!` and `?` flag the plan's errors and warnings (`plan::check` over `record::board_plan`, computed while the swarm is `planning` or `review`).
-  - **Empty board:** while planning, the planner's terminal fills the panel. A planner that answered nothing usable leaves the board empty, with its error.
-- **Panel**, on the selected task:
-  - `1 Task` is the card: instructions, done-when, files, dependencies, result or error, branch and review, and the plan's problems.
-  - `2 Live` is its worker's terminal.
-  - `3 Thread` shows messages from or to its worker, plus broadcasts.
-  - `4 Changes` is a worktree task's commits and diff since it branched from the workspace's branch, or the workspace's uncommitted diff for a shared task.
-  - The default tab follows the state (`Tab::for_state`), and a chosen tab sticks per task.
-  - `a` shows **Activity**, every message of the workspace.
-- **Needs you** (`swarm_board::compute_needs`), most urgent first:
-  - an open question from a worker or to `user` (`bus::swarm::open_questions`)
-  - a worker on a terminal prompt
-  - the plan in review, or a planner that gave no plan
-  - a failed task, a lost task (its session exited mid-task), a stalled task (idle after its one nudge)
-  - a branch waiting for review, a proposed task
-  - a finished swarm
-
-  `!` focuses it, `Enter` acts, and `d` dismisses an item for the screen's lifetime (keyed by the task's `updated_ns`, so a new failure comes back).
-- **Verbs** go through `App::swarm_action` (`SwarmVerb`), the same path as `agent-mux swarm …`:
-  - **Plan:** `y` approves the plan (refused while it has errors). `p` re-plans with notes, which keeps tasks that ran.
-  - **Branches and proposals:** `y` merges a review branch (`merge_branch`, recorded in `swarm_reviews`) or accepts a proposal. `x` sets a branch aside or drops a proposal.
-  - **Running:** `space` pauses or resumes. `r` retries (`reopen_task`; a stalled task's worker is stopped first).
-  - **Closing:** `y` closes a finished swarm (`App::stop_swarm`, `record::end_swarm`).
-  - **Editing the board:** `n`, `e` and `d` add, edit (`record::update_plan_task`) and delete (only a task that never started) tasks.
-  - **Stopping:** `x` stops a task's worker or cancels an open task.
-
-  A confirmation takes `y` only.
-- **Writing:** `>` opens the command line, `m` opens it to the selected task's worker (or as a reply), and `b` opens it to everyone.
-  - **Syntax:** a line reads `[!] [@who] [#topic] message` (`swarm_board::parse_command`).
-  - **Addresses:** `@all`, or a task key whose worker is live (a separator-blind prefix or a launch id). Without one, the line goes to the selected task's worker, or to the asker when replying. `Tab` completes keys.
-  - **Topic:** a leading `!` sends topic `urgent`, which the `PreToolUse` hook delivers mid-turn. Otherwise it's `answer` for a reply to a question and `directive` else, unless `#topic` names one.
-  - **Delivery:** every message wakes an idle recipient.
-- **Refresh:** the screen refreshes when the `trace_changes` feed advances (triggers on the bus tables, `swarms` and `swarm_tasks`) or a live session changes (`SwarmBoard::refresh_due`, at most one look per 500 ms), never on a timer. `Ctrl+R` and every action refresh at once.
+- **Layout:** `ui::draw` gives `Mode::Swarm` the sidebar (`swarm_board::draw_tree`, `SIDEBAR_WIDTH`) and the main pane (`draw_pane`).
+  - A row with a live session draws it through the Agents screen's own pane, `ui::draw_session_pane`, so workers' PTYs, which are sized to the main pane, draw uncut. `App::sync_swarm_pane_selection` keeps `App::selected` on that session, so selection, search and key forwarding work.
+  - Other rows draw the swarm's card (`draw_swarm_card`) or the task's card (`draw_task_card`).
+  - The global status bar is the only footer, and actions report there (`App::set_swarm_status`).
+- **Tree:** `SwarmBoard::rows` holds `Row::Swarm`, `Row::Coordinator` (the planner run) and `Row::Task`.
+  - **Which swarms:** every live swarm (`record::live_swarms`, the opened folder's first), then those ended within `RECENT_NS` (`record::ended_swarms_since`), folded.
+  - **Cursor and folding:** the cursor is kept by row key across refreshes, `←`/`→` fold, and `sync_current` points the selected-swarm fields at the cursor's swarm.
+  - **Plan checks:** computed for the selected swarm, against its own workspace (`current_workspace`).
+  - **Live sessions:** the screen gets every one (`App::live_sessions_in(None)`), so workers in other workspaces are not taken for lost.
+- **Pane focus:** `Enter` on a terminal sets `pane_focused`. Dispatch then forwards keys as `Action::ForwardBytes`, paste goes to the session, and `text_entry_active` holds back the shared verbs. The Focus chord (`ActionId::FocusAgents`) hands the keyboard back to the tree.
+- **Needs you:** `swarm_board::needs_for` computes them per swarm. They show as `!` on task rows and `⚑n` on swarm rows, listed in full on the swarm's card, and `!` jumps to the next one. A question reads its first line that is not a header (`question_line`). The dispatcher totals them for the swarms this TUI runs (`App::swarm_needs`), which the Agents sidebar and the status bar show.
+- **Cost:** a live session carries `priced` (`LiveSwarmSession`), so an unpriced harness shows `—` and a partly priced total `≥$x` (`ui::swarm_board::spend`).
+- **Writing:** `>` opens the command line, `m` addresses it to the selected task's worker (or answers its open question), and `b` addresses it to everyone (`swarm_board::parse_command`).
+- **Refresh:** only when `trace_changes` advances or a live session changes (`SwarmBoard::refresh_due`), at most every 500 ms.
 - **Broadcast wakes.** `ControlRequest::WakeWorkspace { workspace, prompt, exclude }` wakes every live session of the workspace (and of the worktrees its tasks run in) the way `WakeSession` wakes one, except the sender; the response's `detail` counts how many were woken and how many queued until idle. The screen's `@all` (`b`), `agent-mux swarm broadcast --wake`, `agent-mux bus send --wake` without `--to` and `agent_mux_send_message(to = "*", wake = true)` all send it.
 - **The orchestrated swarm (schema v21).** Design: `docs/superpowers/specs/2026-11-02-swarm-orchestrator-design.md`.
   - **Tables:** `swarms` holds one swarm's run (`planning` → `review` → `running`/`paused` → `integrating` → `finished`; one live per workspace; `owner_run` is the TUI that dispatches it). `swarm_tasks` extends `agent_tasks` with the plan's key, position, `depends_on`, acceptance, `proposed`, attempts and `nudged_ns`. The migration ends every coordinator-era swarm (`swarm_state`, `swarm_plans`).

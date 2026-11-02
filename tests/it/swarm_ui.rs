@@ -1,6 +1,6 @@
 //! The Swarm screen drawn into a test terminal and driven through the App
-//! (`app::swarm_board`, `ui::swarm_board`): a plan in review drawn as a
-//! board with what needs the operator, `y` approving only a plan without
+//! (`app::swarm_board`, `ui::swarm_board`), in the Agents layout: a plan in
+//! review drawn as a tree beside the swarm's card with what needs you, `y` approving only a plan without
 //! errors, `d` deleting a draft task, `y` merging a finished branch, the
 //! launch card and form, and a refresh only when the store moved.
 
@@ -159,7 +159,6 @@ fn seed(f: &Fixture, status: SwarmStatus, tasks: Vec<PlannedTask>) -> SwarmRun {
 }
 
 fn open_screen(f: &mut Fixture) {
-    f.app.sessions.clear();
     let conn = open_aux(&f.db).unwrap();
     let view = SwarmBoard::open(
         f.ws.clone(),
@@ -189,8 +188,15 @@ fn press(f: &mut Fixture, c: KeyCode) {
     f.app.handle_key(&key(c), Instant::now());
 }
 
+fn notice(app: &App) -> String {
+    app.notice
+        .as_ref()
+        .map(|n| n.text.clone())
+        .unwrap_or_default()
+}
+
 #[test]
-fn a_plan_in_review_is_drawn_as_a_board_with_what_needs_you() {
+fn a_plan_in_review_is_drawn_as_a_tree_beside_the_swarms_card() {
     let mut f = fixture();
     let mut bad = task("docs", &[]);
     bad.harness = Some("gemini".into());
@@ -201,50 +207,52 @@ fn a_plan_in_review_is_drawn_as_a_board_with_what_needs_you() {
     );
     open_screen(&mut f);
     let out = render(&f.app, 140, 32);
-    for want in [
-        "◆ Ship the follow-ups",
-        "· review · 0/3 done",
-        "0/2 workers",
-        "⚑ NEEDS YOU (1)",
-        "the plan waits for you: 3 task(s), 1 error(s) to fix first",
-        "Plan (3) · planner: claude · \"one task per subsystem\"",
-        "schema",
-        "queries ",
-        "← schema",
-        "schema · draft · Do schema",
-        "1 Task",
-        "Instructions for schema.",
-        "── Done when ──",
-        "y approve",
-    ] {
-        assert!(out.contains(want), "missing {want:?} in:\n{out}");
-    }
     if std::env::var_os("SWARM_UI_PRINT").is_some() {
         println!("{out}");
     }
+    for want in [
+        // the tree, where the Agents list is
+        "Swarms • Keyboard focus",
+        "▾ ◆ Ship the follow-ups  ⚑1",
+        "· 1 schema",
+        "· 2 queries",
+        "· 3 docs",
+        "+ new swarm  n",
+        // the swarm's card in the main pane
+        "◆ Ship the follow-ups",
+        "review · 0/3 done · 0/2 workers",
+        "── Needs you (1) ──",
+        "the plan waits for you: 3 task(s), 1 error(s) to fix first",
+        "one task per subsystem",
+        "y approve · p re-plan",
+        // one footer: the global one
+        "[F1 Commands] Swarm",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
+    }
+    assert!(!out.contains("NEEDS YOU"), "no strip of its own:\n{out}");
     for width in [80u16, 120, 180] {
         let out = render(&f.app, width, 24);
-        for want in [
-            "◆ Ship",
-            "NEEDS YOU (1)",
-            "Plan (3)",
-            "schema",
-            "queries",
-            "1 Task",
-            "y approve",
-        ] {
+        for want in ["Swarms", "◆ Ship", "1 schema", "Needs you (1)"] {
             assert!(
                 out.contains(want),
                 "{width} columns: missing {want:?} in:\n{out}"
             );
         }
-        if width == 80 && std::env::var_os("SWARM_UI_PRINT").is_some() {
-            println!("{out}");
-        }
     }
-    // The task with an error is marked on the board and explains itself.
-    let docs_row = out.lines().find(|l| l.contains("Do docs")).unwrap();
-    assert!(docs_row.contains("!·"), "{docs_row}");
+    // A task: its card, and the task with an error is marked in the tree.
+    f.app.handle_key(&key(KeyCode::Down), Instant::now());
+    let out = render(&f.app, 140, 32);
+    for want in [
+        "schema · draft · Do schema",
+        "1 Task",
+        "Instructions for schema.",
+        "── Done when ──",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
+    }
+    let docs_row = out.lines().find(|l| l.contains("3 docs")).unwrap();
+    assert!(docs_row.contains("✗ gemini"), "{docs_row}");
     press(&mut f, KeyCode::Char('G'));
     let out = render(&f.app, 140, 32);
     assert!(
@@ -264,8 +272,8 @@ fn y_approves_only_a_plan_without_errors_and_d_deletes_a_draft_task() {
     press(&mut f, KeyCode::Char('y'));
     assert!(view(&f.app).confirm.is_none());
     assert_eq!(
-        view(&f.app).status_msg.as_deref(),
-        Some("fix the plan first: docs: harness `gemini` is not installed")
+        notice(&f.app),
+        "fix the plan first: docs: harness `gemini` is not installed"
     );
 
     press(&mut f, KeyCode::Char('G'));
@@ -275,6 +283,7 @@ fn y_approves_only_a_plan_without_errors_and_d_deletes_a_draft_task() {
     press(&mut f, KeyCode::Char('y'));
     assert_eq!(view(&f.app).board.len(), 1);
 
+    press(&mut f, KeyCode::Char('g'));
     press(&mut f, KeyCode::Char('y'));
     let out = render(&f.app, 120, 30);
     assert!(
@@ -288,8 +297,8 @@ fn y_approves_only_a_plan_without_errors_and_d_deletes_a_draft_task() {
         SwarmStatus::Running
     );
     assert_eq!(
-        view(&f.app).status_msg.as_deref(),
-        Some("plan approved: 1 task(s); workers start now")
+        notice(&f.app),
+        "plan approved: 1 task(s); workers start now"
     );
     assert!(bstore::plan_blocks(&conn, &swarm.workspace).is_none());
 }
@@ -345,8 +354,9 @@ fn y_merges_a_finished_branch_into_the_workspace() {
     open_screen(&mut f);
     let out = render(&f.app, 120, 30);
     assert!(out.contains("review    a finished on loop/bus-a"), "{out}");
-    assert!(out.contains("⇡"), "{out}");
+    assert!(out.contains("⇡ 1 a"), "{out}");
 
+    press(&mut f, KeyCode::Down);
     press(&mut f, KeyCode::Char('y'));
     let out = render(&f.app, 120, 30);
     assert!(
@@ -355,12 +365,9 @@ fn y_merges_a_finished_branch_into_the_workspace() {
     );
     press(&mut f, KeyCode::Char('y'));
     assert!(
-        view(&f.app)
-            .status_msg
-            .as_deref()
-            .is_some_and(|m| m.starts_with("merged loop/bus-a (")),
-        "{:?}",
-        view(&f.app).status_msg
+        notice(&f.app).starts_with("merged loop/bus-a ("),
+        "{}",
+        notice(&f.app)
     );
     assert!(
         f.ws.join("b.txt").exists(),
@@ -377,7 +384,7 @@ fn with_no_swarm_the_screen_offers_one_and_the_form_starts_it() {
     open_screen(&mut f);
     let out = render(&f.app, 120, 30);
     assert!(out.contains("No swarm in this workspace."), "{out}");
-    assert!(out.contains("Nothing needs you."), "{out}");
+    assert!(out.contains("no swarms: n starts one"), "{out}");
     press(&mut f, KeyCode::Enter);
     assert!(matches!(view(&f.app).modal, Some(Modal::Launch { .. })));
     let out = render(&f.app, 120, 30);
@@ -437,4 +444,126 @@ fn the_screen_refreshes_only_when_the_store_or_a_session_moved() {
     v.refresh(&[], None, now_ns());
     assert_eq!(v.messages.len(), 1);
     assert!(!v.refresh_due(&[], t0 + Duration::from_secs(3)));
+}
+
+fn pump(
+    rx: &mut mpsc::Receiver<agent_mux::events::AppEvent>,
+    app: &mut App,
+    ms: u64,
+    mut done: impl FnMut(&App) -> bool,
+) -> bool {
+    use agent_mux::events::AppEvent;
+    let deadline = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < deadline {
+        if done(app) {
+            return true;
+        }
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::PtyOutput { id, bytes } => {
+                    app.handle_pty_output(id, &bytes, Instant::now())
+                }
+                AppEvent::PtyExit { id } => app.handle_pty_exit(id),
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    done(app)
+}
+
+#[test]
+fn a_workers_terminal_fills_the_pane_and_enter_types_into_it() {
+    let mut f = fixture();
+    // A plain shell is the worker of the first task.
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut app = App::new(
+        vec![Profile {
+            name: "shell".into(),
+            command: "sh".into(),
+            args: vec![],
+            default_dir: Some(f.ws.to_string_lossy().into_owned()),
+            tracing: None,
+            model: None,
+            bypass_approvals: None,
+        }],
+        None,
+        tx,
+    );
+    app.trace_db_path = Some(f.db.clone());
+    app.set_pane_size(30, 108);
+    app.focus_list();
+    app.handle_key(&key(KeyCode::Char('n')), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert_eq!(app.sessions.len(), 1);
+    let launch = format!("session-{}", app.sessions[0].id);
+    let swarm = seed(&f, SwarmStatus::Running, vec![task("schema", &[])]);
+    let conn = open_aux(&f.db).unwrap();
+    let board = record::board(&conn, &swarm.id).unwrap();
+    conn.execute(
+        "UPDATE agent_tasks SET status = 'running', assigned_to = ?1 WHERE id = ?2",
+        rusqlite::params![launch, board[0].task.id],
+    )
+    .unwrap();
+    assert!(pump(&mut rx, &mut app, 5000, |a| !a.sessions[0]
+        .parser
+        .screen()
+        .contents()
+        .trim()
+        .is_empty()));
+    f.app = app;
+    open_screen(&mut f);
+    // ↓ to the task: its live terminal in the main pane, at the pane's size.
+    press(&mut f, KeyCode::Down);
+    let v = view(&f.app);
+    assert_eq!(v.pane(), agent_mux::app::swarm_board::PaneView::Session(0));
+    let out = render(&f.app, 140, 32);
+    assert!(out.contains("shell — "), "the Agents pane's title:\n{out}");
+    // Enter gives it the keyboard; what is typed reaches the shell.
+    press(&mut f, KeyCode::Enter);
+    assert!(view(&f.app).pane_focused);
+    for c in "echo swarm-pane-$((6*7))".chars() {
+        press(&mut f, KeyCode::Char(c));
+    }
+    press(&mut f, KeyCode::Enter);
+    assert!(
+        pump(&mut rx, &mut f.app, 5000, |a| a.sessions[0]
+            .parser
+            .screen()
+            .contents()
+            .contains("swarm-pane-42")),
+        "{}",
+        f.app.sessions[0].parser.screen().contents()
+    );
+    let out = render(&f.app, 240, 32);
+    assert!(out.contains("Keyboard goes to shell"), "{out}");
+    // The focus chord takes the keyboard back to the tree.
+    f.app.handle_key(
+        &KeyEvent::new(
+            KeyCode::Char('L'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+        Instant::now(),
+    );
+    assert!(!view(&f.app).pane_focused);
+    assert!(
+        matches!(f.app.mode, Mode::Swarm(_)),
+        "still on the Swarm screen"
+    );
+    f.app.kill_all();
+}
+
+#[test]
+fn a_swarm_that_needs_you_shows_on_the_agents_screen() {
+    let mut f = fixture();
+    let conn = open_aux(&f.db).unwrap();
+    let swarm = seed(&f, SwarmStatus::Review, vec![task("schema", &[])]);
+    // this TUI dispatches it
+    record::set_owner(&conn, &swarm.id, &f.app.app_run_id).unwrap();
+    f.app.on_tick(Instant::now());
+    assert_eq!(f.app.swarm_needs, 1, "the plan waits for approval");
+    let out = render(&f.app, 140, 32);
+    assert!(out.contains("⚑ swarm needs you (1)"), "{out}");
+    assert!(out.contains("⚑ swarm 1"), "the status bar:\n{out}");
 }

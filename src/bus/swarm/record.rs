@@ -212,6 +212,16 @@ pub fn live_swarm(conn: &Connection, workspace: &str) -> rusqlite::Result<Option
     .optional()
 }
 
+/// Swarms that ended at or after `since_ns`, newest first.
+pub fn ended_swarms_since(conn: &Connection, since_ns: i64) -> rusqlite::Result<Vec<SwarmRun>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SWARM_COLS} FROM swarms WHERE ended_ns IS NOT NULL AND ended_ns >= ?1
+         ORDER BY ended_ns DESC LIMIT 20"
+    ))?;
+    let rows = stmt.query_map(params![since_ns], row_to_swarm)?;
+    rows.collect()
+}
+
 /// Every live swarm, oldest first.
 pub fn live_swarms(conn: &Connection) -> rusqlite::Result<Vec<SwarmRun>> {
     let mut stmt = conn.prepare(&format!(

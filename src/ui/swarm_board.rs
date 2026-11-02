@@ -1,14 +1,15 @@
-//! Drawing the Swarm screen (`crate::app::swarm_board`): the mission strip,
-//! the Needs-you strip, the board, the panel on the selected task (Task,
-//! Live, Thread, Changes) or the swarm's Activity, the footer or the `>`
-//! command line, and the forms and confirmations over them (§8.1 of
-//! `docs/superpowers/specs/2026-11-02-swarm-orchestrator-design.md`).
+//! Drawing the Swarm screen (`crate::app::swarm_board`) in the Agents
+//! layout: the swarm tree where the Agents list is (`draw_tree`), and the
+//! selected row in the main pane (`draw_pane`): a live session's terminal
+//! through the Agents screen's own pane (`ui::draw_session_pane`), else the
+//! swarm's or the task's card. The global status bar is the only footer.
+//! Spec: `docs/superpowers/specs/2026-11-02-swarm-agents-layout-design.md` §2.
 
-use super::flow::{dim, head, hints};
+use super::flow::{dim, head};
 use crate::app::App;
 use crate::app::swarm_board::{
-    Confirm, Focus, LaunchField, LinePurpose, Modal, NeedKind, Recipient, SwarmBoard, Tab,
-    TaskField,
+    Confirm, Focus, LaunchField, LinePurpose, Modal, NeedKind, PaneView, Recipient, Row,
+    SwarmBoard, Tab, TaskField,
 };
 use crate::app::text_area::TextArea;
 use crate::bus::swarm::engine::{self, Shown};
@@ -19,57 +20,8 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use tui_term::widget::PseudoTerminal;
-
-pub fn draw(f: &mut Frame, area: Rect, v: &SwarmBoard, app: &App) {
-    f.render_widget(Clear, area);
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(mission_strip(v, area.width.saturating_sub(4) as usize));
-    let inner = outer.inner(area);
-    f.render_widget(outer, area);
-
-    let shown = v
-        .needs
-        .len()
-        .min(if v.focus == Focus::Needs { 5 } else { 3 });
-    let needs_h = if v.needs.is_empty() {
-        1
-    } else {
-        1 + shown as u16
-    };
-    let foot_h = if v.command.is_some() { 2 } else { 1 };
-    let [needs_area, body, foot] = Layout::vertical([
-        Constraint::Length(needs_h.min(inner.height.saturating_sub(4))),
-        Constraint::Min(0),
-        Constraint::Length(foot_h),
-    ])
-    .areas(inner);
-    draw_needs(f, needs_area, v, shown);
-
-    if v.swarm.is_none() {
-        draw_launch_card(f, body, v);
-    } else {
-        let board_w = (body.width * 55 / 100).clamp(40.min(body.width), 96);
-        let [board_area, panel_area] =
-            Layout::horizontal([Constraint::Length(board_w), Constraint::Min(0)]).areas(body);
-        draw_board(f, board_area, v);
-        if v.activity {
-            draw_activity(f, panel_area, v);
-        } else {
-            draw_panel(f, panel_area, v, app);
-        }
-    }
-    draw_footer(f, foot, v);
-    if let Some(m) = &v.modal {
-        draw_modal(f, area, m, v);
-    }
-    if let Some(c) = &v.confirm {
-        draw_confirm(f, area, c);
-    }
-}
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use std::time::Instant;
 
 fn state_label(s: SwarmStatus) -> &'static str {
     match s {
@@ -80,66 +32,6 @@ fn state_label(s: SwarmStatus) -> &'static str {
         SwarmStatus::Integrating => "integrating",
         SwarmStatus::Finished => "finished",
     }
-}
-
-/// The top border: goal, state, tasks done and a bar, workers against the
-/// cap, elapsed time, tokens and cost. The goal gives way first.
-fn mission_strip(v: &SwarmBoard, width: usize) -> Line<'static> {
-    let Some(s) = &v.swarm else {
-        return Line::from(vec![
-            Span::styled(" ◆ Swarm ", head()),
-            Span::styled(
-                format!(
-                    "· {} · no swarm ",
-                    crate::app::workspaces_view::tilde_path(&v.workspace)
-                ),
-                dim(),
-            ),
-        ]);
-    };
-    let total = v.board.len();
-    let done = v
-        .board
-        .iter()
-        .filter(|t| t.task.status == TaskStatus::Done)
-        .count();
-    let bar_w = 10usize;
-    let filled = (done * bar_w).checked_div(total).unwrap_or(0);
-    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
-    let (tokens, cost) = v
-        .board
-        .iter()
-        .filter_map(|t| v.worker_of(t))
-        .fold((0i64, 0f64), |(t, c), w| (t + w.tokens, c + w.cost_usd));
-    let elapsed = crate::bus::swarm::short_age(v.now_ns - s.started_ns);
-    let ended = if s.ended_ns.is_some() {
-        " · closed"
-    } else {
-        ""
-    };
-    let check_state = s
-        .check_result
-        .as_deref()
-        .and_then(crate::bus::swarm::check::CheckResult::parse);
-    let check = match (&s.check_cmd, check_state) {
-        (Some(_), Some(r)) if r.running => " · check running",
-        (Some(_), Some(r)) if r.passed => " · check ✓",
-        (Some(_), Some(_)) => " · check ✗",
-        _ => "",
-    };
-    let tail = format!(
-        " · {}{ended}{check} · {done}/{total} done {bar} · {}/{} workers · {elapsed} · {} tok {} ",
-        state_label(s.status),
-        v.busy_workers(),
-        s.max_workers,
-        fmt_tokens(Some(tokens)),
-        fmt_cost(Some(cost)),
-    );
-    let room = width.saturating_sub(tail.chars().count() + 4);
-    Line::from(vec![
-        Span::styled(format!(" ◆ {}", truncate(&s.goal, room.max(8))), head()),
-        Span::styled(tail, Style::default().fg(Color::Gray)),
-    ])
 }
 
 fn shown_style(s: Shown) -> Style {
@@ -160,296 +52,492 @@ fn shown_style(s: Shown) -> Style {
 
 fn focus_border(focused: bool) -> Style {
     if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     }
 }
 
-fn draw_needs(f: &mut Frame, area: Rect, v: &SwarmBoard, shown: usize) {
-    if area.height == 0 {
-        return;
-    }
-    if v.needs.is_empty() {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(" ✓ ", Style::default().fg(Color::Green)),
-                Span::styled("Nothing needs you.", dim()),
-            ])),
-            area,
-        );
-        return;
-    }
-    let focused = v.focus == Focus::Needs;
-    let width = area.width as usize;
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            format!(" ⚑ NEEDS YOU ({}) ", v.needs.len()),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if focused {
-                "  ↑↓ choose · Enter act · d dismiss · Esc back"
-            } else {
-                "  ! to act"
-            },
-            dim(),
-        ),
-    ])];
-    let start = if focused {
-        super::sidebar_window(v.selected_need, v.needs.len(), shown.max(1))
-    } else {
-        0
+/// Tokens and cost of a swarm's live workers and coordinator: `—` when none
+/// of it is priced, `≥$x` when part of it is (agy is not priced).
+pub fn spend(v: &SwarmBoard, swarm: usize) -> (i64, String) {
+    let Some(d) = v.swarms.get(swarm) else {
+        return (0, "—".into());
     };
-    for (i, need) in v.needs.iter().enumerate().skip(start).take(shown) {
-        let selected = focused && i == v.selected_need;
-        let kind_style = match need.kind {
-            NeedKind::Failed | NeedKind::Lost | NeedKind::PlannerFailed | NeedKind::CheckFailed => {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    let launches = d
+        .board
+        .iter()
+        .filter_map(|t| t.task.assigned_to.as_deref())
+        .chain(d.run.planner_launch.as_deref());
+    let (mut tokens, mut cost, mut priced, mut unpriced) = (0i64, 0f64, 0usize, 0usize);
+    for l in launches {
+        if let Some(w) = v.live.get(l) {
+            tokens += w.tokens;
+            if w.priced {
+                cost += w.cost_usd;
+                priced += 1;
+            } else {
+                unpriced += 1;
             }
-            NeedKind::Question | NeedKind::Prompt | NeedKind::Plan | NeedKind::Stalled => {
+        }
+    }
+    let label = match (priced, unpriced) {
+        (0, _) => "—".to_string(),
+        (_, 0) => fmt_cost(Some(cost)),
+        _ => format!("≥{}", fmt_cost(Some(cost))),
+    };
+    (tokens, label)
+}
+
+/// The tree, where the Agents list is: each swarm, its coordinator and its
+/// tasks, with `!` and `⚑n` where the operator is needed.
+pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
+    let focused = v.focus == Focus::Board && !v.pane_focused;
+    let live = v.swarms.iter().filter(|d| d.run.ended_ns.is_none()).count();
+    let needs = v.needs_total();
+    // like the Agents list's: the name and where the keyboard is, then what
+    // fits of the counts (the rows carry the badges)
+    let room = usize::from(area.width.saturating_sub(4));
+    let mut title = if focused {
+        "Swarms • Keyboard focus".to_string()
+    } else {
+        format!("Swarms · {live} live")
+    };
+    let badge = format!(" ⚑{needs}");
+    if needs > 0 && title.chars().count() + badge.chars().count() <= room {
+        title.push_str(&badge);
+    }
+    let title = format!(" {title} ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border(focused))
+        .title(Span::styled(
+            title,
+            if needs > 0 {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
+            } else if focused {
+                head()
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+    let inner_w = usize::from(area.width.saturating_sub(2));
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = super::sidebar_window(v.cursor, v.rows.len(), visible.saturating_sub(1).max(1));
+    let mut items: Vec<ListItem> = Vec::new();
+    for (n, row) in v.rows.iter().enumerate().skip(start).take(visible) {
+        let is_cursor = n == v.cursor;
+        let marker = if is_cursor { ">" } else { " " };
+        let (left, lstyle, right, rstyle): (String, Style, String, Style) = match *row {
+            Row::Swarm(i) => {
+                let d = &v.swarms[i];
+                let arrow = if v.is_folded(i) { "▸" } else { "▾" };
+                let done = d
+                    .board
+                    .iter()
+                    .filter(|t| t.task.status == TaskStatus::Done)
+                    .count();
+                let n_need = d.needs.len();
+                let (right, rstyle) = if d.run.ended_ns.is_some() {
+                    ("✓".to_string(), dim())
+                } else if n_need > 0 {
+                    (
+                        format!("⚑{n_need}"),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    (format!("{done}/{}", d.board.len()), dim())
+                };
+                (
+                    format!("{arrow} ◆ {}", d.run.goal),
+                    if d.run.ended_ns.is_some() {
+                        dim()
+                    } else {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    },
+                    right,
+                    rstyle,
+                )
+            }
+            Row::Coordinator(i) => {
+                let d = &v.swarms[i];
+                let state = d
+                    .run
+                    .planner_launch
+                    .as_deref()
+                    .and_then(|l| v.live.get(l))
+                    .map(|w| match w.worker.state {
+                        engine::WorkerState::Working => ("●", Style::default().fg(Color::Green)),
+                        engine::WorkerState::Prompt => ("⚑", Style::default().fg(Color::Yellow)),
+                        engine::WorkerState::Idle => ("○", dim()),
+                        engine::WorkerState::Exited => ("·", dim()),
+                    })
+                    .unwrap_or(("·", dim()));
+                (
+                    format!("    ★ planner·{}", d.run.planner_harness),
+                    Style::default().fg(Color::Gray),
+                    state.0.to_string(),
+                    state.1,
+                )
+            }
+            Row::Task(i, j) => {
+                let d = &v.swarms[i];
+                let t = &d.board[j];
+                let input = engine::Input {
+                    swarm: &d.run,
+                    board: &d.board,
+                    workers: &v.workers,
+                    asking: &d.asking,
+                    now_ns: v.now_ns,
+                };
+                let st = engine::shown(t, &input);
+                let needs = v.row_needs(*row);
+                let plan_error = i
+                    == v.rows
+                        .get(v.cursor)
+                        .map(|r| match r {
+                            Row::Swarm(k) | Row::Coordinator(k) | Row::Task(k, _) => *k,
+                        })
+                        .unwrap_or(usize::MAX)
+                    && v.problems.for_task(&t.ext.plan_key).any(|(e, _)| e);
+                let harness = v
+                    .worker_of(t)
+                    .map(|w| w.provider.clone())
+                    .or_else(|| t.task.target_harness.clone())
+                    .unwrap_or_default();
+                let (right, rstyle) = if plan_error {
+                    (
+                        format!("✗ {harness}"),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )
+                } else if needs > 0 {
+                    (
+                        "!".to_string(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    (harness, dim())
+                };
+                (
+                    format!("    {} {} {}", st.glyph(), j + 1, t.ext.plan_key),
+                    shown_style(st),
+                    right,
+                    rstyle,
+                )
+            }
+        };
+        let room = inner_w.saturating_sub(1 + right.chars().count() + 1);
+        let left = truncate(&left, room);
+        let pad = room.saturating_sub(left.chars().count());
+        let item = ListItem::new(Line::from(vec![
+            Span::styled(marker, Style::default().fg(Color::Cyan)),
+            Span::styled(left, lstyle),
+            Span::raw(" ".repeat(pad + 1)),
+            Span::styled(right, rstyle),
+        ]));
+        items.push(if is_cursor && focused {
+            item.style(Style::default().add_modifier(Modifier::REVERSED))
+        } else if is_cursor {
+            item.style(Style::default().fg(Color::Cyan))
+        } else {
+            item
+        });
+    }
+    if items.len() < visible {
+        items.push(ListItem::new(Line::styled(
+            if v.rows.is_empty() {
+                " no swarms: n starts one"
+            } else {
+                " + new swarm  n"
+            },
+            dim(),
+        )));
+    }
+    f.render_widget(List::new(items).block(block), area);
+}
+
+/// The main pane: the selected row's terminal or card, the command line,
+/// and the forms and confirmations over them.
+pub fn draw_pane(f: &mut Frame, area: Rect, v: &SwarmBoard, app: &App, now: Instant) {
+    let (body, line) = if v.command.is_some() {
+        let [b, l] = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(area);
+        (b, Some(l))
+    } else {
+        (area, None)
+    };
+    if v.activity {
+        draw_activity(f, body, v);
+    } else {
+        match v.pane() {
+            PaneView::Session(idx) => super::draw_session_pane(f, body, app, idx, now),
+            PaneView::SwarmCard => draw_swarm_card(f, body, v),
+            PaneView::TaskCard => draw_task_card(f, body, v),
+            PaneView::Launch => draw_launch_card(f, body, v),
+        }
+    }
+    if let Some(l) = line {
+        f.render_widget(Clear, l);
+        draw_command(f, l, v);
+    }
+    if let Some(m) = &v.modal {
+        draw_modal(f, area, m, v);
+    }
+    if let Some(c) = &v.confirm {
+        draw_confirm(f, area, c);
+    }
+}
+
+fn card_block(title: String, focused: bool) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border(focused))
+        .title(Span::styled(
+            title,
+            if focused {
+                head()
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ))
+}
+
+/// The swarm's card: where it stands, what needs you, the plan, the check
+/// and its verbs.
+fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
+    let Some(s) = &v.swarm else {
+        draw_launch_card(f, area, v);
+        return;
+    };
+    let si = match v.rows.get(v.cursor) {
+        Some(Row::Swarm(i)) | Some(Row::Coordinator(i)) | Some(Row::Task(i, _)) => *i,
+        None => 0,
+    };
+    let block = card_block(format!(" ◆ {} ", s.goal), v.focus == Focus::Panel);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let section = |t: &str| {
+        Line::styled(
+            format!("── {t} ──"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let total = v.board.len();
+    let done = v
+        .board
+        .iter()
+        .filter(|t| t.task.status == TaskStatus::Done)
+        .count();
+    let (tokens, cost) = spend(v, si);
+    let elapsed = crate::bus::swarm::short_age(v.now_ns - s.started_ns);
+    let state = if s.ended_ns.is_some() {
+        "closed".to_string()
+    } else {
+        state_label(s.status).to_string()
+    };
+    let mut out = vec![
+        Line::from(vec![
+            Span::styled(state, head()),
+            Span::styled(
+                format!(
+                    " · {done}/{total} done · {}/{} workers · {elapsed} · {} tok · {cost}",
+                    v.busy_workers(),
+                    s.max_workers,
+                    fmt_tokens(Some(tokens)),
+                ),
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+        Line::styled(
+            format!(
+                "{} · {} · planner {}",
+                s.id,
+                crate::app::workspaces_view::tilde_path(std::path::Path::new(&s.workspace)),
+                s.planner_harness
+            ),
+            dim(),
+        ),
+        Line::raw(""),
+    ];
+    if s.status == SwarmStatus::Planning {
+        let since = crate::bus::swarm::short_age(v.now_ns - s.updated_ns);
+        out.push(Line::styled(
+            format!(
+                "◌ {} has been planning for {since} (it gives up after 15m). Its terminal is the ★ row.",
+                s.planner_harness
+            ),
+            Style::default().fg(Color::Yellow),
+        ));
+        out.push(Line::raw(""));
+    }
+    out.push(section(&format!("Needs you ({})", v.needs.len())));
+    if v.needs.is_empty() {
+        out.push(Line::styled(
+            "✓ Nothing needs you.",
+            Style::default().fg(Color::Green),
+        ));
+    }
+    for n in &v.needs {
+        let kind_style = match n.kind {
+            NeedKind::Failed | NeedKind::Lost | NeedKind::PlannerFailed | NeedKind::CheckFailed => {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             }
             NeedKind::Review | NeedKind::Proposed => Style::default().fg(Color::Cyan),
             NeedKind::Finished => Style::default().fg(Color::Green),
+            _ => Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         };
-        let label = format!("{:<10}", need.kind.label());
-        let verbs = format!("  {}", need.kind.verbs());
-        let room = width.saturating_sub(4 + label.len() + verbs.chars().count());
-        lines.push(
-            Line::from(vec![
-                Span::styled(
-                    if selected { " ▸ " } else { "   " },
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(label, kind_style),
-                Span::styled(
-                    truncate(&need.text, room),
-                    Style::default().fg(Color::White),
-                ),
-                Span::styled(verbs, dim()),
-            ])
-            .style(if selected {
-                Style::default().bg(Color::Rgb(52, 44, 20))
-            } else {
-                Style::default()
-            }),
-        );
+        out.push(Line::from(vec![
+            Span::styled(format!("{:<10}", n.kind.label()), kind_style),
+            Span::raw(n.text.clone()),
+        ]));
     }
-    let hidden = v.needs.len().saturating_sub(shown);
-    if hidden > 0
-        && !focused
-        && let Some(last) = lines.last_mut()
-    {
-        last.spans
-            .push(Span::styled(format!("   +{hidden} more"), dim()));
-    }
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-fn draw_board(f: &mut Frame, area: Rect, v: &SwarmBoard) {
-    let focused = v.focus == Focus::Board;
-    let s = v.swarm.as_ref().expect("a swarm");
-    let summary = s
-        .plan_summary
-        .as_deref()
-        .filter(|x| !x.is_empty())
-        .map(|x| format!(" · \"{x}\""))
-        .unwrap_or_default();
-    let title = format!(
-        " Plan ({}) · planner: {}{summary} ",
-        v.board.len(),
-        s.planner_harness
-    );
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focus_border(focused))
-        .title(Span::styled(
-            truncate(&title, area.width.saturating_sub(4) as usize),
-            if focused {
-                head()
-            } else {
-                Style::default().fg(Color::Gray)
-            },
+    if !v.needs.is_empty() {
+        out.push(Line::styled(
+            "! goes to the next one; its row takes the verbs.",
+            dim(),
         ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if v.board.is_empty() {
-        let mut lines = vec![Line::raw("")];
-        match (s.status, &s.plan_error) {
-            (SwarmStatus::Planning, _) => {
-                lines.push(Line::styled(
-                    format!(
-                        "  ◌ {} is planning: {}",
-                        s.planner_harness,
-                        truncate(&s.goal, 60)
-                    ),
-                    Style::default().fg(Color::Yellow),
-                ));
-                lines.push(Line::styled(
-                    "  Its output is on the right; Enter attaches to it.",
-                    dim(),
-                ));
-            }
-            (_, Some(e)) => {
-                lines.push(Line::styled(
-                    "  The planner gave no plan:",
-                    Style::default().fg(Color::Red),
-                ));
-                lines.push(Line::raw(format!("  {e}")));
-                lines.push(Line::styled(
-                    "  p re-plans with your notes; n adds a task by hand.",
-                    dim(),
-                ));
-            }
-            _ => lines.push(Line::styled("  No tasks. n adds one.", dim())),
-        }
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-        return;
     }
-
-    let width = inner.width as usize;
-    let rows_visible = inner.height as usize;
-    let start = super::sidebar_window(v.selected, v.board.len(), rows_visible.max(1));
-    let key_w = v
-        .board
+    out.push(Line::raw(""));
+    out.push(section("Plan"));
+    if let Some(sum) = s.plan_summary.as_deref().filter(|x| !x.is_empty()) {
+        out.push(Line::raw(sum.to_string()));
+    }
+    if let Some(e) = &s.plan_error {
+        out.push(Line::styled(
+            format!("The planner gave no plan: {e}"),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    for (k, m) in v
+        .problems
+        .errors
         .iter()
-        .map(|t| t.ext.plan_key.chars().count())
-        .max()
-        .unwrap_or(4)
-        .clamp(4, 18);
-    let mut lines = Vec::new();
-    for (i, t) in v.board.iter().enumerate().skip(start).take(rows_visible) {
-        let st = v.shown(t);
-        let selected = i == v.selected;
-        let problems: Vec<(bool, &str)> = v.problems.for_task(&t.ext.plan_key).collect();
-        let mark = if problems.iter().any(|(e, _)| *e) {
-            Span::styled(
-                "!",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            )
-        } else if !problems.is_empty() {
-            Span::styled("?", Style::default().fg(Color::Yellow))
-        } else {
-            Span::raw(" ")
-        };
-        let who = match v.worker_of(t) {
-            Some(w) => w.provider.clone(),
-            None => t.task.target_harness.clone().unwrap_or_default(),
-        };
-        let deps = if t.ext.depends_on.is_empty() {
-            String::new()
-        } else {
-            format!(" ← {}", t.ext.depends_on.join(","))
-        };
-        let money = v
-            .worker_of(t)
-            .map(|w| format!(" {}", fmt_cost(Some(w.cost_usd))))
-            .unwrap_or_default();
-        let right = format!("{deps}  {who}{money}");
-        let left = format!("{:>2} {:<key_w$} ", i + 1, truncate(&t.ext.plan_key, key_w));
-        let room = width.saturating_sub(4 + left.chars().count() + right.chars().count());
-        lines.push(
-            Line::from(vec![
-                Span::styled(
-                    if selected { "▸" } else { " " },
-                    Style::default().fg(Color::Cyan),
-                ),
-                mark,
-                Span::styled(format!("{} ", st.glyph()), shown_style(st)),
-                Span::styled(left, Style::default().fg(Color::Gray)),
-                Span::styled(
-                    format!("{:<room$}", truncate(&t.task.title, room)),
-                    if st == Shown::Cancelled {
-                        dim()
-                    } else {
-                        Style::default().fg(Color::White)
-                    },
-                ),
-                Span::styled(right, dim()),
-            ])
-            .style(if selected && focused {
-                Style::default().bg(Color::Rgb(30, 40, 56))
-            } else {
-                Style::default()
-            }),
-        );
+        .chain(v.problems.warnings.iter())
+        .filter(|(k, _)| k.is_empty())
+    {
+        let _ = k;
+        out.push(Line::styled(m.clone(), Style::default().fg(Color::Yellow)));
     }
-    f.render_widget(Paragraph::new(lines), inner);
+    out.push(Line::styled(
+        format!(
+            "{total} task(s){}",
+            if v.problems.errors.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", {} error(s) to fix before approving",
+                    v.problems.errors.len()
+                )
+            }
+        ),
+        dim(),
+    ));
+    if let Some(cmd) = &s.check_cmd {
+        out.push(Line::raw(""));
+        out.push(section("Check when done"));
+        match s
+            .check_result
+            .as_deref()
+            .and_then(crate::bus::swarm::check::CheckResult::parse)
+        {
+            Some(r) => {
+                out.push(Line::styled(
+                    r.summary(cmd),
+                    if r.running {
+                        Style::default().fg(Color::Yellow)
+                    } else if r.passed {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        Style::default().fg(Color::Red)
+                    },
+                ));
+                if !r.running && !r.passed {
+                    out.extend(
+                        r.tail
+                            .lines()
+                            .map(|l| Line::styled(format!("  {l}"), dim())),
+                    );
+                }
+            }
+            None => out.push(Line::styled(
+                format!("{cmd} (runs once everything is settled)"),
+                dim(),
+            )),
+        }
+    }
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        match (s.ended_ns.is_some(), s.status) {
+            (true, _) => "This swarm is closed. n starts a new one.",
+            (_, SwarmStatus::Review) => {
+                "y approve · p re-plan · n add a task · ↓ a task: e edit, d delete"
+            }
+            (_, SwarmStatus::Running) => "space pause · > message · ! next need · n add a task",
+            (_, SwarmStatus::Paused) => "space resume · > message · ! next need",
+            (_, SwarmStatus::Finished) => "y close the swarm",
+            (_, SwarmStatus::Integrating) => "↓ a branch: y merge, x set aside",
+            (_, SwarmStatus::Planning) => "p re-plan once it answers · x then r on ★ restarts it",
+        },
+        dim(),
+    ));
+    let lines: Vec<Line<'static>> = out.into_iter().skip(v.panel_scroll).collect();
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        indented(inner),
+    );
 }
 
-fn draw_panel(f: &mut Frame, area: Rect, v: &SwarmBoard, app: &App) {
-    let focused = v.focus == Focus::Panel;
-    let task = v.selected_task();
-    let title = match task {
-        Some(t) => {
-            let st = v.shown(t);
-            format!(" {} · {} · {} ", t.ext.plan_key, st.as_str(), t.task.title)
-        }
-        None => " Planner ".to_string(),
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focus_border(focused))
-        .title(Span::styled(
-            truncate(&title, area.width.saturating_sub(4) as usize),
-            if focused {
-                head()
-            } else {
-                Style::default().fg(Color::Gray)
-            },
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let Some(t) = task else {
-        // While planning, the planner's terminal.
-        match v
-            .planner_session()
-            .and_then(|p| app.sessions.get(p.session_idx))
-        {
-            Some(s) => f.render_widget(PseudoTerminal::new(s.parser.screen()), inner),
-            None => f.render_widget(
-                Paragraph::new(Line::styled("  Nothing selected.", dim())),
-                inner,
-            ),
-        }
+/// A task's card: its tabs (Task, Live, Thread, Changes) and the chosen one.
+fn draw_task_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
+    let Some(t) = v.selected_task() else {
+        draw_swarm_card(f, area, v);
         return;
     };
-
+    let st = v.shown(t);
+    let focused = v.focus == Focus::Panel;
+    let block = card_block(
+        format!(" {} · {} · {} ", t.ext.plan_key, st.as_str(), t.task.title),
+        focused,
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
     let [tabs_area, content] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
     let current = v.tab();
     let thread_len = v.thread().len();
-    let compact = inner.width < 52;
-    let pad = if compact { "" } else { " " };
-    let mut spans: Vec<Span<'static>> = vec![Span::raw(pad)];
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
     for (n, tab) in Tab::ALL.iter().enumerate() {
         let label = match tab {
-            Tab::Thread if thread_len > 0 && !compact => format!("{} Thread ({thread_len})", n + 1),
+            Tab::Thread if thread_len > 0 => format!("{} Thread ({thread_len})", n + 1),
             _ => format!("{} {}", n + 1, tab.label()),
         };
         spans.push(if *tab == current {
             Span::styled(
-                format!("{pad}{label}{pad}"),
+                format!(" {label} "),
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(format!("{pad}{label}{pad}"), dim())
+            Span::styled(format!(" {label} "), dim())
         });
         spans.push(Span::raw(" "));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), tabs_area);
-
     match current {
         Tab::Task => {
             let lines: Vec<Line<'static>> =
@@ -459,25 +547,22 @@ fn draw_panel(f: &mut Frame, area: Rect, v: &SwarmBoard, app: &App) {
                 indented(content),
             );
         }
-        Tab::Live => match v.worker_of(t).and_then(|w| app.sessions.get(w.session_idx)) {
-            Some(s) => f.render_widget(PseudoTerminal::new(s.parser.screen()), content),
-            None => f.render_widget(
-                Paragraph::new(vec![
-                    Line::raw(""),
-                    Line::styled(
-                        match v.shown(t) {
-                            Shown::Draft | Shown::Ready | Shown::Blocked | Shown::Proposed => {
-                                "  No worker yet: agent-mux starts one when the task is ready."
-                            }
-                            Shown::Lost => "  Its session exited mid-task: r retries it.",
-                            _ => "  No terminal: its worker is gone or runs in another window.",
-                        },
-                        dim(),
-                    ),
-                ]),
-                content,
-            ),
-        },
+        Tab::Live => f.render_widget(
+            Paragraph::new(vec![
+                Line::raw(""),
+                Line::styled(
+                    match st {
+                        Shown::Draft | Shown::Ready | Shown::Blocked | Shown::Proposed => {
+                            "  No worker yet: agent-mux starts one when the task is ready."
+                        }
+                        Shown::Lost => "  Its session exited mid-task: r retries it.",
+                        _ => "  No terminal here: its worker is gone or runs in another window.",
+                    },
+                    dim(),
+                ),
+            ]),
+            content,
+        ),
         Tab::Thread => {
             let msgs = v.thread();
             if msgs.is_empty() {
@@ -823,87 +908,6 @@ fn draw_command(f: &mut Frame, area: Rect, v: &SwarmBoard) {
         Span::styled(tail, Style::default().fg(Color::White)),
     ]);
     f.render_widget(Paragraph::new(vec![preview, input]), area);
-}
-
-fn draw_footer(f: &mut Frame, area: Rect, v: &SwarmBoard) {
-    if v.command.is_some() {
-        draw_command(f, area, v);
-        return;
-    }
-    if let Some(msg) = &v.status_msg {
-        f.render_widget(
-            Paragraph::new(Line::styled(
-                format!(" {msg}"),
-                Style::default().fg(Color::Yellow),
-            )),
-            area,
-        );
-        return;
-    }
-    let status = v
-        .swarm
-        .as_ref()
-        .filter(|s| s.ended_ns.is_none())
-        .map(|s| s.status);
-    let lists = v.activity || v.tab() == Tab::Thread;
-    let pairs: &[(&str, &str)] = if v.focus == Focus::Needs {
-        &[
-            ("↑↓", "need"),
-            ("Enter", "act"),
-            ("d", "dismiss"),
-            ("Esc", "board"),
-        ]
-    } else if status.is_none() {
-        &[("r", "start a swarm"), ("Esc", "close")]
-    } else if v.focus == Focus::Panel && lists {
-        &[
-            ("↑↓", "message"),
-            ("Enter", "read"),
-            ("m", "reply"),
-            ("1-4", "view"),
-            ("Tab/Esc", "board"),
-        ]
-    } else if v.focus == Focus::Panel {
-        &[
-            ("↑↓", "scroll"),
-            ("1-4", "view"),
-            ("a", "activity"),
-            ("Tab/Esc", "board"),
-        ]
-    } else if status == Some(SwarmStatus::Review) {
-        &[
-            ("y", "approve"),
-            ("p", "re-plan"),
-            ("e", "edit"),
-            ("n", "add"),
-            ("d", "delete"),
-            ("↑↓", "task"),
-            ("1-4", "view"),
-            ("Esc", "close"),
-        ]
-    } else if status == Some(SwarmStatus::Finished) {
-        &[
-            ("y", "close the swarm"),
-            ("↑↓", "task"),
-            ("1-4", "view"),
-            ("a", "activity"),
-            ("Esc", "close"),
-        ]
-    } else {
-        &[
-            ("↑↓", "task"),
-            ("Enter", "attach"),
-            ("1-4", "view"),
-            (">", "message"),
-            ("space", "pause"),
-            ("r", "retry"),
-            ("x", "stop"),
-            ("!", "needs"),
-            ("a", "activity"),
-            ("Esc", "close"),
-        ]
-    };
-    f.render_widget(Paragraph::new(hints(pairs)), area);
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
