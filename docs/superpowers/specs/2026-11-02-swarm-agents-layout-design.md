@@ -1,6 +1,6 @@
 # Swarm: the Agents layout and a coordinator agent — design
 
-Status: draft for review, 2026-11-02. Replaces §8 (the screen) of
+Status: approved for implementation, 2026-11-02 (decisions in §9). Replaces §8 (the screen) of
 `2026-11-02-swarm-orchestrator-design.md` and amends its §4 (planning) and
 §5.6 (questions). The engine (§5), the store (§7) and the CLI (§9) stay.
 
@@ -249,12 +249,11 @@ ALTER TABLE swarms ADD COLUMN coordinator_launch TEXT;  -- the live coordinator
 | **B: the coordinator** | Schema v22, `agent_mux_swarm_plan`, the coordinator launch and its built-in agent, plans submitted through the tool with errors answered, questions and events routed to it, restart, the plan timeout. The headless planner path removed. End to end with a fake coordinator that submits a plan with an error, then a good one. |
 | **C: harness and agents** | The workers' harness and per-task edits (§4), the agy probe and its fix or check (§5). |
 
-## 9. Open questions
+## 9. Decisions (operator, 2026-11-02)
 
-1. **Coordinator per swarm, or one per workspace** that outlives swarms? A
-   per-swarm coordinator is proposed: it knows one goal.
-2. **Coordinator cost:** an idle interactive session costs nothing, but every
-   event message that wakes it costs a turn. Should events be batched (at
-   most one wake per minute, proposed) or sent only on demand?
-3. **`n` inside a swarm:** a new task (proposed), or ask the coordinator to
-   add one?
+1. **One coordinator per swarm.** It knows one goal and ends with its swarm.
+2. **Event messages are batched:** at most one wake of the coordinator per
+   minute, carrying every event since the last one.
+3. **`n` inside a swarm adds a task directly** (a proposal when the gate is
+   on, so it goes through the same accept path). Asking the coordinator to add
+   one is done with `>`.
