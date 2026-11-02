@@ -5,10 +5,11 @@
 //! without a running TUI refuses instead of inventing a coordinator. The
 //! screen refreshes only when the bus's change feed, a live session or a
 //! lease's expiry says so, and a swarm's `max_workers` refuses the spawn
-//! that would exceed it.
+//! that would exceed it. A wake is pasted, and its Enter written apart, so a
+//! TUI that takes a burst as a paste still submits it.
 
 use agent_mux::app::swarm_view::SwarmView;
-use agent_mux::app::{App, Mode};
+use agent_mux::app::{App, Mode, PendingWake, WAKE_TTL};
 use agent_mux::bus::control::ControlRequest;
 use agent_mux::bus::store as bstore;
 use agent_mux::bus::swarm::{LiveSwarmSession, load_snapshot};
@@ -195,6 +196,8 @@ async fn pump_until(
         let remaining = deadline
             .saturating_duration_since(Instant::now())
             .min(Duration::from_millis(200));
+        // What the tick does for wakes: their Enter is a write of its own.
+        app.flush_pending_bus_wakes(Instant::now());
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Some(AppEvent::PtyOutput { id, bytes })) => {
                 app.handle_pty_output(id, &bytes, Instant::now());
@@ -307,6 +310,155 @@ async fn wake_workspace_reaches_every_idle_session_but_the_sender() {
     assert_eq!(
         resp.detail.as_deref(),
         Some("woke 0 session(s), queued 0 until idle")
+    );
+    app.kill_all();
+}
+
+/// A stand-in for Claude Code's and Codex's input box (probed 2026-11-02):
+/// it enables bracketed paste, and a read that is a paste (bracketed, or a
+/// burst over 64 bytes) takes `\r` as text; only a `\r` arriving on its own
+/// submits, printing `SUBMIT[<text>]`.
+const PASTE_AWARE_TUI: &str = r#"
+import os, sys, termios, tty
+tty.setraw(0)
+os.write(1, b"\x1b[?2004h> ")
+buf, pasting = b"", False
+while True:
+    chunk = os.read(0, 4096)
+    if not chunk:
+        break
+    if chunk.startswith(b"\x1b[200~"):
+        pasting, chunk = True, chunk[6:]
+    if pasting and b"\x1b[201~" in chunk:
+        chunk = chunk.replace(b"\x1b[201~", b"")
+        buf += chunk
+        pasting = False
+        continue
+    if pasting or len(chunk) > 64:
+        buf += chunk.replace(b"\r", b"\n")
+        continue
+    for c in chunk:
+        if c == 13:
+            os.write(1, b"\r\nSUBMIT[" + buf + b"]\r\n> ")
+            buf = b""
+        else:
+            buf += bytes([c])
+"#;
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_long_wake_is_submitted_by_a_tui_that_takes_a_burst_as_a_paste() {
+    if Command::new("python3").arg("-c").arg("1").output().is_err() {
+        eprintln!("skipped: python3 is not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().canonicalize().unwrap();
+    let script = ws.join("tui.py");
+    std::fs::write(&script, PASTE_AWARE_TUI).unwrap();
+    let profiles = vec![Profile {
+        name: "paste-aware".into(),
+        command: "python3".into(),
+        args: vec![script.to_string_lossy().into_owned()],
+        default_dir: Some(ws.to_string_lossy().into_owned()),
+        tracing: None,
+        model: None,
+        bypass_approvals: None,
+    }];
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut app = App::new(profiles, None, tx);
+    let now = Instant::now();
+    app.focus_list();
+    app.handle_key(&key(KeyCode::Char('n')), now);
+    app.handle_key(&key(KeyCode::Enter), now);
+    app.handle_key(&key(KeyCode::Enter), now);
+    assert_eq!(app.sessions.len(), 1);
+    assert!(
+        pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {
+            a.sessions[0].parser.screen().bracketed_paste()
+                && a.sessions[0].status(Instant::now()) == Status::Idle
+        })
+        .await,
+        "{}",
+        screen(&app, 0)
+    );
+
+    let prompt = "[plan-approved] The operator approved your plan: delegate the tasks now, \
+                  one worker per task, then wait for their results.";
+    assert!(prompt.len() > 100);
+    let resp = app.handle_bus_control(
+        ControlRequest::WakeSession {
+            launch_id: format!("session-{}", app.sessions[0].id),
+            prompt: prompt.into(),
+        },
+        Instant::now(),
+    );
+    assert_eq!(
+        resp.detail.as_deref(),
+        Some("injected into idle PTY"),
+        "{resp:?}"
+    );
+    assert!(
+        pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {
+            screen(a, 0)
+                .replace('\n', "")
+                .contains("SUBMIT[[plan-approved]")
+        })
+        .await,
+        "the wake was pasted but not submitted:\n{}",
+        screen(&app, 0)
+    );
+    assert!(app.pending_wake_submits.is_empty());
+    app.kill_all();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_queued_wake_older_than_its_ttl_is_dropped_not_typed_in_late() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().canonicalize().unwrap();
+    let (tx, mut rx) = mpsc::channel(256);
+    let mut app = App::new(shell_profiles(&ws), None, tx);
+    let now = Instant::now();
+    app.focus_list();
+    app.handle_key(&key(KeyCode::Char('n')), now);
+    app.handle_key(&key(KeyCode::Enter), now);
+    app.handle_key(&key(KeyCode::Enter), now);
+    assert!(
+        pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {
+            a.sessions[0].status(Instant::now()) == Status::Idle
+        })
+        .await
+    );
+    let id = format!("session-{}", app.sessions[0].id);
+    let t = Instant::now();
+    let Some(stale) = t.checked_sub(WAKE_TTL) else {
+        return; // the clock started less than WAKE_TTL ago
+    };
+    app.pending_bus_wakes = vec![
+        PendingWake {
+            launch_id: id.clone(),
+            prompt: "echo stale-wake".into(),
+            queued_at: stale,
+        },
+        PendingWake {
+            launch_id: id,
+            prompt: "echo fresh-wake".into(),
+            queued_at: t,
+        },
+    ];
+    app.flush_pending_bus_wakes(t);
+    assert!(app.pending_bus_wakes.is_empty());
+    assert!(
+        pump_until(&mut rx, &mut app, Duration::from_secs(10), |a| {
+            screen(a, 0).contains("fresh-wake")
+        })
+        .await
+    );
+    assert!(
+        !screen(&app, 0).contains("stale-wake"),
+        "{}",
+        screen(&app, 0)
     );
     app.kill_all();
 }
