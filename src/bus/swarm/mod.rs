@@ -50,6 +50,9 @@ pub struct LiveSwarmSession {
     pub turns: usize,
     pub tokens: i64,
     pub cost_usd: f64,
+    /// Whether `cost_usd` is the whole cost: reported by the harness, or
+    /// estimated with every generation priced (agy is not priced).
+    pub priced: bool,
     pub running_tool: Option<String>,
     /// Nanoseconds since the session last printed anything.
     pub quiet_ns: Option<i64>,

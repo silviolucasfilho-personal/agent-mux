@@ -1,15 +1,17 @@
 # Swarms: one goal, many agents
 
-A **swarm** splits one goal into tasks that agents work on in parallel in the same workspace. agent-mux runs it: a planner writes the plan, you review and approve it, and agent-mux starts one worker per task, in order, up to the number of workers you allow. Workers can be Claude Code, Codex, Antigravity or OpenCode sessions, in any mix. You watch and steer the swarm from the **Swarm** screen. This guide shows how to use it. How it works inside (tables, control requests, the dispatcher) is in [bus.md](bus.md#swarm-mission-control-modeswarm-agent-mux-swarm-), and the design is in [the spec](superpowers/specs/2026-11-02-swarm-orchestrator-design.md).
+A **swarm** splits one goal into tasks that agents work on in parallel in the same workspace. agent-mux runs it: a planner writes the plan, you review and approve it, and agent-mux starts one worker per task, in order, up to the number of workers you allow. Workers can be Claude Code, Codex, Antigravity or OpenCode sessions, in any mix. You watch and steer the swarm from the **Swarm** screen. This guide shows how to use it. How it works inside (tables, control requests, the dispatcher) is in [bus.md](bus.md#swarm-mission-control-modeswarm-agent-mux-swarm-), and the design is in the specs for [the orchestrator](superpowers/specs/2026-11-02-swarm-orchestrator-design.md) and [the screen](superpowers/specs/2026-11-02-swarm-agents-layout-design.md).
 
 ## In one minute
 
 1. Select a session in the folder you want to work on, press `F1` and choose **Open swarm**.
-2. Press `r` (or `Enter`), write the goal, and press `Ctrl+S`.
-3. The planner writes the plan. When **⚑ NEEDS YOU** says the plan waits for you, read the board, edit what you want, and press `y` then `y` to approve it.
-4. Workers start, each on one task. Answer what lands in **Needs you**, and write to workers with `>`.
-5. When a worker finishes in its own git worktree, `y` merges its branch.
-6. When the swarm is finished, `y` closes it.
+2. Press `n` (or `Enter` on the empty screen), write the goal, and press `Ctrl+S`.
+3. The planner writes the plan: its `★` row shows its terminal. When the swarm's card says the plan waits for you, look over the tasks, edit what you want, and press `y` then `y` to approve it.
+4. Workers start, each on one task. Select a task to see its worker's terminal, and press `Enter` to type into it. `!` jumps to whatever needs you, and `>` writes to workers.
+5. When a worker finishes in its own git worktree, `y` on its row merges its branch.
+6. When the swarm is finished, `y` on its row closes it.
+
+Anything that needs you also shows outside the Swarm screen, as `⚑ swarm needs you (n)` in the Agents sidebar and `⚑ swarm n` in the status bar.
 
 ## Before you start
 
@@ -20,7 +22,7 @@ A **swarm** splits one goal into tasks that agents work on in parallel in the sa
 
 ## Starting a swarm
 
-Press `r` (or `Enter` on the empty screen). The form asks for:
+Press `n` on a swarm row (or `Enter` on the empty screen). The form asks for:
 
 | Field | Meaning | Default |
 | --- | --- | --- |
@@ -35,33 +37,33 @@ Press `r` (or `Enter` on the empty screen). The form asks for:
 
 ## The screen
 
+The Swarm screen has the Agents screen's layout: a tree on the left, and the selected row in the main pane on the right.
+
 ```
-┌ ◆ Ship three follow-ups · running · 1/3 done ███░░░░░░░ · 2/3 workers · 18m · 41k tok $1.24 ───────┐
-│ ⚑ NEEDS YOU (1)   ! to act                                                                         │
-│   question  f1-search asks: match section titles case-insensitively?   Enter answer                │
-│┌ Plan (3) · planner: claude · "one task per subsystem" ─┐┌ f1-search · asking · F1 search ──────────┐│
-││  ✓  1 bus-fix    Bus: all_workspaces lists …    codex ││ 1 Task   2 Live   3 Thread (2)   4 Changes ││
-││▸ ◷  2 f1-search  F1: search section titles      codex ││ …its task card, terminal, messages or diff ││
-││  ⋯  3 lf-cost    Langfuse: trace cost ← bus-fix claude││                                            ││
-│ ↑↓ task  Enter attach  1-4 view  > message  space pause  r retry  x stop  ! needs  a activity  Esc   │
+┌ Swarms • Keyboard focus ───┐┌ grok-spec · asking · Design specification ─────────────────────┐
+│>▾ ◆ add grok to agent… ⚑2  ││  1 Task   2 Live   3 Thread (1)   4 Changes                      │
+│     ★ planner·claude    ○  ││                                                                 │
+│     ◷ 1 grok-spec       !  ││  12:35 grok-spec → you #question                                │
+│     ⇡ 2 harness-core    !  ││    Should the spec cover ~/.grok sessions?                      │
+│     ⋯ 3 workflows-and-… sh ││                                                                 │
+│ ▸ ◆ fix the bus          ✓ ││                                                                 │
+│ + new swarm  n             ││                                                                 │
+└────────────────────────────┘└─────────────────────────────────────────────────────────────────┘
+[F1 Commands] Swarm • Keyboard focus [n] New [e] Edit [d] Delete [r] Run/resume
 ```
 
-- **Top line:** the goal, the swarm's state, tasks done out of the total, busy workers against your limit, elapsed time, and tokens and cost.
-  - The states run `planning` → `review` → `running` (or `paused`) → `integrating` → `finished`.
-- **Needs you:** only what *you* have to resolve, most urgent first. When nothing does, it collapses to "Nothing needs you."
-- **Board:** one row per task, in plan order. Each row shows:
-  - its state symbol and number
-  - its key and title
-  - `← key` for each task it depends on
-  - the harness, and once a worker runs it, its cost
-  - `!` for a task with a plan error, `?` for a warning
-- **Panel:** shows the selected task, on one of four tabs:
-  - `1 Task` is its card: instructions, done-when, files, dependencies, and its result or error.
-  - `2 Live` is its worker's terminal.
-  - `3 Thread` is its messages.
-  - `4 Changes` is its diff: its branch's commits and diff for a worktree task, or the workspace's uncommitted changes for a shared one.
-  - The panel opens on the tab that matters: Thread when the worker asked something, Live while it works, Changes when its branch waits for review, Task otherwise. A tab you choose sticks to that task.
-  - `a` swaps the panel for **Activity**, every message of the swarm.
+- **The tree** lists every swarm: live ones first (the one in your folder at the top), then those that ended in the last week, folded. Under each `◆` swarm:
+  - **`★` planner:** the coordinator's row. It shows the planner's terminal while it plans.
+  - **Tasks:** one row per task, in plan order, with its state symbol, number and key. On the right is its harness, `!` when it needs you, or `✗` when the plan has an error on it.
+
+  A swarm shows `⚑n` when it needs you, `done/total` otherwise, and `✓` once it's closed.
+- **The main pane** shows the selected row:
+  - **A swarm** shows its card: state, done/total, workers against your limit, elapsed time, tokens and cost, then everything that needs you, the plan, the check and the keys that apply now.
+  - **The planner** shows its terminal.
+  - **A task** shows its worker's terminal while it has one. This is the same pane as the Agents screen, at full size. Its tabs are `1 Task` (the card: instructions, done-when, files, dependencies, result or error, branch, and the plan's problems), `2 Live` (the terminal), `3 Thread` (its messages) and `4 Changes` (its diff). The pane opens on the tab that matters: Thread when the worker asked something, Live while it works, Changes when its branch waits for review, Task otherwise.
+- **`Enter` on a terminal** gives it the keyboard, as on the Agents screen: the pane's title says `Keyboard goes to …`. `⌘L` (`Ctrl+Shift+L`) brings the keyboard back to the tree.
+- **`a`** shows **Activity**, every message of the swarm.
+- **Cost** reads `—` when a harness's cost isn't priced (agy isn't), and `≥$x` when only part of it is.
 
 ### What the task symbols mean
 
@@ -96,23 +98,23 @@ In **review** you can change the plan before approving it:
 
 With the gate on, nothing starts before you approve, and workers can't claim tasks.
 
-## Acting on "Needs you"
+## What needs you
 
-Press `!` to focus the strip, `↑`/`↓` to choose an item, `Enter` to act, `d` to dismiss it for as long as the screen is open, and `Esc` to go back to the board.
+Each task that needs you carries `!` on its row, and its swarm carries `⚑n`. The swarm's card lists them all, most urgent first. `!` jumps to the next row that needs you, and that row's keys act on it.
 
-| Item | When | Enter | Also (on the board) |
-| --- | --- | --- | --- |
-| `question` | a worker asked you something | answer it on the command line | |
-| `prompt` | a worker waits on a prompt in its terminal (usually a permission) | attach to it | |
-| `plan` | the plan waits for your approval | show the task's card | `y` approve · `p` re-plan |
-| `planner` | the planner gave no usable plan | re-plan with notes | `n` add tasks by hand |
-| `failed` | a task failed | show its card | `r` retry |
-| `lost` | a worker's session exited mid-task | show its card | `r` retry |
-| `stalled` | a worker stopped without reporting, even after a reminder | attach to it | `r` stops it, then `r` retries |
-| `review` | a worktree task finished | show its Changes | `y` merge · `x` set aside |
-| `proposed` | a worker proposed a new task | show its card | `y` accept · `x` drop |
-| `check` | the final check failed | read its output | `r` retry a task |
-| `finished` | everything is settled | | `y` close the swarm |
+| Item | When | On its row |
+| --- | --- | --- |
+| `question` | a worker asked you something | `m` answers it |
+| `prompt` | a worker waits on a prompt in its terminal (usually a permission) | `Enter` types into its terminal |
+| `plan` | the plan waits for your approval | on the swarm: `y` approve · `p` re-plan |
+| `planner` | the planner gave no usable plan | on the swarm: `p` re-plan · `n` add tasks by hand |
+| `failed` | a task failed | `r` retry |
+| `lost` | a worker's session exited mid-task | `r` retry |
+| `stalled` | a worker stopped without reporting, even after a reminder | `Enter` types into its terminal · `r` stops it, then `r` retries |
+| `review` | a worktree task finished | `y` merge · `x` set aside |
+| `proposed` | a worker proposed a new task | `y` accept · `x` drop |
+| `check` | the final check failed | the swarm's card shows its output |
+| `finished` | everything is settled | on the swarm: `y` close |
 
 A worker that goes idle on an unfinished task gets one reminder after 90 seconds. Only if it stays idle does it show up as `stalled`.
 
@@ -138,27 +140,30 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 - **Editing:** `Tab` completes `@` names (press again to cycle), and `Esc` cancels.
 - **Delivery:** every message wakes an idle worker. Without `!`, a busy worker reads it when it next checks its messages.
 
-## Board keys
+## Keys
 
 | Key | Does |
 | --- | --- |
-| `↑` `↓` `g` `G` | choose a task |
-| `Tab` | move to the panel and back (in Thread or Activity, `↑`/`↓` choose a message, `Enter` reads it in full, `m` answers it) |
-| `1`–`4` | panel tab |
-| `Enter` | attach to the task's worker, or edit a task that hasn't started |
+| `↑` `↓` `g` `G` | choose a row |
+| `←` `→` | fold or unfold a swarm (`←` on a task climbs to its swarm) |
+| `Enter` | type into the row's terminal · edit a task that hasn't started · fold or unfold a swarm · start a swarm when there is none |
+| `Tab` | move between the tree and the card (in Thread or Activity, `↑`/`↓` choose a message, `Enter` reads it in full, `m` answers it) |
+| `1`–`4` | a task's tab |
 | `y` | approve the plan · merge a branch · accept a proposal · close a finished swarm |
 | `space` | pause or resume: while paused, running workers continue but nothing new starts |
-| `n` / `e` / `d` | add, edit or delete a task (delete only a task that never started) |
-| `r` | retry a failed, lost, cancelled or stalled task · start a swarm when none runs |
+| `n` | a new swarm (on a swarm row) · a new task (on a task or the planner) |
+| `e` / `d` | edit or delete a task (delete only a task that never started) |
+| `r` | retry a failed, lost, cancelled or stalled task |
 | `x` | stop the task's worker · cancel a task · set a branch aside · drop a proposal |
 | `p` | re-plan (in review) |
 | `>` `m` `b` | write to workers |
-| `!` | focus Needs you |
+| `!` | the next row that needs you |
 | `a` | Activity on or off |
 | `Ctrl+R` | reload now (the screen refreshes on its own when anything changes) |
-| `Esc` | back to the board, then close |
+| `⌘L` | from a terminal, back to the tree |
+| `Esc` | back to the tree, then close the screen |
 
-Confirmations take `y` only. `Enter` never confirms.
+Confirmations take `y` only. `Enter` never confirms. What an action did shows in the status bar.
 
 ## Reviewing and finishing
 

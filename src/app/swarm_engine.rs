@@ -480,6 +480,7 @@ impl App {
         let Ok(swarms) = record::live_swarms(&conn) else {
             return;
         };
+        self.swarm_needs = 0;
         if swarms.is_empty() {
             return;
         }
@@ -561,6 +562,17 @@ impl App {
             asking: &asking,
             now_ns: crate::tracing::store::now_ns(),
         });
+        let data = crate::app::swarm_board::SwarmData {
+            run: swarm.clone(),
+            board: board.clone(),
+            messages: messages.clone(),
+            asking: asking.clone(),
+            problems: Default::default(),
+            needs: Vec::new(),
+        };
+        self.swarm_needs +=
+            crate::app::swarm_board::needs_for(&data, &workers, crate::tracing::store::now_ns())
+                .len();
         for action in actions {
             let now_ns = crate::tracing::store::now_ns();
             match action {

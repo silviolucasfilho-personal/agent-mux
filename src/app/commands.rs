@@ -201,7 +201,17 @@ impl App {
         }
         use ActionId::*;
         match id {
-            FocusAgents => self.request_navigation(NavigationTarget::Agents, now),
+            FocusAgents => {
+                // on the Swarm screen, the focus key takes the keyboard back
+                // from the pane to the swarm tree
+                if let Mode::Swarm(v) = &mut self.mode
+                    && v.pane_focused
+                {
+                    v.pane_focused = false;
+                    return;
+                }
+                self.request_navigation(NavigationTarget::Agents, now)
+            }
             ReturnToSession => {
                 if let Some(id) = self.return_session_id() {
                     self.request_navigation(NavigationTarget::Session(id), now);

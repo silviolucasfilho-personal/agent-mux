@@ -239,6 +239,20 @@ pub(super) fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         used += focus.width();
         spans.push(Span::styled(focus, Style::default().fg(Color::Yellow)));
     }
+    // a swarm waiting on the operator shows everywhere, not only on its screen
+    if app.swarm_needs > 0 {
+        let badge = format!(" ⚑ swarm {}", app.swarm_needs);
+        if used + badge.width() <= width {
+            used += badge.width();
+            spans.push(Span::styled(
+                badge,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
     let search = app
         .search
         .as_ref()
