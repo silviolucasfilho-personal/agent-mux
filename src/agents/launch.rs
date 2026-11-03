@@ -182,9 +182,16 @@ pub fn tool_notes(spec: &AgentSpec, harness: Harness) -> Vec<(Level, String)> {
             }
         }
         Harness::Antigravity => {
+            // seen in agy 1.4.12's own transcripts (2026-11-02): a Markdown
+            // custom agent had view_file and MCP only; the same worker
+            // without it had write_file, edit_file and run_command
             out.push((
                 Level::Warning,
-                "agy: the tool list is not enforced (agy tool names are unverified); the session has agy's own tools".to_string(),
+                if crate::agents::tools_write(Some(tools)) {
+                    "agy: under a custom agent the session gets read-only tools (no write_file, edit_file or run_command); an agent that edits or runs commands needs another harness".to_string()
+                } else {
+                    "agy: the tool list is not enforced; custom agents get agy's read-only tools".to_string()
+                },
             ));
         }
         Harness::OpenCode => {

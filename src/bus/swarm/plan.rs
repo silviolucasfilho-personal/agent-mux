@@ -104,6 +104,9 @@ pub struct CheckEnv {
     pub harnesses: Vec<String>,
     /// Agent names the catalog knows.
     pub agents: Vec<String>,
+    /// The agents among them that change files or run commands
+    /// (`agents::tools_write`): agy cannot run them with those tools.
+    pub writing_agents: Vec<String>,
     pub git_repo: bool,
     /// The swarm's default isolation, for tasks that name none.
     pub default_isolation: TaskIsolation,
@@ -125,21 +128,33 @@ impl CheckEnv {
         workspace: &std::path::Path,
         default_isolation: TaskIsolation,
     ) -> CheckEnv {
+        let catalog = crate::agents::Catalog::load(&crate::assets::root(), Some(workspace));
         CheckEnv {
             harnesses: crate::harness::Harness::ALL
                 .iter()
                 .filter(|h| crate::session::command_available(h.as_str()))
                 .map(|h| h.as_str().to_string())
                 .collect(),
-            agents: crate::agents::Catalog::load(&crate::assets::root(), Some(workspace))
-                .entries
-                .iter()
-                .map(|e| e.name.clone())
-                .collect(),
+            agents: catalog.entries.iter().map(|e| e.name.clone()).collect(),
+            writing_agents: writing_agents(&catalog),
             git_repo: crate::loops::worktree::is_git_repo(workspace),
             default_isolation,
         }
     }
+}
+
+/// The catalog's agents that change files or run commands.
+pub fn writing_agents(catalog: &crate::agents::Catalog) -> Vec<String> {
+    catalog
+        .entries
+        .iter()
+        .filter(|e| {
+            e.spec
+                .as_ref()
+                .is_some_and(|s| crate::agents::tools_write(s.tools.as_deref()))
+        })
+        .map(|e| e.name.clone())
+        .collect()
 }
 
 impl Problems {
@@ -212,6 +227,20 @@ pub fn check(plan: &Plan, env: &CheckEnv) -> Problems {
             && !env.agents.iter().any(|x| x == a)
         {
             err(&t.key, format!("no agent named `{a}`"));
+        }
+        // agy runs a Markdown custom agent with read-only tools: the first
+        // real swarm's agy `doc-writer` had view_file and MCP, no
+        // write_file, edit_file or run_command (agy 1.4.12, 2026-11-02)
+        if t.harness.as_deref() == Some("agy")
+            && let Some(a) = &t.agent
+            && env.writing_agents.iter().any(|x| x == a)
+        {
+            err(
+                &t.key,
+                format!(
+                    "agy loses its write and shell tools under a custom agent (`{a}`): drop the agent or use another harness"
+                ),
+            );
         }
         if let Some(i) = &t.isolation
             && TaskIsolation::parse(i).is_none()
@@ -374,7 +403,8 @@ mod tests {
     fn env() -> CheckEnv {
         CheckEnv {
             harnesses: vec!["claude".into(), "codex".into()],
-            agents: vec!["reviewer".into()],
+            agents: vec!["reviewer".into(), "doc-writer".into()],
+            writing_agents: vec!["doc-writer".into()],
             git_repo: true,
             default_isolation: TaskIsolation::Shared,
         }
@@ -467,6 +497,32 @@ mod tests {
             );
         }
         assert!(!check(&Plan::default(), &env()).is_ok(), "an empty plan");
+    }
+
+    #[test]
+    fn agy_with_a_writing_agent_is_an_error() {
+        let mut t = task("spec", &[], &[]);
+        t.harness = Some("agy".into());
+        t.agent = Some("doc-writer".into());
+        let mut e = env();
+        e.harnesses.push("agy".into());
+        let one = |t: &PlannedTask| Plan {
+            summary: String::new(),
+            tasks: vec![t.clone()],
+        };
+        let p = check(&one(&t), &e);
+        assert!(
+            p.errors
+                .iter()
+                .any(|(_, m)| m.starts_with("agy loses its write and shell tools")),
+            "{p:?}"
+        );
+        // a read-only agent on agy is fine, and so is the same agent on claude
+        t.agent = Some("reviewer".into());
+        assert!(check(&one(&t), &e).is_ok());
+        t.agent = Some("doc-writer".into());
+        t.harness = Some("claude".into());
+        assert!(check(&one(&t), &e).is_ok());
     }
 
     #[test]

@@ -976,6 +976,7 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
         Modal::Launch {
             goal,
             planner,
+            worker_harness,
             workers,
             isolation,
             gate,
@@ -995,6 +996,14 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
                     .map(|h| h.as_str().to_string())
                     .unwrap_or_else(|| "claude".into()),
                 *field == LaunchField::Planner,
+            ));
+            l.push(choice(
+                "Workers' harness (tasks that name none)",
+                v.harnesses
+                    .get(*worker_harness)
+                    .map(|h| h.as_str().to_string())
+                    .unwrap_or_else(|| "claude".into()),
+                *field == LaunchField::WorkerHarness,
             ));
             l.push(choice(
                 "Max parallel workers",
@@ -1024,6 +1033,11 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
         }
         Modal::Task {
             editing,
+            retry,
+            runs,
+            harness,
+            agent,
+            isolation,
             key,
             title,
             instructions,
@@ -1031,8 +1045,15 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
             files,
             depends_on,
             field,
+            ..
         } => {
             let mut l = Vec::new();
+            if *retry {
+                l.push(Line::styled(
+                    "Saving puts the task back on the board; change its harness or agent if it got stuck.",
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
             let fields: [(TaskField, &TextArea, usize); 6] = [
                 (TaskField::Key, key, 1),
                 (TaskField::Title, title, 1),
@@ -1049,8 +1070,41 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
                 l.push(field_line(fl.label(), *field == fl));
                 l.extend(text_lines(t, *field == fl, max));
             }
+            let harness_name = harness
+                .checked_sub(1)
+                .and_then(|i| v.harnesses.get(i))
+                .map(|h| h.as_str().to_string())
+                .unwrap_or_else(|| "the workers' harness".into());
+            if *runs {
+                l.push(choice(
+                    "Harness",
+                    harness_name,
+                    *field == TaskField::Harness,
+                ));
+                l.push(field_line(
+                    TaskField::Agent.label(),
+                    *field == TaskField::Agent,
+                ));
+                l.extend(text_lines(agent, *field == TaskField::Agent, 1));
+                l.push(choice(
+                    "Isolation",
+                    isolation.as_str().to_string(),
+                    *field == TaskField::Isolation,
+                ));
+            } else {
+                l.push(Line::styled(
+                    format!(
+                        "  {harness_name} · agent {} · {} (fixed while it runs; r retries with others)",
+                        if agent.text.is_empty() { "none" } else { agent.text.as_str() },
+                        isolation.as_str()
+                    ),
+                    dim(),
+                ));
+            }
             (
-                if editing.is_some() {
+                if *retry {
+                    " Retry task "
+                } else if editing.is_some() {
                     " Edit task "
                 } else {
                     " Add a task "

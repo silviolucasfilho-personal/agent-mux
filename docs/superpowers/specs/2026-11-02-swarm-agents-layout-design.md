@@ -5,7 +5,7 @@ Status: approved for implementation, 2026-11-02 (decisions in §9). The screen a
 - **No rename:** `swarms.planner_harness` keeps its name and holds the coordinator's harness.
 - **No built-in agent:** the coordinator's role travels in its opening prompt (`bus::swarm::prompt::coordinator_prompt`) rather than in a built-in `coordinator` agent, which would hit the agy tools problem of §5.
 
-`worker_harness` is in the table for PR C. Replaces §8 (the screen) of
+`worker_harness` is used by PR C. For §5, PR C did not run a probe: agy's own transcripts settled the question. The agy worker with the `doc-writer` agent had `view_file` and MCP only, and the one without an agent had `write_file`, `edit_file` and `run_command`. agy's frontmatter has no per-tool list, so the fix is the check, not a mapping: an agy task with a writing agent is an error. Replaces §8 (the screen) of
 `2026-11-02-swarm-orchestrator-design.md` and amends its §4 (planning) and
 §5.6 (questions). The engine (§5), the store (§7) and the CLI (§9) stay.
 

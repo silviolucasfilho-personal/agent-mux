@@ -167,6 +167,7 @@ pub struct Outgoing {
 pub enum LaunchField {
     Goal,
     Planner,
+    WorkerHarness,
     Workers,
     Isolation,
     Gate,
@@ -174,9 +175,10 @@ pub enum LaunchField {
 }
 
 impl LaunchField {
-    const ORDER: [LaunchField; 6] = [
+    const ORDER: [LaunchField; 7] = [
         LaunchField::Goal,
         LaunchField::Planner,
+        LaunchField::WorkerHarness,
         LaunchField::Workers,
         LaunchField::Isolation,
         LaunchField::Gate,
@@ -196,22 +198,37 @@ pub enum TaskField {
     Acceptance,
     Files,
     DependsOn,
+    Harness,
+    Agent,
+    Isolation,
 }
 
 impl TaskField {
-    const ORDER: [TaskField; 6] = [
+    const ORDER: [TaskField; 9] = [
         TaskField::Key,
         TaskField::Title,
         TaskField::Instructions,
         TaskField::Acceptance,
         TaskField::Files,
         TaskField::DependsOn,
+        TaskField::Harness,
+        TaskField::Agent,
+        TaskField::Isolation,
     ];
-    fn step(self, d: isize, with_key: bool) -> Self {
+    /// Whether the field runs the task (harness, agent, isolation): only
+    /// for a task that has not started, or is being retried.
+    pub fn runs(self) -> bool {
+        matches!(
+            self,
+            TaskField::Harness | TaskField::Agent | TaskField::Isolation
+        )
+    }
+    fn step(self, d: isize, with_key: bool, with_runs: bool) -> Self {
         let order: Vec<TaskField> = Self::ORDER
             .iter()
             .copied()
             .filter(|f| with_key || *f != TaskField::Key)
+            .filter(|f| with_runs || !f.runs())
             .collect();
         let i = order.iter().position(|f| *f == self).unwrap_or(0) as isize;
         order[(i + d).rem_euclid(order.len() as isize) as usize]
@@ -224,6 +241,9 @@ impl TaskField {
             TaskField::Acceptance => "Done when",
             TaskField::Files => "Files (comma separated)",
             TaskField::DependsOn => "Depends on (task keys, comma separated)",
+            TaskField::Harness => "Harness",
+            TaskField::Agent => "Agent (empty: none)",
+            TaskField::Isolation => "Isolation",
         }
     }
 }
@@ -232,15 +252,27 @@ pub enum Modal {
     Launch {
         goal: TextArea,
         planner: usize,
+        /// The workers' harness (index into `harnesses`).
+        worker_harness: usize,
         workers: usize,
         isolation: TaskIsolation,
         gate: bool,
         check: TextArea,
         field: LaunchField,
     },
-    /// Add a task (`editing` none) or edit one.
+    /// Add a task (`editing` none) or edit one; `retry` puts it back on
+    /// the board when saved (stopping `stop`, its worker, first).
     Task {
         editing: Option<String>,
+        retry: bool,
+        stop: Option<usize>,
+        /// Harness, agent and isolation can change: the task has not
+        /// started, or is being retried.
+        runs: bool,
+        /// 0: the swarm's default; else `harnesses[harness - 1]`.
+        harness: usize,
+        agent: TextArea,
+        isolation: TaskIsolation,
         key: TextArea,
         title: TextArea,
         instructions: TextArea,
@@ -305,6 +337,7 @@ pub enum Outcome {
     Start {
         goal: String,
         planner: Harness,
+        workers: Harness,
         max_workers: usize,
         isolation: TaskIsolation,
         gate: bool,
@@ -326,6 +359,13 @@ pub enum Outcome {
     EditTask {
         task_id: String,
         task: PlannedTask,
+    },
+    /// Save the task's card, then put it back on the board, stopping its
+    /// worker first when it still has one.
+    RetryTask {
+        task_id: String,
+        task: PlannedTask,
+        stop: Option<usize>,
     },
     DeleteTask(String),
     CancelTask(String),
@@ -1057,6 +1097,7 @@ impl SwarmBoard {
         self.modal = Some(Modal::Launch {
             goal: TextArea::new(""),
             planner,
+            worker_harness: planner,
             workers: 3,
             isolation: TaskIsolation::Shared,
             gate: true,
@@ -1066,6 +1107,24 @@ impl SwarmBoard {
     }
 
     fn open_task_modal(&mut self, editing: Option<&BoardTask>) {
+        let runs = editing.is_none_or(|t| t.ext.attempts == 0 && t.task.status == TaskStatus::Open);
+        self.open_task_form(editing, false, None, runs);
+    }
+
+    /// `r` on a failed, lost, cancelled or stalled task: the form, with its
+    /// harness, agent and isolation open; saving puts it back on the board
+    /// (layout spec §4.2: a stuck agy task moves to Claude in one step).
+    fn open_retry_form(&mut self, t: &BoardTask, stop: Option<usize>) {
+        self.open_task_form(Some(t), true, stop, true);
+    }
+
+    fn open_task_form(
+        &mut self,
+        editing: Option<&BoardTask>,
+        retry: bool,
+        stop: Option<usize>,
+        runs: bool,
+    ) {
         let (key, title, instructions, acceptance, files, deps) = match editing {
             Some(t) => (
                 t.ext.plan_key.clone(),
@@ -1077,15 +1136,34 @@ impl SwarmBoard {
             ),
             None => Default::default(),
         };
+        let harness = editing
+            .and_then(|t| t.task.target_harness.as_deref())
+            .and_then(|h| self.harnesses.iter().position(|x| x.as_str() == h))
+            .map_or(0, |i| i + 1);
         self.modal = Some(Modal::Task {
             editing: editing.map(|t| t.task.id.clone()),
+            retry,
+            stop,
+            runs,
+            harness,
+            agent: TextArea::new(
+                editing
+                    .and_then(|t| t.task.target_agent.clone())
+                    .unwrap_or_default(),
+            ),
+            isolation: editing
+                .map(|t| t.task.isolation)
+                .or_else(|| self.swarm.as_ref().map(|s| s.isolation))
+                .unwrap_or_default(),
             key: TextArea::new(key),
             title: TextArea::new(title),
             instructions: TextArea::new(instructions),
             acceptance: TextArea::new(acceptance),
             files: TextArea::new(files),
             depends_on: TextArea::new(deps),
-            field: if editing.is_some() {
+            field: if retry {
+                TaskField::Harness
+            } else if editing.is_some() {
                 TaskField::Title
             } else {
                 TaskField::Key
@@ -1153,9 +1231,14 @@ impl SwarmBoard {
             acceptance,
             files,
             depends_on,
+            agent,
             ..
         }) = &mut self.modal
         {
+            if *field == TaskField::Agent {
+                agent.insert_str(text);
+                return;
+            }
             match field {
                 TaskField::Key => key.insert_str(text),
                 TaskField::Title => title.insert_str(text),
@@ -1163,6 +1246,8 @@ impl SwarmBoard {
                 TaskField::Acceptance => acceptance.insert_str(text),
                 TaskField::Files => files.insert_str(text),
                 TaskField::DependsOn => depends_on.insert_str(text),
+                TaskField::Agent => {}
+                TaskField::Harness | TaskField::Isolation => {}
             }
         }
     }
@@ -1455,14 +1540,11 @@ impl SwarmBoard {
                 st,
                 Shown::Failed | Shown::Lost | Shown::Cancelled | Shown::Stalled
             ) {
-                let id = t.task.id.clone();
-                if st == Shown::Stalled || st == Shown::Lost {
-                    // A worker still open on it is stopped first.
-                    if let Some(w) = self.worker_of(t) {
-                        return Outcome::StopSession(w.session_idx);
-                    }
-                }
-                return self.verb(SwarmVerb::Retry, Some(id));
+                // a worker still open on it is stopped when the form is saved
+                let stop = self.worker_of(t).map(|w| w.session_idx);
+                let t = t.clone();
+                self.open_retry_form(&t, stop);
+                return Outcome::None;
             }
         }
         if self.swarm.as_ref().is_none_or(|s| s.ended_ns.is_some()) {
@@ -1634,6 +1716,7 @@ impl SwarmBoard {
             Some(Modal::Launch {
                 goal,
                 planner,
+                worker_harness,
                 workers,
                 isolation,
                 gate,
@@ -1651,10 +1734,28 @@ impl SwarmBoard {
                     }
                     LaunchField::Planner => match key.code {
                         KeyCode::Left | KeyCode::Char('h') => {
-                            *planner = (*planner + n_harness - 1) % n_harness
+                            // the workers follow the coordinator until set apart
+                            let follow = *worker_harness == *planner;
+                            *planner = (*planner + n_harness - 1) % n_harness;
+                            if follow {
+                                *worker_harness = *planner;
+                            }
                         }
                         KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
-                            *planner = (*planner + 1) % n_harness
+                            let follow = *worker_harness == *planner;
+                            *planner = (*planner + 1) % n_harness;
+                            if follow {
+                                *worker_harness = *planner;
+                            }
+                        }
+                        _ => {}
+                    },
+                    LaunchField::WorkerHarness => match key.code {
+                        KeyCode::Left | KeyCode::Char('h') => {
+                            *worker_harness = (*worker_harness + n_harness - 1) % n_harness
+                        }
+                        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                            *worker_harness = (*worker_harness + 1) % n_harness
                         }
                         _ => {}
                     },
@@ -1690,6 +1791,10 @@ impl SwarmBoard {
             },
             Some(Modal::Task {
                 editing,
+                runs,
+                harness,
+                agent,
+                isolation,
                 key: k,
                 title,
                 instructions,
@@ -1697,24 +1802,49 @@ impl SwarmBoard {
                 files,
                 depends_on,
                 field,
+                ..
             }) => {
                 let with_key = editing.is_none();
+                let choices = n_harness + 1; // 0: the swarm's default
                 match key.code {
-                    KeyCode::Tab => *field = field.step(1, with_key),
-                    KeyCode::BackTab => *field = field.step(-1, with_key),
-                    _ => {
-                        crate::keymap::apply_text(
-                            match field {
-                                TaskField::Key => k,
-                                TaskField::Title => title,
-                                TaskField::Instructions => instructions,
-                                TaskField::Acceptance => acceptance,
-                                TaskField::Files => files,
-                                TaskField::DependsOn => depends_on,
-                            },
-                            &key,
-                        );
-                    }
+                    KeyCode::Tab => *field = field.step(1, with_key, *runs),
+                    KeyCode::BackTab => *field = field.step(-1, with_key, *runs),
+                    _ => match field {
+                        TaskField::Harness => match key.code {
+                            KeyCode::Left | KeyCode::Char('h') => {
+                                *harness = (*harness + choices - 1) % choices
+                            }
+                            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                                *harness = (*harness + 1) % choices
+                            }
+                            _ => {}
+                        },
+                        TaskField::Isolation => {
+                            if matches!(
+                                key.code,
+                                KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                            ) {
+                                *isolation = match isolation {
+                                    TaskIsolation::Shared => TaskIsolation::Worktree,
+                                    TaskIsolation::Worktree => TaskIsolation::Shared,
+                                };
+                            }
+                        }
+                        _ => {
+                            crate::keymap::apply_text(
+                                match field {
+                                    TaskField::Key => k,
+                                    TaskField::Title => title,
+                                    TaskField::Instructions => instructions,
+                                    TaskField::Acceptance => acceptance,
+                                    TaskField::Files => files,
+                                    TaskField::DependsOn => depends_on,
+                                    _ => agent,
+                                },
+                                &key,
+                            );
+                        }
+                    },
                 }
             }
             _ => {}
@@ -1727,6 +1857,7 @@ impl SwarmBoard {
             Some(Modal::Launch {
                 goal,
                 planner,
+                worker_harness,
                 workers,
                 isolation,
                 gate,
@@ -1738,6 +1869,7 @@ impl SwarmBoard {
                     self.modal = Some(Modal::Launch {
                         goal,
                         planner,
+                        worker_harness,
                         workers,
                         isolation,
                         gate,
@@ -1754,6 +1886,11 @@ impl SwarmBoard {
                         .get(planner)
                         .copied()
                         .unwrap_or(self.default_harness),
+                    workers: self
+                        .harnesses
+                        .get(worker_harness)
+                        .copied()
+                        .unwrap_or(self.default_harness),
                     max_workers: workers,
                     isolation,
                     gate,
@@ -1762,6 +1899,12 @@ impl SwarmBoard {
             }
             Some(Modal::Task {
                 editing,
+                retry,
+                stop,
+                runs,
+                harness,
+                agent,
+                isolation,
                 key,
                 title,
                 instructions,
@@ -1770,7 +1913,36 @@ impl SwarmBoard {
                 depends_on,
                 field,
             }) => {
+                let existing = editing
+                    .as_ref()
+                    .and_then(|id| self.board.iter().find(|t| &t.task.id == id))
+                    .cloned();
+                // harness, agent and isolation: as chosen when they could
+                // change, else as they are
+                let (h, a, iso) = if runs {
+                    (
+                        harness
+                            .checked_sub(1)
+                            .and_then(|i| self.harnesses.get(i))
+                            .map(|h| h.as_str().to_string()),
+                        Some(agent.text.trim().to_string()).filter(|a| !a.is_empty()),
+                        Some(isolation.as_str().to_string()),
+                    )
+                } else {
+                    (
+                        existing
+                            .as_ref()
+                            .and_then(|t| t.task.target_harness.clone()),
+                        existing.as_ref().and_then(|t| t.task.target_agent.clone()),
+                        existing
+                            .as_ref()
+                            .map(|t| t.task.isolation.as_str().to_string()),
+                    )
+                };
                 let planned = PlannedTask {
+                    harness: h,
+                    agent: a,
+                    isolation: iso,
                     key: match &editing {
                         Some(id) => self
                             .board
@@ -1785,7 +1957,6 @@ impl SwarmBoard {
                     acceptance: Some(acceptance.text.trim().to_string()).filter(|a| !a.is_empty()),
                     files: csv(&files.text),
                     depends_on: csv(&depends_on.text),
-                    ..Default::default()
                 };
                 let missing = if planned.key.is_empty() {
                     Some(TaskField::Key)
@@ -1800,6 +1971,12 @@ impl SwarmBoard {
                     self.status_msg = Some(format!("{} is required.", f.label()));
                     self.modal = Some(Modal::Task {
                         editing,
+                        retry,
+                        stop,
+                        runs,
+                        harness,
+                        agent,
+                        isolation,
                         key,
                         title,
                         instructions,
@@ -1812,6 +1989,11 @@ impl SwarmBoard {
                     return Outcome::None;
                 }
                 match editing {
+                    Some(task_id) if retry => Outcome::RetryTask {
+                        task_id,
+                        task: planned,
+                        stop,
+                    },
                     Some(task_id) => Outcome::EditTask {
                         task_id,
                         task: planned,
@@ -2782,14 +2964,33 @@ mod tests {
         assert!(matches!(v.confirm, Some(Confirm::SetAside { .. })));
         v.handle_key(key(KeyCode::Esc));
         v.handle_key(key(KeyCode::Down));
-        assert_eq!(
-            v.handle_key(key(KeyCode::Char('r'))),
-            Outcome::Verb {
-                verb: SwarmVerb::Retry,
-                task: Some("task-f".into()),
-                notes: None
+        // r opens the retry form on its harness (claude, as the task names):
+        // → moves it to codex, and Ctrl+S puts it back on the board.
+        assert_eq!(v.handle_key(key(KeyCode::Char('r'))), Outcome::None);
+        assert!(matches!(
+            v.modal,
+            Some(Modal::Task {
+                retry: true,
+                runs: true,
+                field: TaskField::Harness,
+                harness: 1,
+                ..
+            })
+        ));
+        v.handle_key(key(KeyCode::Right));
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        match v.handle_key(ctrl_s) {
+            Outcome::RetryTask {
+                task_id,
+                task,
+                stop,
+            } => {
+                assert_eq!(task_id, "task-f");
+                assert_eq!(task.harness.as_deref(), Some("codex"));
+                assert_eq!(stop, None, "no worker left to stop");
             }
-        );
+            other => panic!("expected RetryTask, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2851,6 +3052,7 @@ mod tests {
             Outcome::Start {
                 goal: "Ship it".into(),
                 planner: Harness::Codex,
+                workers: Harness::Codex,
                 max_workers: 3,
                 isolation: TaskIsolation::Shared,
                 gate: true,

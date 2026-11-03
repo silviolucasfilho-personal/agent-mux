@@ -41,6 +41,12 @@ pub enum Tool {
     Mcp(String),
 }
 
+/// Whether an agent with `tools` expects to change files or run commands
+/// (`None`: the harness's own tool set, which does).
+pub fn tools_write(tools: Option<&[Tool]>) -> bool {
+    tools.is_none_or(|t| t.contains(&Tool::Edit) || t.contains(&Tool::Shell))
+}
+
 impl Tool {
     pub fn parse(text: &str) -> Result<Tool, String> {
         match text.trim() {

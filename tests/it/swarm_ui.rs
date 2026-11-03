@@ -130,6 +130,7 @@ fn seed(f: &Fixture, status: SwarmStatus, tasks: Vec<PlannedTask>) -> SwarmRun {
             gate: true,
             check_cmd: None,
             owner_run: Some("another-tui".into()),
+            worker_harness: None,
         },
         now_ns(),
     )
@@ -566,4 +567,66 @@ fn a_swarm_that_needs_you_shows_on_the_agents_screen() {
     let out = render(&f.app, 140, 32);
     assert!(out.contains("⚑ swarm needs you (1)"), "{out}");
     assert!(out.contains("⚑ swarm 1"), "the status bar:\n{out}");
+}
+
+#[test]
+fn r_on_a_failed_agy_task_moves_it_to_claude_and_puts_it_back() {
+    let mut f = fixture();
+    let mut t = task("spec", &[]);
+    t.harness = Some("agy".into());
+    t.agent = Some("doc-writer".into());
+    let swarm = seed(&f, SwarmStatus::Running, vec![t]);
+    let conn = open_aux(&f.db).unwrap();
+    let id = record::board(&conn, &swarm.id).unwrap()[0].task.id.clone();
+    bstore::update_task(
+        &conn,
+        None,
+        &id,
+        "worker-1",
+        TaskStatus::Failed,
+        None,
+        Some("agy lacks write_file".into()),
+        None,
+        None,
+        now_ns(),
+    )
+    .unwrap();
+    open_screen(&mut f);
+    press(&mut f, KeyCode::Down);
+    press(&mut f, KeyCode::Char('r'));
+    let out = render(&f.app, 140, 40);
+    for want in [
+        "Retry task",
+        "Saving puts the task back on the board",
+        "Harness",
+        "Agent (empty: none)",
+        "Isolation",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
+    }
+    // agy is not installed here: the form starts on the workers' harness;
+    // → is claude. The agent goes too.
+    press(&mut f, KeyCode::Right);
+    press(&mut f, KeyCode::Tab);
+    for _ in 0.."doc-writer".len() {
+        press(&mut f, KeyCode::Backspace);
+    }
+    f.app.handle_key(
+        &KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        Instant::now(),
+    );
+    let t = bstore::get_task(&conn, &id).unwrap().unwrap();
+    assert_eq!(
+        t.status,
+        TaskStatus::Open,
+        "back on the board: {:?}",
+        notice(&f.app)
+    );
+    assert_eq!(t.target_harness.as_deref(), Some("claude"));
+    assert_eq!(t.target_agent, None);
+    assert!(
+        notice(&f.app).contains("is back on the board on claude"),
+        "{}",
+        notice(&f.app)
+    );
 }

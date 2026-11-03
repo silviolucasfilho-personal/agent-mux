@@ -1612,7 +1612,7 @@ fn draw_agent_form(f: &mut Frame, area: Rect, st: &FlowBuilderState, role: Role,
         ));
     }
     lines.push(Line::styled(
-        " ! on agy the tool list is not enforced; codex has no per-tool list",
+        " ! on agy a custom agent gets read-only tools; codex has no per-tool list",
         Style::default().fg(Color::Yellow),
     ));
     if let Some(e) = &form.error {

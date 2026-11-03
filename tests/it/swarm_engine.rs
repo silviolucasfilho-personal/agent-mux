@@ -213,6 +213,7 @@ fn start_with(f: &mut Fixture, gate: bool, check: Option<&str>) {
             isolation: TaskIsolation::Shared,
             gate,
             check: check.map(str::to_string),
+            workers: None,
         })
         .unwrap_or_else(|e| panic!("the swarm did not start: {e}"));
 }
