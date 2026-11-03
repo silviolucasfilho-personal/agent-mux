@@ -287,6 +287,8 @@ pub enum Modal {
         files: TextArea,
         depends_on: TextArea,
         field: TaskField,
+        /// A warning or why saving was refused, drawn at the form's top.
+        note: Option<String>,
     },
     /// One message in full.
     Message { message: BusMessage, scroll: usize },
@@ -450,6 +452,10 @@ pub struct SwarmBoard {
     /// The launch form as it was submitted, until the App says whether the
     /// swarm started (`launch_failed`, `launch_started`).
     pub last_launch: Option<Modal>,
+    /// Agents that edit files or run commands (`plan::writing_agents`):
+    /// agy runs them read-only, so a task must not pair them (the App sets
+    /// it when it opens and refreshes the screen).
+    pub writing_agents: Vec<String>,
     /// The swarm the next refresh puts the cursor on (one just started).
     select_next: Option<String>,
     /// Every swarm the tree lists.
@@ -547,6 +553,7 @@ impl SwarmBoard {
     ) -> Self {
         let mut v = SwarmBoard {
             last_launch: None,
+            writing_agents: Vec::new(),
             select_next: None,
             workspace,
             swarms: Vec::new(),
@@ -1147,6 +1154,15 @@ impl SwarmBoard {
     /// `r` on a failed, lost, cancelled or stalled task: the form, with its
     /// harness, agent and isolation open; saving puts it back on the board
     /// (layout spec §4.2: a stuck agy task moves to Claude in one step).
+    /// The writing agent `t` names when it runs on agy, which cannot give
+    /// that agent its write and shell tools.
+    fn agy_trap(&self, t: &BoardTask) -> Option<String> {
+        let a = t.task.target_agent.as_deref()?;
+        (t.task.target_harness.as_deref() == Some(Harness::Antigravity.as_str())
+            && self.writing_agents.iter().any(|w| w == a))
+        .then(|| a.to_string())
+    }
+
     fn open_retry_form(&mut self, t: &BoardTask, stop: Option<usize>) {
         self.open_task_form(Some(t), true, stop, true);
     }
@@ -1169,10 +1185,37 @@ impl SwarmBoard {
             ),
             None => Default::default(),
         };
-        let harness = editing
+        let mut harness = editing
             .and_then(|t| t.task.target_harness.as_deref())
             .and_then(|h| self.harnesses.iter().position(|x| x.as_str() == h))
             .map_or(0, |i| i + 1);
+        // a retry of agy with a writing agent would fail the same way: it
+        // starts on another harness, Claude first, and says why
+        let mut note = None;
+        if let Some(a) = editing.and_then(|t| self.agy_trap(t)) {
+            let other = self
+                .harnesses
+                .iter()
+                .position(|h| *h == Harness::Claude)
+                .or_else(|| {
+                    self.harnesses
+                        .iter()
+                        .position(|h| *h != Harness::Antigravity)
+                });
+            note = Some(match other {
+                Some(i) if retry => {
+                    harness = i + 1;
+                    format!(
+                        "agy runs the `{a}` agent read-only, so it could not write: moved to {}. \
+                         To keep agy, clear the agent.",
+                        self.harnesses[i].as_str()
+                    )
+                }
+                _ => format!(
+                    "agy runs the `{a}` agent read-only: pick another harness or clear the agent."
+                ),
+            });
+        }
         self.modal = Some(Modal::Task {
             editing: editing.map(|t| t.task.id.clone()),
             retry,
@@ -1201,6 +1244,7 @@ impl SwarmBoard {
             } else {
                 TaskField::Key
             },
+            note,
         });
     }
 
@@ -1980,6 +2024,7 @@ impl SwarmBoard {
                 files,
                 depends_on,
                 field,
+                note,
             }) => {
                 let existing = editing
                     .as_ref()
@@ -2035,6 +2080,40 @@ impl SwarmBoard {
                 } else {
                     None
                 };
+                // the harness the task would run on: its own, else the swarm's
+                let runs_on = planned.harness.clone().or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|t| t.task.target_harness.clone())
+                });
+                let trap = (runs_on.as_deref() == Some(Harness::Antigravity.as_str()))
+                    .then(|| planned.agent.clone())
+                    .flatten()
+                    .filter(|a| self.writing_agents.iter().any(|w| w == a));
+                if let Some(a) = trap {
+                    self.modal = Some(Modal::Task {
+                        editing,
+                        retry,
+                        stop,
+                        runs,
+                        harness,
+                        agent,
+                        isolation,
+                        key,
+                        title,
+                        instructions,
+                        acceptance,
+                        files,
+                        depends_on,
+                        field: TaskField::Harness,
+                        note: Some(format!(
+                            "✗ agy runs the `{a}` agent read-only (no write or shell tools): \
+                             pick another harness or clear the agent."
+                        )),
+                    });
+                    let _ = (field, note);
+                    return Outcome::None;
+                }
                 if let Some(f) = missing {
                     self.status_msg = Some(format!("{} is required.", f.label()));
                     self.modal = Some(Modal::Task {
@@ -2052,6 +2131,7 @@ impl SwarmBoard {
                         files,
                         depends_on,
                         field: f,
+                        note,
                     });
                     let _ = field;
                     return Outcome::None;
@@ -3127,6 +3207,50 @@ mod tests {
                 check: None
             }
         );
+    }
+
+    #[test]
+    fn the_task_form_refuses_agy_with_a_writing_agent() {
+        let mut v = board(SwarmStatus::Running, vec![], &[]);
+        v.harnesses = vec![Harness::Claude, Harness::Antigravity];
+        v.writing_agents = vec!["doc-writer".into()];
+        v.open_task_form(None, false, None, true);
+        if let Some(Modal::Task {
+            key,
+            title,
+            instructions,
+            harness,
+            agent,
+            ..
+        }) = &mut v.modal
+        {
+            *key = TextArea::new("spec");
+            *title = TextArea::new("Write the spec");
+            *instructions = TextArea::new("Write it");
+            *harness = 2; // agy
+            *agent = TextArea::new("doc-writer");
+        }
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(v.handle_key(ctrl_s), Outcome::None);
+        match &v.modal {
+            Some(Modal::Task {
+                note: Some(n),
+                field,
+                ..
+            }) => {
+                assert!(
+                    n.starts_with("✗ agy runs the `doc-writer` agent read-only"),
+                    "{n}"
+                );
+                assert_eq!(*field, TaskField::Harness);
+            }
+            _ => panic!("the form should stay open with the reason"),
+        }
+        // Without the agent, agy is fine.
+        if let Some(Modal::Task { agent, .. }) = &mut v.modal {
+            *agent = TextArea::new("");
+        }
+        assert!(matches!(v.handle_key(ctrl_s), Outcome::AddTask(_)));
     }
 
     #[test]

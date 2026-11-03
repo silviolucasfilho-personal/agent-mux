@@ -4885,7 +4885,7 @@ impl App {
         if harnesses.is_empty() {
             harnesses = crate::harness::Harness::ALL.to_vec();
         }
-        let view = swarm_board::SwarmBoard::open(
+        let mut view = swarm_board::SwarmBoard::open(
             ws.clone(),
             conn,
             &live,
@@ -4894,6 +4894,7 @@ impl App {
             self.default_swarm_harness(),
             crate::tracing::store::now_ns(),
         );
+        view.writing_agents = self.swarm_writing_agents(&ws);
         self.mode = Mode::Swarm(Box::new(view));
         // The plan's checks need the App: a second read with them.
         self.refresh_swarm_board();
@@ -5110,6 +5111,12 @@ impl App {
         }
     }
 
+    /// The agents agy cannot run with their tools (`plan::writing_agents`).
+    fn swarm_writing_agents(&self, workspace: &std::path::Path) -> Vec<String> {
+        let catalog = crate::agents::Catalog::load(&self.library_root(), Some(workspace));
+        crate::bus::swarm::plan::writing_agents(&catalog)
+    }
+
     /// Re-reads the open Swarm screen now.
     fn refresh_swarm_board(&mut self) {
         let Mode::Swarm(view) = &self.mode else {
@@ -5117,7 +5124,9 @@ impl App {
         };
         let env = self.swarm_board_env(view);
         let live = self.live_sessions_in(None);
+        let writing = self.swarm_writing_agents(&view.current_workspace());
         if let Mode::Swarm(view) = &mut self.mode {
+            view.writing_agents = writing;
             view.refresh(&live, env.as_ref(), crate::tracing::store::now_ns());
         }
         self.sync_swarm_pane_selection();
@@ -8225,6 +8234,23 @@ impl App {
                         "workspace '{}' does not exist",
                         ws_path.display()
                     ));
+                }
+                // agy 1.4.12 runs a custom agent read-only: a worker that must
+                // write would only stall asking for the tools it lacks
+                if target_harness == crate::harness::Harness::Antigravity
+                    && let Some(a) = agent.as_deref().filter(|a| !a.trim().is_empty())
+                {
+                    let catalog =
+                        crate::agents::Catalog::load(&self.library_root(), Some(&ws_path));
+                    if crate::bus::swarm::plan::writing_agents(&catalog)
+                        .iter()
+                        .any(|w| w == a)
+                    {
+                        return ControlResponse::err(format!(
+                            "agy runs the `{a}` agent read-only (no write or shell tools): \
+                             retry it on another harness, or without the agent"
+                        ));
+                    }
                 }
                 if let Some(why) = self
                     .trace_db_path
