@@ -248,17 +248,24 @@ impl TaskField {
     }
 }
 
+#[derive(Clone)]
 pub enum Modal {
     Launch {
         goal: TextArea,
         planner: usize,
-        /// The workers' harness (index into `harnesses`).
-        worker_harness: usize,
+        /// The workers' pool: one tick per entry of `harnesses`.
+        pool: Vec<bool>,
+        /// The pool entry `←`/`→` is on; `Space` ticks it.
+        pool_cursor: usize,
+        /// The pool follows the coordinator until the operator ticks one.
+        pool_touched: bool,
         workers: usize,
         isolation: TaskIsolation,
         gate: bool,
         check: TextArea,
         field: LaunchField,
+        /// Why the last Ctrl+S did not start the swarm, shown in the form.
+        error: Option<String>,
     },
     /// Add a task (`editing` none) or edit one; `retry` puts it back on
     /// the board when saved (stopping `stop`, its worker, first).
@@ -337,7 +344,8 @@ pub enum Outcome {
     Start {
         goal: String,
         planner: Harness,
-        workers: Harness,
+        /// The workers' pool, the harness of tasks that name none first.
+        workers: Vec<Harness>,
         max_workers: usize,
         isolation: TaskIsolation,
         gate: bool,
@@ -439,6 +447,11 @@ pub struct SwarmBoard {
     /// The folder the screen was opened from: its swarm comes first, and a
     /// new swarm starts there.
     pub workspace: PathBuf,
+    /// The launch form as it was submitted, until the App says whether the
+    /// swarm started (`launch_failed`, `launch_started`).
+    pub last_launch: Option<Modal>,
+    /// The swarm the next refresh puts the cursor on (one just started).
+    select_next: Option<String>,
     /// Every swarm the tree lists.
     pub swarms: Vec<SwarmData>,
     pub rows: Vec<Row>,
@@ -533,6 +546,8 @@ impl SwarmBoard {
         now_ns: i64,
     ) -> Self {
         let mut v = SwarmBoard {
+            last_launch: None,
+            select_next: None,
             workspace,
             swarms: Vec::new(),
             rows: Vec::new(),
@@ -629,7 +644,11 @@ impl SwarmBoard {
     /// Re-reads every swarm, its board and messages, keeping the cursor on
     /// the same row.
     pub fn refresh(&mut self, live: &[LiveSwarmSession], env: Option<&CheckEnv>, now_ns: i64) {
-        let key = self.rows.get(self.cursor).and_then(|r| self.row_key(*r));
+        let key = self
+            .select_next
+            .take()
+            .map(RowKey::Swarm)
+            .or_else(|| self.rows.get(self.cursor).and_then(|r| self.row_key(*r)));
         let prev_len = self.list_len();
         let at_bottom = prev_len == 0 || self.selected_message + 1 >= prev_len;
         let current = self.swarm.as_ref().map(|s| s.id.clone());
@@ -1075,35 +1094,49 @@ impl SwarmBoard {
     }
 
     pub fn open_launch(&mut self) {
-        let here = self.norm_workspace();
-        if let Some(s) = self
-            .swarms
-            .iter()
-            .map(|d| &d.run)
-            .find(|r| r.ended_ns.is_none() && r.workspace == here)
-        {
-            self.status_msg = Some(format!(
-                "{} is {}: one swarm per workspace (close it first)",
-                s.id,
-                s.status.as_str()
-            ));
-            return;
-        }
+        // a workspace may run several swarms (schema v23)
         let planner = self
             .harnesses
             .iter()
             .position(|h| *h == self.default_harness)
             .unwrap_or(0);
+        let mut pool = vec![false; self.harnesses.len().max(1)];
+        let last = pool.len() - 1;
+        pool[planner.min(last)] = true;
         self.modal = Some(Modal::Launch {
             goal: TextArea::new(""),
             planner,
-            worker_harness: planner,
+            pool,
+            pool_cursor: planner,
+            pool_touched: false,
             workers: 3,
             isolation: TaskIsolation::Shared,
             gate: true,
             check: TextArea::new(""),
             field: LaunchField::Goal,
+            error: None,
         });
+    }
+
+    /// The launch form back, as the operator left it, with why it did not
+    /// start (the App calls this when `Outcome::Start` fails).
+    pub fn launch_failed(&mut self, why: String) {
+        if let Some(mut m) = self.last_launch.take() {
+            if let Modal::Launch { error, .. } = &mut m {
+                *error = Some(why);
+            }
+            self.modal = Some(m);
+        }
+    }
+
+    /// The swarm started: the form's copy is no longer needed.
+    pub fn launch_started(&mut self) {
+        self.last_launch = None;
+    }
+
+    /// Puts the cursor on swarm `id` at the next refresh.
+    pub fn select_swarm(&mut self, id: &str) {
+        self.select_next = Some(id.to_string());
     }
 
     fn open_task_modal(&mut self, editing: Option<&BoardTask>) {
@@ -1707,6 +1740,7 @@ impl SwarmBoard {
             })
         );
         if (key.code == KeyCode::Char('s') && ctrl)
+            || (key.code == KeyCode::Enter && ctrl)
             || (key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE && !multiline)
         {
             return self.submit_modal();
@@ -1716,12 +1750,15 @@ impl SwarmBoard {
             Some(Modal::Launch {
                 goal,
                 planner,
-                worker_harness,
+                pool,
+                pool_cursor,
+                pool_touched,
                 workers,
                 isolation,
                 gate,
                 check,
                 field,
+                ..
             }) => match key.code {
                 KeyCode::Tab => *field = field.step(1),
                 KeyCode::BackTab => *field = field.step(-1),
@@ -1732,30 +1769,36 @@ impl SwarmBoard {
                     LaunchField::Check => {
                         crate::keymap::apply_text(check, &key);
                     }
-                    LaunchField::Planner => match key.code {
-                        KeyCode::Left | KeyCode::Char('h') => {
-                            // the workers follow the coordinator until set apart
-                            let follow = *worker_harness == *planner;
-                            *planner = (*planner + n_harness - 1) % n_harness;
-                            if follow {
-                                *worker_harness = *planner;
+                    LaunchField::Planner => {
+                        let d = match key.code {
+                            KeyCode::Left | KeyCode::Char('h') => n_harness - 1,
+                            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => 1,
+                            _ => 0,
+                        };
+                        if d > 0 {
+                            *planner = (*planner + d) % n_harness;
+                            // the pool follows the coordinator until ticked
+                            if !*pool_touched {
+                                pool.iter_mut().for_each(|t| *t = false);
+                                if let Some(t) = pool.get_mut(*planner) {
+                                    *t = true;
+                                }
+                                *pool_cursor = *planner;
                             }
                         }
-                        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
-                            let follow = *worker_harness == *planner;
-                            *planner = (*planner + 1) % n_harness;
-                            if follow {
-                                *worker_harness = *planner;
-                            }
-                        }
-                        _ => {}
-                    },
+                    }
                     LaunchField::WorkerHarness => match key.code {
                         KeyCode::Left | KeyCode::Char('h') => {
-                            *worker_harness = (*worker_harness + n_harness - 1) % n_harness
+                            *pool_cursor = (*pool_cursor + n_harness - 1) % n_harness
                         }
-                        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
-                            *worker_harness = (*worker_harness + 1) % n_harness
+                        KeyCode::Right | KeyCode::Char('l') => {
+                            *pool_cursor = (*pool_cursor + 1) % n_harness
+                        }
+                        KeyCode::Char(' ') | KeyCode::Char('x') => {
+                            if let Some(t) = pool.get_mut(*pool_cursor) {
+                                *t = !*t;
+                                *pool_touched = true;
+                            }
                         }
                         _ => {}
                     },
@@ -1857,45 +1900,70 @@ impl SwarmBoard {
             Some(Modal::Launch {
                 goal,
                 planner,
-                worker_harness,
+                pool,
+                pool_cursor,
+                pool_touched,
                 workers,
                 isolation,
                 gate,
                 check,
                 field,
+                ..
             }) => {
-                if goal.text.trim().is_empty() {
-                    self.status_msg = Some("Write the goal first.".into());
-                    self.modal = Some(Modal::Launch {
-                        goal,
-                        planner,
-                        worker_harness,
-                        workers,
-                        isolation,
-                        gate,
-                        check,
-                        field: LaunchField::Goal,
-                    });
-                    let _ = field;
+                let planner_h = self
+                    .harnesses
+                    .get(planner)
+                    .copied()
+                    .unwrap_or(self.default_harness);
+                // the coordinator's harness first when it is in the pool
+                let mut chosen: Vec<Harness> = self
+                    .harnesses
+                    .iter()
+                    .zip(&pool)
+                    .filter(|(_, t)| **t)
+                    .map(|(h, _)| *h)
+                    .collect();
+                if let Some(i) = chosen.iter().position(|h| *h == planner_h) {
+                    chosen.swap(0, i);
+                }
+                let why = if goal.text.trim().is_empty() {
+                    Some("Write the goal first.")
+                } else if chosen.is_empty() {
+                    Some("Tick at least one harness for the workers (Space).")
+                } else {
+                    None
+                };
+                let form = Modal::Launch {
+                    goal,
+                    planner,
+                    pool,
+                    pool_cursor,
+                    pool_touched,
+                    workers,
+                    isolation,
+                    gate,
+                    check,
+                    field,
+                    error: why.map(str::to_string),
+                };
+                if why.is_some() {
+                    self.modal = Some(form);
                     return Outcome::None;
                 }
-                Outcome::Start {
+                let Modal::Launch { goal, check, .. } = &form else {
+                    unreachable!()
+                };
+                let out = Outcome::Start {
                     goal: goal.text.trim().to_string(),
-                    planner: self
-                        .harnesses
-                        .get(planner)
-                        .copied()
-                        .unwrap_or(self.default_harness),
-                    workers: self
-                        .harnesses
-                        .get(worker_harness)
-                        .copied()
-                        .unwrap_or(self.default_harness),
+                    planner: planner_h,
+                    workers: chosen,
                     max_workers: workers,
                     isolation,
                     gate,
                     check: Some(check.text.trim().to_string()).filter(|c| !c.is_empty()),
-                }
+                };
+                self.last_launch = Some(form);
+                out
             }
             Some(Modal::Task {
                 editing,
@@ -3052,12 +3120,67 @@ mod tests {
             Outcome::Start {
                 goal: "Ship it".into(),
                 planner: Harness::Codex,
-                workers: Harness::Codex,
+                workers: vec![Harness::Codex],
                 max_workers: 3,
                 isolation: TaskIsolation::Shared,
                 gate: true,
                 check: None
             }
         );
+    }
+
+    #[test]
+    fn the_launch_form_ticks_a_pool_and_keeps_the_coordinators_first() {
+        let mut v = SwarmBoard::open(
+            PathBuf::from("/nonexistent-ws"),
+            None,
+            &[],
+            None,
+            vec![Harness::Claude, Harness::Codex, Harness::Antigravity],
+            Harness::Claude,
+            0,
+        );
+        v.open_launch();
+        for c in "Ship it".chars() {
+            v.handle_key(key(KeyCode::Char(c)));
+        }
+        v.handle_key(key(KeyCode::Tab)); // coordinator
+        v.handle_key(key(KeyCode::Tab)); // workers' pool, on claude
+        v.handle_key(key(KeyCode::Char(' '))); // untick claude
+        v.handle_key(key(KeyCode::Right));
+        v.handle_key(key(KeyCode::Char(' '))); // codex
+        v.handle_key(key(KeyCode::Right));
+        v.handle_key(key(KeyCode::Char(' '))); // agy
+        let ctrl_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL);
+        match v.handle_key(ctrl_enter) {
+            Outcome::Start {
+                planner, workers, ..
+            } => {
+                assert_eq!(planner, Harness::Claude);
+                assert_eq!(workers, [Harness::Codex, Harness::Antigravity]);
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+        // A failed start brings the form back, as it was, with the reason.
+        v.launch_failed("✗ no trace store".into());
+        match &v.modal {
+            Some(Modal::Launch {
+                goal, pool, error, ..
+            }) => {
+                assert_eq!(goal.text, "Ship it");
+                assert_eq!(pool, &[false, true, true]);
+                assert_eq!(error.as_deref(), Some("✗ no trace store"));
+            }
+            _ => panic!("the form is not back"),
+        }
+        // An empty pool is refused in the form (still on the pool field).
+        v.handle_key(key(KeyCode::Char(' ')));
+        v.handle_key(key(KeyCode::Left));
+        v.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(v.handle_key(ctrl_enter), Outcome::None);
+        assert!(matches!(
+            &v.modal,
+            Some(Modal::Launch { error: Some(e), .. }) if e.contains("Tick at least one")
+        ));
     }
 }

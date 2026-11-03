@@ -39,7 +39,8 @@ pub struct StartSwarm {
     pub isolation: TaskIsolation,
     pub gate: bool,
     pub check: Option<String>,
-    /// The harness of tasks that name none; `None`: the coordinator's.
+    /// The workers' pool, comma separated (`agy,codex`), the first for
+    /// tasks that name none; `None`: the coordinator's harness alone.
     pub workers: Option<String>,
 }
 
@@ -86,6 +87,7 @@ impl App {
             writing_agents: crate::bus::swarm::plan::writing_agents(&catalog),
             git_repo: crate::loops::worktree::is_git_repo(workspace),
             default_isolation: isolation,
+            pool: Vec::new(),
         }
     }
 
@@ -104,6 +106,18 @@ impl App {
             Some(h) if !h.is_empty() => h.parse::<Harness>()?,
             _ => self.default_swarm_harness(),
         };
+        // the workers' pool: "agy,codex", the first for tasks that name none
+        let mut worker_pool = Vec::new();
+        for h in req
+            .workers
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        {
+            worker_pool.push(h.parse::<Harness>()?.as_str().to_string());
+        }
         let db = self
             .trace_db_path
             .clone()
@@ -121,10 +135,7 @@ impl App {
                 gate: req.gate,
                 check_cmd: req.check.clone(),
                 owner_run: Some(self.app_run_id.clone()),
-                worker_harness: match req.workers.as_deref().map(str::trim) {
-                    Some(h) if !h.is_empty() => Some(h.parse::<Harness>()?.as_str().to_string()),
-                    _ => None,
-                },
+                worker_pool,
             },
             crate::tracing::store::now_ns(),
         )?;
@@ -153,22 +164,20 @@ impl App {
     ) -> Result<PathBuf, String> {
         let workspace = PathBuf::from(&swarm.workspace);
         let catalog = crate::agents::Catalog::load(&self.library_root(), Some(&workspace));
+        let pool = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|db| crate::tracing::store::open_ro(db).ok())
+            .map(|c| record::worker_pool(&c, swarm))
+            .unwrap_or_else(|| vec![swarm.planner_harness.clone()]);
         let ctx = PlannerContext {
             goal: swarm.goal.clone(),
             workspace: crate::workflows::planner::inventory(&workspace),
             workspace_path: swarm.workspace.clone(),
             git_repo: crate::loops::worktree::is_git_repo(&workspace),
-            harnesses: self
-                .installed_harnesses()
-                .iter()
-                .map(|h| h.as_str().to_string())
-                .collect(),
-            default_harness: self
-                .trace_db_path
-                .as_deref()
-                .and_then(|db| crate::tracing::store::open_ro(db).ok())
-                .map(|c| record::worker_harness(&c, swarm))
-                .unwrap_or_else(|| swarm.planner_harness.clone()),
+            // the workers' pool, the default first: a task names one of them
+            harnesses: pool.clone(),
+            default_harness: pool[0].clone(),
             agents: catalog
                 .entries
                 .iter()
@@ -362,9 +371,23 @@ impl App {
         true
     }
 
-    /// Carries out an operator verb on `workspace`'s swarm.
+    /// Carries out an operator verb on `workspace`'s only live swarm (see
+    /// [`App::swarm_action_on`] to name one).
     pub fn swarm_action(
         &mut self,
+        workspace: &Path,
+        verb: SwarmVerb,
+        task: Option<&str>,
+        notes: Option<&str>,
+    ) -> Result<String, String> {
+        self.swarm_action_on(None, workspace, verb, task, notes)
+    }
+
+    /// Carries out an operator verb on the swarm `swarm_id` names, else the
+    /// one the task id is on, else `workspace`'s only live swarm.
+    pub fn swarm_action_on(
+        &mut self,
+        swarm_id: Option<&str>,
         workspace: &Path,
         verb: SwarmVerb,
         task: Option<&str>,
@@ -373,13 +396,21 @@ impl App {
         let db = self.trace_db_path.clone().ok_or("no trace store")?;
         let conn = crate::tracing::store::open_aux(&db)?;
         let norm = crate::bus::store::normalize_workspace(workspace);
-        let swarm = record::live_swarm(&conn, &norm)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("no swarm runs in {norm}"))?;
+        let of_task = match (swarm_id, task) {
+            (None, Some(t)) => record::swarm_of_task(&conn, t).ok().flatten(),
+            _ => None,
+        };
+        let swarm = match of_task {
+            Some(s) => s,
+            None => record::resolve_swarm(&conn, &norm, swarm_id)?,
+        };
+        if swarm.ended_ns.is_some() {
+            return Err(format!("{} has ended", swarm.id));
+        }
         let now = crate::tracing::store::now_ns();
         match verb {
             SwarmVerb::Close => {
-                let (stopped, records) = self.stop_swarm(Path::new(&swarm.workspace));
+                let (stopped, records) = self.stop_swarm_run(&swarm);
                 let (cancelled, released) = records?;
                 Ok(format!(
                     "closed: stopped {stopped} session(s), cancelled {cancelled} task(s), released {released} lease(s)"
@@ -501,7 +532,9 @@ impl App {
                 verb,
                 task,
                 notes,
-            } => match self.swarm_action(
+                swarm,
+            } => match self.swarm_action_on(
+                swarm.as_deref(),
                 Path::new(&workspace),
                 verb,
                 task.as_deref(),

@@ -4988,7 +4988,52 @@ impl App {
             .collect()
     }
 
-    /// Ends `workspace`'s swarm: stops its worker sessions (bus-group
+    /// Ends one swarm: stops its coordinator and its tasks' workers, then
+    /// `record::end_swarm`; the workspace's other swarms keep running. Answers the sessions stopped and the store's result.
+    pub fn stop_swarm_run(
+        &mut self,
+        swarm: &crate::bus::swarm::record::SwarmRun,
+    ) -> (usize, Result<(usize, usize), String>) {
+        let Some(db) = self.trace_db_path.clone() else {
+            return (0, Err("no trace store".into()));
+        };
+        let conn = match crate::tracing::store::open_aux(&db) {
+            Ok(c) => c,
+            Err(e) => return (0, Err(e)),
+        };
+        let mut launches: Vec<String> = crate::bus::swarm::record::board(&conn, &swarm.id)
+            .unwrap_or_default()
+            .into_iter()
+            // finished workers stay open until the swarm closes
+            .filter_map(|t| t.task.assigned_to)
+            .collect();
+        if let Some(c) = crate::bus::swarm::record::coordinator(&conn, &swarm.id)
+            .ok()
+            .flatten()
+            .and_then(|c| c.launch)
+        {
+            launches.push(c);
+        }
+        launches.extend(swarm.planner_launch.clone());
+        let mut stopped = 0;
+        for s in self.sessions.iter_mut() {
+            if s.trace
+                .as_ref()
+                .is_some_and(|t| launches.contains(&t.launch_id))
+                && !matches!(s.status(Instant::now()), Status::Exited(_))
+            {
+                s.kill();
+                stopped += 1;
+            }
+        }
+        let now = crate::tracing::store::now_ns();
+        (
+            stopped,
+            crate::bus::swarm::record::end_swarm(&conn, Some(&db), swarm, now),
+        )
+    }
+
+    /// Ends `workspace`'s swarms: stops its worker sessions (bus-group
     /// sessions there and in its task worktrees), then `record::end_swarm`
     /// (or `bus::store::stop_swarm` when no swarm row is live). Answers the sessions stopped and the
     /// store's result.
@@ -5016,13 +5061,18 @@ impl App {
                 let norm = crate::bus::store::normalize_workspace(workspace);
                 let now = crate::tracing::store::now_ns();
                 // An orchestrated swarm (schema v21) ends its row too.
-                match crate::bus::swarm::record::live_swarm(&conn, &norm)
-                    .ok()
-                    .flatten()
-                {
-                    Some(s) => crate::bus::swarm::record::end_swarm(&conn, Some(db), &s, now),
-                    None => crate::bus::store::stop_swarm(&conn, Some(db), &norm, now),
+                // every swarm the workspace runs (schema v23 allows several)
+                let live = crate::bus::swarm::record::live_swarms_in(&conn, &norm)
+                    .map_err(|e| e.to_string())?;
+                if live.is_empty() {
+                    return crate::bus::store::stop_swarm(&conn, Some(db), &norm, now);
                 }
+                let mut total = (0, 0);
+                for s in &live {
+                    let (c, r) = crate::bus::swarm::record::end_swarm(&conn, Some(db), s, now)?;
+                    total = (total.0 + c, total.1 + r);
+                }
+                Ok(total)
             }),
             None => Err("no trace store".into()),
         };
@@ -5036,7 +5086,16 @@ impl App {
     ) -> Option<crate::bus::swarm::plan::CheckEnv> {
         view.wants_checks().then(|| {
             let isolation = view.swarm.as_ref().map(|s| s.isolation).unwrap_or_default();
-            self.swarm_check_env(&view.current_workspace(), isolation)
+            let env = self.swarm_check_env(&view.current_workspace(), isolation);
+            // the swarm's workers' pool, as `record::submit_plan` checks it
+            let pool = view.swarm.as_ref().and_then(|s| {
+                let conn = crate::tracing::store::open_ro(self.trace_db_path.as_deref()?).ok()?;
+                Some(crate::bus::swarm::record::worker_pool(&conn, s))
+            });
+            match pool {
+                Some(p) => env.with_pool(p),
+                None => env,
+            }
         })
     }
 
@@ -5102,15 +5161,23 @@ impl App {
                 let conn = crate::tracing::store::open_aux(db)?;
                 f(&conn, db)
             };
+        // the swarm the cursor is in: a workspace may run several
+        let board_swarm: Option<String> = match &self.mode {
+            Mode::Swarm(v) => v.swarm.as_ref().map(|s| s.id.clone()),
+            _ => None,
+        };
         let live_swarm = || -> Result<crate::bus::swarm::record::SwarmRun, String> {
             let db = self.trace_db_path.as_deref().ok_or("no trace store")?;
             let conn = crate::tracing::store::open_aux(db)?;
-            crate::bus::swarm::record::live_swarm(
+            crate::bus::swarm::record::resolve_swarm(
                 &conn,
                 &crate::bus::store::normalize_workspace(&ws_path),
+                board_swarm.as_deref(),
             )
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "no swarm runs here".to_string())
+            .and_then(|s| match s.ended_ns {
+                None => Ok(s),
+                Some(_) => Err(format!("{} has ended", s.id)),
+            })
         };
         let result: Option<Result<String, String>> = match outcome {
             Outcome::None => return,
@@ -5145,8 +5212,8 @@ impl App {
                 isolation,
                 gate,
                 check,
-            } => Some(
-                self.start_orchestrated_swarm(swarm_engine::StartSwarm {
+            } => {
+                let started = self.start_orchestrated_swarm(swarm_engine::StartSwarm {
                     workspace: ws_path.clone(),
                     goal,
                     planner: Some(planner.as_str().to_string()),
@@ -5154,13 +5221,44 @@ impl App {
                     isolation,
                     gate,
                     check,
-                    workers: Some(workers.as_str().to_string()),
-                })
-                .map(|s| format!("{} is planning with {}", s.id, s.planner_harness)),
-            ),
-            Outcome::Verb { verb, task, notes } => {
-                Some(self.swarm_action(&ws_path, verb, task.as_deref(), notes.as_deref()))
+                    workers: Some(
+                        workers
+                            .iter()
+                            .map(|h| h.as_str())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                });
+                // a failed start brings the form back with the reason in it
+                if let Mode::Swarm(v) = &mut self.mode {
+                    match &started {
+                        Ok(s) => {
+                            v.launch_started();
+                            v.select_swarm(&s.id);
+                        }
+                        Err(e) => v.launch_failed(format!("✗ {e}")),
+                    }
+                }
+                Some(started.map(|s| {
+                    format!(
+                        "{} is planning with {} · workers: {}",
+                        s.id,
+                        s.planner_harness,
+                        workers
+                            .iter()
+                            .map(|h| h.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }))
             }
+            Outcome::Verb { verb, task, notes } => Some(self.swarm_action_on(
+                board_swarm.as_deref(),
+                &ws_path,
+                verb,
+                task.as_deref(),
+                notes.as_deref(),
+            )),
             Outcome::AddTask(pt) => Some(live_swarm().and_then(|swarm| {
                 with_conn(&|conn, db| {
                     crate::bus::swarm::record::add_task(conn, Some(db), &swarm, &pt, false, now_ns)
@@ -5191,7 +5289,8 @@ impl App {
                     .map(|_| String::new())
                 });
                 Some(saved.and_then(|_| {
-                    self.swarm_action(
+                    self.swarm_action_on(
+                        board_swarm.as_deref(),
                         &ws_path,
                         crate::bus::swarm::record::SwarmVerb::Retry,
                         Some(&task_id),
@@ -8131,12 +8230,7 @@ impl App {
                     .trace_db_path
                     .as_deref()
                     .and_then(|db| crate::tracing::store::open_ro(db).ok())
-                    .and_then(|c| {
-                        crate::bus::store::plan_blocks(
-                            &c,
-                            &crate::bus::store::normalize_workspace(&ws_path),
-                        )
-                    })
+                    .and_then(|c| crate::bus::store::plan_blocks(&c, &task_id))
                 {
                     return ControlResponse::err(why);
                 }

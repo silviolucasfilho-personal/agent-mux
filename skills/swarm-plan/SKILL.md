@@ -13,7 +13,7 @@ agent-mux runs a swarm: you, its coordinator, write the plan, the operator revie
 1. Read the file named by `$AGENT_MUX_SWARM_PLAN` before anything else. If it is unset or missing, print `no planner context` and stop. It holds:
    - `goal`: what the swarm should achieve.
    - `workspace` (layout, languages, test and lint commands, git status) and `workspace_path`, `git_repo`.
-   - `harnesses` (installed CLIs) and `default_harness`.
+   - `harnesses`: the workers' pool the operator chose, and `default_harness`, the first of them.
    - `agents`: personas a task may run as.
    - `max_workers`: how many tasks run at once.
    - `default_isolation`: `shared` (one folder, file leases) or `worktree` (a branch per task).
@@ -28,7 +28,7 @@ agent-mux runs a swarm: you, its coordinator, write the plan, the operator revie
 - **Say when it is done.** `acceptance` is one line a worker can check: "`cargo test bus::` passes and a new test covers X".
 - **Small enough to review, big enough to matter.** Usually 2–6 tasks, rarely more than `max_workers × 2`. Do not create tasks for "investigate", "review" or "summarize": the operator reviews.
 - **Isolation.** Leave `isolation` out to use the default. Choose `worktree` for broad changes to code that others are editing too (only when `git_repo` is true), and `shared` for small, separate files.
-- **Harness and agent.** Leave them out unless a task clearly suits another installed harness or a listed agent.
+- **Harness and agent.** Give each task a `harness` from `harnesses`, and only from them: agent-mux refuses any other. With more than one, spread the tasks across the pool by fit: `claude` for broad refactors and design, `codex` for focused code and tests, `agy` without a writing `agent` (it runs custom agents read-only). Leave `harness` out to use `default_harness`. Leave `agent` out unless a listed agent clearly suits the task.
 - **Re-plan.** Tasks with `started: true` stay as they are; do not repeat them. Plan only what is still needed, following the operator's notes. Reuse a key only for the same task.
 
 ## Submit

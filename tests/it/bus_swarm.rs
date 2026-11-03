@@ -426,7 +426,7 @@ fn bus_writes_advance_the_change_feed() {
             gate: true,
             check_cmd: None,
             owner_run: None,
-            worker_harness: None,
+            worker_pool: vec![],
         },
         4_000,
     )

@@ -18,7 +18,7 @@ Anything that needs you also shows outside the Swarm screen, as `⚑ swarm needs
 - **The workspace** is the folder of the session selected when you open the screen (otherwise the folder agent-mux started in).
 - **The workers need the bus tools.** agent-mux attaches its MCP server to every session it launches, so this works out of the box. If you set `[agents] mcp = "off"` in `profiles.toml`, workers can't report that they're done.
 - **Worktree isolation needs a git repository.** With **shared** isolation, workers edit the same files, protected by file leases. With **worktree** isolation, each task gets its own branch under `.loop-worktrees/`.
-- **One swarm per workspace** at a time. Close one before starting the next.
+- **Several swarms per workspace.** A new swarm starts beside a running or stuck one. Verbs, messages and closing act on the swarm the cursor is in; on the CLI, name one with `--swarm ID` when the folder runs several.
 
 ## Starting a swarm
 
@@ -28,13 +28,15 @@ Press `n` on a swarm row (or `Enter` on the empty screen). The form asks for:
 | --- | --- | --- |
 | Goal | What the swarm should achieve. Be concrete: what done looks like, and what's out of scope. | — |
 | Coordinator | Which harness the coordinator runs on. | Claude when installed, else the selected session's |
-| Workers' harness | The harness of tasks that don't name one. It follows the coordinator's until you change it. | the coordinator's |
+| Workers may run on | The workers' pool: tick each harness workers may use (`←`/`→` move, `Space` ticks). The coordinator gives each task one of them, and a plan naming another is refused. Tasks that name none run on the coordinator's harness if it is ticked, else on the first ticked. Until you tick one, the pool follows the coordinator. | the coordinator's |
 | Max parallel workers | How many tasks run at once. A finished worker no longer counts. | 3 (up to 8) |
 | Default isolation | `shared` (leases on files) or `worktree` (one branch per task). | `shared` |
 | Approve the plan before workers start | The **plan gate**. With it off, workers start as soon as the plan passes its checks. | yes |
 | Check when done | An optional command, such as `cargo test`. agent-mux runs it in the workspace once every task is settled and every branch reviewed, before the swarm reads `finished`. | — |
 
-`Tab` moves between fields, `←`/`→` change an option, `Alt+Enter` adds a line to the goal, and `Ctrl+S` starts. The coordinator starts at once: select its `★` row to watch it plan.
+`Tab` moves between fields, `←`/`→` change an option, `Space` ticks a harness, `Alt+Enter` adds a line to the goal, and `Ctrl+S` (or `Ctrl+Enter`) starts. The coordinator starts at once, and the cursor moves to the new swarm: select its `★` row to watch it plan. If the swarm can't start, the form stays open with the reason in red at its top.
+
+For example, Claude as coordinator with agy and Codex ticked gives a plan whose tasks run on agy or Codex, as the coordinator judges fit. You can still move any task with `e` before it starts, or with `r` when it fails or gets stuck; a harness chosen there joins the pool.
 
 ## The screen
 
@@ -178,8 +180,8 @@ Confirmations take `y` only. `Enter` never confirms. What an action did shows in
 ## From the command line
 
 ```sh
-agent-mux swarm start "Add OAuth login" --planner claude --worker-harness codex --workers 4 --isolation worktree
-#   --planner: the coordinator's harness · --worker-harness: tasks that name none
+agent-mux swarm start "Add OAuth login" --planner claude --worker-harness agy,codex --workers 4 --isolation worktree
+#   --planner: the coordinator's harness · --worker-harness: the workers' pool, the first for tasks that name none
 agent-mux swarm status                  # the swarm and its board, each task's state (--json for scripts)
 agent-mux swarm plan                    # the board with the plan's errors and warnings
 agent-mux swarm approve                 # workers start

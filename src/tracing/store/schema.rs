@@ -1,11 +1,11 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 22;
+pub const SCHEMA_VERSION: i32 = 23;
 
 pub const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22,
+    V22, V23,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -1175,4 +1175,15 @@ BEGIN
   INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
   VALUES ('swarm_coordinator', NEW.swarm_id, NULL, NEW.launch, 'update');
 END;
+"#;
+
+// v23: several live swarms per workspace. The unique `swarms_live` index
+// held a workspace to one swarm, so a stuck swarm kept a new one from
+// starting; a swarm is now found by its id (the tree's row, a task's
+// `swarm_tasks` row, a coordinator's launch), and a plain index keeps the
+// workspace's lookup fast. `swarm_coordinators.worker_harness` holds the
+// workers' pool, comma separated, its first harness the default.
+const V23: &str = r#"
+DROP INDEX IF EXISTS swarms_live;
+CREATE INDEX IF NOT EXISTS swarms_workspace_live ON swarms (workspace, ended_ns);
 "#;

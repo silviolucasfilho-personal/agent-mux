@@ -801,7 +801,7 @@ pub fn claim_task(
     let Some(task) = get_task(conn, task_id).map_err(|e| e.to_string())? else {
         return Err(format!("no task '{task_id}'"));
     };
-    if let Some(why) = plan_blocks(conn, &task.workspace) {
+    if let Some(why) = plan_blocks(conn, &task.id) {
         return Err(why);
     }
     if task.status != TaskStatus::Open
@@ -980,22 +980,20 @@ pub fn list_workspace_messages(
     Ok(out)
 }
 
-/// Why work may not start yet in `workspace`: its swarm's plan is not past
-/// review. `None` when nothing holds it back.
-pub fn plan_blocks(conn: &Connection, workspace: &str) -> Option<String> {
-    if let Some(swarm) = crate::bus::swarm::record::live_swarm(conn, workspace)
+/// Why `task_id` may not start yet: the swarm it is on has a plan not past
+/// review. `None` when nothing holds it back (a task on no swarm's board
+/// never waits: a workspace may run several swarms, schema v23).
+pub fn plan_blocks(conn: &Connection, task_id: &str) -> Option<String> {
+    let swarm = crate::bus::swarm::record::swarm_of_task(conn, task_id)
         .ok()
-        .flatten()
-    {
-        return (!swarm.status.approved()).then(|| {
-            format!(
-                "the swarm's plan is not approved yet ({}): agent-mux starts the workers itself once \
-                 the operator approves it",
-                swarm.status.as_str()
-            )
-        });
-    }
-    None
+        .flatten()?;
+    (swarm.ended_ns.is_none() && !swarm.status.approved()).then(|| {
+        format!(
+            "the swarm's plan is not approved yet ({}): agent-mux starts the workers itself once \
+             the operator approves it",
+            swarm.status.as_str()
+        )
+    })
 }
 
 /// What the operator did with a finished worktree branch.

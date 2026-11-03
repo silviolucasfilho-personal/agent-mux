@@ -71,7 +71,9 @@ Since schema v21 agent-mux runs a swarm itself, without a coordinator session:
 
 5. A worker's `task_split` or `delegate` becomes a proposal on its board (`record::swarm_of_worker`, `record::propose`).
 6. The swarm's optional check command runs (`bus::swarm::check`, `Action::RunCheck`) before it reads `finished`.
-7. Tasks that name no harness run on the workers' harness (`record::worker_harness`; the coordinator defaults to Claude). The task form, and `r`'s retry form, change a task's harness, agent and isolation. `plan::check` refuses agy with a writing agent: agy 1.4.12 runs custom agents read-only.
+7. The launch form ticks the workers' pool (`record::worker_pool`, `--worker-harness agy,codex`); the coordinator assigns each task one of them, `plan::check` refuses others, and tasks that name none run on its first (`record::worker_harness`; the coordinator defaults to Claude). A start that fails keeps the form open with the reason (`SwarmBoard::launch_failed`). The task form, and `r`'s retry form, change a task's harness, agent and isolation. `plan::check` refuses agy with a writing agent: agy 1.4.12 runs custom agents read-only.
+
+8. Since schema v23 a workspace may run several swarms: verbs name theirs by id (`App::swarm_action_on`, `record::resolve_swarm`, `record::swarm_of_task`, `--swarm`), and `plan_blocks` gates a task by its own swarm.
 
 The coordinator-era tables `swarm_state` and `swarm_plans` (v17, v19) are left in the schema, unused.
 Guide: `docs/bus.md`; how to use swarms: `docs/swarm.md`.

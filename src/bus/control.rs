@@ -82,6 +82,9 @@ pub enum ControlRequest {
         task: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         notes: Option<String>,
+        /// The swarm, when the workspace runs several (schema v23).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        swarm: Option<String>,
     },
     /// End `workspace`'s swarm: stop its worker sessions, cancel its open
     /// tasks, release its leases, end its row.

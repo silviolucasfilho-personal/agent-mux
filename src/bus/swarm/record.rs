@@ -94,8 +94,9 @@ pub struct NewSwarm {
     pub gate: bool,
     pub check_cmd: Option<String>,
     pub owner_run: Option<String>,
-    /// The harness of tasks that name none (`None`: the coordinator's).
-    pub worker_harness: Option<String>,
+    /// The harnesses the workers may run on, the first one for tasks that
+    /// name none (empty: the coordinator's).
+    pub worker_pool: Vec<String>,
 }
 
 /// The plan's side of one board task.
@@ -152,7 +153,7 @@ fn poke(db: Option<&Path>) {
     }
 }
 
-/// Starts a swarm in `planning`. Refuses when the workspace has a live one.
+/// Starts a swarm in `planning`. A workspace may run several (schema v23).
 pub fn create_swarm(
     conn: &Connection,
     db: Option<&Path>,
@@ -160,13 +161,6 @@ pub fn create_swarm(
     now: i64,
 ) -> Result<SwarmRun, String> {
     let workspace = normalize_workspace(Path::new(&new.workspace));
-    if let Some(live) = live_swarm(conn, &workspace).map_err(|e| e.to_string())? {
-        return Err(format!(
-            "this workspace already runs a swarm ({}, {}): stop it first",
-            live.id,
-            live.status.as_str()
-        ));
-    }
     let id = format!("swarm-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
     conn.execute(
         "INSERT INTO swarms (id, workspace, goal, status, planner_harness, max_workers,
@@ -192,14 +186,7 @@ pub fn create_swarm(
     conn.execute(
         "INSERT INTO swarm_coordinators (swarm_id, worker_harness, updated_ns) VALUES (?1, ?2, ?3)
          ON CONFLICT (swarm_id) DO UPDATE SET worker_harness = excluded.worker_harness",
-        params![
-            id,
-            new.worker_harness
-                .as_deref()
-                .map(str::trim)
-                .filter(|h| !h.is_empty()),
-            now
-        ],
+        params![id, encode_pool(&new.worker_pool), now],
     )
     .map_err(|e| e.to_string())?;
     poke(db);
@@ -208,14 +195,41 @@ pub fn create_swarm(
         .ok_or_else(|| "the swarm disappeared".into())
 }
 
-/// The harness of the swarm's tasks that name none: the workers' harness
-/// chosen at the start, else the coordinator's.
-pub fn worker_harness(conn: &Connection, swarm: &SwarmRun) -> String {
-    coordinator(conn, &swarm.id)
+/// `swarm_coordinators.worker_harness`: the pool, comma separated.
+fn encode_pool(pool: &[String]) -> Option<String> {
+    let mut seen: Vec<&str> = Vec::new();
+    for h in pool.iter().map(|h| h.trim()).filter(|h| !h.is_empty()) {
+        if !seen.contains(&h) {
+            seen.push(h);
+        }
+    }
+    (!seen.is_empty()).then(|| seen.join(","))
+}
+
+/// The harnesses the swarm's workers may run on, the default first: the
+/// pool chosen at the start, else the coordinator's harness alone.
+pub fn worker_pool(conn: &Connection, swarm: &SwarmRun) -> Vec<String> {
+    let pool: Vec<String> = coordinator(conn, &swarm.id)
         .ok()
         .flatten()
         .and_then(|c| c.worker_harness)
-        .unwrap_or_else(|| swarm.planner_harness.clone())
+        .map(|s| {
+            s.split(',')
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if pool.is_empty() {
+        vec![swarm.planner_harness.clone()]
+    } else {
+        pool
+    }
+}
+
+/// The harness of the swarm's tasks that name none: the pool's first.
+pub fn worker_harness(conn: &Connection, swarm: &SwarmRun) -> String {
+    worker_pool(conn, swarm).remove(0)
 }
 
 pub fn get_swarm(conn: &Connection, id: &str) -> rusqlite::Result<Option<SwarmRun>> {
@@ -227,14 +241,77 @@ pub fn get_swarm(conn: &Connection, id: &str) -> rusqlite::Result<Option<SwarmRu
     .optional()
 }
 
-/// `workspace`'s live swarm (normalized path), if any.
+/// `workspace`'s newest live swarm (normalized path), if any. A workspace
+/// may run several: name one by id where it matters ([`live_swarms_in`],
+/// [`swarm_of_task`]).
 pub fn live_swarm(conn: &Connection, workspace: &str) -> rusqlite::Result<Option<SwarmRun>> {
     conn.query_row(
-        &format!("SELECT {SWARM_COLS} FROM swarms WHERE workspace = ?1 AND ended_ns IS NULL"),
+        &format!(
+            "SELECT {SWARM_COLS} FROM swarms WHERE workspace = ?1 AND ended_ns IS NULL
+             ORDER BY started_ns DESC LIMIT 1"
+        ),
         params![workspace],
         row_to_swarm,
     )
     .optional()
+}
+
+/// `workspace`'s live swarms, oldest first.
+pub fn live_swarms_in(conn: &Connection, workspace: &str) -> rusqlite::Result<Vec<SwarmRun>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SWARM_COLS} FROM swarms WHERE workspace = ?1 AND ended_ns IS NULL
+         ORDER BY started_ns ASC"
+    ))?;
+    let rows = stmt.query_map(params![workspace], row_to_swarm)?;
+    rows.collect()
+}
+
+/// The swarm `task_id` is on the board of, live or not.
+pub fn swarm_of_task(conn: &Connection, task_id: &str) -> rusqlite::Result<Option<SwarmRun>> {
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT swarm_id FROM swarm_tasks WHERE task_id = ?1",
+            params![task_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match id {
+        Some(id) => get_swarm(conn, &id),
+        None => Ok(None),
+    }
+}
+
+/// The live swarm a command names: `id` (an id or its short form), else
+/// `workspace`'s only live one. Several live and none named is an error
+/// that lists them.
+pub fn resolve_swarm(
+    conn: &Connection,
+    workspace: &str,
+    id: Option<&str>,
+) -> Result<SwarmRun, String> {
+    if let Some(id) = id.map(str::trim).filter(|s| !s.is_empty()) {
+        let full = if id.starts_with("swarm-") {
+            id.to_string()
+        } else {
+            format!("swarm-{id}")
+        };
+        return get_swarm(conn, &full)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no swarm `{id}`"));
+    }
+    let mut live = live_swarms_in(conn, workspace).map_err(|e| e.to_string())?;
+    match live.len() {
+        0 => Err(format!("no swarm runs in {workspace}")),
+        1 => Ok(live.remove(0)),
+        _ => Err(format!(
+            "{} swarms run in {workspace}: name one with --swarm ({})",
+            live.len(),
+            live.iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 /// Swarms that ended at or after `since_ns`, newest first.
@@ -613,7 +690,7 @@ pub fn submit_plan(
                 .push(board_plan(swarm, std::slice::from_ref(t)).tasks.remove(0));
         }
     }
-    let problems = super::plan::check(&merged, env);
+    let problems = super::plan::check(&merged, &env.with_pool(worker_pool(conn, swarm)));
     if !problems.is_ok() {
         return Ok(Submitted::Rejected(problems));
     }
@@ -841,19 +918,28 @@ pub fn update_plan_task(
         now,
     )?;
     // the harness, agent and isolation the card names (a harness of none
-    // is the swarm's workers' harness)
-    let harness = match &pt.harness {
-        Some(h) => Some(h.clone()),
-        None => conn
-            .query_row(
-                "SELECT swarm_id FROM swarm_tasks WHERE task_id = ?1",
-                params![task_id],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?
-            .and_then(|id| get_swarm(conn, &id).ok().flatten())
-            .map(|s| worker_harness(conn, &s)),
+    // is the swarm's workers' harness); the operator's harness joins the
+    // pool, so the plan check accepts the card as it now stands
+    let swarm = swarm_of_task(conn, task_id).map_err(|e| e.to_string())?;
+    let harness = match (&pt.harness, &swarm) {
+        (Some(h), Some(s)) => {
+            let mut pool = worker_pool(conn, s);
+            if !pool.contains(h) {
+                pool.push(h.clone());
+                conn.execute(
+                    "INSERT INTO swarm_coordinators (swarm_id, worker_harness, updated_ns)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT (swarm_id) DO UPDATE SET worker_harness = excluded.worker_harness,
+                                                          updated_ns = excluded.updated_ns",
+                    params![s.id, encode_pool(&pool), now],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            Some(h.clone())
+        }
+        (Some(h), None) => Some(h.clone()),
+        (None, Some(s)) => Some(worker_harness(conn, s)),
+        (None, None) => None,
     };
     let isolation = pt
         .isolation
@@ -957,13 +1043,48 @@ pub fn end_swarm(
     swarm: &SwarmRun,
     now: i64,
 ) -> Result<(usize, usize), String> {
-    let (cancelled, released) = bstore::stop_swarm(conn, db, &swarm.workspace, now)?;
+    let (cancelled, released) = stop_swarm_tasks(conn, db, &swarm.id, now)?;
     conn.execute(
         "UPDATE swarms SET status = 'finished', ended_ns = ?1, updated_ns = ?1 WHERE id = ?2",
         params![now, swarm.id],
     )
     .map_err(|e| e.to_string())?;
     poke(db);
+    Ok((cancelled, released))
+}
+
+/// Cancels the swarm's open tasks and releases the leases its workers
+/// hold; another swarm of the workspace keeps its own.
+fn stop_swarm_tasks(
+    conn: &Connection,
+    db: Option<&Path>,
+    swarm_id: &str,
+    now: i64,
+) -> Result<(usize, usize), String> {
+    let board = board(conn, swarm_id).map_err(|e| e.to_string())?;
+    let mut cancelled = 0;
+    let mut released = 0;
+    for t in board.iter().filter(|t| !t.task.status.is_terminal()) {
+        released += conn
+            .execute(
+                "DELETE FROM agent_leases WHERE task_id = ?1",
+                params![t.task.id],
+            )
+            .map_err(|e| e.to_string())?;
+        bstore::update_task(
+            conn,
+            db,
+            &t.task.id,
+            t.task.assigned_to.as_deref().unwrap_or("user"),
+            TaskStatus::Cancelled,
+            Some(serde_json::json!("Swarm stopped")),
+            None,
+            None,
+            None,
+            now,
+        )?;
+        cancelled += 1;
+    }
     Ok((cancelled, released))
 }
 
@@ -1084,7 +1205,10 @@ pub fn apply(
                     status.as_str()
                 ));
             }
-            let problems = super::plan::check(&board_plan(swarm, &board), env);
+            let problems = super::plan::check(
+                &board_plan(swarm, &board),
+                &env.with_pool(worker_pool(conn, swarm)),
+            );
             if let Some((k, m)) = problems.errors.first() {
                 return Err(format!(
                     "the plan has {} error(s); first: {}{m}",
@@ -1208,7 +1332,7 @@ mod tests {
             gate: true,
             check_cmd: Some("  ".into()),
             owner_run: Some("run-1".into()),
-            worker_harness: None,
+            worker_pool: vec![],
         }
     }
 
@@ -1227,7 +1351,7 @@ mod tests {
         let (dir, conn) = store();
         let ws = dir.path().to_string_lossy().into_owned();
         let mut n = new_swarm(&ws);
-        n.worker_harness = Some("codex".into());
+        n.worker_pool = vec!["codex".into()];
         let s = create_swarm(&conn, None, &n, 1).unwrap();
         assert_eq!(worker_harness(&conn, &s), "codex");
         let mut named = pt("b", &[]);
@@ -1275,17 +1399,110 @@ mod tests {
     }
 
     #[test]
-    fn one_live_swarm_per_workspace_and_a_board_in_plan_order() {
+    fn a_workspace_runs_several_swarms_and_each_ends_alone() {
+        let (dir, conn) = store();
+        let ws = normalize_workspace(dir.path());
+        let a = create_swarm(&conn, None, &new_swarm(&ws), 1).unwrap();
+        let b = create_swarm(&conn, None, &new_swarm(&ws), 2).unwrap();
+        let ids: Vec<String> = live_swarms_in(&conn, &ws)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, [a.id.clone(), b.id.clone()]);
+        assert_eq!(
+            live_swarm(&conn, &ws).unwrap().unwrap().id,
+            b.id,
+            "the newest"
+        );
+        // Unnamed, a command is ambiguous; named, it is not.
+        let err = resolve_swarm(&conn, &ws, None).unwrap_err();
+        assert!(err.contains("2 swarms run") && err.contains(&a.id), "{err}");
+        assert_eq!(
+            resolve_swarm(&conn, &ws, Some(&a.id[6..])).unwrap().id,
+            a.id,
+            "the short id"
+        );
+        let plan = |k: &str| Plan {
+            summary: String::new(),
+            tasks: vec![pt(k, &[])],
+        };
+        let ta = replace_draft(&conn, None, &a, &plan("x"), 3).unwrap();
+        let tb = replace_draft(&conn, None, &b, &plan("y"), 3).unwrap();
+        assert_eq!(
+            swarm_of_task(&conn, &tb[0].task.id).unwrap().unwrap().id,
+            b.id
+        );
+        // Ending one leaves the other's tasks and its row alone.
+        assert_eq!(end_swarm(&conn, None, &a, 4).unwrap().0, 1);
+        let a_task = bstore::get_task(&conn, &ta[0].task.id).unwrap().unwrap();
+        let b_task = bstore::get_task(&conn, &tb[0].task.id).unwrap().unwrap();
+        assert_eq!(
+            (a_task.status, b_task.status),
+            (TaskStatus::Cancelled, TaskStatus::Open)
+        );
+        assert_eq!(resolve_swarm(&conn, &ws, None).unwrap().id, b.id);
+        // Only a task of an unapproved swarm waits for its plan.
+        assert!(bstore::plan_blocks(&conn, &tb[0].task.id).is_some());
+        set_status(&conn, None, &b.id, SwarmStatus::Running, 5).unwrap();
+        assert!(bstore::plan_blocks(&conn, &tb[0].task.id).is_none());
+    }
+
+    #[test]
+    fn the_workers_pool_bounds_the_plan_and_the_operator_widens_it() {
+        let (dir, conn) = store();
+        let ws = dir.path().to_string_lossy().into_owned();
+        let mut n = new_swarm(&ws);
+        n.worker_pool = vec!["agy".into(), "codex".into(), "agy".into()];
+        let s = create_swarm(&conn, None, &n, 1).unwrap();
+        assert_eq!(
+            worker_pool(&conn, &s),
+            ["agy", "codex"],
+            "deduplicated, in order"
+        );
+        assert_eq!(worker_harness(&conn, &s), "agy");
+        let env = super::super::plan::CheckEnv {
+            harnesses: vec!["claude".into(), "codex".into(), "agy".into()],
+            git_repo: false,
+            ..Default::default()
+        };
+        let on = |h: &str| {
+            let mut t = pt("a", &[]);
+            t.harness = Some(h.into());
+            Plan {
+                summary: String::new(),
+                tasks: vec![t],
+            }
+        };
+        match submit_plan(&conn, None, &s, &on("claude"), &env, 2).unwrap() {
+            Submitted::Rejected(p) => assert!(
+                p.errors[0]
+                    .1
+                    .contains("not in the swarm's workers' pool (agy, codex)"),
+                "{p:?}"
+            ),
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+        let accepted = submit_plan(&conn, None, &s, &on("codex"), &env, 3).unwrap();
+        assert!(
+            matches!(accepted, Submitted::Accepted { .. }),
+            "{accepted:?}"
+        );
+        // The operator moves the task to claude: claude joins the pool.
+        let task = board(&conn, &s.id).unwrap().remove(0);
+        let mut moved = pt("a", &[]);
+        moved.harness = Some("claude".into());
+        update_plan_task(&conn, None, &task.task.id, &moved, 4).unwrap();
+        assert_eq!(worker_pool(&conn, &s), ["agy", "codex", "claude"]);
+    }
+
+    #[test]
+    fn a_board_in_plan_order() {
         let (dir, conn) = store();
         let ws = dir.path().to_string_lossy().into_owned();
         let s = create_swarm(&conn, None, &new_swarm(&ws), 1).unwrap();
         assert_eq!(s.status, SwarmStatus::Planning);
         assert_eq!(s.check_cmd, None, "a blank check is none");
-        assert!(
-            create_swarm(&conn, None, &new_swarm(&ws), 2)
-                .unwrap_err()
-                .contains("already runs a swarm")
-        );
 
         let plan = Plan {
             summary: "two".into(),
@@ -1374,6 +1591,7 @@ mod tests {
             writing_agents: vec![],
             git_repo: false,
             default_isolation: TaskIsolation::Shared,
+            pool: vec![],
         };
         let live = get_swarm(&conn, &s.id).unwrap().unwrap();
         let before = board(&conn, &s.id).unwrap().len();
