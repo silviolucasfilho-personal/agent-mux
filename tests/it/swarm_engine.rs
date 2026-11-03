@@ -274,7 +274,8 @@ async fn a_coordinator_plans_through_the_tool_and_the_swarm_runs_its_tasks_in_or
     assert!(board(&f).iter().all(|t| t.task.status == TaskStatus::Open));
     let conn = open_aux(&f.db).unwrap();
     let ws = agent_mux::bus::store::normalize_workspace(&f.ws);
-    assert!(agent_mux::bus::store::plan_blocks(&conn, &ws).is_some());
+    let first = board(&f)[0].task.id.clone();
+    assert!(agent_mux::bus::store::plan_blocks(&conn, &first).is_some());
 
     let done = f
         .app

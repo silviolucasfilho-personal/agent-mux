@@ -52,7 +52,10 @@ impl App {
                     return Availability::Disabled("Langfuse credentials not configured".into());
                 }
             }
-            SubmitDialog => matches!(self.mode, Mode::NewSession(_) | Mode::WorkflowDialog(_)),
+            SubmitDialog => {
+                matches!(self.mode, Mode::NewSession(_) | Mode::WorkflowDialog(_))
+                    || matches!(&self.mode, Mode::Swarm(v) if v.modal.is_some())
+            }
             Commands | Help | FocusAgents | TestShortcuts | Quit | Runs | Skills
             | Configuration | Memory | Workspaces | Swarm | Inbox | History => true,
             ReturnToSession => self.return_session_id().is_some(),

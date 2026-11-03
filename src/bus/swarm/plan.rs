@@ -110,6 +110,9 @@ pub struct CheckEnv {
     pub git_repo: bool,
     /// The swarm's default isolation, for tasks that name none.
     pub default_isolation: TaskIsolation,
+    /// The swarm's workers' pool (`record::worker_pool`): a task's harness
+    /// must be one of them. Empty: any installed harness.
+    pub pool: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -139,6 +142,15 @@ impl CheckEnv {
             writing_agents: writing_agents(&catalog),
             git_repo: crate::loops::worktree::is_git_repo(workspace),
             default_isolation,
+            pool: Vec::new(),
+        }
+    }
+
+    /// These checks for a swarm whose workers run on `pool`.
+    pub fn with_pool(&self, pool: Vec<String>) -> CheckEnv {
+        CheckEnv {
+            pool,
+            ..self.clone()
         }
     }
 }
@@ -222,6 +234,17 @@ pub fn check(plan: &Plan, env: &CheckEnv) -> Problems {
             && !env.harnesses.iter().any(|x| x == h)
         {
             err(&t.key, format!("harness `{h}` is not installed"));
+        } else if let Some(h) = &t.harness
+            && !env.pool.is_empty()
+            && !env.pool.iter().any(|x| x == h)
+        {
+            err(
+                &t.key,
+                format!(
+                    "harness `{h}` is not in the swarm's workers' pool ({})",
+                    env.pool.join(", ")
+                ),
+            );
         }
         if let Some(a) = &t.agent
             && !env.agents.iter().any(|x| x == a)
@@ -407,6 +430,7 @@ mod tests {
             writing_agents: vec!["doc-writer".into()],
             git_repo: true,
             default_isolation: TaskIsolation::Shared,
+            pool: vec![],
         }
     }
 

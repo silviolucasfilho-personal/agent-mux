@@ -130,7 +130,7 @@ fn seed(f: &Fixture, status: SwarmStatus, tasks: Vec<PlannedTask>) -> SwarmRun {
             gate: true,
             check_cmd: None,
             owner_run: Some("another-tui".into()),
-            worker_harness: None,
+            worker_pool: vec![],
         },
         now_ns(),
     )
@@ -301,7 +301,8 @@ fn y_approves_only_a_plan_without_errors_and_d_deletes_a_draft_task() {
         notice(&f.app),
         "plan approved: 1 task(s); workers start now"
     );
-    assert!(bstore::plan_blocks(&conn, &swarm.workspace).is_none());
+    let first = record::board(&conn, &swarm.id).unwrap()[0].task.id.clone();
+    assert!(bstore::plan_blocks(&conn, &first).is_none());
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -629,4 +630,79 @@ fn r_on_a_failed_agy_task_moves_it_to_claude_and_puts_it_back() {
         "{}",
         notice(&f.app)
     );
+}
+
+#[test]
+fn a_second_swarm_starts_beside_a_stuck_one_and_a_failed_start_stays_in_the_form() {
+    let mut f = fixture();
+    let stuck = seed(&f, SwarmStatus::Running, vec![task("a", &[])]);
+    open_screen(&mut f);
+    // `n` on the stuck swarm's row opens the form: no "close it first".
+    press(&mut f, KeyCode::Char('n'));
+    assert!(
+        matches!(view(&f.app).modal, Some(Modal::Launch { .. })),
+        "{}",
+        notice(&f.app)
+    );
+    for c in "Second goal".chars() {
+        press(&mut f, KeyCode::Char(c));
+    }
+    let out = render(&f.app, 140, 40);
+    assert!(out.contains("Workers may run on: [x] claude"), "{out}");
+    f.app.handle_key(
+        &KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        Instant::now(),
+    );
+    assert!(view(&f.app).modal.is_none(), "{}", notice(&f.app));
+    let conn = open_aux(&f.db).unwrap();
+    let live = record::live_swarms_in(&conn, &f.ws.to_string_lossy()).unwrap();
+    assert_eq!(live.len(), 2, "{}", notice(&f.app));
+    let second = live.iter().find(|s| s.id != stuck.id).unwrap();
+    assert_eq!(second.goal, "Second goal");
+    assert_eq!(record::worker_pool(&conn, second), ["claude"]);
+    assert!(
+        notice(&f.app).contains("is planning with claude"),
+        "{}",
+        notice(&f.app)
+    );
+    // The cursor is on the new swarm.
+    assert_eq!(
+        view(&f.app).swarm.as_ref().map(|s| s.id.clone()),
+        Some(second.id.clone())
+    );
+
+    // A start that fails keeps the form, with the reason drawn in it.
+    f.app.trace_db_path = None;
+    press(&mut f, KeyCode::Char('n'));
+    for c in "Third".chars() {
+        press(&mut f, KeyCode::Char(c));
+    }
+    f.app.handle_key(
+        &KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        Instant::now(),
+    );
+    let out = render(&f.app, 140, 40);
+    assert!(
+        matches!(
+            view(&f.app).modal,
+            Some(Modal::Launch { error: Some(_), .. })
+        ),
+        "{out}"
+    );
+    assert!(out.contains("✗ a swarm needs the trace store"), "{out}");
+    assert!(out.contains("Third"), "{out}");
+}
+
+#[test]
+fn the_commands_menu_submits_the_launch_form_too() {
+    let mut f = fixture();
+    open_screen(&mut f);
+    press(&mut f, KeyCode::Enter);
+    for c in "Via F1".chars() {
+        press(&mut f, KeyCode::Char(c));
+    }
+    f.app
+        .execute_command(agent_mux::keymap::ActionId::SubmitDialog, Instant::now());
+    assert!(view(&f.app).modal.is_none(), "{}", notice(&f.app));
+    assert!(notice(&f.app).contains("is planning"), "{}", notice(&f.app));
 }

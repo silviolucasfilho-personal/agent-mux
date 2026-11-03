@@ -1121,10 +1121,13 @@ fn swarm_plan_result(service: &TraceService, arguments: Value) -> Value {
         .ok()
         .flatten()
         .or_else(|| {
-            record::live_swarm(&conn, &ws.to_string_lossy())
+            // the coordinator's own swarm, from the environment it gave us
+            std::env::var("AGENT_MUX_SWARM_ID")
                 .ok()
-                .flatten()
-        }) {
+                .and_then(|id| record::get_swarm(&conn, &id).ok().flatten())
+        })
+        .or_else(|| record::resolve_swarm(&conn, &ws.to_string_lossy(), None).ok())
+    {
         Some(s) => s,
         None => {
             return tool_error(&ServiceError::InvalidArgument(

@@ -668,9 +668,9 @@ A swarm is run by agent-mux: a headless planner splits the goal into tasks,
 you approve the plan, and agent-mux starts one worker per task.
 
 commands:
-  start <goal...> [--planner claude|codex|agy|opencode] [--worker-harness H] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--check CMD] [--workspace DIR]
+  start <goal...> [--planner claude|codex|agy|opencode] [--worker-harness H[,H...]] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--check CMD] [--workspace DIR]
                                 --planner: the coordinator's harness (default claude when installed);
-                                --worker-harness: the harness of tasks that name none (default: the coordinator's)
+                                --worker-harness: the workers' pool, e.g. agy,codex; the first runs tasks that name none (default: the coordinator's)
                                 start a swarm in the running TUI: plan, then wait for approval (unless --no-plan-gate)
   status [--workspace DIR] [--db PATH] [--json]
                                 the swarm, its board (each task's state) and what waits for you
@@ -694,7 +694,7 @@ commands:
                                 like close; without a running TUI only the records are updated
 
 <task> is a plan key (`bus-fix`), a task id or a unique prefix of either.
-The verbs take --workspace DIR (default: the current folder) and --json.";
+The verbs take --workspace DIR (default: the current folder), --swarm ID when the folder runs several swarms, and --json.";
 
 /// What the CLI knows of live sessions without a TUI: the published
 /// snapshots of running agent-mux TUIs.
@@ -937,6 +937,7 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             verb,
             task: task.clone(),
             notes,
+            swarm: args.value("swarm").map(str::to_string),
         };
         let done = match control::send_request(None, &req, Duration::from_secs(10)) {
             Ok(resp) if resp.ok => resp.detail.unwrap_or_default(),
@@ -946,8 +947,8 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             }
             Err(_) => {
                 let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
-                let swarm = record::live_swarm(&conn, &workspace)?
-                    .ok_or_else(|| anyhow::anyhow!("no swarm runs in {workspace}"))?;
+                let swarm = record::resolve_swarm(&conn, &workspace, args.value("swarm"))
+                    .map_err(|e| anyhow::anyhow!(e))?;
                 let env = cli_check_env(&swarm.workspace, swarm.isolation);
                 let d = record::apply(
                     &conn,
@@ -985,8 +986,15 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             let swarm = caller
                 .as_deref()
                 .and_then(|c| record::swarm_of_coordinator(&conn, c).ok().flatten())
-                .or_else(|| record::live_swarm(&conn, &workspace).ok().flatten())
-                .ok_or_else(|| anyhow::anyhow!("no swarm to plan in {workspace}"))?;
+                .or_else(|| {
+                    // the coordinator's own swarm, from its environment
+                    std::env::var("AGENT_MUX_SWARM_ID")
+                        .ok()
+                        .and_then(|id| record::get_swarm(&conn, &id).ok().flatten())
+                })
+                .map(Ok)
+                .unwrap_or_else(|| record::resolve_swarm(&conn, &workspace, args.value("swarm")))
+                .map_err(|e| anyhow::anyhow!(e))?;
             let env = cli_check_env(&swarm.workspace, swarm.isolation);
             let done = record::submit_plan(&conn, Some(&db_path), &swarm, &plan, &env, now)
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -1003,8 +1011,26 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
         }
         "status" | "plan" => {
             let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
-            if let Some(swarm) = record::live_swarm(&conn, &workspace)? {
+            let live = record::live_swarms_in(&conn, &workspace)?;
+            let named = args.value("swarm");
+            if named.is_some() || live.len() == 1 {
+                let swarm = record::resolve_swarm(&conn, &workspace, named)
+                    .map_err(|e| anyhow::anyhow!(e))?;
                 return print_board(&conn, &swarm, cmd == "plan", args.has("json"));
+            }
+            if live.len() > 1 {
+                if args.has("json") {
+                    println!("{}", json!({ "workspace": workspace, "swarms": live }));
+                } else {
+                    for s in &live {
+                        println!("{}  {}  {}", s.id, s.status.as_str(), s.goal);
+                    }
+                    println!(
+                        "{} swarms run here: `agent-mux swarm status --swarm <id>`",
+                        live.len()
+                    );
+                }
+                return Ok(());
             }
             if cmd == "plan" {
                 anyhow::bail!("no swarm runs in {workspace}");
@@ -1123,11 +1149,19 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                 ),
                 Err(_) => {
                     let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
-                    let (cancelled, released) = match record::live_swarm(&conn, &norm_ws)? {
-                        Some(sw) => record::end_swarm(&conn, Some(&db_path), &sw, now),
-                        None => bstore::stop_swarm(&conn, Some(&db_path), &norm_ws, now),
-                    }
-                    .map_err(|e| anyhow::anyhow!(e))?;
+                    let live = record::live_swarms_in(&conn, &norm_ws)?;
+                    let (cancelled, released) = if live.is_empty() {
+                        bstore::stop_swarm(&conn, Some(&db_path), &norm_ws, now)
+                            .map_err(|e| anyhow::anyhow!(e))?
+                    } else {
+                        let mut total = (0, 0);
+                        for sw in &live {
+                            let (c, r) = record::end_swarm(&conn, Some(&db_path), sw, now)
+                                .map_err(|e| anyhow::anyhow!(e))?;
+                            total = (total.0 + c, total.1 + r);
+                        }
+                        total
+                    };
                     format!(
                         "cancelled {cancelled} task(s), released {released} lease(s); no agent-mux TUI is running, so no session was stopped"
                     )

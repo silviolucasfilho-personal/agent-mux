@@ -971,22 +971,62 @@ fn choice(label: &str, value: String, active: bool) -> Line<'static> {
     ])
 }
 
+/// The workers' pool: a tick box per harness, the cursor's in brackets.
+fn pool_line(v: &SwarmBoard, pool: &[bool], cursor: usize, active: bool) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{}Workers may run on: ", if active { "▸ " } else { "  " }),
+        if active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        },
+    )];
+    for (i, h) in v.harnesses.iter().enumerate() {
+        let ticked = pool.get(i).copied().unwrap_or(false);
+        let text = format!("[{}] {}", if ticked { "x" } else { " " }, h.as_str());
+        let mut style = Style::default().fg(if ticked {
+            Color::White
+        } else {
+            Color::DarkGray
+        });
+        if active && i == cursor {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        spans.push(Span::styled(text, style));
+        spans.push(Span::raw("  "));
+    }
+    Line::from(spans)
+}
+
 fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
     let (title, lines, footer): (&str, Vec<Line<'static>>, &str) = match m {
         Modal::Launch {
             goal,
             planner,
-            worker_harness,
+            pool,
+            pool_cursor,
             workers,
             isolation,
             gate,
             check,
             field,
+            error,
+            ..
         } => {
-            let mut l = vec![field_line(
+            let mut l = Vec::new();
+            if let Some(e) = error {
+                l.push(Line::styled(
+                    e.clone(),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
+                l.push(Line::raw(""));
+            }
+            l.push(field_line(
                 "Goal: what done looks like, and what's out of scope",
                 *field == LaunchField::Goal,
-            )];
+            ));
             l.extend(text_lines(goal, *field == LaunchField::Goal, 6));
             l.push(Line::raw(""));
             l.push(choice(
@@ -997,12 +1037,10 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
                     .unwrap_or_else(|| "claude".into()),
                 *field == LaunchField::Planner,
             ));
-            l.push(choice(
-                "Workers' harness (tasks that name none)",
-                v.harnesses
-                    .get(*worker_harness)
-                    .map(|h| h.as_str().to_string())
-                    .unwrap_or_else(|| "claude".into()),
+            l.push(pool_line(
+                v,
+                pool,
+                *pool_cursor,
                 *field == LaunchField::WorkerHarness,
             ));
             l.push(choice(
@@ -1028,7 +1066,7 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
             (
                 " Start a swarm ",
                 l,
-                " Tab field · ←→ choose · Alt+Enter newline · Ctrl+S start · Esc cancel ",
+                " Tab field · ←→ choose · Space tick · Alt+Enter newline · Ctrl+S or Ctrl+Enter start · Esc cancel ",
             )
         }
         Modal::Task {
