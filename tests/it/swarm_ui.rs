@@ -605,9 +605,13 @@ fn r_on_a_failed_agy_task_moves_it_to_claude_and_puts_it_back() {
     ] {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
     }
-    // agy is not installed here: the form starts on the workers' harness;
-    // → is claude. The agent goes too.
-    press(&mut f, KeyCode::Right);
+    // agy cannot run doc-writer with its tools: the form starts on claude
+    // and says why. The agent goes too.
+    assert!(
+        out.contains("agy runs the `doc-writer` agent read-only")
+            && out.contains("moved to claude"),
+        "{out}"
+    );
     press(&mut f, KeyCode::Tab);
     for _ in 0.."doc-writer".len() {
         press(&mut f, KeyCode::Backspace);
@@ -705,4 +709,72 @@ fn the_commands_menu_submits_the_launch_form_too() {
         .execute_command(agent_mux::keymap::ActionId::SubmitDialog, Instant::now());
     assert!(view(&f.app).modal.is_none(), "{}", notice(&f.app));
     assert!(notice(&f.app).contains("is planning"), "{}", notice(&f.app));
+}
+
+#[test]
+fn saving_the_retry_form_at_once_moves_an_agy_writing_task_to_claude() {
+    // What the operator did: `r` on a stuck agy doc-writer task, then Ctrl+S.
+    let mut f = fixture();
+    let mut t = task("spec", &[]);
+    t.harness = Some("agy".into());
+    t.agent = Some("doc-writer".into());
+    let swarm = seed(&f, SwarmStatus::Running, vec![t]);
+    let conn = open_aux(&f.db).unwrap();
+    let id = record::board(&conn, &swarm.id).unwrap()[0].task.id.clone();
+    bstore::update_task(
+        &conn,
+        None,
+        &id,
+        "worker-1",
+        TaskStatus::Failed,
+        None,
+        Some("agy lacks write_file".into()),
+        None,
+        None,
+        now_ns(),
+    )
+    .unwrap();
+    open_screen(&mut f);
+    press(&mut f, KeyCode::Down);
+    press(&mut f, KeyCode::Char('r'));
+    f.app.handle_key(
+        &KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        Instant::now(),
+    );
+    let t = bstore::get_task(&conn, &id).unwrap().unwrap();
+    assert_eq!(t.status, TaskStatus::Open, "{}", notice(&f.app));
+    assert_eq!(t.target_harness.as_deref(), Some("claude"));
+    assert_eq!(
+        t.target_agent.as_deref(),
+        Some("doc-writer"),
+        "kept on claude"
+    );
+}
+
+#[test]
+fn an_agy_worker_with_a_writing_agent_is_refused_at_spawn() {
+    let mut f = fixture();
+    let resp = f.app.handle_bus_control(
+        agent_mux::bus::control::ControlRequest::SpawnWorker {
+            parent_launch: None,
+            workspace: f.ws.to_string_lossy().into_owned(),
+            task_id: "task-x".into(),
+            title: "Write the spec".into(),
+            instructions: "Write it".into(),
+            harness: Some("agy".into()),
+            agent: Some("doc-writer".into()),
+            isolation: TaskIsolation::Shared,
+            opening_prompt: None,
+        },
+        Instant::now(),
+    );
+    assert!(!resp.ok);
+    assert!(
+        resp.error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("read-only"),
+        "{resp:?}"
+    );
+    assert!(f.app.sessions.is_empty(), "no worker started");
 }

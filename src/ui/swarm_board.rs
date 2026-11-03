@@ -1083,9 +1083,20 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
             files,
             depends_on,
             field,
+            note,
             ..
         } => {
             let mut l = Vec::new();
+            if let Some(n) = note {
+                let style = if n.starts_with('✗') {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                };
+                l.push(Line::styled(n.clone(), style));
+            }
             if *retry {
                 l.push(Line::styled(
                     "Saving puts the task back on the board; change its harness or agent if it got stuck.",

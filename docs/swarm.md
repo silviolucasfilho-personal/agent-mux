@@ -86,7 +86,7 @@ A task that depends on a worktree task starts only once that task's branch is me
 
 The coordinator reads the goal and the workspace and submits tasks, each with a key, instructions, a done-when line, files and dependencies, with the `agent_mux_swarm_plan` tool. agent-mux checks the plan, and answers the coordinator with any errors so it fixes them itself; only a plan without errors goes on the board:
 
-- **Errors block approval:** a key used twice, a dependency that isn't in the plan or forms a cycle, a harness that isn't installed, an unknown agent, a worktree outside a git repository, or an **agy task with an agent that edits or runs commands**. agy runs a custom agent with read-only tools, so such a task can't do its work; drop the agent or pick another harness.
+- **Errors block approval:** a key used twice, a dependency that isn't in the plan or forms a cycle, a harness that isn't installed, an unknown agent, a worktree outside a git repository, or an **agy task with an agent that edits or runs commands**. agy runs a custom agent with read-only tools, so such a task can't do its work; drop the agent or pick another harness. The same pair is refused everywhere else too: the task form won't save it, `r` on such a task opens its retry form already moved to Claude (with a note saying why; clear the agent to keep agy), and agent-mux won't start such a worker, so the task fails with the reason instead of stalling.
 - **Warnings don't:** two tasks that may run at the same time and touch the same files in a shared workspace, or more than 12 tasks.
 
 In **review** you can change the plan before approving it:
