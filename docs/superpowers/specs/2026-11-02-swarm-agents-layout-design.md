@@ -1,5 +1,7 @@
 # Swarm: the Agents layout and a coordinator agent — design
 
+Superseded in part by `2026-11-05-swarm-coordinator-first-design.md` (proposed): the coordinator launches workers through MCP and relays the operator's confirmation from its chat, the screen shows one swarm, and the swarm is one trace. See its header for which sections it replaces.
+
 Status: approved for implementation, 2026-11-02 (decisions in §9). The screen and Needs you are in #107. The coordinator agent is in PR B, which departs from §3 and §7 in three ways:
 - **Side table:** v22 is a side table, `swarm_coordinators`, rather than columns on `swarms`, so the migration stays replay-safe.
 - **No rename:** `swarms.planner_harness` keeps its name and holds the coordinator's harness.

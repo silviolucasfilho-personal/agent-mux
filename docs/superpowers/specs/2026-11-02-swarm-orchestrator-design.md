@@ -1,5 +1,7 @@
 # Swarm: agent-mux as the orchestrator — design
 
+Superseded in part by `2026-11-05-swarm-coordinator-first-design.md` (proposed): the coordinator launches workers through MCP and relays the operator's confirmation from its chat, the screen shows one swarm, and the swarm is one trace. See its header for which sections it replaces.
+
 Status: implemented, 2026-11-02 (decisions in §12): wake fix #102, model and engine #103, screen #104, proposals, the final check and the coordinator-era removal in PR 4. Replaces the coordinator-session model of §8 (the screen) is superseded by `2026-11-02-swarm-agents-layout-design.md`, which also amends §4 and §5.6.
 `2026-10-29-agent-swarm-screen-design.md` and the lane layout of
 `2026-10-30-swarm-mission-control-ux-design.md`. The bus (messages, tasks,
