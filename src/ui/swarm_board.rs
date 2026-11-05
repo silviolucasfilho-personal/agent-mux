@@ -197,6 +197,7 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                     workers: &v.workers,
                     asking: &d.asking,
                     now_ns: v.now_ns,
+                    dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
                 };
                 let st = engine::shown(t, &input);
                 let needs = v.row_needs(*row);

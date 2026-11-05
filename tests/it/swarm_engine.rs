@@ -140,6 +140,9 @@ fn fixture(plan: Option<&str>, bad: bool) -> Fixture {
     app.library_root = Some(home.join(".agent-mux"));
     app.runtime_dir = Some(home.join("runtime"));
     app.loops_file = Some(temp.path().join("loops.json"));
+    // the fake coordinator never launches a task itself: the dispatcher's
+    // grace is short so the test sees it step in
+    app.swarm_dispatch_grace_ns = 2_000_000_000;
     app.reload_skills();
     Fixture {
         _temp: temp,
@@ -332,7 +335,7 @@ async fn a_coordinator_plans_through_the_tool_and_the_swarm_runs_its_tasks_in_or
     assert_eq!(q.to_launch.as_deref(), Some(coordinator.as_str()));
     assert_eq!(q.body, "Which table name?");
     assert!(
-        pump_until(&mut f, Duration::from_secs(60), |f| {
+        pump_until(&mut f, Duration::from_secs(120), |f| {
             swarm(f).is_some_and(|s| s.status == SwarmStatus::Finished)
         })
         .await,
@@ -353,6 +356,63 @@ async fn a_coordinator_plans_through_the_tool_and_the_swarm_runs_its_tasks_in_or
         args.contains(&format!("- `schema` Add the table: did {}", schema.task.id)),
         "a dependent task reads what its dependency did: {args}"
     );
+    // `schema` was asked for by the operator's approval; `queries` became
+    // ready later, was offered to the coordinator, which never launched it,
+    // so the dispatcher started it after the grace (coordinator-first §5.4).
+    assert_eq!(
+        schema.ext.launched_by,
+        Some(record::LaunchedBy::Operator),
+        "{:?}",
+        schema.ext
+    );
+    assert_eq!(
+        queries.ext.launched_by,
+        Some(record::LaunchedBy::Dispatcher)
+    );
+    assert!(queries.ext.offered_ns.is_some());
+    let kinds: Vec<String> = record::recent_events(&conn, &swarm(&f).unwrap().id, 100)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    for k in [
+        "started",
+        "coordinator.started",
+        "plan.proposed",
+        "decision.launch",
+        "task.requested",
+        "task.spawned",
+        "task.offered",
+        "swarm.finished",
+    ] {
+        assert!(kinds.contains(&k.to_string()), "{k} missing from {kinds:?}");
+    }
+    // Every launch of the swarm knows its swarm (§7.1): the coordinator and
+    // both workers, the workers with their task and the coordinator as parent.
+    let sid = swarm(&f).unwrap().id;
+    let mut rows = conn
+        .prepare(
+            "SELECT json_extract(metadata, '$.swarm_role'), json_extract(metadata, '$.swarm_task_key'),
+                    json_extract(metadata, '$.parent_launch')
+             FROM launches WHERE json_extract(metadata, '$.swarm_id') = ?1 ORDER BY started_ns",
+        )
+        .unwrap();
+    let launches: Vec<(String, Option<String>, Option<String>)> = rows
+        .query_map([&sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(launches.len(), 3, "{launches:?}");
+    assert_eq!(launches[0], ("coordinator".into(), None, None));
+    assert_eq!(
+        launches[1],
+        (
+            "worker".into(),
+            Some("schema".into()),
+            Some(coordinator.clone())
+        )
+    );
+    assert_eq!(launches[2].1.as_deref(), Some("queries"));
     // Finished workers stay open for follow-ups until the swarm closes.
     let live_workers = f
         .app

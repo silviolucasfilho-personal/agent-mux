@@ -8,10 +8,13 @@
 use crate::app::{App, Notice};
 use crate::bus::TaskIsolation;
 use crate::bus::control::{ControlRequest, ControlResponse};
+use crate::bus::swarm::SwarmLaunch;
 use crate::bus::swarm::engine::{self, Action, Worker, WorkerState};
 use crate::bus::swarm::plan::CheckEnv;
 use crate::bus::swarm::prompt::{self, AgentInfo, PlannerContext, Replan, ReplanTask};
-use crate::bus::swarm::record::{self, NewSwarm, SwarmRun, SwarmStatus, SwarmVerb};
+use crate::bus::swarm::record::{
+    self, Decider, LaunchedBy, NewSwarm, SwarmRun, SwarmStatus, SwarmVerb,
+};
 use crate::harness::{Harness, LaunchOptions, compose};
 use crate::status::Status;
 use std::collections::{HashMap, HashSet};
@@ -136,6 +139,7 @@ impl App {
                 check_cmd: req.check.clone(),
                 owner_run: Some(self.app_run_id.clone()),
                 worker_pool,
+                headless: false,
             },
             crate::tracing::store::now_ns(),
         )?;
@@ -301,6 +305,7 @@ impl App {
                 Some(SWARM_PLAN_SKILL),
                 None,
                 None,
+                Some(SwarmLaunch::coordinator(&swarm.id, None)),
                 &[],
             )
             .map_err(|e| format!("spawn: {e}"))?;
@@ -325,6 +330,19 @@ impl App {
         {
             let now = crate::tracing::store::now_ns();
             let _ = record::set_coordinator_launch(&conn, Some(&db), &swarm.id, &launch, now);
+            let _ = record::event(
+                &conn,
+                &swarm.id,
+                None,
+                if restart.is_some() {
+                    "coordinator.restarted"
+                } else {
+                    "coordinator.started"
+                },
+                Some(&launch),
+                Some(serde_json::json!({ "harness": harness.as_str() })),
+                now,
+            );
         }
         Ok(launch)
     }
@@ -371,8 +389,8 @@ impl App {
         true
     }
 
-    /// Carries out an operator verb on `workspace`'s only live swarm (see
-    /// [`App::swarm_action_on`] to name one).
+    /// Carries out an operator verb from the screen on `workspace`'s only
+    /// live swarm (see [`App::swarm_action_on`] to name one).
     pub fn swarm_action(
         &mut self,
         workspace: &Path,
@@ -380,11 +398,13 @@ impl App {
         task: Option<&str>,
         notes: Option<&str>,
     ) -> Result<String, String> {
-        self.swarm_action_on(None, workspace, verb, task, notes)
+        self.swarm_action_on(None, workspace, verb, task, notes, &Decider::TUI)
     }
 
     /// Carries out an operator verb on the swarm `swarm_id` names, else the
-    /// one the task id is on, else `workspace`'s only live swarm.
+    /// one the task id is on, else `workspace`'s only live swarm. `who`
+    /// says who relays it (the screen, the CLI, or the coordinator from its
+    /// chat with the operator's words), for the decision's record.
     pub fn swarm_action_on(
         &mut self,
         swarm_id: Option<&str>,
@@ -392,6 +412,7 @@ impl App {
         verb: SwarmVerb,
         task: Option<&str>,
         notes: Option<&str>,
+        who: &Decider<'_>,
     ) -> Result<String, String> {
         let db = self.trace_db_path.clone().ok_or("no trace store")?;
         let conn = crate::tracing::store::open_aux(&db)?;
@@ -408,8 +429,15 @@ impl App {
             return Err(format!("{} has ended", swarm.id));
         }
         let now = crate::tracing::store::now_ns();
+        if who.by == record::DecidedBy::Chat && verb.needs_operator_words() && who.said.is_none() {
+            return Err(format!(
+                "quote what the operator said in operator_said: `{}` happens only on their word",
+                verb.as_str()
+            ));
+        }
         match verb {
             SwarmVerb::Close => {
+                let _ = record::decide(&conn, &swarm.id, None, verb, who, now);
                 let (stopped, records) = self.stop_swarm_run(&swarm);
                 let (cancelled, released) = records?;
                 Ok(format!(
@@ -468,21 +496,51 @@ impl App {
                 self.start_swarm_coordinator(&swarm, Some(replan), Some(summary))?;
                 Ok("a new coordinator started".into())
             }
-            SwarmVerb::Approve => {
+            SwarmVerb::Approve | SwarmVerb::Launch => {
                 let env = self.swarm_check_env(Path::new(&swarm.workspace), swarm.isolation);
-                let done = record::apply(&conn, Some(&db), &swarm, verb, task, &env, now)?;
-                self.tell_coordinator(
-                    &swarm,
-                    "plan-approved",
-                    "The operator approved the plan. agent-mux starts the workers now.",
-                    "[agent-mux swarm] The operator approved your plan: agent-mux starts the workers. Wait for questions and events; do not start workers yourself.",
-                );
+                let was_review = swarm.status == SwarmStatus::Review;
+                let done = record::apply(&conn, Some(&db), &swarm, verb, task, &env, who, now)?;
+                // The coordinator hears of an approval it did not relay itself.
+                if was_review && who.by != record::DecidedBy::Chat {
+                    self.tell_coordinator(
+                        &swarm,
+                        "plan-approved",
+                        "The operator approved the plan; the ready tasks' workers start now.",
+                        "[agent-mux swarm] The operator approved your plan and its ready tasks start now. Follow them with agent_mux_swarm_wait; answer questions, and start the next tasks with agent_mux_swarm_launch as their dependencies finish.",
+                    );
+                }
                 self.last_swarm_engine_pass = None;
                 Ok(done)
             }
+            SwarmVerb::Cancel => {
+                let env = self.swarm_check_env(Path::new(&swarm.workspace), swarm.isolation);
+                let worker = record::board(&conn, &swarm.id)
+                    .ok()
+                    .and_then(|b| task.and_then(|t| record::find_task(&b, t).ok().cloned()))
+                    .and_then(|t| t.task.assigned_to);
+                let done = record::apply(&conn, Some(&db), &swarm, verb, task, &env, who, now)?;
+                // a cancelled task's worker is stopped; a finished one stays
+                let mut stopped = 0;
+                if let Some(launch) = worker {
+                    for s in self.sessions.iter_mut() {
+                        if s.trace.as_ref().is_some_and(|t| t.launch_id == launch)
+                            && !matches!(s.status(Instant::now()), Status::Exited(_))
+                        {
+                            s.kill();
+                            stopped += 1;
+                        }
+                    }
+                }
+                self.last_swarm_engine_pass = None;
+                Ok(if stopped > 0 {
+                    format!("{done}; its worker was stopped")
+                } else {
+                    done
+                })
+            }
             _ => {
                 let env = self.swarm_check_env(Path::new(&swarm.workspace), swarm.isolation);
-                let done = record::apply(&conn, Some(&db), &swarm, verb, task, &env, now)?;
+                let done = record::apply(&conn, Some(&db), &swarm, verb, task, &env, who, now)?;
                 self.last_swarm_engine_pass = None; // act on it at the next tick
                 Ok(done)
             }
@@ -533,12 +591,20 @@ impl App {
                 task,
                 notes,
                 swarm,
+                by,
+                said,
+                from,
             } => match self.swarm_action_on(
                 swarm.as_deref(),
                 Path::new(&workspace),
                 verb,
                 task.as_deref(),
                 notes.as_deref(),
+                &Decider {
+                    by: by.unwrap_or(record::DecidedBy::Cli),
+                    said: said.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                    launch: from.as_deref(),
+                },
             ) {
                 Ok(d) => ok(d, None),
                 Err(e) => ControlResponse::err(e),
@@ -648,6 +714,7 @@ impl App {
             workers: &workers,
             asking: &asking,
             now_ns: crate::tracing::store::now_ns(),
+            dispatch_grace_ns: self.swarm_dispatch_grace_ns,
         });
         let data = crate::app::swarm_board::SwarmData {
             run: swarm.clone(),
@@ -663,13 +730,38 @@ impl App {
         for action in actions {
             let now_ns = crate::tracing::store::now_ns();
             match action {
-                Action::Spawn { task_id } => {
+                Action::Offer { task_id } => {
                     let Some(t) = board.iter().find(|t| t.task.id == task_id) else {
                         continue;
                     };
+                    let _ = record::offer_task(conn, &t.task.id, now_ns);
+                    let _ = record::event(
+                        conn,
+                        &swarm.id,
+                        Some(&t.task.id),
+                        "task.offered",
+                        Some("engine"),
+                        Some(serde_json::json!({
+                            "key": t.ext.plan_key,
+                            "grace_s": self.swarm_dispatch_grace_ns / 1_000_000_000,
+                        })),
+                        now_ns,
+                    );
+                }
+                Action::Spawn { task_id, by } => {
+                    let Some(t) = board.iter().find(|t| t.task.id == task_id) else {
+                        continue;
+                    };
+                    let coordinator = record::coordinator(conn, &swarm.id)
+                        .ok()
+                        .flatten()
+                        .and_then(|c| c.launch);
+                    if by == LaunchedBy::Dispatcher {
+                        let _ = record::request_launch(conn, None, &t.task.id, by, now_ns);
+                    }
                     let resp = self.handle_bus_control(
                         ControlRequest::SpawnWorker {
-                            parent_launch: None,
+                            parent_launch: coordinator.clone(),
                             workspace: swarm.workspace.clone(),
                             task_id: t.task.id.clone(),
                             title: t.task.title.clone(),
@@ -678,10 +770,35 @@ impl App {
                             agent: t.task.target_agent.clone(),
                             isolation: t.task.isolation,
                             opening_prompt: Some(prompt::worker_prompt(swarm, t, &board)),
+                            swarm: Some(SwarmLaunch::worker(
+                                &swarm.id,
+                                &t.task.id,
+                                &t.ext.plan_key,
+                                coordinator,
+                            )),
                         },
                         now,
                     );
                     let _ = record::mark_spawned(conn, &t.task.id);
+                    let _ = record::event(
+                        conn,
+                        &swarm.id,
+                        Some(&t.task.id),
+                        if resp.ok {
+                            "task.spawned"
+                        } else {
+                            "task.spawn_failed"
+                        },
+                        Some("engine"),
+                        Some(serde_json::json!({
+                            "key": t.ext.plan_key,
+                            "by": by.as_str(),
+                            "launch": resp.launch_id,
+                            "harness": resp.harness,
+                            "error": resp.error,
+                        })),
+                        now_ns,
+                    );
                     if !resp.ok {
                         let why = resp.error.unwrap_or_else(|| "unknown error".into());
                         let _ = crate::bus::store::update_task(
@@ -704,12 +821,21 @@ impl App {
                     };
                     let _ = self.handle_bus_control(
                         ControlRequest::WakeSession {
-                            launch_id,
+                            launch_id: launch_id.clone(),
                             prompt: prompt::nudge_prompt(t, &swarm.workspace),
                         },
                         now,
                     );
                     let _ = record::mark_nudged(conn, &task_id, now_ns);
+                    let _ = record::event(
+                        conn,
+                        &swarm.id,
+                        Some(&task_id),
+                        "task.nudged",
+                        Some("engine"),
+                        Some(serde_json::json!({ "key": t.ext.plan_key, "launch": launch_id })),
+                        now_ns,
+                    );
                 }
                 Action::RunCheck => {
                     let Some(cmd) = swarm.check_cmd.clone() else {
@@ -723,6 +849,15 @@ impl App {
                         &marker.to_json(),
                         now_ns,
                     );
+                    let _ = record::event(
+                        conn,
+                        &swarm.id,
+                        None,
+                        "check.started",
+                        Some("engine"),
+                        Some(serde_json::json!({ "command": cmd })),
+                        now_ns,
+                    );
                     let (db, id, ws) =
                         (db.to_path_buf(), swarm.id.clone(), swarm.workspace.clone());
                     std::thread::spawn(move || {
@@ -733,12 +868,22 @@ impl App {
                             now_ns,
                         );
                         if let Ok(conn) = crate::tracing::store::open_aux(&db) {
+                            let end_ns = crate::tracing::store::now_ns();
                             let _ = record::set_check_result(
                                 &conn,
                                 Some(&db),
                                 &id,
                                 &r.to_json(),
-                                crate::tracing::store::now_ns(),
+                                end_ns,
+                            );
+                            let _ = record::event(
+                                &conn,
+                                &id,
+                                None,
+                                "check.done",
+                                Some("engine"),
+                                Some(serde_json::json!({ "exit": r.exit, "tail": r.tail })),
+                                end_ns,
                             );
                         }
                     });
@@ -751,6 +896,15 @@ impl App {
                 }
                 Action::Advance(status) => {
                     let _ = record::set_status(conn, Some(db), &swarm.id, status, now_ns);
+                    let _ = record::event(
+                        conn,
+                        &swarm.id,
+                        None,
+                        &format!("swarm.{}", status.as_str()),
+                        Some("engine"),
+                        None,
+                        now_ns,
+                    );
                     if status == SwarmStatus::Finished {
                         let check = match (&swarm.check_cmd, &swarm.check_result) {
                             (Some(cmd), Some(raw)) => {
@@ -810,6 +964,20 @@ impl App {
         let mut newest = c.events_seen_ns;
         for t in board {
             let key = &t.ext.plan_key;
+            // a ready task offered since: the coordinator launches it, or the
+            // dispatcher does once the grace runs out
+            if t.task.status == crate::bus::TaskStatus::Open
+                && !t.ext.proposed
+                && t.ext.launched_by.is_none()
+                && let Some(offered) = t.ext.offered_ns
+                && offered > c.events_seen_ns
+            {
+                events.push(format!(
+                    "{key} ready: start it with agent_mux_swarm_launch(tasks = [\"{key}\"]), or agent-mux starts it in {}s",
+                    self.swarm_dispatch_grace_ns / 1_000_000_000
+                ));
+                newest = newest.max(offered);
+            }
             if let Some(ended) = t.task.ended_ns
                 && ended > c.events_seen_ns
             {
@@ -858,7 +1026,7 @@ impl App {
             ControlRequest::WakeSession {
                 launch_id: launch,
                 prompt: format!(
-                    "[agent-mux swarm] {} event(s) in your swarm: read them with agent_mux_recv_messages. Advise the operator or propose tasks if something should change; do not start workers.",
+                    "[agent-mux swarm] {} event(s) in your swarm: read them with agent_mux_recv_messages (or agent_mux_swarm_board). Tell the operator what happened in a few lines, start ready tasks with agent_mux_swarm_launch, answer questions, and propose follow-ups if something should change.",
                     events.len()
                 ),
             },

@@ -28,7 +28,7 @@ pub struct ToolSpec {
     pub read_only: bool,
 }
 
-fn schema_of<T: schemars::JsonSchema>() -> Value {
+pub(crate) fn schema_of<T: schemars::JsonSchema>() -> Value {
     serde_json::to_value(schemars::schema_for!(T)).unwrap_or_else(|_| json!({"type": "object"}))
 }
 
@@ -134,7 +134,7 @@ pub fn tool_catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "agent_mux_swarm_plan",
-            description: "Submit (or resubmit) the plan of the agent-mux swarm you coordinate: a summary and the tasks (key, title, instructions, acceptance, files, depends_on, optional harness/agent/isolation). agent-mux checks it; with errors nothing changes and the errors are answered so you can fix them and call again; without errors the tasks go on the board for the operator to approve. You never start workers yourself: agent-mux does, once the plan is approved.",
+            description: "Submit (or resubmit) the plan of the agent-mux swarm you coordinate: a summary and the tasks (key, title, instructions, acceptance, files, depends_on, optional harness/agent/isolation). agent-mux checks it; with errors nothing changes and the errors are answered so you can fix them and call again; without errors the tasks go on the board and the answer carries the plan as a table: show it to the operator and ask whether to start. When they say yes, call agent_mux_swarm_launch with their words.",
             input_schema: schema_of::<SwarmPlanArgs>(),
             read_only: false,
         },
@@ -145,6 +145,9 @@ pub fn tool_catalog() -> Vec<ToolSpec> {
             read_only: false,
         },
     ]
+    .into_iter()
+    .chain(super::swarm_tools::catalog())
+    .collect()
 }
 
 /// Arguments of `agent_mux_get_workflow_run`.
@@ -461,7 +464,7 @@ pub struct BusDelegateArgs {
     pub workspace: Option<String>,
 }
 
-fn bus_workspace(service: &TraceService, explicit: Option<&str>) -> PathBuf {
+pub(crate) fn bus_workspace(service: &TraceService, explicit: Option<&str>) -> PathBuf {
     let raw = explicit
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -484,7 +487,7 @@ fn bus_workspace(service: &TraceService, explicit: Option<&str>) -> PathBuf {
     PathBuf::from(crate::bus::store::normalize_workspace(&raw))
 }
 
-fn bus_caller_id(explicit: Option<&str>) -> String {
+pub(crate) fn bus_caller_id(explicit: Option<&str>) -> String {
     if let Some(id) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
         return id.to_string();
     }
@@ -494,7 +497,7 @@ fn bus_caller_id(explicit: Option<&str>) -> String {
         .unwrap_or_else(|| "cli".to_string())
 }
 
-fn bus_ok_envelope(workspace: &Path, data: Value) -> Value {
+pub(crate) fn bus_ok_envelope(workspace: &Path, data: Value) -> Value {
     let now_rfc3339 = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
@@ -867,6 +870,16 @@ fn bus_task_split_result(service: &TraceService, arguments: Value) -> Value {
             }
         }
     }
+    if let Some(v) = super::swarm_tools::coordinator_adds_tasks(
+        &conn,
+        &config.db_path,
+        &ws,
+        &creator,
+        &specs,
+        now_ns,
+    ) {
+        return v;
+    }
     if let Some(v) = swarm_worker_proposal(&conn, &config.db_path, &ws, &creator, &specs, now_ns) {
         return v;
     }
@@ -1151,8 +1164,14 @@ fn swarm_plan_result(service: &TraceService, arguments: Value) -> Value {
     ) {
         Ok(done) => {
             let note = record::submitted_note(&swarm, &done);
-            let accepted = matches!(done, record::Submitted::Accepted { .. });
-            let mut v = bus_ok_envelope(&ws, json!({ "accepted": accepted, "note": note }));
+            let (accepted, table) = match &done {
+                record::Submitted::Accepted { table, .. } => (true, Some(table.clone())),
+                record::Submitted::Rejected(_) => (false, None),
+            };
+            let mut v = bus_ok_envelope(
+                &ws,
+                json!({ "accepted": accepted, "note": note, "table": table, "swarm": swarm.id }),
+            );
             if let Some(content) = v.get_mut("content")
                 && let Some(first) = content.as_array_mut().and_then(|a| a.first_mut())
             {
@@ -1197,6 +1216,16 @@ fn bus_delegate_result(service: &TraceService, arguments: Value) -> Value {
         target_agent: args.agent.clone(),
         isolation: args.isolation,
     };
+    if let Some(v) = super::swarm_tools::coordinator_adds_tasks(
+        &conn,
+        &config.db_path,
+        &ws,
+        &caller,
+        std::slice::from_ref(&spec),
+        now_ns,
+    ) {
+        return v;
+    }
     if let Some(v) = swarm_worker_proposal(
         &conn,
         &config.db_path,
@@ -1232,6 +1261,7 @@ fn bus_delegate_result(service: &TraceService, arguments: Value) -> Value {
         agent: args.agent,
         isolation: args.isolation,
         opening_prompt: None,
+        swarm: None,
     };
     let spawn = match crate::bus::control::send_request(
         None,
@@ -1297,7 +1327,7 @@ fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
 }
 
-fn tool_error(err: &ServiceError) -> Value {
+pub(crate) fn tool_error(err: &ServiceError) -> Value {
     json!({
         "content": [{ "type": "text", "text": err.to_string() }],
         "structuredContent": {
@@ -1392,6 +1422,11 @@ pub fn handle_message(service: &TraceService, line: &str) -> Option<Value> {
                 }
                 "agent_mux_swarm_plan" => {
                     return Some(rpc_result(id, swarm_plan_result(service, arguments)));
+                }
+                other if other.starts_with("agent_mux_swarm_") => {
+                    if let Some(v) = super::swarm_tools::call(service, other, arguments.clone()) {
+                        return Some(rpc_result(id, v));
+                    }
                 }
                 _ => {}
             }
@@ -1578,8 +1613,13 @@ mod tests {
     #[test]
     fn catalog_contains_trace_and_bus_tools() {
         let names = tool_names();
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 23);
         assert!(names.contains(&"agent_mux_swarm_plan"));
+        assert!(names.contains(&"agent_mux_swarm_start"));
+        assert!(names.contains(&"agent_mux_swarm_launch"));
+        assert!(names.contains(&"agent_mux_swarm_wait"));
+        assert!(names.contains(&"agent_mux_swarm_board"));
+        assert!(names.contains(&"agent_mux_swarm_action"));
         assert!(names.contains(&"agent_mux_get_loop_context"));
         assert!(names.contains(&"agent_mux_get_workflow_run"));
         assert!(names.contains(&"agent_mux_get_briefing"));
@@ -1598,11 +1638,136 @@ mod tests {
         );
         let list = tools_list_value();
         let tools = list["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 23);
         for t in tools {
             assert_eq!(t["annotations"]["destructiveHint"], false);
             assert_eq!(t["inputSchema"]["type"], "object");
         }
+    }
+
+    #[test]
+    fn a_coordinator_starts_plans_launches_and_waits_through_the_swarm_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("traces.db");
+        let _ = crate::tracing::store::open_rw(&db, crate::tracing::store::OpenOptions::default())
+            .unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let service =
+            TraceService::new(ServiceConfig::new(db, Scope::workspace(&ws).unwrap())).unwrap();
+        let call = |name: &str, args: Value| -> Value {
+            let req = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                             "params": {"name": name, "arguments": args}});
+            handle_message(&service, &req.to_string()).unwrap()["result"].clone()
+        };
+        let ws_s = ws.to_string_lossy().into_owned();
+        // A worker-less session becomes the coordinator of a new swarm.
+        let started = call(
+            "agent_mux_swarm_start",
+            json!({"goal": "ship it", "session_id": "coord-1", "workspace": ws_s, "workers": ["codex"]}),
+        );
+        assert_eq!(started["isError"], false, "{started}");
+        let data = &started["structuredContent"]["data"];
+        let swarm = data["swarm"].as_str().unwrap().to_string();
+        assert_eq!(data["status"], "planning");
+        assert_eq!(data["context"]["harnesses"], json!(["codex"]));
+        // Twice is refused.
+        let again = call(
+            "agent_mux_swarm_start",
+            json!({"session_id": "coord-1", "workspace": ws_s}),
+        );
+        assert_eq!(again["isError"], true);
+        // The plan goes on the board and comes back as a table.
+        let planned = call(
+            "agent_mux_swarm_plan",
+            json!({"session_id": "coord-1", "workspace": ws_s, "plan": {"summary": "s", "tasks": [
+                {"key": "a", "title": "Task A", "instructions": "do a"},
+                {"key": "b", "title": "Task B", "instructions": "do b", "depends_on": ["a"]}
+            ]}}),
+        );
+        assert_eq!(planned["isError"], false, "{planned}");
+        let table = planned["structuredContent"]["data"]["table"]
+            .as_str()
+            .unwrap();
+        assert!(table.contains("| `b` | Task B |"), "{table}");
+        assert!(
+            planned["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("agent_mux_swarm_launch"),
+            "{planned}"
+        );
+        // No quote, no approval.
+        let refused = call(
+            "agent_mux_swarm_launch",
+            json!({"session_id": "coord-1", "workspace": ws_s}),
+        );
+        assert_eq!(refused["isError"], true);
+        assert!(
+            refused["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("operator_said"),
+            "{refused}"
+        );
+        let launched = call(
+            "agent_mux_swarm_launch",
+            json!({"session_id": "coord-1", "workspace": ws_s, "operator_said": "go"}),
+        );
+        assert_eq!(launched["isError"], false, "{launched}");
+        let data = &launched["structuredContent"]["data"];
+        assert_eq!(data["approved"], true);
+        assert_eq!(data["requested"], json!(["a"]));
+        assert_eq!(data["board"]["swarm"]["status"], "running");
+        assert_eq!(data["board"]["approved"]["said"], "go");
+        assert_eq!(data["board"]["approved"]["launch"], "coord-1");
+        // The board shows a requested and b blocked; the wait answers the log.
+        let board = call(
+            "agent_mux_swarm_board",
+            json!({"session_id": "coord-1", "workspace": ws_s}),
+        );
+        let tasks = board["structuredContent"]["data"]["tasks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(tasks[0]["launched_by"], "coordinator");
+        assert_eq!(tasks[1]["state"], "blocked");
+        let waited = call(
+            "agent_mux_swarm_wait",
+            json!({"session_id": "coord-1", "workspace": ws_s, "after": 0, "wait_ms": 10}),
+        );
+        let data = &waited["structuredContent"]["data"];
+        assert_eq!(data["timed_out"], false);
+        let kinds: Vec<&str> = data["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "started",
+                "coordinator.started",
+                "plan.proposed",
+                "decision.launch",
+                "task.requested"
+            ]
+        );
+        let last = data["last_event_id"].as_i64().unwrap();
+        let quiet = call(
+            "agent_mux_swarm_wait",
+            json!({"session_id": "coord-1", "workspace": ws_s, "after": last, "wait_ms": 10}),
+        );
+        let data = &quiet["structuredContent"]["data"];
+        assert_eq!(data["timed_out"], true, "{quiet}");
+        assert!(
+            quiet["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("ask whether to keep waiting"),
+            "{quiet}"
+        );
+        let _ = swarm;
     }
 
     #[test]

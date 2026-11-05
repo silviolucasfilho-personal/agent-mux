@@ -241,6 +241,8 @@ mod tests {
             max_workers: 2,
             isolation: TaskIsolation::Shared,
             gate: true,
+            gate_mode: crate::bus::swarm::record::GateMode::Chat,
+            headless: false,
             check_cmd: None,
             check_result: None,
             owner_run: None,

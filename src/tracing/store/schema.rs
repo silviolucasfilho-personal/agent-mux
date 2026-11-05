@@ -1,11 +1,11 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 23;
+pub const SCHEMA_VERSION: i32 = 24;
 
 pub const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23,
+    V22, V23, V24,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -1186,4 +1186,85 @@ END;
 const V23: &str = r#"
 DROP INDEX IF EXISTS swarms_live;
 CREATE INDEX IF NOT EXISTS swarms_workspace_live ON swarms (workspace, ended_ns);
+"#;
+
+// v24: the coordinator-first swarm
+// (`docs/superpowers/specs/2026-11-05-swarm-coordinator-first-design.md`
+// §8). Side tables rather than `ADD COLUMN`, as v14 and v22, so a replay is
+// harmless. `swarm_settings` holds the gate mode (`chat`: the coordinator
+// relays the operator's yes from its chat; `off`: a plan without errors
+// runs at once) and whether the swarm runs headless; the old `swarms.gate`
+// flag is backfilled into it. `swarm_dispatch` is the engine's per-task
+// bookkeeping: when a ready task was offered to the coordinator and who
+// asked for its worker (`coordinator`, `dispatcher` after the grace period,
+// `operator`). `swarm_decisions` records every operator-level decision with
+// who relayed it (`chat`, `tui`, `cli`) and the operator's words when the
+// coordinator relayed them. `swarm_events` is the swarm's log: what Activity
+// derived before, with its actor, read by the screen, the CLI and the
+// Langfuse export.
+const V24: &str = r#"
+CREATE TABLE IF NOT EXISTS swarm_settings (
+  swarm_id    TEXT PRIMARY KEY REFERENCES swarms (id) ON DELETE CASCADE,
+  gate_mode   TEXT NOT NULL DEFAULT 'chat' CHECK (gate_mode IN ('chat','off')),
+  headless    INTEGER NOT NULL DEFAULT 0,
+  updated_ns  INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO swarm_settings (swarm_id, gate_mode, headless, updated_ns)
+  SELECT id, CASE WHEN gate = 0 THEN 'off' ELSE 'chat' END, 0, updated_ns FROM swarms;
+
+CREATE TABLE IF NOT EXISTS swarm_dispatch (
+  task_id       TEXT PRIMARY KEY REFERENCES agent_tasks (id) ON DELETE CASCADE,
+  offered_ns    INTEGER,
+  launched_by   TEXT CHECK (launched_by IN ('coordinator','dispatcher','operator')),
+  requested_ns  INTEGER,
+  updated_ns    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS swarm_decisions (
+  id          INTEGER PRIMARY KEY,
+  swarm_id    TEXT NOT NULL REFERENCES swarms (id) ON DELETE CASCADE,
+  task_id     TEXT,
+  verb        TEXT NOT NULL,
+  by          TEXT NOT NULL CHECK (by IN ('chat','tui','cli')),
+  said        TEXT,
+  launch      TEXT,
+  created_ns  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS swarm_decisions_swarm ON swarm_decisions (swarm_id, created_ns);
+
+CREATE TABLE IF NOT EXISTS swarm_events (
+  id          INTEGER PRIMARY KEY,
+  swarm_id    TEXT NOT NULL REFERENCES swarms (id) ON DELETE CASCADE,
+  task_id     TEXT,
+  kind        TEXT NOT NULL,
+  actor       TEXT,
+  detail      TEXT,
+  created_ns  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS swarm_events_swarm ON swarm_events (swarm_id, id);
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_dispatch_insert
+AFTER INSERT ON swarm_dispatch
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_dispatch_update
+AFTER UPDATE ON swarm_dispatch
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_decisions_insert
+AFTER INSERT ON swarm_decisions
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_decision', NEW.swarm_id, NULL, NEW.launch, 'insert');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_events_insert
+AFTER INSERT ON swarm_events
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_event', NEW.swarm_id, NULL, NEW.actor, 'insert');
+END;
 "#;

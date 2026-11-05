@@ -427,6 +427,7 @@ fn bus_writes_advance_the_change_feed() {
             check_cmd: None,
             owner_run: None,
             worker_pool: vec![],
+            headless: false,
         },
         4_000,
     )

@@ -1958,4 +1958,62 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         poke_wake(&dir.path().join("traces.db"));
     }
+
+    #[test]
+    fn v24_backfills_the_gate_mode_from_the_old_flag_and_replays_harmlessly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        {
+            let store = open_temp(dir.path());
+            store
+                .conn()
+                .execute_batch(
+                    "INSERT INTO swarms (id, workspace, goal, status, planner_harness, max_workers, isolation, gate, started_ns, updated_ns)
+                     VALUES ('swarm-a', '/ws', 'g', 'review', 'claude', 2, 'shared', 1, 1, 1),
+                            ('swarm-b', '/ws', 'g', 'running', 'claude', 2, 'shared', 0, 1, 1);
+                     DELETE FROM swarm_settings;",
+                )
+                .unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 23;").unwrap();
+        drop(conn);
+        let store = open_temp(dir.path());
+        let conn = store.conn();
+        let mode = |id: &str| -> String {
+            conn.query_row(
+                "SELECT gate_mode FROM swarm_settings WHERE swarm_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(mode("swarm-a"), "chat");
+        assert_eq!(mode("swarm-b"), "off");
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        for t in [
+            "swarm_settings",
+            "swarm_dispatch",
+            "swarm_decisions",
+            "swarm_events",
+        ] {
+            assert_eq!(
+                count(&format!(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '{t}'"
+                )),
+                1,
+                "{t}"
+            );
+        }
+        // run again from v23: the settings rows are kept, nothing duplicates
+        drop(store);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 23;").unwrap();
+        drop(conn);
+        let store = open_temp(dir.path());
+        let conn = store.conn();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM swarm_settings"), 2);
+        assert_eq!(count("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+    }
 }

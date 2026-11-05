@@ -555,6 +555,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
                         .or_else(|| task.target_agent.clone()),
                     isolation: task.isolation,
                     opening_prompt: None,
+                    swarm: None,
                 },
                 Duration::from_secs(10),
             )
@@ -664,22 +665,27 @@ fn propose_for_swarm_worker(
 
 pub const SWARM_USAGE: &str = "usage: agent-mux swarm <command> [options]
 
-A swarm is run by agent-mux: a headless planner splits the goal into tasks,
-you approve the plan, and agent-mux starts one worker per task.
+A swarm is a conversation with a coordinator: it plans with you in its chat,
+starts the workers once you say go, and agent-mux supervises them.
 
 commands:
   start <goal...> [--planner claude|codex|agy|opencode] [--worker-harness H[,H...]] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--check CMD] [--workspace DIR]
                                 --planner: the coordinator's harness (default claude when installed);
                                 --worker-harness: the workers' pool, e.g. agy,codex; the first runs tasks that name none (default: the coordinator's)
-                                start a swarm in the running TUI: plan, then wait for approval (unless --no-plan-gate)
+                                start a swarm in the running TUI: the coordinator plans the goal, then asks you in its chat (unless --no-plan-gate)
   status [--workspace DIR] [--db PATH] [--json]
                                 the swarm, its board (each task's state) and what waits for you
   plan [--workspace DIR] [--db PATH] [--json]
                                 the board with the plan's errors and warnings
-  approve                       approve the plan: workers start
-  replan <notes...>             run the planner again with your notes (in review)
+  approve                       approve the plan from a shell (scripts): every ready task starts
+  launch [<task>...]            start the named ready tasks now (or every ready one); approves a plan in review
+  wait [--timeout MS] [--after ID] [--json]
+                                block until the swarm logs something (or MS pass, default 300000): what agent_mux_swarm_wait does
+  events [-n N] [--json]        the swarm's log: decisions, offers, spawns, ends, checks, with who did what
+  replan <notes...>             send the plan back to the coordinator with your notes (in review)
   pause | resume                stop starting new workers / start them again
   retry <task>                  put a failed, lost or cancelled task back on the board
+  cancel <task>                 cancel a task that has not finished; its worker is stopped
   merge <task> | set-aside <task>
                                 merge a finished task's branch into the workspace, or keep it unmerged
   accept <task> | drop <task>   accept or drop a task a worker proposed
@@ -694,28 +700,13 @@ commands:
                                 like close; without a running TUI only the records are updated
 
 <task> is a plan key (`bus-fix`), a task id or a unique prefix of either.
-The verbs take --workspace DIR (default: the current folder), --swarm ID when the folder runs several swarms, and --json.";
+The verbs take --workspace DIR (default: the current folder), --swarm ID when the folder runs several swarms, and --json.
+Decisions from here are recorded as the CLI's (`by = cli`); --said \"<words>\" keeps what the operator said.";
 
 /// What the CLI knows of live sessions without a TUI: the published
 /// snapshots of running agent-mux TUIs.
 fn snapshot_workers() -> HashMap<String, super::swarm::engine::Worker> {
-    use super::swarm::engine::{Worker, WorkerState};
-    use crate::tracing::analysis::RuntimeState;
-    let root = crate::tracing::analysis::default_snapshot_dir();
-    crate::tracing::analysis::read_snapshots(&root, now_ns())
-        .unwrap_or_default()
-        .into_iter()
-        .flat_map(|s| s.sessions)
-        .map(|s| {
-            let state = match s.state {
-                RuntimeState::Working => WorkerState::Working,
-                RuntimeState::WaitingForUser => WorkerState::Prompt,
-                RuntimeState::Idle | RuntimeState::Unknown => WorkerState::Idle,
-                RuntimeState::Exited | RuntimeState::Disconnected => WorkerState::Exited,
-            };
-            (s.launch_id, Worker { state, quiet_ns: 0 })
-        })
-        .collect()
+    super::swarm::view::snapshot_workers()
 }
 
 /// The checks `approve` re-runs, from this machine and the workspace.
@@ -744,6 +735,7 @@ fn print_board(
         workers: &workers,
         asking: &asking,
         now_ns: now_ns(),
+        dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
     };
     let problems = with_problems.then(|| {
         plan::check(
@@ -923,9 +915,29 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
     let db_path = resolve_db(&args);
     let now = now_ns();
 
+    if cmd == "launch" && args.positional.len() > 1 {
+        // several tasks: one request each, through the TUI when it runs
+        let mut details = Vec::new();
+        for t in &args.positional {
+            details.push(
+                run_swarm(
+                    &[
+                        vec!["launch".to_string(), t.clone()],
+                        raw[1..]
+                            .iter()
+                            .filter(|a| !args.positional.contains(a))
+                            .cloned()
+                            .collect(),
+                    ]
+                    .concat(),
+                )
+                .map(|_| t.clone())?,
+            );
+        }
+        return Ok(());
+    }
     if let Some(verb) = SwarmVerb::parse(cmd).filter(|v| *v != SwarmVerb::Close || cmd == "close") {
-        let task = verb
-            .takes_task()
+        let task = (verb.takes_task() || verb == SwarmVerb::Launch)
             .then(|| args.positional.first().cloned())
             .flatten();
         if verb.takes_task() && task.is_none() {
@@ -938,6 +950,9 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             task: task.clone(),
             notes,
             swarm: args.value("swarm").map(str::to_string),
+            by: Some(record::DecidedBy::Cli),
+            said: args.value("said").map(str::to_string),
+            from: None,
         };
         let done = match control::send_request(None, &req, Duration::from_secs(10)) {
             Ok(resp) if resp.ok => resp.detail.unwrap_or_default(),
@@ -957,6 +972,7 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                     verb,
                     task.as_deref(),
                     &env,
+                    &record::Decider::CLI,
                     now,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -972,6 +988,55 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
     }
 
     match cmd {
+        "wait" => {
+            let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+            let swarm = record::resolve_swarm(&conn, &workspace, args.value("swarm"))
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let after = match args.value("after") {
+                Some(a) => a.parse::<i64>()?,
+                None => record::last_event_id(&conn, &swarm.id)?,
+            };
+            drop(conn);
+            let wait_ms = args
+                .value("timeout")
+                .and_then(|t| t.parse::<u64>().ok())
+                .unwrap_or(super::swarm::view::DEFAULT_SWARM_WAIT_MS);
+            let waited = super::swarm::view::wait_events(&db_path, &swarm.id, after, wait_ms)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            if args.has("json") {
+                println!("{}", serde_json::to_string(&waited)?);
+            } else if waited.timed_out {
+                println!(
+                    "nothing happened in {}s (last event {})",
+                    wait_ms / 1000,
+                    waited.last_event_id
+                );
+            } else {
+                for e in &waited.events {
+                    println!("{}", super::swarm::view::event_line(e));
+                }
+                if waited.ended {
+                    println!("the swarm has ended");
+                }
+            }
+        }
+        "events" | "log" => {
+            let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+            let swarm = record::resolve_swarm(&conn, &workspace, args.value("swarm"))
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let n = args
+                .value("n")
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(50);
+            let events = record::recent_events(&conn, &swarm.id, n)?;
+            if args.has("json") {
+                println!("{}", serde_json::to_string(&events)?);
+            } else {
+                for e in &events {
+                    println!("{}", super::swarm::view::event_line(e));
+                }
+            }
+        }
         "submit-plan" => {
             let file = args
                 .value("file")

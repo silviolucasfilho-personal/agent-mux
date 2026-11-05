@@ -953,6 +953,7 @@ impl SwarmBoard {
             workers: &self.workers,
             asking: &self.asking,
             now_ns: self.now_ns,
+            dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
         })
     }
 
@@ -2221,6 +2222,7 @@ pub fn needs_for(d: &SwarmData, workers: &HashMap<String, Worker>, now_ns: i64) 
         workers,
         asking: &d.asking,
         now_ns,
+        dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
     };
     let name_of = |launch: &str| -> String {
         if launch == "user" {
@@ -2677,6 +2679,8 @@ mod tests {
             max_workers: 2,
             isolation: TaskIsolation::Shared,
             gate: true,
+            gate_mode: crate::bus::swarm::record::GateMode::Chat,
+            headless: false,
             check_cmd: None,
             check_result: None,
             owner_run: None,

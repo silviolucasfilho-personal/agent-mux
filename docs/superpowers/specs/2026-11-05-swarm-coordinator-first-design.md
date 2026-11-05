@@ -377,19 +377,31 @@ Replay-safe, as v22 (`pragma_table_info` guards every `ADD COLUMN`).
 
 ```sql
 -- the swarm's gate and its talking phase
-ALTER TABLE swarms ADD COLUMN gate_mode TEXT NOT NULL DEFAULT 'chat'
-  CHECK (gate_mode IN ('chat','off'));                       -- gate=0 → 'off' in the migration
--- status gains 'talking' (coordinator open, no plan yet); 'planning' stays for a headless plan run
-
-ALTER TABLE swarm_tasks ADD COLUMN offered_ns   INTEGER;      -- the engine offered the ready task
-ALTER TABLE swarm_tasks ADD COLUMN launched_by  TEXT;         -- 'coordinator' | 'dispatcher' | 'operator'
+-- Side tables, as v14 and v22 (SQLite has no ADD COLUMN IF NOT EXISTS and
+-- migrations replay): the gate and the headless flag per swarm, the engine's
+-- per-task dispatch bookkeeping. `swarms.gate` is backfilled into gate_mode.
+CREATE TABLE IF NOT EXISTS swarm_settings (
+  swarm_id    TEXT PRIMARY KEY REFERENCES swarms (id) ON DELETE CASCADE,
+  gate_mode   TEXT NOT NULL DEFAULT 'chat' CHECK (gate_mode IN ('chat','off')),
+  headless    INTEGER NOT NULL DEFAULT 0,
+  updated_ns  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS swarm_dispatch (
+  task_id       TEXT PRIMARY KEY REFERENCES agent_tasks (id) ON DELETE CASCADE,
+  offered_ns    INTEGER,                                      -- the engine offered the ready task
+  launched_by   TEXT,                                         -- 'coordinator' | 'dispatcher' | 'operator'
+  requested_ns  INTEGER,
+  updated_ns    INTEGER NOT NULL
+);
+-- `talking` is shown, not stored: a swarm in `planning` with a coordinator
+-- launch and `headless = 0` reads as talking.
 
 CREATE TABLE IF NOT EXISTS swarm_decisions (
   id          INTEGER PRIMARY KEY,
   swarm_id    TEXT NOT NULL REFERENCES swarms (id) ON DELETE CASCADE,
   task_id     TEXT,                                           -- NULL for swarm-level decisions
   verb        TEXT NOT NULL,                                  -- launch, merge, set-aside, cancel, close, …
-  by          TEXT NOT NULL CHECK (by IN ('chat','cli')),
+  by          TEXT NOT NULL CHECK (by IN ('chat','tui','cli')),          -- tui: merge, retry, close… from the screen
   said        TEXT,                                           -- the operator's words, when relayed
   launch      TEXT,                                           -- the coordinator's launch, for 'chat'
   created_ns  INTEGER NOT NULL

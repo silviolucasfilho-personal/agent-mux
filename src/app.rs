@@ -2787,6 +2787,10 @@ pub struct App {
     pub pending_wake_submits: Vec<(String, Instant)>,
     /// When the swarm dispatcher last looked (`swarm_engine`).
     pub last_swarm_engine_pass: Option<Instant>,
+    /// How long a ready task stays offered to the coordinator before the
+    /// dispatcher starts it ([`crate::bus::swarm::engine::DISPATCH_GRACE_NS`];
+    /// `[swarm] dispatch_grace_s`, shorter in tests).
+    pub swarm_dispatch_grace_ns: i64,
     /// When it last checked for swarms whose TUI is gone.
     pub last_swarm_adopt_check: Option<Instant>,
     /// What the swarms this TUI dispatches need from the operator, for the
@@ -2947,6 +2951,7 @@ impl App {
             pending_bus_wakes: Vec::new(),
             pending_wake_submits: Vec::new(),
             last_swarm_engine_pass: None,
+            swarm_dispatch_grace_ns: crate::bus::swarm::engine::DISPATCH_GRACE_NS,
             last_swarm_adopt_check: None,
             swarm_needs: 0,
         };
@@ -3954,7 +3959,7 @@ impl App {
         env: &[(String, String)],
         skill_id: Option<&str>,
     ) -> anyhow::Result<Session> {
-        self.spawn_traced_full(id, profile, dir, env, skill_id, None, None, &[])
+        self.spawn_traced_full(id, profile, dir, env, skill_id, None, None, None, &[])
     }
 
     /// The one spawn path: `spawn_traced_with_env` plus, for a loop run,
@@ -3970,6 +3975,7 @@ impl App {
         skill_id: Option<&str>,
         loop_launch: Option<crate::loops::LoopLaunch>,
         workflow_launch: Option<crate::workflows::WorkflowLaunch>,
+        swarm_launch: Option<crate::bus::swarm::SwarmLaunch>,
         loop_args: &[String],
     ) -> anyhow::Result<Session> {
         prepare_nested_tui(&mut profile);
@@ -3995,6 +4001,9 @@ impl App {
         if let (Some(p), Some(launch)) = (plan.as_mut(), loop_launch) {
             let home = self.skill_home();
             p.attach_loop(launch, &home);
+        }
+        if let (Some(p), Some(sw)) = (plan.as_mut(), swarm_launch) {
+            p.swarm = Some(sw);
         }
         let mut extra_args: Vec<String> = match &plan {
             Some(p) => p.extra_args.clone(),
@@ -5267,6 +5276,7 @@ impl App {
                 verb,
                 task.as_deref(),
                 notes.as_deref(),
+                &crate::bus::swarm::record::Decider::TUI,
             )),
             Outcome::AddTask(pt) => Some(live_swarm().and_then(|swarm| {
                 with_conn(&|conn, db| {
@@ -5304,6 +5314,7 @@ impl App {
                         crate::bus::swarm::record::SwarmVerb::Retry,
                         Some(&task_id),
                         None,
+                        &crate::bus::swarm::record::Decider::TUI,
                     )
                     .map(|done| {
                         format!(
@@ -8208,6 +8219,7 @@ impl App {
                 agent,
                 isolation,
                 opening_prompt,
+                swarm,
             } => {
                 let target_harness = match harness.as_deref() {
                     Some(h) if !h.trim().is_empty() => match h.parse::<crate::harness::Harness>() {
@@ -8395,6 +8407,7 @@ impl App {
                     None,
                     None,
                     None,
+                    swarm,
                     &[],
                 ) {
                     Ok(s) => s,

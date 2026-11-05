@@ -4,7 +4,7 @@
 //! `App::swarm_engine_pass` gathers the [`Input`] and carries out the
 //! [`Action`]s; every decision is here, so it is tested without a PTY.
 
-use super::record::{BoardTask, SwarmRun, SwarmStatus};
+use super::record::{BoardTask, LaunchedBy, SwarmRun, SwarmStatus};
 use crate::bus::TaskStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -12,6 +12,11 @@ use std::collections::{HashMap, HashSet};
 /// How long a worker may sit idle on an unfinished task before it is
 /// nudged once, and again before it is listed as stalled (§5.3).
 pub const STALL_GRACE_NS: i64 = 90 * 1_000_000_000;
+
+/// How long a ready task stays offered to the coordinator before the
+/// dispatcher starts it itself (coordinator-first spec §5.4): the
+/// coordinator launches, agent-mux makes sure the swarm never waits on it.
+pub const DISPATCH_GRACE_NS: i64 = 2 * 60 * 1_000_000_000;
 
 /// A live worker session as the dispatcher sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,14 +42,22 @@ pub struct Input<'a> {
     pub workers: &'a HashMap<String, Worker>,
     /// Launches with an unanswered question.
     pub asking: &'a HashSet<String>,
-    /// Now, in nanoseconds (an abandoned check's age).
+    /// Now, in nanoseconds (an abandoned check's age, an offer's age).
     pub now_ns: i64,
+    /// How long an offered task waits for the coordinator before the
+    /// dispatcher starts it ([`DISPATCH_GRACE_NS`]; shorter in tests).
+    pub dispatch_grace_ns: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Start a worker for this task.
-    Spawn { task_id: String },
+    /// A ready task with a free slot that nobody asked for yet: tell the
+    /// coordinator (it launches with `agent_mux_swarm_launch`), and start
+    /// the grace period.
+    Offer { task_id: String },
+    /// Start a worker for this task, asked for by `by` (the coordinator or
+    /// the operator), or by the dispatcher once the offer's grace ran out.
+    Spawn { task_id: String, by: LaunchedBy },
     /// Remind an idle worker to finish or ask (once per attempt).
     Nudge { task_id: String, launch_id: String },
     /// Move the swarm to its next state.
@@ -199,10 +212,12 @@ pub fn busy_workers(input: &Input<'_>) -> usize {
         .count()
 }
 
-/// What to do next. Spawns follow plan order and stop at the cap; nothing
-/// spawns while planning, in review or paused; nudges go to idle workers
-/// past [`STALL_GRACE_NS`] that were not nudged this attempt; the swarm
-/// advances once every task is settled.
+/// What to do next. Ready tasks are taken in plan order up to the cap: one
+/// somebody asked for (`launched_by`) spawns at once, one never offered is
+/// offered to the coordinator, and one offered longer than the grace spawns
+/// by the dispatcher. Nothing spawns while planning, in review or paused;
+/// nudges go to idle workers past [`STALL_GRACE_NS`] that were not nudged
+/// this attempt; the swarm advances once every task is settled.
 pub fn next_actions(input: &Input<'_>) -> Vec<Action> {
     let status = input.swarm.status;
     let mut out = Vec::new();
@@ -238,10 +253,26 @@ pub fn next_actions(input: &Input<'_>) -> Vec<Action> {
                 && !t.ext.proposed
                 && unmet_dependencies(t, input.board).is_empty()
             {
-                out.push(Action::Spawn {
-                    task_id: t.task.id.clone(),
-                });
-                free -= 1;
+                match (t.ext.launched_by, t.ext.offered_ns) {
+                    (Some(by), _) => {
+                        out.push(Action::Spawn {
+                            task_id: t.task.id.clone(),
+                            by,
+                        });
+                        free -= 1;
+                    }
+                    (None, None) => out.push(Action::Offer {
+                        task_id: t.task.id.clone(),
+                    }),
+                    (None, Some(offered)) if input.now_ns - offered >= input.dispatch_grace_ns => {
+                        out.push(Action::Spawn {
+                            task_id: t.task.id.clone(),
+                            by: LaunchedBy::Dispatcher,
+                        });
+                        free -= 1;
+                    }
+                    (None, Some(_)) => {}
+                }
             }
         }
     }
@@ -298,10 +329,22 @@ mod tests {
             started_ns: 0,
             updated_ns: 0,
             ended_ns: None,
+            gate_mode: super::super::record::GateMode::Chat,
+            headless: false,
         }
     }
 
+    /// A ready task the operator asked for: it spawns at once.
     fn task(key: &str, status: TaskStatus, deps: &[&str]) -> BoardTask {
+        let mut t = fresh(key, status, deps);
+        if status == TaskStatus::Open {
+            t.ext.launched_by = Some(LaunchedBy::Operator);
+        }
+        t
+    }
+
+    /// A ready task nobody asked for yet.
+    fn fresh(key: &str, status: TaskStatus, deps: &[&str]) -> BoardTask {
         BoardTask {
             task: BusTask {
                 id: format!("task-{key}"),
@@ -362,14 +405,73 @@ mod tests {
             board,
             workers: &workers,
             asking: &asking,
-            now_ns: 0,
+            now_ns: 1_000 * 1_000_000_000,
+            dispatch_grace_ns: 120 * 1_000_000_000,
         })
     }
 
     fn spawn(key: &str) -> Action {
         Action::Spawn {
             task_id: format!("task-{key}"),
+            by: LaunchedBy::Operator,
         }
+    }
+
+    fn offer(key: &str) -> Action {
+        Action::Offer {
+            task_id: format!("task-{key}"),
+        }
+    }
+
+    #[test]
+    fn a_ready_task_is_offered_then_started_by_whoever_asks_or_by_the_dispatcher_after_the_grace() {
+        let s = swarm(SwarmStatus::Running, 2);
+        // Nobody asked: offered to the coordinator, nothing spawns.
+        let a = fresh("a", TaskStatus::Open, &[]);
+        assert_eq!(run(&s, std::slice::from_ref(&a), &[], &[]), [offer("a")]);
+        // Offered a minute ago: still the coordinator's to launch.
+        let mut offered = a.clone();
+        offered.ext.offered_ns = Some(940 * 1_000_000_000);
+        assert_eq!(run(&s, std::slice::from_ref(&offered), &[], &[]), []);
+        // The coordinator asked: spawns now, whatever the offer's age.
+        let mut asked = offered.clone();
+        asked.ext.launched_by = Some(LaunchedBy::Coordinator);
+        assert_eq!(
+            run(&s, std::slice::from_ref(&asked), &[], &[]),
+            [Action::Spawn {
+                task_id: "task-a".into(),
+                by: LaunchedBy::Coordinator,
+            }]
+        );
+        // Offered longer than the grace: the dispatcher starts it itself.
+        let mut stale = a.clone();
+        stale.ext.offered_ns = Some(800 * 1_000_000_000);
+        assert_eq!(
+            run(&s, std::slice::from_ref(&stale), &[], &[]),
+            [Action::Spawn {
+                task_id: "task-a".into(),
+                by: LaunchedBy::Dispatcher,
+            }]
+        );
+        // An offer takes no slot, but only tasks that could run are offered.
+        let board = [running("w", "L1", &[]), fresh("b", TaskStatus::Open, &[])];
+        let w = [("L1", live(WorkerState::Working, 0))];
+        assert_eq!(run(&swarm(SwarmStatus::Running, 1), &board, &w, &[]), []);
+        assert_eq!(
+            run(&swarm(SwarmStatus::Running, 2), &board, &w, &[]),
+            [offer("b")]
+        );
+        // Paused or in review: no offers either.
+        assert_eq!(
+            run(
+                &swarm(SwarmStatus::Paused, 2),
+                std::slice::from_ref(&a),
+                &[],
+                &[]
+            ),
+            []
+        );
+        assert_eq!(run(&swarm(SwarmStatus::Review, 2), &[a], &[], &[]), []);
     }
 
     #[test]
@@ -572,6 +674,7 @@ mod tests {
             workers: &workers,
             asking: &asking,
             now_ns: 0,
+            dispatch_grace_ns: DISPATCH_GRACE_NS,
         };
         let got: Vec<&str> = board.iter().map(|t| shown(t, &input).as_str()).collect();
         assert_eq!(
@@ -588,6 +691,7 @@ mod tests {
             workers: &workers,
             asking: &asking,
             now_ns: 0,
+            dispatch_grace_ns: DISPATCH_GRACE_NS,
         };
         assert_eq!(shown(&board[1], &input), Shown::Draft);
     }

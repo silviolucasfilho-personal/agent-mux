@@ -53,6 +53,9 @@ pub enum ControlRequest {
         /// prompt, `bus::swarm::prompt::worker_prompt`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         opening_prompt: Option<String>,
+        /// The worker's place in a swarm, for its launch row (v24).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        swarm: Option<crate::bus::swarm::SwarmLaunch>,
     },
     /// Start an orchestrated swarm for `workspace` (schema v21): agent-mux
     /// runs a headless planner on `goal`, shows the plan for approval (or
@@ -85,6 +88,15 @@ pub enum ControlRequest {
         /// The swarm, when the workspace runs several (schema v23).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         swarm: Option<String>,
+        /// Who relays the decision (v24): the coordinator from its chat
+        /// (`chat`, with the operator's words in `said` and its launch in
+        /// `from`), the screen (`tui`) or the CLI (`cli`, the default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<crate::bus::swarm::record::DecidedBy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        said: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
     },
     /// End `workspace`'s swarm: stop its worker sessions, cancel its open
     /// tasks, release its leases, end its row.
