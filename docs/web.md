@@ -243,4 +243,33 @@ client beside `AgentMux.api`):
 
 ## Configuration library
 
-Filled by its own task.
+The configuration library pages and API inspect every prompt, skill, loop
+pattern, loop skill, loop agent, template, workflow and agent definition
+agent-mux ships, along with any override under `~/.agent-mux/`
+(`$AGENT_MUX_LIBRARY_DIR`) that shadows a compiled-in asset. The library is
+strictly read-only: it enumerates assets and serves their effective text
+without writing, resetting, or modifying any files.
+
+- **Library (`#/library`)** lists every configurable item grouped into sections
+  by kind (`prompts`, `settings`, `skill`, `workflow`, `agent`, `loop patterns`,
+  `loop skill`, `loop agent`, `loop template`). Each item displays its name,
+  a source badge indicating whether it is `built-in`, an `override` shadowing
+  a default, or a `user` asset, its path on disk, byte size, and validation
+  status. A search box filters by name or path fragment, and clicking an item
+  opens its detail page.
+- **Item (`#/library/<id>`)** displays an asset's metadata (kind, source status,
+  whether an override shadows a built-in default, override file path, byte size,
+  and validation status), followed by the effective text in a monospace block.
+- **Agents (`#/agents`)** displays the agent registry loaded from
+  `agents::schedule::load_registry`, listing workflow personas and scheduled task
+  agents with their description, permitted tools, model, task kind, and
+  execution schedule.
+
+### Configuration API
+
+| Route | Method | Description |
+|---|---|---|
+| `/api/library/kinds` | `GET` | Returns all configuration kinds with their labels, titles, and creatability. |
+| `/api/library/items` | `GET` | Lists all configuration items (`id`, `kind`, `name`, `source`, `path`, `size`), optionally filtered by `?kind=` and grouped by kind. |
+| `/api/library/items/{id}` | `GET` | Returns an asset's effective text, kind, source, whether an override shadows a built-in, and the override path. |
+| `/api/library/agents` | `GET` | Returns the agent registry with name, description, tools, model, task kind, and schedule. |
