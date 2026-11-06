@@ -184,10 +184,14 @@ agent-mux swarm start "Add OAuth login" --planner claude --worker-harness agy,co
 #   --planner: the coordinator's harness · --worker-harness: the workers' pool, the first for tasks that name none
 agent-mux swarm status                  # the swarm and its board, each task's state (--json for scripts)
 agent-mux swarm plan                    # the board with the plan's errors and warnings
-agent-mux swarm approve                 # workers start
+agent-mux swarm approve                 # from a shell: every ready task starts
+agent-mux swarm launch [<task>...]      # start the named ready tasks now (or every ready one)
+agent-mux swarm wait [--timeout MS]     # block until the swarm logs something; a timeout is an answer
+agent-mux swarm events [-n 50]          # the swarm's log: who decided, offered, started, finished what
 agent-mux swarm replan "split the API task in two"
 agent-mux swarm pause | resume
 agent-mux swarm retry <task>            # a failed, lost or cancelled task, again
+agent-mux swarm cancel <task>           # a task that has not finished; its worker is stopped
 agent-mux swarm merge <task>            # or: set-aside <task>
 agent-mux swarm accept <task>           # or: drop <task>, for a task a worker proposed
 agent-mux swarm close                   # stops its sessions, cancels open tasks, releases leases

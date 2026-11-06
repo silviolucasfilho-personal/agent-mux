@@ -915,6 +915,7 @@ impl App {
                 skill_id.as_deref(),
                 None,
                 Some(launch),
+                None,
                 &extra_args,
             )
             .map_err(|e| format!("spawn: {e}"))?;
@@ -1480,6 +1481,7 @@ impl App {
                 Some("workflow-author"),
                 None,
                 Some(launch),
+                None,
                 &[],
             )
             .map_err(|e| format!("spawn: {e}"))?;

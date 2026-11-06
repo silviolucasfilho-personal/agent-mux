@@ -1,7 +1,13 @@
 //! The orchestrated swarm's rows (schema v21): `swarms`, one swarm's run
-//! (at most one live per workspace), and `swarm_tasks`, the plan's extension
-//! of the board's `agent_tasks` rows (key, order, dependencies,
-//! acceptance). See `docs/superpowers/specs/2026-11-02-swarm-orchestrator-design.md` §7.
+//! (several may be live per workspace since v23), and `swarm_tasks`, the
+//! plan's extension of the board's `agent_tasks` rows (key, order,
+//! dependencies, acceptance). See
+//! `docs/superpowers/specs/2026-11-02-swarm-orchestrator-design.md` §7.
+//! Schema v24 (`2026-11-05-swarm-coordinator-first-design.md` §8) adds the
+//! side tables `swarm_settings` (the gate mode), `swarm_dispatch` (when a
+//! ready task was offered to the coordinator and who asked for its worker),
+//! `swarm_decisions` (every operator-level decision, with who relayed it and
+//! the operator's words) and `swarm_events` (the swarm's log).
 
 use super::plan::{Plan, PlannedTask};
 use crate::bus::store::{self as bstore, normalize_workspace};
@@ -60,6 +66,141 @@ impl SwarmStatus {
     }
 }
 
+/// How a plan gets approved (`swarm_settings.gate_mode`, v24): `chat`, the
+/// coordinator relays the operator's yes from its own chat
+/// (`agent_mux_swarm_launch` with the operator's words); `off`, a plan
+/// without errors runs at once.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum GateMode {
+    #[default]
+    Chat,
+    Off,
+}
+
+impl GateMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GateMode::Chat => "chat",
+            GateMode::Off => "off",
+        }
+    }
+    pub fn parse(s: &str) -> Option<GateMode> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "chat" => Some(GateMode::Chat),
+            "off" | "none" => Some(GateMode::Off),
+            _ => None,
+        }
+    }
+}
+
+/// Who relayed an operator-level decision (`swarm_decisions.by`): the
+/// coordinator from its chat, the Swarm screen, or the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum DecidedBy {
+    Chat,
+    Tui,
+    Cli,
+}
+
+impl DecidedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecidedBy::Chat => "chat",
+            DecidedBy::Tui => "tui",
+            DecidedBy::Cli => "cli",
+        }
+    }
+    pub fn parse(s: &str) -> Option<DecidedBy> {
+        match s.trim() {
+            "chat" => Some(DecidedBy::Chat),
+            "tui" => Some(DecidedBy::Tui),
+            "cli" => Some(DecidedBy::Cli),
+            _ => None,
+        }
+    }
+}
+
+/// Who asked for a task's worker (`swarm_dispatch.launched_by`): the
+/// coordinator through `agent_mux_swarm_launch`, the dispatcher once the
+/// grace period after the offer ran out, or the operator (screen, CLI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum LaunchedBy {
+    Coordinator,
+    Dispatcher,
+    Operator,
+}
+
+impl LaunchedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LaunchedBy::Coordinator => "coordinator",
+            LaunchedBy::Dispatcher => "dispatcher",
+            LaunchedBy::Operator => "operator",
+        }
+    }
+    pub fn parse(s: &str) -> Option<LaunchedBy> {
+        match s.trim() {
+            "coordinator" => Some(LaunchedBy::Coordinator),
+            "dispatcher" => Some(LaunchedBy::Dispatcher),
+            "operator" => Some(LaunchedBy::Operator),
+            _ => None,
+        }
+    }
+}
+
+impl From<DecidedBy> for LaunchedBy {
+    fn from(by: DecidedBy) -> Self {
+        match by {
+            DecidedBy::Chat => LaunchedBy::Coordinator,
+            DecidedBy::Tui | DecidedBy::Cli => LaunchedBy::Operator,
+        }
+    }
+}
+
+/// Who decides, for [`apply`] and [`launch`]: the relay, the operator's
+/// words when the coordinator relays them, and the relaying launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decider<'a> {
+    pub by: DecidedBy,
+    pub said: Option<&'a str>,
+    pub launch: Option<&'a str>,
+}
+
+impl<'a> Decider<'a> {
+    pub const TUI: Decider<'static> = Decider {
+        by: DecidedBy::Tui,
+        said: None,
+        launch: None,
+    };
+    pub const CLI: Decider<'static> = Decider {
+        by: DecidedBy::Cli,
+        said: None,
+        launch: None,
+    };
+    /// The coordinator relays what the operator said in its chat.
+    pub fn chat(said: Option<&'a str>, launch: Option<&'a str>) -> Decider<'a> {
+        Decider {
+            by: DecidedBy::Chat,
+            said: said.map(str::trim).filter(|s| !s.is_empty()),
+            launch,
+        }
+    }
+    /// The actor name the bus records for this decider.
+    pub fn actor(&self) -> &'a str {
+        match (self.by, self.launch) {
+            (DecidedBy::Chat, Some(l)) => l,
+            (DecidedBy::Chat, None) => "coordinator",
+            (DecidedBy::Tui, _) => "user",
+            (DecidedBy::Cli, _) => "cli",
+        }
+    }
+}
+
 /// One swarm's run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SwarmRun {
@@ -73,6 +214,7 @@ pub struct SwarmRun {
     pub plan_error: Option<String>,
     pub max_workers: usize,
     pub isolation: TaskIsolation,
+    /// Whether a plan waits for the operator (`gate_mode != off`).
     pub gate: bool,
     pub check_cmd: Option<String>,
     pub check_result: Option<String>,
@@ -81,6 +223,11 @@ pub struct SwarmRun {
     pub started_ns: i64,
     pub updated_ns: i64,
     pub ended_ns: Option<i64>,
+    /// How the plan is approved (v24).
+    pub gate_mode: GateMode,
+    /// A headless swarm: the goal came with the start, the coordinator plans
+    /// without asking (v24).
+    pub headless: bool,
 }
 
 /// What a new swarm starts with.
@@ -91,12 +238,15 @@ pub struct NewSwarm {
     pub planner_harness: String,
     pub max_workers: usize,
     pub isolation: TaskIsolation,
+    /// `false` is gate mode `off`; `true` is `chat`.
     pub gate: bool,
     pub check_cmd: Option<String>,
     pub owner_run: Option<String>,
     /// The harnesses the workers may run on, the first one for tasks that
     /// name none (empty: the coordinator's).
     pub worker_pool: Vec<String>,
+    /// The goal is given and the coordinator plans without a conversation.
+    pub headless: bool,
 }
 
 /// The plan's side of one board task.
@@ -110,6 +260,10 @@ pub struct SwarmTaskExt {
     pub proposed: bool,
     pub attempts: i64,
     pub nudged_ns: Option<i64>,
+    /// When the engine offered the ready task to the coordinator (v24).
+    pub offered_ns: Option<i64>,
+    /// Who asked for its worker; set before the spawn (v24).
+    pub launched_by: Option<LaunchedBy>,
 }
 
 /// A board task with its plan extension and, for a finished worktree
@@ -121,9 +275,12 @@ pub struct BoardTask {
     pub review: Option<String>,
 }
 
-const SWARM_COLS: &str = "id, workspace, goal, status, planner_harness, planner_launch, \
-    plan_summary, plan_error, max_workers, isolation, gate, check_cmd, check_result, \
-    owner_run, started_ns, updated_ns, ended_ns";
+const SWARM_COLS: &str = "s.id, s.workspace, s.goal, s.status, s.planner_harness, s.planner_launch, \
+    s.plan_summary, s.plan_error, s.max_workers, s.isolation, s.gate, s.check_cmd, s.check_result, \
+    s.owner_run, s.started_ns, s.updated_ns, s.ended_ns, \
+    COALESCE(g.gate_mode, CASE WHEN s.gate = 0 THEN 'off' ELSE 'chat' END), COALESCE(g.headless, 0)";
+/// `swarms` with its v24 settings; the columns of [`SWARM_COLS`].
+const SWARM_FROM: &str = "swarms s LEFT JOIN swarm_settings g ON g.swarm_id = s.id";
 
 fn row_to_swarm(r: &rusqlite::Row<'_>) -> rusqlite::Result<SwarmRun> {
     Ok(SwarmRun {
@@ -144,6 +301,8 @@ fn row_to_swarm(r: &rusqlite::Row<'_>) -> rusqlite::Result<SwarmRun> {
         started_ns: r.get(14)?,
         updated_ns: r.get(15)?,
         ended_ns: r.get(16)?,
+        gate_mode: GateMode::parse(&r.get::<_, String>(17)?).unwrap_or_default(),
+        headless: r.get::<_, i64>(18)? != 0,
     })
 }
 
@@ -189,6 +348,32 @@ pub fn create_swarm(
         params![id, encode_pool(&new.worker_pool), now],
     )
     .map_err(|e| e.to_string())?;
+    let gate_mode = if new.gate {
+        GateMode::Chat
+    } else {
+        GateMode::Off
+    };
+    conn.execute(
+        "INSERT INTO swarm_settings (swarm_id, gate_mode, headless, updated_ns) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (swarm_id) DO UPDATE SET gate_mode = excluded.gate_mode,
+             headless = excluded.headless, updated_ns = excluded.updated_ns",
+        params![id, gate_mode.as_str(), new.headless, now],
+    )
+    .map_err(|e| e.to_string())?;
+    let _ = event(
+        conn,
+        &id,
+        None,
+        "started",
+        Some("operator"),
+        Some(serde_json::json!({
+            "goal": new.goal.trim(),
+            "coordinator": new.planner_harness,
+            "gate": gate_mode.as_str(),
+            "headless": new.headless,
+        })),
+        now,
+    );
     poke(db);
     get_swarm(conn, &id)
         .map_err(|e| e.to_string())?
@@ -234,7 +419,7 @@ pub fn worker_harness(conn: &Connection, swarm: &SwarmRun) -> String {
 
 pub fn get_swarm(conn: &Connection, id: &str) -> rusqlite::Result<Option<SwarmRun>> {
     conn.query_row(
-        &format!("SELECT {SWARM_COLS} FROM swarms WHERE id = ?1"),
+        &format!("SELECT {SWARM_COLS} FROM {SWARM_FROM} WHERE s.id = ?1"),
         params![id],
         row_to_swarm,
     )
@@ -247,8 +432,8 @@ pub fn get_swarm(conn: &Connection, id: &str) -> rusqlite::Result<Option<SwarmRu
 pub fn live_swarm(conn: &Connection, workspace: &str) -> rusqlite::Result<Option<SwarmRun>> {
     conn.query_row(
         &format!(
-            "SELECT {SWARM_COLS} FROM swarms WHERE workspace = ?1 AND ended_ns IS NULL
-             ORDER BY started_ns DESC LIMIT 1"
+            "SELECT {SWARM_COLS} FROM {SWARM_FROM} WHERE s.workspace = ?1 AND s.ended_ns IS NULL
+             ORDER BY s.started_ns DESC LIMIT 1"
         ),
         params![workspace],
         row_to_swarm,
@@ -259,8 +444,8 @@ pub fn live_swarm(conn: &Connection, workspace: &str) -> rusqlite::Result<Option
 /// `workspace`'s live swarms, oldest first.
 pub fn live_swarms_in(conn: &Connection, workspace: &str) -> rusqlite::Result<Vec<SwarmRun>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {SWARM_COLS} FROM swarms WHERE workspace = ?1 AND ended_ns IS NULL
-         ORDER BY started_ns ASC"
+        "SELECT {SWARM_COLS} FROM {SWARM_FROM} WHERE s.workspace = ?1 AND s.ended_ns IS NULL
+         ORDER BY s.started_ns ASC"
     ))?;
     let rows = stmt.query_map(params![workspace], row_to_swarm)?;
     rows.collect()
@@ -317,8 +502,8 @@ pub fn resolve_swarm(
 /// Swarms that ended at or after `since_ns`, newest first.
 pub fn ended_swarms_since(conn: &Connection, since_ns: i64) -> rusqlite::Result<Vec<SwarmRun>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {SWARM_COLS} FROM swarms WHERE ended_ns IS NOT NULL AND ended_ns >= ?1
-         ORDER BY ended_ns DESC LIMIT 20"
+        "SELECT {SWARM_COLS} FROM {SWARM_FROM} WHERE s.ended_ns IS NOT NULL AND s.ended_ns >= ?1
+         ORDER BY s.ended_ns DESC LIMIT 20"
     ))?;
     let rows = stmt.query_map(params![since_ns], row_to_swarm)?;
     rows.collect()
@@ -327,7 +512,7 @@ pub fn ended_swarms_since(conn: &Connection, since_ns: i64) -> rusqlite::Result<
 /// Every live swarm, oldest first.
 pub fn live_swarms(conn: &Connection) -> rusqlite::Result<Vec<SwarmRun>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {SWARM_COLS} FROM swarms WHERE ended_ns IS NULL ORDER BY started_ns ASC"
+        "SELECT {SWARM_COLS} FROM {SWARM_FROM} WHERE s.ended_ns IS NULL ORDER BY s.started_ns ASC"
     ))?;
     let rows = stmt.query_map([], row_to_swarm)?;
     rows.collect()
@@ -418,6 +603,11 @@ fn row_to_ext(r: &rusqlite::Row<'_>) -> rusqlite::Result<SwarmTaskExt> {
         proposed: r.get::<_, i64>(5)? != 0,
         attempts: r.get(6)?,
         nudged_ns: r.get(7)?,
+        offered_ns: r.get(8)?,
+        launched_by: r
+            .get::<_, Option<String>>(9)?
+            .as_deref()
+            .and_then(LaunchedBy::parse),
     })
 }
 
@@ -425,12 +615,13 @@ fn row_to_ext(r: &rusqlite::Row<'_>) -> rusqlite::Result<SwarmTaskExt> {
 pub fn board(conn: &Connection, swarm_id: &str) -> rusqlite::Result<Vec<BoardTask>> {
     let mut stmt = conn.prepare(
         "SELECT st.task_id, st.plan_key, st.position, st.depends_on_json, st.acceptance,
-                st.proposed, st.attempts, st.nudged_ns, r.verdict
+                st.proposed, st.attempts, st.nudged_ns, d.offered_ns, d.launched_by, r.verdict
          FROM swarm_tasks st LEFT JOIN swarm_reviews r ON r.task_id = st.task_id
+                             LEFT JOIN swarm_dispatch d ON d.task_id = st.task_id
          WHERE st.swarm_id = ?1 ORDER BY st.position ASC, st.task_id ASC",
     )?;
     let rows: Vec<(SwarmTaskExt, Option<String>)> = stmt
-        .query_map(params![swarm_id], |r| Ok((row_to_ext(r)?, r.get(8)?)))?
+        .query_map(params![swarm_id], |r| Ok((row_to_ext(r)?, r.get(10)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut out = Vec::with_capacity(rows.len());
     for (ext, review) in rows {
@@ -656,6 +847,8 @@ pub enum Submitted {
         tasks: usize,
         status: SwarmStatus,
         warnings: Vec<(String, String)>,
+        /// The plan rendered for the chat ([`plan_table`]).
+        table: String,
     },
     /// Nothing changed: these errors must be fixed first.
     Rejected(super::plan::Problems),
@@ -694,19 +887,88 @@ pub fn submit_plan(
     if !problems.is_ok() {
         return Ok(Submitted::Rejected(problems));
     }
+    let revised = swarm.plan_summary.is_some() || !before.is_empty();
     let board = replace_draft(conn, db, swarm, plan, now)?;
-    let status = if swarm.gate {
-        SwarmStatus::Review
-    } else {
+    let status = if swarm.gate_mode == GateMode::Off {
         SwarmStatus::Running
+    } else {
+        SwarmStatus::Review
     };
     set_plan_result(conn, db, &swarm.id, Some(&plan.summary), None, status, now)
         .map_err(|e| e.to_string())?;
+    let _ = event(
+        conn,
+        &swarm.id,
+        None,
+        if revised {
+            "plan.revised"
+        } else {
+            "plan.proposed"
+        },
+        coordinator(conn, &swarm.id)
+            .ok()
+            .flatten()
+            .and_then(|c| c.launch)
+            .as_deref(),
+        Some(serde_json::json!({
+            "summary": plan.summary,
+            "tasks": board.iter().map(|t| t.ext.plan_key.clone()).collect::<Vec<_>>(),
+            "warnings": problems.warnings.len(),
+        })),
+        now,
+    );
     Ok(Submitted::Accepted {
         tasks: board.len(),
         status,
         warnings: problems.warnings,
+        table: plan_table(swarm, &board),
     })
+}
+
+/// The plan as a Markdown table, for the coordinator to show the operator
+/// in its chat: what the Board tab draws.
+pub fn plan_table(swarm: &SwarmRun, board: &[BoardTask]) -> String {
+    let mut out = String::from(
+        "| # | key | title | harness · agent | isolation | depends on | done when |\n| --- | --- | --- | --- | --- | --- | --- |\n",
+    );
+    for (i, t) in board.iter().enumerate() {
+        let who = match (&t.task.target_harness, &t.task.target_agent) {
+            (Some(h), Some(a)) => format!("{h} · {a}"),
+            (Some(h), None) => h.clone(),
+            (None, Some(a)) => format!("· {a}"),
+            (None, None) => "—".into(),
+        };
+        out.push_str(&format!(
+            "| {} | `{}` | {} | {} | {} | {} | {} |\n",
+            i + 1,
+            t.ext.plan_key,
+            t.task.title.replace('|', "/"),
+            who,
+            t.task.isolation.as_str(),
+            if t.ext.depends_on.is_empty() {
+                "—".to_string()
+            } else {
+                t.ext.depends_on.join(", ")
+            },
+            t.ext
+                .acceptance
+                .as_deref()
+                .unwrap_or("—")
+                .replace('|', "/")
+                .replace('\n', " "),
+        ));
+    }
+    out.push_str(&format!(
+        "\nUp to {} worker(s) at once · default isolation {}{}",
+        swarm.max_workers,
+        swarm.isolation.as_str(),
+        swarm
+            .check_cmd
+            .as_deref()
+            .map(|c| format!(" · check when done: `{c}`"))
+            .unwrap_or_default()
+    ));
+    out
 }
 
 /// A submission's answer, in the coordinator's words.
@@ -716,6 +978,7 @@ pub fn submitted_note(swarm: &SwarmRun, s: &Submitted) -> String {
             tasks,
             status,
             warnings,
+            table,
         } => {
             let mut out = match status {
                 SwarmStatus::Running => format!(
@@ -723,8 +986,9 @@ pub fn submitted_note(swarm: &SwarmRun, s: &Submitted) -> String {
                     swarm.id
                 ),
                 _ => format!(
-                    "Plan accepted: {tasks} task(s) on the board of {}. The operator reviews it; \
-                     you will be told when it is approved or sent back.",
+                    "Plan accepted: {tasks} task(s) on the board of {}. Show this table to the \
+                     operator and ask whether to start; when they say yes, call \
+                     agent_mux_swarm_launch with their words in operator_said.\n\n{table}",
                     swarm.id
                 ),
             };
@@ -790,8 +1054,12 @@ pub fn swarm_of_worker(
     Ok(task.map(|t| (swarm, t)))
 }
 
-/// A key for a task a worker proposes: its title as a slug, unique on the
-/// board.
+/// A key for a task added outside the plan (a worker's proposal, the
+/// coordinator's addition): its title as a slug, unique on the board.
+pub fn key_for_title(conn: &Connection, swarm_id: &str, title: &str) -> String {
+    proposal_key(conn, swarm_id, title)
+}
+
 fn proposal_key(conn: &Connection, swarm_id: &str, title: &str) -> String {
     let mut slug: String = title
         .chars()
@@ -996,6 +1264,376 @@ pub fn mark_nudged(conn: &Connection, task_id: &str, now: i64) -> rusqlite::Resu
     Ok(())
 }
 
+/// The engine offered a ready task to the coordinator (v24): from now the
+/// grace period runs, after which the dispatcher starts it itself. A task
+/// already offered keeps its first offer.
+pub fn offer_task(conn: &Connection, task_id: &str, now: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO swarm_dispatch (task_id, offered_ns, updated_ns) VALUES (?1, ?2, ?2)
+         ON CONFLICT (task_id) DO UPDATE SET offered_ns = COALESCE(swarm_dispatch.offered_ns, excluded.offered_ns),
+             updated_ns = excluded.updated_ns",
+        params![task_id, now],
+    )?;
+    Ok(())
+}
+
+/// Someone asked for the task's worker: the engine spawns it at its next
+/// pass (within the cap). Who asked is kept on the row.
+pub fn request_launch(
+    conn: &Connection,
+    db: Option<&Path>,
+    task_id: &str,
+    by: LaunchedBy,
+    now: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO swarm_dispatch (task_id, launched_by, requested_ns, updated_ns) VALUES (?1, ?2, ?3, ?3)
+         ON CONFLICT (task_id) DO UPDATE SET launched_by = excluded.launched_by,
+             requested_ns = excluded.requested_ns, updated_ns = excluded.updated_ns",
+        params![task_id, by.as_str(), now],
+    )?;
+    poke(db);
+    Ok(())
+}
+
+/// Forgets a task's offer and request (a retry starts the cycle again).
+pub fn reset_dispatch(conn: &Connection, task_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM swarm_dispatch WHERE task_id = ?1",
+        params![task_id],
+    )?;
+    Ok(())
+}
+
+/// One line of the swarm's log (`swarm_events`, v24).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwarmEvent {
+    pub id: i64,
+    pub swarm_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// `started`, `plan.proposed`, `plan.revised`, `decision.<verb>`,
+    /// `task.offered`, `task.spawned`, `task.nudged`, `task.done`,
+    /// `task.failed`, `task.lost`, `check.started`, `check.done`,
+    /// `swarm.<status>`, `closed`.
+    pub kind: String,
+    /// A launch id, `operator`, `engine`, or none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+    pub created_ns: i64,
+}
+
+/// Writes one event to the swarm's log. Answers its id.
+pub fn event(
+    conn: &Connection,
+    swarm_id: &str,
+    task_id: Option<&str>,
+    kind: &str,
+    actor: Option<&str>,
+    detail: Option<serde_json::Value>,
+    now: i64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO swarm_events (swarm_id, task_id, kind, actor, detail, created_ns)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            swarm_id,
+            task_id,
+            kind,
+            actor,
+            detail.map(|d| d.to_string()),
+            now
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn row_to_event(r: &rusqlite::Row<'_>) -> rusqlite::Result<SwarmEvent> {
+    let detail: Option<String> = r.get(5)?;
+    Ok(SwarmEvent {
+        id: r.get(0)?,
+        swarm_id: r.get(1)?,
+        task_id: r.get(2)?,
+        kind: r.get(3)?,
+        actor: r.get(4)?,
+        detail: detail.and_then(|d| serde_json::from_str(&d).ok()),
+        created_ns: r.get(6)?,
+    })
+}
+
+/// The events after `after_id`, oldest first, at most `limit`.
+pub fn events_after(
+    conn: &Connection,
+    swarm_id: &str,
+    after_id: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<SwarmEvent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, swarm_id, task_id, kind, actor, detail, created_ns FROM swarm_events
+         WHERE swarm_id = ?1 AND id > ?2 ORDER BY id ASC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(
+        params![swarm_id, after_id, limit.clamp(1, 1000) as i64],
+        row_to_event,
+    )?;
+    rows.collect()
+}
+
+/// The newest `limit` events, oldest first.
+pub fn recent_events(
+    conn: &Connection,
+    swarm_id: &str,
+    limit: usize,
+) -> rusqlite::Result<Vec<SwarmEvent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, swarm_id, task_id, kind, actor, detail, created_ns FROM (
+             SELECT id, swarm_id, task_id, kind, actor, detail, created_ns FROM swarm_events
+             WHERE swarm_id = ?1 ORDER BY id DESC LIMIT ?2
+         ) ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![swarm_id, limit.clamp(1, 1000) as i64], row_to_event)?;
+    rows.collect()
+}
+
+/// The id of the swarm's last event (0 when there is none): where a
+/// `swarm_wait` starts.
+pub fn last_event_id(conn: &Connection, swarm_id: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM swarm_events WHERE swarm_id = ?1",
+        params![swarm_id],
+        |r| r.get(0),
+    )
+}
+
+/// One operator-level decision (`swarm_decisions`, v24).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwarmDecision {
+    pub id: i64,
+    pub swarm_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub verb: SwarmVerb,
+    pub by: DecidedBy,
+    /// The operator's words, when the coordinator relayed them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said: Option<String>,
+    /// The relaying launch (the coordinator's, for `chat`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<String>,
+    pub created_ns: i64,
+}
+
+/// Records a decision and its event (`decision.<verb>`).
+pub fn decide(
+    conn: &Connection,
+    swarm_id: &str,
+    task_id: Option<&str>,
+    verb: SwarmVerb,
+    who: &Decider<'_>,
+    now: i64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO swarm_decisions (swarm_id, task_id, verb, by, said, launch, created_ns)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            swarm_id,
+            task_id,
+            verb.as_str(),
+            who.by.as_str(),
+            who.said,
+            who.launch,
+            now
+        ],
+    )?;
+    let id = conn.last_insert_rowid();
+    let _ = event(
+        conn,
+        swarm_id,
+        task_id,
+        &format!("decision.{}", verb.as_str()),
+        Some(who.actor()),
+        Some(serde_json::json!({ "by": who.by.as_str(), "said": who.said })),
+        now,
+    );
+    Ok(id)
+}
+
+/// The swarm's decisions, oldest first.
+pub fn decisions(conn: &Connection, swarm_id: &str) -> rusqlite::Result<Vec<SwarmDecision>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, swarm_id, task_id, verb, by, said, launch, created_ns FROM swarm_decisions
+         WHERE swarm_id = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![swarm_id], |r| {
+        Ok(SwarmDecision {
+            id: r.get(0)?,
+            swarm_id: r.get(1)?,
+            task_id: r.get(2)?,
+            verb: SwarmVerb::parse(&r.get::<_, String>(3)?).unwrap_or(SwarmVerb::Launch),
+            by: DecidedBy::parse(&r.get::<_, String>(4)?).unwrap_or(DecidedBy::Cli),
+            said: r.get(5)?,
+            launch: r.get(6)?,
+            created_ns: r.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// The decision that approved the plan, if it was.
+pub fn launch_decision(conn: &Connection, swarm_id: &str) -> Option<SwarmDecision> {
+    decisions(conn, swarm_id)
+        .ok()?
+        .into_iter()
+        .find(|d| matches!(d.verb, SwarmVerb::Launch | SwarmVerb::Approve) && d.task_id.is_none())
+}
+
+/// What [`launch`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Launched {
+    /// The plan was approved by this call (`review` → `running`).
+    pub approved: bool,
+    /// The tasks whose workers were asked for, by key.
+    pub requested: Vec<String>,
+}
+
+impl Launched {
+    pub fn note(&self, swarm: &SwarmRun) -> String {
+        let mut out = if self.approved {
+            format!("plan approved: swarm {} is running", swarm.id)
+        } else {
+            format!("swarm {} is {}", swarm.id, swarm.status.as_str())
+        };
+        match self.requested.len() {
+            0 => out.push_str("; no task is ready to start right now"),
+            n => out.push_str(&format!(
+                "; starting {n} worker(s): {}",
+                self.requested
+                    .iter()
+                    .map(|k| format!("`{k}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+        out
+    }
+}
+
+/// The coordinator's `agent_mux_swarm_launch` (and `swarm approve`,
+/// `swarm launch`): approves a plan in review, recording who relayed the
+/// operator's yes, and asks for the workers of `tasks` (keys, ids or
+/// prefixes), or of every ready task when none is named. The engine spawns
+/// them at its next pass, within the cap. A coordinator relaying from its
+/// chat must quote the operator (`Decider::said`) to approve.
+pub fn launch(
+    conn: &Connection,
+    db: Option<&Path>,
+    swarm: &SwarmRun,
+    tasks: &[String],
+    who: &Decider<'_>,
+    env: &super::plan::CheckEnv,
+    now: i64,
+) -> Result<Launched, String> {
+    let board = board(conn, &swarm.id).map_err(|e| e.to_string())?;
+    let mut approved = false;
+    match swarm.status {
+        SwarmStatus::Review => {
+            if who.by == DecidedBy::Chat && who.said.is_none() {
+                return Err(
+                    "quote what the operator said in operator_said: the plan is approved only on                      their word"
+                        .into(),
+                );
+            }
+            let problems = super::plan::check(
+                &board_plan(swarm, &board),
+                &env.with_pool(worker_pool(conn, swarm)),
+            );
+            if let Some((k, m)) = problems.errors.first() {
+                return Err(format!(
+                    "the plan has {} error(s); first: {}{m}",
+                    problems.errors.len(),
+                    if k.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{k}: ")
+                    }
+                ));
+            }
+            if board.is_empty() {
+                return Err("the plan has no tasks".into());
+            }
+            set_status(conn, db, &swarm.id, SwarmStatus::Running, now)
+                .map_err(|e| e.to_string())?;
+            decide(conn, &swarm.id, None, SwarmVerb::Launch, who, now)
+                .map_err(|e| e.to_string())?;
+            approved = true;
+        }
+        SwarmStatus::Running | SwarmStatus::Paused | SwarmStatus::Integrating => {}
+        SwarmStatus::Planning => {
+            return Err("there is no plan yet: submit one with agent_mux_swarm_plan first".into());
+        }
+        SwarmStatus::Finished => return Err("the swarm is finished".into()),
+    }
+    let mut chosen: Vec<&BoardTask> = Vec::new();
+    if tasks.is_empty() {
+        chosen.extend(board.iter().filter(|t| {
+            t.task.status == TaskStatus::Open
+                && !t.ext.proposed
+                && super::engine::unmet_dependencies(t, &board).is_empty()
+        }));
+    } else {
+        for needle in tasks {
+            let t = find_task(&board, needle)?;
+            if t.task.status != TaskStatus::Open {
+                return Err(format!(
+                    "`{}` is {}: only an open task starts",
+                    t.ext.plan_key,
+                    t.task.status.as_str()
+                ));
+            }
+            let unmet = super::engine::unmet_dependencies(t, &board);
+            if !unmet.is_empty() {
+                return Err(format!(
+                    "`{}` waits for {}: start those first",
+                    t.ext.plan_key,
+                    unmet
+                        .iter()
+                        .map(|k| format!("`{k}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !chosen.iter().any(|c| c.task.id == t.task.id) {
+                chosen.push(t);
+            }
+        }
+    }
+    let by: LaunchedBy = who.by.into();
+    let mut requested = Vec::new();
+    for t in chosen {
+        if t.ext.proposed {
+            accept_proposal(conn, None, &t.task.id).map_err(|e| e.to_string())?;
+        }
+        request_launch(conn, None, &t.task.id, by, now).map_err(|e| e.to_string())?;
+        let _ = event(
+            conn,
+            &swarm.id,
+            Some(&t.task.id),
+            "task.requested",
+            Some(who.actor()),
+            Some(serde_json::json!({ "by": by.as_str(), "key": t.ext.plan_key })),
+            now,
+        );
+        requested.push(t.ext.plan_key.clone());
+    }
+    poke(db);
+    Ok(Launched {
+        approved,
+        requested,
+    })
+}
+
 /// Accepts a proposed task: from now on the dispatcher schedules it.
 pub fn accept_proposal(
     conn: &Connection,
@@ -1049,6 +1687,15 @@ pub fn end_swarm(
         params![now, swarm.id],
     )
     .map_err(|e| e.to_string())?;
+    let _ = event(
+        conn,
+        &swarm.id,
+        None,
+        "closed",
+        None,
+        Some(serde_json::json!({ "cancelled": cancelled, "released": released })),
+        now,
+    );
     poke(db);
     Ok((cancelled, released))
 }
@@ -1093,8 +1740,13 @@ fn stop_swarm_tasks(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SwarmVerb {
-    /// Approve the plan: `review` → `running`.
+    /// Approve the plan: `review` → `running` (every ready task starts).
     Approve,
+    /// Approve the plan if it waits, and start the named ready task (or
+    /// every ready one): the coordinator's `agent_mux_swarm_launch`.
+    Launch,
+    /// Cancel a task that has not finished; a running worker is stopped.
+    Cancel,
     /// Run the planner again with notes (needs the TUI).
     Replan,
     Pause,
@@ -1119,6 +1771,8 @@ impl SwarmVerb {
     pub fn parse(s: &str) -> Option<SwarmVerb> {
         Some(match s {
             "approve" => SwarmVerb::Approve,
+            "launch" | "start-task" => SwarmVerb::Launch,
+            "cancel" => SwarmVerb::Cancel,
             "replan" | "re-plan" => SwarmVerb::Replan,
             "pause" => SwarmVerb::Pause,
             "resume" => SwarmVerb::Resume,
@@ -1132,15 +1786,47 @@ impl SwarmVerb {
             _ => return None,
         })
     }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SwarmVerb::Approve => "approve",
+            SwarmVerb::Launch => "launch",
+            SwarmVerb::Cancel => "cancel",
+            SwarmVerb::Replan => "replan",
+            SwarmVerb::Pause => "pause",
+            SwarmVerb::Resume => "resume",
+            SwarmVerb::Retry => "retry",
+            SwarmVerb::Merge => "merge",
+            SwarmVerb::SetAside => "set-aside",
+            SwarmVerb::Accept => "accept",
+            SwarmVerb::Drop => "drop",
+            SwarmVerb::Close => "close",
+            SwarmVerb::Restart => "restart",
+        }
+    }
     /// Whether the verb names a task.
     pub fn takes_task(self) -> bool {
         matches!(
             self,
             SwarmVerb::Retry
+                | SwarmVerb::Cancel
                 | SwarmVerb::Merge
                 | SwarmVerb::SetAside
                 | SwarmVerb::Accept
                 | SwarmVerb::Drop
+        )
+    }
+    /// Whether a coordinator relaying the verb from its chat must quote the
+    /// operator (`operator_said`): what starts, merges, discards or ends
+    /// work (spec §5.3).
+    pub fn needs_operator_words(self) -> bool {
+        matches!(
+            self,
+            SwarmVerb::Approve
+                | SwarmVerb::Launch
+                | SwarmVerb::Merge
+                | SwarmVerb::SetAside
+                | SwarmVerb::Cancel
+                | SwarmVerb::Close
         )
     }
     /// Whether only the running TUI can carry it out (it starts or stops
@@ -1178,6 +1864,7 @@ pub fn board_plan(swarm: &SwarmRun, board: &[BoardTask]) -> Plan {
 /// Carries out a verb that only changes rows (and, for `merge`, runs git in
 /// the workspace). `env` re-checks the plan on approval. Answers what was
 /// done, for the operator.
+#[allow(clippy::too_many_arguments)]
 pub fn apply(
     conn: &Connection,
     db: Option<&Path>,
@@ -1185,10 +1872,17 @@ pub fn apply(
     verb: SwarmVerb,
     task: Option<&str>,
     env: &super::plan::CheckEnv,
+    who: &Decider<'_>,
     now: i64,
 ) -> Result<String, String> {
     if verb.needs_tui() {
         return Err(format!("{verb:?} needs the running agent-mux TUI"));
+    }
+    if who.by == DecidedBy::Chat && verb.needs_operator_words() && who.said.is_none() {
+        return Err(format!(
+            "quote what the operator said in operator_said: `{}` happens only on their word",
+            verb.as_str()
+        ));
     }
     let board = board(conn, &swarm.id).map_err(|e| e.to_string())?;
     let target = match (verb.takes_task(), task) {
@@ -1197,6 +1891,7 @@ pub fn apply(
         (false, _) => None,
     };
     let status = swarm.status;
+    let task_id = target.map(|t| t.task.id.as_str());
     match verb {
         SwarmVerb::Approve => {
             if status != SwarmStatus::Review {
@@ -1205,27 +1900,51 @@ pub fn apply(
                     status.as_str()
                 ));
             }
-            let problems = super::plan::check(
-                &board_plan(swarm, &board),
-                &env.with_pool(worker_pool(conn, swarm)),
-            );
-            if let Some((k, m)) = problems.errors.first() {
+            let done = launch(conn, db, swarm, &[], who, env, now)?;
+            Ok(format!(
+                "plan approved: {} task(s); {}",
+                board.len(),
+                match done.requested.len() {
+                    0 => "no task is ready yet".to_string(),
+                    n => format!("{n} worker(s) start now"),
+                }
+            ))
+        }
+        SwarmVerb::Launch => {
+            let tasks: Vec<String> = task.map(|t| vec![t.to_string()]).unwrap_or_default();
+            let done = launch(conn, db, swarm, &tasks, who, env, now)?;
+            let current = get_swarm(conn, &swarm.id)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| swarm.clone());
+            Ok(done.note(&current))
+        }
+        SwarmVerb::Cancel => {
+            let t = target.expect("takes a task");
+            if t.task.status.is_terminal() {
                 return Err(format!(
-                    "the plan has {} error(s); first: {}{m}",
-                    problems.errors.len(),
-                    if k.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{k}: ")
-                    }
+                    "`{}` is already {}",
+                    t.ext.plan_key,
+                    t.task.status.as_str()
                 ));
             }
-            set_status(conn, db, &swarm.id, SwarmStatus::Running, now)
-                .map_err(|e| e.to_string())?;
-            Ok(format!(
-                "plan approved: {} task(s); workers start now",
-                board.len()
-            ))
+            bstore::update_task(
+                conn,
+                db,
+                &t.task.id,
+                t.task.assigned_to.as_deref().unwrap_or(who.actor()),
+                TaskStatus::Cancelled,
+                Some(serde_json::json!(format!(
+                    "cancelled by the operator{}",
+                    who.said.map(|s| format!(": {s}")).unwrap_or_default()
+                ))),
+                None,
+                None,
+                None,
+                now,
+            )?;
+            decide(conn, &swarm.id, task_id, verb, who, now).map_err(|e| e.to_string())?;
+            Ok(format!("cancelled `{}`", t.ext.plan_key))
         }
         SwarmVerb::Pause => {
             if status != SwarmStatus::Running {
@@ -1235,6 +1954,7 @@ pub fn apply(
                 ));
             }
             set_status(conn, db, &swarm.id, SwarmStatus::Paused, now).map_err(|e| e.to_string())?;
+            decide(conn, &swarm.id, None, verb, who, now).map_err(|e| e.to_string())?;
             Ok("paused: running workers continue, nothing new starts".into())
         }
         SwarmVerb::Resume => {
@@ -1246,12 +1966,15 @@ pub fn apply(
             }
             set_status(conn, db, &swarm.id, SwarmStatus::Running, now)
                 .map_err(|e| e.to_string())?;
+            decide(conn, &swarm.id, None, verb, who, now).map_err(|e| e.to_string())?;
             Ok("resumed".into())
         }
         SwarmVerb::Retry => {
             let t = target.expect("takes a task");
             bstore::reopen_task(conn, db, &t.task.id, now)?;
+            reset_dispatch(conn, &t.task.id).map_err(|e| e.to_string())?;
             clear_check(conn, &swarm.id).map_err(|e| e.to_string())?;
+            decide(conn, &swarm.id, task_id, verb, who, now).map_err(|e| e.to_string())?;
             if matches!(status, SwarmStatus::Integrating | SwarmStatus::Finished) {
                 set_status(conn, db, &swarm.id, SwarmStatus::Running, now)
                     .map_err(|e| e.to_string())?;
@@ -1284,6 +2007,20 @@ pub fn apply(
                 now,
             )
             .map_err(|e| e.to_string())?;
+            decide(conn, &swarm.id, task_id, verb, who, now).map_err(|e| e.to_string())?;
+            let _ = event(
+                conn,
+                &swarm.id,
+                task_id,
+                if merged {
+                    "review.merged"
+                } else {
+                    "review.set_aside"
+                },
+                Some(who.actor()),
+                Some(serde_json::json!({ "branch": branch, "commit": detail })),
+                now,
+            );
             Ok(match detail {
                 Some(c) => format!("merged {branch} ({c})"),
                 None => format!("set {branch} aside"),
@@ -1294,6 +2031,7 @@ pub fn apply(
             if !t.ext.proposed {
                 return Err(format!("`{}` is not a proposal", t.ext.plan_key));
             }
+            decide(conn, &swarm.id, task_id, verb, who, now).map_err(|e| e.to_string())?;
             if verb == SwarmVerb::Accept {
                 accept_proposal(conn, db, &t.task.id).map_err(|e| e.to_string())?;
                 Ok(format!("accepted `{}`", t.ext.plan_key))
@@ -1333,6 +2071,7 @@ mod tests {
             check_cmd: Some("  ".into()),
             owner_run: Some("run-1".into()),
             worker_pool: vec![],
+            headless: false,
         }
     }
 
@@ -1657,5 +2396,199 @@ mod tests {
         assert_eq!(cancelled, 4);
         assert!(live_swarm(&conn, &s.workspace).unwrap().is_none());
         create_swarm(&conn, None, &new_swarm(&ws), 6).expect("a new swarm after the end");
+    }
+
+    fn check_env() -> super::super::plan::CheckEnv {
+        super::super::plan::CheckEnv {
+            harnesses: vec!["claude".into(), "codex".into()],
+            agents: vec![],
+            writing_agents: vec![],
+            git_repo: false,
+            default_isolation: TaskIsolation::Shared,
+            pool: vec![],
+        }
+    }
+
+    #[test]
+    fn a_plan_is_approved_on_the_operators_word_and_its_ready_tasks_are_requested() {
+        let (dir, conn) = store();
+        let ws = dir.path().to_string_lossy().into_owned();
+        let s = create_swarm(&conn, None, &new_swarm(&ws), 1).unwrap();
+        assert_eq!(s.gate_mode, GateMode::Chat);
+        assert!(!s.headless);
+        let plan = Plan {
+            summary: "two steps".into(),
+            tasks: vec![pt("a", &[]), pt("b", &["a"])],
+        };
+        let done = submit_plan(&conn, None, &s, &plan, &check_env(), 2).unwrap();
+        let Submitted::Accepted { table, status, .. } = &done else {
+            panic!("{done:?}");
+        };
+        assert_eq!(*status, SwarmStatus::Review);
+        assert!(table.contains("| `a` | Task a |"), "{table}");
+        assert!(table.contains("Up to 2 worker(s)"), "{table}");
+        let s = get_swarm(&conn, &s.id).unwrap().unwrap();
+
+        // The coordinator must quote the operator to approve.
+        let err = launch(
+            &conn,
+            None,
+            &s,
+            &[],
+            &Decider::chat(None, Some("coord")),
+            &check_env(),
+            3,
+        )
+        .unwrap_err();
+        assert!(err.contains("operator_said"), "{err}");
+        assert_eq!(
+            get_swarm(&conn, &s.id).unwrap().unwrap().status,
+            SwarmStatus::Review
+        );
+
+        let done = launch(
+            &conn,
+            None,
+            &s,
+            &[],
+            &Decider::chat(Some("go"), Some("coord")),
+            &check_env(),
+            4,
+        )
+        .unwrap();
+        assert!(done.approved);
+        assert_eq!(done.requested, ["a"], "b waits for a");
+        let s = get_swarm(&conn, &s.id).unwrap().unwrap();
+        assert_eq!(s.status, SwarmStatus::Running);
+        let rows = board(&conn, &s.id).unwrap();
+        assert_eq!(rows[0].ext.launched_by, Some(LaunchedBy::Coordinator));
+        assert_eq!(rows[1].ext.launched_by, None);
+        let d = launch_decision(&conn, &s.id).expect("recorded");
+        assert_eq!(
+            (d.by, d.said.as_deref(), d.launch.as_deref()),
+            (DecidedBy::Chat, Some("go"), Some("coord"))
+        );
+        let kinds: Vec<String> = recent_events(&conn, &s.id, 50)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "started",
+                "plan.proposed",
+                "decision.launch",
+                "task.requested"
+            ]
+        );
+
+        // Launching a blocked task is refused; a done one too.
+        let err = launch(
+            &conn,
+            None,
+            &s,
+            &["b".into()],
+            &Decider::TUI,
+            &check_env(),
+            5,
+        )
+        .unwrap_err();
+        assert!(err.contains("waits for `a`"), "{err}");
+        // The dispatcher's offer is kept once; a retry forgets it.
+        offer_task(&conn, &rows[1].task.id, 10).unwrap();
+        offer_task(&conn, &rows[1].task.id, 20).unwrap();
+        assert_eq!(board(&conn, &s.id).unwrap()[1].ext.offered_ns, Some(10));
+        bstore::update_task(
+            &conn,
+            None,
+            &rows[1].task.id,
+            "w",
+            TaskStatus::Failed,
+            None,
+            Some("boom".into()),
+            None,
+            None,
+            30,
+        )
+        .unwrap();
+        apply(
+            &conn,
+            None,
+            &s,
+            SwarmVerb::Retry,
+            Some("b"),
+            &check_env(),
+            &Decider::CLI,
+            31,
+        )
+        .unwrap();
+        let b = &board(&conn, &s.id).unwrap()[1];
+        assert_eq!((b.ext.offered_ns, b.ext.launched_by), (None, None));
+        assert_eq!(b.task.status, TaskStatus::Open);
+        // The log can be waited on from an id.
+        let last = last_event_id(&conn, &s.id).unwrap();
+        assert!(events_after(&conn, &s.id, last, 10).unwrap().is_empty());
+        assert_eq!(
+            events_after(&conn, &s.id, 0, 100).unwrap().len() as i64,
+            last - events_after(&conn, &s.id, 0, 1).unwrap()[0].id + 1
+        );
+    }
+
+    #[test]
+    fn the_gate_off_runs_the_plan_at_once_and_cancel_needs_the_operators_words_from_the_chat() {
+        let (dir, conn) = store();
+        let ws = dir.path().to_string_lossy().into_owned();
+        let mut n = new_swarm(&ws);
+        n.gate = false;
+        let s = create_swarm(&conn, None, &n, 1).unwrap();
+        assert_eq!(s.gate_mode, GateMode::Off);
+        let plan = Plan {
+            summary: String::new(),
+            tasks: vec![pt("a", &[])],
+        };
+        let done = submit_plan(&conn, None, &s, &plan, &check_env(), 2).unwrap();
+        assert!(matches!(
+            done,
+            Submitted::Accepted {
+                status: SwarmStatus::Running,
+                ..
+            }
+        ));
+        let s = get_swarm(&conn, &s.id).unwrap().unwrap();
+        let err = apply(
+            &conn,
+            None,
+            &s,
+            SwarmVerb::Cancel,
+            Some("a"),
+            &check_env(),
+            &Decider::chat(None, Some("c")),
+            3,
+        )
+        .unwrap_err();
+        assert!(err.contains("operator_said"), "{err}");
+        let d = apply(
+            &conn,
+            None,
+            &s,
+            SwarmVerb::Cancel,
+            Some("a"),
+            &check_env(),
+            &Decider::chat(Some("stop a"), Some("c")),
+            4,
+        )
+        .unwrap();
+        assert_eq!(d, "cancelled `a`");
+        assert_eq!(
+            board(&conn, &s.id).unwrap()[0].task.status,
+            TaskStatus::Cancelled
+        );
+        let ds = decisions(&conn, &s.id).unwrap();
+        assert_eq!(ds.len(), 1);
+        assert_eq!(
+            (ds[0].verb, ds[0].said.as_deref()),
+            (SwarmVerb::Cancel, Some("stop a"))
+        );
     }
 }

@@ -12,9 +12,88 @@ pub mod engine;
 pub mod plan;
 pub mod prompt;
 pub mod record;
+pub mod view;
 
 use super::BusMessage;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+/// A launch's place in a swarm, recorded on its launch row as
+/// `launches.metadata.swarm_id`, `swarm_role`, `swarm_task`,
+/// `swarm_task_key` and `parent_launch` (coordinator-first spec §7.1), the
+/// way loop and workflow launches record `loop_*` and `workflow_*`. With
+/// it the store, `agent-mux trace swarm`, Heimdall and the Langfuse export
+/// read one swarm as one tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmLaunch {
+    pub swarm_id: String,
+    pub role: SwarmRole,
+    /// The task a worker runs (`agent_tasks.id`) and its plan key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_key: Option<String>,
+    /// The coordinator's launch for a worker; the operator's session for a
+    /// coordinator started from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_launch: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SwarmRole {
+    Coordinator,
+    Worker,
+}
+
+impl SwarmRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SwarmRole::Coordinator => "coordinator",
+            SwarmRole::Worker => "worker",
+        }
+    }
+}
+
+impl SwarmLaunch {
+    pub fn coordinator(swarm_id: &str, parent_launch: Option<String>) -> SwarmLaunch {
+        SwarmLaunch {
+            swarm_id: swarm_id.to_string(),
+            role: SwarmRole::Coordinator,
+            task_id: None,
+            task_key: None,
+            parent_launch,
+        }
+    }
+    pub fn worker(
+        swarm_id: &str,
+        task_id: &str,
+        task_key: &str,
+        coordinator_launch: Option<String>,
+    ) -> SwarmLaunch {
+        SwarmLaunch {
+            swarm_id: swarm_id.to_string(),
+            role: SwarmRole::Worker,
+            task_id: Some(task_id.to_string()),
+            task_key: Some(task_key.to_string()),
+            parent_launch: coordinator_launch,
+        }
+    }
+    /// The keys written to `launches.metadata`.
+    pub fn metadata(&self, meta: &mut serde_json::Map<String, serde_json::Value>) {
+        meta.insert("swarm_id".into(), self.swarm_id.as_str().into());
+        meta.insert("swarm_role".into(), self.role.as_str().into());
+        if let Some(t) = &self.task_id {
+            meta.insert("swarm_task".into(), t.as_str().into());
+        }
+        if let Some(k) = &self.task_key {
+            meta.insert("swarm_task_key".into(), k.as_str().into());
+        }
+        if let Some(p) = &self.parent_launch {
+            meta.insert("parent_launch".into(), p.as_str().into());
+        }
+    }
+}
 
 /// The `question` messages nobody answered: no later message names one in
 /// `reply_to`, and its asker got nothing back from whom it asked (anyone,

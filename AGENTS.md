@@ -75,6 +75,8 @@ Since schema v21 agent-mux runs a swarm itself, without a coordinator session:
 
 8. Since schema v23 a workspace may run several swarms: verbs name theirs by id (`App::swarm_action_on`, `record::resolve_swarm`, `record::swarm_of_task`, `--swarm`), and `plan_blocks` gates a task by its own swarm.
 
+9. Since schema v24 (coordinator-first design, `docs/superpowers/specs/2026-11-05-swarm-coordinator-first-design.md`) the coordinator launches and agent-mux supervises: the engine **offers** a ready task (`engine::Action::Offer`, `swarm_dispatch`), the coordinator starts it with `agent_mux_swarm_launch` (`record::launch`, quoting the operator's yes in `operator_said`; a `swarm_decisions` row with `by = chat|tui|cli`), and the dispatcher starts it itself after `DISPATCH_GRACE_NS`. `agent_mux_swarm_start|wait|board|action` (`src/mcp/swarm_tools.rs`, `bus::swarm::view`) and `agent-mux swarm launch|wait|events|cancel` share the rows; `swarm_events` is the log; every launch carries `launches.metadata.swarm_*` (`bus::swarm::SwarmLaunch`). Gate modes: `chat` (default) and `off`; the screen never approves a plan.
+
 The coordinator-era tables `swarm_state` and `swarm_plans` (v17, v19) are left in the schema, unused.
 Guide: `docs/bus.md`; how to use swarms: `docs/swarm.md`.
 

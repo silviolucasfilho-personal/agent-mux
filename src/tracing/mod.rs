@@ -139,6 +139,9 @@ pub struct LaunchPlan {
     pub loop_launch: Option<crate::loops::LoopLaunch>,
     /// A workflow session: the keys written to `launches.metadata.workflow_*`.
     pub workflow: Option<crate::workflows::WorkflowLaunch>,
+    /// A swarm's coordinator or worker: the keys written to
+    /// `launches.metadata.swarm_*` and `parent_launch` (v24).
+    pub swarm: Option<crate::bus::swarm::SwarmLaunch>,
     profile_name: String,
     dir: PathBuf,
 }
@@ -627,6 +630,7 @@ impl TraceRuntime {
             skill: None,
             loop_launch: None,
             workflow: None,
+            swarm: None,
             dir: dir.to_path_buf(),
         })
     }
@@ -920,6 +924,7 @@ impl TraceRuntime {
             skill: None,
             loop_launch: None,
             workflow: None,
+            swarm: None,
             dir: dir.to_path_buf(),
         })
     }
@@ -1051,6 +1056,9 @@ impl TraceRuntime {
             if let Some(a) = &w.agent {
                 meta.insert("workflow_agent".into(), serde_json::Value::from(a.as_str()));
             }
+        }
+        if let Some(sw) = &plan.swarm {
+            sw.metadata(&mut meta);
         }
         if let Some(lp) = &plan.loop_launch {
             meta.insert(

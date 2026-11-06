@@ -131,6 +131,7 @@ fn seed(f: &Fixture, status: SwarmStatus, tasks: Vec<PlannedTask>) -> SwarmRun {
             check_cmd: None,
             owner_run: Some("another-tui".into()),
             worker_pool: vec![],
+            headless: false,
         },
         now_ns(),
     )
@@ -299,7 +300,7 @@ fn y_approves_only_a_plan_without_errors_and_d_deletes_a_draft_task() {
     );
     assert_eq!(
         notice(&f.app),
-        "plan approved: 1 task(s); workers start now"
+        "plan approved: 1 task(s); 1 worker(s) start now"
     );
     let first = record::board(&conn, &swarm.id).unwrap()[0].task.id.clone();
     assert!(bstore::plan_blocks(&conn, &first).is_none());
@@ -765,6 +766,7 @@ fn an_agy_worker_with_a_writing_agent_is_refused_at_spawn() {
             agent: Some("doc-writer".into()),
             isolation: TaskIsolation::Shared,
             opening_prompt: None,
+            swarm: None,
         },
         Instant::now(),
     );
