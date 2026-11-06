@@ -1247,6 +1247,13 @@ impl App {
                     }
                     _ => format!("{} {}", key, t.task.status.as_str()),
                 };
+                // a review's first line is only its verdict
+                let what = match &t.ext.review_of {
+                    Some(_) if t.task.status == crate::bus::TaskStatus::Done => format!(
+                        "{what} (a review: tell the operator the verdict and the findings, in agent_mux_swarm_board's `reviews`)"
+                    ),
+                    _ => what,
+                };
                 events.push(what);
                 newest = newest.max(ended);
             }
