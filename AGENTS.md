@@ -64,10 +64,10 @@ Live peer-to-peer coordination and lead-to-worker task delegation across Claude 
 
 `WakeWorkspace` wakes every live session of a workspace but the sender, which is how a broadcast with `wake` reaches the swarm. The dispatcher keeps the swarm's `max_workers`, and `SpawnWorker` itself has no cap.
 
-Since schema v21 agent-mux runs a swarm itself, without a coordinator session:
-1. A coordinator agent, an interactive session (`App::start_swarm_coordinator`, `bus::swarm::prompt::coordinator_prompt`, skill `skills/swarm-plan`, `$AGENT_MUX_SWARM_PLAN`, prompt `[swarm] plan`; schema v22 `swarm_coordinators`), submits the plan with `agent_mux_swarm_plan` (CLI `swarm submit-plan`).
-2. `record::submit_plan` checks it (`bus::swarm::plan`) and answers errors to the coordinator, or puts it on the board (`swarms`, `swarm_tasks`). The coordinator then answers workers' questions (`to = "coordinator"`, `record::coordinator_address`) and is told task events in batches (`App::tell_coordinator_events`). It never dispatches.
-3. The operator approves it (`SwarmVerb`, `ControlRequest::SwarmAction`, `agent-mux swarm approve`).
+Since schema v21 agent-mux runs a swarm itself (the dispatcher), and since v24 the coordinator steers it from its chat:
+1. The coordinator, an interactive session (`App::start_swarm_coordinator`, `bus::swarm::prompt::coordinator_prompt`, skill `skills/swarm-coordinator`, `$AGENT_MUX_SWARM_CONTEXT`, prompt `[swarm] coordinator`; schema v22 `swarm_coordinators`), talks the goal over with the operator and submits the plan with `agent_mux_swarm_plan` (CLI `swarm submit-plan`).
+2. `record::submit_plan` checks it (`bus::swarm::plan`) and answers errors to the coordinator, or puts it on the board (`swarms`, `swarm_tasks`) and answers the plan as a table. The coordinator then answers workers' questions (`to = "coordinator"`, `record::coordinator_address`) and is told task events in batches (`App::tell_coordinator_events`).
+3. The operator confirms in the coordinator's chat, and the coordinator relays it (`agent_mux_swarm_launch(operator_said)`; from a shell `agent-mux swarm approve`). The screen never approves a plan.
 4. The pure dispatcher `bus::swarm::engine::next_actions`, run by `app::swarm_engine` on every tick:
    - starts each worker with its whole task as the opening prompt (`bus::swarm::prompt`, `SpawnWorker.opening_prompt`)
    - nudges a worker idle on its task once

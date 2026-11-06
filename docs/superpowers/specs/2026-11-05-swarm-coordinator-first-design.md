@@ -1,6 +1,12 @@
 # Swarm: coordinator-first — design
 
-Status: proposed, 2026-11-05 (operator decisions in §13). Supersedes, where
+Status: implemented, 2026-11-06 (operator decisions in §13): A store and
+tools #113, B the coordinator #115, C the screen #116, D the trace #117, E
+docs and cleanup #118. Departures from the text: the Log is also fed by
+`bus::store` (`task.<status>`, `message`, `question.*`), the swarm row has
+six tabs (Activity stayed beside Log), a worker's Changes tab stayed, and
+`--planner` / `--no-plan-gate` remain accepted one more release as aliases
+of `--coordinator` / `--gate off`. Supersedes, where
 they conflict, `2026-11-02-swarm-orchestrator-design.md` §4 (planning), §5.1
 (who spawns), §8 (the screen) and `2026-11-02-swarm-agents-layout-design.md`
 §2 (the tree of every swarm), §3.1 (the plan written from a form) and §4.1

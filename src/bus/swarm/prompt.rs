@@ -148,7 +148,8 @@ pub fn nudge_prompt(t: &BoardTask, workspace: &str) -> String {
     )
 }
 
-/// The planner's context file (`$AGENT_MUX_SWARM_PLAN`).
+/// The coordinator's context file (`$AGENT_MUX_SWARM_CONTEXT`; also
+/// `$AGENT_MUX_SWARM_PLAN` for older skills).
 #[derive(Debug, Clone, Serialize)]
 pub struct PlannerContext {
     pub goal: String,

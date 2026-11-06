@@ -97,16 +97,9 @@ The coordinator reads the goal and the workspace and submits tasks, each with a 
 - **Errors block approval:** a key used twice, a dependency that isn't in the plan or forms a cycle, a harness that isn't installed, an unknown agent, a worktree outside a git repository, or an **agy task with an agent that edits or runs commands**. agy runs a custom agent with read-only tools, so such a task can't do its work; drop the agent or pick another harness. The same pair is refused everywhere else too: the task form won't save it, `r` on such a task opens its retry form already moved to Claude (with a note saying why; clear the agent to keep agy), and agent-mux won't start such a worker, so the task fails with the reason instead of stalling.
 - **Warnings don't:** two tasks that may run at the same time and touch the same files in a shared workspace, or more than 12 tasks.
 
-The coordinator shows you the same plan as a table in its chat and asks whether to start. **You confirm there**: say go, or say what to change and it submits the plan again (tasks that already ran are kept). `y` on the screen never approves a plan: it puts the keyboard in the coordinator's chat. From a shell, `agent-mux swarm approve` does the same for scripts. In **review** the screen also lets you:
+The coordinator shows you the same plan as a table in its chat and asks whether to start. **You confirm there**: say go, or say what to change ("move 2 to codex", "split the API task in two", "drop docs") and it submits the plan again (tasks that already ran are kept). The Board mirrors the plan read-only while it is in **review**, with `waiting for you to confirm in the coordinator's chat` and each task's errors and warnings; `y` on the screen never approves a plan, it puts the keyboard in the coordinator's chat, and `e`, `d` and `p` only remind you to tell the coordinator. From a shell, `agent-mux swarm approve` (or `swarm replan "<notes>"`) does the same for scripts.
 
-| Key | Does |
-| --- | --- |
-| `e` (or `Enter`) | edit the selected task: title, instructions, done-when, files, dependencies |
-| `n` | add a task |
-| `d` | delete the selected task |
-| `p` | re-plan: write what should change and press `Enter`. The coordinator gets your notes and submits a new plan. Tasks that already ran are kept. |
-
-Nothing starts before you confirm, and workers can't claim tasks. Once you have, the coordinator starts each task when its dependencies are done (`agent_mux_swarm_launch`); a task it has not started two minutes after agent-mux told it is started by agent-mux itself, and the log says so. Every decision — who confirmed, with which words — is recorded (`agent-mux swarm events`).
+Nothing starts before you confirm, and workers can't claim tasks. Once you have, the coordinator starts each task when its dependencies are done (`agent_mux_swarm_launch`, quoting your words); a task it has not started two minutes after agent-mux told it is started by agent-mux itself, and the log says so (the swarm then lists `coordinator quiet` in Needs you, so you know it is not steering). Every decision — who confirmed, with which words — is recorded (`agent-mux swarm events`, the Log tab).
 
 ## What needs you
 
@@ -116,8 +109,9 @@ Each task that needs you carries `!` on its row, and its swarm carries `⚑n`. T
 | --- | --- | --- |
 | `question` | a worker or the coordinator asked you something, or a worker's question to the coordinator went unanswered for 5 minutes | `m` answers it |
 | `prompt` | a worker waits on a prompt in its terminal (usually a permission) | `Enter` types into its terminal |
-| `plan` | the plan waits for your approval | on the swarm: `y` approve · `p` re-plan |
-| `coordinator` | the coordinator has not submitted a plan after 15 minutes | on the swarm: `p` nudges it with notes · on `★`: `x` stops it, `r` starts a new one |
+| `plan` | the plan waits for your go in the coordinator's chat | `Enter` on `★` and say go, or what to change |
+| `coordinator` | the coordinator has not submitted a plan after 15 minutes | `Enter` on `★` to see what it is doing and talk to it · `x` stops it, `r` starts a new one |
+| `coordinator quiet` | a ready task waited two minutes and agent-mux started it itself | `Enter` on `★`: ask the coordinator to keep steering, or let agent-mux start the rest |
 | `failed` | a task failed | `r` retry |
 | `lost` | a worker's session exited mid-task | `r` retry |
 | `stalled` | a worker stopped without reporting, even after a reminder | `Enter` types into its terminal · `r` stops it, then `r` retries |
@@ -192,8 +186,9 @@ Every session of a swarm is recorded with the swarm's id (`launches.metadata.swa
 ## From the command line
 
 ```sh
-agent-mux swarm start "Add OAuth login" --planner claude --worker-harness agy,codex --workers 4 --isolation worktree
-#   --planner: the coordinator's harness · --worker-harness: the workers' pool, the first for tasks that name none
+agent-mux swarm start "Add OAuth login" --coordinator claude --worker-harness agy,codex --workers 4 --isolation worktree
+#   a goal here makes the swarm headless; without one the coordinator opens and you say it in its chat
+#   --coordinator: its harness · --gate chat|off · --worker-harness: the workers' pool, the first for tasks that name none
 agent-mux swarm status                  # the swarm and its board, each task's state (--json for scripts)
 agent-mux swarm plan                    # the board with the plan's errors and warnings
 agent-mux swarm approve                 # from a shell: every ready task starts
@@ -210,22 +205,28 @@ agent-mux swarm close                   # stops its sessions, cancels open tasks
 agent-mux swarm restart                 # a new coordinator in place of one that exited
 agent-mux swarm submit-plan --file plan.json   # what agent_mux_swarm_plan does, from a shell
 agent-mux swarm broadcast "Freeze src/api/" --urgent --wake
+agent-mux trace swarm <id> --tree | --timeline | --log | --json   # the swarm as one trace
+agent-mux langfuse export-swarm <id>    # send it to Langfuse (also sent when a swarm closes)
 ```
 
 - **`<task>`** is a plan key (`bus-fix`), a task id, or a unique prefix of either.
 - **Without the TUI:** `start`, `replan`, `restart` and `close` need the agent-mux TUI running. `approve`, `pause`, `resume`, `retry`, `merge`, `set-aside`, `accept` and `drop` also work without it: they update the records, and the workers start when a TUI runs.
 - **`stop`** is like `close`. Without a TUI, it only updates the records and says so.
-- **Options:** every command takes `--workspace DIR` (default: the current folder) and `--json`. `--no-plan-gate` starts the workers as soon as the plan passes its checks.
+- **Options:** every command takes `--workspace DIR` (default: the current folder) and `--json`. `--gate off` starts the workers as soon as the plan passes its checks. `--said "<words>"` on `approve`, `launch`, `merge`, `set-aside`, `cancel` and `close` records your words with the decision; a coordinator without MCP relays them with `--as-coordinator --said`. (`--planner` and `--no-plan-gate` are still accepted as the old spellings of `--coordinator` and `--gate off`, for one more release.)
 
 ## The coordinator
 
-The coordinator is an interactive session on the coordinator harness, in the swarm's workspace. Its opening prompt is its role and the planner context (`$AGENT_MUX_SWARM_PLAN`).
+The coordinator is an interactive session on the harness you picked, in the swarm's workspace, running the `swarm-coordinator` skill. Its opening message is three lines: its role, the swarm's id, and where its context is (`$AGENT_MUX_SWARM_CONTEXT`: the workspace inventory, the harnesses and agents installed, the limits you fixed in Advanced, the tools and their shell fallbacks). Everything else it does, it does in the conversation:
 
-- **It plans** with `agent_mux_swarm_plan`. With errors, the tool answers them and nothing changes; the coordinator fixes them and submits again. A sound plan goes on the board for you to review.
-- **It answers** the workers' questions, or forwards them to you with its recommendation.
-- **It is told** when you approve the plan or send it back, and, batched at most once a minute while it is idle, which tasks finished, failed or were proposed. It may propose follow-up tasks (`agent_mux_task_split`), which land on the board as proposals.
-- **It cannot** approve its own plan, start workers, merge or close the swarm. agent-mux does those, at your word.
-- **If it stops,** the swarm keeps running. Its `★` row shows it, and `r` there starts a new coordinator with the board as it stands (`x` stops a running one first).
+- **It talks the goal over** with you, asks what it needs, and **plans** with `agent_mux_swarm_plan`. With errors, the tool answers them and nothing changes; the coordinator fixes them and submits again. A sound plan goes on the board and comes back to it as a table, which it shows you and asks whether to start.
+- **It starts the workers at your word** with `agent_mux_swarm_launch`, quoting what you said; it cannot launch without a quotable yes, and the Board shows `confirmed in the chat 12:31 “go”`. As tasks finish it launches the ones they unblocked; if it doesn't within two minutes, agent-mux does.
+- **It follows the swarm** with `agent_mux_swarm_wait`, which returns as soon as something happens (a task finished, failed, asked, a decision, the check). A wait that returns empty after five minutes is a **check-in**, not a stop: the coordinator tells you where things stand and asks whether to keep waiting. Nothing is ever killed on a timeout; stopping is your call.
+- **It answers** the workers' questions (`to = "coordinator"`), or forwards them to you with its recommendation. A question it leaves unanswered for 5 minutes lands in your Needs you.
+- **It relays your decisions** with `agent_mux_swarm_action` (retry, cancel, merge, set aside, accept, drop, pause, resume, close), quoting you for merge, set-aside, cancel and close. It may propose follow-up tasks (`agent_mux_task_split`), which land on the board as proposals.
+- **It summarises at the end**, asks which branches to merge and closes the swarm when you say so.
+- **It never does the work itself** and never edits a file.
+- **If it stops,** the swarm keeps running: agent-mux still supervises every worker. Its `★` row shows it, and `r` there starts a new coordinator with the board as it stands (`x` stops a running one first).
+- **Without MCP** (`[agents] mcp = "off"`), the same calls exist as `agent-mux swarm plan|launch|wait|action … --as-coordinator --said "<words>"`.
 
 ## What the workers use
 
@@ -251,8 +252,10 @@ The full list and the matching `agent-mux bus …` commands are in [bus.md](bus.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `y` says "fix the plan first: …" | The plan has an error. Select the task marked `!`, read its card, and `e` edit or `d` delete it, or `p` re-plan. |
-| "the coordinator has not submitted a plan" | Select `★` to see what it is doing, and `Enter` to talk to it. `p` sends it notes; `x` then `r` on `★` starts a new one. |
+| The Board lists an error on a task | Select the task marked `✗`, read its card, and tell the coordinator what to change (`Enter` on `★`); it submits the plan again. |
+| "the coordinator has not submitted a plan" | Select `★` to see what it is doing, and `Enter` to talk to it. `agent-mux swarm replan "<notes>"` sends it notes from a shell; `x` then `r` on `★` starts a new one. |
+| "coordinator quiet" on the swarm | The coordinator did not launch a ready task within two minutes, so agent-mux started it. Fine if you want; otherwise `Enter` on `★` and ask it to keep steering. |
+| The coordinator says a wait timed out | Nothing happened for five minutes. Answer it: keep waiting, or look at the Board (`!` jumps to what needs you). Nothing was stopped. |
 | A task stays `⋯` blocked | A task it depends on isn't done, or its branch isn't merged. The card says which. A failed dependency needs `r`. |
 | A task shows `!` lost | Its session exited mid-task. `r` retries it with a new worker. |
 | A task shows `○` stalled | The worker stopped without reporting, even after a reminder. Attach (`Enter`) to see why, message it, or `r` to stop it and `r` again to retry. |
