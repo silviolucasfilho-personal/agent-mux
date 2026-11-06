@@ -55,6 +55,17 @@ fn fake_claude(bin: &Path, db: &Path, ws: &Path, plan: Option<&str>, bad: bool) 
         format!(
             r#"#!/bin/sh
 r='{calls}'
+# The dispatcher records a worker's task (assigned_to) just after starting
+# its process; a real harness boots for seconds first, this one does not:
+# retry a bus call refused in that window.
+retry() {{
+  i=0
+  until "$@"; do
+    i=$((i+1))
+    [ "$i" -ge 40 ] && return 1
+    sleep 0.25
+  done
+}}
 if [ -n "$AGENT_MUX_SWARM_PLAN" ]; then
   cp "$AGENT_MUX_SWARM_PLAN" "$r/planner-context.json"
   printf '%s\n' "$@" > "$r/coordinator-args.txt"
@@ -76,11 +87,11 @@ if [ -n "$AGENT_MUX_TASK_ID" ]; then
   printf '%s\n' "$@" > "$r/worker-$AGENT_MUX_TASK_ID.txt"
   if [ -f '{bin}/ask' ] && [ ! -f "$r/asked-once" ]; then
     touch "$r/asked-once"
-    '{mux}' bus send --to coordinator --topic question --workspace '{ws}' --db '{db}' "Which table name?" > "$r/ask.txt" 2>&1
+    retry '{mux}' bus send --to coordinator --topic question --workspace '{ws}' --db '{db}' "Which table name?" > "$r/ask.txt" 2>&1
   fi
   if [ -f '{bin}/propose' ] && [ ! -f "$r/proposed-once" ]; then
     touch "$r/proposed-once"
-    '{mux}' bus split --title "Follow-up found by the worker" --instructions "Tidy it." --workspace '{ws}' --db '{db}' > "$r/split.txt" 2>&1
+    retry '{mux}' bus split --title "Follow-up found by the worker" --instructions "Tidy it." --workspace '{ws}' --db '{db}' > "$r/split.txt" 2>&1
   fi
   result="did $AGENT_MUX_TASK_ID"
   # a review answers with the verdict the test left, and says where it ran
@@ -89,7 +100,7 @@ if [ -n "$AGENT_MUX_TASK_ID" ]; then
     pwd > "$r/review-cwd.txt"
     echo x >> "$r/reviews.txt"
   fi
-  '{mux}' bus done "$AGENT_MUX_TASK_ID" --workspace '{ws}' --db '{db}' --result "$result" > "$r/done-$AGENT_MUX_TASK_ID.txt" 2>&1
+  retry '{mux}' bus done "$AGENT_MUX_TASK_ID" --workspace '{ws}' --db '{db}' --result "$result" > "$r/done-$AGENT_MUX_TASK_ID.txt" 2>&1
   echo "worker finished"
   sleep 600
 fi

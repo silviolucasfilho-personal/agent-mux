@@ -8546,7 +8546,26 @@ impl App {
                 self.sessions.push(session);
                 let _ = self.save_active_sessions();
 
-                if let Some(db) = self.trace_db_path.as_deref()
+                // A worker can report before this row is written (a fast
+                // one, or a test's fake): it is not put back to running, and
+                // only its worktree and branch are recorded.
+                let reported = self
+                    .trace_db_path
+                    .as_deref()
+                    .and_then(|db| crate::tracing::store::open_aux(db).ok())
+                    .and_then(|c| crate::bus::store::get_task(&c, &task_id).ok().flatten())
+                    .is_some_and(|t| t.status.is_terminal());
+                if reported
+                    && let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let _ = conn.execute(
+                        "UPDATE agent_tasks SET worktree = COALESCE(worktree, ?1),
+                             branch = COALESCE(branch, ?2) WHERE id = ?3",
+                        rusqlite::params![worktree_path, branch_name, task_id],
+                    );
+                    crate::tracing::store::poke_wake(db);
+                } else if let Some(db) = self.trace_db_path.as_deref()
                     && let Ok(conn) = crate::tracing::store::open_aux(db)
                 {
                     let now_ns = crate::tracing::store::now_ns();
