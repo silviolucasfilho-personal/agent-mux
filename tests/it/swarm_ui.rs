@@ -895,3 +895,92 @@ fn an_agy_worker_with_a_writing_agent_is_refused_at_spawn() {
     );
     assert!(f.app.sessions.is_empty(), "no worker started");
 }
+
+/// An older swarm left open in another folder with something for the
+/// operator, and a newer one running in this folder.
+fn an_old_swarm_that_needs_you_elsewhere(f: &mut Fixture) -> (SwarmRun, SwarmRun) {
+    let conn = open_aux(&f.db).unwrap();
+    let old = seed(f, SwarmStatus::Review, vec![task("old", &[])]);
+    let elsewhere = f.ws.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    conn.execute(
+        "UPDATE swarms SET workspace = ?1 WHERE id = ?2",
+        rusqlite::params![elsewhere.to_string_lossy(), old.id],
+    )
+    .unwrap();
+    record::set_owner(&conn, &old.id, &f.app.app_run_id).unwrap();
+    let new = seed(f, SwarmStatus::Running, vec![task("new", &[])]);
+    f.app.on_tick(Instant::now());
+    assert_eq!(f.app.swarm_needs_first.as_deref(), Some(old.id.as_str()));
+    (old, new)
+}
+
+#[test]
+fn f1_open_swarm_opens_the_folders_swarm_before_an_older_one_that_needs_you() {
+    let mut f = fixture();
+    let (_old, new) = an_old_swarm_that_needs_you_elsewhere(&mut f);
+    // a plain session in this folder, in no swarm, is selected
+    f.app.focus_list();
+    press(&mut f, KeyCode::Char('n'));
+    press(&mut f, KeyCode::Enter);
+    press(&mut f, KeyCode::Enter);
+    assert_eq!(f.app.sessions.len(), 1, "{}", notice(&f.app));
+    f.app
+        .execute_command(agent_mux::keymap::ActionId::Swarm, Instant::now());
+    assert_eq!(
+        view(&f.app).swarm.as_ref().map(|s| s.id.clone()),
+        Some(new.id.clone()),
+        "the run in this folder, not the old one"
+    );
+    f.app.kill_all();
+}
+
+#[test]
+fn with_several_swarms_that_need_you_the_newest_is_the_one_to_open() {
+    let mut f = fixture();
+    let conn = open_aux(&f.db).unwrap();
+    let older = seed(&f, SwarmStatus::Review, vec![task("a", &[])]);
+    let newer = seed(&f, SwarmStatus::Review, vec![task("b", &[])]);
+    record::set_owner(&conn, &older.id, &f.app.app_run_id).unwrap();
+    record::set_owner(&conn, &newer.id, &f.app.app_run_id).unwrap();
+    f.app.on_tick(Instant::now());
+    assert_eq!(f.app.swarm_needs, 2);
+    assert_eq!(f.app.swarm_needs_first.as_deref(), Some(newer.id.as_str()));
+}
+
+#[test]
+fn a_swarm_row_keeps_the_cursor_when_a_session_elsewhere_ends() {
+    use agent_mux::app::agents_list::AgentKind;
+    let mut f = fixture();
+    f.app.clean = false;
+    for _ in 0..2 {
+        f.app.focus_list();
+        press(&mut f, KeyCode::Char('n'));
+        press(&mut f, KeyCode::Enter);
+        press(&mut f, KeyCode::Enter);
+    }
+    assert_eq!(f.app.sessions.len(), 2, "{}", notice(&f.app));
+    f.app.sessions[0].group = Some(agent_mux::tree::GroupRef {
+        kind: agent_mux::tree::GroupKind::Swarm,
+        id: "swarm-1".into(),
+        title: "the web run".into(),
+        detail: "1".into(),
+        label: "w1".into(),
+    });
+    f.app.selected = 0;
+    let lines = f.app.agent_lines();
+    let at = lines
+        .iter()
+        .position(|l| matches!(&l.kind, AgentKind::Run(k) if k.starts_with("swarm:")))
+        .expect("a swarm group row");
+    f.app.select_agent_line(&lines, at);
+    // the other session ends; the selected one is still selected
+    let mut gone = f.app.sessions.remove(1);
+    gone.kill();
+    assert!(
+        matches!(f.app.agent_row(), Some(AgentKind::Run(k)) if k.starts_with("swarm:")),
+        "{:?}",
+        f.app.agent_row()
+    );
+    f.app.kill_all();
+}
