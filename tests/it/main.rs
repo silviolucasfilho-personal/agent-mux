@@ -46,6 +46,7 @@ mod trace_session;
 mod trace_store;
 mod trace_tail;
 mod vt100_degenerate_grid;
+mod web;
 mod workflow_cli;
 mod workflow_runs;
 mod workflow_ui;

@@ -54,10 +54,11 @@ agent-mux trace path          # where the SQLite store is
 agent-mux skill list
 agent-mux md README.md        # Markdown viewer and editor, Mermaid drawn as text (docs/markdown.md)
 agent-mux memory install      # shared memory for Claude, Codex, agy and opencode through ai-memory (docs/memory.md)
+agent-mux web --open          # read-only web explorer of the trace store on 127.0.0.1 (docs/web.md)
 agent-mux run --help
 ```
 
-There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `run`, `loop`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI; `--hide-sidebar` starts it full-screen. The Agents list starts with the harness rows and their sessions alone: no scheduled agents, flows, skills or personas (History stays), `n` opens the New session dialog straight away, and the inbox badge stays off (`App::clean`); `m` in the list shows those sections and hides them again (`App::toggle_agent_sections`). The older `--clean` flag and `clean = true` in `profiles.toml` are no longer needed and are ignored.
+There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `web`, `run`, `loop`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI; `--hide-sidebar` starts it full-screen. The Agents list starts with the harness rows and their sessions alone: no scheduled agents, flows, skills or personas (History stays), `n` opens the New session dialog straight away, and the inbox badge stays off (`App::clean`); `m` in the list shows those sections and hides them again (`App::toggle_agent_sections`). The older `--clean` flag and `clean = true` in `profiles.toml` are no longer needed and are ignored.
 
 `--version` prints the stamp [build.rs](build.rs) bakes in at compile time and [src/build_info.rs](src/build_info.rs) formats:
 

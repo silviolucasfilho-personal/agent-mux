@@ -31,5 +31,6 @@ pub mod tracing;
 pub mod transcript;
 pub mod tree;
 pub mod ui;
+pub mod web;
 pub mod workflows;
 pub mod workspace;
