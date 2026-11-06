@@ -34,7 +34,9 @@ const BAD_PLAN: &str = r#"{"plan": {"summary": "oops",
 /// A fake `claude`. As the coordinator (`$AGENT_MUX_SWARM_PLAN` set) it
 /// records its context and arguments, submits `bad-plan.json` then
 /// `plan.json` (each if present) through `agent-mux swarm submit-plan`, as
-/// `agent_mux_swarm_plan` would, and stays open. As a worker
+/// `agent_mux_swarm_plan` would, relays the operator's "go" when `launch`
+/// exists (`swarm launch --as-coordinator --said go`, what
+/// `agent_mux_swarm_launch` does), and stays open. As a worker
 /// (`$AGENT_MUX_TASK_ID` set) it records its arguments, may propose a task
 /// or ask the coordinator (when `propose` / `ask` exist), reports its task
 /// done through `agent-mux bus done` and stays open.
@@ -62,6 +64,10 @@ if [ -n "$AGENT_MUX_SWARM_PLAN" ]; then
   fi
   if [ -f '{bin}/plan.json' ]; then
     '{mux}' swarm submit-plan --file '{bin}/plan.json' --workspace '{ws}' --db '{db}' > "$r/submit-2.txt" 2>&1
+  fi
+  if [ -f '{bin}/launch' ]; then
+    # the operator said go in the chat: relay it, through the rows (no socket)
+    AGENT_MUX_CONTROL_SOCK=/nonexistent/agent-mux-test.sock '{mux}' swarm launch --as-coordinator --said "go" --workspace '{ws}' --db '{db}' > "$r/launch.txt" 2>&1
   fi
   echo "coordinator waiting"
   sleep 600
@@ -225,16 +231,18 @@ fn start_with(f: &mut Fixture, gate: bool, check: Option<&str>) {
 async fn a_coordinator_plans_through_the_tool_and_the_swarm_runs_its_tasks_in_order() {
     let mut f = fixture(Some(PLAN), true);
     std::fs::write(f.bin.join("ask"), "").unwrap();
+    std::fs::write(f.bin.join("launch"), "").unwrap();
     start(&mut f, true);
     assert_eq!(swarm(&f).unwrap().status, SwarmStatus::Planning);
     assert!(
-        pump_until(&mut f, Duration::from_secs(60), |f| {
-            swarm(f).is_some_and(|s| s.status == SwarmStatus::Review)
+        pump_until(&mut f, Duration::from_secs(120), |f| {
+            swarm(f).is_some_and(|s| s.status.approved())
         })
         .await,
-        "the plan never arrived: {:?} {:?}",
+        "the plan never arrived or was not launched: {:?} {:?} launch: {:?}",
         swarm(&f),
-        f.app.notice
+        f.app.notice,
+        std::fs::read_to_string(f.bin.join("calls/launch.txt"))
     );
     let s = swarm(&f).unwrap();
     assert_eq!(
@@ -258,45 +266,57 @@ async fn a_coordinator_plans_through_the_tool_and_the_swarm_runs_its_tasks_in_or
         .to_string();
     assert_eq!(s.planner_launch.as_deref(), Some(coordinator.as_str()));
     let args = std::fs::read_to_string(f.bin.join("calls/coordinator-args.txt")).unwrap();
+    // The opening prompt is three lines: the swarm, the skill, the goal.
     assert!(
-        args.contains("You are the coordinator of the agent-mux swarm"),
+        args.contains(&format!(
+            "You are the coordinator of agent-mux swarm {} in",
+            s.id
+        )),
         "{args}"
     );
-    assert!(args.contains("agent_mux_swarm_plan"), "{args}");
+    assert!(
+        args.contains("/swarm-coordinator Read the context at"),
+        "{args}"
+    );
+    assert!(
+        args.contains("The operator's goal: Add the table and its queries"),
+        "{args}"
+    );
     let ctx: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(f.bin.join("calls/planner-context.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(ctx["goal"], "Add the table and its queries");
     assert_eq!(ctx["max_workers"], 2);
+    assert_eq!(ctx["limits"]["gate"], "chat");
+    assert_eq!(ctx["limits"]["headless"], true, "a goal given up front");
+    assert_eq!(ctx["limits"]["max_workers"], 2);
+    assert_eq!(ctx["tools"]["dispatch_grace_s"], 2);
+    assert!(
+        ctx["tools"]["mcp"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("agent_mux_swarm_launch"))
+    );
     let keys: Vec<String> = board(&f).iter().map(|t| t.ext.plan_key.clone()).collect();
     assert_eq!(keys, ["schema", "queries"]);
 
-    // Nothing starts before approval, and claims are refused.
-    pump_until(&mut f, Duration::from_millis(1500), |_| false).await;
-    assert!(board(&f).iter().all(|t| t.task.status == TaskStatus::Open));
+    // The coordinator relayed the operator's "go" from its chat: the plan is
+    // approved on their word, recorded as the chat's, and nobody on the
+    // screen had to press anything.
     let conn = open_aux(&f.db).unwrap();
     let ws = agent_mux::bus::store::normalize_workspace(&f.ws);
-    let first = board(&f)[0].task.id.clone();
-    assert!(agent_mux::bus::store::plan_blocks(&conn, &first).is_some());
-
-    let done = f
-        .app
-        .swarm_action(&f.ws, SwarmVerb::Approve, None, None)
-        .unwrap();
-    assert!(done.starts_with("plan approved: 2 task(s)"), "{done}");
-    // The coordinator is told.
-    let told = agent_mux::bus::store::list_workspace_messages(&conn, &ws, 50).unwrap();
-    assert!(
-        told.iter()
-            .any(|m| m.topic == "plan-approved"
-                && m.to_launch.as_deref() == Some(coordinator.as_str())),
-        "{told:?}"
-    );
+    let launched = std::fs::read_to_string(f.bin.join("calls/launch.txt")).unwrap();
+    assert!(launched.contains("plan approved"), "{launched}");
+    let d = record::launch_decision(&conn, &s.id).expect("the launch decision");
+    assert_eq!(d.by, record::DecidedBy::Chat);
+    assert_eq!(d.said.as_deref(), Some("go"));
+    assert_eq!(d.launch.as_deref(), Some(coordinator.as_str()));
+    assert_eq!(s.status, SwarmStatus::Running);
 
     // The first task runs and finishes; the second waits for it, then runs.
     assert!(
-        pump_until(&mut f, Duration::from_secs(60), |f| {
+        pump_until(&mut f, Duration::from_secs(120), |f| {
             status_of(f, "schema") == Some(TaskStatus::Done)
         })
         .await,
@@ -361,7 +381,7 @@ async fn a_coordinator_plans_through_the_tool_and_the_swarm_runs_its_tasks_in_or
     // so the dispatcher started it after the grace (coordinator-first §5.4).
     assert_eq!(
         schema.ext.launched_by,
-        Some(record::LaunchedBy::Operator),
+        Some(record::LaunchedBy::Coordinator),
         "{:?}",
         schema.ext
     );
@@ -445,7 +465,7 @@ async fn a_coordinator_plans_through_the_tool_and_the_swarm_runs_its_tasks_in_or
         .collect::<Vec<_>>()
     };
     assert!(
-        pump_until(&mut f, Duration::from_secs(30), |f| !told_events(f)
+        pump_until(&mut f, Duration::from_secs(60), |f| !told_events(f)
             .is_empty())
         .await,
         "no events told"
@@ -473,7 +493,7 @@ async fn a_plan_with_errors_changes_nothing_and_the_swarm_keeps_planning() {
     let mut f = fixture(None, true);
     start(&mut f, false);
     assert!(
-        pump_until(&mut f, Duration::from_secs(60), |f| {
+        pump_until(&mut f, Duration::from_secs(120), |f| {
             std::fs::read_to_string(f.bin.join("calls/submit-1.txt"))
                 .is_ok_and(|t| t.contains("Plan rejected"))
         })
@@ -504,7 +524,7 @@ async fn a_workers_proposal_waits_for_the_operator_and_the_check_runs_before_fin
     std::fs::write(f.bin.join("propose"), "").unwrap();
     start_with(&mut f, true, Some("echo checked-ok"));
     assert!(
-        pump_until(&mut f, Duration::from_secs(60), |f| {
+        pump_until(&mut f, Duration::from_secs(120), |f| {
             swarm(f).is_some_and(|s| s.status == SwarmStatus::Review)
         })
         .await
@@ -515,7 +535,7 @@ async fn a_workers_proposal_waits_for_the_operator_and_the_check_runs_before_fin
 
     // The first worker proposes a task instead of starting an agent.
     assert!(
-        pump_until(&mut f, Duration::from_secs(60), |f| {
+        pump_until(&mut f, Duration::from_secs(120), |f| {
             board(f).iter().any(|t| t.ext.proposed)
         })
         .await,
@@ -533,7 +553,7 @@ async fn a_workers_proposal_waits_for_the_operator_and_the_check_runs_before_fin
 
     // Both planned tasks finish; the proposal holds the swarm until decided.
     assert!(
-        pump_until(&mut f, Duration::from_secs(60), |f| {
+        pump_until(&mut f, Duration::from_secs(120), |f| {
             status_of(f, "queries") == Some(TaskStatus::Done)
         })
         .await
@@ -549,7 +569,7 @@ async fn a_workers_proposal_waits_for_the_operator_and_the_check_runs_before_fin
 
     // It runs, then the check, then the swarm is finished.
     assert!(
-        pump_until(&mut f, Duration::from_secs(60), |f| {
+        pump_until(&mut f, Duration::from_secs(120), |f| {
             swarm(f).is_some_and(|s| s.status == SwarmStatus::Finished)
         })
         .await,

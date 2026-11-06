@@ -5247,27 +5247,38 @@ impl App {
                             .join(","),
                     ),
                 });
-                // a failed start brings the form back with the reason in it
+                // a failed start brings the form back with the reason in it;
+                // a started one puts the keyboard in the coordinator's chat
                 if let Mode::Swarm(v) = &mut self.mode {
                     match &started {
                         Ok(s) => {
                             v.launch_started();
-                            v.select_swarm(&s.id);
+                            v.select_coordinator(&s.id);
+                            v.pane_focused = true;
                         }
                         Err(e) => v.launch_failed(format!("✗ {e}")),
                     }
                 }
+                if started.is_ok() {
+                    self.refresh_swarm_board();
+                }
                 Some(started.map(|s| {
-                    format!(
-                        "{} is planning with {} · workers: {}",
-                        s.id,
-                        s.planner_harness,
-                        workers
-                            .iter()
-                            .map(|h| h.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
+                    let pool = workers
+                        .iter()
+                        .map(|h| h.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if s.headless {
+                        format!(
+                            "{} is planning with {} · workers: {pool}",
+                            s.id, s.planner_harness
+                        )
+                    } else {
+                        format!(
+                            "{} started: say the goal in the {} coordinator's chat · workers: {pool}",
+                            s.id, s.planner_harness
+                        )
+                    }
                 }))
             }
             Outcome::Verb { verb, task, notes } => Some(self.swarm_action_on(

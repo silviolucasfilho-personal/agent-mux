@@ -249,7 +249,7 @@ async fn the_picker_installs_and_launches_on_the_chosen_harness() {
     assert!(text.contains("running [claude]"), "{text}");
     assert_eq!(
         text.matches("not installed").count(),
-        3,
+        7,
         "codex, agy and opencode: {text}"
     );
     app.kill_all();
@@ -491,25 +491,35 @@ async fn s_opens_the_workbench_grouped_by_harness() {
         vec![
             "# claude",
             "heimdall@claude",
+            "swarm-coordinator@claude",
             "# codex",
             "heimdall@codex",
+            "swarm-coordinator@codex",
             "# agy",
             "heimdall@agy",
+            "swarm-coordinator@agy",
             "# opencode",
-            "heimdall@opencode"
+            "heimdall@opencode",
+            "swarm-coordinator@opencode"
         ]
     );
     assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
 
     // j/k skip the headers and clamp at both ends
     app.handle_key(&key(KeyCode::Char('j')), Instant::now());
+    assert_eq!(
+        selected(&app),
+        Some(("swarm-coordinator".into(), Harness::Claude))
+    );
+    app.handle_key(&key(KeyCode::Char('j')), Instant::now());
     assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Codex)));
+    app.handle_key(&key(KeyCode::Char('k')), Instant::now());
     app.handle_key(&key(KeyCode::Char('k')), Instant::now());
     app.handle_key(&key(KeyCode::Char('k')), Instant::now());
     assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
 
     let text = screen(&app);
-    assert!(text.contains("Skills (4) [harness: all]"), "{text}");
+    assert!(text.contains("Skills (8) [harness: all]"), "{text}");
     assert!(
         text.contains("Claude Code") && text.contains("Codex CLI"),
         "{text}"
@@ -538,10 +548,13 @@ async fn s_opens_the_workbench_grouped_by_harness() {
     };
     assert_eq!(v.tab, agent_mux::app::SkillsTab::Executions);
     app.execute_command(agent_mux::keymap::ActionId::FilterCodex, Instant::now());
-    assert_eq!(shape(&app), vec!["# codex", "heimdall@codex"]);
+    assert_eq!(
+        shape(&app),
+        vec!["# codex", "heimdall@codex", "swarm-coordinator@codex"]
+    );
     assert!(screen(&app).contains("[harness: codex]"));
     app.execute_command(agent_mux::keymap::ActionId::FilterCodex, Instant::now());
-    assert_eq!(shape(&app).len(), 8);
+    assert_eq!(shape(&app).len(), 12);
     app.execute_command(
         agent_mux::keymap::ActionId::FilterAntigravity,
         Instant::now(),
@@ -551,7 +564,7 @@ async fn s_opens_the_workbench_grouped_by_harness() {
         matches!(app.mode, Mode::SkillsView(_)),
         "Esc cleared the filter first"
     );
-    assert_eq!(shape(&app).len(), 8);
+    assert_eq!(shape(&app).len(), 12);
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(matches!(app.mode, Mode::Main));
     app.kill_all();
@@ -577,10 +590,18 @@ async fn the_view_has_details_and_executions_tabs_and_reflects_install_state() {
     agent_mux::skill::install::install(&heimdall, Harness::Codex, temp.path(), false).unwrap();
 
     app.handle_key(&key(KeyCode::Char('S')), Instant::now());
-    assert_eq!(
-        shape(&app)[..3],
-        ["# claude", "heimdall@claude", "plain@claude"]
-    );
+    let claude_group: Vec<String> = shape(&app)
+        .into_iter()
+        .take_while(|r| r != "# codex")
+        .collect();
+    assert_eq!(claude_group[0], "# claude");
+    for want in [
+        "heimdall@claude",
+        "plain@claude",
+        "swarm-coordinator@claude",
+    ] {
+        assert!(claude_group.iter().any(|r| r == want), "{claude_group:?}");
+    }
     let tabs = |app: &App| match &app.mode {
         Mode::SkillsView(v) => (v.tabs(), v.tab),
         _ => panic!(),

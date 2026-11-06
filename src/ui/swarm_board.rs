@@ -413,6 +413,36 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
     }
     out.push(Line::raw(""));
     out.push(section("Plan"));
+    if s.status == SwarmStatus::Review && s.gate_mode == crate::bus::swarm::record::GateMode::Chat {
+        out.push(Line::styled(
+            "waiting for you to confirm in the coordinator's chat — Enter on ★ (or `agent-mux swarm approve`)",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some(d) = &v.launch_decision {
+        out.push(Line::styled(
+            format!(
+                "confirmed {} {}{}",
+                match d.by {
+                    crate::bus::swarm::record::DecidedBy::Chat => "in the chat",
+                    crate::bus::swarm::record::DecidedBy::Tui => "on the screen",
+                    crate::bus::swarm::record::DecidedBy::Cli => "from the CLI",
+                },
+                crate::tracing::cli::fmt_time(d.created_ns),
+                d.said
+                    .as_deref()
+                    .map(|w| format!(" “{w}”"))
+                    .unwrap_or_default()
+            ),
+            dim(),
+        ));
+    } else if s.gate_mode == crate::bus::swarm::record::GateMode::Off && s.status.approved() {
+        out.push(Line::styled(
+            "gate off: ran as soon as it checked out",
+            dim(),
+        ));
+    }
     if let Some(sum) = s.plan_summary.as_deref().filter(|x| !x.is_empty()) {
         out.push(Line::raw(sum.to_string()));
     }
@@ -1014,6 +1044,7 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
             check,
             field,
             error,
+            advanced,
             ..
         } => {
             let mut l = Vec::new();
@@ -1024,12 +1055,6 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
                 ));
                 l.push(Line::raw(""));
             }
-            l.push(field_line(
-                "Goal: what done looks like, and what's out of scope",
-                *field == LaunchField::Goal,
-            ));
-            l.extend(text_lines(goal, *field == LaunchField::Goal, 6));
-            l.push(Line::raw(""));
             l.push(choice(
                 "Coordinator",
                 v.harnesses
@@ -1038,36 +1063,64 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
                     .unwrap_or_else(|| "claude".into()),
                 *field == LaunchField::Planner,
             ));
-            l.push(pool_line(
-                v,
-                pool,
-                *pool_cursor,
-                *field == LaunchField::WorkerHarness,
-            ));
-            l.push(choice(
-                "Max parallel workers",
-                workers.to_string(),
-                *field == LaunchField::Workers,
-            ));
-            l.push(choice(
-                "Default isolation",
-                isolation.as_str().to_string(),
-                *field == LaunchField::Isolation,
-            ));
-            l.push(choice(
-                "Approve the plan before workers start",
-                if *gate { "yes".into() } else { "no".into() },
-                *field == LaunchField::Gate,
-            ));
+            l.push(Line::raw(""));
+            for t in [
+                "  The coordinator opens as a session. Tell it the goal there; it asks",
+                "  what it needs, proposes the plan as a table and starts the workers",
+                "  once you say go. The screen mirrors the plan; you confirm in the chat.",
+            ] {
+                l.push(Line::styled(t, dim()));
+            }
+            l.push(Line::raw(""));
             l.push(field_line(
-                "Check when done (optional command, e.g. cargo test)",
-                *field == LaunchField::Check,
+                &format!(
+                    "{} Advanced: goal now, workers' pool, limits, isolation, gate, check",
+                    if *advanced { "▾" } else { "▸" }
+                ),
+                *field == LaunchField::Advanced,
             ));
-            l.extend(text_lines(check, *field == LaunchField::Check, 1));
+            if *advanced {
+                l.push(Line::raw(""));
+                l.push(field_line(
+                    "Goal (optional here: with it the coordinator plans without asking)",
+                    *field == LaunchField::Goal,
+                ));
+                l.extend(text_lines(goal, *field == LaunchField::Goal, 6));
+                l.push(pool_line(
+                    v,
+                    pool,
+                    *pool_cursor,
+                    *field == LaunchField::WorkerHarness,
+                ));
+                l.push(choice(
+                    "Max parallel workers",
+                    workers.to_string(),
+                    *field == LaunchField::Workers,
+                ));
+                l.push(choice(
+                    "Default isolation",
+                    isolation.as_str().to_string(),
+                    *field == LaunchField::Isolation,
+                ));
+                l.push(choice(
+                    "Plan approval",
+                    if *gate {
+                        "in the coordinator's chat".into()
+                    } else {
+                        "off: a plan that checks out runs at once".into()
+                    },
+                    *field == LaunchField::Gate,
+                ));
+                l.push(field_line(
+                    "Check when done (optional command, e.g. cargo test)",
+                    *field == LaunchField::Check,
+                ));
+                l.extend(text_lines(check, *field == LaunchField::Check, 1));
+            }
             (
-                " Start a swarm ",
+                " New swarm ",
                 l,
-                " Tab field · ←→ choose · Space tick · Alt+Enter newline · Ctrl+S or Ctrl+Enter start · Esc cancel ",
+                " Enter start · Tab field · ←→ choose · Space tick/unfold · Alt+Enter newline · Esc cancel ",
             )
         }
         Modal::Task {

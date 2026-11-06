@@ -110,7 +110,7 @@ impl NeedKind {
         match self {
             NeedKind::Question => "Enter answer",
             NeedKind::Prompt | NeedKind::Stalled => "Enter attach · r retry",
-            NeedKind::Plan => "y approve · p re-plan",
+            NeedKind::Plan => "Enter on ★: confirm in the chat · p re-plan",
             NeedKind::PlannerFailed => "p re-plan",
             NeedKind::Failed | NeedKind::Lost => "r retry",
             NeedKind::Review => "y merge · x set aside",
@@ -165,8 +165,12 @@ pub struct Outgoing {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchField {
-    Goal,
+    /// The coordinator's harness: the one field the dialog asks
+    /// (coordinator-first design §4.1).
     Planner,
+    /// The fold that shows the rest.
+    Advanced,
+    Goal,
     WorkerHarness,
     Workers,
     Isolation,
@@ -175,18 +179,26 @@ pub enum LaunchField {
 }
 
 impl LaunchField {
-    const ORDER: [LaunchField; 7] = [
-        LaunchField::Goal,
+    const ORDER: [LaunchField; 8] = [
         LaunchField::Planner,
+        LaunchField::Advanced,
+        LaunchField::Goal,
         LaunchField::WorkerHarness,
         LaunchField::Workers,
         LaunchField::Isolation,
         LaunchField::Gate,
         LaunchField::Check,
     ];
-    fn step(self, d: isize) -> Self {
-        let i = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0) as isize;
-        Self::ORDER[(i + d).rem_euclid(Self::ORDER.len() as isize) as usize]
+    /// The next field: folded, Tab moves between the coordinator and the
+    /// Advanced fold only.
+    fn step(self, d: isize, advanced: bool) -> Self {
+        let order: &[LaunchField] = if advanced {
+            &Self::ORDER
+        } else {
+            &Self::ORDER[..2]
+        };
+        let i = order.iter().position(|f| *f == self).unwrap_or(0) as isize;
+        order[(i + d).rem_euclid(order.len() as isize) as usize]
     }
 }
 
@@ -266,6 +278,9 @@ pub enum Modal {
         field: LaunchField,
         /// Why the last Ctrl+S did not start the swarm, shown in the form.
         error: Option<String>,
+        /// The Advanced fold is open: goal, pool, limits, isolation, gate,
+        /// check. Folded, the dialog asks for the coordinator only.
+        advanced: bool,
     },
     /// Add a task (`editing` none) or edit one; `retry` puts it back on
     /// the board when saved (stopping `stop`, its worker, first).
@@ -406,6 +421,9 @@ pub struct SwarmData {
     /// The plan's checks (read for the selected swarm only).
     pub problems: Problems,
     pub needs: Vec<Need>,
+    /// The decision that approved the plan, once there is one (who relayed
+    /// it, the operator's words).
+    pub launch_decision: Option<crate::bus::swarm::record::SwarmDecision>,
 }
 
 /// A row of the tree.
@@ -458,6 +476,8 @@ pub struct SwarmBoard {
     pub writing_agents: Vec<String>,
     /// The swarm the next refresh puts the cursor on (one just started).
     select_next: Option<String>,
+    /// With `select_next`: the coordinator's row rather than the swarm's.
+    select_next_coordinator: bool,
     /// Every swarm the tree lists.
     pub swarms: Vec<SwarmData>,
     pub rows: Vec<Row>,
@@ -474,6 +494,8 @@ pub struct SwarmBoard {
     pub messages: Vec<BusMessage>,
     /// The plan's checks, while it is drafted or reviewed.
     pub problems: Problems,
+    /// How the plan was approved, once it was.
+    pub launch_decision: Option<crate::bus::swarm::record::SwarmDecision>,
     pub live: HashMap<String, LiveWorker>,
     pub workers: HashMap<String, Worker>,
     pub asking: HashSet<String>,
@@ -555,6 +577,7 @@ impl SwarmBoard {
             last_launch: None,
             writing_agents: Vec::new(),
             select_next: None,
+            select_next_coordinator: false,
             workspace,
             swarms: Vec::new(),
             rows: Vec::new(),
@@ -567,6 +590,7 @@ impl SwarmBoard {
             board: Vec::new(),
             messages: Vec::new(),
             problems: Problems::default(),
+            launch_decision: None,
             live: HashMap::new(),
             workers: HashMap::new(),
             asking: HashSet::new(),
@@ -651,10 +675,17 @@ impl SwarmBoard {
     /// Re-reads every swarm, its board and messages, keeping the cursor on
     /// the same row.
     pub fn refresh(&mut self, live: &[LiveSwarmSession], env: Option<&CheckEnv>, now_ns: i64) {
+        let to_coordinator = std::mem::take(&mut self.select_next_coordinator);
         let key = self
             .select_next
             .take()
-            .map(RowKey::Swarm)
+            .map(|id| {
+                if to_coordinator {
+                    RowKey::Coordinator(id)
+                } else {
+                    RowKey::Swarm(id)
+                }
+            })
             .or_else(|| self.rows.get(self.cursor).and_then(|r| self.row_key(*r)));
         let prev_len = self.list_len();
         let at_bottom = prev_len == 0 || self.selected_message + 1 >= prev_len;
@@ -722,6 +753,10 @@ impl SwarmBoard {
                         self.folded.insert(run.id.clone());
                     }
                 }
+                let launch_decision = self
+                    .conn
+                    .as_ref()
+                    .and_then(|c| record::launch_decision(c, &run.id));
                 let mut d = SwarmData {
                     run,
                     board,
@@ -729,6 +764,7 @@ impl SwarmBoard {
                     asking,
                     problems,
                     needs: Vec::new(),
+                    launch_decision,
                 };
                 d.needs = needs_for(&d, &self.workers, now_ns);
                 swarms.push(d);
@@ -785,6 +821,7 @@ impl SwarmBoard {
                 self.asking = d.asking.clone();
                 self.problems = d.problems.clone();
                 self.needs = d.needs.clone();
+                self.launch_decision = d.launch_decision.clone();
             }
             None => {
                 self.swarm = None;
@@ -793,6 +830,7 @@ impl SwarmBoard {
                 self.asking.clear();
                 self.problems = Problems::default();
                 self.needs.clear();
+                self.launch_decision = None;
             }
         }
         self.on_task = task.is_some();
@@ -1121,8 +1159,9 @@ impl SwarmBoard {
             isolation: TaskIsolation::Shared,
             gate: true,
             check: TextArea::new(""),
-            field: LaunchField::Goal,
+            field: LaunchField::Planner,
             error: None,
+            advanced: false,
         });
     }
 
@@ -1145,6 +1184,30 @@ impl SwarmBoard {
     /// Puts the cursor on swarm `id` at the next refresh.
     pub fn select_swarm(&mut self, id: &str) {
         self.select_next = Some(id.to_string());
+        self.select_next_coordinator = false;
+    }
+
+    /// Puts the cursor on swarm `id`'s coordinator at the next refresh (a
+    /// swarm just started: the operator's next keystrokes are the goal).
+    pub fn select_coordinator(&mut self, id: &str) {
+        self.select_next = Some(id.to_string());
+        self.select_next_coordinator = true;
+    }
+
+    /// Moves the cursor to the current swarm's coordinator row now.
+    fn cursor_to_coordinator(&mut self) -> bool {
+        let Some(Row::Swarm(i) | Row::Coordinator(i) | Row::Task(i, _)) =
+            self.rows.get(self.cursor).copied()
+        else {
+            return false;
+        };
+        match self.rows.iter().position(|r| *r == Row::Coordinator(i)) {
+            Some(at) => {
+                self.cursor = at;
+                true
+            }
+            None => false,
+        }
     }
 
     fn open_task_modal(&mut self, editing: Option<&BoardTask>) {
@@ -1589,6 +1652,18 @@ impl SwarmBoard {
                             format!("{k}: ")
                         }
                     ));
+                } else if swarm.gate_mode == crate::bus::swarm::record::GateMode::Chat {
+                    // the screen never approves a plan (coordinator-first
+                    // §5.3): the operator says go in the coordinator's chat
+                    let moved = self.cursor_to_coordinator();
+                    self.status_msg = Some(format!(
+                        "Confirm the plan in the coordinator's chat{} — or `agent-mux swarm approve` from a shell.",
+                        if moved {
+                            ": Enter types into it"
+                        } else {
+                            " (Enter on ★)"
+                        }
+                    ));
                 } else {
                     self.confirm = Some(Confirm::Approve {
                         tasks: self.board.len(),
@@ -1784,9 +1859,19 @@ impl SwarmBoard {
                 ..
             })
         );
+        let on_fold = matches!(
+            self.modal,
+            Some(Modal::Launch {
+                field: LaunchField::Advanced,
+                ..
+            })
+        );
         if (key.code == KeyCode::Char('s') && ctrl)
             || (key.code == KeyCode::Enter && ctrl)
-            || (key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE && !multiline)
+            || (key.code == KeyCode::Enter
+                && key.modifiers == KeyModifiers::NONE
+                && !multiline
+                && !on_fold)
         {
             return self.submit_modal();
         }
@@ -1803,11 +1888,24 @@ impl SwarmBoard {
                 gate,
                 check,
                 field,
+                advanced,
                 ..
             }) => match key.code {
-                KeyCode::Tab => *field = field.step(1),
-                KeyCode::BackTab => *field = field.step(-1),
+                KeyCode::Tab => *field = field.step(1, *advanced),
+                KeyCode::BackTab => *field = field.step(-1, *advanced),
                 _ => match field {
+                    LaunchField::Advanced => {
+                        if matches!(
+                            key.code,
+                            KeyCode::Enter
+                                | KeyCode::Char(' ')
+                                | KeyCode::Left
+                                | KeyCode::Right
+                                | KeyCode::Char('a')
+                        ) {
+                            *advanced = !*advanced;
+                        }
+                    }
                     LaunchField::Goal => {
                         crate::keymap::apply_text(goal, &key);
                     }
@@ -1953,6 +2051,7 @@ impl SwarmBoard {
                 gate,
                 check,
                 field,
+                advanced,
                 ..
             }) => {
                 let planner_h = self
@@ -1971,9 +2070,9 @@ impl SwarmBoard {
                 if let Some(i) = chosen.iter().position(|h| *h == planner_h) {
                     chosen.swap(0, i);
                 }
-                let why = if goal.text.trim().is_empty() {
-                    Some("Write the goal first.")
-                } else if chosen.is_empty() {
+                // the goal is optional: without one the operator says it in
+                // the coordinator's chat (coordinator-first §4.1)
+                let why = if chosen.is_empty() {
                     Some("Tick at least one harness for the workers (Space).")
                 } else {
                     None
@@ -1990,6 +2089,7 @@ impl SwarmBoard {
                     check,
                     field,
                     error: why.map(str::to_string),
+                    advanced,
                 };
                 if why.is_some() {
                     self.modal = Some(form);
@@ -2773,6 +2873,7 @@ mod tests {
             asking,
             problems: v.problems.clone(),
             needs: Vec::new(),
+            launch_decision: None,
         };
         d.needs = needs_for(&d, &v.workers, v.now_ns);
         v.swarms = vec![d];
@@ -2955,26 +3056,22 @@ mod tests {
     }
 
     #[test]
-    fn y_approves_a_clean_plan_and_refuses_one_with_errors() {
+    fn y_never_approves_a_plan_from_the_screen_and_refuses_one_with_errors() {
         let mut v = board(
             SwarmStatus::Review,
             vec![task("a", TaskStatus::Open, None)],
             &[],
         );
         assert_eq!(v.needs[0].kind, NeedKind::Plan);
+        // The gate is the chat: y says so and nothing is confirmed.
         assert_eq!(v.handle_key(key(KeyCode::Char('y'))), Outcome::None);
-        assert_eq!(v.confirm, Some(Confirm::Approve { tasks: 1 }));
-        // Enter does not confirm; only y does.
-        assert_eq!(v.handle_key(key(KeyCode::Enter)), Outcome::None);
         assert_eq!(v.confirm, None);
-        v.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(
-            v.handle_key(key(KeyCode::Char('y'))),
-            Outcome::Verb {
-                verb: SwarmVerb::Approve,
-                task: None,
-                notes: None
-            }
+        assert!(
+            v.status_msg
+                .as_deref()
+                .is_some_and(|m| m.contains("Confirm the plan in the coordinator's chat")),
+            "{:?}",
+            v.status_msg
         );
         v.problems
             .errors
@@ -3194,15 +3291,20 @@ mod tests {
             0,
         );
         v.handle_key(key(KeyCode::Enter));
-        assert!(matches!(v.modal, Some(Modal::Launch { planner: 1, .. })));
-        for c in "Ship it".chars() {
-            v.handle_key(key(KeyCode::Char(c)));
-        }
-        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            v.modal,
+            Some(Modal::Launch {
+                planner: 1,
+                field: LaunchField::Planner,
+                advanced: false,
+                ..
+            })
+        ));
+        // One field: Enter starts the coordinator; the goal is said in its chat.
         assert_eq!(
-            v.handle_key(ctrl_s),
+            v.handle_key(key(KeyCode::Enter)),
             Outcome::Start {
-                goal: "Ship it".into(),
+                goal: String::new(),
                 planner: Harness::Codex,
                 workers: vec![Harness::Codex],
                 max_workers: 3,
@@ -3211,6 +3313,47 @@ mod tests {
                 check: None
             }
         );
+        // Advanced unfolds the goal and the limits; Tab stays within the two
+        // fields while folded.
+        v.open_launch();
+        v.handle_key(key(KeyCode::Tab));
+        assert!(matches!(
+            v.modal,
+            Some(Modal::Launch {
+                field: LaunchField::Advanced,
+                ..
+            })
+        ));
+        v.handle_key(key(KeyCode::Tab));
+        assert!(matches!(
+            v.modal,
+            Some(Modal::Launch {
+                field: LaunchField::Planner,
+                ..
+            })
+        ));
+        v.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            v.handle_key(key(KeyCode::Enter)),
+            Outcome::None,
+            "Enter on the fold unfolds"
+        );
+        assert!(matches!(
+            v.modal,
+            Some(Modal::Launch { advanced: true, .. })
+        ));
+        v.handle_key(key(KeyCode::Tab)); // goal
+        for c in "Ship it".chars() {
+            v.handle_key(key(KeyCode::Char(c)));
+        }
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        match v.handle_key(ctrl_s) {
+            Outcome::Start { goal, planner, .. } => {
+                assert_eq!(goal, "Ship it");
+                assert_eq!(planner, Harness::Codex);
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3269,10 +3412,12 @@ mod tests {
             0,
         );
         v.open_launch();
+        v.handle_key(key(KeyCode::Tab)); // the Advanced fold
+        v.handle_key(key(KeyCode::Char(' '))); // open it
+        v.handle_key(key(KeyCode::Tab)); // goal
         for c in "Ship it".chars() {
             v.handle_key(key(KeyCode::Char(c)));
         }
-        v.handle_key(key(KeyCode::Tab)); // coordinator
         v.handle_key(key(KeyCode::Tab)); // workers' pool, on claude
         v.handle_key(key(KeyCode::Char(' '))); // untick claude
         v.handle_key(key(KeyCode::Right));

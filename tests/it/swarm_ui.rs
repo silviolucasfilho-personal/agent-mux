@@ -264,7 +264,7 @@ fn a_plan_in_review_is_drawn_as_a_tree_beside_the_swarms_card() {
 }
 
 #[test]
-fn y_approves_only_a_plan_without_errors_and_d_deletes_a_draft_task() {
+fn y_never_approves_a_plan_it_points_at_the_chat_and_d_deletes_a_draft_task() {
     let mut f = fixture();
     let mut bad = task("docs", &[]);
     bad.harness = Some("gemini".into());
@@ -285,25 +285,45 @@ fn y_approves_only_a_plan_without_errors_and_d_deletes_a_draft_task() {
     press(&mut f, KeyCode::Char('y'));
     assert_eq!(view(&f.app).board.len(), 1);
 
+    // A clean plan: y does not approve it (coordinator-first §5.3); it says
+    // where the confirmation happens and puts the cursor on the coordinator.
     press(&mut f, KeyCode::Char('g'));
     press(&mut f, KeyCode::Char('y'));
+    assert!(view(&f.app).confirm.is_none());
+    assert!(
+        notice(&f.app).contains("Confirm the plan in the coordinator's chat"),
+        "{}",
+        notice(&f.app)
+    );
+    let conn = open_aux(&f.db).unwrap();
+    assert_eq!(
+        record::get_swarm(&conn, &swarm.id).unwrap().unwrap().status,
+        SwarmStatus::Review
+    );
+    let first = record::board(&conn, &swarm.id).unwrap()[0].task.id.clone();
+    assert!(bstore::plan_blocks(&conn, &first).is_some());
     let out = render(&f.app, 120, 30);
     assert!(
-        out.contains("Approve the plan? 1 task(s); workers start now."),
-        "{out}"
+        out.contains("confirm in the coordinator's chat"),
+        "the Board says so:\n{out}"
     );
-    press(&mut f, KeyCode::Char('y'));
-    let conn = open_aux(&f.db).unwrap();
+    // The CLI's approve (scripts) still works, recorded as the CLI's.
+    f.app
+        .swarm_action_on(
+            Some(&swarm.id),
+            &f.ws,
+            agent_mux::bus::swarm::record::SwarmVerb::Approve,
+            None,
+            None,
+            &agent_mux::bus::swarm::record::Decider::CLI,
+        )
+        .unwrap();
     assert_eq!(
         record::get_swarm(&conn, &swarm.id).unwrap().unwrap().status,
         SwarmStatus::Running
     );
-    assert_eq!(
-        notice(&f.app),
-        "plan approved: 1 task(s); 1 worker(s) start now"
-    );
-    let first = record::board(&conn, &swarm.id).unwrap()[0].task.id.clone();
-    assert!(bstore::plan_blocks(&conn, &first).is_none());
+    let d = record::launch_decision(&conn, &swarm.id).unwrap();
+    assert_eq!(d.by, agent_mux::bus::swarm::record::DecidedBy::Cli);
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -392,11 +412,24 @@ fn with_no_swarm_the_screen_offers_one_and_the_form_starts_it() {
     assert!(matches!(view(&f.app).modal, Some(Modal::Launch { .. })));
     let out = render(&f.app, 120, 30);
     for want in [
-        "Start a swarm",
-        "Goal: what done looks like",
-        "Coordinator: claude",
+        "New swarm",
+        "Coordinator: ◂ claude ▸",
+        "Tell it the goal there",
+        "▸ Advanced: goal now, workers' pool",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
+    }
+    assert!(!out.contains("Max parallel workers"), "folded:\n{out}");
+    // Advanced unfolds the limits.
+    press(&mut f, KeyCode::Tab);
+    press(&mut f, KeyCode::Char(' '));
+    let out = render(&f.app, 120, 36);
+    for want in [
+        "▾ Advanced",
+        "Goal (optional here",
+        "Workers may run on: [x] claude",
         "Max parallel workers: 3",
-        "Approve the plan before workers start: yes",
+        "Plan approval: in the coordinator's chat",
     ] {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
     }
@@ -566,7 +599,7 @@ fn a_swarm_that_needs_you_shows_on_the_agents_screen() {
     record::set_owner(&conn, &swarm.id, &f.app.app_run_id).unwrap();
     f.app.on_tick(Instant::now());
     assert_eq!(f.app.swarm_needs, 1, "the plan waits for approval");
-    let out = render(&f.app, 140, 32);
+    let out = render(&f.app, 140, 44);
     assert!(out.contains("⚑ swarm needs you (1)"), "{out}");
     assert!(out.contains("⚑ swarm 1"), "the status bar:\n{out}");
 }
@@ -649,24 +682,20 @@ fn a_second_swarm_starts_beside_a_stuck_one_and_a_failed_start_stays_in_the_form
         "{}",
         notice(&f.app)
     );
-    for c in "Second goal".chars() {
-        press(&mut f, KeyCode::Char(c));
-    }
+    // Enter starts the coordinator at once: the goal is said in its chat.
     let out = render(&f.app, 140, 40);
-    assert!(out.contains("Workers may run on: [x] claude"), "{out}");
-    f.app.handle_key(
-        &KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
-        Instant::now(),
-    );
+    assert!(out.contains("Coordinator: ◂ claude ▸"), "{out}");
+    press(&mut f, KeyCode::Enter);
     assert!(view(&f.app).modal.is_none(), "{}", notice(&f.app));
     let conn = open_aux(&f.db).unwrap();
     let live = record::live_swarms_in(&conn, &f.ws.to_string_lossy()).unwrap();
     assert_eq!(live.len(), 2, "{}", notice(&f.app));
     let second = live.iter().find(|s| s.id != stuck.id).unwrap();
-    assert_eq!(second.goal, "Second goal");
+    assert_eq!(second.goal, "");
+    assert!(!second.headless);
     assert_eq!(record::worker_pool(&conn, second), ["claude"]);
     assert!(
-        notice(&f.app).contains("is planning with claude"),
+        notice(&f.app).contains("say the goal in the claude coordinator's chat"),
         "{}",
         notice(&f.app)
     );
@@ -676,12 +705,28 @@ fn a_second_swarm_starts_beside_a_stuck_one_and_a_failed_start_stays_in_the_form
         Some(second.id.clone())
     );
 
-    // A start that fails keeps the form, with the reason drawn in it.
+    // The keyboard went to the coordinator's chat; the focus chord brings it
+    // back to the tree.
+    assert!(view(&f.app).pane_focused);
+    f.app.handle_key(
+        &KeyEvent::new(
+            KeyCode::Char('L'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+        Instant::now(),
+    );
+    assert!(!view(&f.app).pane_focused);
+
+    // A start that fails keeps the form, with the reason drawn in it. `n`
+    // on a swarm row (the top one) opens it; on the coordinator it adds a task.
     f.app.trace_db_path = None;
+    press(&mut f, KeyCode::Char('g'));
     press(&mut f, KeyCode::Char('n'));
-    for c in "Third".chars() {
-        press(&mut f, KeyCode::Char(c));
-    }
+    press(&mut f, KeyCode::Right); // another coordinator, kept on failure
+    let chosen = match &view(&f.app).modal {
+        Some(Modal::Launch { planner, .. }) => *planner,
+        _ => panic!("no form"),
+    };
     f.app.handle_key(
         &KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
         Instant::now(),
@@ -690,12 +735,11 @@ fn a_second_swarm_starts_beside_a_stuck_one_and_a_failed_start_stays_in_the_form
     assert!(
         matches!(
             view(&f.app).modal,
-            Some(Modal::Launch { error: Some(_), .. })
+            Some(Modal::Launch { error: Some(_), planner, .. }) if planner == chosen
         ),
         "{out}"
     );
     assert!(out.contains("✗ a swarm needs the trace store"), "{out}");
-    assert!(out.contains("Third"), "{out}");
 }
 
 #[test]
@@ -703,13 +747,16 @@ fn the_commands_menu_submits_the_launch_form_too() {
     let mut f = fixture();
     open_screen(&mut f);
     press(&mut f, KeyCode::Enter);
-    for c in "Via F1".chars() {
-        press(&mut f, KeyCode::Char(c));
-    }
     f.app
         .execute_command(agent_mux::keymap::ActionId::SubmitDialog, Instant::now());
     assert!(view(&f.app).modal.is_none(), "{}", notice(&f.app));
-    assert!(notice(&f.app).contains("is planning"), "{}", notice(&f.app));
+    assert!(
+        notice(&f.app).contains("started: say the goal in the claude coordinator's chat"),
+        "{}",
+        notice(&f.app)
+    );
+    // The keyboard went to the coordinator's chat.
+    assert!(view(&f.app).pane_focused, "{}", notice(&f.app));
 }
 
 #[test]

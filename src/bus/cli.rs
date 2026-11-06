@@ -60,7 +60,14 @@ impl Args {
                     flags.insert(k.to_string(), Some(v.to_string()));
                 } else if matches!(
                     name,
-                    "all" | "json" | "wake" | "no-ack" | "help" | "no-plan-gate" | "urgent"
+                    "all"
+                        | "json"
+                        | "wake"
+                        | "no-ack"
+                        | "help"
+                        | "no-plan-gate"
+                        | "urgent"
+                        | "as-coordinator"
                 ) {
                     flags.insert(name.to_string(), None);
                 } else {
@@ -669,10 +676,11 @@ A swarm is a conversation with a coordinator: it plans with you in its chat,
 starts the workers once you say go, and agent-mux supervises them.
 
 commands:
-  start <goal...> [--planner claude|codex|agy|opencode] [--worker-harness H[,H...]] [--workers N] [--isolation shared|worktree] [--no-plan-gate] [--check CMD] [--workspace DIR]
-                                --planner: the coordinator's harness (default claude when installed);
+  start [<goal...>] [--coordinator claude|codex|agy|opencode] [--gate chat|off] [--worker-harness H[,H...]] [--workers N] [--isolation shared|worktree] [--check CMD] [--workspace DIR]
+                                open a coordinator session in the running TUI and say the goal in its chat;
+                                with a goal (or --headless \"<goal>\") the coordinator plans it without asking
+                                --coordinator: its harness (default claude when installed); --gate chat (default: you confirm in the chat) or off;
                                 --worker-harness: the workers' pool, e.g. agy,codex; the first runs tasks that name none (default: the coordinator's)
-                                start a swarm in the running TUI: the coordinator plans the goal, then asks you in its chat (unless --no-plan-gate)
   status [--workspace DIR] [--db PATH] [--json]
                                 the swarm, its board (each task's state) and what waits for you
   plan [--workspace DIR] [--db PATH] [--json]
@@ -701,7 +709,8 @@ commands:
 
 <task> is a plan key (`bus-fix`), a task id or a unique prefix of either.
 The verbs take --workspace DIR (default: the current folder), --swarm ID when the folder runs several swarms, and --json.
-Decisions from here are recorded as the CLI's (`by = cli`); --said \"<words>\" keeps what the operator said.";
+Decisions from here are recorded as the CLI's (`by = cli`); --said \"<words>\" keeps what the operator said.
+A coordinator without MCP relays from its chat with --as-coordinator --said \"<words>\" (recorded as `by = chat`).";
 
 /// What the CLI knows of live sessions without a TUI: the published
 /// snapshots of running agent-mux TUIs.
@@ -944,15 +953,34 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             anyhow::bail!("swarm {cmd} needs a task (its key or id)\n\n{SWARM_USAGE}");
         }
         let notes = (verb == SwarmVerb::Replan).then(|| args.positional.join(" "));
+        // --as-coordinator: a coordinator without MCP relays from its chat
+        // (`by = chat`, its launch from $AGENT_MUX_SESSION_ID); it must quote
+        // the operator for what starts, merges, discards or ends work
+        let as_coordinator = args.has("as-coordinator");
+        let said = args.value("said").map(str::to_string);
+        if as_coordinator
+            && verb.needs_operator_words()
+            && said.as_deref().is_none_or(|s| s.trim().is_empty())
+        {
+            anyhow::bail!("swarm {cmd} --as-coordinator needs --said \"<the operator's words>\"");
+        }
+        let decider = if as_coordinator {
+            record::Decider::chat(said.as_deref(), None)
+        } else {
+            record::Decider::CLI
+        };
+        let from = as_coordinator
+            .then(|| bstore::resolve_caller_launch(args.value("from")))
+            .flatten();
         let req = ControlRequest::SwarmAction {
             workspace: workspace.clone(),
             verb,
             task: task.clone(),
             notes,
             swarm: args.value("swarm").map(str::to_string),
-            by: Some(record::DecidedBy::Cli),
-            said: args.value("said").map(str::to_string),
-            from: None,
+            by: Some(decider.by),
+            said: said.clone(),
+            from: from.clone(),
         };
         let done = match control::send_request(None, &req, Duration::from_secs(10)) {
             Ok(resp) if resp.ok => resp.detail.unwrap_or_default(),
@@ -972,7 +1000,10 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                     verb,
                     task.as_deref(),
                     &env,
-                    &record::Decider::CLI,
+                    &record::Decider {
+                        launch: from.as_deref(),
+                        ..decider
+                    },
                     now,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -1109,12 +1140,24 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             }
         }
         "start" => {
-            let goal_words = args.positional.clone();
-            if goal_words.is_empty() {
-                anyhow::bail!("swarm start requires a goal description\n\n{SWARM_USAGE}");
-            }
-            let goal = goal_words.join(" ");
-            let planner = args.value("planner").map(str::to_string);
+            // a goal makes the swarm headless; without one the operator says
+            // it in the coordinator's chat (--headless is the same as a goal)
+            let goal = args
+                .value("headless")
+                .map(str::to_string)
+                .unwrap_or_else(|| args.positional.join(" "));
+            let planner = args
+                .value("coordinator")
+                .or_else(|| args.value("planner"))
+                .map(str::to_string);
+            let gate = match args.value("gate") {
+                Some(g) => match record::GateMode::parse(g) {
+                    Some(record::GateMode::Chat) => true,
+                    Some(record::GateMode::Off) => false,
+                    None => anyhow::bail!("--gate is chat or off, not {g}"),
+                },
+                None => !args.has("no-plan-gate"),
+            };
             let max_workers = args
                 .value("workers")
                 .and_then(|w| w.parse::<usize>().ok())
@@ -1130,7 +1173,7 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                 planner,
                 max_workers,
                 isolation,
-                gate: Some(!args.has("no-plan-gate")),
+                gate: Some(gate),
                 check: args.value("check").map(str::to_string),
                 workers: args.value("worker-harness").map(str::to_string),
             };

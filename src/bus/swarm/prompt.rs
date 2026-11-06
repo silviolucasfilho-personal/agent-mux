@@ -90,10 +90,11 @@ pub fn worker_prompt(swarm: &SwarmRun, t: &BoardTask, board: &[BoardTask]) -> St
     p
 }
 
-/// The coordinator agent's opening prompt (§3 of the layout spec): its
-/// role, what it may and may not do, and how it plans. `template` is the
-/// library's `[swarm] plan` (with `{invocation}` and `{plan}`); `restart`
-/// is the board summary for a coordinator that replaces one that exited.
+/// The coordinator's opening prompt (coordinator-first design §5.2): three
+/// lines from the library's `[swarm] coordinator` template, the role itself
+/// living in the `swarm-coordinator` skill. `invocation` is the skill as
+/// the harness invokes it, `context` the context file's path; `restart` is
+/// the board summary for a coordinator that replaces one that exited.
 pub fn coordinator_prompt(
     swarm: &SwarmRun,
     invocation: &str,
@@ -101,42 +102,39 @@ pub fn coordinator_prompt(
     template: &str,
     restart: Option<&str>,
 ) -> String {
-    let id = &swarm.id;
-    let ws = &swarm.workspace;
-    let mut p = format!(
-        "You are the coordinator of the agent-mux swarm {id}. Its goal: {goal}\n\n\
-         agent-mux runs the swarm: once the operator approves your plan it starts one worker \
-         per task, in order, and tracks them. You plan, advise and answer. You never start \
-         workers, merge branches, approve the plan or close the swarm, and you do not edit files.\n\n",
-        goal = swarm.goal,
-    );
-    match restart {
-        Some(board) => p.push_str(&format!(
-            "You replace a coordinator that exited. The board as it stands:\n{board}\n\n\
-             Read the board with agent_mux_task_board(workspace = \"{ws}\") and your messages with \
-             agent_mux_recv_messages, then wait for questions and events.\n\n"
-        )),
-        None => {
-            let planning = template
-                .replace("{invocation}", invocation)
-                .replace("{plan}", context);
-            p.push_str(&format!("## 1. Plan\n{planning}\n\n"));
-        }
+    let goal = if swarm.goal.trim().is_empty() {
+        "The operator has not said the goal yet: ask for it.".to_string()
+    } else {
+        format!("The operator's goal: {}", swarm.goal.trim())
+    };
+    let template = if template.trim().is_empty() {
+        DEFAULT_COORDINATOR
+    } else {
+        template
+    };
+    let mut p = template
+        .replace("{id}", &swarm.id)
+        .replace("{workspace}", &swarm.workspace)
+        .replace("{invocation}", invocation)
+        .replace("{context}", context)
+        .replace("{goal}", &goal);
+    if let Some(board) = restart {
+        p.push_str(&format!(
+            "\n\nYou replace a coordinator that exited. The board as it stands:\n{board}\n\
+             The plan is {}: do not plan again. Read the board with agent_mux_swarm_board, tell the \
+             operator where things stand, then follow the skill from step 4.",
+            if swarm.status.approved() {
+                "approved and running"
+            } else {
+                "not approved yet"
+            }
+        ));
     }
-    p.push_str(&format!(
-        "## 2. Then wait, and answer when woken\n\
-         - The operator approves the plan, or sends it back with notes: revise it and call \
-         agent_mux_swarm_plan again.\n\
-         - A worker asks you something (topic question): answer it with \
-         agent_mux_send_message(to = <its launch id>, reply_to = <the message id>, wake = true, workspace = \"{ws}\"). \
-         If only the operator can decide, forward it to \"user\" with your recommendation.\n\
-         - Tasks finish, fail or are proposed (topic swarm-events): look at the board with \
-         agent_mux_task_board, and propose follow-up tasks with agent_mux_task_split, or tell the \
-         user what you would change.\n\
-         Keep each turn short: read, answer, stop."
-    ));
     p
 }
+
+/// The template when the library has none.
+const DEFAULT_COORDINATOR: &str = "You are the coordinator of agent-mux swarm {id} in {workspace}.\n{invocation} Read the context at {context} (also in $AGENT_MUX_SWARM_CONTEXT) first and follow the skill.\n{goal}";
 
 /// The one reminder an idle worker gets before it is listed as stalled.
 pub fn nudge_prompt(t: &BoardTask, workspace: &str) -> String {
@@ -165,6 +163,69 @@ pub struct PlannerContext {
     /// On a re-plan: the board as it stands and the operator's notes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replan: Option<Replan>,
+    /// What the operator fixed in advance (coordinator-first §5.2): `null`
+    /// where the coordinator may propose.
+    pub limits: Limits,
+    /// The swarm tools and their shell twins, and the waits' defaults.
+    pub tools: Tools,
+    /// One line on what the operator sees meanwhile.
+    pub screen: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Limits {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_workers: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_isolation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    /// `chat` or `off`.
+    pub gate: String,
+    /// The goal is final and the coordinator plans without asking.
+    pub headless: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Tools {
+    /// `agent_mux_swarm_wait`'s default and ceiling, in milliseconds.
+    pub wait_ms: u64,
+    pub wait_ms_max: u64,
+    /// After this many seconds an offered task starts on its own.
+    pub dispatch_grace_s: i64,
+    /// The MCP tools the coordinator uses, in the order of the playbook.
+    pub mcp: Vec<&'static str>,
+    /// Their shell twins, for a harness without MCP.
+    pub cli: Vec<&'static str>,
+}
+
+impl Default for Tools {
+    fn default() -> Self {
+        Tools {
+            wait_ms: super::view::DEFAULT_SWARM_WAIT_MS,
+            wait_ms_max: super::view::MAX_SWARM_WAIT_MS,
+            dispatch_grace_s: super::engine::DISPATCH_GRACE_NS / 1_000_000_000,
+            mcp: vec![
+                "agent_mux_swarm_plan",
+                "agent_mux_swarm_launch",
+                "agent_mux_swarm_wait",
+                "agent_mux_swarm_board",
+                "agent_mux_swarm_action",
+                "agent_mux_send_message",
+                "agent_mux_recv_messages",
+            ],
+            cli: vec![
+                "agent-mux swarm submit-plan --file PLAN.json",
+                "agent-mux swarm launch [<task>...] --as-coordinator --said \"<words>\"",
+                "agent-mux swarm wait [--timeout MS] [--after ID] --json",
+                "agent-mux swarm status --json",
+                "agent-mux swarm <pause|resume|retry|cancel|merge|set-aside|accept|drop|close> [<task>] --as-coordinator --said \"<words>\"",
+                "agent-mux bus send --to <launch> --reply-to <id> --wake <body>",
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
