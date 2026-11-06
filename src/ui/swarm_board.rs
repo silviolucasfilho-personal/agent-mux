@@ -9,7 +9,7 @@ use super::flow::{dim, head};
 use crate::app::App;
 use crate::app::swarm_board::{
     Confirm, Focus, LaunchField, LinePurpose, Modal, NeedKind, PaneView, Recipient, Row,
-    SwarmBoard, Tab, TaskField,
+    SwarmBoard, SwarmTab, Tab, TaskField,
 };
 use crate::app::text_area::TextArea;
 use crate::bus::swarm::engine::{self, Shown};
@@ -205,7 +205,10 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                     == v.rows
                         .get(v.cursor)
                         .map(|r| match r {
-                            Row::Swarm(k) | Row::Coordinator(k) | Row::Task(k, _) => *k,
+                            Row::Swarm(k)
+                            | Row::Coordinator(k)
+                            | Row::Task(k, _)
+                            | Row::Agent(k, ..) => *k,
                         })
                         .unwrap_or(usize::MAX)
                     && v.problems.for_task(&t.ext.plan_key).any(|(e, _)| e);
@@ -214,6 +217,25 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                     .map(|w| w.provider.clone())
                     .or_else(|| t.task.target_harness.clone())
                     .unwrap_or_default();
+                // with room: harness · elapsed · cost (§9.2)
+                let harness = if inner_w >= 44 && t.ext.attempts > 0 {
+                    let since =
+                        t.task.ended_ns.unwrap_or(v.now_ns) - t.task.updated_ns.min(v.now_ns);
+                    let age = crate::bus::swarm::short_age(since.max(0));
+                    match v.worker_of(t) {
+                        Some(w) if w.priced => {
+                            format!("{harness} {age} ${:.2}", w.cost_usd)
+                        }
+                        _ => format!("{harness} {age}"),
+                    }
+                } else {
+                    harness
+                };
+                let fold = if v.has_folded_agents(i, j) {
+                    " ▸"
+                } else {
+                    ""
+                };
                 let (right, rstyle) = if plan_error {
                     (
                         format!("✗ {harness}"),
@@ -230,10 +252,33 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                     (harness, dim())
                 };
                 (
-                    format!("    {} {} {}", st.glyph(), j + 1, t.ext.plan_key),
+                    format!("    {} {} {}{fold}", st.glyph(), j + 1, t.ext.plan_key),
                     shown_style(st),
                     right,
                     rstyle,
+                )
+            }
+            Row::Agent(..) => {
+                let a = v.agent_of(*row);
+                let (name, age, live) = match a {
+                    Some(a) => (
+                        a.name.clone(),
+                        crate::bus::swarm::short_age(
+                            a.end_ns.unwrap_or(v.now_ns).saturating_sub(a.start_ns),
+                        ),
+                        a.end_ns.is_none(),
+                    ),
+                    None => (String::new(), String::new(), false),
+                };
+                (
+                    format!("        ↳ {name}"),
+                    if live {
+                        Style::default().fg(Color::Green)
+                    } else {
+                        dim()
+                    },
+                    age,
+                    dim(),
                 )
             }
         };
@@ -276,15 +321,17 @@ pub fn draw_pane(f: &mut Frame, area: Rect, v: &SwarmBoard, app: &App, now: Inst
     } else {
         (area, None)
     };
-    if v.activity {
-        draw_activity(f, body, v);
-    } else {
-        match v.pane() {
-            PaneView::Session(idx) => super::draw_session_pane(f, body, app, idx, now),
-            PaneView::SwarmCard => draw_swarm_card(f, body, v),
-            PaneView::TaskCard => draw_task_card(f, body, v),
-            PaneView::Launch => draw_launch_card(f, body, v),
-        }
+    match v.pane() {
+        PaneView::Session(idx) => super::draw_session_pane(f, body, app, idx, now),
+        PaneView::SwarmCard if v.swarm.is_some() => match v.swarm_tab {
+            SwarmTab::Board => draw_swarm_card(f, body, v),
+            SwarmTab::Live => draw_live_mosaic(f, body, v, app, now),
+            SwarmTab::Activity => draw_activity(f, body, v),
+            SwarmTab::Changes => draw_swarm_changes(f, body, v),
+        },
+        PaneView::SwarmCard => draw_swarm_card(f, body, v),
+        PaneView::TaskCard => draw_task_card(f, body, v),
+        PaneView::Launch => draw_launch_card(f, body, v),
     }
     if let Some(l) = line {
         f.render_widget(Clear, l);
@@ -320,12 +367,18 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
         return;
     };
     let si = match v.rows.get(v.cursor) {
-        Some(Row::Swarm(i)) | Some(Row::Coordinator(i)) | Some(Row::Task(i, _)) => *i,
+        Some(Row::Swarm(i))
+        | Some(Row::Coordinator(i))
+        | Some(Row::Task(i, _))
+        | Some(Row::Agent(i, ..)) => *i,
         None => 0,
     };
     let block = card_block(format!(" ◆ {} ", s.goal), v.focus == Focus::Panel);
-    let inner = block.inner(area);
+    let whole = block.inner(area);
     f.render_widget(block, area);
+    let [tabs_area, inner] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(whole);
+    draw_swarm_tabs(f, tabs_area, v);
     let section = |t: &str| {
         Line::styled(
             format!("── {t} ──"),
@@ -446,6 +499,33 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
     if let Some(sum) = s.plan_summary.as_deref().filter(|x| !x.is_empty()) {
         out.push(Line::raw(sum.to_string()));
     }
+    // the plan as a table, with each task's live state (§9.3)
+    for (j, t) in v.board.iter().enumerate() {
+        let st = v.shown(t);
+        let who = match (&t.task.target_harness, &t.task.target_agent) {
+            (Some(h), Some(a)) => format!("{h}·{a}"),
+            (Some(h), None) => h.clone(),
+            (None, Some(a)) => format!("·{a}"),
+            (None, None) => String::new(),
+        };
+        let deps = if t.ext.depends_on.is_empty() {
+            String::new()
+        } else {
+            format!(" ← {}", t.ext.depends_on.join(" "))
+        };
+        out.push(Line::from(vec![
+            Span::styled(format!("{} {:<9}", st.glyph(), st.word()), shown_style(st)),
+            Span::styled(
+                format!(" {:>2} {:<16}", j + 1, truncate(&t.ext.plan_key, 16)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!(" {}", truncate(&t.task.title, 40)),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled(format!("  {who}{deps}"), dim()),
+        ]));
+    }
     if let Some(e) = &s.plan_error {
         out.push(Line::styled(
             format!("The planner gave no plan: {e}"),
@@ -532,6 +612,221 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
 }
 
 /// A task's card: its tabs (Task, Live, Thread, Changes) and the chosen one.
+/// The swarm row's tab bar: `1 Board · 2 Live · 3 Activity · 4 Changes`.
+fn draw_swarm_tabs(f: &mut Frame, area: Rect, v: &SwarmBoard) {
+    let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+    let live = v.live_tiles().len();
+    for (n, tab) in SwarmTab::ALL.iter().enumerate() {
+        let label = match tab {
+            SwarmTab::Live if live > 0 => format!("{} Live ({live})", n + 1),
+            SwarmTab::Activity if !v.messages.is_empty() => {
+                format!("{} Activity ({})", n + 1, v.messages.len())
+            }
+            _ => format!("{} {}", n + 1, tab.label()),
+        };
+        spans.push(if *tab == v.swarm_tab {
+            Span::styled(
+                format!(" {label} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!(" {label} "), dim())
+        });
+        spans.push(Span::raw(" "));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The Live tab: every live terminal of the swarm at once (§9.5). The
+/// coordinator's tile first, then the workers in plan order, in a grid
+/// (1×1, 1×2, 2×2, 2×3; more than six page). A tile shows the bottom of
+/// its session's screen, as text: a PTY is never resized for a tile, so a
+/// worker's own terminal is left as it is. `↑↓←→` move between tiles,
+/// `Enter` connects to one.
+fn draw_live_mosaic(f: &mut Frame, area: Rect, v: &SwarmBoard, app: &App, now: Instant) {
+    let focused = v.focus == Focus::Panel;
+    let title = match &v.swarm {
+        Some(s) => format!(" ◆ {} · live ", s.goal),
+        None => " live ".into(),
+    };
+    let block = card_block(title, focused);
+    let whole = block.inner(area);
+    f.render_widget(block, area);
+    let [tabs_area, body] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(whole);
+    draw_swarm_tabs(f, tabs_area, v);
+    let tiles = v.live_tiles();
+    if tiles.is_empty() {
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::raw(""),
+                Line::styled(
+                    "  No live terminal: the coordinator and the workers have exited (Enter on a worker reconnects it).",
+                    dim(),
+                ),
+            ]),
+            body,
+        );
+        return;
+    }
+    let per_page = 6usize;
+    let page = v.tile_cursor / per_page;
+    let shown: Vec<&(String, usize)> = tiles.iter().skip(page * per_page).take(per_page).collect();
+    let (cols, rows) = match shown.len() {
+        1 => (1, 1),
+        2 => (2, 1),
+        3 | 4 => (2, 2),
+        _ => (3, 2),
+    };
+    let row_areas = Layout::vertical(vec![Constraint::Ratio(1, rows as u32); rows]).split(body);
+    for (n, (launch, idx)) in shown.iter().enumerate() {
+        let r = n / cols;
+        let c = n % cols;
+        let cols_areas =
+            Layout::horizontal(vec![Constraint::Ratio(1, cols as u32); cols]).split(row_areas[r]);
+        let tile = cols_areas[c];
+        let Some(session) = app.sessions.get(*idx) else {
+            continue;
+        };
+        let is_cursor = page * per_page + n == v.tile_cursor;
+        let who = match &v.swarm {
+            Some(s) if s.planner_launch.as_deref() == Some(launch.as_str()) => {
+                format!("★ coordinator · {}", s.planner_harness)
+            }
+            _ => v
+                .board
+                .iter()
+                .position(|t| t.task.assigned_to.as_deref() == Some(launch.as_str()))
+                .map(|j| {
+                    let t = &v.board[j];
+                    format!(
+                        "{} {} · {} · {}",
+                        j + 1,
+                        t.ext.plan_key,
+                        v.worker_of(t)
+                            .map(|w| w.provider.clone())
+                            .unwrap_or_default(),
+                        v.shown(t).word()
+                    )
+                })
+                .unwrap_or_else(|| crate::bus::short_id(launch).to_string()),
+        };
+        let (label, _) = super::status_label_style(session.status(now));
+        let needs = v
+            .board
+            .iter()
+            .find(|t| t.task.assigned_to.as_deref() == Some(launch.as_str()))
+            .map(|t| {
+                v.needs
+                    .iter()
+                    .any(|n| n.task_id.as_deref() == Some(t.task.id.as_str()))
+            })
+            .unwrap_or(false);
+        let tile_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(if is_cursor && focused {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            })
+            .title(Span::styled(
+                format!(" {who} [{label}]{} ", if needs { " !" } else { "" }),
+                if needs {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else if is_cursor {
+                    head()
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ));
+        let inner = tile_block.inner(tile);
+        f.render_widget(tile_block, tile);
+        if inner.height == 0 || inner.width == 0 {
+            continue;
+        }
+        // the bottom of the screen, as text, cut to the tile's width
+        let screen = session.parser.screen();
+        let all: Vec<String> = screen.rows(0, inner.width).collect();
+        let last_full = all
+            .iter()
+            .rposition(|l| !l.trim().is_empty())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let start = last_full.saturating_sub(inner.height as usize);
+        let lines: Vec<Line<'static>> = all[start..last_full]
+            .iter()
+            .map(|l| Line::styled(l.clone(), Style::default().fg(Color::White)))
+            .collect();
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+    if tiles.len() > per_page {
+        let note = format!(
+            " {}–{} of {} · PgUp/PgDn ",
+            page * per_page + 1,
+            (page * per_page + shown.len()).min(tiles.len()),
+            tiles.len()
+        );
+        let w = note.chars().count() as u16;
+        if body.width > w {
+            f.render_widget(
+                Paragraph::new(Line::styled(note, dim())),
+                Rect::new(
+                    body.x + body.width - w,
+                    body.y + body.height.saturating_sub(1),
+                    w,
+                    1,
+                ),
+            );
+        }
+    }
+}
+
+/// The swarm's Changes tab: every worktree task's branch against the base,
+/// then the workspace's own diff (§9.3).
+fn draw_swarm_changes(f: &mut Frame, area: Rect, v: &SwarmBoard) {
+    let focused = v.focus == Focus::Panel;
+    let title = match &v.swarm {
+        Some(s) => format!(" ◆ {} · changes ", s.goal),
+        None => " changes ".into(),
+    };
+    let block = card_block(title, focused);
+    let whole = block.inner(area);
+    f.render_widget(block, area);
+    let [tabs_area, content] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(whole);
+    draw_swarm_tabs(f, tabs_area, v);
+    f.render_widget(
+        Paragraph::new(diff_lines(v, content.height as usize)),
+        content,
+    );
+}
+
+/// `diff_lines` coloured as a diff, from the panel's scroll.
+fn diff_lines(v: &SwarmBoard, height: usize) -> Vec<Line<'static>> {
+    v.diff_lines
+        .iter()
+        .skip(v.panel_scroll)
+        .take(height)
+        .map(|l| {
+            let style = if l.starts_with('+') && !l.starts_with("+++") {
+                Style::default().fg(Color::Green)
+            } else if l.starts_with('-') && !l.starts_with("---") {
+                Style::default().fg(Color::Red)
+            } else if l.starts_with("@@") || l.starts_with("diff ") || l.starts_with("── ") {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::styled(l.clone(), style)
+        })
+        .collect()
+}
+
 fn draw_task_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
     let Some(t) = v.selected_task() else {
         draw_swarm_card(f, area, v);
@@ -586,8 +881,8 @@ fn draw_task_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                         Shown::Draft | Shown::Ready | Shown::Blocked | Shown::Proposed => {
                             "  No worker yet: agent-mux starts one when the task is ready."
                         }
-                        Shown::Lost => "  Its session exited mid-task: r retries it.",
-                        _ => "  No terminal here: its worker is gone or runs in another window.",
+                        Shown::Lost => "  Its session exited mid-task: Enter reconnects it (the same conversation), r retries the task.",
+                        _ => "  No terminal here: its worker is gone or runs in another window. Enter reconnects to its conversation.",
                     },
                     dim(),
                 ),
@@ -609,25 +904,10 @@ fn draw_task_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
             }
         }
         Tab::Changes => {
-            let lines: Vec<Line<'static>> = v
-                .diff_lines
-                .iter()
-                .skip(v.panel_scroll)
-                .take(content.height as usize)
-                .map(|l| {
-                    let style = if l.starts_with('+') && !l.starts_with("+++") {
-                        Style::default().fg(Color::Green)
-                    } else if l.starts_with('-') && !l.starts_with("---") {
-                        Style::default().fg(Color::Red)
-                    } else if l.starts_with("@@") || l.starts_with("diff ") {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    };
-                    Line::styled(l.clone(), style)
-                })
-                .collect();
-            f.render_widget(Paragraph::new(lines), content);
+            f.render_widget(
+                Paragraph::new(diff_lines(v, content.height as usize)),
+                content,
+            );
         }
     }
 }

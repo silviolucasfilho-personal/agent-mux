@@ -224,9 +224,13 @@ fn a_plan_in_review_is_drawn_as_a_tree_beside_the_swarms_card() {
         "◆ Ship the follow-ups",
         "review · 0/3 done · 0/2 workers",
         "── Needs you (1) ──",
-        "the plan waits for you: 3 task(s), 1 error(s) to fix first",
+        "the plan waits for your go in the coordinator's chat: 3 task(s), 1 error(s) to fix first",
         "one task per subsystem",
-        "y approve · p re-plan",
+        "waiting for you to confirm in the coordinator's chat",
+        // the swarm row's tabs and the plan as a table with each task's word
+        "1 Board   2 Live   3 Activity   4 Changes",
+        "· waiting    1 schema",
+        "· waiting    3 docs",
         // one footer: the global one
         "[F1 Commands] Swarm",
     ] {
@@ -264,11 +268,11 @@ fn a_plan_in_review_is_drawn_as_a_tree_beside_the_swarms_card() {
 }
 
 #[test]
-fn y_never_approves_a_plan_it_points_at_the_chat_and_d_deletes_a_draft_task() {
+fn y_never_approves_a_plan_it_points_at_the_chat_and_the_plan_keys_are_gone() {
     let mut f = fixture();
     let mut bad = task("docs", &[]);
     bad.harness = Some("gemini".into());
-    let swarm = seed(&f, SwarmStatus::Review, vec![task("schema", &[]), bad]);
+    seed(&f, SwarmStatus::Review, vec![task("schema", &[]), bad]);
     open_screen(&mut f);
 
     press(&mut f, KeyCode::Char('y'));
@@ -278,16 +282,22 @@ fn y_never_approves_a_plan_it_points_at_the_chat_and_d_deletes_a_draft_task() {
         "fix the plan first: docs: harness `gemini` is not installed"
     );
 
+    // d, e and p no longer edit the plan: that is said to the coordinator.
     press(&mut f, KeyCode::Char('G'));
     press(&mut f, KeyCode::Char('d'));
-    let out = render(&f.app, 120, 30);
-    assert!(out.contains("Delete `docs` from the plan?"), "{out}");
-    press(&mut f, KeyCode::Char('y'));
-    assert_eq!(view(&f.app).board.len(), 1);
+    assert!(view(&f.app).confirm.is_none());
+    assert!(
+        notice(&f.app).contains("said to the coordinator"),
+        "{}",
+        notice(&f.app)
+    );
+    assert_eq!(view(&f.app).board.len(), 2);
 
     // A clean plan: y does not approve it (coordinator-first §5.3); it says
     // where the confirmation happens and puts the cursor on the coordinator.
-    press(&mut f, KeyCode::Char('g'));
+    let mut f = fixture();
+    let swarm = seed(&f, SwarmStatus::Review, vec![task("schema", &[])]);
+    open_screen(&mut f);
     press(&mut f, KeyCode::Char('y'));
     assert!(view(&f.app).confirm.is_none());
     assert!(
@@ -586,6 +596,25 @@ fn a_workers_terminal_fills_the_pane_and_enter_types_into_it() {
     assert!(
         matches!(f.app.mode, Mode::Swarm(_)),
         "still on the Swarm screen"
+    );
+    // The swarm row's Live tab is the mosaic: one tile per live terminal,
+    // showing the bottom of its screen; Enter on a tile connects to it.
+    press(&mut f, KeyCode::Char('g'));
+    press(&mut f, KeyCode::Char('2'));
+    let out = render(&f.app, 140, 32);
+    assert!(out.contains("2 Live (1)"), "{out}");
+    assert!(out.contains("1 schema · "), "the tile's title:\n{out}");
+    assert!(
+        out.contains("swarm-pane-42"),
+        "the tile shows the screen:\n{out}"
+    );
+    press(&mut f, KeyCode::Tab);
+    assert!(view(&f.app).in_mosaic());
+    press(&mut f, KeyCode::Enter);
+    assert!(view(&f.app).pane_focused);
+    assert_eq!(
+        view(&f.app).pane(),
+        agent_mux::app::swarm_board::PaneView::Session(0)
     );
     f.app.kill_all();
 }

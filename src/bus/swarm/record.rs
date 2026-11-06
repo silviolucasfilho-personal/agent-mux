@@ -831,6 +831,23 @@ pub fn swarm_of_coordinator(conn: &Connection, launch: &str) -> rusqlite::Result
     }
 }
 
+/// The swarm a launch belongs to, live or ended, from its launch row's
+/// `swarm_id` (v24): a coordinator, a worker, even one whose task ended.
+pub fn swarm_of_launch(conn: &Connection, launch: &str) -> rusqlite::Result<Option<SwarmRun>> {
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(metadata, '$.swarm_id') FROM launches WHERE id = ?1",
+            params![launch],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    match id {
+        Some(id) => get_swarm(conn, &id),
+        None => Ok(None),
+    }
+}
+
 /// Where a message `to = "coordinator"` from `sender` goes: the live
 /// coordinator of the swarm `sender` works for.
 pub fn coordinator_address(conn: &Connection, sender: &str) -> Option<String> {

@@ -441,7 +441,7 @@ async fn a_coordinator_plans_through_the_tool_and_the_swarm_runs_its_tasks_in_or
         .filter(|s| {
             s.group
                 .as_ref()
-                .is_some_and(|g| g.kind == agent_mux::tree::GroupKind::Bus)
+                .is_some_and(|g| g.kind == agent_mux::tree::GroupKind::Swarm)
         })
         .filter(|s| {
             !matches!(
