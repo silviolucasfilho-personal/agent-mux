@@ -444,6 +444,33 @@ pub fn send_message(
             now
         ],
     )?;
+    // a message between a swarm's agents goes to its log too (§7.2):
+    // `question.asked`, `question.answered`, else `message`
+    if let Some(swarm_id) = swarm_of_participant(conn, from_launch)
+        .or_else(|| to_clean.and_then(|to| swarm_of_participant(conn, to)))
+    {
+        let kind = if topic == "question" {
+            "question.asked"
+        } else if topic == "answer" || reply_clean.is_some() {
+            "question.answered"
+        } else {
+            "message"
+        };
+        let _ = crate::bus::swarm::record::event(
+            conn,
+            &swarm_id,
+            None,
+            kind,
+            Some(from_launch),
+            Some(serde_json::json!({
+                "to": to_clean,
+                "topic": topic,
+                "body": first_line(body),
+                "message": id,
+            })),
+            now,
+        );
+    }
     if let Some(p) = db_path {
         crate::tracing::store::poke_wake(p);
     }
@@ -850,6 +877,51 @@ pub fn claim_task(
         .ok_or_else(|| format!("task '{task_id}' disappeared"))
 }
 
+/// The swarm a task is on, if it is a swarm's (`swarm_tasks`, v21).
+fn swarm_of_task_id(conn: &Connection, task_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT swarm_id FROM swarm_tasks WHERE task_id = ?1",
+        params![task_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// The swarm a launch takes part in: its launch row's `swarm_id` (v24),
+/// else the swarm it coordinates, else the one whose task it holds.
+fn swarm_of_participant(conn: &Connection, launch: &str) -> Option<String> {
+    if launch.is_empty() || launch == "user" {
+        return None;
+    }
+    let one = |sql: &str| -> Option<String> {
+        conn.query_row(sql, params![launch], |r| r.get::<_, Option<String>>(0))
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+    };
+    one("SELECT json_extract(metadata, '$.swarm_id') FROM launches WHERE id = ?1")
+        .or_else(|| one("SELECT swarm_id FROM swarm_coordinators WHERE launch = ?1"))
+        .or_else(|| {
+            one(
+                "SELECT st.swarm_id FROM swarm_tasks st JOIN agent_tasks t ON t.id = st.task_id
+                 WHERE t.assigned_to = ?1 ORDER BY t.updated_ns DESC LIMIT 1",
+            )
+        })
+}
+
+fn first_line(s: &str) -> String {
+    s.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(160)
+        .collect()
+}
+
 /// Updates a task's status, result, error, or worktree/branch metadata.
 /// Automatically releases the task's file leases when transitioning to a terminal state
 /// (`done`, `failed`, `cancelled`) and posts a `task-update` message to the creator.
@@ -931,6 +1003,28 @@ pub fn update_task(
                 );
             }
         }
+    }
+    // a swarm's task writes its ending to the swarm's log (coordinator-first
+    // spec §7.2): `task.done`, `task.failed`, `task.cancelled`; what
+    // `agent_mux_swarm_wait` wakes on and the Log and Timeline tabs show
+    if status.is_terminal()
+        && let Some(swarm_id) = swarm_of_task_id(conn, task_id)
+    {
+        let what = match (&result, &error) {
+            (_, Some(e)) => Some(first_line(e)),
+            (Some(Value::String(r)), _) => Some(first_line(r)),
+            (Some(other), _) => Some(first_line(&other.to_string())),
+            _ => None,
+        };
+        let _ = crate::bus::swarm::record::event(
+            conn,
+            &swarm_id,
+            Some(task_id),
+            &format!("task.{}", status.as_str()),
+            Some(actor_launch),
+            Some(serde_json::json!({ "title": before.title, "what": what })),
+            now,
+        );
     }
     if let Some(p) = db_path {
         crate::tracing::store::poke_wake(p);

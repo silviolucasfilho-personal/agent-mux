@@ -1,4 +1,4 @@
-//! CLI commands for Langfuse: `agent-mux langfuse web|status|traces`.
+//! CLI commands for Langfuse: `agent-mux langfuse web|status|traces|export-swarm`.
 
 use crate::config::{self, resolve_langfuse};
 use crate::tracing::langfuse::api::{ListTracesParams, check_health, list_traces, resolve_web_url};
@@ -22,6 +22,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "web" | "open" => run_web(&args[1..], lf.as_ref()),
         "status" | "health" => run_status(lf.as_ref()),
         "traces" | "ls" => run_traces(&args[1..], lf.as_ref()),
+        "export-swarm" => run_export_swarm(&args[1..], tracing_cfg),
         cmd => {
             eprintln!("unknown langfuse command: {cmd}\n");
             print_usage();
@@ -36,9 +37,13 @@ fn print_usage() {
         Commands:\n  \
           web       Open Langfuse Web in your default browser\n  \
           status    Verify credentials and reachability\n  \
-          traces    List recent traces (last 30 days, newest first)\n\n\
+          traces    List recent traces (last 30 days, newest first)\n  \
+          export-swarm <id> [--dry-run]\n            \
+                    Send one swarm to Langfuse: every session of its launches in the\n            \
+                    swarm's Langfuse session, then its summary trace (also sent when\n            \
+                    a swarm closes). `langfuse web -s <swarm id>` opens it.\n\n\
         Options:\n  \
-          --session <id>   Target a session (e.g. claude:s1)\n  \
+          --session <id>   Target a session (e.g. claude:s1, or a swarm id)\n  \
           --trace <id>     Target a trace ID\n  \
           --project <id>   Override Langfuse project ID\n  \
           --limit <n>      Number of traces to fetch (default: 20)\n"
@@ -195,5 +200,68 @@ fn run_traces(args: &[String], lf: Option<&crate::config::ResolvedLangfuse>) -> 
         );
     }
 
+    Ok(())
+}
+
+/// `langfuse export-swarm <id> [--dry-run]`: `tracing::langfuse::export_swarm`.
+fn run_export_swarm(
+    args: &[String],
+    tracing_cfg: &crate::config::TracingConfig,
+) -> Result<(), String> {
+    use crate::tracing::langfuse::{ExporterConfig, export_swarm, map::MapCtx};
+    let env_getter = |k: &str| std::env::var(k).ok();
+    let resolved = crate::config::resolve_tracing(Some(tracing_cfg), &env_getter)
+        .or_else(|| {
+            let mut enabled = tracing_cfg.clone();
+            enabled.enabled = Some(true);
+            crate::config::resolve_tracing(Some(&enabled), &env_getter)
+        })
+        .ok_or("could not resolve tracing configuration")?;
+    let Some(lf) = resolved.langfuse.as_ref() else {
+        return Err(
+            "Langfuse is not configured. Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY.".into(),
+        );
+    };
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let Some(id) = args.iter().find(|a| !a.starts_with("--")) else {
+        return Err("usage: agent-mux langfuse export-swarm <swarm id> [--dry-run]".into());
+    };
+    let conn = crate::tracing::store::open_ro(&resolved.db_path)?;
+    let ws = std::env::current_dir()
+        .map(|d| crate::bus::store::normalize_workspace(&d))
+        .unwrap_or_default();
+    let swarm = crate::bus::swarm::record::resolve_swarm(&conn, &ws, Some(id))?;
+    let mut cfg = ExporterConfig::new(lf);
+    cfg.flush_interval = std::time::Duration::from_millis(200);
+    let report = export_swarm(
+        &conn,
+        cfg,
+        MapCtx::from_settings(&resolved),
+        &swarm,
+        dry_run,
+        std::time::Duration::from_secs(120),
+    )?;
+    println!(
+        "{} {}: {} session(s), {} row(s), {} event(s) to {} (Langfuse session {})",
+        if dry_run { "would send" } else { "sent" },
+        swarm.id,
+        report.sessions,
+        report.ops,
+        report.events,
+        lf.host,
+        swarm.id
+    );
+    if dry_run && let Some(first) = &report.first_event {
+        println!("first event: {first}");
+    }
+    if report.dropped > 0 {
+        println!("[!!] {} event(s) were not accepted", report.dropped);
+    }
+    for note in &report.notes {
+        println!("  {note}");
+    }
+    if report.notes.iter().any(|n| n.contains("authentication")) {
+        return Err("Langfuse rejected the credentials".into());
+    }
     Ok(())
 }

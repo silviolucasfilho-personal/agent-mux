@@ -5095,10 +5095,27 @@ impl App {
             }
         }
         let now = crate::tracing::store::now_ns();
-        (
-            stopped,
-            crate::bus::swarm::record::end_swarm(&conn, Some(&db), swarm, now),
-        )
+        let ended = crate::bus::swarm::record::end_swarm(&conn, Some(&db), swarm, now);
+        if ended.is_ok() {
+            self.export_swarm_trace(&swarm.id);
+        }
+        (stopped, ended)
+    }
+
+    /// Sends a closed swarm's summary trace to Langfuse (coordinator-first
+    /// spec §7.3), from a thread; nothing when Langfuse is not configured.
+    pub fn export_swarm_trace(&self, swarm_id: &str) {
+        let (Some(db), Some(rt)) = (self.trace_db_path.clone(), self.tracing.as_ref()) else {
+            return;
+        };
+        if rt.langfuse().is_none() {
+            return;
+        }
+        crate::tracing::langfuse::export_swarm_summary_in_background(
+            db,
+            rt.settings().clone(),
+            swarm_id.to_string(),
+        );
     }
 
     /// Ends `workspace`'s swarms: stops its worker sessions (bus-group
@@ -5124,6 +5141,7 @@ impl App {
         for &idx in &targets {
             self.sessions[idx].kill();
         }
+        let mut ended: Vec<String> = Vec::new();
         let records = match self.trace_db_path.as_deref() {
             Some(db) => crate::tracing::store::open_aux(db).and_then(|conn| {
                 let norm = crate::bus::store::normalize_workspace(workspace);
@@ -5139,11 +5157,16 @@ impl App {
                 for s in &live {
                     let (c, r) = crate::bus::swarm::record::end_swarm(&conn, Some(db), s, now)?;
                     total = (total.0 + c, total.1 + r);
+                    ended.push(s.id.clone());
                 }
                 Ok(total)
             }),
             None => Err("no trace store".into()),
         };
+        // a closed swarm's summary trace goes to Langfuse (§7.3)
+        for id in ended {
+            self.export_swarm_trace(&id);
+        }
         (targets.len(), records)
     }
 

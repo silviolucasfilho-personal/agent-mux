@@ -28,6 +28,10 @@ pub struct HeimdallDossier {
     pub sessions: DossierSection<SessionDossier>,
     pub skills: DossierSection<SkillDossier>,
     pub agents: DossierSection<AgentDossier>,
+    /// The workspace's swarms of the session window (coordinator-first
+    /// design §7.1): live ones and those that ended within it.
+    #[serde(default)]
+    pub swarms: DossierSection<SwarmDossier>,
 }
 
 /// Scope definition of the dossier.
@@ -65,10 +69,14 @@ pub struct DossierHealth {
     pub sessions_build_ms: u64,
     pub skills_build_ms: u64,
     pub agents_build_ms: u64,
+    #[serde(default)]
+    pub swarms_build_ms: u64,
     pub bytes: usize,
     pub max_session_cards: usize,
     pub max_skill_rows: usize,
     pub max_agent_rows: usize,
+    #[serde(default)]
+    pub max_swarm_cards: usize,
     pub examples_per_category: usize,
 }
 
@@ -133,6 +141,44 @@ pub struct SessionDossier {
     pub total_cost_usd: Option<f64>,
 }
 
+/// The swarms of the window: one card each, newest first.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SwarmDossier {
+    pub swarms: Vec<SwarmCard>,
+    pub total_swarms: usize,
+}
+
+/// One swarm as the briefing tells it (`tracing::swarm_report`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SwarmCard {
+    pub id: String,
+    pub goal: String,
+    /// `planning`, `review`, `running`, `paused`, `integrating`,
+    /// `finished`, or `closed` once it ended.
+    pub status: String,
+    pub workspace: String,
+    pub started_ns: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_ns: Option<i64>,
+    /// The coordinator's launch id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator: Option<String>,
+    /// Launches of the swarm: the coordinator and every worker session.
+    pub launches: usize,
+    pub tasks_done: usize,
+    pub tasks_total: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Part of the cost is unpriced (agy): `cost_usd` is a floor.
+    pub unpriced: bool,
+    /// What waits for the operator, one line each.
+    pub needs: Vec<String>,
+    /// The Langfuse session every turn of the swarm is in (`session.id`).
+    pub langfuse_session: String,
+}
+
 /// Limits and timing configuration for dossier building.
 #[derive(Debug, Clone)]
 pub struct DossierConfig {
@@ -142,6 +188,7 @@ pub struct DossierConfig {
     pub max_session_cards: usize,
     pub max_skill_rows: usize,
     pub max_agent_rows: usize,
+    pub max_swarm_cards: usize,
     pub examples_per_category: usize,
     pub deadline: Duration,
 }
@@ -155,6 +202,7 @@ impl Default for DossierConfig {
             max_session_cards: 20,
             max_skill_rows: 30,
             max_agent_rows: 30,
+            max_swarm_cards: 10,
             examples_per_category: 3,
             deadline: Duration::from_secs(5),
         }
@@ -432,6 +480,19 @@ pub fn finalize_dossier(
                 return Ok(dossier);
             }
         }
+        if !dossier.swarms.data.swarms.is_empty() {
+            dossier.swarms.data.swarms.pop();
+            dossier.swarms.truncated = true;
+            dossier.swarms.status = CoverageStatus::Partial;
+            let warn = "Swarm cards omitted to fit byte limit".to_string();
+            if !dossier.swarms.warnings.contains(&warn) {
+                dossier.swarms.warnings.push(warn);
+            }
+            removed = true;
+            if sync_serialized_bytes(&mut dossier)? <= config.max_bytes {
+                return Ok(dossier);
+            }
+        }
         if !dossier.sessions.data.sessions.is_empty() {
             dossier.sessions.data.sessions.pop();
             dossier.sessions.truncated = true;
@@ -602,6 +663,71 @@ pub fn build_dossier(
         Ok((d, total_matching, warnings, truncated))
     });
 
+    // 7b. Build Swarms section (coordinator-first §7.1): the workspace's
+    // swarms live or ended within the session window
+    let (swarms_section, swarms_ms) = orchestrate_section(|| {
+        let ws = inputs.workspace.to_string_lossy();
+        let runs = crate::tracing::swarm_report::swarms_since(
+            inputs.conn,
+            Some(&ws),
+            session_since_ns,
+            config.max_swarm_cards + 1,
+        )
+        .map_err(AnalysisError::Sqlite)?;
+        let total_matching = runs.len();
+        let truncated = runs.len() > config.max_swarm_cards;
+        let no_workers = std::collections::HashMap::new();
+        let mut cards = Vec::with_capacity(runs.len().min(config.max_swarm_cards));
+        for run in runs.iter().take(config.max_swarm_cards) {
+            let r = crate::tracing::swarm_report::report(inputs.conn, run, &no_workers, as_of_ns)
+                .map_err(AnalysisError::Sqlite)?;
+            cards.push(SwarmCard {
+                id: run.id.clone(),
+                goal: run
+                    .goal
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect(),
+                status: if run.ended_ns.is_some() {
+                    "closed".into()
+                } else {
+                    run.status.as_str().to_string()
+                },
+                workspace: run.workspace.clone(),
+                started_ns: run.started_ns,
+                ended_ns: run.ended_ns,
+                coordinator: r.coordinator.clone(),
+                launches: r.launches.len(),
+                tasks_done: r.done,
+                tasks_total: r.total,
+                tokens: r.tokens,
+                cost_usd: r.cost_usd,
+                unpriced: r.unpriced,
+                needs: r.attention.clone(),
+                langfuse_session: run.id.clone(),
+            });
+        }
+        let mut warnings = Vec::new();
+        if truncated {
+            warnings.push(format!(
+                "Swarm cards capped at {} (total matching: {})",
+                config.max_swarm_cards, total_matching
+            ));
+        }
+        Ok((
+            SwarmDossier {
+                swarms: cards,
+                total_swarms: total_matching,
+            },
+            total_matching,
+            warnings,
+            truncated,
+        ))
+    });
+
     // Explicitly drop progress handler guard before health queries
     drop(guard);
 
@@ -644,10 +770,12 @@ pub fn build_dossier(
         sessions_build_ms: sessions_ms,
         skills_build_ms: skills_ms,
         agents_build_ms: agents_ms,
+        swarms_build_ms: swarms_ms,
         bytes: 0,
         max_session_cards: config.max_session_cards,
         max_skill_rows: config.max_skill_rows,
         max_agent_rows: config.max_agent_rows,
+        max_swarm_cards: config.max_swarm_cards,
         examples_per_category: config.examples_per_category,
     };
 
@@ -662,6 +790,7 @@ pub fn build_dossier(
         sessions: sessions_section,
         skills: skills_section,
         agents: agents_section,
+        swarms: swarms_section,
     };
 
     finalize_dossier(dossier, &config)

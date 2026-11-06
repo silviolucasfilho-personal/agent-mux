@@ -81,6 +81,45 @@ FROM traces_fts JOIN traces t ON t.rid = traces_fts.rowid
 WHERE traces_fts MATCH ?1 ORDER BY t.start_ns DESC LIMIT 20;
 ```
 
+## Swarms
+
+One swarm as one tree (coordinator-first design §7.1): every launch of a
+swarm carries `launches.metadata.swarm_id`, `swarm_role` (`coordinator` |
+`worker`), `swarm_task`, `swarm_task_key` and `parent_launch`, so its
+coordinator, workers and their totals are one query. `agent-mux trace swarm
+<id>` and `agent_mux_get_swarm` answer the same from `tracing::swarm_report`.
+
+```sql
+SELECT l.id, json_extract(l.metadata,'$.swarm_role') AS role,
+       json_extract(l.metadata,'$.swarm_task_key') AS task,
+       SUM(s.total_tokens) AS tokens, SUM(s.total_cost_usd) AS cost,
+       SUM(s.unpriced_generations) > 0 AS unpriced,
+       l.started_ns, l.ended_ns
+FROM launches l LEFT JOIN trace_stats s ON s.launch_id = l.id
+WHERE json_extract(l.metadata,'$.swarm_id') = ?1
+GROUP BY l.id
+ORDER BY role = 'coordinator' DESC, l.started_ns;
+```
+
+A worker's sub-agents (a Claude `Task` run, a Codex sub-agent) hang under
+its turns:
+
+```sql
+SELECT o.name, o.start_ns, o.end_ns, o.total_tokens
+FROM observations o JOIN traces t ON t.id = o.trace_id
+WHERE t.launch_id = ?1 AND o.type = 'agent' ORDER BY o.start_ns;
+```
+
+The swarm's log, with who did what (`swarm_events`: `plan.proposed`,
+`decision.launch` with the operator's words, `task.offered`,
+`task.spawned`, `task.done`, `task.failed`, `question.asked`, `message`,
+`check.done`, `closed`):
+
+```sql
+SELECT datetime(created_ns/1000000000,'unixepoch','localtime') AS at, kind, actor, task_id, detail
+FROM swarm_events WHERE swarm_id = ?1 ORDER BY id;
+```
+
 ## Guardrails
 
 - Only `SELECT` / `WITH`. The CLI rejects writes, and you must not try.

@@ -326,6 +326,8 @@ pub fn draw_pane(f: &mut Frame, area: Rect, v: &SwarmBoard, app: &App, now: Inst
         PaneView::SwarmCard if v.swarm.is_some() => match v.swarm_tab {
             SwarmTab::Board => draw_swarm_card(f, body, v),
             SwarmTab::Live => draw_live_mosaic(f, body, v, app, now),
+            SwarmTab::Timeline => draw_swarm_timeline(f, body, v),
+            SwarmTab::Log => draw_swarm_log(f, body, v),
             SwarmTab::Activity => draw_activity(f, body, v),
             SwarmTab::Changes => draw_swarm_changes(f, body, v),
         },
@@ -619,6 +621,9 @@ fn draw_swarm_tabs(f: &mut Frame, area: Rect, v: &SwarmBoard) {
     for (n, tab) in SwarmTab::ALL.iter().enumerate() {
         let label = match tab {
             SwarmTab::Live if live > 0 => format!("{} Live ({live})", n + 1),
+            SwarmTab::Log if !v.events.is_empty() => {
+                format!("{} Log ({})", n + 1, v.events.len())
+            }
             SwarmTab::Activity if !v.messages.is_empty() => {
                 format!("{} Activity ({})", n + 1, v.messages.len())
             }
@@ -903,6 +908,26 @@ fn draw_task_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                 draw_messages(f, content, v, &msgs, focused);
             }
         }
+        Tab::Trace => {
+            let lines: Vec<Line<'static>> = v
+                .trace_lines
+                .iter()
+                .skip(v.panel_scroll)
+                .take(content.height as usize)
+                .map(|l| {
+                    if l.starts_with("turn ") {
+                        Line::styled(l.clone(), head())
+                    } else if l.contains(" ✗") {
+                        Line::styled(l.clone(), Style::default().fg(Color::Red))
+                    } else if l.contains(" agent ") {
+                        Line::styled(l.clone(), Style::default().fg(Color::Cyan))
+                    } else {
+                        Line::raw(l.clone())
+                    }
+                })
+                .collect();
+            f.render_widget(Paragraph::new(lines), indented(content));
+        }
         Tab::Changes => {
             f.render_widget(
                 Paragraph::new(diff_lines(v, content.height as usize)),
@@ -910,6 +935,216 @@ fn draw_task_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
             );
         }
     }
+}
+
+/// A lane's colour, by its task's state word.
+fn lane_style(state: &str) -> Style {
+    match state {
+        "working" | "starting" | "running" => Style::default().fg(Color::Green),
+        "asking" | "prompt" | "stalled" | "review" | "planning" => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        "failed" | "lost" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        "done" | "closed" | "finished" => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::DIM),
+        "coordinator" | "integrating" | "paused" => Style::default().fg(Color::Cyan),
+        _ => dim(),
+    }
+}
+
+/// The Timeline tab (§9.3): one lane per agent, the coordinator first,
+/// sub-agents indented under their worker, time left to right from the
+/// swarm's start; `█` where the agent worked, `░` while it was alive, `?`
+/// while it waited on an answer, marks for decisions and task events.
+/// `←`/`→` pan, `-`/`+` zoom, `0` the whole swarm.
+fn draw_swarm_timeline(f: &mut Frame, area: Rect, v: &SwarmBoard) {
+    use crate::tracing::swarm_report::{LEGEND, lane_cells};
+    let focused = v.focus == Focus::Panel;
+    let block = card_block(
+        format!(
+            " Timeline · {}× {}· ←→ pan · -+ zoom · 0 all ",
+            v.tl_zoom,
+            if v.tl_pan != 0 { "panned " } else { "" }
+        ),
+        focused,
+    );
+    let whole = block.inner(area);
+    f.render_widget(block, area);
+    let [tabs_area, inner] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(whole);
+    draw_swarm_tabs(f, tabs_area, v);
+    let (Some(tl), Some(w)) = (&v.timeline, v.timeline_window()) else {
+        f.render_widget(
+            Paragraph::new(Line::styled("  Nothing traced yet.", dim())),
+            inner,
+        );
+        return;
+    };
+    let width = inner.width as usize;
+    let label_w = (width / 3).clamp(12, 32).min(width.saturating_sub(10));
+    let track = width.saturating_sub(label_w + 2);
+    let mut lines: Vec<Line<'static>> = vec![Line::styled(
+        format!(
+            "{:<label_w$}  {}",
+            format!(
+                "{} → {}",
+                &crate::tracing::cli::fmt_time(w.start_ns)[11..16],
+                &crate::tracing::cli::fmt_time(w.end_ns)[11..16]
+            ),
+            crate::tracing::view::axis(&w, track)
+        ),
+        dim(),
+    )];
+    for lane in tl.lanes.iter().skip(v.panel_scroll) {
+        let label = format!("{}{}", "  ".repeat(lane.depth.min(3)), lane.label);
+        let cells = lane_cells(lane, &w, track, v.now_ns);
+        let mut spans = vec![Span::styled(
+            format!("{:<label_w$}  ", truncate(&label, label_w)),
+            if lane.depth > 0 {
+                dim()
+            } else {
+                lane_style(&lane.state)
+            },
+        )];
+        let style = lane_style(&lane.state);
+        let mut run = String::new();
+        let mut run_kind: Option<u8> = None;
+        let flush = |spans: &mut Vec<Span<'static>>, run: &mut String, kind: Option<u8>| {
+            if run.is_empty() {
+                return;
+            }
+            let st = match kind {
+                Some(0) => dim(),                              // alive
+                Some(1) => style,                              // working
+                Some(2) => Style::default().fg(Color::Yellow), // asking
+                Some(3) => Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD), // a mark
+                _ => Style::default(),
+            };
+            spans.push(Span::styled(std::mem::take(run), st));
+        };
+        for c in cells {
+            let kind = match c {
+                '░' => Some(0),
+                '█' | '▶' => Some(1),
+                '?' => Some(2),
+                ' ' => None,
+                _ => Some(3),
+            };
+            if kind != run_kind {
+                flush(&mut spans, &mut run, run_kind);
+                run_kind = kind;
+            }
+            run.push(c);
+        }
+        flush(&mut spans, &mut run, run_kind);
+        lines.push(Line::from(spans));
+    }
+    let height = inner.height as usize;
+    if lines.len() + 2 <= height {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(format!("{:<label_w$}  {LEGEND}", ""), dim()));
+    } else {
+        lines.truncate(height.saturating_sub(1));
+        lines.push(Line::styled(format!("{:<label_w$}  {LEGEND}", ""), dim()));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The Log tab (§9.3): `swarm_events` newest last, one line each (time,
+/// kind, actor, detail); `t` cycles the kinds (all, decisions, tasks,
+/// messages), `/` filters by text, `Enter` opens the row the event is about.
+fn draw_swarm_log(f: &mut Frame, area: Rect, v: &SwarmBoard) {
+    use crate::tracing::swarm_report::LogKind;
+    let focused = v.focus == Focus::Panel;
+    let block = card_block(
+        " Log · t kinds · / filter · Enter opens the row ".to_string(),
+        focused,
+    );
+    let whole = block.inner(area);
+    f.render_widget(block, area);
+    let [tabs_area, head_area, inner] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(whole);
+    draw_swarm_tabs(f, tabs_area, v);
+    let mut head_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+    for k in LogKind::ALL {
+        head_spans.push(if k == v.log_kind {
+            Span::styled(
+                format!(" {} ", k.label()),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            )
+        } else {
+            Span::styled(format!(" {} ", k.label()), dim())
+        });
+    }
+    head_spans.push(Span::raw("   "));
+    head_spans.push(if v.log_editing {
+        Span::styled(
+            format!("/{}▏", v.log_filter),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if !v.log_filter.is_empty() {
+        Span::styled(format!("/{}", v.log_filter), head())
+    } else {
+        Span::styled("/ filter", dim())
+    });
+    f.render_widget(Paragraph::new(Line::from(head_spans)), head_area);
+    let entries = v.log_entries();
+    if entries.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                if v.events.is_empty() {
+                    "  Nothing logged yet."
+                } else {
+                    "  No event matches."
+                },
+                dim(),
+            )),
+            inner,
+        );
+        return;
+    }
+    let height = inner.height as usize;
+    let selected = v.selected_message.min(entries.len() - 1);
+    let start = (selected + 1).saturating_sub(height);
+    let lines: Vec<Line<'static>> = entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(i, e)| {
+            let line = crate::bus::swarm::view::event_line(e);
+            let style = if e.kind.starts_with("decision.") || e.kind.starts_with("plan.") {
+                Style::default().fg(Color::Cyan)
+            } else if e.kind.ends_with(".failed") || e.kind == "task.lost" {
+                Style::default().fg(Color::Red)
+            } else if e.kind == "task.done" || e.kind == "check.done" {
+                Style::default().fg(Color::Green)
+            } else if e.kind.starts_with("question.") || e.kind == "message" {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            let marker = if focused && i == selected {
+                "▸ "
+            } else {
+                "  "
+            };
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::styled(line, style),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// The Task tab: the card, its plan checks, and what it produced.

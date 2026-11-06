@@ -40,23 +40,27 @@ pub enum Focus {
     Panel,
 }
 
-/// The panel's tabs, in the order `1`–`4` choose them.
+/// The panel's tabs, in the order `1`–`5` choose them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Task,
     Live,
     Thread,
+    /// The worker's turns, tool calls and sub-agents from the store, with
+    /// tokens and cost (coordinator-first design §9.2).
+    Trace,
     Changes,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Task, Tab::Live, Tab::Thread, Tab::Changes];
+    pub const ALL: [Tab; 5] = [Tab::Task, Tab::Live, Tab::Thread, Tab::Trace, Tab::Changes];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Task => "Task",
             Tab::Live => "Live",
             Tab::Thread => "Thread",
+            Tab::Trace => "Trace",
             Tab::Changes => "Changes",
         }
     }
@@ -72,13 +76,17 @@ impl Tab {
     }
 }
 
-/// The swarm row's tabs, in the order `1`–`4` choose them
-/// (coordinator-first design §9.3; Timeline and Log come with the trace).
+/// The swarm row's tabs, in the order `1`–`6` choose them
+/// (coordinator-first design §9.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwarmTab {
     Board,
     /// Every live terminal of the swarm at once (§9.5).
     Live,
+    /// One lane per agent, time left to right (`tracing::swarm_report`).
+    Timeline,
+    /// The swarm's log, `swarm_events` newest last.
+    Log,
     /// Every message of the swarm.
     Activity,
     /// The combined diff: each worktree's branch, and the workspace.
@@ -86,9 +94,11 @@ pub enum SwarmTab {
 }
 
 impl SwarmTab {
-    pub const ALL: [SwarmTab; 4] = [
+    pub const ALL: [SwarmTab; 6] = [
         SwarmTab::Board,
         SwarmTab::Live,
+        SwarmTab::Timeline,
+        SwarmTab::Log,
         SwarmTab::Activity,
         SwarmTab::Changes,
     ];
@@ -96,6 +106,8 @@ impl SwarmTab {
         match self {
             SwarmTab::Board => "Board",
             SwarmTab::Live => "Live",
+            SwarmTab::Timeline => "Timeline",
+            SwarmTab::Log => "Log",
             SwarmTab::Activity => "Activity",
             SwarmTab::Changes => "Changes",
         }
@@ -107,6 +119,9 @@ impl SwarmTab {
 /// terminal of its own; its row connects to its worker's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubAgent {
+    /// The observation's id and turn, for its rows in the Trace tab.
+    pub id: String,
+    pub trace_id: String,
     pub name: String,
     pub start_ns: i64,
     pub end_ns: Option<i64>,
@@ -469,6 +484,10 @@ pub struct SwarmData {
     pub launch_decision: Option<crate::bus::swarm::record::SwarmDecision>,
     /// Each worker's sub-agents, by the worker's launch id.
     pub agents: HashMap<String, Vec<SubAgent>>,
+    /// The swarm's log (`swarm_events`), oldest first.
+    pub events: Vec<crate::bus::swarm::record::SwarmEvent>,
+    /// The Timeline tab's lanes, computed once per refresh.
+    pub timeline: Option<crate::tracing::swarm_report::Timeline>,
 }
 
 /// A row of the tree.
@@ -555,6 +574,21 @@ pub struct SwarmBoard {
     pub problems: Problems,
     /// How the plan was approved, once it was.
     pub launch_decision: Option<crate::bus::swarm::record::SwarmDecision>,
+    /// The selected swarm's log and timeline (from its `SwarmData`).
+    pub events: Vec<crate::bus::swarm::record::SwarmEvent>,
+    pub timeline: Option<crate::tracing::swarm_report::Timeline>,
+    /// The Timeline tab's magnification (1× is the whole swarm) and pan,
+    /// in tenths of the shown span.
+    pub tl_zoom: u32,
+    pub tl_pan: i32,
+    /// The Log tab's kind filter (`t`) and text filter (`/`).
+    pub log_kind: crate::tracing::swarm_report::LogKind,
+    pub log_filter: String,
+    /// `/` is typing the text filter.
+    pub log_editing: bool,
+    /// The Trace tab's lines, for `(launch, sub-agent)`.
+    pub trace_lines: Vec<String>,
+    trace_for: Option<(String, Option<String>)>,
     pub live: HashMap<String, LiveWorker>,
     pub workers: HashMap<String, Worker>,
     pub asking: HashSet<String>,
@@ -654,6 +688,15 @@ impl SwarmBoard {
             messages: Vec::new(),
             problems: Problems::default(),
             launch_decision: None,
+            events: Vec::new(),
+            timeline: None,
+            tl_zoom: 1,
+            tl_pan: 0,
+            log_kind: crate::tracing::swarm_report::LogKind::All,
+            log_filter: String::new(),
+            log_editing: false,
+            trace_lines: Vec::new(),
+            trace_for: None,
             live: HashMap::new(),
             workers: HashMap::new(),
             asking: HashSet::new(),
@@ -836,6 +879,17 @@ impl SwarmBoard {
                     .as_ref()
                     .map(|c| sub_agents(c, &board))
                     .unwrap_or_default();
+                // the log and the timeline (§9.3), once per refresh
+                let events = self
+                    .conn
+                    .as_ref()
+                    .and_then(|c| record::recent_events(c, &run.id, 1000).ok())
+                    .unwrap_or_default();
+                let timeline = self.conn.as_ref().and_then(|c| {
+                    crate::tracing::swarm_report::report(c, &run, &self.workers, now_ns)
+                        .ok()
+                        .map(|r| crate::tracing::swarm_report::timeline(&r, now_ns))
+                });
                 let mut d = SwarmData {
                     run,
                     board,
@@ -845,6 +899,8 @@ impl SwarmBoard {
                     needs: Vec::new(),
                     launch_decision,
                     agents,
+                    events,
+                    timeline,
                 };
                 d.needs = needs_for(&d, &self.workers, now_ns);
                 swarms.push(d);
@@ -867,6 +923,10 @@ impl SwarmBoard {
         if self.on_task && self.tab() == Tab::Changes {
             self.diff_for = None;
             self.load_diff();
+        }
+        if self.on_task && self.tab() == Tab::Trace {
+            self.trace_for = None;
+            self.load_trace();
         }
     }
 
@@ -940,6 +1000,8 @@ impl SwarmBoard {
                 self.problems = d.problems.clone();
                 self.needs = d.needs.clone();
                 self.launch_decision = d.launch_decision.clone();
+                self.events = d.events.clone();
+                self.timeline = d.timeline.clone();
             }
             None => {
                 self.swarm = None;
@@ -949,6 +1011,8 @@ impl SwarmBoard {
                 self.problems = Problems::default();
                 self.needs.clear();
                 self.launch_decision = None;
+                self.events.clear();
+                self.timeline = None;
             }
         }
         self.on_task = task.is_some();
@@ -1122,7 +1186,7 @@ impl SwarmBoard {
     /// A form, the command line, or the pane typing into a session: letters
     /// are text, not the screen's verbs.
     pub fn text_entry_active(&self) -> bool {
-        self.modal.is_some() || self.command.is_some() || self.pane_focused
+        self.modal.is_some() || self.command.is_some() || self.pane_focused || self.log_editing
     }
 
     pub fn confirmation_active(&self) -> bool {
@@ -1193,6 +1257,8 @@ impl SwarmBoard {
         };
         match &self.chosen_tab {
             Some((id, tab)) if *id == t.task.id => *tab,
+            // a sub-agent row opens on its rows in the trace (§9.5)
+            _ if matches!(self.rows.get(self.cursor), Some(Row::Agent(..))) => Tab::Trace,
             _ => Tab::for_state(self.shown(t)),
         }
     }
@@ -1206,6 +1272,9 @@ impl SwarmBoard {
         if tab == Tab::Changes {
             self.load_diff();
         }
+        if tab == Tab::Trace {
+            self.load_trace();
+        }
     }
 
     fn after_selection_change(&mut self) {
@@ -1216,9 +1285,83 @@ impl SwarmBoard {
         {
             self.load_diff();
         }
+        if self.on_task && self.tab() == Tab::Trace {
+            self.load_trace();
+        }
     }
 
-    /// `1`–`4` on the swarm row.
+    /// The Trace tab's lines for the selected worker (and, on a sub-agent
+    /// row, that sub-agent's rows only), read once per selection.
+    fn load_trace(&mut self) {
+        let Some(launch) = self
+            .selected_task()
+            .and_then(|t| t.task.assigned_to.clone())
+        else {
+            self.trace_lines = vec!["  No worker yet: nothing was traced.".into()];
+            self.trace_for = None;
+            return;
+        };
+        let agent = self
+            .rows
+            .get(self.cursor)
+            .copied()
+            .and_then(|r| self.agent_of(r))
+            .map(|a| a.id.clone());
+        let want = (launch.clone(), agent.clone());
+        if self.trace_for.as_ref() == Some(&want) {
+            return;
+        }
+        self.trace_lines = match &self.conn {
+            Some(conn) => {
+                crate::tracing::swarm_report::launch_trace_lines(conn, &launch, agent.as_deref())
+                    .unwrap_or_else(|e| vec![format!("  could not read the trace: {e}")])
+            }
+            None => vec!["  No trace store.".into()],
+        };
+        self.trace_for = Some(want);
+    }
+
+    /// The Log tab's events: the kind and text filters applied.
+    pub fn log_entries(&self) -> Vec<&crate::bus::swarm::record::SwarmEvent> {
+        let needle = self.log_filter.trim().to_lowercase();
+        self.events
+            .iter()
+            .filter(|e| self.log_kind.admits(e))
+            .filter(|e| {
+                needle.is_empty()
+                    || crate::bus::swarm::view::event_line(e)
+                        .to_lowercase()
+                        .contains(&needle)
+            })
+            .collect()
+    }
+
+    /// The Log tab has the keyboard: `↑`/`↓` choose a line.
+    pub fn in_log(&self) -> bool {
+        !self.on_task
+            && self.swarm.is_some()
+            && self.swarm_tab == SwarmTab::Log
+            && self.focus == Focus::Panel
+            && !self.pane_focused
+    }
+
+    /// The Timeline tab has the keyboard: `←`/`→` pan, `-`/`+` zoom.
+    pub fn in_timeline(&self) -> bool {
+        !self.on_task
+            && self.swarm.is_some()
+            && self.swarm_tab == SwarmTab::Timeline
+            && self.focus == Focus::Panel
+            && !self.pane_focused
+    }
+
+    /// The part of the swarm the Timeline tab shows.
+    pub fn timeline_window(&self) -> Option<crate::tracing::view::Window> {
+        self.timeline
+            .as_ref()
+            .map(|tl| tl.view(self.tl_zoom, self.tl_pan))
+    }
+
+    /// `1`–`6` on the swarm row.
     fn set_swarm_tab(&mut self, tab: SwarmTab) {
         self.swarm_tab = tab;
         self.activity = tab == SwarmTab::Activity;
@@ -1314,7 +1457,9 @@ impl SwarmBoard {
     }
 
     fn list_len(&self) -> usize {
-        if self.activity || self.tab() == Tab::Thread {
+        if !self.on_task && self.swarm_tab == SwarmTab::Log {
+            self.log_entries().len()
+        } else if self.activity || self.tab() == Tab::Thread {
             self.panel_messages().len()
         } else {
             0
@@ -1654,8 +1799,64 @@ impl SwarmBoard {
         if ctrl && key.code == KeyCode::Char('r') {
             return Outcome::Reload;
         }
+        if self.log_editing {
+            // `/` on the Log tab types its text filter
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => self.log_editing = false,
+                KeyCode::Backspace => {
+                    self.log_filter.pop();
+                }
+                KeyCode::Char(c) if !ctrl => self.log_filter.push(c),
+                _ => {}
+            }
+            self.selected_message = self.list_len().saturating_sub(1);
+            return Outcome::None;
+        }
         let in_list = (self.focus == Focus::Panel)
-            && (self.activity || (self.on_task && self.tab() == Tab::Thread));
+            && (self.activity || self.in_log() || (self.on_task && self.tab() == Tab::Thread));
+        if self.in_timeline() {
+            match key.code {
+                KeyCode::Left | KeyCode::Char('h') => {
+                    self.tl_pan -= 1;
+                    return Outcome::None;
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    self.tl_pan += 1;
+                    return Outcome::None;
+                }
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    self.tl_zoom = (self.tl_zoom * 2).min(64);
+                    return Outcome::None;
+                }
+                KeyCode::Char('-') => {
+                    self.tl_zoom = (self.tl_zoom / 2).max(1);
+                    if self.tl_zoom == 1 {
+                        self.tl_pan = 0;
+                    }
+                    return Outcome::None;
+                }
+                KeyCode::Char('0') => {
+                    self.tl_zoom = 1;
+                    self.tl_pan = 0;
+                    return Outcome::None;
+                }
+                _ => {}
+            }
+        }
+        if self.in_log() {
+            match key.code {
+                KeyCode::Char('/') => {
+                    self.log_editing = true;
+                    return Outcome::None;
+                }
+                KeyCode::Char('t') => {
+                    self.log_kind = self.log_kind.next();
+                    self.selected_message = self.list_len().saturating_sub(1);
+                    return Outcome::None;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 if self.focus != Focus::Board {
@@ -1676,13 +1877,15 @@ impl SwarmBoard {
                 };
                 Outcome::None
             }
-            KeyCode::Char(c @ '1'..='4') => {
+            KeyCode::Char(c @ '1'..='6') => {
                 let n = (c as u8 - b'1') as usize;
                 if self.on_task {
-                    self.activity = false;
-                    self.set_tab(Tab::ALL[n]);
-                } else {
-                    self.set_swarm_tab(SwarmTab::ALL[n]);
+                    if let Some(tab) = Tab::ALL.get(n) {
+                        self.activity = false;
+                        self.set_tab(*tab);
+                    }
+                } else if let Some(tab) = SwarmTab::ALL.get(n) {
+                    self.set_swarm_tab(*tab);
                 }
                 Outcome::None
             }
@@ -1773,7 +1976,7 @@ impl SwarmBoard {
             | KeyCode::Char('b')
             | KeyCode::Char('a') => {
                 self.status_msg = Some(
-                    "Changes to the plan are said to the coordinator (Enter on ★). > writes to workers; 3 on the swarm row is Activity."
+                    "Changes to the plan are said to the coordinator (Enter on ★). > writes to workers; 5 on the swarm row is Activity."
                         .into(),
                 );
                 Outcome::None
@@ -1793,6 +1996,31 @@ impl SwarmBoard {
     }
 
     fn enter(&mut self, in_list: bool) -> Outcome {
+        if in_list && self.in_log() {
+            // Enter on a log line opens the row the event is about
+            let target = self
+                .log_entries()
+                .get(self.selected_message)
+                .map(|e| (e.task_id.clone(), e.actor.clone()));
+            let Some((task_id, actor)) = target else {
+                return Outcome::None;
+            };
+            let at = match task_id {
+                Some(id) => self.rows.iter().position(|r| {
+                    matches!(r, Row::Task(i, j)
+                        if self.swarms.get(*i).and_then(|d| d.board.get(*j)).is_some_and(|t| t.task.id == id))
+                }),
+                None => actor.as_deref().and_then(|a| self.row_of_launch(a)),
+            };
+            match at {
+                Some(at) => {
+                    self.focus = Focus::Board;
+                    self.set_cursor(at);
+                }
+                None => self.status_msg = Some("That event names no row of this swarm.".into()),
+            }
+            return Outcome::None;
+        }
         if in_list {
             if let Some(m) = self.selected_message().cloned() {
                 self.modal = Some(Modal::Message {
@@ -2516,7 +2744,7 @@ impl SwarmBoard {
 fn sub_agents(conn: &Connection, board: &[BoardTask]) -> HashMap<String, Vec<SubAgent>> {
     let mut out: HashMap<String, Vec<SubAgent>> = HashMap::new();
     let Ok(mut stmt) = conn.prepare(
-        "SELECT o.name, o.start_ns, o.end_ns FROM observations o
+        "SELECT o.id, o.trace_id, o.name, o.start_ns, o.end_ns FROM observations o
          JOIN traces t ON t.id = o.trace_id
          WHERE t.launch_id = ?1 AND o.type = 'agent' ORDER BY o.start_ns ASC LIMIT 50",
     ) else {
@@ -2526,9 +2754,11 @@ fn sub_agents(conn: &Connection, board: &[BoardTask]) -> HashMap<String, Vec<Sub
         let rows: Vec<SubAgent> = stmt
             .query_map([launch], |r| {
                 Ok(SubAgent {
-                    name: r.get(0)?,
-                    start_ns: r.get(1)?,
-                    end_ns: r.get(2)?,
+                    id: r.get(0)?,
+                    trace_id: r.get(1)?,
+                    name: r.get(2)?,
+                    start_ns: r.get(3)?,
+                    end_ns: r.get(4)?,
                 })
             })
             .and_then(|it| it.collect())
@@ -3172,6 +3402,8 @@ mod tests {
             needs: Vec::new(),
             launch_decision: None,
             agents: HashMap::new(),
+            events: Vec::new(),
+            timeline: None,
         };
         d.needs = needs_for(&d, &v.workers, v.now_ns);
         v.swarms = vec![d];

@@ -209,10 +209,12 @@ fn dossier_builds_are_byte_for_byte_identical() {
     d1.health.sessions_build_ms = 0;
     d1.health.skills_build_ms = 0;
     d1.health.agents_build_ms = 0;
+    d1.health.swarms_build_ms = 0;
     d2.health.total_build_ms = 0;
     d2.health.sessions_build_ms = 0;
     d2.health.skills_build_ms = 0;
     d2.health.agents_build_ms = 0;
+    d2.health.swarms_build_ms = 0;
 
     let json1 = serde_json::to_vec(&d1).unwrap();
     let json2 = serde_json::to_vec(&d2).unwrap();

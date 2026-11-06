@@ -47,7 +47,7 @@ The Swarm screen shows **one swarm**: its coordinator, the agents it started and
 
 ```
 ┌ Swarms • Keyboard focus ───┐┌ ◆ add OAuth login ─────────────────────────────────────────────┐
-│>▾ ◆ add OAuth login    ⚑1  ││  1 Board   2 Live (3)   3 Activity (12)   4 Changes             │
+│>▾ ◆ add OAuth login    ⚑1  ││  1 Board  2 Live (3)  3 Timeline  4 Log (41)  5 Activity (12)  6 Changes │
 │     ★ coordinator·claude ○ ││                                                                 │
 │     ✓ 1 oauth-schema       ││ running · 1/5 done · 2/3 workers · 18m · 41k tok · $1.24        │
 │     ● 2 oauth-routes codex ││                                                                 │
@@ -66,9 +66,10 @@ The Swarm screen shows **one swarm**: its coordinator, the agents it started and
   - **One row per agent the swarm started**, in plan order: its state glyph, number and key, and on the right its harness, elapsed time and cost (`!` when it needs you, `✗` when the plan has an error on it). `Enter` types into its terminal.
   - **`↳` sub-agents** under a worker (a Claude `Task` run, a Codex sub-agent), live ones always, ended ones when you unfold the worker with `→`. They have no terminal of their own: `Enter` goes to their worker's.
 - **The main pane** shows the selected row:
-  - **The swarm row** has four tabs (`1`–`4`): **Board** (the card: state, needs, the plan as a table with each task's live word, how the plan was confirmed and by whose words, the check), **Live** (every live terminal of the swarm at once, a tile each, the coordinator first; `Tab` into it, `↑↓←→` choose a tile, `Enter` connects to it), **Activity** (every message of the swarm) and **Changes** (each worktree task's branch, then the workspace's diff).
+  - **The swarm row** has six tabs (`1`–`6`): **Board** (the card: state, needs, the plan as a table with each task's live word, how the plan was confirmed and by whose words, the check), **Live** (every live terminal of the swarm at once, a tile each, the coordinator first; `Tab` into it, `↑↓←→` choose a tile, `Enter` connects to it), **Timeline** (one lane per agent — the swarm, `★` the coordinator, each worker, `↳` its sub-agents, the check last — time left to right from the swarm's start: `█` while the agent worked, `░` while its session lived, `?` while it waited on an answer, and marks for what happened — `▲` launch, `✓` done, `✗` failed, `◆` merge, `│` a message, `▤` a plan, `■` closed; `Tab` into it, `←`/`→` pan, `-`/`+` zoom, `0` the whole swarm), **Log** (the swarm's log, newest last: time, kind, who, what — every decision with the operator's words, every task offered, started, done or failed, every question and message, the check; `Tab` into it, `t` cycles the kinds — all, decisions, tasks, messages — `/` filters by text, `Enter` opens the row the line is about), **Activity** (every message of the swarm) and **Changes** (each worktree task's branch, then the workspace's diff).
   - **The coordinator** shows its terminal.
-  - **A worker** shows its terminal while it has one; its tabs are `1 Task` (instructions, done-when, files, dependencies, result or error, branch), `2 Live`, `3 Thread` (its messages) and `4 Changes` (its diff). The pane opens on the tab that matters.
+  - **A worker** shows its terminal while it has one; its tabs are `1 Task` (instructions, done-when, files, dependencies, result or error, branch), `2 Live`, `3 Thread` (its messages), `4 Trace` (its turns from the store, each with its tool calls, generations and sub-agents, duration, tokens and cost) and `5 Changes` (its diff). The pane opens on the tab that matters.
+  - **A sub-agent** (`↳`) opens on the Trace tab with its own rows only; `Enter` goes to its worker's terminal.
   - **A worker whose session ended** keeps its row: `Enter` **reconnects** — the same harness resumes the same conversation in a new session on the task (Claude Code, Codex and OpenCode; agy cannot, `r` retries instead).
 - **`Enter` on a terminal** gives it the keyboard: the pane's title says `Keyboard goes to …`. `⌘L` (`Ctrl+Shift+L`) brings the keyboard back to the tree.
 - **Cost** reads `—` when a harness's cost isn't priced (agy isn't), and `≥$x` when only part of it is.
@@ -156,8 +157,8 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | `↑` `↓` `g` `G` | choose a row |
 | `←` `→` | fold or unfold: a worker's ended sub-agents (`→` on it), `←` on a child climbs to its parent |
 | `Enter` | type into the row's terminal · reconnect a worker whose session ended · connect to a Live tile · start a swarm when there is none |
-| `Tab` | tree ↔ pane (in Activity or Thread, `↑`/`↓` choose a message, `Enter` reads it in full, `m` answers it; in Live, `↑↓←→` choose a tile) |
-| `1`–`4` | the swarm row's tab (Board, Live, Activity, Changes) or a worker's (Task, Live, Thread, Changes) |
+| `Tab` | tree ↔ pane (in Activity or Thread, `↑`/`↓` choose a message, `Enter` reads it in full, `m` answers it; in Live, `↑↓←→` choose a tile; in Timeline, `←`/`→` pan, `-`/`+` zoom, `0` all; in Log, `↑`/`↓` choose a line, `t` the kinds, `/` a text filter, `Enter` opens the row it is about) |
+| `1`–`6` | the swarm row's tab (Board, Live, Timeline, Log, Activity, Changes) or a worker's (Task, Live, Thread, Trace, Changes) |
 | `y` | confirm the one thing on the row: merge a branch in `review` · accept a proposal · close a finished swarm. Never the plan: on a plan in review, `y` moves the keyboard to the coordinator's chat. |
 | `x` | stop a worker · cancel a task · set a branch aside · drop a proposal (confirms with `y`) |
 | `r` | retry a failed, lost, cancelled or stalled task (the retry form: harness, agent, isolation) · restart an exited coordinator |
@@ -179,6 +180,14 @@ Changing the plan (a task's card, adding or dropping one, re-planning) is said t
 - **Finished workers stay open.** You can attach to one or message it with follow-ups until the swarm closes.
 - **The check:** when every task is settled and every branch reviewed, agent-mux runs the swarm's check command, if it has one, in the workspace (`sh -c`, at most 30 minutes). The top line reads `check running`, then `check ✓` or `check ✗`. A failed check lands in Needs you with the end of its output. The swarm still finishes, because whether to fix it is your call.
 - **Finished:** once every task is settled, every branch reviewed and the check run, the swarm is `finished` and Needs you offers to close it. `y` closes the swarm: its sessions stop, open tasks are cancelled, and leases are released.
+
+## The trace
+
+Every session of a swarm is recorded with the swarm's id (`launches.metadata.swarm_id`, its role, its task and its parent), so the whole swarm reads as one trace:
+
+- `agent-mux trace swarm <id>` prints the swarm as a tree (the coordinator, each worker with its task's state, turns, tools, tokens, cost and `↳` sub-agents, the decisions, the check); `--timeline` draws the Timeline tab's lanes, `--log` prints the log, `--json` gives it all. Without an id, the workspace's live swarm.
+- `agent_mux_get_swarm` is the same for a session or Heimdall (whose startup briefing lists the workspace's swarms of the day).
+- **Langfuse:** with Langfuse configured, every turn of the coordinator and the workers carries `session.id = <swarm id>` and the tags `swarm`, `swarm:coordinator` or `swarm:worker`, so the swarm is one Langfuse session (`agent-mux langfuse web -s <swarm id>`). When the swarm closes, agent-mux sends one **summary trace** named `swarm <goal>`: a span for the swarm, one per task (timing, state, worker, tokens, cost, result or error, and the worker's trace ids) and an event per decision. `agent-mux langfuse export-swarm <id>` sends a swarm again, or for the first time when it ran with Langfuse off.
 
 ## From the command line
 

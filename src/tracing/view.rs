@@ -116,7 +116,7 @@ pub fn tree_rows<'a>(obs: &'a [ObservationView], collapsed: &HashSet<String>) ->
 }
 
 /// The time span a timeline is drawn against.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct Window {
     pub start_ns: i64,
     pub end_ns: i64,

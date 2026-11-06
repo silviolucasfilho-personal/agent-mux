@@ -17,6 +17,12 @@ Each session card holds:
   - `last_assistant_output` (closing text).
 - Resources: `duration_ms`, `last_active_ns`, `total_tokens`, `total_cost_usd`.
 
+## Dossier Section: `swarms`
+
+`data.swarms` lists the workspace's swarms live or ended within the same window (at most 10, newest first). Each card holds `id`, `goal`, `status` (`planning`, `review`, `running`, `paused`, `integrating`, `finished`, or `closed` once ended), `workspace`, `started_ns`/`ended_ns`, `coordinator` (its launch id), `launches` (coordinator + worker sessions), `tasks_done`/`tasks_total`, `tokens`, `cost_usd` (`unpriced = true`: a floor), `needs` (what waits for the operator) and `langfuse_session` (the swarm id; every turn of the swarm is in that Langfuse session).
+
+A swarm's sessions are ordinary session cards too: fold them under the swarm in the report instead of listing them twice. Drill into one swarm only when asked: `agent_mux_get_swarm` (`swarm = "<id>"`), or `trace swarm <id> --json` (`--tree` the launches with turns and sub-agents, `--timeline` one lane per agent, `--log` the `swarm_events` rows).
+
 ## Procedure
 
 1. For the startup briefing: answer directly from `$AGENT_MUX_BRIEFING`'s `sessions` section. Do not query MCP or the CLI.
@@ -27,6 +33,10 @@ Each session card holds:
 ## Report shape
 
 ```
+### ◆ swarm <goal> · <status> · <done>/<total> tasks · <launches> agents
+Needs you: … (one line per `needs` entry, or "nothing")
+Cost: <tokens> tokens · $<usd> · <duration>  ·  Langfuse session <id>
+
 ### <provider> · <cwd> · <session key>
 Goal: …
 Now: <tool> on <path/command> for <n> s   (or: idle since <time>)

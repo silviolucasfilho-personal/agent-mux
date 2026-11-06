@@ -414,6 +414,11 @@ impl ExporterState {
         let launch = match op {
             StoreOp::Trace(t) => self.aggregate_trace(t),
             StoreOp::Observation(o) => self.aggregate_observation(o),
+            StoreOp::Launch(l) => {
+                // a swarm's launch: its turns join the swarm's session (§7.3)
+                self.ctx.note_launch(l);
+                None
+            }
             _ => None,
         };
         let mut event = map::event_for(op, &self.ctx)?;
@@ -616,12 +621,14 @@ pub fn replay_sessions(
 ) -> Result<ReplayReport, String> {
     let mut report = ReplayReport::default();
     let mut ops: Vec<StoreOp> = Vec::new();
+    let mut ctx = ctx;
     for key in session_keys {
         let rows = crate::tracing::store::read_session_ops(conn, key)
             .map_err(|e| format!("read {key}: {e}"))?;
         report.sessions += 1;
         ops.extend(rows);
     }
+    seed_swarms(conn, &mut ctx, session_keys).map_err(|e| format!("read launches: {e}"))?;
     report.ops = ops.len();
     let events: Vec<Event> = ops
         .iter()
@@ -655,6 +662,160 @@ pub fn replay_sessions(
             .push("langfuse: the replay did not finish before the deadline".into());
     }
     Ok(report)
+}
+
+/// Teaches `ctx` the swarm of every launch of `session_keys`, so a replay
+/// puts a swarm's turns in the swarm's Langfuse session as the live
+/// exporter does (a session's ops carry no launch row).
+fn seed_swarms(
+    conn: &rusqlite::Connection,
+    ctx: &mut MapCtx,
+    session_keys: &[String],
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT id, metadata FROM launches
+         WHERE session_key = ?1 AND json_extract(metadata, '$.swarm_id') IS NOT NULL",
+    )?;
+    for key in session_keys {
+        let rows: Vec<(String, String)> = stmt
+            .query_map(rusqlite::params![key], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, meta) in rows {
+            if let Some(sw) = serde_json::from_str::<serde_json::Value>(&meta)
+                .ok()
+                .as_ref()
+                .and_then(crate::bus::swarm::SwarmLaunch::from_metadata)
+            {
+                ctx.swarms.insert(id, sw);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Posts ready-made events (the swarm summary) in batches, synchronously,
+/// with the exporter's retry policy but no breaker: the caller is a CLI or
+/// a one-off thread. Answers the server's rejection notes.
+pub fn send_events(cfg: &ExporterConfig, events: &[Event]) -> Result<Vec<String>, String> {
+    let agent = agent(cfg.connect_timeout, cfg.request_timeout);
+    let mut notes = Vec::new();
+    let mut batch = Batch::default();
+    let mut batches = Vec::new();
+    for e in events {
+        batch.push(e.clone());
+        if batch.is_full(cfg.max_batch_events, cfg.max_batch_bytes) {
+            batches.push(std::mem::take(&mut batch));
+        }
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    for b in batches {
+        let body = b.body();
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match post_batch(&agent, cfg, &body) {
+                PostOutcome::Success(rej) => {
+                    notes.extend(rej);
+                    break;
+                }
+                PostOutcome::AuthFailure => {
+                    return Err("langfuse: authentication failed (check the keys)".into());
+                }
+                PostOutcome::ClientError(code) => {
+                    return Err(format!("langfuse: the export was refused (HTTP {code})"));
+                }
+                PostOutcome::RateLimited(wait) if attempt <= cfg.attempts => {
+                    std::thread::sleep(wait.min(cfg.retry_after_cap));
+                }
+                PostOutcome::Retryable if attempt <= cfg.attempts => {
+                    std::thread::sleep(jitter(cfg.backoff_base * attempt, attempt as u64));
+                }
+                PostOutcome::RateLimited(_) | PostOutcome::Retryable => {
+                    return Err(format!(
+                        "langfuse: {} attempt(s) failed (network or server)",
+                        attempt
+                    ));
+                }
+            }
+        }
+    }
+    Ok(notes)
+}
+
+/// Replays one swarm to Langfuse (coordinator-first spec §7.3): every
+/// session of its launches, so each turn sits in the swarm's session, then
+/// the summary trace (`map::swarm_summary`). `agent-mux langfuse
+/// export-swarm <id>`; for a swarm that ran with Langfuse off, or to
+/// refresh the summary.
+pub fn export_swarm(
+    conn: &rusqlite::Connection,
+    cfg: ExporterConfig,
+    ctx: MapCtx,
+    swarm: &crate::bus::swarm::record::SwarmRun,
+    dry_run: bool,
+    deadline: Duration,
+) -> Result<ReplayReport, String> {
+    let now = crate::tracing::store::now_ns();
+    let report = crate::tracing::swarm_report::report(
+        conn,
+        swarm,
+        &crate::bus::swarm::view::snapshot_workers(),
+        now,
+    )
+    .map_err(|e| format!("read {}: {e}", swarm.id))?;
+    let keys: Vec<String> = report
+        .launches
+        .iter()
+        .filter_map(|l| l.session_key.clone())
+        .collect();
+    let mut out = replay_sessions(conn, cfg.clone(), ctx.clone(), &keys, dry_run, deadline)?;
+    let summary = map::swarm_summary(&report, &ctx);
+    out.events += summary.len();
+    if out.first_event.is_none() {
+        out.first_event = summary.first().map(|e| e.json.clone());
+    }
+    if !dry_run {
+        match send_events(&cfg, &summary) {
+            Ok(notes) => out.notes.extend(notes),
+            Err(e) => out.notes.push(e),
+        }
+    }
+    Ok(out)
+}
+
+/// Sends a swarm's summary trace from a thread of its own, when the swarm
+/// closes in the TUI: reads the store, builds `map::swarm_summary`, posts
+/// it. Nothing is reported back; `langfuse export-swarm` re-sends it.
+pub fn export_swarm_summary_in_background(
+    db_path: std::path::PathBuf,
+    settings: crate::config::ResolvedTracing,
+    swarm_id: String,
+) {
+    let Some(lf) = settings.langfuse.clone() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let Ok(conn) = crate::tracing::store::open_aux(&db_path) else {
+            return;
+        };
+        let Ok(Some(swarm)) = crate::bus::swarm::record::get_swarm(&conn, &swarm_id) else {
+            return;
+        };
+        let now = crate::tracing::store::now_ns();
+        let Ok(report) = crate::tracing::swarm_report::report(
+            &conn,
+            &swarm,
+            &std::collections::HashMap::new(),
+            now,
+        ) else {
+            return;
+        };
+        let ctx = MapCtx::from_settings(&settings);
+        let events = map::swarm_summary(&report, &ctx);
+        let _ = send_events(&ExporterConfig::new(&lf), &events);
+    });
 }
 
 /// One end-to-end host+auth probe with the exact headers the exporter

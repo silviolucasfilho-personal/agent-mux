@@ -79,6 +79,24 @@ impl SwarmLaunch {
             parent_launch: coordinator_launch,
         }
     }
+    /// The swarm a launch row's `metadata` names, if any (the inverse of
+    /// [`SwarmLaunch::metadata`]).
+    pub fn from_metadata(meta: &serde_json::Value) -> Option<SwarmLaunch> {
+        let m = meta.as_object()?;
+        let text = |k: &str| m.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        let swarm_id = text("swarm_id")?;
+        let role = match text("swarm_role").as_deref() {
+            Some("worker") => SwarmRole::Worker,
+            _ => SwarmRole::Coordinator,
+        };
+        Some(SwarmLaunch {
+            swarm_id,
+            role,
+            task_id: text("swarm_task"),
+            task_key: text("swarm_task_key"),
+            parent_launch: text("parent_launch"),
+        })
+    }
     /// The keys written to `launches.metadata`.
     pub fn metadata(&self, meta: &mut serde_json::Map<String, serde_json::Value>) {
         meta.insert("swarm_id".into(), self.swarm_id.as_str().into());

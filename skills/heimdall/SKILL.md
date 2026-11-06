@@ -30,6 +30,7 @@ Prefer the MCP tool; use the CLI command (`"$AGENT_MUX_BIN" trace …`, add `--j
 | Sessions with turns, tools, tokens, cost, state | `agent_mux_list_sessions` | `trace ls --all --json` (`--since 7d`, `--limit N`) |
 | One session's card | `agent_mux_get_session` (`session_key`) | `trace show <session-key> --json` |
 | A session's turns and observations in order | `agent_mux_get_timeline` (`session_key`) | `trace show <trace-id> --json --tree` / `--timeline` |
+| One swarm as one trace: coordinator, workers, sub-agents, decisions, log | `agent_mux_get_swarm` (`swarm`) | `trace swarm <id> --json` (`--tree`, `--timeline`, `--log`) |
 | Search prompts and outputs | `agent_mux_search_traces` (`query`) | `trace search "<fts5 query>" --json` |
 | Per-skill attribution, errors, latency, cost | `agent_mux_analyze_skills` (`skill`) | `trace skills --json`, `trace skills lint [name]` |
 | Two launches side by side | `agent_mux_compare_runs` (`a`, `b`) | `trace compare <a> <b>` |
@@ -45,6 +46,7 @@ Deep procedures, thresholds and report shapes live next to this file: `reference
 1. Answer from `$AGENT_MUX_BRIEFING`'s `sessions` section. Its `data.sessions` cards already hold goal, current activity, files, commands, last output, turns, tools, tokens and cost for this workspace. `status = "partial"` with warnings or `live_snapshot_available = false` in `health` means live clues were unavailable or cards were capped; state this limitation without calling tools.
 2. Only when the user asks about another workspace or an older window: `agent_mux_get_briefing` with `since`/`until`, or `trace briefing --all-workspaces --json`.
 3. For a session requiring drill-down timeline detail: `agent_mux_get_timeline` (or `trace show <session-key> --json`).
+3b. The `swarms` section (`data.swarms`) lists the workspace's swarms of the window: report each as one line (goal, status, tasks done/total, launches, tokens, cost, what needs the operator) under the sessions, and group a swarm's sessions (`launch_id` among the swarm's launches) under it rather than listing them apart. Drill into one only when asked: `agent_mux_get_swarm` (or `trace swarm <id> --json`).
 4. Report per session: **Goal** (first user prompt), **Now** (open turn or open observation, its tool and target), **Done** (turns, tool calls by name, files touched, commands run), **Last output** (one or two sentences), **Cost** (tokens, USD, duration). Follow `reference/sessions.md`.
 
 ## Playbook B — evaluate skills
