@@ -198,6 +198,7 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                     asking: &d.asking,
                     now_ns: v.now_ns,
                     dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
+                    review: d.review.enabled,
                 };
                 let st = engine::shown(t, &input);
                 let needs = v.row_needs(*row);
@@ -251,8 +252,24 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                 } else {
                     (harness, dim())
                 };
+                // the review's verdict beside the task it reviews (v25)
+                let reviewed = crate::bus::swarm::review::state(t, &d.board, d.review.enabled)
+                    .map(|r| r.glyph())
+                    .filter(|g| !g.is_empty())
+                    .map(|g| format!(" {g}"))
+                    .unwrap_or_default();
+                let lead = if t.ext.review_of.is_some() {
+                    "      ↳"
+                } else {
+                    "   "
+                };
                 (
-                    format!("    {} {} {}{fold}", st.glyph(), j + 1, t.ext.plan_key),
+                    format!(
+                        "{lead} {} {} {}{reviewed}{fold}",
+                        st.glyph(),
+                        j + 1,
+                        t.ext.plan_key
+                    ),
                     shown_style(st),
                     right,
                     rstyle,
@@ -1228,6 +1245,46 @@ fn task_card(v: &SwarmBoard, t: &BoardTask) -> Vec<Line<'static>> {
         };
         out.extend(text.lines().map(|l| Line::raw(l.to_string())));
     }
+    // its review (v25): where it stands, by whom, and the findings
+    let review = v.review_settings();
+    if let Some(state) = crate::bus::swarm::review::state(t, &v.board, review.enabled) {
+        use crate::bus::swarm::review::ReviewState as R;
+        out.push(Line::raw(""));
+        out.push(section("Review"));
+        let by = t
+            .ext
+            .review_task
+            .as_deref()
+            .and_then(|id| v.board.iter().find(|o| o.task.id == id));
+        let who = by
+            .map(|r| {
+                format!(
+                    " · `{}` on {}",
+                    r.ext.plan_key,
+                    r.task.target_harness.as_deref().unwrap_or("?")
+                )
+            })
+            .unwrap_or_default();
+        let color = match state {
+            R::Approved => Color::Green,
+            R::Changes | R::Failed => Color::Red,
+            R::Unclear => Color::Yellow,
+            _ => Color::Gray,
+        };
+        out.push(Line::styled(
+            format!("  {} {}{who}", state.glyph(), state.as_str()),
+            Style::default().fg(color),
+        ));
+        if let Some(text) = by.and_then(crate::bus::swarm::review::result_text) {
+            out.extend(text.lines().map(|l| Line::raw(format!("  {l}"))));
+        }
+        if state == R::Changes {
+            out.push(Line::styled(
+                "  Tell the coordinator to send it back to the worker, then `review` it again.",
+                dim(),
+            ));
+        }
+    }
     if let Some(e) = &t.task.error {
         out.push(Line::raw(""));
         out.push(section("Error"));
@@ -1560,6 +1617,7 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
             field,
             error,
             advanced,
+            review,
             ..
         } => {
             let mut l = Vec::new();
@@ -1578,11 +1636,17 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
                     .unwrap_or_else(|| "claude".into()),
                 *field == LaunchField::Planner,
             ));
+            l.push(choice(
+                "Reviews",
+                v.review_label(*review),
+                *field == LaunchField::Review,
+            ));
             l.push(Line::raw(""));
             for t in [
                 "  The coordinator opens as a session. Tell it the goal there; it asks",
                 "  what it needs, proposes the plan as a table and starts the workers",
                 "  once you say go. The screen mirrors the plan; you confirm in the chat.",
+                "  Each finished task is reviewed read-only before you merge it.",
             ] {
                 l.push(Line::styled(t, dim()));
             }

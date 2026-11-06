@@ -134,7 +134,7 @@ pub fn tool_catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "agent_mux_swarm_plan",
-            description: "Submit (or resubmit) the plan of the agent-mux swarm you coordinate: a summary and the tasks (key, title, instructions, acceptance, files, depends_on, optional harness/agent/isolation). agent-mux checks it; with errors nothing changes and the errors are answered so you can fix them and call again; without errors the tasks go on the board and the answer carries the plan as a table: show it to the operator and ask whether to start. When they say yes, call agent_mux_swarm_launch with their words.",
+            description: "Submit (or resubmit) the plan of the agent-mux swarm you coordinate: a summary, the tasks (key, title, instructions, acceptance, files, depends_on, optional harness/agent/isolation, review = false to skip one task's review) and optionally review {enabled, harness}: each finished task is reviewed read-only before the merge unless the operator dismisses it. agent-mux checks it; with errors nothing changes and the errors are answered so you can fix them and call again; without errors the tasks go on the board and the answer carries the plan as a table: show it to the operator and ask whether to start. When they say yes, call agent_mux_swarm_launch with their words.",
             input_schema: schema_of::<SwarmPlanArgs>(),
             read_only: false,
         },

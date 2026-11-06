@@ -1142,6 +1142,7 @@ mod tests {
                 owner_run: None,
                 worker_pool: Vec::new(),
                 headless: false,
+                review: crate::bus::swarm::review::ReviewSettings::off(),
             },
             t0,
         )
@@ -1167,7 +1168,9 @@ mod tests {
                 harness: None,
                 agent: None,
                 isolation: None,
+                review: None,
             }],
+            review: None,
         };
         record::submit_plan(&conn, None, &swarm, &plan, &env, t0 + 1_000_000_000).unwrap();
         let swarm = record::get_swarm(&conn, &swarm.id).unwrap().unwrap();

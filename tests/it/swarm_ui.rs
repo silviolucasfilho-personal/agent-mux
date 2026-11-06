@@ -132,6 +132,7 @@ fn seed(f: &Fixture, status: SwarmStatus, tasks: Vec<PlannedTask>) -> SwarmRun {
             owner_run: Some("another-tui".into()),
             worker_pool: vec![],
             headless: false,
+            review: agent_mux::bus::swarm::review::ReviewSettings::off(),
         },
         now_ns(),
     )
@@ -143,6 +144,7 @@ fn seed(f: &Fixture, status: SwarmStatus, tasks: Vec<PlannedTask>) -> SwarmRun {
         &Plan {
             summary: "one task per subsystem".into(),
             tasks,
+            review: None,
         },
         now_ns(),
     )
@@ -464,12 +466,14 @@ fn with_no_swarm_the_screen_offers_one_and_the_form_starts_it() {
         "New swarm",
         "Coordinator: ◂ claude ▸",
         "Tell it the goal there",
+        "Reviews: auto · another harness than the worker's",
         "▸ Advanced: goal now, workers' pool",
     ] {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
     }
     assert!(!out.contains("Max parallel workers"), "folded:\n{out}");
-    // Advanced unfolds the limits.
+    // Advanced unfolds the limits (past the review).
+    press(&mut f, KeyCode::Tab);
     press(&mut f, KeyCode::Tab);
     press(&mut f, KeyCode::Char(' '));
     let out = render(&f.app, 120, 36);

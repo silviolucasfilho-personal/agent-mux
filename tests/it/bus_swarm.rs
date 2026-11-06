@@ -428,6 +428,7 @@ fn bus_writes_advance_the_change_feed() {
             owner_run: None,
             worker_pool: vec![],
             headless: false,
+            review: agent_mux::bus::swarm::review::ReviewSettings::off(),
         },
         4_000,
     )
