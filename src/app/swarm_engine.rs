@@ -909,6 +909,8 @@ impl App {
             needs: Vec::new(),
             launch_decision: None,
             agents: Default::default(),
+            events: Vec::new(),
+            timeline: None,
         };
         let needs =
             crate::app::swarm_board::needs_for(&data, &workers, crate::tracing::store::now_ns())

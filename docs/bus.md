@@ -32,6 +32,7 @@ Every harness session wired with the `agent-mux` MCP server can call these tools
 | `agent_mux_swarm_launch` | Approves a plan in review on the operator's quoted words (`operator_said`, required for the chat relay: `record::launch`, a `swarm_decisions` row `by = chat`) and asks for the workers of `tasks` (plan keys) or of every ready task (`swarm_dispatch.launched_by = coordinator`); the engine spawns them at its next pass. CLI: `swarm approve`, `swarm launch [<task>…]`. |
 | `agent_mux_swarm_wait` | Blocks until the swarm logs an event after `after` (`swarm_events`: a task offered, spawned, done, failed, lost, a decision, the check) or `wait_ms` pass (default 5 min, at most 10: `view::wait_events`). A timeout is an answer, never an error: the coordinator reports to the operator and asks whether to keep waiting. CLI: `swarm wait`. |
 | `agent_mux_swarm_board` | The board as the screen shows it (`view::board_view`): each task's shown state, worker, result, branch, question; ready tasks nobody launched; open questions; the last event id. CLI: `swarm status --json`. |
+| `agent_mux_get_swarm` | One swarm as one trace (`tracing::swarm_report::report`): the swarm, its launches from `launches.metadata.swarm_id` (each with turns, tools, tokens, cost and `agent` observations), every task's state, the decisions, the log and the messages. Defaults to the caller's swarm; `swarm` names another, ended or not. CLI: `agent-mux trace swarm <id> [--tree\|--timeline\|--log\|--json]`. |
 | `agent_mux_swarm_action` | Relays an operator decision: pause, resume, retry, cancel, merge, set-aside, accept, drop, close. Merge, set-aside, cancel and close need `operator_said`. Through the control socket when a TUI runs (`SwarmAction` with `by = chat`, `said`, `from`), else `record::apply`. |
 
 ## CLI (`agent-mux bus …`)
@@ -116,4 +117,8 @@ agent-mux swarm replan <notes...>
 agent-mux swarm retry|cancel|merge|set-aside|accept|drop <task> [--workspace DIR] [--json]
 agent-mux swarm broadcast <message...> [--urgent] [--wake] [--workspace DIR] [--db PATH] [--json]
 agent-mux swarm stop [--workspace DIR] [--db PATH] [--json]
+agent-mux trace swarm <id> [--tree | --timeline | --log] [--json] [--workspace DIR]
+agent-mux langfuse export-swarm <id> [--dry-run]
 ```
+
+- **The trace (§7):** `swarm_events` is the log (`record::event`; `bus::store::update_task` writes `task.<status>` for a swarm's task and `send_message` writes `message` / `question.asked` / `question.answered` for a swarm's participants). `tracing::swarm_report` reads a swarm as one tree (launches by `launches.metadata.swarm_id`, turns from `trace_stats`, sub-agents from `observations.type = 'agent'`), draws the Timeline (`timeline`, `lane_cells`) and the Log (`log_lines`), and lists recent swarms for Heimdall's dossier (`swarms_since`). With Langfuse, `map::MapCtx::swarms` (learned from `StoreOp::Launch` rows, seeded from the store for a replay) puts a swarm's turns in `session.id = <swarm id>` with the `swarm` tags; `map::swarm_summary` is the summary trace, sent by `App::export_swarm_trace` when a swarm closes and by `langfuse::export_swarm` (`langfuse export-swarm`).

@@ -1423,7 +1423,9 @@ pub fn handle_message(service: &TraceService, line: &str) -> Option<Value> {
                 "agent_mux_swarm_plan" => {
                     return Some(rpc_result(id, swarm_plan_result(service, arguments)));
                 }
-                other if other.starts_with("agent_mux_swarm_") => {
+                other
+                    if other.starts_with("agent_mux_swarm_") || other == "agent_mux_get_swarm" =>
+                {
                     if let Some(v) = super::swarm_tools::call(service, other, arguments.clone()) {
                         return Some(rpc_result(id, v));
                     }
@@ -1613,8 +1615,9 @@ mod tests {
     #[test]
     fn catalog_contains_trace_and_bus_tools() {
         let names = tool_names();
-        assert_eq!(names.len(), 23);
+        assert_eq!(names.len(), 24);
         assert!(names.contains(&"agent_mux_swarm_plan"));
+        assert!(names.contains(&"agent_mux_get_swarm"));
         assert!(names.contains(&"agent_mux_swarm_start"));
         assert!(names.contains(&"agent_mux_swarm_launch"));
         assert!(names.contains(&"agent_mux_swarm_wait"));
@@ -1638,7 +1641,7 @@ mod tests {
         );
         let list = tools_list_value();
         let tools = list["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
         for t in tools {
             assert_eq!(t["annotations"]["destructiveHint"], false);
             assert_eq!(t["inputSchema"]["type"], "object");
@@ -1731,6 +1734,26 @@ mod tests {
             .unwrap();
         assert_eq!(tasks[0]["launched_by"], "coordinator");
         assert_eq!(tasks[1]["state"], "blocked");
+        // The swarm as one trace: its launches, decisions and log.
+        let traced = call(
+            "agent_mux_get_swarm",
+            json!({"session_id": "coord-1", "workspace": ws_s}),
+        );
+        assert_eq!(traced["isError"], false, "{traced}");
+        let data = &traced["structuredContent"]["data"];
+        assert_eq!(data["swarm"]["status"], "running");
+        assert_eq!(data["gate_mode"], "chat");
+        assert_eq!(data["decisions"][0]["said"], "go");
+        assert_eq!(data["tasks"].as_array().unwrap().len(), 2);
+        assert!(data["events"].as_array().unwrap().len() >= 4, "{data}");
+        let by_id = call(
+            "agent_mux_get_swarm",
+            json!({"swarm": data["swarm"]["id"], "workspace": ws_s}),
+        );
+        assert_eq!(
+            by_id["structuredContent"]["data"]["swarm"]["id"],
+            data["swarm"]["id"]
+        );
         let waited = call(
             "agent_mux_swarm_wait",
             json!({"session_id": "coord-1", "workspace": ws_s, "after": 0, "wait_ms": 10}),

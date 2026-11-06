@@ -23,6 +23,9 @@ commands:
   show <session|trace> [--full] [--json] [--tree | --timeline]
                                turns of a session, or observations of a trace
                                (--tree: nesting; --timeline: bars over the turn)
+  swarm <id> [--tree | --timeline | --log] [--json] [--workspace DIR]
+                               one swarm as one trace: its coordinator, workers, sub-agents,
+                               log and timeline (the id, or the workspace's live swarm)
   search <fts5 query> [--limit N] [--json]
                                full-text search over content (full mode data)
   import <path>... | --discover [--provider claude|codex|antigravity|opencode] [--content-mode full|metadata]
@@ -77,6 +80,7 @@ impl Args {
                         | "langfuse"
                         | "tree"
                         | "timeline"
+                        | "log"
                         | "all-workspaces"
                         | "guard"
                         | "loop"
@@ -242,6 +246,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
         }
         "ls" | "list" => ls(&args),
         "show" => show(&args),
+        "swarm" => swarm(&args),
         "search" => search(&args),
         "import" => import(&args),
         "export" => export(&args),
@@ -1809,6 +1814,54 @@ fn print_body(label: &str, body: &str) {
     for line in body.lines().take(200) {
         println!("      {line}");
     }
+}
+
+/// `trace swarm <id> [--tree | --timeline | --log] [--json]`: one swarm as
+/// one trace (coordinator-first spec §7.1), from `tracing::swarm_report`.
+/// Without an id, the workspace's only live swarm.
+fn swarm(args: &Args) -> anyhow::Result<()> {
+    use super::swarm_report as sr;
+    let (_, resolved) = resolved()?;
+    let conn = open_ro(&resolved)?;
+    let workspace = args
+        .value("workspace")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let ws = crate::bus::store::normalize_workspace(&workspace);
+    let swarm = crate::bus::swarm::record::resolve_swarm(
+        &conn,
+        &ws,
+        args.positional.first().map(String::as_str),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    let now = now_ns();
+    let workers = crate::bus::swarm::view::snapshot_workers();
+    let report = sr::report(&conn, &swarm, &workers, now)?;
+    if args.has("json") {
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
+    }
+    let (tree, timeline, log) = (args.has("tree"), args.has("timeline"), args.has("log"));
+    if [tree, timeline, log].iter().filter(|b| **b).count() > 1 {
+        anyhow::bail!("--tree, --timeline and --log are three views of the same swarm: pick one");
+    }
+    if timeline {
+        let tl = sr::timeline(&report, now);
+        for line in sr::timeline_lines(&tl, 30, 70, now) {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    if log {
+        for line in sr::log_lines(&report.events, sr::LogKind::All, "") {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+    for line in sr::tree_lines(&report, now) {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn show(args: &Args) -> anyhow::Result<()> {

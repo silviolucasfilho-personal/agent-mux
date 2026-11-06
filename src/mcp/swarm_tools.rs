@@ -48,6 +48,12 @@ pub fn catalog() -> Vec<ToolSpec> {
             read_only: true,
         },
         ToolSpec {
+            name: "agent_mux_get_swarm",
+            description: "One swarm as one trace: the swarm, its coordinator and workers (each launch's turns, tools, tokens, cost and sub-agents), every task's state, the decisions, the log (swarm_events) and the messages. Defaults to the calling session's swarm; an id or prefix names another.",
+            input_schema: schema_of::<GetSwarmArgs>(),
+            read_only: true,
+        },
+        ToolSpec {
             name: "agent_mux_swarm_action",
             description: "Relay an operator decision on the swarm: pause, resume, retry <task>, cancel <task>, merge <task>, set-aside <task>, accept <task>, drop <task>, close. Merge, set-aside, cancel and close need the operator's words in operator_said; the decision is recorded with them.",
             input_schema: schema_of::<SwarmActionArgs>(),
@@ -68,6 +74,7 @@ pub fn call(service: &TraceService, name: &str, arguments: Value) -> Option<Valu
         "agent_mux_swarm_launch" => launch(service, arguments),
         "agent_mux_swarm_wait" => wait(service, arguments),
         "agent_mux_swarm_board" => board(service, arguments),
+        "agent_mux_get_swarm" => get_swarm(service, arguments),
         "agent_mux_swarm_action" => action(service, arguments),
         _ => return None,
     })
@@ -461,6 +468,49 @@ fn board(service: &TraceService, arguments: Value) -> Value {
     let now = crate::tracing::store::now_ns();
     match view::board_view(&conn, &swarm, &view::snapshot_workers(), now) {
         Ok(b) => bus_ok_envelope(&ws, serde_json::to_value(&b).unwrap_or(Value::Null)),
+        Err(e) => tool_error(&ServiceError::DbUnavailable(e.to_string())),
+    }
+}
+
+/// Arguments of `agent_mux_get_swarm`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetSwarmArgs {
+    /// The swarm (`swarm-<id>`, or the id's prefix); absent means the
+    /// caller's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// `agent_mux_get_swarm`: the swarm's report (`tracing::swarm_report`).
+fn get_swarm(service: &TraceService, arguments: Value) -> Value {
+    let args: GetSwarmArgs = match serde_json::from_value(arguments) {
+        Ok(a) => a,
+        Err(e) => return invalid("get_swarm", e),
+    };
+    let ws = bus_workspace(service, args.workspace.as_deref());
+    let caller = bus_caller_id(args.session_id.as_deref());
+    let (conn, _) = match open(service) {
+        Ok(c) => c,
+        Err(v) => return v,
+    };
+    let swarm = match swarm_of_caller(&conn, &caller, &ws, args.swarm.as_deref()).or_else(|e| {
+        match args.swarm.as_deref() {
+            // an ended swarm named by id is a trace too
+            Some(id) => record::resolve_swarm(&conn, &ws.to_string_lossy(), Some(id)),
+            None => Err(e),
+        }
+    }) {
+        Ok(s) => s,
+        Err(e) => return tool_error(&ServiceError::NotFound(e)),
+    };
+    let now = crate::tracing::store::now_ns();
+    match crate::tracing::swarm_report::report(&conn, &swarm, &view::snapshot_workers(), now) {
+        Ok(r) => bus_ok_envelope(&ws, serde_json::to_value(&r).unwrap_or(Value::Null)),
         Err(e) => tool_error(&ServiceError::DbUnavailable(e.to_string())),
     }
 }

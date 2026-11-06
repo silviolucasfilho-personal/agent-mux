@@ -14,14 +14,17 @@
 //! the whole export for that), and the Langfuse-specific fields ride on
 //! the attribute names in `LangfuseOtelSpanAttributes`.
 
+use crate::bus::swarm::SwarmLaunch;
 use crate::config::ResolvedTracing;
 use crate::tracing::ids;
 use crate::tracing::pricing::{Cost, PriceTable, cost_for};
 use crate::tracing::store::model::{
-    Level, ObservationRow, ObservationType, StoreOp, TraceRow, TraceStatus,
+    LaunchRow, Level, ObservationRow, ObservationType, StoreOp, TraceRow, TraceStatus,
 };
+use crate::tracing::swarm_report::SwarmReport;
 use crate::tracing::usage::NormalizedUsage;
 use serde_json::{Map, Value, json};
+use std::collections::HashMap;
 
 /// Settings shared by every span of a run.
 #[derive(Debug, Clone)]
@@ -32,6 +35,11 @@ pub struct MapCtx {
     pub release: Option<String>,
     pub environment: Option<String>,
     pub tags: Vec<String>,
+    /// The launches that belong to a swarm (coordinator-first spec §7.3),
+    /// by launch id: their turns get `session.id = <swarm id>` and the
+    /// swarm tags. Learned from `StoreOp::Launch` rows as they pass
+    /// ([`MapCtx::note_launch`]) or seeded from the store for a replay.
+    pub swarms: HashMap<String, SwarmLaunch>,
 }
 
 impl MapCtx {
@@ -43,6 +51,14 @@ impl MapCtx {
             release: settings.release.clone(),
             environment: settings.environment.clone(),
             tags: settings.tags.clone(),
+            swarms: HashMap::new(),
+        }
+    }
+
+    /// Remembers a launch's swarm, from its row's metadata.
+    pub fn note_launch(&mut self, l: &LaunchRow) {
+        if let Some(sw) = l.metadata.as_ref().and_then(SwarmLaunch::from_metadata) {
+            self.swarms.insert(l.id.clone(), sw);
         }
     }
 }
@@ -265,11 +281,28 @@ fn trace_span(t: &TraceRow, ctx: &MapCtx) -> Event {
     if !tags.iter().any(|x| x == &t.provider) {
         tags.push(t.provider.clone());
     }
+    // a swarm's turn: one Langfuse session per swarm (§7.3), so the
+    // coordinator's and the workers' turns list together in order
+    let swarm = t.launch_id.as_deref().and_then(|l| ctx.swarms.get(l));
+    let session_id = match swarm {
+        Some(sw) => {
+            tags.push("swarm".into());
+            tags.push(format!("swarm:{}", sw.role.as_str()));
+            metadata.insert("swarm_id".into(), Value::from(sw.swarm_id.clone()));
+            metadata.insert("swarm_role".into(), Value::from(sw.role.as_str()));
+            put(&mut metadata, "swarm_task", sw.task_id.clone());
+            put(&mut metadata, "swarm_task_key", sw.task_key.clone());
+            put(&mut metadata, "parent_launch", sw.parent_launch.clone());
+            metadata.insert("harness_session".into(), Value::from(t.session_id.clone()));
+            sw.swarm_id.clone()
+        }
+        None => t.session_id.clone(),
+    };
     let name: String = t.name.chars().take(1000).collect();
     let mut attrs = common_attrs(ctx);
     attrs.push(attr(OBSERVATION_TYPE, any_str("span")));
     attrs.push(attr(TRACE_NAME, any_str(name.clone())));
-    attrs.push(attr(TRACE_SESSION_ID, any_str(t.session_id.clone())));
+    attrs.push(attr(TRACE_SESSION_ID, any_str(session_id)));
     push_str_attr(&mut attrs, TRACE_USER_ID, ctx.user_id.clone());
     push_str_attr(&mut attrs, TRACE_INPUT, t.input.clone());
     push_str_attr(&mut attrs, TRACE_OUTPUT, t.output.clone());
@@ -385,6 +418,259 @@ fn observation_span(o: &ObservationRow, ctx: &MapCtx) -> Event {
     }
 }
 
+/// The swarm's trace id: one deterministic trace per swarm.
+pub fn swarm_trace_id(swarm_id: &str) -> String {
+    ids::trace_id_hex(&format!("amx1|swarm|{swarm_id}"))
+}
+
+fn text(v: &str, max: usize) -> String {
+    v.chars().take(max).collect()
+}
+
+/// The summary trace of a swarm (coordinator-first spec §7.3): one trace
+/// named `swarm <goal>` in the swarm's Langfuse session, with a root span
+/// for the swarm, a child span per task (its timing, state, worker launch,
+/// tokens, cost, result or error, and the worker's trace ids: OTLP cannot
+/// parent a span across traces, so the link is metadata) and an event per
+/// decision. Sent when the swarm closes and by `langfuse export-swarm`;
+/// the ids are deterministic, so sending it again updates it.
+pub fn swarm_summary(r: &SwarmReport, ctx: &MapCtx) -> Vec<Event> {
+    let s = &r.swarm;
+    let trace_id = swarm_trace_id(&s.id);
+    let root_id = ids::span_id_hex(&format!("amx1|swarm|root|{}", s.id));
+    let goal = text(r.swarm.goal.lines().next().unwrap_or(""), 120);
+    let name = format!("swarm {goal}");
+    let now = crate::tracing::store::now_ns();
+    let end = s.ended_ns.unwrap_or(now);
+    let launch_of = |id: Option<&str>| r.launches.iter().find(|l| Some(l.launch_id.as_str()) == id);
+    let mut events = Vec::with_capacity(1 + r.tasks.len() + r.decisions.len());
+
+    let mut tags = ctx.tags.clone();
+    tags.push("swarm".into());
+    tags.push("swarm:summary".into());
+    for l in &r.launches {
+        if !tags.contains(&l.provider) {
+            tags.push(l.provider.clone());
+        }
+    }
+    let mut metadata = Map::new();
+    metadata.insert("swarm_id".into(), Value::from(s.id.clone()));
+    metadata.insert("workspace".into(), Value::from(s.workspace.clone()));
+    metadata.insert(
+        "status".into(),
+        Value::from(if s.ended_ns.is_some() {
+            "closed"
+        } else {
+            s.status.as_str()
+        }),
+    );
+    metadata.insert("gate_mode".into(), Value::from(r.gate_mode.clone()));
+    metadata.insert("max_workers".into(), Value::from(s.max_workers));
+    metadata.insert("isolation".into(), Value::from(s.isolation.as_str()));
+    metadata.insert("done".into(), Value::from(r.done));
+    metadata.insert("total".into(), Value::from(r.total));
+    put(&mut metadata, "tokens", r.tokens);
+    put(&mut metadata, "cost_usd", r.cost_usd);
+    metadata.insert("unpriced".into(), Value::Bool(r.unpriced));
+    put(&mut metadata, "coordinator", r.coordinator.clone());
+    metadata.insert(
+        "launches".into(),
+        Value::Array(
+            r.launches
+                .iter()
+                .map(|l| Value::from(l.launch_id.clone()))
+                .collect(),
+        ),
+    );
+    put(&mut metadata, "check_cmd", s.check_cmd.clone());
+    put(&mut metadata, "check_result", s.check_result.clone());
+    metadata.insert("started_ns".into(), Value::from(s.started_ns));
+    put(&mut metadata, "ended_ns", s.ended_ns);
+    metadata.insert("decisions".into(), Value::from(r.decisions.len()));
+    metadata.insert("events".into(), Value::from(r.events.len()));
+    let output = format!(
+        "{} · {}/{} done · {} launch(es) · {} tok · {}{}{}",
+        if s.ended_ns.is_some() {
+            "closed"
+        } else {
+            s.status.as_str()
+        },
+        r.done,
+        r.total,
+        r.launches.len(),
+        r.tokens
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "—".into()),
+        r.cost_usd
+            .map(|c| format!("${c:.2}"))
+            .unwrap_or_else(|| "—".into()),
+        s.plan_summary
+            .as_deref()
+            .map(|p| format!("\nplan: {p}"))
+            .unwrap_or_default(),
+        s.check_result
+            .as_deref()
+            .map(|c| format!("\ncheck: {c}"))
+            .unwrap_or_default(),
+    );
+    let mut attrs = common_attrs(ctx);
+    attrs.push(attr(OBSERVATION_TYPE, any_str("span")));
+    attrs.push(attr(TRACE_NAME, any_str(name.clone())));
+    attrs.push(attr(TRACE_SESSION_ID, any_str(s.id.clone())));
+    push_str_attr(&mut attrs, TRACE_USER_ID, ctx.user_id.clone());
+    attrs.push(attr(TRACE_INPUT, any_str(text(&s.goal, 4000))));
+    attrs.push(attr(TRACE_OUTPUT, any_str(output.clone())));
+    attrs.push(attr(OBSERVATION_INPUT, any_str(text(&s.goal, 4000))));
+    attrs.push(attr(OBSERVATION_OUTPUT, any_str(output)));
+    attrs.push(attr(TRACE_TAGS, any_str(Value::from(tags).to_string())));
+    push_json_attr(&mut attrs, TRACE_METADATA, metadata.clone());
+    push_json_attr(&mut attrs, OBSERVATION_METADATA, metadata);
+    let failed = r.tasks.iter().filter(|t| t.state == "failed").count();
+    let error = (failed > 0).then(|| Some(format!("{failed} task(s) failed")));
+    if error.is_some() {
+        attrs.push(attr(OBSERVATION_LEVEL, any_str("ERROR")));
+    }
+    events.push(Event {
+        entity_id: root_id.clone(),
+        launch_id: None,
+        kind: "swarm",
+        json: span_json(
+            &trace_id,
+            &root_id,
+            None,
+            &name,
+            s.started_ns,
+            end,
+            attrs,
+            error,
+        ),
+    });
+
+    for t in &r.tasks {
+        let span_id = ids::span_id_hex(&format!("amx1|swarm|task|{}", t.id));
+        let worker = launch_of(t.worker.as_deref());
+        let start = worker.map(|l| l.started_ns).unwrap_or(s.started_ns);
+        let task_end = t
+            .ended_ns
+            .or_else(|| worker.and_then(|l| l.ended_ns))
+            .unwrap_or(if t.worker.is_some() { end } else { start });
+        let mut m = Map::new();
+        m.insert("task_id".into(), Value::from(t.id.clone()));
+        m.insert("task_key".into(), Value::from(t.key.clone()));
+        m.insert("state".into(), Value::from(t.state.clone()));
+        m.insert("status".into(), Value::from(t.status.clone()));
+        put(&mut m, "harness", t.harness.clone());
+        put(&mut m, "agent", t.agent.clone());
+        m.insert("isolation".into(), Value::from(t.isolation.clone()));
+        m.insert(
+            "depends_on".into(),
+            Value::Array(
+                t.depends_on
+                    .iter()
+                    .map(|d| Value::from(d.clone()))
+                    .collect(),
+            ),
+        );
+        m.insert(
+            "files".into(),
+            Value::Array(t.files.iter().map(|f| Value::from(f.clone())).collect()),
+        );
+        put(&mut m, "worker", t.worker.clone());
+        put(&mut m, "launched_by", t.launched_by.clone());
+        put(&mut m, "offered_ns", t.offered_ns);
+        m.insert("attempts".into(), Value::from(t.attempts));
+        put(&mut m, "branch", t.branch.clone());
+        put(&mut m, "review", t.review.clone());
+        put(&mut m, "error", t.error.clone());
+        if let Some(res) = &t.result {
+            m.insert("result".into(), res.clone());
+        }
+        if let Some(l) = worker {
+            put(&mut m, "tokens", l.tokens);
+            put(&mut m, "cost_usd", l.cost_usd);
+            m.insert("turns".into(), Value::from(l.turns.len()));
+            m.insert("tools".into(), Value::from(l.tools));
+            m.insert("errors".into(), Value::from(l.errors));
+            m.insert(
+                "worker_traces".into(),
+                Value::Array(l.turns.iter().map(|t| Value::from(t.id.clone())).collect()),
+            );
+            m.insert(
+                "sub_agents".into(),
+                Value::Array(
+                    l.sub_agents
+                        .iter()
+                        .map(|a| Value::from(a.name.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        let mut attrs = common_attrs(ctx);
+        attrs.push(attr(OBSERVATION_TYPE, any_str("span")));
+        push_str_attr(&mut attrs, OBSERVATION_INPUT, t.acceptance.clone());
+        let out = match (&t.result, &t.error) {
+            (_, Some(e)) => Some(text(e, 4000)),
+            (Some(Value::String(r)), _) => Some(text(r, 4000)),
+            (Some(other), _) => Some(text(&other.to_string(), 4000)),
+            _ => None,
+        };
+        push_str_attr(&mut attrs, OBSERVATION_OUTPUT, out);
+        push_json_attr(&mut attrs, OBSERVATION_METADATA, m);
+        let error = matches!(t.state.as_str(), "failed" | "lost")
+            .then(|| Some(t.error.clone().unwrap_or_else(|| t.state.clone())));
+        if error.is_some() {
+            attrs.push(attr(OBSERVATION_LEVEL, any_str("ERROR")));
+        }
+        let name = format!("{} {}", t.key, text(&t.title, 200));
+        events.push(Event {
+            entity_id: span_id.clone(),
+            launch_id: t.worker.clone(),
+            kind: "swarm-task",
+            json: span_json(
+                &trace_id,
+                &span_id,
+                Some(&root_id),
+                &name,
+                start,
+                task_end,
+                attrs,
+                error,
+            ),
+        });
+    }
+
+    for d in &r.decisions {
+        let span_id = ids::span_id_hex(&format!("amx1|swarm|decision|{}|{}", s.id, d.id));
+        let mut m = Map::new();
+        m.insert("verb".into(), Value::from(d.verb.as_str()));
+        m.insert("by".into(), Value::from(d.by.as_str()));
+        put(&mut m, "said", d.said.clone());
+        put(&mut m, "launch", d.launch.clone());
+        put(&mut m, "task_id", d.task_id.clone());
+        let mut attrs = common_attrs(ctx);
+        attrs.push(attr(OBSERVATION_TYPE, any_str("event")));
+        push_str_attr(&mut attrs, OBSERVATION_INPUT, d.said.clone());
+        push_json_attr(&mut attrs, OBSERVATION_METADATA, m);
+        let name = format!("decision {}", d.verb.as_str());
+        events.push(Event {
+            entity_id: span_id.clone(),
+            launch_id: d.launch.clone(),
+            kind: "swarm-decision",
+            json: span_json(
+                &trace_id,
+                &span_id,
+                Some(&root_id),
+                &name,
+                d.created_ns,
+                d.created_ns,
+                attrs,
+                None,
+            ),
+        });
+    }
+    events
+}
+
 /// The span for one op; launch and session rows have no Langfuse shape.
 pub fn event_for(op: &StoreOp, ctx: &MapCtx) -> Option<Event> {
     match op {
@@ -455,6 +741,7 @@ mod tests {
             release: Some("r1".into()),
             environment: Some("dev".into()),
             tags: vec!["agent-mux".into()],
+            swarms: HashMap::new(),
         }
     }
 
@@ -594,6 +881,259 @@ mod tests {
         open.end_ns = None;
         let s = parsed(&event_for(&StoreOp::Trace(open), &ctx()).unwrap());
         assert_eq!(s["endTimeUnixNano"], s["startTimeUnixNano"]);
+    }
+
+    fn swarm_run(id: &str) -> crate::bus::swarm::record::SwarmRun {
+        use crate::bus::swarm::record::{GateMode, SwarmRun, SwarmStatus};
+        SwarmRun {
+            id: id.into(),
+            workspace: "/ws".into(),
+            goal: "Ship the follow-ups\nwith care".into(),
+            status: SwarmStatus::Finished,
+            planner_harness: "claude".into(),
+            planner_launch: Some("L-coord".into()),
+            plan_summary: Some("one task".into()),
+            plan_error: None,
+            max_workers: 2,
+            isolation: crate::bus::TaskIsolation::Shared,
+            gate: true,
+            check_cmd: Some("cargo test".into()),
+            check_result: Some("ok".into()),
+            owner_run: None,
+            started_ns: 1_000,
+            updated_ns: 9_000,
+            ended_ns: Some(9_000),
+            gate_mode: GateMode::Chat,
+            headless: false,
+        }
+    }
+
+    #[test]
+    fn a_swarms_turn_joins_the_swarms_langfuse_session_with_its_tags() {
+        use crate::bus::swarm::SwarmLaunch;
+        let mut ctx = ctx();
+        let mut t = trace();
+        t.launch_id = Some("L-w1".into());
+        // not a swarm's launch: the harness session, as before
+        let plain = parsed(&trace_span(&t, &ctx));
+        let s = &plain;
+        assert_eq!(attr_str(s, "session.id"), Some("sess-1"));
+
+        let mut meta = Map::new();
+        SwarmLaunch::worker("swarm-abc", "task-1", "schema", Some("L-coord".into()))
+            .metadata(&mut meta);
+        let mut launch = LaunchRow {
+            id: "L-w1".into(),
+            run_id: "run".into(),
+            agent_mux_session: 1,
+            profile: "default".into(),
+            provider: "claude".into(),
+            cwd: "/ws".into(),
+            project_slug: "ws".into(),
+            content_mode: "full".into(),
+            correlation_plan: "known".into(),
+            correlation: None,
+            session_key: Some("claude:sess-1".into()),
+            injected_session_id: true,
+            attached: false,
+            started_ns: 1,
+            ended_ns: None,
+            termination: None,
+            exit_code: None,
+            parse_errors: None,
+            dropped_ops: None,
+            reported_cost_usd: None,
+            reported_lines_added: None,
+            reported_lines_removed: None,
+            agent_mux_version: "test".into(),
+            user_id: None,
+            release: None,
+            environment: None,
+            tags: Vec::new(),
+            metadata: Some(Value::Object(meta)),
+        };
+        ctx.note_launch(&launch);
+        let v = parsed(&trace_span(&t, &ctx));
+        let s = &v;
+        assert_eq!(attr_str(s, "session.id"), Some("swarm-abc"));
+        let tags: Value =
+            serde_json::from_str(attr_str(s, "langfuse.trace.tags").unwrap()).unwrap();
+        assert_eq!(
+            tags,
+            json!(["agent-mux", "claude", "swarm", "swarm:worker"])
+        );
+        let md: Value =
+            serde_json::from_str(attr_str(s, "langfuse.trace.metadata").unwrap()).unwrap();
+        assert_eq!(md["swarm_id"], "swarm-abc");
+        assert_eq!(md["swarm_role"], "worker");
+        assert_eq!(md["swarm_task_key"], "schema");
+        assert_eq!(md["parent_launch"], "L-coord");
+        assert_eq!(md["harness_session"], "sess-1");
+        // a launch of no swarm teaches nothing
+        launch.id = "L-plain".into();
+        launch.metadata = Some(json!({"loop_run_id": "x"}));
+        ctx.note_launch(&launch);
+        assert!(!ctx.swarms.contains_key("L-plain"));
+    }
+
+    #[test]
+    fn the_swarm_summary_is_one_trace_with_a_span_per_task_and_an_event_per_decision() {
+        use crate::bus::swarm::record::{DecidedBy, SwarmDecision, SwarmVerb};
+        use crate::bus::swarm::view::TaskView;
+        use crate::tracing::swarm_report::{LaunchReport, SwarmReport, TurnReport};
+        let swarm = swarm_run("swarm-abc");
+        let worker = LaunchReport {
+            launch_id: "L-w1".into(),
+            role: "worker".into(),
+            task_id: Some("task-1".into()),
+            task_key: Some("schema".into()),
+            parent_launch: Some("L-coord".into()),
+            provider: "codex".into(),
+            session_key: Some("codex:w1".into()),
+            started_ns: 3_000,
+            ended_ns: Some(8_000),
+            turns: vec![TurnReport {
+                id: "T-w1".into(),
+                ordinal: 1,
+                name: "do it".into(),
+                status: "closed".into(),
+                start_ns: 3_000,
+                end_ns: Some(7_000),
+                tools: 4,
+                errors: 0,
+                tokens: Some(500),
+                cost_usd: Some(0.02),
+            }],
+            tools: 4,
+            errors: 0,
+            tokens: Some(500),
+            cost_usd: Some(0.02),
+            unpriced: false,
+            sub_agents: Vec::new(),
+        };
+        let task = |key: &str, id: &str, state: &str, worker: Option<&str>, error: Option<&str>| {
+            TaskView {
+                key: key.into(),
+                id: id.into(),
+                title: format!("Task {key}"),
+                state: state.into(),
+                status: if state == "done" { "done" } else { "failed" }.into(),
+                harness: Some("codex".into()),
+                agent: None,
+                isolation: "shared".into(),
+                depends_on: Vec::new(),
+                acceptance: Some("tests pass".into()),
+                files: vec!["src/a.rs".into()],
+                worker: worker.map(str::to_string),
+                attempts: 1,
+                offered_ns: Some(2_500),
+                launched_by: Some("coordinator".into()),
+                result: (state == "done").then(|| json!("written")),
+                error: error.map(str::to_string),
+                branch: None,
+                review: None,
+                question: None,
+                updated_ns: 8_000,
+                ended_ns: Some(8_000),
+            }
+        };
+        let report = SwarmReport {
+            swarm: swarm.clone(),
+            gate_mode: "chat".into(),
+            coordinator: Some("L-coord".into()),
+            done: 1,
+            total: 2,
+            tokens: Some(500),
+            cost_usd: Some(0.02),
+            unpriced: false,
+            launches: vec![worker],
+            tasks: vec![
+                task("schema", "task-1", "done", Some("L-w1"), None),
+                task("docs", "task-2", "failed", None, Some("no writer")),
+            ],
+            attention: Vec::new(),
+            questions: Vec::new(),
+            decisions: vec![SwarmDecision {
+                id: 7,
+                swarm_id: "swarm-abc".into(),
+                task_id: None,
+                verb: SwarmVerb::Launch,
+                by: DecidedBy::Chat,
+                said: Some("go".into()),
+                launch: Some("L-coord".into()),
+                created_ns: 2_000,
+            }],
+            events: Vec::new(),
+            messages: Vec::new(),
+        };
+        let events = swarm_summary(&report, &ctx());
+        assert_eq!(events.len(), 4, "root + 2 tasks + 1 decision");
+        assert_eq!(events[0].kind, "swarm");
+        assert_eq!(events[1].kind, "swarm-task");
+        assert_eq!(events[3].kind, "swarm-decision");
+        let root = parsed(&events[0]);
+        let r = &root;
+        assert_eq!(r["traceId"], swarm_trace_id("swarm-abc"));
+        assert_eq!(r["name"], "swarm Ship the follow-ups");
+        assert_eq!(attr_str(r, "session.id"), Some("swarm-abc"));
+        assert_eq!(
+            attr_str(r, "langfuse.trace.input"),
+            Some("Ship the follow-ups\nwith care")
+        );
+        let tags: Value =
+            serde_json::from_str(attr_str(r, "langfuse.trace.tags").unwrap()).unwrap();
+        assert_eq!(
+            tags,
+            json!(["agent-mux", "swarm", "swarm:summary", "codex"])
+        );
+        let md: Value =
+            serde_json::from_str(attr_str(r, "langfuse.trace.metadata").unwrap()).unwrap();
+        assert_eq!(md["done"], 1);
+        assert_eq!(md["total"], 2);
+        assert_eq!(md["status"], "closed");
+        assert_eq!(md["launches"], json!(["L-w1"]));
+        // one failed task: the root reads as an error
+        assert_eq!(r["status"]["code"], STATUS_ERROR);
+        assert_eq!(attr_str(r, "langfuse.observation.level"), Some("ERROR"));
+
+        let t1 = parsed(&events[1]);
+        let t1 = &t1;
+        assert_eq!(t1["traceId"], swarm_trace_id("swarm-abc"));
+        assert_eq!(t1["parentSpanId"], r["spanId"]);
+        assert_eq!(t1["name"], "schema Task schema");
+        assert_eq!(t1["startTimeUnixNano"], "3000");
+        assert_eq!(t1["endTimeUnixNano"], "8000");
+        let md: Value =
+            serde_json::from_str(attr_str(t1, "langfuse.observation.metadata").unwrap()).unwrap();
+        assert_eq!(md["worker"], "L-w1");
+        assert_eq!(md["worker_traces"], json!(["T-w1"]));
+        assert_eq!(md["tokens"], 500);
+        assert_eq!(md["state"], "done");
+        assert_eq!(attr_str(t1, "langfuse.observation.output"), Some("written"));
+        assert_eq!(t1["status"]["code"], STATUS_UNSET);
+
+        let t2 = parsed(&events[2]);
+        let t2 = &t2;
+        assert_eq!(t2["status"]["code"], STATUS_ERROR);
+        assert_eq!(t2["status"]["message"], "no writer");
+        // a task with no worker starts at the swarm's start and ends when it did
+        assert_eq!(t2["startTimeUnixNano"], "1000");
+        assert_eq!(t2["endTimeUnixNano"], "8000");
+
+        let d = parsed(&events[3]);
+        let d = &d;
+        assert_eq!(d["name"], "decision launch");
+        assert_eq!(attr_str(d, "langfuse.observation.type"), Some("event"));
+        assert_eq!(attr_str(d, "langfuse.observation.input"), Some("go"));
+        let md: Value =
+            serde_json::from_str(attr_str(d, "langfuse.observation.metadata").unwrap()).unwrap();
+        assert_eq!(md["by"], "chat");
+        // deterministic: sending it again updates rather than duplicates
+        let again = swarm_summary(&report, &ctx());
+        assert_eq!(
+            again.iter().map(|e| &e.entity_id).collect::<Vec<_>>(),
+            events.iter().map(|e| &e.entity_id).collect::<Vec<_>>()
+        );
     }
 
     #[test]

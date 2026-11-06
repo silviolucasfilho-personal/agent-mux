@@ -228,7 +228,7 @@ fn a_plan_in_review_is_drawn_as_a_tree_beside_the_swarms_card() {
         "one task per subsystem",
         "waiting for you to confirm in the coordinator's chat",
         // the swarm row's tabs and the plan as a table with each task's word
-        "1 Board   2 Live   3 Activity   4 Changes",
+        "1 Board   2 Live   3 Timeline   4 Log",
         "· waiting    1 schema",
         "· waiting    3 docs",
         // one footer: the global one
@@ -237,6 +237,45 @@ fn a_plan_in_review_is_drawn_as_a_tree_beside_the_swarms_card() {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
     }
     assert!(!out.contains("NEEDS YOU"), "no strip of its own:\n{out}");
+    // The Timeline tab: one lane per agent against the swarm's clock; the
+    // Log tab: the swarm's events, filtered by kind (t) and text (/).
+    press(&mut f, KeyCode::Char('3'));
+    let out = render(&f.app, 140, 32);
+    for want in [
+        "Timeline · 1×",
+        "◆ Ship the follow-ups",
+        "· schema · draft",
+        "█ working  ░ alive",
+    ] {
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
+    }
+    press(&mut f, KeyCode::Char('4'));
+    let out = render(&f.app, 140, 32);
+    for want in ["4 Log (1)", " all ", " decisions ", "started"] {
+        assert!(out.contains(want), "missing {want:?} in:\n{out}");
+    }
+    press(&mut f, KeyCode::Tab);
+    assert!(view(&f.app).in_log());
+    press(&mut f, KeyCode::Char('/'));
+    for c in "nothing-like-this".chars() {
+        press(&mut f, KeyCode::Char(c));
+    }
+    assert!(f.app.text_entry_active(), "typing the filter is text entry");
+    press(&mut f, KeyCode::Enter);
+    let v = view(&f.app);
+    assert_eq!(v.log_filter, "nothing-like-this");
+    assert!(v.log_entries().is_empty(), "{:?}", v.log_entries());
+    let out = render(&f.app, 140, 32);
+    assert!(out.contains("No event matches."), "{out}");
+    press(&mut f, KeyCode::Char('t'));
+    assert_eq!(
+        view(&f.app).log_kind,
+        agent_mux::tracing::swarm_report::LogKind::Decisions
+    );
+    // Esc: back to the tree; 1: the Board again
+    press(&mut f, KeyCode::Esc);
+    assert!(!view(&f.app).in_log());
+    press(&mut f, KeyCode::Char('1'));
     for width in [80u16, 120, 180] {
         let out = render(&f.app, width, 24);
         for want in ["Swarms", "◆ Ship", "1 schema", "Needs you (1)"] {

@@ -27,6 +27,7 @@ pub mod pricing;
 pub mod scores;
 pub mod store;
 pub mod subagents;
+pub mod swarm_report;
 pub mod tail;
 pub mod usage;
 pub mod view;
@@ -414,6 +415,11 @@ impl TraceRuntime {
 
     pub fn langfuse(&self) -> Option<&crate::config::ResolvedLangfuse> {
         self.settings.langfuse.as_ref()
+    }
+
+    /// The resolved tracing settings this runtime runs with.
+    pub fn settings(&self) -> &ResolvedTracing {
+        &self.settings
     }
 
     /// True when Langfuse credentials resolved and the exporter is running.

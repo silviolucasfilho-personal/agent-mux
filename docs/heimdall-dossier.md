@@ -46,10 +46,12 @@ Heimdall briefs the user on active and recent sessions and evaluates skills and 
     "sessions_build_ms": 18,
     "skills_build_ms": 12,
     "agents_build_ms": 11,
+    "swarms_build_ms": 4,
     "bytes": 18450,
     "max_session_cards": 20,
     "max_skill_rows": 30,
     "max_agent_rows": 30,
+    "max_swarm_cards": 10,
     "examples_per_category": 3
   },
   "sessions": {
@@ -90,9 +92,32 @@ Heimdall briefs the user on active and recent sessions and evaluates skills and 
       "total_definitions": 3,
       "total_observed": 3
     }
+  },
+  "swarms": {
+    "status": "full",
+    "warnings": [],
+    "errors": [],
+    "truncated": false,
+    "total_matching": 1,
+    "data": {
+      "swarms": [ /* SwarmCard */ ],
+      "total_swarms": 1
+    }
   }
 }
 ```
+
+The `swarms` section (added with the coordinator-first swarm design, schema
+version unchanged: readers of version 2 ignore it) lists the workspace's
+swarms live or ended within the sessions window, newest first, at most
+`max_swarm_cards` (10). A `SwarmCard` carries `id`, `goal` (first line),
+`status` (`planning` … `finished`, or `closed` once it ended), `workspace`,
+`started_ns`, `ended_ns`, `coordinator` (its launch id), `launches` (the
+coordinator and every worker session), `tasks_done`, `tasks_total`,
+`tokens`, `cost_usd`, `unpriced`, `needs` (what waits for the operator, one
+line each) and `langfuse_session` (the swarm id: every turn of the swarm sits
+in that Langfuse session). It is built from `tracing::swarm_report`, which
+`agent-mux trace swarm <id>` and `agent_mux_get_swarm` also answer from.
 
 ---
 
