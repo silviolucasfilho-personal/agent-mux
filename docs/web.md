@@ -169,7 +169,77 @@ messages. These pages have no write controls.
 
 ## Runs: loops and workflows
 
-Filled by its own task.
+The Runs area reads `loop_runs`, `workflow_runs` and `workflow_steps` (the
+rows `loops::store` and `workflows::store` write) and the launch a run points
+at. Its routes are `GET` with path and query parameters, unlike the trace
+API, and answer plain JSON documents (`{"ok": true, …}`), not the trace
+envelope; an error is the shared `{"ok": false, "error": "…"}`: `404` for an
+unknown run, `503` while the store does not exist. Nothing here writes a row
+or decides an inbox item.
+
+| Route | Answer |
+|---|---|
+| `GET /api/runs/loops?limit=N` | `{ok, runs: [loop run…]}`: every loop's runs, newest scheduled first (`loops::store::all_recent_runs`). `limit` defaults to 100, at most 1000. |
+| `GET /api/runs/loops/{id}` | `{ok, run, launch, facts, files_touched}`: the row (`loops::store::get_run`), its launch (`{id, session_key, provider, started_ns, ended_ns}` or `null`), the facts read from the launch's traces (`loops::store::run_facts`: `tokens`, `cost_usd`, `verifier_ran`, `verifier_verdict`, `verifier_verdicts`, `files_touched`, `final_message`; `null` without a launch) and the write tools' paths (`loops::store::files_touched`). |
+| `GET /api/runs/workflows?limit=N` | `{ok, runs: [workflow run…]}`, newest first (`workflows::store::recent_runs`), without the document text. |
+| `GET /api/runs/workflows/{id}` | `{ok, run, steps}`: the run by id or unique id prefix (`workflows::store::resolve_run`), with its `document`, and its sessions (`workflows::store::steps_of`), each with the `session_key` of its launch. |
+| `GET /api/runs/inbox` | `{ok, loops, workflows}`: what waits on a human. |
+
+A loop run is `LoopRun` field by field (`id`, `loop_id`, `workspace`,
+`pattern`, `harness`, `level`, `effective_level`, `launch_id`, `scheduled_ns`,
+`started_ns`, `ended_ns`, `outcome`, `items_found`, `actions_taken`,
+`escalations`, `tokens`, `cost_usd`, `readiness_score`, `worktree`, `branch`,
+`decision`, `decided_ns`, `detail`, `pattern_hash`) plus `outcome_word` (the
+outcome in the reader's words: `fix ready`, `needs you`, `quiet`…),
+`duration_s` and `in_inbox`. A workflow run is `WorkflowRun` field by field
+plus `result_text` (a string result as is, an object pretty-printed),
+`duration_s`, `awaiting` (the verdict a finished run waits on when its
+document's `accept` list does not admit it, or `no verdict`) and
+`needs_human`. A step is `WorkflowStep` field by field plus `result_text`,
+`duration_s` and `session_key`.
+
+**Inbox.** The loop side is `loops::store::inbox`: runs that proposed a fix
+or escalated and have no decision yet, the rows the TUI's `I` lists under
+Loops. The workflow side applies the TUI's rule to the stored runs
+(`web::runs::workflow_needs_human`, after `RecentWorkflowRun::needs_human`):
+a run whose status is not `finished`, or that has an error, or that finished
+with a verdict its document does not `accept` (the document is parsed from
+the row). A run still `running` is not listed. Two things the TUI inbox keeps
+in memory only are not here: a planner's document waiting for review, and the
+items dismissed with `d` in this TUI session.
+
+```sh
+curl -s localhost:7331/api/runs/loops?limit=5
+curl -s localhost:7331/api/runs/loops/2026-11-06T08%3A00%3A00Z
+curl -s localhost:7331/api/runs/workflows/aed11f58
+curl -s localhost:7331/api/runs/inbox
+```
+
+Pages (`web/runs.js`; the script fetches with `GET`, so it has its own small
+client beside `AgentMux.api`):
+
+- **Runs** (`#/runs`) is two sortable tables, loop runs and workflow runs:
+  run id, loop and pattern (or workflow name), workspace, harness, status
+  (the outcome word and the decision; the workflow status and the verdict it
+  awaits), verdict, started, duration and cost. `?limit=` changes how many
+  of each are loaded. A row opens its detail page.
+- **Loop run** (`#/runs/loop/<id>`) shows the summary cards, the details
+  (loop, pattern and its digest, workspace, harness, level and effective
+  level, outcome and reason, decision, times, worktree and branch, the
+  launch as a link to `#/sessions/<key>` when the store has it), the verdict
+  (the verifier's combined word and each checker's), the budget facts
+  (items, actions, escalations, recorded and traced tokens and cost,
+  readiness score), the files touched, the final message and the raw
+  `detail` document.
+- **Workflow run** (`#/runs/workflow/<id>`) shows the summary cards, the
+  run (document name and source, workspace, harness and profile, the args,
+  status, verdict, error, budget, times), the steps table (session, step,
+  phase, kind, item, harness, status, launch link, duration, tokens, cost)
+  with each step's result text and changed files folded under it, the run's
+  result text, and the TOML the run executed.
+- **Inbox** (`#/inbox`) lists the undecided loop runs and the workflow runs
+  that need a human, each row linking to its detail page. It only reads:
+  decide in the TUI (`I`, `a`/`d`) or with `agent-mux loop decide`.
 
 ## Configuration library
 
