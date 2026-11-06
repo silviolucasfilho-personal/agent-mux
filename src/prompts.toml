@@ -32,10 +32,15 @@ inline = "You are session {step} of the {workflow} workflow, run by agent-mux. R
 plan = "{invocation} Describe an agent for the task in the planner context at {plan} (also in $AGENT_MUX_WORKFLOW_PLAN). Answer with one fenced agent-toml block when one session can do the task, or with a fenced workflow-toml block when it needs a flow of several."
 
 [swarm]
-# The planning part of the swarm coordinator's opening prompt (the role
-# around it is agent-mux's). {invocation} is the swarm-plan skill, {plan}
-# the planner context file (also in $AGENT_MUX_SWARM_PLAN).
-plan = "{invocation} Read the planner context at {plan} (also in $AGENT_MUX_SWARM_PLAN) and look at the code the goal touches. Then submit the plan with agent_mux_swarm_plan(plan = {summary, tasks}). If it answers errors, fix them and call it again. Do not change any file."
+# The swarm coordinator's opening prompt (coordinator-first design §5.2):
+# three lines, the role lives in the swarm-coordinator skill. {id} is the
+# swarm, {workspace} its folder, {invocation} the skill as this harness
+# invokes it, {context} the context file (also in $AGENT_MUX_SWARM_CONTEXT),
+# {goal} the goal line: "The operator's goal: …", or, with no goal yet,
+# "The operator has not said the goal yet: ask for it."
+coordinator = "You are the coordinator of agent-mux swarm {id} in {workspace}.\n{invocation} Read the context at {context} (also in $AGENT_MUX_SWARM_CONTEXT) first and follow the skill.\n{goal}"
+# Kept for shadow files written before the coordinator template; unused.
+plan = ""
 
 [agent]
 # Inserted as a "## Baseline" section right after the frontmatter of every

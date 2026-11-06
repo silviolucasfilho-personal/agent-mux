@@ -250,15 +250,19 @@ fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
         vec![
             "# claude",
             "heimdall@claude",
+            "swarm-coordinator@claude",
             "native deploy",
             "native silent",
             "# codex",
             "heimdall@codex",
+            "swarm-coordinator@codex",
             "# agy",
             "heimdall@agy",
+            "swarm-coordinator@agy",
             // opencode reads the project's .claude/skills too
             "# opencode",
             "heimdall@opencode",
+            "swarm-coordinator@opencode",
             "native deploy",
             "native silent",
         ]
@@ -266,6 +270,7 @@ fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
     assert_eq!(view.selected, 1, "the first selectable row, never a header");
 
     // j reaches the native rows; the store knows deploy's turn and misses
+    view.step(1);
     view.step(1);
     assert_eq!(
         view.selected_native().map(|d| d.name.as_str()),
@@ -318,18 +323,18 @@ fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
 
     // a harness filter keeps only that group; the same key clears it
     view.toggle_filter(Harness::Codex);
-    assert_eq!(view.rows.len(), 2);
+    assert_eq!(view.rows.len(), 3, "the header, heimdall, the coordinator");
     assert_eq!(
         view.selected_package().map(|(p, h)| (p.id.as_str(), h)),
         Some(("heimdall", Harness::Codex))
     );
     assert!(view.clear_filter());
-    assert_eq!(view.rows.len(), 12);
+    assert_eq!(view.rows.len(), 16);
     assert!(!view.clear_filter());
 
     // without a store the view still lists what is on disk
     let bare = SkillsViewState::new(None, &cwd, &home, &home, Some(&skills_dir));
-    assert_eq!(bare.rows.len(), 12);
+    assert_eq!(bare.rows.len(), 16);
     assert!(bare.turns.is_empty());
     assert!(bare.error.as_deref().unwrap().contains("tracing is off"));
 }

@@ -218,7 +218,7 @@ fn user_packages_load_and_shadow_builtin() {
         .collect();
     assert_eq!(
         ids,
-        ["audit", "heimdall"],
+        ["audit", "heimdall", "swarm-coordinator"],
         "hidden step skills are not agents"
     );
     let heimdall = skills.iter().find(|s| s.id == "heimdall").unwrap();

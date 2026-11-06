@@ -84,7 +84,7 @@ macro_rules! wf_skill {
 }
 
 /// Every compiled-in package: Heimdall, the workflow planner, the swarm
-/// planner and the workflow step skills.
+/// coordinator and the workflow step skills.
 pub fn builtin_packages() -> Vec<BuiltinPackage> {
     vec![
         BuiltinPackage {
@@ -111,11 +111,14 @@ pub fn builtin_packages() -> Vec<BuiltinPackage> {
             ],
         },
         BuiltinPackage {
-            id: "swarm-plan",
-            repo_dir: "skills/swarm-plan/",
-            skill_md: include_str!("../../skills/swarm-plan/SKILL.md"),
-            skill_toml: Some(include_str!("../../skills/swarm-plan/skill.toml")),
-            files: &[],
+            id: "swarm-coordinator",
+            repo_dir: "skills/swarm-coordinator/",
+            skill_md: include_str!("../../skills/swarm-coordinator/SKILL.md"),
+            skill_toml: Some(include_str!("../../skills/swarm-coordinator/skill.toml")),
+            files: &[(
+                "reference/plan.md",
+                include_str!("../../skills/swarm-coordinator/reference/plan.md"),
+            )],
         },
         wf_skill!("wf-review-find"),
         wf_skill!("wf-refute"),
@@ -654,8 +657,13 @@ mod tests {
         );
         assert_eq!(s[0].id, "heimdall");
         assert!(
-            s.iter().filter(|p| p.hidden).count() >= 17,
-            "step skills and the planner are hidden"
+            s.iter().filter(|p| p.hidden).count() >= 16,
+            "step skills and the workflow planner are hidden"
+        );
+        assert!(
+            s.iter()
+                .any(|p| p.id == "swarm-coordinator" && !p.hidden && p.auto_approve),
+            "the swarm coordinator is a sidebar skill"
         );
         assert!(s.iter().any(|p| p.id == "wf-transform" && p.writes));
         assert!(s[0].is_builtin);

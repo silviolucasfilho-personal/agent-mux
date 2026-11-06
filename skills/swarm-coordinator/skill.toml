@@ -1,0 +1,17 @@
+# agent-mux metadata for the swarm coordinator. SKILL.md is harness-neutral;
+# this file says how agent-mux lists and launches it. The swarm starts with
+# this skill in the coordinator's session (F1 → New swarm, `agent-mux swarm
+# start`), and any session may invoke it by hand to become a coordinator
+# (coordinator-first design §4.2).
+name = "Swarm Coordinator"
+icon = "◆"
+harnesses = ["claude", "codex", "agy", "opencode"]
+capabilities = ["trace.read"]
+# The coordinator reads, plans, launches and relays through the agent-mux
+# MCP tools; it never edits files. Approvals granted so it never stalls on a
+# prompt the operator is not looking at while the workers run.
+auto_approve = true
+startup_prompt = "Start a swarm in this folder: ask me the goal, then plan it with me."
+
+[agent]
+mcp = "auto"

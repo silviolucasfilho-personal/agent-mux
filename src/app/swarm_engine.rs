@@ -11,7 +11,9 @@ use crate::bus::control::{ControlRequest, ControlResponse};
 use crate::bus::swarm::SwarmLaunch;
 use crate::bus::swarm::engine::{self, Action, Worker, WorkerState};
 use crate::bus::swarm::plan::CheckEnv;
-use crate::bus::swarm::prompt::{self, AgentInfo, PlannerContext, Replan, ReplanTask};
+use crate::bus::swarm::prompt::{
+    self, AgentInfo, Limits, PlannerContext, Replan, ReplanTask, Tools,
+};
 use crate::bus::swarm::record::{
     self, Decider, LaunchedBy, NewSwarm, SwarmRun, SwarmStatus, SwarmVerb,
 };
@@ -21,8 +23,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// The planner skill (`skills/swarm-plan`).
-pub const SWARM_PLAN_SKILL: &str = "swarm-plan";
+/// The coordinator's skill (`skills/swarm-coordinator`).
+pub const SWARM_PLAN_SKILL: &str = "swarm-coordinator";
 
 /// How often the dispatcher looks at the board. Spawns are rare and a
 /// pass reads a few rows, so a second is plenty.
@@ -94,11 +96,11 @@ impl App {
         }
     }
 
-    /// Starts a swarm: its row, then the planner run.
+    /// Starts a swarm: its row, then its coordinator session. With a goal the
+    /// swarm is headless (the coordinator plans it without asking); without
+    /// one the operator says it in the coordinator's chat (coordinator-first
+    /// design §4.1, §10).
     pub fn start_orchestrated_swarm(&mut self, req: StartSwarm) -> Result<SwarmRun, String> {
-        if req.goal.trim().is_empty() {
-            return Err("the goal is empty".into());
-        }
         if !req.workspace.is_dir() {
             return Err(format!(
                 "workspace {} does not exist",
@@ -139,7 +141,7 @@ impl App {
                 check_cmd: req.check.clone(),
                 owner_run: Some(self.app_run_id.clone()),
                 worker_pool,
-                headless: false,
+                headless: !req.goal.trim().is_empty(),
             },
             crate::tracing::store::now_ns(),
         )?;
@@ -158,9 +160,10 @@ impl App {
         Ok(swarm)
     }
 
-    /// Writes the coordinator's planner context (`$AGENT_MUX_SWARM_PLAN`):
-    /// the goal, the workspace's inventory, the harnesses and agents, and on
-    /// a re-plan the board and the operator's notes.
+    /// Writes the coordinator's context (`$AGENT_MUX_SWARM_CONTEXT`, also
+    /// `$AGENT_MUX_SWARM_PLAN`): the goal when there is one, the workspace's
+    /// inventory, the harnesses and agents, the limits the operator fixed,
+    /// the tools, and on a re-plan the board and the operator's notes.
     fn write_planner_context(
         &self,
         swarm: &SwarmRun,
@@ -195,11 +198,25 @@ impl App {
             max_workers: swarm.max_workers,
             default_isolation: swarm.isolation.as_str().to_string(),
             replan,
+            limits: Limits {
+                max_workers: Some(swarm.max_workers),
+                pool: Some(pool),
+                default_isolation: Some(swarm.isolation.as_str().to_string()),
+                check: swarm.check_cmd.clone(),
+                gate: swarm.gate_mode.as_str().to_string(),
+                headless: swarm.headless,
+            },
+            tools: Tools {
+                dispatch_grace_s: self.swarm_dispatch_grace_ns / 1_000_000_000,
+                ..Tools::default()
+            },
+            screen: "The operator sees the Swarm screen: your plan read-only (it says to confirm here, in this chat), each worker's terminal, and what needs them. They can also type into any worker."
+                .into(),
         };
         let dir = self.workflows_runtime_dir().join("swarms").join(&swarm.id);
         std::fs::create_dir_all(&dir).map_err(|e| format!("planner context: {e}"))?;
         let n = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
-        let path = dir.join(format!("plan-{n}.json"));
+        let path = dir.join(format!("context-{n}.json"));
         std::fs::write(
             &path,
             serde_json::to_vec_pretty(&ctx).map_err(|e| e.to_string())?,
@@ -248,16 +265,16 @@ impl App {
         let def = self
             .find_skill(SWARM_PLAN_SKILL)
             .cloned()
-            .ok_or("the swarm-plan skill is not available")?;
+            .ok_or("the swarm-coordinator skill is not available")?;
         crate::skill::install::install(&def, harness, &self.skill_home(), false)
-            .map_err(|e| format!("installing swarm-plan for {}: {e}", harness.as_str()))?;
+            .map_err(|e| format!("installing swarm-coordinator for {}: {e}", harness.as_str()))?;
         let ctx_path = self.write_planner_context(swarm, replan)?;
         let prompts = crate::prompts::Prompts::current();
         let opening = prompt::coordinator_prompt(
             swarm,
             &crate::skill::render::invocation(SWARM_PLAN_SKILL, harness),
             &ctx_path.display().to_string(),
-            &prompts.swarm_plan,
+            &prompts.swarm_coordinator,
             restart.as_deref(),
         );
         let mut profile = self
@@ -288,6 +305,11 @@ impl App {
         let opening_args = harness.opening_args(opening);
         profile.args.extend(opening_args.iter().cloned());
         let env: Vec<(String, String)> = vec![
+            (
+                "AGENT_MUX_SWARM_CONTEXT".into(),
+                ctx_path.to_string_lossy().into_owned(),
+            ),
+            // the name before v24, for shadowed skills that still read it
             (
                 "AGENT_MUX_SWARM_PLAN".into(),
                 ctx_path.to_string_lossy().into_owned(),
@@ -580,7 +602,14 @@ impl App {
                 workers,
             }) {
                 Ok(s) => ok(
-                    format!("{} started: {} is planning", s.id, s.planner_harness),
+                    if s.headless {
+                        format!("{} started: {} is planning", s.id, s.planner_harness)
+                    } else {
+                        format!(
+                            "{} started: say the goal in the {} coordinator's chat",
+                            s.id, s.planner_harness
+                        )
+                    },
                     None,
                 ),
                 Err(e) => ControlResponse::err(e),
@@ -723,6 +752,7 @@ impl App {
             asking: asking.clone(),
             problems: Default::default(),
             needs: Vec::new(),
+            launch_decision: None,
         };
         self.swarm_needs +=
             crate::app::swarm_board::needs_for(&data, &workers, crate::tracing::store::now_ns())
@@ -997,6 +1027,17 @@ impl App {
                 events.push(format!("{key} proposed by a worker: {}", t.task.title));
                 newest = newest.max(t.task.created_ns);
             }
+        }
+        if matches!(
+            swarm.status,
+            SwarmStatus::Integrating | SwarmStatus::Finished
+        ) && swarm.updated_ns > c.events_seen_ns
+        {
+            events.push(format!(
+                "every task is settled ({}): summarise for the operator, ask which branches to merge, and close when they say so",
+                swarm.status.as_str()
+            ));
+            newest = newest.max(swarm.updated_ns);
         }
         if events.is_empty() {
             return;

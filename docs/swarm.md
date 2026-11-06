@@ -1,15 +1,15 @@
 # Swarms: one goal, many agents
 
-A **swarm** splits one goal into tasks that agents work on in parallel in the same workspace. Each swarm has a **coordinator**, an agent session you can watch and talk to, which writes the plan and answers the workers' questions. You review and approve the plan, and agent-mux starts one worker per task, in order, up to the number of workers you allow. agent-mux runs the swarm itself, so a quiet coordinator never stalls it. Workers can be Claude Code, Codex, Antigravity or OpenCode sessions, in any mix. You watch and steer the swarm from the **Swarm** screen. This guide shows how to use it. How it works inside (tables, control requests, the dispatcher) is in [bus.md](bus.md#swarm-mission-control-modeswarm-agent-mux-swarm-), and the design is in the specs for [the orchestrator](superpowers/specs/2026-11-02-swarm-orchestrator-design.md) and [the screen](superpowers/specs/2026-11-02-swarm-agents-layout-design.md).
+A **swarm** splits one goal into tasks that agents work on in parallel in the same workspace. A swarm is a **conversation with a coordinator**: an agent session on the harness you pick, which talks the goal over with you, proposes the plan as a table, starts the workers once you say go, answers their questions and summarises at the end. agent-mux **supervises** it: it tracks every worker, reminds an idle one, notices a lost one, tells the coordinator what happened, and starts a ready task itself if the coordinator has not launched it two minutes after being told. Workers can be Claude Code, Codex, Antigravity or OpenCode sessions, in any mix. You watch and steer the swarm from the **Swarm** screen. This guide shows how to use it. How it works inside (tables, control requests, the dispatcher) is in [bus.md](bus.md#swarm-mission-control-modeswarm-agent-mux-swarm-), and the design is in the [coordinator-first spec](superpowers/specs/2026-11-05-swarm-coordinator-first-design.md), on top of [the orchestrator](superpowers/specs/2026-11-02-swarm-orchestrator-design.md) and [the screen](superpowers/specs/2026-11-02-swarm-agents-layout-design.md).
 
 ## In one minute
 
-1. Select a session in the folder you want to work on, press `F1` and choose **Open swarm**.
-2. Press `n` (or `Enter` on the empty screen), write the goal, and press `Ctrl+S`.
-3. The coordinator writes the plan in its own terminal (the `★` row; `Enter` there to talk to it). When the swarm's card says the plan waits for you, look over the tasks, edit what you want, and press `y` then `y` to approve it.
-4. Workers start, each on one task. Select a task to see its worker's terminal, and press `Enter` to type into it. `!` jumps to whatever needs you, and `>` writes to workers.
-5. When a worker finishes in its own git worktree, `y` on its row merges its branch.
-6. When the swarm is finished, `y` on its row closes it.
+1. Select a session in the folder you want to work on, press `F1` and choose **Open swarm**, then `n` (or `Enter` on the empty screen).
+2. Pick the coordinator's harness and press `Enter`. Its session opens with the keyboard in it: tell it the goal.
+3. The coordinator asks what it needs, then shows the plan as a table and asks whether to start. Say **go**, or tell it what to change ("move task 2 to codex", "drop the docs task"). The screen mirrors the plan read-only; it never approves it.
+4. Workers start, each on one task. Select a task to see its worker's terminal, and press `Enter` to type into it. `!` jumps to whatever needs you, and `>` writes to workers. The coordinator reports as tasks finish; when nothing has happened for five minutes it checks in and asks whether to keep waiting.
+5. When everything is settled the coordinator summarises and asks which branches to merge. Tell it, or press `y` on a task row yourself.
+6. When you say to close, it closes the swarm (or `y` on the swarm row).
 
 Anything that needs you also shows outside the Swarm screen, as `⚑ swarm needs you (n)` in the Agents sidebar and `⚑ swarm n` in the status bar.
 
@@ -22,21 +22,24 @@ Anything that needs you also shows outside the Swarm screen, as `⚑ swarm needs
 
 ## Starting a swarm
 
-Press `n` on a swarm row (or `Enter` on the empty screen). The form asks for:
+Press `n` on a swarm row (or `Enter` on the empty screen). The dialog asks one thing, **which harness coordinates** (`←`/`→`; Claude when installed, else the selected session's), and `Enter` starts it. The coordinator's session opens with the keyboard in it: say the goal there, as you would to any agent. Everything else — the workers' pool, how many run at once, isolation, a check command — is talked over in the chat and shows in the plan you confirm.
+
+**Advanced** (`Tab` to the fold, `Space`) unfolds what you may want to fix in advance; anything set there is a limit the coordinator cannot exceed:
 
 | Field | Meaning | Default |
 | --- | --- | --- |
-| Goal | What the swarm should achieve. Be concrete: what done looks like, and what's out of scope. | — |
-| Coordinator | Which harness the coordinator runs on. | Claude when installed, else the selected session's |
+| Goal | Optional here. With a goal the swarm is **headless**: the coordinator plans it without asking you anything first (what `agent-mux swarm start "<goal>"` does). | — |
 | Workers may run on | The workers' pool: tick each harness workers may use (`←`/`→` move, `Space` ticks). The coordinator gives each task one of them, and a plan naming another is refused. Tasks that name none run on the coordinator's harness if it is ticked, else on the first ticked. Until you tick one, the pool follows the coordinator. | the coordinator's |
 | Max parallel workers | How many tasks run at once. A finished worker no longer counts. | 3 (up to 8) |
 | Default isolation | `shared` (leases on files) or `worktree` (one branch per task). | `shared` |
-| Approve the plan before workers start | The **plan gate**. With it off, workers start as soon as the plan passes its checks. | yes |
+| Plan approval | `in the coordinator's chat` (you say go there) or `off` (a plan that passes its checks runs at once; the coordinator still shows you the table). The screen never approves a plan. | in the chat |
 | Check when done | An optional command, such as `cargo test`. agent-mux runs it in the workspace once every task is settled and every branch reviewed, before the swarm reads `finished`. | — |
 
-`Tab` moves between fields, `←`/`→` change an option, `Space` ticks a harness, `Alt+Enter` adds a line to the goal, and `Ctrl+S` (or `Ctrl+Enter`) starts. The coordinator starts at once, and the cursor moves to the new swarm: select its `★` row to watch it plan. If the swarm can't start, the form stays open with the reason in red at its top.
+`Tab` moves between fields, `←`/`→` change an option, `Space` ticks a harness, `Alt+Enter` adds a line to the goal, and `Enter` (or `Ctrl+S`) starts. If the swarm can't start, the dialog stays open with the reason in red at its top.
 
-For example, Claude as coordinator with agy and Codex ticked gives a plan whose tasks run on agy or Codex, as the coordinator judges fit. You can still move any task with `e` before it starts, or with `r` when it fails or gets stuck; a harness chosen there joins the pool.
+**Any session can become a coordinator.** In a running session, invoke the `swarm-coordinator` skill (`/swarm-coordinator` on Claude Code and Antigravity, `$swarm-coordinator` on Codex, `load skill swarm-coordinator` on OpenCode) and ask for a swarm: the session records itself as the coordinator of a new swarm in its folder and the running agent-mux supervises it.
+
+For example, Claude as coordinator with agy and Codex in the pool gives a plan whose tasks run on agy or Codex, as the coordinator judges fit. Tell it to move a task before you say go; move a task yourself with `r` when it fails or gets stuck; a harness chosen there joins the pool.
 
 ## The screen
 
@@ -89,7 +92,7 @@ The coordinator reads the goal and the workspace and submits tasks, each with a 
 - **Errors block approval:** a key used twice, a dependency that isn't in the plan or forms a cycle, a harness that isn't installed, an unknown agent, a worktree outside a git repository, or an **agy task with an agent that edits or runs commands**. agy runs a custom agent with read-only tools, so such a task can't do its work; drop the agent or pick another harness. The same pair is refused everywhere else too: the task form won't save it, `r` on such a task opens its retry form already moved to Claude (with a note saying why; clear the agent to keep agy), and agent-mux won't start such a worker, so the task fails with the reason instead of stalling.
 - **Warnings don't:** two tasks that may run at the same time and touch the same files in a shared workspace, or more than 12 tasks.
 
-In **review** you can change the plan before approving it:
+The coordinator shows you the same plan as a table in its chat and asks whether to start. **You confirm there**: say go, or say what to change and it submits the plan again (tasks that already ran are kept). `y` on the screen never approves a plan: it puts the keyboard in the coordinator's chat. From a shell, `agent-mux swarm approve` does the same for scripts. In **review** the screen also lets you:
 
 | Key | Does |
 | --- | --- |
@@ -97,9 +100,8 @@ In **review** you can change the plan before approving it:
 | `n` | add a task |
 | `d` | delete the selected task |
 | `p` | re-plan: write what should change and press `Enter`. The coordinator gets your notes and submits a new plan. Tasks that already ran are kept. |
-| `y` | approve. Refused while the plan has errors: the status line names the first one. |
 
-With the gate on, nothing starts before you approve, and workers can't claim tasks.
+Nothing starts before you confirm, and workers can't claim tasks. Once you have, the coordinator starts each task when its dependencies are done (`agent_mux_swarm_launch`); a task it has not started two minutes after agent-mux told it is started by agent-mux itself, and the log says so. Every decision — who confirmed, with which words — is recorded (`agent-mux swarm events`).
 
 ## What needs you
 
