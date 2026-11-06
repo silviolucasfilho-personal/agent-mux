@@ -17,7 +17,7 @@ pub mod view;
 
 use super::BusMessage;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A launch's place in a swarm, recorded on its launch row as
 /// `launches.metadata.swarm_id`, `swarm_role`, `swarm_task`,
@@ -214,6 +214,71 @@ pub fn merge_branch(workspace: &Path, branch: &str) -> Result<String, String> {
     }
     let head = git(&["rev-parse", "--short", "HEAD"])?;
     Ok(String::from_utf8_lossy(&head.stdout).trim().to_string())
+}
+
+/// The folder under the workspace that holds the loop and bus worktrees.
+pub const WORKTREES_DIR: &str = ".loop-worktrees";
+
+/// Removes the worktree checkouts of a deleted swarm: `git worktree remove
+/// --force` for each path that exists and lies inside
+/// `<workspace>/.loop-worktrees/`, then `git worktree prune`, and the
+/// entries go from the loop worktree manifest. Branches are kept. A path
+/// outside that folder is refused; one that is already gone is skipped.
+/// Answers each attempted path with its outcome.
+pub fn remove_worktrees(workspace: &Path, paths: &[PathBuf]) -> Vec<(PathBuf, Result<(), String>)> {
+    let root = workspace.join(WORKTREES_DIR);
+    let canonical_root = root.canonicalize().ok();
+    let inside = |p: &Path| {
+        p.starts_with(&root)
+            || match (&canonical_root, p.canonicalize()) {
+                (Some(r), Ok(c)) => c.starts_with(r),
+                _ => false,
+            }
+    };
+    let git = |args: &[&str]| -> Result<(), String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(args)
+            .output()
+            .map_err(|e| format!("git: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    };
+    let mut done = Vec::new();
+    let mut removed: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        if !p.exists() {
+            continue;
+        }
+        if !inside(p) {
+            done.push((p.clone(), Err(format!("not under {}", root.display()))));
+            continue;
+        }
+        let r = git(&["worktree", "remove", "--force", &p.to_string_lossy()]);
+        if r.is_ok() {
+            removed.push(p.clone());
+        }
+        done.push((p.clone(), r));
+    }
+    if !done.is_empty() {
+        let _ = git(&["worktree", "prune"]);
+    }
+    if !removed.is_empty() && crate::loops::worktree::manifest_path(&root).exists() {
+        let gone = |entry: &str| {
+            let e = Path::new(entry);
+            removed
+                .iter()
+                .any(|r| r == e || e.file_name() == r.file_name())
+        };
+        let _ = crate::loops::worktree::update_manifest(&root, |m| {
+            m.worktrees.retain(|w| !gone(&w.path));
+        });
+    }
+    done
 }
 
 #[cfg(test)]
