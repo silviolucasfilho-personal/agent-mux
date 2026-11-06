@@ -74,8 +74,9 @@ impl AgentLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentFocus {
     pub kind: AgentKind,
-    pub selected: usize,
-    pub sessions: usize,
+    /// The selected session's id (not its index: a worker that starts or
+    /// ends elsewhere in the list keeps the row under the cursor).
+    pub selected: Option<usize>,
 }
 
 impl App {
@@ -316,12 +317,18 @@ impl App {
         out
     }
 
-    /// A row without a cursor in one of the older sections, while it still holds.
+    /// A row without a cursor in one of the older sections, while it still
+    /// holds: until another session is selected. Sessions starting or
+    /// ending elsewhere (a swarm's workers) leave it alone.
     pub fn agent_focus(&self) -> Option<&AgentKind> {
         self.agent_focus
             .as_ref()
-            .filter(|f| f.selected == self.selected && f.sessions == self.sessions.len())
+            .filter(|f| f.selected == self.selected_session_id())
             .map(|f| &f.kind)
+    }
+
+    fn selected_session_id(&self) -> Option<usize> {
+        self.sessions.get(self.selected).map(|s| s.id)
     }
 
     /// The index of the cursor in `lines`, read from the selection the
@@ -392,8 +399,7 @@ impl App {
                 self.sidebar_section = SidebarSection::Active;
                 self.agent_focus = Some(AgentFocus {
                     kind: kind.clone(),
-                    selected: self.selected,
-                    sessions: self.sessions.len(),
+                    selected: self.selected_session_id(),
                 });
             }
             AgentKind::Session(s) => {
@@ -419,8 +425,7 @@ impl App {
                 self.sidebar_section = kind.section();
                 self.agent_focus = Some(AgentFocus {
                     kind: kind.clone(),
-                    selected: self.selected,
-                    sessions: self.sessions.len(),
+                    selected: self.selected_session_id(),
                 });
             }
         }

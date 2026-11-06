@@ -2809,7 +2809,7 @@ pub struct App {
     /// What the swarms this TUI dispatches need from the operator, for the
     /// Agents sidebar and the status bar (`swarm_board::needs_for`).
     pub swarm_needs: usize,
-    /// The first swarm that needs the operator (`⚑ swarm needs you` opens
+    /// The newest swarm that needs the operator (`⚑ swarm needs you` opens
     /// the Swarm screen on it).
     pub swarm_needs_first: Option<String>,
 }
@@ -4896,12 +4896,12 @@ impl App {
         }
     }
 
-    /// Opens the Agent Swarm Control Room for the workspace of the selected session
-    /// (or current working directory).
     /// `F1 → Open swarm`: the Swarm screen on the selected session's swarm
-    /// (its coordinator or a worker, by its launch row), else on the swarm
-    /// that needs the operator, else on the folder's newest live swarm
-    /// (coordinator-first design §9.1).
+    /// (its coordinator or a worker, by its launch row), else on the
+    /// folder's newest live swarm, else on the newest swarm that needs the
+    /// operator (coordinator-first design §9.1). The folder's own swarm
+    /// comes before the needs: an older swarm left open with a question
+    /// must not take the screen from the run in this folder.
     pub fn open_swarm_view(&mut self) {
         let ws = self
             .sessions
@@ -4909,18 +4909,27 @@ impl App {
             .map(|s| s.dir.clone())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let conn = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|db| crate::tracing::store::open_ro(db).ok());
         let of_session = self
             .sessions
             .get(self.selected)
             .and_then(|s| s.trace.as_ref().map(|t| t.launch_id.clone()))
             .and_then(|launch| {
-                let db = self.trace_db_path.as_deref()?;
-                let conn = crate::tracing::store::open_ro(db).ok()?;
-                crate::bus::swarm::record::swarm_of_launch(&conn, &launch)
+                crate::bus::swarm::record::swarm_of_launch(conn.as_ref()?, &launch)
                     .ok()
                     .flatten()
             });
+        let of_folder = || {
+            let here = crate::bus::store::normalize_workspace(&ws);
+            crate::bus::swarm::record::live_swarm(conn.as_ref()?, &here)
+                .ok()
+                .flatten()
+        };
         let scope = of_session
+            .or_else(of_folder)
             .map(|s| s.id)
             .or_else(|| self.swarm_needs_first.clone());
         self.open_swarm_screen(ws, scope);

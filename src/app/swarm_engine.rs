@@ -916,7 +916,9 @@ impl App {
             crate::app::swarm_board::needs_for(&data, &workers, crate::tracing::store::now_ns())
                 .len();
         self.swarm_needs += needs;
-        if needs > 0 && self.swarm_needs_first.is_none() {
+        // swarms come oldest first: the newest one that needs the operator
+        // is the one the badge and F1 open
+        if needs > 0 {
             self.swarm_needs_first = Some(swarm.id.clone());
         }
         for action in actions {
