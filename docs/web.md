@@ -141,7 +141,31 @@ The five trace pages read the trace API above and nothing else.
 
 ## Swarms and bus
 
-Filled by its own task.
+These read-only routes accept **GET** query parameters (and POST aliases
+for the shared SPA client); they do not use the trace envelope.
+
+| Route | Answer |
+|---|---|
+| `GET /api/swarm/list?since=<ns>&workspace=<path>` | `swarms`: up to 500 live or recently ended swarms, newest first, each with `swarm`, worker launch count, cost, done and total tasks. Since defaults to zero; live swarms are always included. Workspace is optional. |
+| `GET /api/swarm/{id}` | `report` from `swarm_report::report`, `tree_lines`, structured `timeline` (lanes, spans and marks), and rendered `log` lines, matching the trace CLI. |
+| `GET /api/swarm/{id}/tasks` | `tasks`: board entries with the task (status, assigned worker, branch, result), plan extension and review. |
+| `GET /api/bus/peers?workspace=<path>&all=1` | `peers` from the bus store; `all=1` includes exited launches. |
+| `GET /api/bus/messages?workspace=<path>` | `messages`: the latest 500 workspace messages in chronological order, without marking delivery or acknowledgement. |
+| `GET /api/bus/tasks?workspace=<path>` | `tasks`: the workspace bus tasks. |
+
+Bus routes require a nonempty workspace; paths are normalized as in the
+bus CLI. Missing swarms return JSON 404, invalid queries JSON 400, and an
+unavailable store JSON 503. Every request opens the database read-only.
+Live worker state comes from the same runtime snapshots used by swarm
+reports outside the TUI.
+
+**Swarms** (`#/swarms`) lists ID, goal, status, start, worker launches and
+cost. An ID opens **Swarm** (`#/swarms/<id>`): Board shows tasks and peers,
+Tree shows the report tree, Timeline shows one row per lane with alive
+bounds, working/question spans and event marks, Log shows the event log,
+and Messages shows the swarm's messages. A workspace link opens **Bus**
+(`#/bus?workspace=<path>`), whose workspace form loads peers, tasks and
+messages. These pages have no write controls.
 
 ## Runs: loops and workflows
 
