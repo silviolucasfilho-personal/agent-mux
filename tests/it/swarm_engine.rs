@@ -82,7 +82,14 @@ if [ -n "$AGENT_MUX_TASK_ID" ]; then
     touch "$r/proposed-once"
     '{mux}' bus split --title "Follow-up found by the worker" --instructions "Tidy it." --workspace '{ws}' --db '{db}' > "$r/split.txt" 2>&1
   fi
-  '{mux}' bus done "$AGENT_MUX_TASK_ID" --workspace '{ws}' --db '{db}' --result "did $AGENT_MUX_TASK_ID" > "$r/done-$AGENT_MUX_TASK_ID.txt" 2>&1
+  result="did $AGENT_MUX_TASK_ID"
+  # a review answers with the verdict the test left, and says where it ran
+  if grep -q 'You review one change' "$r/worker-$AGENT_MUX_TASK_ID.txt"; then
+    result=$(cat '{bin}/verdict' 2>/dev/null || echo 'APPROVE fine')
+    pwd > "$r/review-cwd.txt"
+    echo x >> "$r/reviews.txt"
+  fi
+  '{mux}' bus done "$AGENT_MUX_TASK_ID" --workspace '{ws}' --db '{db}' --result "$result" > "$r/done-$AGENT_MUX_TASK_ID.txt" 2>&1
   echo "worker finished"
   sleep 600
 fi
@@ -213,6 +220,10 @@ fn start(f: &mut Fixture, gate: bool) {
 }
 
 fn start_with(f: &mut Fixture, gate: bool, check: Option<&str>) {
+    start_reviewed(f, gate, check, "off");
+}
+
+fn start_reviewed(f: &mut Fixture, gate: bool, check: Option<&str>, review: &str) {
     f.app
         .start_orchestrated_swarm(StartSwarm {
             workspace: f.ws.clone(),
@@ -223,6 +234,7 @@ fn start_with(f: &mut Fixture, gate: bool, check: Option<&str>) {
             gate,
             check: check.map(str::to_string),
             workers: None,
+            review: Some(review.into()),
         })
         .unwrap_or_else(|e| panic!("the swarm did not start: {e}"));
 }
@@ -583,5 +595,139 @@ async fn a_workers_proposal_waits_for_the_operator_and_the_check_runs_before_fin
     .unwrap();
     assert!(r.passed && !r.running, "{r:?}");
     assert_eq!(r.tail, "checked-ok");
+    f.app.kill_all();
+}
+
+const ONE_TASK: &str = r#"{"plan": {"summary": "one task",
+ "tasks": [
+  {"key": "schema", "title": "Add the table", "instructions": "Create it.", "acceptance": "tests pass", "files": ["src/a.rs"]}
+ ]}}"#;
+
+fn review_state(f: &Fixture, key: &str) -> Option<agent_mux::bus::swarm::review::ReviewState> {
+    let b = board(f);
+    let t = b.iter().find(|t| t.ext.plan_key == key)?;
+    agent_mux::bus::swarm::review::state(t, &b, true)
+}
+
+#[tokio::test]
+async fn a_finished_task_is_reviewed_read_only_and_reviewed_again_after_a_fix() {
+    use agent_mux::bus::swarm::review::ReviewState;
+    let mut f = fixture(Some(ONE_TASK), false);
+    std::fs::write(f.bin.join("launch"), "").unwrap();
+    std::fs::write(
+        f.bin.join("verdict"),
+        "CHANGES\n- src/a.rs:1 the table has no primary key",
+    )
+    .unwrap();
+    start_reviewed(&mut f, true, None, "auto");
+    let conn = open_aux(&f.db).unwrap();
+    let s = swarm(&f).unwrap();
+    assert!(agent_mux::bus::swarm::review::settings(&conn, &s.id).enabled);
+
+    // The task finishes; its review goes on the board and runs.
+    assert!(
+        pump_until(&mut f, Duration::from_secs(120), |f| {
+            review_state(f, "schema") == Some(ReviewState::Changes)
+        })
+        .await,
+        "no verdict: {:?}",
+        board(&f)
+            .iter()
+            .map(|t| (
+                &t.ext.plan_key,
+                t.task.status,
+                &t.task.result,
+                &t.task.error
+            ))
+            .collect::<Vec<_>>()
+    );
+    let b = board(&f);
+    let review = b
+        .iter()
+        .find(|t| t.ext.plan_key == "schema-review")
+        .unwrap();
+    let schema = b.iter().find(|t| t.ext.plan_key == "schema").unwrap();
+    assert_eq!(
+        review.ext.review_of.as_deref(),
+        Some(schema.task.id.as_str())
+    );
+    assert_eq!(
+        schema.ext.review_task.as_deref(),
+        Some(review.task.id.as_str())
+    );
+    // only claude here: it reviews its own harness's work, as `reviewer`
+    assert_eq!(review.task.target_harness.as_deref(), Some("claude"));
+    assert_eq!(review.task.target_agent.as_deref(), Some("reviewer"));
+    let args = std::fs::read_to_string(f.bin.join(format!("calls/worker-{}.txt", review.task.id)))
+        .unwrap();
+    assert!(args.contains("**change no file**"), "{args}");
+    assert!(
+        args.contains("### The change under review: `schema`"),
+        "{args}"
+    );
+    assert!(args.contains("tests pass"), "the done-when line: {args}");
+    assert!(args.contains("did "), "the worker's result: {args}");
+    assert!(args.contains("reviewer"), "the reviewer agent: {args}");
+    // a shared task is reviewed in the workspace itself
+    let cwd = std::fs::read_to_string(f.bin.join("calls/review-cwd.txt")).unwrap();
+    assert_eq!(
+        std::path::Path::new(cwd.trim()).canonicalize().unwrap(),
+        f.ws
+    );
+    // the coordinator's board says so, with the findings and the warning
+    let view = agent_mux::bus::swarm::view::board_view(
+        &conn,
+        &swarm(&f).unwrap(),
+        &Default::default(),
+        agent_mux::tracing::store::now_ns(),
+    )
+    .unwrap();
+    assert_eq!(view.review, "auto");
+    let r = view.reviews.iter().find(|r| r.task == "schema").unwrap();
+    assert_eq!(r.state, "changes");
+    assert!(r.verdict.as_deref().unwrap().contains("no primary key"));
+    assert_eq!(
+        r.merge_warning.as_deref(),
+        Some("its review asked for changes")
+    );
+
+    // After the fix, `review` puts a second review on the board; it approves,
+    // and the first review's findings stay as they were.
+    std::fs::write(f.bin.join("verdict"), "APPROVE the key is there now").unwrap();
+    let done = f
+        .app
+        .swarm_action(&f.ws, SwarmVerb::Review, Some("schema"), None)
+        .unwrap();
+    assert!(
+        done.contains("reviewed again by `schema-review-2`"),
+        "{done}"
+    );
+    assert!(
+        pump_until(&mut f, Duration::from_secs(120), |f| {
+            review_state(f, "schema") == Some(ReviewState::Approved)
+        })
+        .await,
+        "never approved: {:?}",
+        review_state(&f, "schema")
+    );
+    let reviews = std::fs::read_to_string(f.bin.join("calls/reviews.txt")).unwrap();
+    assert_eq!(reviews.lines().count(), 2, "two review runs");
+    let first = board(&f)
+        .into_iter()
+        .find(|t| t.ext.plan_key == "schema-review")
+        .unwrap();
+    assert!(
+        agent_mux::bus::swarm::review::result_text(&first)
+            .unwrap()
+            .starts_with("CHANGES")
+    );
+    assert!(
+        pump_until(&mut f, Duration::from_secs(60), |f| {
+            swarm(f).is_none_or(|s| s.status == SwarmStatus::Finished)
+        })
+        .await,
+        "the swarm did not finish: {:?}",
+        swarm(&f).map(|s| s.status)
+    );
     f.app.kill_all();
 }

@@ -47,6 +47,8 @@ pub struct StartSwarm {
     /// The workers' pool, comma separated (`agy,codex`), the first for
     /// tasks that name none; `None`: the coordinator's harness alone.
     pub workers: Option<String>,
+    /// How finished tasks are reviewed: `auto` (`None`), `off` or a harness.
+    pub review: Option<String>,
 }
 
 impl App {
@@ -123,6 +125,8 @@ impl App {
         {
             worker_pool.push(h.parse::<Harness>()?.as_str().to_string());
         }
+        let review =
+            crate::bus::swarm::review::ReviewSettings::parse(req.review.as_deref().unwrap_or(""))?;
         let db = self
             .trace_db_path
             .clone()
@@ -142,6 +146,7 @@ impl App {
                 owner_run: Some(self.app_run_id.clone()),
                 worker_pool,
                 headless: !req.goal.trim().is_empty(),
+                review,
             },
             crate::tracing::store::now_ns(),
         )?;
@@ -171,12 +176,18 @@ impl App {
     ) -> Result<PathBuf, String> {
         let workspace = PathBuf::from(&swarm.workspace);
         let catalog = crate::agents::Catalog::load(&self.library_root(), Some(&workspace));
-        let pool = self
+        let ro = self
             .trace_db_path
             .as_deref()
-            .and_then(|db| crate::tracing::store::open_ro(db).ok())
-            .map(|c| record::worker_pool(&c, swarm))
+            .and_then(|db| crate::tracing::store::open_ro(db).ok());
+        let pool = ro
+            .as_ref()
+            .map(|c| record::worker_pool(c, swarm))
             .unwrap_or_else(|| vec![swarm.planner_harness.clone()]);
+        let review = ro
+            .as_ref()
+            .map(|c| crate::bus::swarm::review::settings(c, &swarm.id))
+            .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off);
         let ctx = PlannerContext {
             goal: swarm.goal.clone(),
             workspace: crate::workflows::planner::inventory(&workspace),
@@ -205,6 +216,8 @@ impl App {
                 check: swarm.check_cmd.clone(),
                 gate: swarm.gate_mode.as_str().to_string(),
                 headless: swarm.headless,
+                review: review.as_choice(),
+                review_step: review.describe(),
             },
             tools: Tools {
                 dispatch_grace_s: self.swarm_dispatch_grace_ns / 1_000_000_000,
@@ -745,6 +758,7 @@ impl App {
                 gate,
                 check,
                 workers,
+                review,
             } => match self.start_orchestrated_swarm(StartSwarm {
                 workspace: PathBuf::from(workspace),
                 goal,
@@ -754,6 +768,7 @@ impl App {
                 gate: gate.unwrap_or(true),
                 check,
                 workers,
+                review,
             }) {
                 Ok(s) => ok(
                     if s.headless {
@@ -892,6 +907,7 @@ impl App {
             .into_iter()
             .map(|m| m.from_launch.clone())
             .collect();
+        let review = crate::bus::swarm::review::settings(conn, &swarm.id);
         let actions = engine::next_actions(&engine::Input {
             swarm,
             board: &board,
@@ -899,6 +915,7 @@ impl App {
             asking: &asking,
             now_ns: crate::tracing::store::now_ns(),
             dispatch_grace_ns: self.swarm_dispatch_grace_ns,
+            review: review.enabled,
         });
         let data = crate::app::swarm_board::SwarmData {
             run: swarm.clone(),
@@ -911,6 +928,7 @@ impl App {
             agents: Default::default(),
             events: Vec::new(),
             timeline: None,
+            review: review.clone(),
         };
         let needs =
             crate::app::swarm_board::needs_for(&data, &workers, crate::tracing::store::now_ns())
@@ -953,17 +971,47 @@ impl App {
                     if by == LaunchedBy::Dispatcher {
                         let _ = record::request_launch(conn, None, &t.task.id, by, now_ns);
                     }
+                    // a review runs in the folder of the task it reviews
+                    // (its worktree, else the workspace), with its own prompt
+                    let reviewed = t
+                        .ext
+                        .review_of
+                        .as_deref()
+                        .and_then(|id| board.iter().find(|o| o.task.id == id));
+                    let (spawn_ws, opening) = match reviewed {
+                        Some(r) => {
+                            let dir = r
+                                .task
+                                .worktree
+                                .clone()
+                                .filter(|w| Path::new(w).is_dir())
+                                .unwrap_or_else(|| swarm.workspace.clone());
+                            let base = r
+                                .task
+                                .branch
+                                .as_ref()
+                                .and_then(|_| workspace_branch(Path::new(&swarm.workspace)));
+                            (
+                                dir,
+                                crate::bus::swarm::review::prompt(swarm, t, r, base.as_deref()),
+                            )
+                        }
+                        None => (
+                            swarm.workspace.clone(),
+                            prompt::worker_prompt(swarm, t, &board),
+                        ),
+                    };
                     let resp = self.handle_bus_control(
                         ControlRequest::SpawnWorker {
                             parent_launch: coordinator.clone(),
-                            workspace: swarm.workspace.clone(),
+                            workspace: spawn_ws,
                             task_id: t.task.id.clone(),
                             title: t.task.title.clone(),
                             instructions: t.task.instructions.clone(),
                             harness: t.task.target_harness.clone(),
                             agent: t.task.target_agent.clone(),
                             isolation: t.task.isolation,
-                            opening_prompt: Some(prompt::worker_prompt(swarm, t, &board)),
+                            opening_prompt: Some(opening),
                             swarm: Some(SwarmLaunch::worker(
                                 &swarm.id,
                                 &t.task.id,
@@ -1007,6 +1055,21 @@ impl App {
                             None,
                             now_ns,
                         );
+                    }
+                }
+                Action::AddReview { task_id } => {
+                    if let Err(e) = record::add_review(conn, Some(db), swarm, &task_id, now_ns) {
+                        let _ = record::event(
+                            conn,
+                            &swarm.id,
+                            Some(&task_id),
+                            "review.add_failed",
+                            Some("engine"),
+                            Some(serde_json::json!({ "error": e })),
+                            now_ns,
+                        );
+                        // once: the operator can ask again with `review`
+                        let _ = crate::bus::swarm::review::set_skip(conn, &task_id, true, now_ns);
                     }
                 }
                 Action::Nudge { task_id, launch_id } => {
@@ -1263,4 +1326,17 @@ fn first_line(s: &str) -> String {
         .chars()
         .take(160)
         .collect()
+}
+
+/// The branch the workspace has checked out (what a worktree branch forked
+/// from), for a review's `git diff <base>...HEAD`.
+fn workspace_branch(ws: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(ws)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !b.is_empty() && b != "HEAD").then_some(b)
 }

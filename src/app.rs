@@ -5307,8 +5307,10 @@ impl App {
                 isolation,
                 gate,
                 check,
+                review,
             } => {
                 let started = self.start_orchestrated_swarm(swarm_engine::StartSwarm {
+                    review: Some(review),
                     workspace: ws_path.clone(),
                     goal,
                     planner: Some(planner.as_str().to_string()),

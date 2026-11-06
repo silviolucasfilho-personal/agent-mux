@@ -94,6 +94,10 @@ pub struct BoardView {
     pub gate_mode: String,
     pub coordinator: Option<String>,
     pub worker_pool: Vec<String>,
+    /// How finished tasks are reviewed: `off`, `auto` or a harness.
+    pub review: String,
+    /// Each finished task's review (v25), in board order.
+    pub reviews: Vec<ReviewView>,
     /// The decision that approved the plan, if it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved: Option<record::SwarmDecision>,
@@ -107,6 +111,27 @@ pub struct BoardView {
     /// Open questions, newest last: who asked (launch), to whom, the text.
     pub questions: Vec<QuestionView>,
     pub last_event_id: i64,
+}
+
+/// Where one finished task's review stands.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewView {
+    /// The reviewed task's key.
+    pub task: String,
+    /// `pending`, `running`, `approved`, `changes`, `unclear`, `failed`,
+    /// `skipped`.
+    pub state: String,
+    /// The review's own task on the board, once there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// The review's result: the verdict line, then the findings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    /// What merging it now would go against, if anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,6 +158,7 @@ pub fn board_view(
     let messages = bstore::list_workspace_messages(conn, &swarm.workspace, 500)?;
     let open = super::open_questions(&messages);
     let asking: HashSet<String> = open.iter().map(|m| m.from_launch.clone()).collect();
+    let settings = super::review::settings(conn, &swarm.id);
     let input = Input {
         swarm,
         board: &board,
@@ -140,6 +166,7 @@ pub fn board_view(
         asking: &asking,
         now_ns,
         dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
+        review: settings.enabled,
     };
     let task_of = |launch: &str| -> Option<String> {
         board
@@ -176,6 +203,26 @@ pub fn board_view(
         gate_mode: swarm.gate_mode.as_str().to_string(),
         coordinator,
         worker_pool: record::worker_pool(conn, swarm),
+        review: settings.as_choice(),
+        reviews: board
+            .iter()
+            .filter_map(|t| {
+                let state = super::review::state(t, &board, settings.enabled)?;
+                let by = t
+                    .ext
+                    .review_task
+                    .as_deref()
+                    .and_then(|id| board.iter().find(|o| o.task.id == id));
+                Some(ReviewView {
+                    task: t.ext.plan_key.clone(),
+                    state: state.as_str().to_string(),
+                    review_key: by.map(|r| r.ext.plan_key.clone()),
+                    harness: by.and_then(|r| r.task.target_harness.clone()),
+                    verdict: by.and_then(super::review::result_text),
+                    merge_warning: super::review::merge_warning(Some(state)).map(str::to_string),
+                })
+            })
+            .collect(),
         approved: record::launch_decision(conn, &swarm.id),
         done: tasks.iter().filter(|t| t.status == "done").count(),
         total: tasks.len(),

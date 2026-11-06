@@ -1,11 +1,11 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 24;
+pub const SCHEMA_VERSION: i32 = 25;
 
 pub const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24,
+    V22, V23, V24, V25,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -1266,5 +1266,54 @@ AFTER INSERT ON swarm_events
 BEGIN
   INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
   VALUES ('swarm_event', NEW.swarm_id, NULL, NEW.actor, 'insert');
+END;
+"#;
+
+// v25: a review of each finished task (`bus::swarm::review`). The swarm's
+// review setting (`on` with a harness, `None` meaning one other than the
+// worker's, and the agent, `reviewer` by default; or `off`) and, per task,
+// whether the plan dismissed its review and which board task reviews it.
+// Side tables, as v24, so a replay is harmless; a swarm with no settings
+// row (every swarm from before) has reviews off.
+const V25: &str = r#"
+CREATE TABLE IF NOT EXISTS swarm_review_settings (
+  swarm_id    TEXT PRIMARY KEY REFERENCES swarms (id) ON DELETE CASCADE,
+  mode        TEXT NOT NULL CHECK (mode IN ('on','off')),
+  harness     TEXT,
+  agent       TEXT,
+  updated_ns  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS swarm_task_reviews (
+  task_id      TEXT PRIMARY KEY REFERENCES agent_tasks (id) ON DELETE CASCADE,
+  skip         INTEGER NOT NULL DEFAULT 0,
+  review_task  TEXT,
+  updated_ns   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS swarm_task_reviews_review ON swarm_task_reviews (review_task);
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_review_settings_insert
+AFTER INSERT ON swarm_review_settings
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm', NEW.swarm_id, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_review_settings_update
+AFTER UPDATE ON swarm_review_settings
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm', NEW.swarm_id, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_task_reviews_insert
+AFTER INSERT ON swarm_task_reviews
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_task_reviews_update
+AFTER UPDATE ON swarm_task_reviews
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'update');
 END;
 "#;

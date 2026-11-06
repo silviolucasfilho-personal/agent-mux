@@ -20,6 +20,21 @@ pub struct Plan {
     pub summary: String,
     #[serde(default)]
     pub tasks: Vec<PlannedTask>,
+    /// The review of each finished task (on unless the operator turned it
+    /// off): dismiss it with `enabled = false` when the operator asks, or
+    /// choose its harness. Absent: the swarm's setting stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<PlanReview>,
+}
+
+/// The plan's say on reviews (`bus::swarm::review`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
+pub struct PlanReview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// A harness, or `auto` (one other than the worker's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
@@ -40,6 +55,9 @@ pub struct PlannedTask {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<String>,
+    /// `false`: no review for this task (the operator said so).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<bool>,
 }
 
 /// Reads the last fenced `swarm-plan` block of `text` (a planner may quote
@@ -207,6 +225,16 @@ pub fn check(plan: &Plan, env: &CheckEnv) -> Problems {
     let mut err = |k: &str, m: String| p.errors.push((k.to_string(), m));
     if plan.tasks.is_empty() {
         err("", "the plan has no tasks".into());
+    }
+    if let Some(h) = plan
+        .review
+        .as_ref()
+        .and_then(|r| r.harness.as_deref())
+        .map(str::trim)
+        .filter(|h| !h.is_empty() && *h != "auto")
+        && !env.harnesses.iter().any(|x| x == h)
+    {
+        err("", format!("review harness `{h}` is not installed"));
     }
     let mut seen = HashSet::new();
     for t in &plan.tasks {
@@ -482,6 +510,7 @@ mod tests {
                 task("a", &[], &["src/a.rs"]),
                 task("b", &["a"], &["src/a.rs"]),
             ],
+            review: None,
         };
         let p = check(&plan, &env());
         assert!(p.is_ok(), "{p:?}");
@@ -502,6 +531,7 @@ mod tests {
         let plan = Plan {
             summary: String::new(),
             tasks: vec![task("a", &[], &[]), dup, bad, task("bad key!", &[], &[])],
+            review: None,
         };
         let p = check(&plan, &env());
         let msgs: Vec<String> = p.errors.iter().map(|(k, m)| format!("{k}: {m}")).collect();
@@ -533,6 +563,7 @@ mod tests {
         let one = |t: &PlannedTask| Plan {
             summary: String::new(),
             tasks: vec![t.clone()],
+            review: None,
         };
         let p = check(&one(&t), &e);
         assert!(
@@ -558,6 +589,7 @@ mod tests {
                 task("b", &["a"], &[]),
                 task("c", &["b"], &[]),
             ],
+            review: None,
         };
         let p = check(&plan, &env());
         assert!(
@@ -580,6 +612,7 @@ mod tests {
                 task("b", &[], &["src/bus/store.rs"]),
                 task("c", &[], &["docs/x.md"]),
             ],
+            review: None,
         };
         let mut e = env();
         e.git_repo = false;
@@ -597,6 +630,7 @@ mod tests {
         let many = Plan {
             summary: String::new(),
             tasks: (0..13).map(|i| task(&format!("t{i}"), &[], &[])).collect(),
+            review: None,
         };
         assert!(
             check(&many, &env())

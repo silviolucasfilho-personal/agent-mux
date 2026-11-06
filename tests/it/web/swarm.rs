@@ -35,6 +35,7 @@ fn swarm_and_bus_routes_read_seeded_facts() {
             owner_run: None,
             worker_pool: vec![],
             headless: false,
+            review: agent_mux::bus::swarm::review::ReviewSettings::off(),
         },
         now,
     )
