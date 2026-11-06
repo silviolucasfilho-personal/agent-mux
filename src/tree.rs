@@ -26,6 +26,10 @@ pub enum GroupKind {
     Workflow,
     /// Delegated worker sessions spawned from a lead session via the agent bus.
     Bus,
+    /// A swarm: its coordinator and the workers it started (the id is the
+    /// swarm's; the title its goal). `Enter` on the group opens the Swarm
+    /// screen on it (coordinator-first design §9.1).
+    Swarm,
 }
 
 impl GroupKind {
@@ -36,6 +40,7 @@ impl GroupKind {
             GroupKind::Loop => "loop",
             GroupKind::Workflow => "wf",
             GroupKind::Bus => "bus",
+            GroupKind::Swarm => "swarm",
         }
     }
 
@@ -45,6 +50,7 @@ impl GroupKind {
             GroupKind::Loop => "⟳",
             GroupKind::Workflow => "⚙",
             GroupKind::Bus => "⇄",
+            GroupKind::Swarm => "◆",
         }
     }
 }

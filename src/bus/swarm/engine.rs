@@ -103,6 +103,20 @@ impl Shown {
             Shown::Cancelled => "cancelled",
         }
     }
+    /// The seven words the screen uses beside the glyph (coordinator-first
+    /// design §9.2): the glyph still tells which of the finer states.
+    pub fn word(self) -> &'static str {
+        match self {
+            Shown::Draft | Shown::Blocked | Shown::Ready => "waiting",
+            Shown::Proposed => "proposed",
+            Shown::Working => "working",
+            Shown::Asking => "asking",
+            Shown::Prompt | Shown::Stalled | Shown::Failed | Shown::Lost => "needs you",
+            Shown::Done => "done",
+            Shown::Review => "review",
+            Shown::Cancelled => "off",
+        }
+    }
     pub fn glyph(self) -> &'static str {
         match self {
             Shown::Draft => "·",

@@ -43,45 +43,49 @@ For example, Claude as coordinator with agy and Codex in the pool gives a plan w
 
 ## The screen
 
-The Swarm screen has the Agents screen's layout: a tree on the left, and the selected row in the main pane on the right.
+The Swarm screen shows **one swarm**: its coordinator, the agents it started and their sub-agents, each a real terminal you can watch and type into. It opens on the swarm of the session you have selected (its coordinator or one of its workers), else on the swarm that needs you, else on the folder's newest live one; `n` starts another. Every swarm is also a group in the Agents sidebar (`◆ <goal>`, with `★ coordinator` and the workers under it), where `Enter` opens this screen on it. The layout is the Agents screen's: a tree on the left, the selected row in the main pane on the right.
 
 ```
-┌ Swarms • Keyboard focus ───┐┌ grok-spec · asking · Design specification ─────────────────────┐
-│>▾ ◆ add grok to agent… ⚑2  ││  1 Task   2 Live   3 Thread (1)   4 Changes                      │
+┌ Swarms • Keyboard focus ───┐┌ ◆ add OAuth login ─────────────────────────────────────────────┐
+│>▾ ◆ add OAuth login    ⚑1  ││  1 Board   2 Live (3)   3 Activity (12)   4 Changes             │
 │     ★ coordinator·claude ○ ││                                                                 │
-│     ◷ 1 grok-spec       !  ││  12:35 grok-spec → you #question                                │
-│     ⇡ 2 harness-core    !  ││    Should the spec cover ~/.grok sessions?                      │
-│     ⋯ 3 workflows-and-… sh ││                                                                 │
-│ ▸ ◆ fix the bus          ✓ ││                                                                 │
-│ + new swarm  n             ││                                                                 │
+│     ✓ 1 oauth-schema       ││ running · 1/5 done · 2/3 workers · 18m · 41k tok · $1.24        │
+│     ● 2 oauth-routes codex ││                                                                 │
+│         ↳ write tests   1m ││ ── Needs you (1) ──                                             │
+│     ◷ 3 oauth-ui         ! ││ question  oauth-ui asks: which provider first?                  │
+│     ◦ 4 docs               ││ ── Plan ──                                                      │
+│ + new swarm  n             ││ confirmed in the chat 12:31 “go”                                │
+│                            ││ ✓ done      1 oauth-schema   Add the tables  claude             │
+│                            ││ ● working   2 oauth-routes   Routes  codex ← oauth-schema       │
 └────────────────────────────┘└─────────────────────────────────────────────────────────────────┘
-[F1 Commands] Swarm • Keyboard focus [n] New [e] Edit [d] Delete [r] Run/resume
+[F1 Commands] Swarm • Keyboard focus [n] New [r] Retry [x] Stop
 ```
 
-- **The tree** lists every swarm: live ones first (the one in your folder at the top), then those that ended in the last week, folded. Under each `◆` swarm:
-  - **`★` coordinator:** the coordinator agent's row and its session state.
-  - **Tasks:** one row per task, in plan order, with its state symbol, number and key. On the right is its harness, `!` when it needs you, or `✗` when the plan has an error on it.
-
-  A swarm shows `⚑n` when it needs you, `done/total` otherwise, and `✓` once it's closed.
+- **The tree:** the swarm's row (`⚑n` when it needs you, `done/total` otherwise, `✓` once closed), then:
+  - **`★` coordinator:** its session state. `Enter` types into it: this is where the plan is talked over and confirmed.
+  - **One row per agent the swarm started**, in plan order: its state glyph, number and key, and on the right its harness, elapsed time and cost (`!` when it needs you, `✗` when the plan has an error on it). `Enter` types into its terminal.
+  - **`↳` sub-agents** under a worker (a Claude `Task` run, a Codex sub-agent), live ones always, ended ones when you unfold the worker with `→`. They have no terminal of their own: `Enter` goes to their worker's.
 - **The main pane** shows the selected row:
-  - **A swarm** shows its card: state, done/total, workers against your limit, elapsed time, tokens and cost, then everything that needs you, the plan, the check and the keys that apply now.
-  - **The coordinator** shows its terminal; `Enter` there to talk to it.
-  - **A task** shows its worker's terminal while it has one. This is the same pane as the Agents screen, at full size. Its tabs are `1 Task` (the card: instructions, done-when, files, dependencies, result or error, branch, and the plan's problems), `2 Live` (the terminal), `3 Thread` (its messages) and `4 Changes` (its diff). The pane opens on the tab that matters: Thread when the worker asked something, Live while it works, Changes when its branch waits for review, Task otherwise.
-- **`Enter` on a terminal** gives it the keyboard, as on the Agents screen: the pane's title says `Keyboard goes to …`. `⌘L` (`Ctrl+Shift+L`) brings the keyboard back to the tree.
-- **`a`** shows **Activity**, every message of the swarm.
+  - **The swarm row** has four tabs (`1`–`4`): **Board** (the card: state, needs, the plan as a table with each task's live word, how the plan was confirmed and by whose words, the check), **Live** (every live terminal of the swarm at once, a tile each, the coordinator first; `Tab` into it, `↑↓←→` choose a tile, `Enter` connects to it), **Activity** (every message of the swarm) and **Changes** (each worktree task's branch, then the workspace's diff).
+  - **The coordinator** shows its terminal.
+  - **A worker** shows its terminal while it has one; its tabs are `1 Task` (instructions, done-when, files, dependencies, result or error, branch), `2 Live`, `3 Thread` (its messages) and `4 Changes` (its diff). The pane opens on the tab that matters.
+  - **A worker whose session ended** keeps its row: `Enter` **reconnects** — the same harness resumes the same conversation in a new session on the task (Claude Code, Codex and OpenCode; agy cannot, `r` retries instead).
+- **`Enter` on a terminal** gives it the keyboard: the pane's title says `Keyboard goes to …`. `⌘L` (`Ctrl+Shift+L`) brings the keyboard back to the tree.
 - **Cost** reads `—` when a harness's cost isn't priced (agy isn't), and `≥$x` when only part of it is.
 
-### What the task symbols mean
+### What the task words mean
 
-| Symbol | State | | Symbol | State |
-| --- | --- | --- | --- | --- |
-| `·` | draft (the plan isn't approved yet) | | `✓` | done |
-| `⋯` | blocked: waits for a task it depends on | | `⇡` | done, its branch waits for review |
-| `◦` | ready: starts when a worker is free | | `✗` | failed |
-| `●` | working | | `!` | lost: its session exited mid-task |
-| `◷` | asking: waits for your answer | | `–` | cancelled |
-| `○` | stalled: stopped without finishing | | `+` | proposed by a worker |
-| `⚑` | waiting on a prompt in its terminal | | | |
+The Board shows seven words beside the glyphs; the glyph tells which finer state it is.
+
+| Word | Glyphs | Meaning |
+| --- | --- | --- |
+| `waiting` | `·` draft · `⋯` blocked · `◦` ready | not started: the plan isn't confirmed, a dependency isn't done, or it waits for the coordinator to start it (agent-mux starts it itself two minutes after telling the coordinator) |
+| `working` | `●` (`◌` starting) | its worker works |
+| `asking` | `◷` | it asked a question nobody answered yet |
+| `needs you` | `⚑` prompt · `○` stalled · `!` lost · `✗` failed | its worker waits on a prompt, stopped without reporting, exited mid-task, or failed |
+| `done` | `✓` | done |
+| `review` | `⇡` | done on a branch that waits for your merge |
+| `off` | `–` | cancelled or set aside |
 
 A task that depends on a worktree task starts only once that task's branch is merged, so it builds on the merged work.
 
@@ -127,7 +131,7 @@ A worker that goes idle on an unfinished task gets one reminder after 90 seconds
 
 ## Writing to workers
 
-Press `>` to open the command line. `m` opens it addressed to the selected task's worker (or, on a message, as a reply to its sender), and `b` opens it addressed to everyone.
+Press `>` to open the command line. `m` opens it addressed to the selected task's worker (or, on a message, as a reply to its sender); `@all` addresses everyone.
 
 ```
 [!] [@who] [#topic] message
@@ -150,25 +154,22 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | Key | Does |
 | --- | --- |
 | `↑` `↓` `g` `G` | choose a row |
-| `←` `→` | fold or unfold a swarm (`←` on a task climbs to its swarm) |
-| `Enter` | type into the row's terminal · edit a task that hasn't started · fold or unfold a swarm · start a swarm when there is none |
-| `Tab` | move between the tree and the card (in Thread or Activity, `↑`/`↓` choose a message, `Enter` reads it in full, `m` answers it) |
-| `1`–`4` | a task's tab |
-| `y` | approve the plan · merge a branch · accept a proposal · close a finished swarm |
+| `←` `→` | fold or unfold: a worker's ended sub-agents (`→` on it), `←` on a child climbs to its parent |
+| `Enter` | type into the row's terminal · reconnect a worker whose session ended · connect to a Live tile · start a swarm when there is none |
+| `Tab` | tree ↔ pane (in Activity or Thread, `↑`/`↓` choose a message, `Enter` reads it in full, `m` answers it; in Live, `↑↓←→` choose a tile) |
+| `1`–`4` | the swarm row's tab (Board, Live, Activity, Changes) or a worker's (Task, Live, Thread, Changes) |
+| `y` | confirm the one thing on the row: merge a branch in `review` · accept a proposal · close a finished swarm. Never the plan: on a plan in review, `y` moves the keyboard to the coordinator's chat. |
+| `x` | stop a worker · cancel a task · set a branch aside · drop a proposal (confirms with `y`) |
+| `r` | retry a failed, lost, cancelled or stalled task (the retry form: harness, agent, isolation) · restart an exited coordinator |
 | `space` | pause or resume: while paused, running workers continue but nothing new starts |
-| `n` | a new swarm (on a swarm row) · a new task (on a task or the coordinator) |
-| `e` / `d` | edit or delete a task. Its harness, agent and isolation change only before it starts or on a retry; delete only a task that never started. |
-| `r` | retry a failed, lost, cancelled or stalled task |
-| `x` | stop the task's worker · cancel a task · set a branch aside · drop a proposal |
-| `p` | re-plan (in review) |
-| `>` `m` `b` | write to workers |
+| `n` | a new swarm |
+| `>` `m` | write to workers (`m`: the selected task's worker, or an answer to its question) |
 | `!` | the next row that needs you |
-| `a` | Activity on or off |
 | `Ctrl+R` | reload now (the screen refreshes on its own when anything changes) |
 | `⌘L` | from a terminal, back to the tree |
 | `Esc` | back to the tree, then close the screen |
 
-Confirmations take `y` only. `Enter` never confirms. What an action did shows in the status bar.
+Changing the plan (a task's card, adding or dropping one, re-planning) is said to the coordinator: `Enter` on `★`. Confirmations take `y` only. `Enter` never confirms. What an action did shows in the status bar.
 
 ## Reviewing and finishing
 

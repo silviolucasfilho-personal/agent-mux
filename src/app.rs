@@ -258,6 +258,8 @@ pub enum Action {
     CancelWorkflow,
     /// `W`: the Workflows view.
     OpenRunsView,
+    /// Enter on a swarm's group in the Agents sidebar: the Swarm screen on it.
+    OpenSwarmGroup,
     RunsKey,
     OpenInbox,
     InboxKey,
@@ -477,6 +479,9 @@ pub enum RowTag {
     Session,
     /// A run no other row stands for: it has only its sessions.
     Run,
+    /// A swarm's group (its coordinator and workers): Enter opens the Swarm
+    /// screen on it.
+    SwarmGroup,
 }
 
 pub struct DispatchCtx {
@@ -643,6 +648,14 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 // skill's own keys
                 KeyCode::Enter | KeyCode::Char('x' | 'd' | 'r' | 't' | 'h' | ' ')
                     if in_list && ctx.agent_row == RowTag::Run =>
+                {
+                    Action::None
+                }
+                KeyCode::Enter if in_list && ctx.agent_row == RowTag::SwarmGroup => {
+                    Action::OpenSwarmGroup
+                }
+                KeyCode::Char('x' | 'd' | 'r' | 't' | 'h' | ' ')
+                    if in_list && ctx.agent_row == RowTag::SwarmGroup =>
                 {
                     Action::None
                 }
@@ -2796,6 +2809,9 @@ pub struct App {
     /// What the swarms this TUI dispatches need from the operator, for the
     /// Agents sidebar and the status bar (`swarm_board::needs_for`).
     pub swarm_needs: usize,
+    /// The first swarm that needs the operator (`⚑ swarm needs you` opens
+    /// the Swarm screen on it).
+    pub swarm_needs_first: Option<String>,
 }
 
 /// A bus wake waiting for its session to turn idle.
@@ -2954,6 +2970,7 @@ impl App {
             swarm_dispatch_grace_ns: crate::bus::swarm::engine::DISPATCH_GRACE_NS,
             last_swarm_adopt_check: None,
             swarm_needs: 0,
+            swarm_needs_first: None,
         };
         if let Some(sock_dir) = app.trace_db_path.as_deref().and_then(|p| p.parent()) {
             let sock = sock_dir.join("bus.sock");
@@ -4410,6 +4427,9 @@ impl App {
                 }
                 Some(agents_list::AgentKind::Persona(_)) => RowTag::Persona,
                 Some(agents_list::AgentKind::Session(_)) => RowTag::Session,
+                Some(agents_list::AgentKind::Run(k)) if k.starts_with("swarm:") => {
+                    RowTag::SwarmGroup
+                }
                 Some(agents_list::AgentKind::Run(_)) => RowTag::Run,
                 _ => RowTag::Other,
             }
@@ -4878,6 +4898,10 @@ impl App {
 
     /// Opens the Agent Swarm Control Room for the workspace of the selected session
     /// (or current working directory).
+    /// `F1 → Open swarm`: the Swarm screen on the selected session's swarm
+    /// (its coordinator or a worker, by its launch row), else on the swarm
+    /// that needs the operator, else on the folder's newest live swarm
+    /// (coordinator-first design §9.1).
     pub fn open_swarm_view(&mut self) {
         let ws = self
             .sessions
@@ -4885,6 +4909,39 @@ impl App {
             .map(|s| s.dir.clone())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let of_session = self
+            .sessions
+            .get(self.selected)
+            .and_then(|s| s.trace.as_ref().map(|t| t.launch_id.clone()))
+            .and_then(|launch| {
+                let db = self.trace_db_path.as_deref()?;
+                let conn = crate::tracing::store::open_ro(db).ok()?;
+                crate::bus::swarm::record::swarm_of_launch(&conn, &launch)
+                    .ok()
+                    .flatten()
+            });
+        let scope = of_session
+            .map(|s| s.id)
+            .or_else(|| self.swarm_needs_first.clone());
+        self.open_swarm_screen(ws, scope);
+    }
+
+    /// The Swarm screen on swarm `id` (a group in the Agents sidebar, the
+    /// needs badge).
+    pub fn open_swarm_view_on(&mut self, id: &str) {
+        let ws = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|db| crate::tracing::store::open_ro(db).ok())
+            .and_then(|c| crate::bus::swarm::record::get_swarm(&c, id).ok().flatten())
+            .map(|s| std::path::PathBuf::from(s.workspace))
+            .or_else(|| self.sessions.get(self.selected).map(|s| s.dir.clone()))
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        self.open_swarm_screen(ws, Some(id.to_string()));
+    }
+
+    fn open_swarm_screen(&mut self, ws: std::path::PathBuf, scope: Option<String>) {
         let live = self.live_sessions_in(None);
         let conn = self
             .trace_db_path
@@ -4902,7 +4959,8 @@ impl App {
             harnesses,
             self.default_swarm_harness(),
             crate::tracing::store::now_ns(),
-        );
+        )
+        .scoped(scope);
         view.writing_agents = self.swarm_writing_agents(&ws);
         self.mode = Mode::Swarm(Box::new(view));
         // The plan's checks need the App: a second read with them.
@@ -5184,19 +5242,6 @@ impl App {
             Mode::Swarm(v) => v.swarm.as_ref().map(|s| s.id.clone()),
             _ => None,
         };
-        let live_swarm = || -> Result<crate::bus::swarm::record::SwarmRun, String> {
-            let db = self.trace_db_path.as_deref().ok_or("no trace store")?;
-            let conn = crate::tracing::store::open_aux(db)?;
-            crate::bus::swarm::record::resolve_swarm(
-                &conn,
-                &crate::bus::store::normalize_workspace(&ws_path),
-                board_swarm.as_deref(),
-            )
-            .and_then(|s| match s.ended_ns {
-                None => Ok(s),
-                Some(_) => Err(format!("{} has ended", s.id)),
-            })
-        };
         let result: Option<Result<String, String>> = match outcome {
             Outcome::None => return,
             Outcome::Close => {
@@ -5289,16 +5334,6 @@ impl App {
                 notes.as_deref(),
                 &crate::bus::swarm::record::Decider::TUI,
             )),
-            Outcome::AddTask(pt) => Some(live_swarm().and_then(|swarm| {
-                with_conn(&|conn, db| {
-                    crate::bus::swarm::record::add_task(conn, Some(db), &swarm, &pt, false, now_ns)
-                        .map(|_| format!("added `{}`", pt.key))
-                })
-            })),
-            Outcome::EditTask { task_id, task } => Some(with_conn(&|conn, db| {
-                crate::bus::swarm::record::update_plan_task(conn, Some(db), &task_id, &task, now_ns)
-                    .map(|_| format!("saved `{}`", task.key))
-            })),
             Outcome::RetryTask {
                 task_id,
                 task,
@@ -5335,12 +5370,9 @@ impl App {
                     })
                 }))
             }
-            Outcome::DeleteTask(task_id) => Some(with_conn(&|conn, db| {
-                crate::bus::swarm::record::delete_task(conn, &task_id)
-                    .map_err(|e| e.to_string())?;
-                crate::tracing::store::poke_wake(db);
-                Ok("deleted".into())
-            })),
+            Outcome::Reconnect { task_id, launch } => {
+                Some(self.reconnect_swarm_worker(&task_id, &launch))
+            }
             Outcome::CancelTask(task_id) => Some(with_conn(&|conn, db| {
                 crate::bus::store::update_task(
                     conn,
@@ -6085,6 +6117,14 @@ impl App {
                 }
                 _ => self.open_runs_view(),
             },
+            Action::OpenSwarmGroup => {
+                if let Some(agents_list::AgentKind::Run(k)) = self.agent_row()
+                    && let Some(id) = k.strip_prefix("swarm:")
+                {
+                    let id = id.to_string();
+                    self.open_swarm_view_on(&id);
+                }
+            }
             Action::RunsKey => self.handle_runs_view_key(key),
             Action::OpenInbox => self.open_inbox(),
             Action::InboxKey => self.handle_inbox_key(key),
@@ -8406,6 +8446,7 @@ impl App {
                 profile.args.extend(opening_args.iter().cloned());
 
                 let id = self.next_id;
+                let swarm_link = swarm.clone();
                 let mut extra_env = vec![("AGENT_MUX_TASK_ID".to_string(), task_id.clone())];
                 if let Some((plan, _)) = &agent_prep {
                     extra_env.extend(plan.env.iter().cloned());
@@ -8431,12 +8472,35 @@ impl App {
                     .filter(|s| !s.is_empty())
                     .unwrap_or(&task_id)
                     .to_string();
-                session.group = Some(crate::tree::GroupRef {
-                    kind: crate::tree::GroupKind::Bus,
-                    id: group_id,
-                    title: "delegated".into(),
-                    detail: crate::bus::short_id(&task_id).to_string(),
-                    label: title.clone(),
+                // a swarm's worker sits under its swarm's group (◆, the goal);
+                // a delegated worker under its lead's bus group (⇄)
+                session.group = Some(match swarm_link.as_ref() {
+                    Some(sw) => crate::tree::GroupRef {
+                        kind: crate::tree::GroupKind::Swarm,
+                        id: sw.swarm_id.clone(),
+                        title: self
+                            .trace_db_path
+                            .as_deref()
+                            .and_then(|db| crate::tracing::store::open_ro(db).ok())
+                            .and_then(|c| {
+                                crate::bus::swarm::record::get_swarm(&c, &sw.swarm_id)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .map(|s| crate::app::swarm_engine::swarm_group_title(&s))
+                            .unwrap_or_else(|| "swarm".into()),
+                        detail: crate::bus::short_id(&sw.swarm_id).to_string(),
+                        label: format!("{} {}", sw.task_key.as_deref().unwrap_or(""), title)
+                            .trim()
+                            .to_string(),
+                    },
+                    None => crate::tree::GroupRef {
+                        kind: crate::tree::GroupKind::Bus,
+                        id: group_id,
+                        title: "delegated".into(),
+                        detail: crate::bus::short_id(&task_id).to_string(),
+                        label: title.clone(),
+                    },
                 });
                 let new_launch_id = session
                     .trace

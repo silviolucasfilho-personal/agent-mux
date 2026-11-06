@@ -72,6 +72,46 @@ impl Tab {
     }
 }
 
+/// The swarm row's tabs, in the order `1`–`4` choose them
+/// (coordinator-first design §9.3; Timeline and Log come with the trace).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwarmTab {
+    Board,
+    /// Every live terminal of the swarm at once (§9.5).
+    Live,
+    /// Every message of the swarm.
+    Activity,
+    /// The combined diff: each worktree's branch, and the workspace.
+    Changes,
+}
+
+impl SwarmTab {
+    pub const ALL: [SwarmTab; 4] = [
+        SwarmTab::Board,
+        SwarmTab::Live,
+        SwarmTab::Activity,
+        SwarmTab::Changes,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            SwarmTab::Board => "Board",
+            SwarmTab::Live => "Live",
+            SwarmTab::Activity => "Activity",
+            SwarmTab::Changes => "Changes",
+        }
+    }
+}
+
+/// A worker's sub-agent (a Claude `Task` run, a Codex sub-agent): an
+/// `observations` row of type `agent` under the worker's launch. It has no
+/// terminal of its own; its row connects to its worker's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubAgent {
+    pub name: String,
+    pub start_ns: i64,
+    pub end_ns: Option<i64>,
+}
+
 /// What only the operator can resolve, most urgent first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NeedKind {
@@ -85,6 +125,9 @@ pub enum NeedKind {
     Review,
     Proposed,
     CheckFailed,
+    /// agent-mux started a task itself: the coordinator did not launch it
+    /// within the grace period (§9.2).
+    CoordinatorQuiet,
     Finished,
 }
 
@@ -101,6 +144,7 @@ impl NeedKind {
             NeedKind::Review => "review",
             NeedKind::Proposed => "proposed",
             NeedKind::CheckFailed => "check",
+            NeedKind::CoordinatorQuiet => "coordinator quiet",
             NeedKind::Finished => "finished",
         }
     }
@@ -110,12 +154,13 @@ impl NeedKind {
         match self {
             NeedKind::Question => "Enter answer",
             NeedKind::Prompt | NeedKind::Stalled => "Enter attach · r retry",
-            NeedKind::Plan => "Enter on ★: confirm in the chat · p re-plan",
-            NeedKind::PlannerFailed => "p re-plan",
+            NeedKind::Plan => "Enter on ★: confirm in the chat",
+            NeedKind::PlannerFailed => "Enter on ★: talk to it · x then r on ★ restarts it",
             NeedKind::Failed | NeedKind::Lost => "r retry",
             NeedKind::Review => "y merge · x set aside",
             NeedKind::Proposed => "y accept · x drop",
             NeedKind::CheckFailed => "Enter read it · r retry a task",
+            NeedKind::CoordinatorQuiet => "Enter on ★: talk to it",
             NeedKind::Finished => "y close",
         }
     }
@@ -315,7 +360,6 @@ pub enum Confirm {
     Merge { task_id: String, branch: String },
     SetAside { task_id: String, branch: String },
     Close,
-    Delete { task_id: String, key: String },
     Cancel { task_id: String, key: String },
     Stop { session_idx: usize, key: String },
 }
@@ -336,7 +380,6 @@ impl Confirm {
                 "Close the swarm? Its sessions stop, open tasks are cancelled, leases released."
                     .into()
             }
-            Confirm::Delete { key, .. } => format!("Delete `{key}` from the plan?"),
             Confirm::Cancel { key, .. } => format!("Cancel `{key}`? It will not run."),
             Confirm::Stop { key, .. } if key == "the coordinator" => {
                 "Stop the coordinator? The swarm keeps running; r on its row starts a new one."
@@ -380,11 +423,6 @@ pub enum Outcome {
         body: String,
         urgent: bool,
     },
-    AddTask(PlannedTask),
-    EditTask {
-        task_id: String,
-        task: PlannedTask,
-    },
     /// Save the task's card, then put it back on the board, stopping its
     /// worker first when it still has one.
     RetryTask {
@@ -392,7 +430,12 @@ pub enum Outcome {
         task: PlannedTask,
         stop: Option<usize>,
     },
-    DeleteTask(String),
+    /// Resume the ended worker's conversation in a new session on the same
+    /// task (coordinator-first §9.5).
+    Reconnect {
+        task_id: String,
+        launch: String,
+    },
     CancelTask(String),
     StopSession(usize),
 }
@@ -424,6 +467,8 @@ pub struct SwarmData {
     /// The decision that approved the plan, once there is one (who relayed
     /// it, the operator's words).
     pub launch_decision: Option<crate::bus::swarm::record::SwarmDecision>,
+    /// Each worker's sub-agents, by the worker's launch id.
+    pub agents: HashMap<String, Vec<SubAgent>>,
 }
 
 /// A row of the tree.
@@ -435,6 +480,8 @@ pub enum Row {
     Coordinator(usize),
     /// A task of a swarm (swarm index, task index on its board).
     Task(usize, usize),
+    /// A sub-agent of a task's worker (swarm, task, index in its list).
+    Agent(usize, usize, usize),
 }
 
 /// A row by what it stands for, so the cursor survives a refresh.
@@ -443,6 +490,7 @@ enum RowKey {
     Swarm(String),
     Coordinator(String),
     Task(String),
+    Agent(String, usize),
 }
 
 /// What the main pane shows for the selected row.
@@ -474,6 +522,11 @@ pub struct SwarmBoard {
     /// agy runs them read-only, so a task must not pair them (the App sets
     /// it when it opens and refreshes the screen).
     pub writing_agents: Vec<String>,
+    /// The one swarm this screen shows (coordinator-first design §9.1): its
+    /// coordinator, the agents it started and their sub-agents. `None`
+    /// until a swarm is chosen: the folder's newest live one, else the
+    /// empty screen and the New swarm dialog.
+    pub scope: Option<String>,
     /// The swarm the next refresh puts the cursor on (one just started).
     select_next: Option<String>,
     /// With `select_next`: the coordinator's row rather than the swarm's.
@@ -483,7 +536,13 @@ pub struct SwarmBoard {
     pub rows: Vec<Row>,
     pub cursor: usize,
     folded: HashSet<String>,
+    /// Tasks whose ended sub-agents are listed too (live ones always are).
+    agent_unfolded: HashSet<String>,
     seen: HashSet<String>,
+    /// The swarm row's tab.
+    pub swarm_tab: SwarmTab,
+    /// The tile `↑↓←→` are on in the Live mosaic.
+    pub tile_cursor: usize,
     /// The pane has the keyboard: keys go to the selected row's session.
     pub pane_focused: bool,
     /// The cursor is on a task (`selected` indexes the board).
@@ -576,6 +635,7 @@ impl SwarmBoard {
         let mut v = SwarmBoard {
             last_launch: None,
             writing_agents: Vec::new(),
+            scope: None,
             select_next: None,
             select_next_coordinator: false,
             workspace,
@@ -583,7 +643,10 @@ impl SwarmBoard {
             rows: Vec::new(),
             cursor: 0,
             folded: HashSet::new(),
+            agent_unfolded: HashSet::new(),
             seen: HashSet::new(),
+            swarm_tab: SwarmTab::Board,
+            tile_cursor: 0,
             pane_focused: false,
             on_task: false,
             swarm: None,
@@ -669,6 +732,9 @@ impl SwarmBoard {
             Row::Swarm(i) => RowKey::Swarm(self.swarms.get(i)?.run.id.clone()),
             Row::Coordinator(i) => RowKey::Coordinator(self.swarms.get(i)?.run.id.clone()),
             Row::Task(i, j) => RowKey::Task(self.swarms.get(i)?.board.get(j)?.task.id.clone()),
+            Row::Agent(i, j, k) => {
+                RowKey::Agent(self.swarms.get(i)?.board.get(j)?.task.id.clone(), k)
+            }
         })
     }
 
@@ -720,10 +786,18 @@ impl SwarmBoard {
         if let Some(conn) = &self.conn {
             self.last_change_seq = crate::tracing::store::latest_change_seq(conn).ok();
             let here = self.norm_workspace();
-            let mut runs = record::live_swarms(conn).unwrap_or_default();
-            // The opened folder's swarm first, then the other live ones.
-            runs.sort_by_key(|r| r.workspace != here);
-            runs.extend(record::ended_swarms_since(conn, now_ns - RECENT_NS).unwrap_or_default());
+            // One swarm per screen (§9.1): the chosen one, else the folder's
+            // newest live one, which then becomes the choice. Other swarms
+            // are groups in the Agents sidebar.
+            if self.scope.is_none() {
+                self.scope = record::live_swarm(conn, &here).ok().flatten().map(|s| s.id);
+            }
+            let runs: Vec<SwarmRun> = self
+                .scope
+                .as_deref()
+                .and_then(|id| record::get_swarm(conn, id).ok().flatten())
+                .into_iter()
+                .collect();
             let mut swarms = Vec::with_capacity(runs.len());
             for run in runs {
                 let board = record::board(conn, &run.id).unwrap_or_default();
@@ -757,6 +831,11 @@ impl SwarmBoard {
                     .conn
                     .as_ref()
                     .and_then(|c| record::launch_decision(c, &run.id));
+                let agents = self
+                    .conn
+                    .as_ref()
+                    .map(|c| sub_agents(c, &board))
+                    .unwrap_or_default();
                 let mut d = SwarmData {
                     run,
                     board,
@@ -765,6 +844,7 @@ impl SwarmBoard {
                     problems,
                     needs: Vec::new(),
                     launch_decision,
+                    agents,
                 };
                 d.needs = needs_for(&d, &self.workers, now_ns);
                 swarms.push(d);
@@ -800,17 +880,55 @@ impl SwarmBoard {
             if d.run.planner_launch.is_some() {
                 self.rows.push(Row::Coordinator(i));
             }
-            for j in 0..d.board.len() {
+            for (j, t) in d.board.iter().enumerate() {
                 self.rows.push(Row::Task(i, j));
+                // its worker's sub-agents: the live ones always, the ended
+                // ones when the task is unfolded (→)
+                let unfolded = self.agent_unfolded.contains(&t.task.id);
+                if let Some(agents) = t.task.assigned_to.as_deref().and_then(|l| d.agents.get(l)) {
+                    for (k, a) in agents.iter().enumerate() {
+                        if unfolded || a.end_ns.is_none() {
+                            self.rows.push(Row::Agent(i, j, k));
+                        }
+                    }
+                }
             }
         }
+    }
+
+    /// Whether task `j` of swarm `i` has ended sub-agents folded away.
+    pub fn has_folded_agents(&self, i: usize, j: usize) -> bool {
+        let Some(d) = self.swarms.get(i) else {
+            return false;
+        };
+        let Some(t) = d.board.get(j) else {
+            return false;
+        };
+        if self.agent_unfolded.contains(&t.task.id) {
+            return false;
+        }
+        t.task
+            .assigned_to
+            .as_deref()
+            .and_then(|l| d.agents.get(l))
+            .is_some_and(|a| a.iter().any(|x| x.end_ns.is_some()))
+    }
+
+    /// The sub-agent a row stands for.
+    pub fn agent_of(&self, r: Row) -> Option<&SubAgent> {
+        let Row::Agent(i, j, k) = r else {
+            return None;
+        };
+        let d = self.swarms.get(i)?;
+        let launch = d.board.get(j)?.task.assigned_to.as_deref()?;
+        d.agents.get(launch)?.get(k)
     }
 
     /// Points the selected-swarm fields at the cursor's swarm.
     fn sync_current(&mut self) {
         let (si, task) = match self.rows.get(self.cursor) {
             Some(Row::Swarm(i)) | Some(Row::Coordinator(i)) => (Some(*i), None),
-            Some(Row::Task(i, j)) => (Some(*i), Some(*j)),
+            Some(Row::Task(i, j)) | Some(Row::Agent(i, j, _)) => (Some(*i), Some(*j)),
             None => (None, None),
         };
         match si.and_then(|i| self.swarms.get(i)) {
@@ -846,7 +964,7 @@ impl SwarmBoard {
                 Some(w) => PaneView::Session(w.session_idx),
                 None => PaneView::SwarmCard,
             },
-            Some(Row::Task(..)) => {
+            Some(Row::Task(..)) | Some(Row::Agent(..)) => {
                 match (
                     self.tab(),
                     self.selected_task().and_then(|t| self.worker_of(t)),
@@ -871,7 +989,7 @@ impl SwarmBoard {
     pub fn row_needs(&self, r: Row) -> usize {
         match r {
             Row::Swarm(i) => self.swarms.get(i).map_or(0, |d| d.needs.len()),
-            Row::Coordinator(_) => 0,
+            Row::Coordinator(_) | Row::Agent(..) => 0,
             Row::Task(i, j) => self.swarms.get(i).map_or(0, |d| {
                 let id = d.board.get(j).map(|t| t.task.id.as_str());
                 d.needs
@@ -908,15 +1026,50 @@ impl SwarmBoard {
     }
 
     fn fold(&mut self, fold: bool) {
-        let si = match self.rows.get(self.cursor) {
-            Some(Row::Swarm(i)) => *i,
-            Some(Row::Coordinator(i)) | Some(Row::Task(i, _)) => {
-                if fold {
-                    // ← on a child climbs to its swarm
+        let si = match self.rows.get(self.cursor).copied() {
+            Some(Row::Swarm(i)) => i,
+            Some(Row::Task(i, j)) => {
+                // → on a worker lists its ended sub-agents too; ← folds them,
+                // or climbs to the swarm
+                let id = self.swarms[i].board[j].task.id.clone();
+                if !fold {
+                    if self.agent_unfolded.insert(id) {
+                        self.rebuild_rows();
+                    } else if let Some(next) = self.rows.get(self.cursor + 1).copied()
+                        && matches!(next, Row::Agent(..))
+                    {
+                        self.set_cursor(self.cursor + 1);
+                    }
+                } else if self.agent_unfolded.remove(&id) {
+                    self.rebuild_rows();
+                } else {
                     let at = self
                         .rows
                         .iter()
-                        .position(|r| *r == Row::Swarm(*i))
+                        .position(|r| *r == Row::Swarm(i))
+                        .unwrap_or(0);
+                    self.set_cursor(at);
+                }
+                return;
+            }
+            Some(Row::Agent(i, j, _)) => {
+                if fold {
+                    // ← on a sub-agent climbs to its worker
+                    let at = self
+                        .rows
+                        .iter()
+                        .position(|r| *r == Row::Task(i, j))
+                        .unwrap_or(0);
+                    self.set_cursor(at);
+                }
+                return;
+            }
+            Some(Row::Coordinator(i)) => {
+                if fold {
+                    let at = self
+                        .rows
+                        .iter()
+                        .position(|r| *r == Row::Swarm(i))
                         .unwrap_or(0);
                     self.set_cursor(at);
                 }
@@ -1058,9 +1211,79 @@ impl SwarmBoard {
     fn after_selection_change(&mut self) {
         self.panel_scroll = 0;
         self.selected_message = self.list_len().saturating_sub(1);
-        if self.tab() == Tab::Changes {
+        if (self.on_task && self.tab() == Tab::Changes)
+            || (!self.on_task && self.swarm_tab == SwarmTab::Changes)
+        {
             self.load_diff();
         }
+    }
+
+    /// `1`–`4` on the swarm row.
+    fn set_swarm_tab(&mut self, tab: SwarmTab) {
+        self.swarm_tab = tab;
+        self.activity = tab == SwarmTab::Activity;
+        self.panel_scroll = 0;
+        self.selected_message = self.list_len().saturating_sub(1);
+        if tab == SwarmTab::Changes {
+            self.diff_for = None;
+            self.load_diff();
+        }
+        if tab == SwarmTab::Live {
+            self.tile_cursor = self
+                .tile_cursor
+                .min(self.live_tiles().len().saturating_sub(1));
+        }
+    }
+
+    /// The Live mosaic has the keyboard: the swarm row, its Live tab, the
+    /// pane focused.
+    pub fn in_mosaic(&self) -> bool {
+        !self.on_task
+            && self.swarm.is_some()
+            && self.swarm_tab == SwarmTab::Live
+            && self.focus == Focus::Panel
+            && !self.pane_focused
+    }
+
+    /// The swarm's live terminals, the coordinator first, then the workers
+    /// in plan order: `(launch, session index)`.
+    pub fn live_tiles(&self) -> Vec<(String, usize)> {
+        let Some(s) = &self.swarm else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        if let Some(l) = s.planner_launch.as_deref()
+            && let Some(w) = self.live.get(l)
+            && w.worker.state != WorkerState::Exited
+        {
+            out.push((l.to_string(), w.session_idx));
+        }
+        for t in &self.board {
+            if let Some(l) = t.task.assigned_to.as_deref()
+                && let Some(w) = self.live.get(l)
+                && w.worker.state != WorkerState::Exited
+                && !out.iter().any(|(x, _)| x == l)
+            {
+                out.push((l.to_string(), w.session_idx));
+            }
+        }
+        out
+    }
+
+    /// The tree row of a launch: the coordinator's, or its task's.
+    fn row_of_launch(&self, launch: &str) -> Option<usize> {
+        let si = match self.rows.get(self.cursor).copied()? {
+            Row::Swarm(i) | Row::Coordinator(i) | Row::Task(i, _) | Row::Agent(i, ..) => i,
+        };
+        let d = self.swarms.get(si)?;
+        if d.run.planner_launch.as_deref() == Some(launch) {
+            return self.rows.iter().position(|r| *r == Row::Coordinator(si));
+        }
+        let j = d
+            .board
+            .iter()
+            .position(|t| t.task.assigned_to.as_deref() == Some(launch))?;
+        self.rows.iter().position(|r| *r == Row::Task(si, j))
     }
 
     /// The selected task's messages: from or to its worker, and broadcasts.
@@ -1119,7 +1342,35 @@ impl SwarmBoard {
 
     fn load_diff(&mut self) {
         let Some(t) = self.selected_task() else {
-            self.diff_lines.clear();
+            // the swarm's Changes: every worktree task's branch, then the
+            // workspace (§9.3)
+            let Some(s) = self.swarm.clone() else {
+                self.diff_lines.clear();
+                return;
+            };
+            let key = format!("swarm:{}:{}", s.id, self.board.len());
+            if self.diff_for.as_deref() == Some(key.as_str()) {
+                return;
+            }
+            let ws = PathBuf::from(&s.workspace);
+            let mut lines = Vec::new();
+            for t in &self.board {
+                if let Some(wt) = t
+                    .task
+                    .worktree
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_dir())
+                {
+                    lines.push(format!("── {} ──", t.ext.plan_key));
+                    lines.extend(worktree_diff(&wt, &ws));
+                    lines.push(String::new());
+                }
+            }
+            lines.push("── workspace ──".to_string());
+            lines.extend(workspace_diff(&ws));
+            self.diff_lines = lines;
+            self.diff_for = Some(key);
             return;
         };
         let key = format!("{}:{:?}", t.task.id, t.task.worktree);
@@ -1181,22 +1432,31 @@ impl SwarmBoard {
         self.last_launch = None;
     }
 
-    /// Puts the cursor on swarm `id` at the next refresh.
+    /// Shows swarm `id` (and puts the cursor on it at the next refresh).
     pub fn select_swarm(&mut self, id: &str) {
+        self.scope = Some(id.to_string());
         self.select_next = Some(id.to_string());
         self.select_next_coordinator = false;
     }
 
-    /// Puts the cursor on swarm `id`'s coordinator at the next refresh (a
-    /// swarm just started: the operator's next keystrokes are the goal).
+    /// Shows swarm `id` with the cursor on its coordinator at the next
+    /// refresh (a swarm just started: the operator's next keystrokes are
+    /// the goal).
     pub fn select_coordinator(&mut self, id: &str) {
+        self.scope = Some(id.to_string());
         self.select_next = Some(id.to_string());
         self.select_next_coordinator = true;
     }
 
+    /// The screen on swarm `id` from the start.
+    pub fn scoped(mut self, id: Option<String>) -> Self {
+        self.scope = id;
+        self
+    }
+
     /// Moves the cursor to the current swarm's coordinator row now.
     fn cursor_to_coordinator(&mut self) -> bool {
-        let Some(Row::Swarm(i) | Row::Coordinator(i) | Row::Task(i, _)) =
+        let Some(Row::Swarm(i) | Row::Coordinator(i) | Row::Task(i, _) | Row::Agent(i, ..)) =
             self.rows.get(self.cursor).copied()
         else {
             return false;
@@ -1208,11 +1468,6 @@ impl SwarmBoard {
             }
             None => false,
         }
-    }
-
-    fn open_task_modal(&mut self, editing: Option<&BoardTask>) {
-        let runs = editing.is_none_or(|t| t.ext.attempts == 0 && t.task.status == TaskStatus::Open);
-        self.open_task_form(editing, false, None, runs);
     }
 
     /// `r` on a failed, lost, cancelled or stalled task: the form, with its
@@ -1324,15 +1579,6 @@ impl SwarmBoard {
         });
     }
 
-    fn open_notes(&mut self) {
-        self.command = Some(CommandLine {
-            text: TextArea::new(""),
-            reply_to: None,
-            purpose: LinePurpose::ReplanNotes,
-            completion: None,
-        });
-    }
-
     fn open_reply(&mut self, m: &BusMessage) {
         let to = if m.from_launch == "user" {
             m.to_launch.clone().unwrap_or_default()
@@ -1431,11 +1677,12 @@ impl SwarmBoard {
                 Outcome::None
             }
             KeyCode::Char(c @ '1'..='4') => {
+                let n = (c as u8 - b'1') as usize;
                 if self.on_task {
                     self.activity = false;
-                    self.set_tab(Tab::ALL[(c as u8 - b'1') as usize]);
+                    self.set_tab(Tab::ALL[n]);
                 } else {
-                    self.status_msg = Some("1-4 choose a task's view: select a task.".into());
+                    self.set_swarm_tab(SwarmTab::ALL[n]);
                 }
                 Outcome::None
             }
@@ -1445,6 +1692,15 @@ impl SwarmBoard {
             }
             KeyCode::Right if self.focus == Focus::Board => {
                 self.fold(false);
+                Outcome::None
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down if self.in_mosaic() => {
+                let n = self.live_tiles().len();
+                let d: isize = match key.code {
+                    KeyCode::Left | KeyCode::Up => -1,
+                    _ => 1,
+                };
+                self.tile_cursor = step(self.tile_cursor, n, d);
                 Outcome::None
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1467,17 +1723,8 @@ impl SwarmBoard {
                 self.next_need();
                 Outcome::None
             }
-            KeyCode::Char('a') => {
-                self.activity = !self.activity;
-                self.selected_message = self.list_len().saturating_sub(1);
-                Outcome::None
-            }
             KeyCode::Char('>') => {
                 self.open_command("", None);
-                Outcome::None
-            }
-            KeyCode::Char('b') => {
-                self.open_command("@all ", None);
                 Outcome::None
             }
             KeyCode::Char('m') => {
@@ -1514,50 +1761,21 @@ impl SwarmBoard {
                 }
             },
             KeyCode::Char('y') => self.yes(),
-            KeyCode::Char('p') => {
-                if self.swarm.as_ref().is_some_and(|s| {
-                    matches!(s.status, SwarmStatus::Review | SwarmStatus::Planning)
-                }) {
-                    self.open_notes();
-                } else {
-                    self.status_msg = Some("Re-plan from review: the plan is not open now.".into());
-                }
-                Outcome::None
-            }
             KeyCode::Char('n') => {
-                // a new swarm on a swarm row or with none; a new task inside one
-                let inside = matches!(
-                    self.rows.get(self.cursor),
-                    Some(Row::Task(..)) | Some(Row::Coordinator(_))
+                // a new swarm, from any row (coordinator-first §9.4): the plan
+                // itself is changed by telling the coordinator
+                self.open_launch();
+                Outcome::None
+            }
+            KeyCode::Char('e')
+            | KeyCode::Char('d')
+            | KeyCode::Char('p')
+            | KeyCode::Char('b')
+            | KeyCode::Char('a') => {
+                self.status_msg = Some(
+                    "Changes to the plan are said to the coordinator (Enter on ★). > writes to workers; 3 on the swarm row is Activity."
+                        .into(),
                 );
-                if inside && self.swarm.as_ref().is_some_and(|s| s.ended_ns.is_none()) {
-                    self.open_task_modal(None);
-                } else {
-                    self.open_launch();
-                }
-                Outcome::None
-            }
-            KeyCode::Char('e') => {
-                match self.selected_task().cloned() {
-                    Some(t) if !t.task.status.is_terminal() => self.open_task_modal(Some(&t)),
-                    Some(_) => self.status_msg = Some("A finished task is not edited.".into()),
-                    None => {}
-                }
-                Outcome::None
-            }
-            KeyCode::Char('d') | KeyCode::Char('D') => {
-                if let Some(t) = self.selected_task() {
-                    if t.ext.attempts == 0 && t.task.status == TaskStatus::Open {
-                        self.confirm = Some(Confirm::Delete {
-                            task_id: t.task.id.clone(),
-                            key: t.ext.plan_key.clone(),
-                        });
-                    } else {
-                        self.status_msg = Some(
-                            "Only a task that never started is deleted (x cancels one).".into(),
-                        );
-                    }
-                }
                 Outcome::None
             }
             KeyCode::Char('r') => self.retry_or_launch(),
@@ -1584,6 +1802,20 @@ impl SwarmBoard {
             }
             return Outcome::None;
         }
+        if self.in_mosaic() {
+            // Enter on a tile connects to that session: the cursor moves to
+            // its row, where the pane is its terminal at full size (§9.5)
+            let tiles = self.live_tiles();
+            let Some((launch, idx)) = tiles.get(self.tile_cursor).cloned() else {
+                self.status_msg = Some("No live terminal in this swarm.".into());
+                return Outcome::None;
+            };
+            if let Some(at) = self.row_of_launch(&launch) {
+                self.set_cursor(at);
+            }
+            self.pane_focused = true;
+            return Outcome::FocusPane(idx);
+        }
         match self.pane() {
             PaneView::Launch => {
                 self.open_launch();
@@ -1593,6 +1825,18 @@ impl SwarmBoard {
                 self.pane_focused = true;
                 Outcome::FocusPane(idx)
             }
+            PaneView::TaskCard
+                if self.selected_task().is_some_and(|t| {
+                    t.task.assigned_to.is_some() && self.worker_of(t).is_none()
+                }) =>
+            {
+                // its session ended: reconnect to the same conversation (§9.5)
+                let t = self.selected_task().expect("checked");
+                Outcome::Reconnect {
+                    task_id: t.task.id.clone(),
+                    launch: t.task.assigned_to.clone().unwrap_or_default(),
+                }
+            }
             PaneView::SwarmCard => {
                 if let Some(Row::Swarm(i)) = self.rows.get(self.cursor).copied() {
                     let folded = self.is_folded(i);
@@ -1601,19 +1845,18 @@ impl SwarmBoard {
                 Outcome::None
             }
             PaneView::TaskCard => {
-                let editable = self
+                // a task that has not started: nothing to type into; its
+                // card is changed by telling the coordinator (§9.4)
+                if self
                     .selected_task()
-                    .cloned()
-                    .filter(|t| t.task.status == TaskStatus::Open && t.task.assigned_to.is_none());
-                match editable {
-                    Some(t) => self.open_task_modal(Some(&t)),
-                    None if self
-                        .selected_task()
-                        .is_some_and(|t| self.worker_of(t).is_none()) =>
-                    {
-                        self.status_msg = Some("No live worker on this task.".into())
-                    }
-                    None => self.set_tab(Tab::Live),
+                    .is_some_and(|t| self.worker_of(t).is_none())
+                {
+                    self.status_msg = Some(
+                        "No worker yet: tell the coordinator (Enter on ★) to change or start it."
+                            .into(),
+                    );
+                } else {
+                    self.set_tab(Tab::Live);
                 }
                 Outcome::None
             }
@@ -1768,7 +2011,6 @@ impl SwarmBoard {
             Confirm::Merge { task_id, .. } => self.verb(SwarmVerb::Merge, Some(task_id)),
             Confirm::SetAside { task_id, .. } => self.verb(SwarmVerb::SetAside, Some(task_id)),
             Confirm::Close => self.verb(SwarmVerb::Close, None),
-            Confirm::Delete { task_id, .. } => Outcome::DeleteTask(task_id),
             Confirm::Cancel { task_id, .. } => Outcome::CancelTask(task_id),
             Confirm::Stop { session_idx, .. } => Outcome::StopSession(session_idx),
         }
@@ -2237,17 +2479,16 @@ impl SwarmBoard {
                     let _ = field;
                     return Outcome::None;
                 }
+                // the form is the retry form (coordinator-first §9.4): the
+                // plan itself is edited by telling the coordinator
+                let _ = retry;
                 match editing {
-                    Some(task_id) if retry => Outcome::RetryTask {
+                    Some(task_id) => Outcome::RetryTask {
                         task_id,
                         task: planned,
                         stop,
                     },
-                    Some(task_id) => Outcome::EditTask {
-                        task_id,
-                        task: planned,
-                    },
-                    None => Outcome::AddTask(planned),
+                    None => Outcome::None,
                 }
             }
             other => {
@@ -2268,6 +2509,35 @@ impl SwarmBoard {
             self.set_cursor(at);
         }
     }
+}
+
+/// Each worker's sub-agents from the store: the `agent` observations under
+/// the worker's launch (a Claude `Task` run, a Codex sub-agent).
+fn sub_agents(conn: &Connection, board: &[BoardTask]) -> HashMap<String, Vec<SubAgent>> {
+    let mut out: HashMap<String, Vec<SubAgent>> = HashMap::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT o.name, o.start_ns, o.end_ns FROM observations o
+         JOIN traces t ON t.id = o.trace_id
+         WHERE t.launch_id = ?1 AND o.type = 'agent' ORDER BY o.start_ns ASC LIMIT 50",
+    ) else {
+        return out;
+    };
+    for launch in board.iter().filter_map(|t| t.task.assigned_to.as_deref()) {
+        let rows: Vec<SubAgent> = stmt
+            .query_map([launch], |r| {
+                Ok(SubAgent {
+                    name: r.get(0)?,
+                    start_ns: r.get(1)?,
+                    end_ns: r.get(2)?,
+                })
+            })
+            .and_then(|it| it.collect())
+            .unwrap_or_default();
+        if !rows.is_empty() {
+            out.insert(launch.to_string(), rows);
+        }
+    }
+    out
 }
 
 fn step(cur: usize, len: usize, delta: isize) -> usize {
@@ -2420,16 +2690,43 @@ pub fn needs_for(d: &SwarmData, workers: &HashMap<String, Worker>, now_ns: i64) 
             task_id: None,
             message: None,
             text: format!(
-                "the plan waits for you: {} task(s){}",
+                "the plan waits for your go in the coordinator's chat: {} task(s){}{}",
                 v.board.len(),
                 if v.problems.errors.is_empty() {
                     String::new()
                 } else {
                     format!(", {} error(s) to fix first", v.problems.errors.len())
+                },
+                if now_ns - swarm.updated_ns >= crate::bus::swarm::STUCK_AFTER_NS {
+                    format!(
+                        " ({} without an answer)",
+                        crate::bus::swarm::short_age(now_ns - swarm.updated_ns)
+                    )
+                } else {
+                    String::new()
                 }
             ),
         }),
         _ => {}
+    }
+    // agent-mux started a task itself: the coordinator did not launch it in
+    // time (coordinator-first §9.2), said once per such task while recent
+    for t in v.board.iter().filter(|t| {
+        t.ext.launched_by == Some(crate::bus::swarm::record::LaunchedBy::Dispatcher)
+            && t.task.assigned_to.is_some()
+            && !t.task.status.is_terminal()
+            && now_ns - t.task.updated_ns < 10 * 60 * 1_000_000_000
+    }) {
+        out.push(Need {
+            kind: NeedKind::CoordinatorQuiet,
+            key: format!("quiet:{}", t.task.id),
+            task_id: Some(t.task.id.clone()),
+            message: None,
+            text: format!(
+                "agent-mux started `{}` itself: the coordinator did not launch it in time",
+                t.ext.plan_key
+            ),
+        });
     }
     for t in v.board {
         let st = engine::shown(t, &input);
@@ -2874,6 +3171,7 @@ mod tests {
             problems: v.problems.clone(),
             needs: Vec::new(),
             launch_decision: None,
+            agents: HashMap::new(),
         };
         d.needs = needs_for(&d, &v.workers, v.now_ns);
         v.swarms = vec![d];
@@ -3085,25 +3383,27 @@ mod tests {
     }
 
     #[test]
-    fn p_takes_notes_for_a_re_plan() {
+    fn the_plan_is_changed_in_the_chat_not_with_keys() {
         let mut v = board(
             SwarmStatus::Review,
             vec![task("a", TaskStatus::Open, None)],
             &[],
         );
-        v.handle_key(key(KeyCode::Char('p')));
-        assert!(v.text_entry_active());
-        for c in "split a".chars() {
-            v.handle_key(key(KeyCode::Char(c)));
+        for c in ['p', 'e', 'd', 'b', 'a'] {
+            assert_eq!(v.handle_key(key(KeyCode::Char(c))), Outcome::None);
+            assert!(!v.text_entry_active(), "{c}");
+            assert!(
+                v.status_msg
+                    .as_deref()
+                    .is_some_and(|m| m.contains("said to the coordinator")),
+                "{c}: {:?}",
+                v.status_msg
+            );
         }
-        assert_eq!(
-            v.handle_key(key(KeyCode::Enter)),
-            Outcome::Verb {
-                verb: SwarmVerb::Replan,
-                task: None,
-                notes: Some("split a".into())
-            }
-        );
+        // n is always a new swarm, even inside one
+        v.handle_key(key(KeyCode::Down));
+        v.handle_key(key(KeyCode::Char('n')));
+        assert!(matches!(v.modal, Some(Modal::Launch { .. })));
     }
 
     #[test]
@@ -3243,43 +3543,6 @@ mod tests {
     }
 
     #[test]
-    fn n_adds_a_task_and_the_form_names_what_is_missing() {
-        let mut v = board(
-            SwarmStatus::Review,
-            vec![task("a", TaskStatus::Open, None)],
-            &[],
-        );
-        v.handle_key(key(KeyCode::Char('n')));
-        for c in "b".chars() {
-            v.handle_key(key(KeyCode::Char(c)));
-        }
-        v.handle_key(key(KeyCode::Tab));
-        for c in "Second".chars() {
-            v.handle_key(key(KeyCode::Char(c)));
-        }
-        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
-        assert_eq!(v.handle_key(ctrl_s), Outcome::None);
-        assert_eq!(v.status_msg.as_deref(), Some("Instructions is required."));
-        for c in "do it".chars() {
-            v.handle_key(key(KeyCode::Char(c)));
-        }
-        v.handle_key(key(KeyCode::Tab));
-        v.handle_key(key(KeyCode::Tab));
-        v.handle_key(key(KeyCode::Tab));
-        for c in "a".chars() {
-            v.handle_key(key(KeyCode::Char(c)));
-        }
-        match v.handle_key(ctrl_s) {
-            Outcome::AddTask(t) => {
-                assert_eq!((t.key.as_str(), t.title.as_str()), ("b", "Second"));
-                assert_eq!(t.instructions, "do it");
-                assert_eq!(t.depends_on, ["a"]);
-            }
-            other => panic!("expected AddTask, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn with_no_swarm_enter_opens_the_launch_form() {
         let mut v = SwarmBoard::open(
             PathBuf::from("/nonexistent-ws"),
@@ -3358,22 +3621,16 @@ mod tests {
 
     #[test]
     fn the_task_form_refuses_agy_with_a_writing_agent() {
-        let mut v = board(SwarmStatus::Running, vec![], &[]);
+        let mut v = board(
+            SwarmStatus::Running,
+            vec![task("x", TaskStatus::Failed, None)],
+            &[],
+        );
         v.harnesses = vec![Harness::Claude, Harness::Antigravity];
         v.writing_agents = vec!["doc-writer".into()];
-        v.open_task_form(None, false, None, true);
-        if let Some(Modal::Task {
-            key,
-            title,
-            instructions,
-            harness,
-            agent,
-            ..
-        }) = &mut v.modal
-        {
-            *key = TextArea::new("spec");
-            *title = TextArea::new("Write the spec");
-            *instructions = TextArea::new("Write it");
+        let failed = v.board[0].clone();
+        v.open_task_form(Some(&failed), true, None, true);
+        if let Some(Modal::Task { harness, agent, .. }) = &mut v.modal {
             *harness = 2; // agy
             *agent = TextArea::new("doc-writer");
         }
@@ -3397,7 +3654,12 @@ mod tests {
         if let Some(Modal::Task { agent, .. }) = &mut v.modal {
             *agent = TextArea::new("");
         }
-        assert!(matches!(v.handle_key(ctrl_s), Outcome::AddTask(_)));
+        let out = v.handle_key(ctrl_s);
+        assert!(
+            matches!(out, Outcome::RetryTask { .. }),
+            "{out:?} {:?}",
+            v.status_msg
+        );
     }
 
     #[test]

@@ -333,11 +333,11 @@ impl App {
             .map_err(|e| format!("spawn: {e}"))?;
         session.opening_args = opening_args;
         session.group = Some(crate::tree::GroupRef {
-            kind: crate::tree::GroupKind::Bus,
+            kind: crate::tree::GroupKind::Swarm,
             id: swarm.id.clone(),
-            title: "swarm".into(),
+            title: swarm_group_title(swarm),
             detail: crate::bus::short_id(&swarm.id).to_string(),
-            label: "coordinator".into(),
+            label: "★ coordinator".into(),
         });
         let launch = session
             .trace
@@ -367,6 +367,160 @@ impl App {
             );
         }
         Ok(launch)
+    }
+
+    /// `Enter` on a worker whose session ended (coordinator-first §9.5):
+    /// the same harness resumes the same conversation in a new session on
+    /// the task, in the swarm's group, with the swarm's launch metadata. A
+    /// task that was not settled is tracked again under the new launch.
+    /// agy cannot resume a conversation; `r` retries the task instead.
+    pub fn reconnect_swarm_worker(
+        &mut self,
+        task_id: &str,
+        launch: &str,
+    ) -> Result<String, String> {
+        let db = self.trace_db_path.clone().ok_or("no trace store")?;
+        let conn = crate::tracing::store::open_aux(&db)?;
+        let task = crate::bus::store::get_task(&conn, task_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no task {task_id}"))?;
+        let swarm = record::swarm_of_task(&conn, task_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("the task is on no swarm's board")?;
+        let key = record::board(&conn, &swarm.id)
+            .ok()
+            .and_then(|b| {
+                b.into_iter()
+                    .find(|t| t.task.id == task_id)
+                    .map(|t| t.ext.plan_key)
+            })
+            .unwrap_or_default();
+        if self.sessions.iter().any(|s| {
+            s.trace.as_ref().is_some_and(|t| t.launch_id == launch)
+                && !matches!(s.status(Instant::now()), Status::Exited(_))
+        }) {
+            return Err("its session is still open: Enter types into it".into());
+        }
+        let (provider, session_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT l.provider, s.session_id FROM launches l
+                 LEFT JOIN sessions s ON s.key = l.session_key WHERE l.id = ?1",
+                rusqlite::params![launch],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| format!("no launch row for {launch}"))?;
+        let harness: Harness = provider.parse()?;
+        let session_id = session_id.ok_or_else(|| {
+            format!(
+                "{} never recorded its conversation id: r retries the task instead",
+                harness.as_str()
+            )
+        })?;
+        if harness == Harness::Antigravity {
+            return Err(
+                "agy cannot resume a conversation: r retries the task (a new worker gets its card)"
+                    .into(),
+            );
+        }
+        let dir = task
+            .worktree
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| PathBuf::from(&swarm.workspace));
+        let mut profile = self
+            .profiles
+            .iter()
+            .find(|p| Harness::detect(&p.command) == Some(harness))
+            .cloned()
+            .unwrap_or_else(|| crate::config::Profile {
+                name: harness.as_str().to_string(),
+                command: harness.as_str().to_string(),
+                args: Vec::new(),
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: Some(self.bypass_approvals_default),
+            });
+        profile.name = format!("{} · {}", harness.as_str(), key);
+        let options = LaunchOptions {
+            model: profile.model.clone(),
+            bypass_approvals: profile
+                .bypass_approvals
+                .unwrap_or(self.bypass_approvals_default),
+            resume: crate::harness::Resume::Id(session_id.clone()),
+            ..Default::default()
+        };
+        profile.args = compose(&profile.args, &options.render(harness));
+        let coordinator = record::coordinator(&conn, &swarm.id)
+            .ok()
+            .flatten()
+            .and_then(|c| c.launch);
+        let env = vec![("AGENT_MUX_TASK_ID".to_string(), task_id.to_string())];
+        let id = self.next_id;
+        let mut session = self
+            .spawn_traced_full(
+                id,
+                profile,
+                dir,
+                &env,
+                None,
+                None,
+                None,
+                Some(SwarmLaunch::worker(&swarm.id, task_id, &key, coordinator)),
+                &[],
+            )
+            .map_err(|e| format!("spawn: {e}"))?;
+        session.continued_from = Some(format!(
+            "{} · {}",
+            harness.as_str(),
+            crate::bus::short_id(launch)
+        ));
+        session.group = Some(crate::tree::GroupRef {
+            kind: crate::tree::GroupKind::Swarm,
+            id: swarm.id.clone(),
+            title: swarm_group_title(&swarm),
+            detail: crate::bus::short_id(&swarm.id).to_string(),
+            label: format!("{key} (reconnected)"),
+        });
+        let new_launch = session
+            .trace
+            .as_ref()
+            .map(|t| t.launch_id.clone())
+            .unwrap_or_else(|| format!("session-{id}"));
+        self.next_id += 1;
+        self.sessions.push(session);
+        let _ = self.save_active_sessions();
+        let now = crate::tracing::store::now_ns();
+        if !task.status.is_terminal() {
+            let _ = crate::bus::store::update_task(
+                &conn,
+                Some(&db),
+                task_id,
+                &new_launch,
+                crate::bus::TaskStatus::Running,
+                None,
+                None,
+                None,
+                None,
+                now,
+            );
+        }
+        let _ = record::event(
+            &conn,
+            &swarm.id,
+            Some(task_id),
+            "task.reconnected",
+            Some("operator"),
+            Some(
+                serde_json::json!({ "key": key, "from": launch, "launch": new_launch, "session": session_id }),
+            ),
+            now,
+        );
+        Ok(format!(
+            "reconnected to `{key}`: {} resumes its conversation",
+            harness.as_str()
+        ))
     }
 
     /// The coordinator's launch while its session is open here.
@@ -663,6 +817,7 @@ impl App {
             return;
         };
         self.swarm_needs = 0;
+        self.swarm_needs_first = None;
         if swarms.is_empty() {
             return;
         }
@@ -753,10 +908,15 @@ impl App {
             problems: Default::default(),
             needs: Vec::new(),
             launch_decision: None,
+            agents: Default::default(),
         };
-        self.swarm_needs +=
+        let needs =
             crate::app::swarm_board::needs_for(&data, &workers, crate::tracing::store::now_ns())
                 .len();
+        self.swarm_needs += needs;
+        if needs > 0 && self.swarm_needs_first.is_none() {
+            self.swarm_needs_first = Some(swarm.id.clone());
+        }
         for action in actions {
             let now_ns = crate::tracing::store::now_ns();
             match action {
@@ -1079,6 +1239,17 @@ impl App {
 
 /// At most one wake of the coordinator for events per minute (decision 2).
 pub const EVENTS_EVERY_NS: i64 = 60 * 1_000_000_000;
+
+/// The Agents sidebar's title for a swarm's group: its goal, or, before the
+/// operator said one, a placeholder.
+pub fn swarm_group_title(swarm: &SwarmRun) -> String {
+    let goal = swarm.goal.trim();
+    if goal.is_empty() {
+        "swarm (goal in the chat)".to_string()
+    } else {
+        crate::app::workflows::short_task(goal)
+    }
+}
 
 fn first_line(s: &str) -> String {
     s.lines()
