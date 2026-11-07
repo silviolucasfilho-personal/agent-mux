@@ -74,8 +74,9 @@ impl AgentLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentFocus {
     pub kind: AgentKind,
-    pub selected: usize,
-    pub sessions: usize,
+    /// The selected session's id (not its index: a worker that starts or
+    /// ends elsewhere in the list keeps the row under the cursor).
+    pub selected: Option<usize>,
 }
 
 impl App {
@@ -205,6 +206,18 @@ impl App {
         AgentKind::Harness(by_name.or(by_harness).unwrap_or(0))
     }
 
+    /// Whether session `i` is listed in the Agents sidebar: a swarm's
+    /// coordinator and workers are seen on the Swarm screen only, unless
+    /// `[agents] show_swarm = true`.
+    pub fn session_listed(&self, i: usize) -> bool {
+        self.agents.show_swarm
+            || !self
+                .sessions
+                .get(i)
+                .and_then(|s| s.group.as_ref())
+                .is_some_and(|g| g.kind == crate::tree::GroupKind::Swarm)
+    }
+
     /// The harness row a session sits under in a clean list: by profile
     /// name, else by harness, else the first.
     fn harness_of(&self, idx: usize) -> AgentKind {
@@ -224,12 +237,15 @@ impl App {
     /// harnesses alone, every session under its harness.
     pub fn agent_lines(&self) -> Vec<AgentLine> {
         let rows = self.workflow_rows();
-        let owners: Vec<AgentKind> = (0..self.sessions.len())
+        // `None`: a session the list leaves out (`session_listed`)
+        let owners: Vec<Option<AgentKind>> = (0..self.sessions.len())
             .map(|i| {
-                if self.clean {
-                    self.harness_of(i)
+                if !self.session_listed(i) {
+                    None
+                } else if self.clean {
+                    Some(self.harness_of(i))
                 } else {
-                    self.owner_of(i, &rows)
+                    Some(self.owner_of(i, &rows))
                 }
             })
             .collect();
@@ -239,7 +255,7 @@ impl App {
             let children: Vec<usize> = owners
                 .iter()
                 .enumerate()
-                .filter(|(_, o)| **o == kind)
+                .filter(|(_, o)| o.as_ref() == Some(&kind))
                 .map(|(i, _)| i)
                 .collect();
             let folded = self.agent_is_folded(&kind);
@@ -283,7 +299,7 @@ impl App {
             }
         }
         let mut runs: Vec<AgentKind> = Vec::new();
-        for o in &owners {
+        for o in owners.iter().flatten() {
             if matches!(o, AgentKind::Run(_)) && !runs.contains(o) {
                 runs.push(o.clone());
             }
@@ -316,12 +332,18 @@ impl App {
         out
     }
 
-    /// A row without a cursor in one of the older sections, while it still holds.
+    /// A row without a cursor in one of the older sections, while it still
+    /// holds: until another session is selected. Sessions starting or
+    /// ending elsewhere (a swarm's workers) leave it alone.
     pub fn agent_focus(&self) -> Option<&AgentKind> {
         self.agent_focus
             .as_ref()
-            .filter(|f| f.selected == self.selected && f.sessions == self.sessions.len())
+            .filter(|f| f.selected == self.selected_session_id())
             .map(|f| &f.kind)
+    }
+
+    fn selected_session_id(&self) -> Option<usize> {
+        self.sessions.get(self.selected).map(|s| s.id)
     }
 
     /// The index of the cursor in `lines`, read from the selection the
@@ -340,7 +362,12 @@ impl App {
                 if self.sessions.is_empty() {
                     lines.iter().position(|l| l.kind.selectable())
                 } else {
-                    find(&AgentKind::Session(self.selected))
+                    // a selected session the list leaves out: the first listed one
+                    find(&AgentKind::Session(self.selected)).or_else(|| {
+                        lines
+                            .iter()
+                            .position(|l| matches!(l.kind, AgentKind::Session(_)))
+                    })
                 }
             }
             SidebarSection::Loops => find(&AgentKind::Loop(self.selected_loop)),
@@ -392,8 +419,7 @@ impl App {
                 self.sidebar_section = SidebarSection::Active;
                 self.agent_focus = Some(AgentFocus {
                     kind: kind.clone(),
-                    selected: self.selected,
-                    sessions: self.sessions.len(),
+                    selected: self.selected_session_id(),
                 });
             }
             AgentKind::Session(s) => {
@@ -419,8 +445,7 @@ impl App {
                 self.sidebar_section = kind.section();
                 self.agent_focus = Some(AgentFocus {
                     kind: kind.clone(),
-                    selected: self.selected,
-                    sessions: self.sessions.len(),
+                    selected: self.selected_session_id(),
                 });
             }
         }

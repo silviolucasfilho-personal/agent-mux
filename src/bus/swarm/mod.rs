@@ -12,6 +12,7 @@ pub mod engine;
 pub mod plan;
 pub mod prompt;
 pub mod record;
+pub mod review;
 pub mod view;
 
 use super::BusMessage;

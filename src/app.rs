@@ -2809,7 +2809,7 @@ pub struct App {
     /// What the swarms this TUI dispatches need from the operator, for the
     /// Agents sidebar and the status bar (`swarm_board::needs_for`).
     pub swarm_needs: usize,
-    /// The first swarm that needs the operator (`⚑ swarm needs you` opens
+    /// The newest swarm that needs the operator (`⚑ swarm needs you` opens
     /// the Swarm screen on it).
     pub swarm_needs_first: Option<String>,
 }
@@ -4542,20 +4542,36 @@ impl App {
     }
 
     /// `⌘↑` / `⌘↓`: the previous or next session in list order, without
+    /// The listed session (`session_listed`) `step` away from the
+    /// selected one, wrapping round with `wrap`; `None` when there is none.
+    fn adjacent_listed_session(&self, step: isize, wrap: bool) -> Option<usize> {
+        let n = self.sessions.len() as isize;
+        let mut i = self.selected as isize;
+        for _ in 0..n {
+            i += step;
+            if wrap {
+                i = i.rem_euclid(n);
+            } else if i < 0 || i >= n {
+                return None;
+            }
+            if i as usize == self.selected {
+                return None;
+            }
+            if self.session_listed(i as usize) {
+                return Some(i as usize);
+            }
+        }
+        None
+    }
+
     /// moving the focus; with the pane focused the pane follows.
     fn select_adjacent_session(&mut self, step: i32) {
         if self.sessions.is_empty() {
             return;
         }
-        let last = self.sessions.len() - 1;
-        let next = if step < 0 {
-            self.selected.saturating_sub(1)
-        } else {
-            (self.selected + 1).min(last)
-        };
-        if next == self.selected {
+        let Some(next) = self.adjacent_listed_session(step.signum() as isize, false) else {
             return;
-        }
+        };
         self.selection = None;
         self.selected = next;
         self.sidebar_section = SidebarSection::Active;
@@ -4896,12 +4912,12 @@ impl App {
         }
     }
 
-    /// Opens the Agent Swarm Control Room for the workspace of the selected session
-    /// (or current working directory).
     /// `F1 → Open swarm`: the Swarm screen on the selected session's swarm
-    /// (its coordinator or a worker, by its launch row), else on the swarm
-    /// that needs the operator, else on the folder's newest live swarm
-    /// (coordinator-first design §9.1).
+    /// (its coordinator or a worker, by its launch row), else on the
+    /// folder's newest live swarm, else on the newest swarm that needs the
+    /// operator (coordinator-first design §9.1). The folder's own swarm
+    /// comes before the needs: an older swarm left open with a question
+    /// must not take the screen from the run in this folder.
     pub fn open_swarm_view(&mut self) {
         let ws = self
             .sessions
@@ -4909,18 +4925,27 @@ impl App {
             .map(|s| s.dir.clone())
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let conn = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|db| crate::tracing::store::open_ro(db).ok());
         let of_session = self
             .sessions
             .get(self.selected)
             .and_then(|s| s.trace.as_ref().map(|t| t.launch_id.clone()))
             .and_then(|launch| {
-                let db = self.trace_db_path.as_deref()?;
-                let conn = crate::tracing::store::open_ro(db).ok()?;
-                crate::bus::swarm::record::swarm_of_launch(&conn, &launch)
+                crate::bus::swarm::record::swarm_of_launch(conn.as_ref()?, &launch)
                     .ok()
                     .flatten()
             });
+        let of_folder = || {
+            let here = crate::bus::store::normalize_workspace(&ws);
+            crate::bus::swarm::record::live_swarm(conn.as_ref()?, &here)
+                .ok()
+                .flatten()
+        };
         let scope = of_session
+            .or_else(of_folder)
             .map(|s| s.id)
             .or_else(|| self.swarm_needs_first.clone());
         self.open_swarm_screen(ws, scope);
@@ -5298,8 +5323,10 @@ impl App {
                 isolation,
                 gate,
                 check,
+                review,
             } => {
                 let started = self.start_orchestrated_swarm(swarm_engine::StartSwarm {
+                    review: Some(review),
                     workspace: ws_path.clone(),
                     goal,
                     planner: Some(planner.as_str().to_string()),
@@ -5992,8 +6019,8 @@ impl App {
             Action::MoveDown => {
                 self.selection = None;
                 if self.sidebar_hidden {
-                    if !self.sessions.is_empty() {
-                        self.selected = (self.selected + 1).min(self.sessions.len() - 1);
+                    if let Some(i) = self.adjacent_listed_session(1, false) {
+                        self.selected = i;
                     }
                 } else if self.sidebar_section == SidebarSection::History {
                     if !self.history_sessions.is_empty() {
@@ -6009,7 +6036,9 @@ impl App {
             Action::MoveUp => {
                 self.selection = None;
                 if self.sidebar_hidden {
-                    self.selected = self.selected.saturating_sub(1);
+                    if let Some(i) = self.adjacent_listed_session(-1, false) {
+                        self.selected = i;
+                    }
                 } else if self.sidebar_section == SidebarSection::History {
                     if self.selected_history > 0 {
                         self.selected_history -= 1;
@@ -6030,8 +6059,8 @@ impl App {
             Action::UnfoldAgent => self.unfold_agent(),
             Action::ToggleSidebarSection => {
                 if self.sidebar_hidden {
-                    if !self.sessions.is_empty() {
-                        self.selected = (self.selected + 1) % self.sessions.len();
+                    if let Some(i) = self.adjacent_listed_session(1, true) {
+                        self.selected = i;
                     }
                 } else if self.sidebar_section == SidebarSection::History {
                     // back to the Agents list, on the row it left
@@ -8535,7 +8564,26 @@ impl App {
                 self.sessions.push(session);
                 let _ = self.save_active_sessions();
 
-                if let Some(db) = self.trace_db_path.as_deref()
+                // A worker can report before this row is written (a fast
+                // one, or a test's fake): it is not put back to running, and
+                // only its worktree and branch are recorded.
+                let reported = self
+                    .trace_db_path
+                    .as_deref()
+                    .and_then(|db| crate::tracing::store::open_aux(db).ok())
+                    .and_then(|c| crate::bus::store::get_task(&c, &task_id).ok().flatten())
+                    .is_some_and(|t| t.status.is_terminal());
+                if reported
+                    && let Some(db) = self.trace_db_path.as_deref()
+                    && let Ok(conn) = crate::tracing::store::open_aux(db)
+                {
+                    let _ = conn.execute(
+                        "UPDATE agent_tasks SET worktree = COALESCE(worktree, ?1),
+                             branch = COALESCE(branch, ?2) WHERE id = ?3",
+                        rusqlite::params![worktree_path, branch_name, task_id],
+                    );
+                    crate::tracing::store::poke_wake(db);
+                } else if let Some(db) = self.trace_db_path.as_deref()
                     && let Ok(conn) = crate::tracing::store::open_aux(db)
                 {
                     let now_ns = crate::tracing::store::now_ns();

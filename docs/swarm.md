@@ -5,11 +5,12 @@ A **swarm** splits one goal into tasks that agents work on in parallel in the sa
 ## In one minute
 
 1. Select a session in the folder you want to work on, press `F1` and choose **Open swarm**, then `n` (or `Enter` on the empty screen).
-2. Pick the coordinator's harness and press `Enter`. Its session opens with the keyboard in it: tell it the goal.
+2. Pick the coordinator's harness (and, under it, which harness reviews the finished tasks) and press `Enter`. Its session opens with the keyboard in it: tell it the goal.
 3. The coordinator asks what it needs, then shows the plan as a table and asks whether to start. Say **go**, or tell it what to change ("move task 2 to codex", "drop the docs task"). The screen mirrors the plan read-only; it never approves it.
 4. Workers start, each on one task. Select a task to see its worker's terminal, and press `Enter` to type into it. `!` jumps to whatever needs you, and `>` writes to workers. The coordinator reports as tasks finish; when nothing has happened for five minutes it checks in and asks whether to keep waiting.
-5. When everything is settled the coordinator summarises and asks which branches to merge. Tell it, or press `y` on a task row yourself.
-6. When you say to close, it closes the swarm (or `y` on the swarm row).
+5. Each finished task is **reviewed**: a read-only `reviewer` session, by default on a harness other than the worker's, answers APPROVE or CHANGES with its findings. The coordinator tells you each verdict; on CHANGES it can send the findings back to the worker and review again.
+6. When everything is settled the coordinator summarises, with the verdicts, and asks which branches to merge. Tell it, or press `y` on a task row yourself.
+7. When you say to close, it closes the swarm (or `y` on the swarm row).
 
 Anything that needs you also shows outside the Swarm screen, as `⚑ swarm needs you (n)` in the Agents sidebar and `⚑ swarm n` in the status bar.
 
@@ -22,7 +23,7 @@ Anything that needs you also shows outside the Swarm screen, as `⚑ swarm needs
 
 ## Starting a swarm
 
-Press `n` on a swarm row (or `Enter` on the empty screen). The dialog asks one thing, **which harness coordinates** (`←`/`→`; Claude when installed, else the selected session's), and `Enter` starts it. The coordinator's session opens with the keyboard in it: say the goal there, as you would to any agent. Everything else — the workers' pool, how many run at once, isolation, a check command — is talked over in the chat and shows in the plan you confirm.
+Press `n` on a swarm row (or `Enter` on the empty screen). The dialog asks **which harness coordinates** (`←`/`→`; Claude when installed, else the selected session's) and **how finished tasks are reviewed** (**Reviews**: `auto`, each installed harness, or `off`; see [Reviews](#reviews)), and `Enter` starts it. The coordinator's session opens with the keyboard in it: say the goal there, as you would to any agent. Everything else — the workers' pool, how many run at once, isolation, a check command — is talked over in the chat and shows in the plan you confirm.
 
 **Advanced** (`Tab` to the fold, `Space`) unfolds what you may want to fix in advance; anything set there is a limit the coordinator cannot exceed:
 
@@ -43,7 +44,7 @@ For example, Claude as coordinator with agy and Codex in the pool gives a plan w
 
 ## The screen
 
-The Swarm screen shows **one swarm**: its coordinator, the agents it started and their sub-agents, each a real terminal you can watch and type into. It opens on the swarm of the session you have selected (its coordinator or one of its workers), else on the swarm that needs you, else on the folder's newest live one; `n` starts another. Every swarm is also a group in the Agents sidebar (`◆ <goal>`, with `★ coordinator` and the workers under it), where `Enter` opens this screen on it. The layout is the Agents screen's: a tree on the left, the selected row in the main pane on the right.
+The Swarm screen shows **one swarm**: its coordinator, the agents it started and their sub-agents, each a real terminal you can watch and type into. It opens on the swarm of the session you have selected (its coordinator or one of its workers), else on the swarm that needs you, else on the folder's newest live one; `o` picks another swarm (any folder's, live or closed in the last week) and `n` starts a new one. A swarm's coordinator and workers are seen here only: the Agents sidebar leaves them out. With `[agents] show_swarm = true` in `profiles.toml`, every swarm is also a group in the Agents sidebar (`◆ <goal>`, with `★ coordinator` and the workers under it), where `Enter` opens this screen on it. The layout is the Agents screen's: a tree on the left, the selected row in the main pane on the right.
 
 ```
 ┌ Swarms • Keyboard focus ───┐┌ ◆ add OAuth login ─────────────────────────────────────────────┐
@@ -158,6 +159,7 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | `r` | retry a failed, lost, cancelled or stalled task (the retry form: harness, agent, isolation) · restart an exited coordinator |
 | `space` | pause or resume: while paused, running workers continue but nothing new starts |
 | `n` | a new swarm |
+| `o` | the swarm picker: every live swarm (this folder's first) and those closed in the last week; `Enter` shows one |
 | `>` `m` | write to workers (`m`: the selected task's worker, or an answer to its question) |
 | `!` | the next row that needs you |
 | `Ctrl+R` | reload now (the screen refreshes on its own when anything changes) |
@@ -165,6 +167,19 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | `Esc` | back to the tree, then close the screen |
 
 Changing the plan (a task's card, adding or dropping one, re-planning) is said to the coordinator: `Enter` on `★`. Confirmations take `y` only. `Enter` never confirms. What an action did shows in the status bar.
+
+## Reviews
+
+Every swarm reviews each finished task before you merge it, unless you turn it off.
+
+- **When:** as soon as a task is done, agent-mux puts its review on the board: a task keyed `<key>-review`, drawn under it (`↳`), offered to the coordinator and started like any task (by agent-mux itself after the grace period). It takes a worker slot.
+- **Who:** the `reviewer` agent (built in: it reads the code and reports only defects it can point at; edit it from the Configuration view). It runs on the **review harness**: with `auto`, a harness of the workers' pool other than the worker's (Codex reviews Claude's work and the other way round; agy only when nothing else is in the pool, and then without the agent, which agy would run without a shell). With only one harness, it reviews its own work.
+- **Where:** in the task's worktree (a shared task: the workspace), told the branch and its base (`git diff <base>...HEAD`), the task's instructions, its done-when line and what the worker said it did. It is read-only: no edit, no commit, no push.
+- **The verdict** is the first line of its result: `APPROVE` with a reason, or `CHANGES` with one finding per line (`file:line`). The task row shows `◔` while it runs, then `✓` or `✗` (`?` when it gave no verdict or failed); the Task tab shows the verdict, the findings and who reviewed; `agent_mux_swarm_board` lists them under `reviews`.
+- **Changes requested:** tell the coordinator to send it back. It messages the worker with the findings, and when the worker reports done again it reviews again (`agent_mux_swarm_action(verb = "review")`, `agent-mux swarm review <task>`). Each review is a new row, so earlier verdicts stay.
+- **Merging** an unapproved task still works, but `y` asks with a `⚠` line first and the answer to a coordinator's merge carries the warning.
+- **Choosing:** the launch form's **Reviews** field, `agent-mux swarm start --review auto|off|<harness>`, or `agent_mux_swarm_start(review = …)`. The coordinator keeps the step in every plan: its table has a **review** column and a `Review:` line. Say "no review" (or "no review for the docs task", or "review on codex") and it dismisses or moves it in the plan (`"review": {"enabled": false}`, a task's `"review": false`, `"review": {"harness": "codex"}`).
+- Swarms started before this change have reviews off.
 
 ## Reviewing and finishing
 
@@ -189,6 +204,7 @@ Every session of a swarm is recorded with the swarm's id (`launches.metadata.swa
 agent-mux swarm start "Add OAuth login" --coordinator claude --worker-harness agy,codex --workers 4 --isolation worktree
 #   a goal here makes the swarm headless; without one the coordinator opens and you say it in its chat
 #   --coordinator: its harness · --gate chat|off · --worker-harness: the workers' pool, the first for tasks that name none
+#   --review auto|off|<harness>: how finished tasks are reviewed (default auto)
 agent-mux swarm status                  # the swarm and its board, each task's state (--json for scripts)
 agent-mux swarm plan                    # the board with the plan's errors and warnings
 agent-mux swarm approve                 # from a shell: every ready task starts
@@ -198,6 +214,7 @@ agent-mux swarm events [-n 50]          # the swarm's log: who decided, offered,
 agent-mux swarm replan "split the API task in two"
 agent-mux swarm pause | resume
 agent-mux swarm retry <task>            # a failed, lost or cancelled task, again
+agent-mux swarm review <task>           # review a finished task again (after a fix round)
 agent-mux swarm cancel <task>           # a task that has not finished; its worker is stopped
 agent-mux swarm merge <task>            # or: set-aside <task>
 agent-mux swarm accept <task>           # or: drop <task>, for a task a worker proposed

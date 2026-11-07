@@ -132,6 +132,7 @@ fn seed(f: &Fixture, status: SwarmStatus, tasks: Vec<PlannedTask>) -> SwarmRun {
             owner_run: Some("another-tui".into()),
             worker_pool: vec![],
             headless: false,
+            review: agent_mux::bus::swarm::review::ReviewSettings::off(),
         },
         now_ns(),
     )
@@ -143,6 +144,7 @@ fn seed(f: &Fixture, status: SwarmStatus, tasks: Vec<PlannedTask>) -> SwarmRun {
         &Plan {
             summary: "one task per subsystem".into(),
             tasks,
+            review: None,
         },
         now_ns(),
     )
@@ -464,12 +466,14 @@ fn with_no_swarm_the_screen_offers_one_and_the_form_starts_it() {
         "New swarm",
         "Coordinator: ◂ claude ▸",
         "Tell it the goal there",
+        "Reviews: auto · another harness than the worker's",
         "▸ Advanced: goal now, workers' pool",
     ] {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
     }
     assert!(!out.contains("Max parallel workers"), "folded:\n{out}");
-    // Advanced unfolds the limits.
+    // Advanced unfolds the limits (past the review).
+    press(&mut f, KeyCode::Tab);
     press(&mut f, KeyCode::Tab);
     press(&mut f, KeyCode::Char(' '));
     let out = render(&f.app, 120, 36);
@@ -894,4 +898,186 @@ fn an_agy_worker_with_a_writing_agent_is_refused_at_spawn() {
         "{resp:?}"
     );
     assert!(f.app.sessions.is_empty(), "no worker started");
+}
+
+/// An older swarm left open in another folder with something for the
+/// operator, and a newer one running in this folder.
+fn an_old_swarm_that_needs_you_elsewhere(f: &mut Fixture) -> (SwarmRun, SwarmRun) {
+    let conn = open_aux(&f.db).unwrap();
+    let old = seed(f, SwarmStatus::Review, vec![task("old", &[])]);
+    let elsewhere = f.ws.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    conn.execute(
+        "UPDATE swarms SET workspace = ?1 WHERE id = ?2",
+        rusqlite::params![elsewhere.to_string_lossy(), old.id],
+    )
+    .unwrap();
+    record::set_owner(&conn, &old.id, &f.app.app_run_id).unwrap();
+    let new = seed(f, SwarmStatus::Running, vec![task("new", &[])]);
+    f.app.on_tick(Instant::now());
+    assert_eq!(f.app.swarm_needs_first.as_deref(), Some(old.id.as_str()));
+    (old, new)
+}
+
+#[test]
+fn f1_open_swarm_opens_the_folders_swarm_before_an_older_one_that_needs_you() {
+    let mut f = fixture();
+    let (_old, new) = an_old_swarm_that_needs_you_elsewhere(&mut f);
+    // a plain session in this folder, in no swarm, is selected
+    f.app.focus_list();
+    press(&mut f, KeyCode::Char('n'));
+    press(&mut f, KeyCode::Enter);
+    press(&mut f, KeyCode::Enter);
+    assert_eq!(f.app.sessions.len(), 1, "{}", notice(&f.app));
+    f.app
+        .execute_command(agent_mux::keymap::ActionId::Swarm, Instant::now());
+    assert_eq!(
+        view(&f.app).swarm.as_ref().map(|s| s.id.clone()),
+        Some(new.id.clone()),
+        "the run in this folder, not the old one"
+    );
+    f.app.kill_all();
+}
+
+#[test]
+fn with_several_swarms_that_need_you_the_newest_is_the_one_to_open() {
+    let mut f = fixture();
+    let conn = open_aux(&f.db).unwrap();
+    let older = seed(&f, SwarmStatus::Review, vec![task("a", &[])]);
+    let newer = seed(&f, SwarmStatus::Review, vec![task("b", &[])]);
+    record::set_owner(&conn, &older.id, &f.app.app_run_id).unwrap();
+    record::set_owner(&conn, &newer.id, &f.app.app_run_id).unwrap();
+    f.app.on_tick(Instant::now());
+    assert_eq!(f.app.swarm_needs, 2);
+    assert_eq!(f.app.swarm_needs_first.as_deref(), Some(newer.id.as_str()));
+}
+
+#[test]
+fn a_swarm_row_keeps_the_cursor_when_a_session_elsewhere_ends() {
+    use agent_mux::app::agents_list::AgentKind;
+    let mut f = fixture();
+    f.app.clean = false;
+    f.app.agents.show_swarm = true;
+    for _ in 0..2 {
+        f.app.focus_list();
+        press(&mut f, KeyCode::Char('n'));
+        press(&mut f, KeyCode::Enter);
+        press(&mut f, KeyCode::Enter);
+    }
+    assert_eq!(f.app.sessions.len(), 2, "{}", notice(&f.app));
+    f.app.sessions[0].group = Some(agent_mux::tree::GroupRef {
+        kind: agent_mux::tree::GroupKind::Swarm,
+        id: "swarm-1".into(),
+        title: "the web run".into(),
+        detail: "1".into(),
+        label: "w1".into(),
+    });
+    f.app.selected = 0;
+    let lines = f.app.agent_lines();
+    let at = lines
+        .iter()
+        .position(|l| matches!(&l.kind, AgentKind::Run(k) if k.starts_with("swarm:")))
+        .expect("a swarm group row");
+    f.app.select_agent_line(&lines, at);
+    // the other session ends; the selected one is still selected
+    let mut gone = f.app.sessions.remove(1);
+    gone.kill();
+    assert!(
+        matches!(f.app.agent_row(), Some(AgentKind::Run(k)) if k.starts_with("swarm:")),
+        "{:?}",
+        f.app.agent_row()
+    );
+    f.app.kill_all();
+}
+
+#[test]
+fn swarm_sessions_stay_off_the_agents_list_unless_the_option_says_so() {
+    use agent_mux::app::agents_list::AgentKind;
+    let mut f = fixture();
+    for _ in 0..2 {
+        f.app.focus_list();
+        press(&mut f, KeyCode::Char('n'));
+        press(&mut f, KeyCode::Enter);
+        press(&mut f, KeyCode::Enter);
+    }
+    assert_eq!(f.app.sessions.len(), 2, "{}", notice(&f.app));
+    f.app.sessions[1].group = Some(agent_mux::tree::GroupRef {
+        kind: agent_mux::tree::GroupKind::Swarm,
+        id: "swarm-1".into(),
+        title: "the web run".into(),
+        detail: "1".into(),
+        label: "w1".into(),
+    });
+    let listed = |app: &agent_mux::app::App| -> Vec<usize> {
+        app.agent_lines()
+            .iter()
+            .filter_map(|l| match l.kind {
+                AgentKind::Session(i) => Some(i),
+                _ => None,
+            })
+            .collect()
+    };
+    let swarm_row = |app: &agent_mux::app::App| {
+        app.agent_lines()
+            .iter()
+            .any(|l| matches!(&l.kind, AgentKind::Run(k) if k.starts_with("swarm:")))
+    };
+    // the default: the worker is on the Swarm screen only, in either list
+    for clean in [true, false] {
+        f.app.clean = clean;
+        assert_eq!(listed(&f.app), vec![0], "clean = {clean}");
+        assert!(!swarm_row(&f.app), "clean = {clean}");
+    }
+    // a selected worker leaves the cursor on a listed session
+    f.app.selected = 1;
+    assert_eq!(f.app.agent_row(), Some(AgentKind::Session(0)));
+    // stepping through sessions with the sidebar hidden skips it
+    f.app.selected = 0;
+    f.app.sidebar_hidden = true;
+    f.app.focus_list();
+    press(&mut f, KeyCode::Down);
+    assert_eq!(f.app.selected, 0);
+    // `[agents] show_swarm = true` steps onto it and lists it under its swarm
+    f.app.agents.show_swarm = true;
+    press(&mut f, KeyCode::Down);
+    assert_eq!(f.app.selected, 1);
+    f.app.sidebar_hidden = false;
+    assert_eq!(listed(&f.app), vec![0, 1]);
+    assert!(swarm_row(&f.app));
+    f.app.kill_all();
+}
+
+#[test]
+fn o_picks_another_swarm_to_show() {
+    let mut f = fixture();
+    let older = seed(&f, SwarmStatus::Review, vec![task("a", &[])]);
+    let newer = seed(&f, SwarmStatus::Review, vec![task("b", &[])]);
+    open_screen(&mut f);
+    assert_eq!(view(&f.app).scope.as_deref(), Some(newer.id.as_str()));
+
+    press(&mut f, KeyCode::Char('o'));
+    let Some(Modal::Picker { swarms, cursor }) = &view(&f.app).modal else {
+        panic!("no picker: {:?}", view(&f.app).status_msg);
+    };
+    // the folder's live swarms, newest first, the cursor on the one shown
+    let ids: Vec<&str> = swarms.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, vec![newer.id.as_str(), older.id.as_str()]);
+    assert_eq!(*cursor, 0);
+    let screen = render(&f.app, 140, 40);
+    assert!(screen.contains("Swarms"), "{screen}");
+    assert!(
+        screen.contains(agent_mux::bus::short_id(&older.id)),
+        "{screen}"
+    );
+
+    press(&mut f, KeyCode::Down);
+    press(&mut f, KeyCode::Enter);
+    let v = view(&f.app);
+    assert!(v.modal.is_none());
+    assert_eq!(v.scope.as_deref(), Some(older.id.as_str()));
+    assert_eq!(
+        v.swarm.as_ref().map(|s| s.id.as_str()),
+        Some(older.id.as_str())
+    );
+    f.app.kill_all();
 }

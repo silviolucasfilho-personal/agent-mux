@@ -187,6 +187,11 @@ pub struct Limits {
     pub gate: String,
     /// The goal is final and the coordinator plans without asking.
     pub headless: bool,
+    /// How finished tasks are reviewed: `auto`, a harness or `off`
+    /// (`bus::swarm::review`); the plan table shows it in every plan.
+    pub review: String,
+    /// The same, in one sentence.
+    pub review_step: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

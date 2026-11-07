@@ -47,6 +47,8 @@ pub struct Input<'a> {
     /// How long an offered task waits for the coordinator before the
     /// dispatcher starts it ([`DISPATCH_GRACE_NS`]; shorter in tests).
     pub dispatch_grace_ns: i64,
+    /// The swarm reviews its finished tasks (`review::settings`, v25).
+    pub review: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +66,9 @@ pub enum Action {
     Advance(SwarmStatus),
     /// Run the swarm's final check (`check_cmd`) before it is finished.
     RunCheck,
+    /// Put the review of this finished task on the board
+    /// (`record::add_review`); it is offered and started like any task.
+    AddReview { task_id: String },
 }
 
 /// A task's state as the board shows it (§3.2), first match wins.
@@ -156,6 +161,18 @@ pub fn unmet_dependencies<'a>(t: &'a BoardTask, board: &'a [BoardTask]) -> Vec<&
         })
         .map(String::as_str)
         .collect()
+}
+
+/// Whether a finished task still needs its review put on the board: done,
+/// not a review itself, not dismissed by the plan, not merged or set aside
+/// yet, and none asked for so far.
+pub fn needs_review(t: &BoardTask, input: &Input<'_>) -> bool {
+    input.review
+        && t.task.status == TaskStatus::Done
+        && t.ext.review_of.is_none()
+        && !t.ext.review_skip
+        && t.ext.review_task.is_none()
+        && t.review.is_none()
 }
 
 /// Whether a finished task's branch still waits for the operator.
@@ -257,6 +274,15 @@ pub fn next_actions(input: &Input<'_>) -> Vec<Action> {
             });
         }
     }
+    if matches!(status, SwarmStatus::Running | SwarmStatus::Integrating) {
+        for t in input.board {
+            if needs_review(t, input) {
+                out.push(Action::AddReview {
+                    task_id: t.task.id.clone(),
+                });
+            }
+        }
+    }
     if status == SwarmStatus::Running {
         let mut free = input.swarm.max_workers.saturating_sub(busy_workers(input));
         for t in input.board {
@@ -290,7 +316,9 @@ pub fn next_actions(input: &Input<'_>) -> Vec<Action> {
             }
         }
     }
-    let settled = input.board.iter().all(|t| t.task.status.is_terminal());
+    // a review still to be put on the board keeps the swarm running
+    let settled = input.board.iter().all(|t| t.task.status.is_terminal())
+        && !input.board.iter().any(|t| needs_review(t, input));
     let next = if !settled {
         (status == SwarmStatus::Integrating).then_some(SwarmStatus::Running)
     } else if input.board.iter().any(awaits_review) {
@@ -421,7 +449,69 @@ mod tests {
             asking: &asking,
             now_ns: 1_000 * 1_000_000_000,
             dispatch_grace_ns: 120 * 1_000_000_000,
+            review: false,
         })
+    }
+
+    fn run_reviewed(s: &SwarmRun, board: &[BoardTask]) -> Vec<Action> {
+        next_actions(&Input {
+            swarm: s,
+            board,
+            workers: &HashMap::new(),
+            asking: &HashSet::new(),
+            now_ns: 1_000 * 1_000_000_000,
+            dispatch_grace_ns: 120 * 1_000_000_000,
+            review: true,
+        })
+    }
+
+    #[test]
+    fn a_finished_task_gets_its_review_before_the_swarm_settles() {
+        let s = swarm(SwarmStatus::Running, 2);
+        let done = task("a", TaskStatus::Done, &[]);
+        // reviews on: the review goes on the board, and the swarm waits
+        assert_eq!(
+            run_reviewed(&s, std::slice::from_ref(&done)),
+            [Action::AddReview {
+                task_id: "task-a".into()
+            }]
+        );
+        // reviews off: it finishes as before
+        assert_eq!(
+            run(&s, std::slice::from_ref(&done), &[], &[]),
+            [Action::Advance(SwarmStatus::Finished)]
+        );
+        // a dismissed review, or one already asked for, adds nothing
+        let mut skipped = done.clone();
+        skipped.ext.review_skip = true;
+        assert_eq!(
+            run_reviewed(&s, &[skipped]),
+            [Action::Advance(SwarmStatus::Finished)]
+        );
+        let mut reviewed = done.clone();
+        reviewed.ext.review_task = Some("task-r".into());
+        let mut review = task("a-review", TaskStatus::Running, &[]);
+        review.task.id = "task-r".into();
+        review.ext.review_of = Some("task-a".into());
+        review.task.assigned_to = Some("L-r".into());
+        // the review holds the swarm until it is done
+        assert!(
+            !run_reviewed(&s, &[reviewed.clone(), review.clone()])
+                .iter()
+                .any(|a| matches!(a, Action::Advance(_) | Action::AddReview { .. }))
+        );
+        review.task.status = TaskStatus::Done;
+        assert_eq!(
+            run_reviewed(&s, &[reviewed, review]),
+            [Action::Advance(SwarmStatus::Finished)]
+        );
+        // a branch the operator merged is not reviewed after the fact
+        let mut merged = done;
+        merged.review = Some("merged".into());
+        assert_eq!(
+            run_reviewed(&s, &[merged]),
+            [Action::Advance(SwarmStatus::Finished)]
+        );
     }
 
     fn spawn(key: &str) -> Action {
@@ -689,6 +779,7 @@ mod tests {
             asking: &asking,
             now_ns: 0,
             dispatch_grace_ns: DISPATCH_GRACE_NS,
+            review: false,
         };
         let got: Vec<&str> = board.iter().map(|t| shown(t, &input).as_str()).collect();
         assert_eq!(
@@ -706,6 +797,7 @@ mod tests {
             asking: &asking,
             now_ns: 0,
             dispatch_grace_ns: DISPATCH_GRACE_NS,
+            review: false,
         };
         assert_eq!(shown(&board[1], &input), Shown::Draft);
     }

@@ -54,10 +54,11 @@ agent-mux trace path          # where the SQLite store is
 agent-mux skill list
 agent-mux md README.md        # Markdown viewer and editor, Mermaid drawn as text (docs/markdown.md)
 agent-mux memory install      # shared memory for Claude, Codex, agy and opencode through ai-memory (docs/memory.md)
+agent-mux web --open          # read-only web explorer of the trace store on 127.0.0.1 (docs/web.md)
 agent-mux run --help
 ```
 
-There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `run`, `loop`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI; `--hide-sidebar` starts it full-screen. The Agents list starts with the harness rows and their sessions alone: no scheduled agents, flows, skills or personas (History stays), `n` opens the New session dialog straight away, and the inbox badge stays off (`App::clean`); `m` in the list shows those sections and hides them again (`App::toggle_agent_sections`). The older `--clean` flag and `clean = true` in `profiles.toml` are no longer needed and are ignored.
+There is no general-purpose argument parser: `main` matches only `trace`, `mcp`, `web`, `run`, `loop`, `skill`, `--version` (also `-V` and `version`) and the legacy `langfuse` (which prints a migration notice). Anything else opens the TUI; `--hide-sidebar` starts it full-screen. The Agents list starts with the harness rows and their sessions alone: no scheduled agents, flows, skills or personas (History stays), `n` opens the New session dialog straight away, and the inbox badge stays off (`App::clean`); `m` in the list shows those sections and hides them again (`App::toggle_agent_sections`). The older `--clean` flag and `clean = true` in `profiles.toml` are no longer needed and are ignored.
 
 `--version` prints the stamp [build.rs](build.rs) bakes in at compile time and [src/build_info.rs](src/build_info.rs) formats:
 
@@ -247,6 +248,7 @@ no_progress = 3
 [agents]
 hydrate = true      # write a briefing snapshot for agents that ask for one
 mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
+show_swarm = false  # list swarm coordinators and workers in the Agents sidebar
 ```
 
 ### Fields, defaults and precedence
@@ -272,7 +274,7 @@ mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 | `tracing.loops` | Warning thresholds (25 / 6 / 3); `0` disables one. |
 | `tracing.models` | Price rows: `id`, optional `provider`, `match` patterns, `input`, `output`, optional `cache_read`, `cache_write`, `cache_write_1h`, `reasoning` (USD per million tokens). Rows with an empty id or negative input/output are dropped silently. |
 | Per-profile `[profiles.tracing]` | `enabled`, `provider`, `content_mode`, `inject_session_id`, `hooks`, `backend`, `max_cost_usd`, `max_turns` override the global defaults for that profile. |
-| `[agents] hydrate`, `mcp` | `true` and `"auto"` by default (`config::resolve_agents`). `hydrate = false` writes no briefing snapshots; `mcp = "off"` never registers the MCP server for any session or harness. |
+| `[agents] hydrate`, `mcp`, `show_swarm` | `true`, `"auto"` and `false` by default (`config::resolve_agents`). `hydrate = false` writes no briefing snapshots; `mcp = "off"` never registers the MCP server for any session or harness; `show_swarm = true` lists a swarm's coordinator and workers in the Agents sidebar (otherwise they are seen on the Swarm screen only, `App::session_listed`). |
 | `[loops] enabled`, `max_concurrent`, `catch_up`, `run_timeout_s`, `worktrees_dir` | `true`, `1`, `"once"`, `900`, `".loop-worktrees"` (`config::resolve_loops`). `enabled = false` leaves manual runs only; `catch_up = "skip"` moves a slot missed while agent-mux was closed to the next one; the timeout floors at 30 s. |
 
 Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secret_key`, `flush_interval_ms` default 3,000) or from `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` then `LANGFUSE_BASE_URL` for the host (default `https://cloud.langfuse.com`). If the `[tracing.langfuse]` sub-table exists at all, the legacy `[tracing] host/public_key/secret_key` fields are ignored entirely; they are used only when the sub-table is absent, and trip a migration notice. Both keys must resolve or the remote backend is unavailable and launches fall back to local. A trailing `/` or `/api/public` is stripped from the host.

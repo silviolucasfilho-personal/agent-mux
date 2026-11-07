@@ -228,6 +228,9 @@ pub enum LaunchField {
     /// The coordinator's harness: the one field the dialog asks
     /// (coordinator-first design §4.1).
     Planner,
+    /// How finished tasks are reviewed: `auto`, a harness, or `off`
+    /// (`bus::swarm::review`); shown folded too, so the step is never hidden.
+    Review,
     /// The fold that shows the rest.
     Advanced,
     Goal,
@@ -239,8 +242,9 @@ pub enum LaunchField {
 }
 
 impl LaunchField {
-    const ORDER: [LaunchField; 8] = [
+    const ORDER: [LaunchField; 9] = [
         LaunchField::Planner,
+        LaunchField::Review,
         LaunchField::Advanced,
         LaunchField::Goal,
         LaunchField::WorkerHarness,
@@ -249,13 +253,13 @@ impl LaunchField {
         LaunchField::Gate,
         LaunchField::Check,
     ];
-    /// The next field: folded, Tab moves between the coordinator and the
-    /// Advanced fold only.
+    /// The next field: folded, Tab moves between the coordinator, the
+    /// review and the Advanced fold only.
     fn step(self, d: isize, advanced: bool) -> Self {
         let order: &[LaunchField] = if advanced {
             &Self::ORDER
         } else {
-            &Self::ORDER[..2]
+            &Self::ORDER[..3]
         };
         let i = order.iter().position(|f| *f == self).unwrap_or(0) as isize;
         order[(i + d).rem_euclid(order.len() as isize) as usize]
@@ -335,6 +339,9 @@ pub enum Modal {
         isolation: TaskIsolation,
         gate: bool,
         check: TextArea,
+        /// The review: 0 `auto`, 1..=n the harnesses, n+1 `off`
+        /// ([`SwarmBoard::review_choice`]).
+        review: usize,
         field: LaunchField,
         /// Why the last Ctrl+S did not start the swarm, shown in the form.
         error: Option<String>,
@@ -367,16 +374,40 @@ pub enum Modal {
     },
     /// One message in full.
     Message { message: BusMessage, scroll: usize },
+    /// `o`: the swarm picker. Every live swarm (this folder's first, then
+    /// the newest), then the ones that ended within [`RECENT_NS`]; `Enter`
+    /// shows the one under the cursor. With swarm sessions off the Agents
+    /// sidebar (`[agents] show_swarm`), this is how another swarm is reached.
+    Picker {
+        swarms: Vec<SwarmRun>,
+        cursor: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirm {
-    Approve { tasks: usize },
-    Merge { task_id: String, branch: String },
-    SetAside { task_id: String, branch: String },
+    Approve {
+        tasks: usize,
+    },
+    Merge {
+        task_id: String,
+        branch: String,
+        /// Why the merge goes against the task's review, if it does.
+        warning: Option<String>,
+    },
+    SetAside {
+        task_id: String,
+        branch: String,
+    },
     Close,
-    Cancel { task_id: String, key: String },
-    Stop { session_idx: usize, key: String },
+    Cancel {
+        task_id: String,
+        key: String,
+    },
+    Stop {
+        session_idx: usize,
+        key: String,
+    },
 }
 
 impl Confirm {
@@ -385,9 +416,14 @@ impl Confirm {
             Confirm::Approve { tasks } => {
                 format!("Approve the plan? {tasks} task(s); workers start now.")
             }
-            Confirm::Merge { branch, .. } => {
-                format!("Merge {branch} into the workspace's branch (a merge commit)?")
-            }
+            Confirm::Merge {
+                branch, warning, ..
+            } => match warning {
+                Some(w) => format!(
+                    "⚠ {w}. Merge {branch} into the workspace's branch anyway (a merge commit)?"
+                ),
+                None => format!("Merge {branch} into the workspace's branch (a merge commit)?"),
+            },
             Confirm::SetAside { branch, .. } => {
                 format!("Set {branch} aside without merging? The branch is kept.")
             }
@@ -425,6 +461,8 @@ pub enum Outcome {
         isolation: TaskIsolation,
         gate: bool,
         check: Option<String>,
+        /// `auto`, a harness or `off`.
+        review: String,
     },
     Verb {
         verb: SwarmVerb,
@@ -488,6 +526,8 @@ pub struct SwarmData {
     pub events: Vec<crate::bus::swarm::record::SwarmEvent>,
     /// The Timeline tab's lanes, computed once per refresh.
     pub timeline: Option<crate::tracing::swarm_report::Timeline>,
+    /// How the swarm reviews finished tasks (v25).
+    pub review: crate::bus::swarm::review::ReviewSettings,
 }
 
 /// A row of the tree.
@@ -831,7 +871,7 @@ impl SwarmBoard {
             let here = self.norm_workspace();
             // One swarm per screen (§9.1): the chosen one, else the folder's
             // newest live one, which then becomes the choice. Other swarms
-            // are groups in the Agents sidebar.
+            // are reached with `o` (the picker).
             if self.scope.is_none() {
                 self.scope = record::live_swarm(conn, &here).ok().flatten().map(|s| s.id);
             }
@@ -890,6 +930,11 @@ impl SwarmBoard {
                         .ok()
                         .map(|r| crate::tracing::swarm_report::timeline(&r, now_ns))
                 });
+                let review = self
+                    .conn
+                    .as_ref()
+                    .map(|c| crate::bus::swarm::review::settings(c, &run.id))
+                    .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off);
                 let mut d = SwarmData {
                     run,
                     board,
@@ -901,6 +946,7 @@ impl SwarmBoard {
                     agents,
                     events,
                     timeline,
+                    review,
                 };
                 d.needs = needs_for(&d, &self.workers, now_ns);
                 swarms.push(d);
@@ -1202,14 +1248,25 @@ impl SwarmBoard {
     }
 
     fn input(&self) -> Option<engine::Input<'_>> {
+        let swarm = self.swarm.as_ref()?;
         Some(engine::Input {
-            swarm: self.swarm.as_ref()?,
+            swarm,
             board: &self.board,
             workers: &self.workers,
             asking: &self.asking,
             now_ns: self.now_ns,
             dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
+            review: self.review_settings().enabled,
         })
+    }
+
+    /// The current swarm's review setting.
+    pub fn review_settings(&self) -> crate::bus::swarm::review::ReviewSettings {
+        self.swarm
+            .as_ref()
+            .and_then(|s| self.swarms.iter().find(|d| d.run.id == s.id))
+            .map(|d| d.review.clone())
+            .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off)
     }
 
     /// How the board shows `t`.
@@ -1555,6 +1612,7 @@ impl SwarmBoard {
             isolation: TaskIsolation::Shared,
             gate: true,
             check: TextArea::new(""),
+            review: 0,
             field: LaunchField::Planner,
             error: None,
             advanced: false,
@@ -1577,6 +1635,29 @@ impl SwarmBoard {
         self.last_launch = None;
     }
 
+    /// `o`: the swarm picker ([`Modal::Picker`]), the cursor on the swarm
+    /// shown.
+    pub fn open_picker(&mut self) {
+        let Some(conn) = &self.conn else {
+            self.status_msg = Some("No trace store: no swarms to list.".into());
+            return;
+        };
+        let here = self.norm_workspace();
+        let mut live = record::live_swarms(conn).unwrap_or_default();
+        live.sort_by_key(|s| (s.workspace != here, std::cmp::Reverse(s.started_ns)));
+        let ended = record::ended_swarms_since(conn, self.now_ns - RECENT_NS).unwrap_or_default();
+        let swarms: Vec<SwarmRun> = live.into_iter().chain(ended).collect();
+        if swarms.is_empty() {
+            self.status_msg = Some("No swarm yet: n starts one.".into());
+            return;
+        }
+        let cursor = swarms
+            .iter()
+            .position(|s| self.scope.as_deref() == Some(s.id.as_str()))
+            .unwrap_or(0);
+        self.modal = Some(Modal::Picker { swarms, cursor });
+    }
+
     /// Shows swarm `id` (and puts the cursor on it at the next refresh).
     pub fn select_swarm(&mut self, id: &str) {
         self.scope = Some(id.to_string());
@@ -1594,6 +1675,25 @@ impl SwarmBoard {
     }
 
     /// The screen on swarm `id` from the start.
+    /// The launch form's review choice `i` as `ReviewSettings::parse` reads
+    /// it: 0 `auto`, then each harness, then `off`.
+    pub fn review_choice(&self, i: usize) -> String {
+        match i {
+            0 => "auto".into(),
+            i if i <= self.harnesses.len() => self.harnesses[i - 1].as_str().to_string(),
+            _ => "off".into(),
+        }
+    }
+
+    /// How the form draws choice `i`.
+    pub fn review_label(&self, i: usize) -> String {
+        match self.review_choice(i).as_str() {
+            "auto" => "auto · another harness than the worker's".into(),
+            "off" => "off · finished tasks go to you unreviewed".into(),
+            h => format!("on {h}"),
+        }
+    }
+
     pub fn scoped(mut self, id: Option<String>) -> Self {
         self.scope = id;
         self
@@ -1930,6 +2030,10 @@ impl SwarmBoard {
                 self.open_command("", None);
                 Outcome::None
             }
+            KeyCode::Char('o') => {
+                self.open_picker();
+                Outcome::None
+            }
             KeyCode::Char('m') => {
                 let question = self.selected_task().and_then(|t| {
                     let launch = t.task.assigned_to.as_deref()?;
@@ -2100,9 +2204,16 @@ impl SwarmBoard {
         if let Some(t) = self.selected_task().cloned() {
             match self.shown(&t) {
                 Shown::Review => {
+                    let state = crate::bus::swarm::review::state(
+                        &t,
+                        &self.board,
+                        self.review_settings().enabled,
+                    );
                     self.confirm = Some(Confirm::Merge {
                         task_id: t.task.id.clone(),
                         branch: t.task.branch.clone().unwrap_or_default(),
+                        warning: crate::bus::swarm::review::merge_warning(state)
+                            .map(str::to_string),
                     });
                     return Outcome::None;
                 }
@@ -2306,6 +2417,26 @@ impl SwarmBoard {
             self.modal = None;
             return Outcome::None;
         }
+        if let Some(Modal::Picker { swarms, cursor }) = &mut self.modal {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => *cursor = step(*cursor, swarms.len(), 1),
+                KeyCode::Up | KeyCode::Char('k') => *cursor = step(*cursor, swarms.len(), -1),
+                KeyCode::Home | KeyCode::Char('g') => *cursor = 0,
+                KeyCode::End | KeyCode::Char('G') => *cursor = swarms.len().saturating_sub(1),
+                KeyCode::Enter => {
+                    let id = swarms.get(*cursor).map(|s| s.id.clone());
+                    self.modal = None;
+                    if let Some(id) = id {
+                        self.select_swarm(&id);
+                        self.focus = Focus::Board;
+                        self.pane_focused = false;
+                        return Outcome::Reload;
+                    }
+                }
+                _ => {}
+            }
+            return Outcome::None;
+        }
         if let Some(Modal::Message { message, scroll }) = &mut self.modal {
             match key.code {
                 KeyCode::Down | KeyCode::Char('j') => *scroll += 1,
@@ -2357,6 +2488,7 @@ impl SwarmBoard {
                 isolation,
                 gate,
                 check,
+                review,
                 field,
                 advanced,
                 ..
@@ -2378,6 +2510,16 @@ impl SwarmBoard {
                     }
                     LaunchField::Goal => {
                         crate::keymap::apply_text(goal, &key);
+                    }
+                    LaunchField::Review => {
+                        let n = n_harness + 2;
+                        match key.code {
+                            KeyCode::Left | KeyCode::Char('h') => *review = (*review + n - 1) % n,
+                            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                                *review = (*review + 1) % n
+                            }
+                            _ => {}
+                        }
                     }
                     LaunchField::Check => {
                         crate::keymap::apply_text(check, &key);
@@ -2520,10 +2662,12 @@ impl SwarmBoard {
                 isolation,
                 gate,
                 check,
+                review,
                 field,
                 advanced,
                 ..
             }) => {
+                let review_s = self.review_choice(review);
                 let planner_h = self
                     .harnesses
                     .get(planner)
@@ -2557,6 +2701,7 @@ impl SwarmBoard {
                     isolation,
                     gate,
                     check,
+                    review,
                     field,
                     error: why.map(str::to_string),
                     advanced,
@@ -2576,6 +2721,7 @@ impl SwarmBoard {
                     isolation,
                     gate,
                     check: Some(check.text.trim().to_string()).filter(|c| !c.is_empty()),
+                    review: review_s,
                 };
                 self.last_launch = Some(form);
                 out
@@ -2624,6 +2770,7 @@ impl SwarmBoard {
                     )
                 };
                 let planned = PlannedTask {
+                    review: None,
                     harness: h,
                     agent: a,
                     isolation: iso,
@@ -2823,6 +2970,7 @@ pub fn needs_for(d: &SwarmData, workers: &HashMap<String, Worker>, now_ns: i64) 
         asking: &d.asking,
         now_ns,
         dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
+        review: d.review.enabled,
     };
     let name_of = |launch: &str| -> String {
         if launch == "user" {
@@ -3404,6 +3552,7 @@ mod tests {
             agents: HashMap::new(),
             events: Vec::new(),
             timeline: None,
+            review: crate::bus::swarm::review::ReviewSettings::off(),
         };
         d.needs = needs_for(&d, &v.workers, v.now_ns);
         v.swarms = vec![d];
@@ -3730,7 +3879,8 @@ mod tests {
             v.confirm,
             Some(Confirm::Merge {
                 task_id: "task-a".into(),
-                branch: "loop/bus-a".into()
+                branch: "loop/bus-a".into(),
+                warning: None,
             })
         );
         assert_eq!(
@@ -3805,12 +3955,21 @@ mod tests {
                 max_workers: 3,
                 isolation: TaskIsolation::Shared,
                 gate: true,
-                check: None
+                check: None,
+                review: "auto".into(),
             }
         );
-        // Advanced unfolds the goal and the limits; Tab stays within the two
-        // fields while folded.
+        // Advanced unfolds the goal and the limits; Tab stays within the
+        // three fields while folded: the coordinator, the review, the fold.
         v.open_launch();
+        v.handle_key(key(KeyCode::Tab));
+        assert!(matches!(
+            v.modal,
+            Some(Modal::Launch {
+                field: LaunchField::Review,
+                ..
+            })
+        ));
         v.handle_key(key(KeyCode::Tab));
         assert!(matches!(
             v.modal,
@@ -3827,6 +3986,7 @@ mod tests {
                 ..
             })
         ));
+        v.handle_key(key(KeyCode::Tab));
         v.handle_key(key(KeyCode::Tab));
         assert_eq!(
             v.handle_key(key(KeyCode::Enter)),
@@ -3906,6 +4066,7 @@ mod tests {
             0,
         );
         v.open_launch();
+        v.handle_key(key(KeyCode::Tab)); // the review
         v.handle_key(key(KeyCode::Tab)); // the Advanced fold
         v.handle_key(key(KeyCode::Char(' '))); // open it
         v.handle_key(key(KeyCode::Tab)); // goal

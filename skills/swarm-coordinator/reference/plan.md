@@ -9,9 +9,10 @@ The planning rules the coordinator follows before it submits
 - **Independent by default.** Tasks without `depends_on` run at the same time. Give two tasks the same files only when one depends on the other.
 - **Depend only when you must.** Use `depends_on` when a task needs another's code or decision: a schema before its queries, an API before its callers. A dependency on a worktree task waits until its branch is merged.
 - **Say when it is done.** `acceptance` is one line a worker can check: "`cargo test bus::` passes and a new test covers X".
-- **Small enough to review, big enough to matter.** Usually 2–6 tasks, rarely more than `max_workers × 2`. Do not create tasks for "investigate", "review" or "summarize": the operator reviews.
+- **Small enough to review, big enough to matter.** Usually 2–6 tasks, rarely more than `max_workers × 2`. Do not create tasks for "investigate", "review" or "summarize": agent-mux puts a review of each finished task on the board itself (see **Review** below), and the operator decides the merge.
 - **Isolation.** Leave `isolation` out to use the default. Choose `worktree` for broad changes to code that others are editing too (only when `git_repo` is true), and `shared` for small, separate files.
 - **Harness and agent.** Give each task a `harness` from `harnesses`, and only from them: agent-mux refuses any other. With more than one, spread the tasks across the pool by fit: `claude` for broad refactors and design, `codex` for focused code and tests, `agy` without a writing `agent` (it runs custom agents read-only). Leave `harness` out to use `default_harness`. Leave `agent` out unless a listed agent clearly suits the task.
+- **Review.** Every plan carries the review step: each finished task is reviewed read-only by the `reviewer` agent, by default on a harness of the pool other than the worker's (so spread the workers' harnesses when the pool has several). Leave `review` out to keep the swarm's setting (the context's `limits.review`). Only when the operator asks: `"review": {"enabled": false}` dismisses it for the plan, `"review": false` on a task for that task, and `"review": {"harness": "codex"}` moves the reviews to another harness.
 - **Re-plan.** Tasks with `started: true` stay as they are; do not repeat them. Plan only what is still needed, following the operator's notes. Reuse a key only for the same task.
 
 ## Submit
@@ -41,13 +42,15 @@ Call `agent_mux_swarm_plan` with the plan (the `harnesses` are the context's poo
         "harness": "codex",
         "isolation": "worktree"
       }
-    ]
+    ],
+    "review": { "harness": "auto" }
   }
 }
 ```
 
 - `key`: letters, digits, `-` and `_`, unique in the plan.
+- `review` (optional): `{ "enabled": true | false, "harness": "auto" | "<harness>" }`; a task's `"review": false` skips that task's review.
 - `title` and `instructions` are required. `files` are paths or globs relative to the workspace.
-- The tool answers **errors** when a key repeats, a dependency is unknown or forms a cycle, a harness is not installed, an agent is unknown, or a worktree is asked for outside a git repository. Nothing changes then: fix them and call it again. It also lists **warnings**, for tasks that may run at once and touch the same files in a shared workspace.
+- The tool answers **errors** when a key repeats, a dependency is unknown or forms a cycle, a harness is not installed, an agent is unknown, the review harness is not installed, or a worktree is asked for outside a git repository. Nothing changes then: fix them and call it again. It also lists **warnings**, for tasks that may run at once and touch the same files in a shared workspace.
 - The accepted answer carries the plan as a table (`table`): show it to the user as it is.
 - Without the MCP tools: write the same JSON (the `plan` object) to a file and run `agent-mux swarm submit-plan --file <path>`.

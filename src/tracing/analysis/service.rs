@@ -937,11 +937,11 @@ impl TraceService {
             let mut stmt = conn.prepare(
                 "SELECT s.key, s.provider, s.cwd, s.first_seen_ns, s.last_seen_ns,
                         COALESCE(st.turn_count, 0),
-                        COALESCE(st.total_tools, 0),
+                        COALESCE(st.tool_count, 0),
                         st.total_tokens,
                         st.total_cost_usd
                  FROM sessions s
-                 LEFT JOIN session_stats st ON st.session_key = s.key
+                 LEFT JOIN session_stats st ON st.key = s.key
                  WHERE (s.last_seen_ns >= ?1 AND s.first_seen_ns < ?2)
                  ORDER BY s.last_seen_ns DESC",
             )?;
@@ -1482,14 +1482,15 @@ impl TraceService {
 
         // 1. Search in traces (inputs/outputs)
         let mut t_stmt = conn.prepare(
-            "SELECT id, session_key, launch_id, provider, cwd, start_ns, input, output
-             FROM traces
-             WHERE start_ns >= ?1 AND start_ns < ?2
-               AND (?3 = 1 OR cwd = ?4)
-               AND (?5 = '' OR session_key = ?5)
-               AND (?6 = '' OR provider = ?6)
-               AND (input LIKE ?7 OR output LIKE ?7)
-             ORDER BY start_ns DESC",
+            "SELECT t.id, t.session_key, t.launch_id, s.provider, s.cwd, t.start_ns, t.input, t.output
+             FROM traces t
+             LEFT JOIN sessions s ON s.key = t.session_key
+             WHERE t.start_ns >= ?1 AND t.start_ns < ?2
+               AND (?3 = 1 OR s.cwd = ?4)
+               AND (?5 = '' OR t.session_key = ?5)
+               AND (?6 = '' OR s.provider = ?6)
+               AND (t.input LIKE ?7 OR t.output LIKE ?7)
+             ORDER BY t.start_ns DESC",
         )?;
 
         let t_rows = t_stmt.query_map(
@@ -1704,7 +1705,9 @@ impl TraceService {
         let load_run = |lid: &str| -> Result<RunMetrics, ServiceError> {
             let row = conn
                 .query_row(
-                    "SELECT session_key, provider, cwd FROM traces WHERE launch_id = ?1 LIMIT 1",
+                    "SELECT t.session_key, s.provider, s.cwd
+                     FROM traces t LEFT JOIN sessions s ON s.key = t.session_key
+                     WHERE t.launch_id = ?1 LIMIT 1",
                     params![lid],
                     |r| {
                         Ok((

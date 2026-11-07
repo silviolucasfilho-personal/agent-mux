@@ -146,7 +146,8 @@ pub struct LoopsConfig {
     pub no_progress: Option<usize>,
 }
 
-/// Global `[agents]` table: what agent-mux prepares for a skill launch.
+/// Global `[agents]` table: what agent-mux prepares for a skill launch,
+/// and which sessions the Agents sidebar lists.
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 pub struct AgentsConfig {
     /// Write briefing snapshots for packages that ask for them (default true).
@@ -154,6 +155,9 @@ pub struct AgentsConfig {
     /// `"auto"` (default) or `"off"`: a global gate over every package's
     /// `[agent] mcp`.
     pub mcp: Option<String>,
+    /// List a swarm's coordinator and workers in the Agents sidebar
+    /// (default false: they are seen on the Swarm screen only).
+    pub show_swarm: Option<bool>,
 }
 
 /// Global `[loops]` table: the Loop Engineering scheduler
@@ -307,6 +311,8 @@ pub fn resolve_loops(cfg: Option<&LoopRunnerConfig>) -> LoopRunnerSettings {
 pub struct AgentsSettings {
     pub hydrate: bool,
     pub mcp: crate::skill::McpMode,
+    /// `[agents] show_swarm`: swarm sessions in the Agents sidebar.
+    pub show_swarm: bool,
 }
 
 impl Default for AgentsSettings {
@@ -314,6 +320,7 @@ impl Default for AgentsSettings {
         AgentsSettings {
             hydrate: true,
             mcp: crate::skill::McpMode::Auto,
+            show_swarm: false,
         }
     }
 }
@@ -326,6 +333,9 @@ pub fn resolve_agents(cfg: Option<&AgentsConfig>) -> AgentsSettings {
         }
         if let Some(m) = c.mcp.as_deref().and_then(crate::skill::McpMode::parse) {
             out.mcp = m;
+        }
+        if let Some(v) = c.show_swarm {
+            out.show_swarm = v;
         }
     }
     out
@@ -806,6 +816,14 @@ pub fn is_wsl_drive_mount(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn swarm_sessions_are_off_the_agents_sidebar_unless_asked() {
+        let cfg = parse("").unwrap();
+        assert!(!resolve_agents(cfg.agents.as_ref()).show_swarm);
+        let cfg = parse("[agents]\nshow_swarm = true\n").unwrap();
+        assert!(resolve_agents(cfg.agents.as_ref()).show_swarm);
+    }
+
     use super::*;
 
     #[test]

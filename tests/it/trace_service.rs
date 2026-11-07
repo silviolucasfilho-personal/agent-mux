@@ -49,11 +49,11 @@ fn setup_test_db(dir: &Path) -> PathBuf {
         );
         CREATE VIEW session_stats AS
         SELECT
-            session_key,
+            session_key AS key,
             COUNT(id) AS turn_count,
             SUM(total_tokens) AS total_tokens,
             SUM(total_cost_usd) AS total_cost_usd,
-            (SELECT COUNT(o.id) FROM observations o JOIN traces t ON t.id = o.trace_id WHERE t.session_key = traces.session_key AND o.type = 'tool') AS total_tools
+            (SELECT COUNT(o.id) FROM observations o JOIN traces t ON t.id = o.trace_id WHERE t.session_key = traces.session_key AND o.type = 'tool') AS tool_count
         FROM traces
         GROUP BY session_key;
         CREATE VIEW trace_stats AS

@@ -25,7 +25,7 @@ pub fn catalog() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "agent_mux_swarm_start",
-            description: "Become the coordinator of a new agent-mux swarm in this workspace: your session is recorded as its coordinator and the running agent-mux TUI supervises it. Give the goal when you know it; limits (max parallel workers, isolation, check command, workers' harness pool) are optional. Then plan with agent_mux_swarm_plan.",
+            description: "Become the coordinator of a new agent-mux swarm in this workspace: your session is recorded as its coordinator and the running agent-mux TUI supervises it. Give the goal when you know it; limits (max parallel workers, isolation, check command, workers' harness pool, review: auto | a harness | off) are optional; finished tasks are reviewed unless the operator turns it off. Then plan with agent_mux_swarm_plan.",
             input_schema: schema_of::<SwarmStartArgs>(),
             read_only: false,
         },
@@ -55,7 +55,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "agent_mux_swarm_action",
-            description: "Relay an operator decision on the swarm: pause, resume, retry <task>, cancel <task>, merge <task>, set-aside <task>, accept <task>, drop <task>, close. Merge, set-aside, cancel and close need the operator's words in operator_said; the decision is recorded with them.",
+            description: "Relay an operator decision on the swarm: pause, resume, retry <task>, cancel <task>, review <task> (review a finished task again, after a fix round), merge <task>, set-aside <task>, accept <task>, drop <task>, close. Merge, set-aside, cancel and close need the operator's words in operator_said; the decision is recorded with them.",
             input_schema: schema_of::<SwarmActionArgs>(),
             read_only: false,
         },
@@ -147,6 +147,11 @@ pub struct SwarmStartArgs {
     /// `opencode`), the first for tasks that name none; default: yours.
     #[serde(default)]
     pub workers: Vec<String>,
+    /// How each finished task is reviewed before the merge: `auto` (the
+    /// default: the `reviewer` agent on a harness other than the worker's),
+    /// a harness to review on, or `off` only when the operator asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     /// Your launch id; defaults to `$AGENT_MUX_SESSION_ID`.
@@ -212,6 +217,12 @@ fn start(service: &TraceService, arguments: Value) -> Value {
             Err(e) => return tool_error(&ServiceError::InvalidArgument(e)),
         }
     }
+    let review = match crate::bus::swarm::review::ReviewSettings::parse(
+        args.review.as_deref().unwrap_or(""),
+    ) {
+        Ok(r) => r,
+        Err(e) => return tool_error(&ServiceError::InvalidArgument(e)),
+    };
     let now = crate::tracing::store::now_ns();
     let swarm = match record::create_swarm(
         &conn,
@@ -227,6 +238,7 @@ fn start(service: &TraceService, arguments: Value) -> Value {
             owner_run: None,
             worker_pool: pool,
             headless: false,
+            review,
         },
         now,
     ) {
@@ -263,6 +275,8 @@ fn start(service: &TraceService, arguments: Value) -> Value {
                 "max_workers": swarm.max_workers,
                 "default_isolation": swarm.isolation.as_str(),
                 "check": swarm.check_cmd,
+                "review": crate::bus::swarm::review::settings(&conn, &swarm.id).as_choice(),
+                "review_step": crate::bus::swarm::review::settings(&conn, &swarm.id).describe(),
             },
             "note": format!(
                 "You coordinate swarm {}. Talk the goal over with the operator, then submit the plan with agent_mux_swarm_plan; the running agent-mux TUI supervises the swarm and tells you what happens.",
@@ -519,7 +533,7 @@ fn get_swarm(service: &TraceService, arguments: Value) -> Value {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SwarmActionArgs {
-    /// `pause`, `resume`, `retry`, `cancel`, `merge`, `set-aside`, `accept`,
+    /// `pause`, `resume`, `retry`, `cancel`, `review`, `merge`, `set-aside`, `accept`,
     /// `drop`, `close` (also `launch`, `approve`: see agent_mux_swarm_launch).
     pub verb: String,
     /// The task (plan key, id or prefix) for the verbs that take one.
@@ -546,7 +560,7 @@ fn action(service: &TraceService, arguments: Value) -> Value {
     };
     let Some(verb) = SwarmVerb::parse(args.verb.trim()) else {
         return tool_error(&ServiceError::InvalidArgument(format!(
-            "unknown verb `{}`: pause, resume, retry, cancel, merge, set-aside, accept, drop, close",
+            "unknown verb `{}`: pause, resume, retry, cancel, review, merge, set-aside, accept, drop, close",
             args.verb
         )));
     };
@@ -680,6 +694,7 @@ pub fn coordinator_adds_tasks(
             harness: spec.target_harness.clone(),
             agent: spec.target_agent.clone(),
             isolation: Some(spec.isolation.as_str().to_string()),
+            review: None,
         };
         let id = match record::add_task(conn, Some(db), &swarm, &pt, false, now_ns) {
             Ok(id) => id,

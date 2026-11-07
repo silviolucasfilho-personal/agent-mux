@@ -246,6 +246,7 @@ async fn hydration_and_mcp_can_be_switched_off_globally() {
     app.agents = AgentsSettings {
         hydrate: false,
         mcp: McpMode::Off,
+        show_swarm: false,
     };
     launch_heimdall(&mut app);
     wait_for(&f.bin.join("env.txt"));

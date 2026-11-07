@@ -247,6 +247,8 @@ pub struct NewSwarm {
     pub worker_pool: Vec<String>,
     /// The goal is given and the coordinator plans without a conversation.
     pub headless: bool,
+    /// How finished tasks are reviewed (v25).
+    pub review: super::review::ReviewSettings,
 }
 
 /// The plan's side of one board task.
@@ -264,6 +266,15 @@ pub struct SwarmTaskExt {
     pub offered_ns: Option<i64>,
     /// Who asked for its worker; set before the spawn (v24).
     pub launched_by: Option<LaunchedBy>,
+    /// The plan dismissed this task's review (v25).
+    #[serde(default)]
+    pub review_skip: bool,
+    /// The board task that reviews this one (v25).
+    #[serde(default)]
+    pub review_task: Option<String>,
+    /// This task is the review of that one (v25).
+    #[serde(default)]
+    pub review_of: Option<String>,
 }
 
 /// A board task with its plan extension and, for a finished worktree
@@ -360,6 +371,7 @@ pub fn create_swarm(
         params![id, gate_mode.as_str(), new.headless, now],
     )
     .map_err(|e| e.to_string())?;
+    super::review::set_settings(conn, &id, &new.review, now).map_err(|e| e.to_string())?;
     let _ = event(
         conn,
         &id,
@@ -371,6 +383,7 @@ pub fn create_swarm(
             "coordinator": new.planner_harness,
             "gate": gate_mode.as_str(),
             "headless": new.headless,
+            "review": new.review.as_choice(),
         })),
         now,
     );
@@ -608,6 +621,9 @@ fn row_to_ext(r: &rusqlite::Row<'_>) -> rusqlite::Result<SwarmTaskExt> {
             .get::<_, Option<String>>(9)?
             .as_deref()
             .and_then(LaunchedBy::parse),
+        review_skip: r.get::<_, Option<i64>>(11)?.unwrap_or(0) != 0,
+        review_task: r.get(12)?,
+        review_of: r.get(13)?,
     })
 }
 
@@ -615,9 +631,12 @@ fn row_to_ext(r: &rusqlite::Row<'_>) -> rusqlite::Result<SwarmTaskExt> {
 pub fn board(conn: &Connection, swarm_id: &str) -> rusqlite::Result<Vec<BoardTask>> {
     let mut stmt = conn.prepare(
         "SELECT st.task_id, st.plan_key, st.position, st.depends_on_json, st.acceptance,
-                st.proposed, st.attempts, st.nudged_ns, d.offered_ns, d.launched_by, r.verdict
+                st.proposed, st.attempts, st.nudged_ns, d.offered_ns, d.launched_by, r.verdict,
+                rv.skip, rv.review_task, ro.task_id
          FROM swarm_tasks st LEFT JOIN swarm_reviews r ON r.task_id = st.task_id
                              LEFT JOIN swarm_dispatch d ON d.task_id = st.task_id
+                             LEFT JOIN swarm_task_reviews rv ON rv.task_id = st.task_id
+                             LEFT JOIN swarm_task_reviews ro ON ro.review_task = st.task_id
          WHERE st.swarm_id = ?1 ORDER BY st.position ASC, st.task_id ASC",
     )?;
     let rows: Vec<(SwarmTaskExt, Option<String>)> = stmt
@@ -741,7 +760,80 @@ fn insert_task(
             e.to_string()
         }
     })?;
+    if pt.review == Some(false) {
+        super::review::set_skip(conn, &task.id, true, now).map_err(|e| e.to_string())?;
+    }
     Ok(task.id)
+}
+
+/// Puts the review of finished task `task_id` on the board (v25): one more
+/// task, on the review harness (`review::harness_for`) as the review agent
+/// (none on agy, which would run it without a shell), shared: it changes no
+/// file and runs in the reviewed task's folder. It is offered and started
+/// like any task. Answers the review's key.
+pub fn add_review(
+    conn: &Connection,
+    db: Option<&Path>,
+    swarm: &SwarmRun,
+    task_id: &str,
+    now: i64,
+) -> Result<String, String> {
+    let board = board(conn, &swarm.id).map_err(|e| e.to_string())?;
+    let t = board
+        .iter()
+        .find(|t| t.task.id == task_id)
+        .ok_or_else(|| format!("no task {task_id} on the board"))?;
+    if t.ext.review_of.is_some() {
+        return Err(format!("`{}` is a review itself", t.ext.plan_key));
+    }
+    let settings = super::review::settings(conn, &swarm.id);
+    let harness = super::review::harness_for(
+        &settings,
+        t.task.target_harness.as_deref(),
+        &worker_pool(conn, swarm),
+    );
+    let key = super::review::review_key(&board, &t.ext.plan_key);
+    let pt = PlannedTask {
+        key: key.clone(),
+        title: format!("Review: {}", t.task.title),
+        instructions: super::review::instructions(t),
+        acceptance: Some("the result's first line is APPROVE or CHANGES".into()),
+        files: Vec::new(),
+        depends_on: Vec::new(),
+        agent: (harness != "agy").then(|| settings.agent.clone()),
+        harness: Some(harness.clone()),
+        isolation: Some(TaskIsolation::Shared.as_str().to_string()),
+        review: None,
+    };
+    let id = add_task(conn, None, swarm, &pt, false, now)?;
+    super::review::link(conn, &t.task.id, &id, now).map_err(|e| e.to_string())?;
+    let _ = event(
+        conn,
+        &swarm.id,
+        Some(&t.task.id),
+        "review.added",
+        Some("engine"),
+        Some(serde_json::json!({
+            "key": t.ext.plan_key,
+            "review": key,
+            "harness": harness,
+        })),
+        now,
+    );
+    poke(db);
+    Ok(key)
+}
+
+/// Why merging `t` goes against its review, if it does: the swarm reviews
+/// and `t`'s review did not approve it (yet).
+pub fn unreviewed_warning(
+    conn: &Connection,
+    swarm: &SwarmRun,
+    t: &BoardTask,
+    board: &[BoardTask],
+) -> Option<String> {
+    let enabled = super::review::settings(conn, &swarm.id).enabled;
+    super::review::merge_warning(super::review::state(t, board, enabled)).map(str::to_string)
 }
 
 /// A swarm's coordinator agent (schema v22).
@@ -905,6 +997,21 @@ pub fn submit_plan(
         return Ok(Submitted::Rejected(problems));
     }
     let revised = swarm.plan_summary.is_some() || !before.is_empty();
+    if let Some(r) = &plan.review {
+        let mut s = super::review::settings(conn, &swarm.id);
+        if let Some(on) = r.enabled {
+            s.enabled = on;
+        }
+        if let Some(h) = r
+            .harness
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        {
+            s.harness = (h != "auto").then(|| h.to_string());
+        }
+        super::review::set_settings(conn, &swarm.id, &s, now).map_err(|e| e.to_string())?;
+    }
     let board = replace_draft(conn, db, swarm, plan, now)?;
     let status = if swarm.gate_mode == GateMode::Off {
         SwarmStatus::Running
@@ -938,25 +1045,41 @@ pub fn submit_plan(
         tasks: board.len(),
         status,
         warnings: problems.warnings,
-        table: plan_table(swarm, &board),
+        table: plan_table(swarm, &board, &super::review::settings(conn, &swarm.id)),
     })
 }
 
 /// The plan as a Markdown table, for the coordinator to show the operator
 /// in its chat: what the Board tab draws.
-pub fn plan_table(swarm: &SwarmRun, board: &[BoardTask]) -> String {
+pub fn plan_table(
+    swarm: &SwarmRun,
+    board: &[BoardTask],
+    review: &super::review::ReviewSettings,
+) -> String {
     let mut out = String::from(
-        "| # | key | title | harness · agent | isolation | depends on | done when |\n| --- | --- | --- | --- | --- | --- | --- |\n",
+        "| # | key | title | harness · agent | isolation | depends on | done when | review |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
-    for (i, t) in board.iter().enumerate() {
+    for (i, t) in board
+        .iter()
+        .filter(|t| t.ext.review_of.is_none())
+        .enumerate()
+    {
         let who = match (&t.task.target_harness, &t.task.target_agent) {
             (Some(h), Some(a)) => format!("{h} · {a}"),
             (Some(h), None) => h.clone(),
             (None, Some(a)) => format!("· {a}"),
             (None, None) => "—".into(),
         };
+        let reviewed = if !review.enabled || t.ext.review_skip {
+            "—".to_string()
+        } else {
+            match &review.harness {
+                Some(h) => h.clone(),
+                None => "another harness".to_string(),
+            }
+        };
         out.push_str(&format!(
-            "| {} | `{}` | {} | {} | {} | {} | {} |\n",
+            "| {} | `{}` | {} | {} | {} | {} | {} | {} |\n",
             i + 1,
             t.ext.plan_key,
             t.task.title.replace('|', "/"),
@@ -973,8 +1096,10 @@ pub fn plan_table(swarm: &SwarmRun, board: &[BoardTask]) -> String {
                 .unwrap_or("—")
                 .replace('|', "/")
                 .replace('\n', " "),
+            reviewed,
         ));
     }
+    out.push_str(&format!("\nReview: {}", review.describe()));
     out.push_str(&format!(
         "\nUp to {} worker(s) at once · default isolation {}{}",
         swarm.max_workers,
@@ -1146,6 +1271,7 @@ pub fn propose(
             harness: spec.target_harness.clone(),
             agent: spec.target_agent.clone(),
             isolation: Some(spec.isolation.as_str().to_string()),
+            review: None,
         };
         let id = add_task(conn, db, swarm, &pt, swarm.gate, now)?;
         out.push((key, id));
@@ -1782,6 +1908,9 @@ pub enum SwarmVerb {
     Close,
     /// Start a new coordinator in place of one that exited (needs the TUI).
     Restart,
+    /// Review a finished task (again, after a fix round): a new review goes
+    /// on the board; the earlier ones stay (v25).
+    Review,
 }
 
 impl SwarmVerb {
@@ -1800,6 +1929,7 @@ impl SwarmVerb {
             "drop" => SwarmVerb::Drop,
             "close" | "stop" => SwarmVerb::Close,
             "restart" | "restart-coordinator" => SwarmVerb::Restart,
+            "review" | "re-review" => SwarmVerb::Review,
             _ => return None,
         })
     }
@@ -1818,6 +1948,7 @@ impl SwarmVerb {
             SwarmVerb::Drop => "drop",
             SwarmVerb::Close => "close",
             SwarmVerb::Restart => "restart",
+            SwarmVerb::Review => "review",
         }
     }
     /// Whether the verb names a task.
@@ -1830,6 +1961,7 @@ impl SwarmVerb {
                 | SwarmVerb::SetAside
                 | SwarmVerb::Accept
                 | SwarmVerb::Drop
+                | SwarmVerb::Review
         )
     }
     /// Whether a coordinator relaying the verb from its chat must quote the
@@ -1862,7 +1994,7 @@ pub fn board_plan(swarm: &SwarmRun, board: &[BoardTask]) -> Plan {
         summary: swarm.plan_summary.clone().unwrap_or_default(),
         tasks: board
             .iter()
-            .filter(|t| t.task.status != TaskStatus::Cancelled)
+            .filter(|t| t.task.status != TaskStatus::Cancelled && t.ext.review_of.is_none())
             .map(|t| PlannedTask {
                 key: t.ext.plan_key.clone(),
                 title: t.task.title.clone(),
@@ -1873,8 +2005,10 @@ pub fn board_plan(swarm: &SwarmRun, board: &[BoardTask]) -> Plan {
                 harness: t.task.target_harness.clone(),
                 agent: t.task.target_agent.clone(),
                 isolation: Some(t.task.isolation.as_str().to_string()),
+                review: t.ext.review_skip.then_some(false),
             })
             .collect(),
+        review: None,
     }
 }
 
@@ -2038,10 +2172,14 @@ pub fn apply(
                 Some(serde_json::json!({ "branch": branch, "commit": detail })),
                 now,
             );
-            Ok(match detail {
+            let mut out = match detail {
                 Some(c) => format!("merged {branch} ({c})"),
                 None => format!("set {branch} aside"),
-            })
+            };
+            if merged && let Some(w) = unreviewed_warning(conn, swarm, t, &board) {
+                out.push_str(&format!(" — {w}"));
+            }
+            Ok(out)
         }
         SwarmVerb::Accept | SwarmVerb::Drop => {
             let t = target.expect("takes a task");
@@ -2057,6 +2195,56 @@ pub fn apply(
                 poke(db);
                 Ok(format!("dropped `{}`", t.ext.plan_key))
             }
+        }
+        SwarmVerb::Review => {
+            let t = target.expect("takes a task");
+            // naming the review itself means the task it reviews
+            let reviewed = match &t.ext.review_of {
+                Some(of) => board
+                    .iter()
+                    .find(|o| &o.task.id == of)
+                    .ok_or_else(|| format!("the task `{}` reviews is gone", t.ext.plan_key))?,
+                None => t,
+            };
+            if reviewed.task.status != TaskStatus::Done {
+                return Err(format!(
+                    "`{}` is not done yet ({}): it is reviewed when it is",
+                    reviewed.ext.plan_key,
+                    reviewed.task.status.as_str()
+                ));
+            }
+            if reviewed.review.is_some() {
+                return Err(format!(
+                    "`{}` was already {} by the operator",
+                    reviewed.ext.plan_key,
+                    reviewed.review.as_deref().unwrap_or("decided")
+                ));
+            }
+            let existing = reviewed
+                .ext
+                .review_task
+                .as_deref()
+                .and_then(|id| board.iter().find(|o| o.task.id == id));
+            if existing.is_some_and(|r| !r.task.status.is_terminal()) {
+                return Err(format!("`{}` is being reviewed now", reviewed.ext.plan_key));
+            }
+            // a new review each time: the earlier verdicts stay on the board
+            let key = add_review(conn, db, swarm, &reviewed.task.id, now)?;
+            let done = match existing {
+                Some(r) => format!(
+                    "`{}` is reviewed again by `{key}` (the last review was `{}`)",
+                    reviewed.ext.plan_key, r.ext.plan_key
+                ),
+                None => format!("`{}` is reviewed by `{key}`", reviewed.ext.plan_key),
+            };
+            clear_check(conn, &swarm.id).map_err(|e| e.to_string())?;
+            decide(conn, &swarm.id, Some(&reviewed.task.id), verb, who, now)
+                .map_err(|e| e.to_string())?;
+            if matches!(status, SwarmStatus::Integrating | SwarmStatus::Finished) {
+                set_status(conn, db, &swarm.id, SwarmStatus::Running, now)
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(done)
         }
         SwarmVerb::Replan | SwarmVerb::Close | SwarmVerb::Restart => {
             unreachable!("needs the TUI")
@@ -2089,6 +2277,7 @@ mod tests {
             owner_run: Some("run-1".into()),
             worker_pool: vec![],
             headless: false,
+            review: crate::bus::swarm::review::ReviewSettings::off(),
         }
     }
 
@@ -2099,6 +2288,102 @@ mod tests {
             instructions: "do it".into(),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn every_plan_carries_the_review_unless_the_plan_dismisses_it() {
+        use super::super::review::{self, ReviewState};
+        let (dir, conn) = store();
+        let ws = dir.path().to_string_lossy().into_owned();
+        let mut n = new_swarm(&ws);
+        n.review = review::ReviewSettings::default();
+        n.worker_pool = vec!["claude".into(), "codex".into()];
+        let s = create_swarm(&conn, None, &n, 1).unwrap();
+        let env = super::super::plan::CheckEnv {
+            harnesses: vec!["claude".into(), "codex".into()],
+            ..Default::default()
+        };
+        // a task the operator wants unreviewed, one reviewed
+        let mut quiet = pt("docs", &[]);
+        quiet.review = Some(false);
+        let plan = Plan {
+            summary: "two".into(),
+            tasks: vec![pt("code", &[]), quiet],
+            review: None,
+        };
+        let table = match submit_plan(&conn, None, &s, &plan, &env, 2).unwrap() {
+            Submitted::Accepted { table, .. } => table,
+            other => panic!("{other:?}"),
+        };
+        assert!(table.contains("| review |"), "{table}");
+        assert!(table.contains("another harness |"), "{table}");
+        assert!(
+            table.contains("Review: each finished task is reviewed by the `reviewer` agent"),
+            "{table}"
+        );
+        let b = board(&conn, &s.id).unwrap();
+        assert!(!b[0].ext.review_skip && b[1].ext.review_skip);
+        // board_plan keeps the dismissal for a re-check
+        assert_eq!(board_plan(&s, &b).tasks[1].review, Some(false));
+
+        // `code` finishes: its review goes to codex (not the worker's claude)
+        let code = b[0].task.id.clone();
+        bstore::update_task(
+            &conn,
+            None,
+            &code,
+            "w1",
+            TaskStatus::Done,
+            Some(serde_json::json!("done")),
+            None,
+            None,
+            None,
+            3,
+        )
+        .unwrap();
+        let b = board(&conn, &s.id).unwrap();
+        assert_eq!(review::state(&b[0], &b, true), Some(ReviewState::Pending));
+        let key = add_review(&conn, None, &s, &code, 4).unwrap();
+        assert_eq!(key, "code-review");
+        let b = board(&conn, &s.id).unwrap();
+        let r = b.iter().find(|t| t.ext.plan_key == "code-review").unwrap();
+        assert_eq!(r.task.target_harness.as_deref(), Some("codex"));
+        assert_eq!(r.task.target_agent.as_deref(), Some("reviewer"));
+        assert_eq!(r.ext.review_of.as_deref(), Some(code.as_str()));
+        // reviews are not plan tasks
+        assert!(
+            !board_plan(&s, &b)
+                .tasks
+                .iter()
+                .any(|t| t.key == "code-review")
+        );
+        assert!(!plan_table(&s, &b, &review::settings(&conn, &s.id)).contains("code-review"));
+
+        // the plan may also switch reviews off for the whole swarm
+        let s2 = create_swarm(&conn, None, &n, 5).unwrap();
+        let mut off = plan.clone();
+        off.review = Some(super::super::plan::PlanReview {
+            enabled: Some(false),
+            harness: None,
+        });
+        submit_plan(&conn, None, &s2, &off, &env, 6).unwrap();
+        assert!(!review::settings(&conn, &s2.id).enabled);
+        // and a review harness must be installed
+        let s3 = create_swarm(&conn, None, &n, 7).unwrap();
+        let mut bad = plan.clone();
+        bad.review = Some(super::super::plan::PlanReview {
+            enabled: None,
+            harness: Some("opencode".into()),
+        });
+        match submit_plan(&conn, None, &s3, &bad, &env, 8).unwrap() {
+            Submitted::Rejected(p) => assert!(
+                p.errors
+                    .iter()
+                    .any(|(_, m)| m.contains("review harness `opencode`")),
+                "{p:?}"
+            ),
+            other => panic!("{other:?}"),
         }
     }
 
@@ -2119,6 +2404,7 @@ mod tests {
             &Plan {
                 summary: String::new(),
                 tasks: vec![pt("a", &[]), named],
+                review: None,
             },
             2,
         )
@@ -2182,6 +2468,7 @@ mod tests {
         let plan = |k: &str| Plan {
             summary: String::new(),
             tasks: vec![pt(k, &[])],
+            review: None,
         };
         let ta = replace_draft(&conn, None, &a, &plan("x"), 3).unwrap();
         let tb = replace_draft(&conn, None, &b, &plan("y"), 3).unwrap();
@@ -2228,6 +2515,7 @@ mod tests {
             Plan {
                 summary: String::new(),
                 tasks: vec![t],
+                review: None,
             }
         };
         match submit_plan(&conn, None, &s, &on("claude"), &env, 2).unwrap() {
@@ -2263,6 +2551,7 @@ mod tests {
         let plan = Plan {
             summary: "two".into(),
             tasks: vec![pt("b", &[]), pt("a", &["b"])],
+            review: None,
         };
         let b = replace_draft(&conn, None, &s, &plan, 3).unwrap();
         let keys: Vec<&str> = b.iter().map(|t| t.ext.plan_key.as_str()).collect();
@@ -2277,6 +2566,7 @@ mod tests {
         let again = Plan {
             summary: String::new(),
             tasks: vec![pt("b", &[]), pt("c", &[])],
+            review: None,
         };
         let b2 = replace_draft(&conn, None, &s, &again, 4).unwrap();
         let keys: Vec<&str> = b2.iter().map(|t| t.ext.plan_key.as_str()).collect();
@@ -2354,6 +2644,7 @@ mod tests {
         let bad = Plan {
             summary: "x".into(),
             tasks: vec![pt("z", &["nope"])],
+            review: None,
         };
         match submit_plan(&conn, None, &live, &bad, &env, 4).unwrap() {
             Submitted::Rejected(p) => {
@@ -2378,6 +2669,7 @@ mod tests {
         let good = Plan {
             summary: "two".into(),
             tasks: vec![pt("y", &[]), pt("z", &["y"])],
+            review: None,
         };
         match submit_plan(&conn, None, &live, &good, &env, 4).unwrap() {
             Submitted::Accepted { status, .. } => assert_eq!(status, SwarmStatus::Review),
@@ -2436,6 +2728,7 @@ mod tests {
         let plan = Plan {
             summary: "two steps".into(),
             tasks: vec![pt("a", &[]), pt("b", &["a"])],
+            review: None,
         };
         let done = submit_plan(&conn, None, &s, &plan, &check_env(), 2).unwrap();
         let Submitted::Accepted { table, status, .. } = &done else {
@@ -2563,6 +2856,7 @@ mod tests {
         let plan = Plan {
             summary: String::new(),
             tasks: vec![pt("a", &[])],
+            review: None,
         };
         let done = submit_plan(&conn, None, &s, &plan, &check_env(), 2).unwrap();
         assert!(matches!(
