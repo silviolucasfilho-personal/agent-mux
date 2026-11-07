@@ -44,7 +44,7 @@ For example, Claude as coordinator with agy and Codex in the pool gives a plan w
 
 ## The screen
 
-The Swarm screen shows **one swarm**: its coordinator, the agents it started and their sub-agents, each a real terminal you can watch and type into. It opens on the swarm of the session you have selected (its coordinator or one of its workers), else on the swarm that needs you, else on the folder's newest live one; `n` starts another. Every swarm is also a group in the Agents sidebar (`◆ <goal>`, with `★ coordinator` and the workers under it), where `Enter` opens this screen on it. The layout is the Agents screen's: a tree on the left, the selected row in the main pane on the right.
+The Swarm screen shows **one swarm**: its coordinator, the agents it started and their sub-agents, each a real terminal you can watch and type into. It opens on the swarm of the session you have selected (its coordinator or one of its workers), else on the swarm that needs you, else on the folder's newest live one; `o` picks another swarm (any folder's, live or closed in the last week) and `n` starts a new one. A swarm's coordinator and workers are seen here only: the Agents sidebar leaves them out. With `[agents] show_swarm = true` in `profiles.toml`, every swarm is also a group in the Agents sidebar (`◆ <goal>`, with `★ coordinator` and the workers under it), where `Enter` opens this screen on it. The layout is the Agents screen's: a tree on the left, the selected row in the main pane on the right.
 
 ```
 ┌ Swarms • Keyboard focus ───┐┌ ◆ add OAuth login ─────────────────────────────────────────────┐
@@ -159,6 +159,7 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | `r` | retry a failed, lost, cancelled or stalled task (the retry form: harness, agent, isolation) · restart an exited coordinator |
 | `space` | pause or resume: while paused, running workers continue but nothing new starts |
 | `n` | a new swarm |
+| `o` | the swarm picker: every live swarm (this folder's first) and those closed in the last week; `Enter` shows one |
 | `>` `m` | write to workers (`m`: the selected task's worker, or an answer to its question) |
 | `!` | the next row that needs you |
 | `Ctrl+R` | reload now (the screen refreshes on its own when anything changes) |

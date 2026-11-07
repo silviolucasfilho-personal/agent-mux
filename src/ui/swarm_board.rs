@@ -13,7 +13,7 @@ use crate::app::swarm_board::{
 };
 use crate::app::text_area::TextArea;
 use crate::bus::swarm::engine::{self, Shown};
-use crate::bus::swarm::record::{BoardTask, SwarmStatus};
+use crate::bus::swarm::record::{BoardTask, SwarmRun, SwarmStatus};
 use crate::bus::{BusMessage, TaskStatus};
 use crate::tracing::cli::{fmt_cost, fmt_tokens};
 use ratatui::Frame;
@@ -321,7 +321,7 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
             if v.rows.is_empty() {
                 " no swarms: n starts one"
             } else {
-                " + new swarm  n"
+                " + new swarm  n · other swarms  o"
             },
             dim(),
         )));
@@ -611,12 +611,14 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
     out.push(Line::raw(""));
     out.push(Line::styled(
         match (s.ended_ns.is_some(), s.status) {
-            (true, _) => "This swarm is closed. n starts a new one.",
+            (true, _) => "This swarm is closed. n starts a new one · o another swarm",
             (_, SwarmStatus::Review) => {
                 "y approve · p re-plan · n add a task · ↓ a task: e edit, d delete"
             }
-            (_, SwarmStatus::Running) => "space pause · > message · ! next need · n add a task",
-            (_, SwarmStatus::Paused) => "space resume · > message · ! next need",
+            (_, SwarmStatus::Running) => {
+                "space pause · > message · ! next need · n add a task · o another swarm"
+            }
+            (_, SwarmStatus::Paused) => "space resume · > message · ! next need · o another swarm",
             (_, SwarmStatus::Finished) => "y close the swarm",
             (_, SwarmStatus::Integrating) => "↓ a branch: y merge, x set aside",
             (_, SwarmStatus::Planning) => "p sends it notes · on ★: x stops it, r starts a new one",
@@ -1439,6 +1441,15 @@ fn draw_launch_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
             ),
             Span::raw(" starts one."),
         ]),
+        Line::from(vec![
+            Span::styled(
+                "  o",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" opens a swarm that runs elsewhere."),
+        ]),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
@@ -1822,6 +1833,11 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
             );
             (" Message ", l, " ↑↓ scroll · m reply · Esc close ")
         }
+        Modal::Picker { swarms, cursor } => (
+            " Swarms ",
+            picker_lines(v, swarms, *cursor),
+            " ↑↓ choose · Enter show · Esc close ",
+        ),
     };
     let h = (lines.len() as u16 + 4)
         .min(area.height.saturating_sub(2))
@@ -1859,6 +1875,51 @@ fn draw_confirm(f: &mut Frame, area: Rect, c: &Confirm) {
         .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+/// The swarm picker's rows, around the cursor: `●` the swarm shown, the
+/// short id, the status, the goal and, outside this folder, where it runs.
+fn picker_lines(v: &SwarmBoard, swarms: &[SwarmRun], cursor: usize) -> Vec<Line<'static>> {
+    const SHOWN: usize = 16;
+    let here = crate::bus::store::normalize_workspace(&v.workspace);
+    let first = cursor
+        .saturating_sub(SHOWN / 2)
+        .min(swarms.len().saturating_sub(SHOWN));
+    let mut out = Vec::new();
+    for (i, s) in swarms.iter().enumerate().skip(first).take(SHOWN) {
+        let shown = v.scope.as_deref() == Some(s.id.as_str());
+        let ended = s.ended_ns.is_some();
+        let state = if ended { "closed" } else { s.status.as_str() };
+        let place = if s.workspace == here {
+            String::new()
+        } else {
+            format!(
+                "  {}",
+                crate::app::workspaces_view::tilde_path(std::path::Path::new(&s.workspace))
+            )
+        };
+        let text = format!(
+            "{} {:<8} {:<11} {:>5}  {}{}",
+            if shown { "●" } else { " " },
+            crate::bus::short_id(&s.id),
+            state,
+            fmt_clock(s.started_ns),
+            truncate(s.goal.lines().next().unwrap_or(""), 56),
+            place
+        );
+        let mut style = if ended { dim() } else { Style::default() };
+        if i == cursor {
+            style = style.add_modifier(Modifier::REVERSED);
+        }
+        out.push(Line::styled(text, style));
+    }
+    if swarms.len() > SHOWN {
+        out.push(Line::styled(
+            format!("  {} of {}", cursor + 1, swarms.len()),
+            dim(),
+        ));
+    }
+    out
 }
 
 fn indented(r: Rect) -> Rect {

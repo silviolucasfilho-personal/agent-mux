@@ -374,6 +374,14 @@ pub enum Modal {
     },
     /// One message in full.
     Message { message: BusMessage, scroll: usize },
+    /// `o`: the swarm picker. Every live swarm (this folder's first, then
+    /// the newest), then the ones that ended within [`RECENT_NS`]; `Enter`
+    /// shows the one under the cursor. With swarm sessions off the Agents
+    /// sidebar (`[agents] show_swarm`), this is how another swarm is reached.
+    Picker {
+        swarms: Vec<SwarmRun>,
+        cursor: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -863,7 +871,7 @@ impl SwarmBoard {
             let here = self.norm_workspace();
             // One swarm per screen (§9.1): the chosen one, else the folder's
             // newest live one, which then becomes the choice. Other swarms
-            // are groups in the Agents sidebar.
+            // are reached with `o` (the picker).
             if self.scope.is_none() {
                 self.scope = record::live_swarm(conn, &here).ok().flatten().map(|s| s.id);
             }
@@ -1627,6 +1635,29 @@ impl SwarmBoard {
         self.last_launch = None;
     }
 
+    /// `o`: the swarm picker ([`Modal::Picker`]), the cursor on the swarm
+    /// shown.
+    pub fn open_picker(&mut self) {
+        let Some(conn) = &self.conn else {
+            self.status_msg = Some("No trace store: no swarms to list.".into());
+            return;
+        };
+        let here = self.norm_workspace();
+        let mut live = record::live_swarms(conn).unwrap_or_default();
+        live.sort_by_key(|s| (s.workspace != here, std::cmp::Reverse(s.started_ns)));
+        let ended = record::ended_swarms_since(conn, self.now_ns - RECENT_NS).unwrap_or_default();
+        let swarms: Vec<SwarmRun> = live.into_iter().chain(ended).collect();
+        if swarms.is_empty() {
+            self.status_msg = Some("No swarm yet: n starts one.".into());
+            return;
+        }
+        let cursor = swarms
+            .iter()
+            .position(|s| self.scope.as_deref() == Some(s.id.as_str()))
+            .unwrap_or(0);
+        self.modal = Some(Modal::Picker { swarms, cursor });
+    }
+
     /// Shows swarm `id` (and puts the cursor on it at the next refresh).
     pub fn select_swarm(&mut self, id: &str) {
         self.scope = Some(id.to_string());
@@ -1997,6 +2028,10 @@ impl SwarmBoard {
             }
             KeyCode::Char('>') => {
                 self.open_command("", None);
+                Outcome::None
+            }
+            KeyCode::Char('o') => {
+                self.open_picker();
                 Outcome::None
             }
             KeyCode::Char('m') => {
@@ -2380,6 +2415,26 @@ impl SwarmBoard {
     fn handle_modal_key(&mut self, key: KeyEvent) -> Outcome {
         if key.code == KeyCode::Esc {
             self.modal = None;
+            return Outcome::None;
+        }
+        if let Some(Modal::Picker { swarms, cursor }) = &mut self.modal {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => *cursor = step(*cursor, swarms.len(), 1),
+                KeyCode::Up | KeyCode::Char('k') => *cursor = step(*cursor, swarms.len(), -1),
+                KeyCode::Home | KeyCode::Char('g') => *cursor = 0,
+                KeyCode::End | KeyCode::Char('G') => *cursor = swarms.len().saturating_sub(1),
+                KeyCode::Enter => {
+                    let id = swarms.get(*cursor).map(|s| s.id.clone());
+                    self.modal = None;
+                    if let Some(id) = id {
+                        self.select_swarm(&id);
+                        self.focus = Focus::Board;
+                        self.pane_focused = false;
+                        return Outcome::Reload;
+                    }
+                }
+                _ => {}
+            }
             return Outcome::None;
         }
         if let Some(Modal::Message { message, scroll }) = &mut self.modal {

@@ -957,6 +957,7 @@ fn a_swarm_row_keeps_the_cursor_when_a_session_elsewhere_ends() {
     use agent_mux::app::agents_list::AgentKind;
     let mut f = fixture();
     f.app.clean = false;
+    f.app.agents.show_swarm = true;
     for _ in 0..2 {
         f.app.focus_list();
         press(&mut f, KeyCode::Char('n'));
@@ -985,6 +986,98 @@ fn a_swarm_row_keeps_the_cursor_when_a_session_elsewhere_ends() {
         matches!(f.app.agent_row(), Some(AgentKind::Run(k)) if k.starts_with("swarm:")),
         "{:?}",
         f.app.agent_row()
+    );
+    f.app.kill_all();
+}
+
+#[test]
+fn swarm_sessions_stay_off_the_agents_list_unless_the_option_says_so() {
+    use agent_mux::app::agents_list::AgentKind;
+    let mut f = fixture();
+    for _ in 0..2 {
+        f.app.focus_list();
+        press(&mut f, KeyCode::Char('n'));
+        press(&mut f, KeyCode::Enter);
+        press(&mut f, KeyCode::Enter);
+    }
+    assert_eq!(f.app.sessions.len(), 2, "{}", notice(&f.app));
+    f.app.sessions[1].group = Some(agent_mux::tree::GroupRef {
+        kind: agent_mux::tree::GroupKind::Swarm,
+        id: "swarm-1".into(),
+        title: "the web run".into(),
+        detail: "1".into(),
+        label: "w1".into(),
+    });
+    let listed = |app: &agent_mux::app::App| -> Vec<usize> {
+        app.agent_lines()
+            .iter()
+            .filter_map(|l| match l.kind {
+                AgentKind::Session(i) => Some(i),
+                _ => None,
+            })
+            .collect()
+    };
+    let swarm_row = |app: &agent_mux::app::App| {
+        app.agent_lines()
+            .iter()
+            .any(|l| matches!(&l.kind, AgentKind::Run(k) if k.starts_with("swarm:")))
+    };
+    // the default: the worker is on the Swarm screen only, in either list
+    for clean in [true, false] {
+        f.app.clean = clean;
+        assert_eq!(listed(&f.app), vec![0], "clean = {clean}");
+        assert!(!swarm_row(&f.app), "clean = {clean}");
+    }
+    // a selected worker leaves the cursor on a listed session
+    f.app.selected = 1;
+    assert_eq!(f.app.agent_row(), Some(AgentKind::Session(0)));
+    // stepping through sessions with the sidebar hidden skips it
+    f.app.selected = 0;
+    f.app.sidebar_hidden = true;
+    f.app.focus_list();
+    press(&mut f, KeyCode::Down);
+    assert_eq!(f.app.selected, 0);
+    // `[agents] show_swarm = true` steps onto it and lists it under its swarm
+    f.app.agents.show_swarm = true;
+    press(&mut f, KeyCode::Down);
+    assert_eq!(f.app.selected, 1);
+    f.app.sidebar_hidden = false;
+    assert_eq!(listed(&f.app), vec![0, 1]);
+    assert!(swarm_row(&f.app));
+    f.app.kill_all();
+}
+
+#[test]
+fn o_picks_another_swarm_to_show() {
+    let mut f = fixture();
+    let older = seed(&f, SwarmStatus::Review, vec![task("a", &[])]);
+    let newer = seed(&f, SwarmStatus::Review, vec![task("b", &[])]);
+    open_screen(&mut f);
+    assert_eq!(view(&f.app).scope.as_deref(), Some(newer.id.as_str()));
+
+    press(&mut f, KeyCode::Char('o'));
+    let Some(Modal::Picker { swarms, cursor }) = &view(&f.app).modal else {
+        panic!("no picker: {:?}", view(&f.app).status_msg);
+    };
+    // the folder's live swarms, newest first, the cursor on the one shown
+    let ids: Vec<&str> = swarms.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, vec![newer.id.as_str(), older.id.as_str()]);
+    assert_eq!(*cursor, 0);
+    let screen = render(&f.app, 140, 40);
+    assert!(screen.contains("Swarms"), "{screen}");
+    assert!(
+        screen.contains(agent_mux::bus::short_id(&older.id)),
+        "{screen}"
+    );
+
+    press(&mut f, KeyCode::Down);
+    press(&mut f, KeyCode::Enter);
+    let v = view(&f.app);
+    assert!(v.modal.is_none());
+    assert_eq!(v.scope.as_deref(), Some(older.id.as_str()));
+    assert_eq!(
+        v.swarm.as_ref().map(|s| s.id.as_str()),
+        Some(older.id.as_str())
     );
     f.app.kill_all();
 }

@@ -4542,20 +4542,36 @@ impl App {
     }
 
     /// `⌘↑` / `⌘↓`: the previous or next session in list order, without
+    /// The listed session (`session_listed`) `step` away from the
+    /// selected one, wrapping round with `wrap`; `None` when there is none.
+    fn adjacent_listed_session(&self, step: isize, wrap: bool) -> Option<usize> {
+        let n = self.sessions.len() as isize;
+        let mut i = self.selected as isize;
+        for _ in 0..n {
+            i += step;
+            if wrap {
+                i = i.rem_euclid(n);
+            } else if i < 0 || i >= n {
+                return None;
+            }
+            if i as usize == self.selected {
+                return None;
+            }
+            if self.session_listed(i as usize) {
+                return Some(i as usize);
+            }
+        }
+        None
+    }
+
     /// moving the focus; with the pane focused the pane follows.
     fn select_adjacent_session(&mut self, step: i32) {
         if self.sessions.is_empty() {
             return;
         }
-        let last = self.sessions.len() - 1;
-        let next = if step < 0 {
-            self.selected.saturating_sub(1)
-        } else {
-            (self.selected + 1).min(last)
-        };
-        if next == self.selected {
+        let Some(next) = self.adjacent_listed_session(step.signum() as isize, false) else {
             return;
-        }
+        };
         self.selection = None;
         self.selected = next;
         self.sidebar_section = SidebarSection::Active;
@@ -6003,8 +6019,8 @@ impl App {
             Action::MoveDown => {
                 self.selection = None;
                 if self.sidebar_hidden {
-                    if !self.sessions.is_empty() {
-                        self.selected = (self.selected + 1).min(self.sessions.len() - 1);
+                    if let Some(i) = self.adjacent_listed_session(1, false) {
+                        self.selected = i;
                     }
                 } else if self.sidebar_section == SidebarSection::History {
                     if !self.history_sessions.is_empty() {
@@ -6020,7 +6036,9 @@ impl App {
             Action::MoveUp => {
                 self.selection = None;
                 if self.sidebar_hidden {
-                    self.selected = self.selected.saturating_sub(1);
+                    if let Some(i) = self.adjacent_listed_session(-1, false) {
+                        self.selected = i;
+                    }
                 } else if self.sidebar_section == SidebarSection::History {
                     if self.selected_history > 0 {
                         self.selected_history -= 1;
@@ -6041,8 +6059,8 @@ impl App {
             Action::UnfoldAgent => self.unfold_agent(),
             Action::ToggleSidebarSection => {
                 if self.sidebar_hidden {
-                    if !self.sessions.is_empty() {
-                        self.selected = (self.selected + 1) % self.sessions.len();
+                    if let Some(i) = self.adjacent_listed_session(1, true) {
+                        self.selected = i;
                     }
                 } else if self.sidebar_section == SidebarSection::History {
                     // back to the Agents list, on the row it left
