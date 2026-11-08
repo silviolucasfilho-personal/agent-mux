@@ -14,7 +14,7 @@ use crate::bus::store::{self as bstore, normalize_workspace};
 use crate::bus::{BusTask, NewTaskSpec, TaskIsolation, TaskStatus};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Who created a swarm's tasks on the board: `swarm:<id>`.
 pub fn creator(swarm_id: &str) -> String {
@@ -1911,6 +1911,10 @@ pub enum SwarmVerb {
     /// Review a finished task (again, after a fix round): a new review goes
     /// on the board; the earlier ones stay (v25).
     Review,
+    /// Remove the swarm: a closed one from the store and the worktree
+    /// folder; a live one is closed first (needs the TUI to stop its
+    /// sessions).
+    Delete,
 }
 
 impl SwarmVerb {
@@ -1930,6 +1934,7 @@ impl SwarmVerb {
             "close" | "stop" => SwarmVerb::Close,
             "restart" | "restart-coordinator" => SwarmVerb::Restart,
             "review" | "re-review" => SwarmVerb::Review,
+            "delete" | "rm" | "remove" => SwarmVerb::Delete,
             _ => return None,
         })
     }
@@ -1949,6 +1954,7 @@ impl SwarmVerb {
             SwarmVerb::Close => "close",
             SwarmVerb::Restart => "restart",
             SwarmVerb::Review => "review",
+            SwarmVerb::Delete => "delete",
         }
     }
     /// Whether the verb names a task.
@@ -1976,10 +1982,12 @@ impl SwarmVerb {
                 | SwarmVerb::SetAside
                 | SwarmVerb::Cancel
                 | SwarmVerb::Close
+                | SwarmVerb::Delete
         )
     }
     /// Whether only the running TUI can carry it out (it starts or stops
-    /// sessions).
+    /// sessions). `Delete` is not one: a closed swarm's records go from a
+    /// shell too, and a live one is refused there.
     pub fn needs_tui(self) -> bool {
         matches!(
             self,
@@ -2246,10 +2254,114 @@ pub fn apply(
             }
             Ok(done)
         }
+        SwarmVerb::Delete => {
+            if swarm.ended_ns.is_none() {
+                return Err(format!(
+                    "{} is still running: delete it from the TUI (d on the Swarm screen) or close it first",
+                    swarm.id
+                ));
+            }
+            let deleted = delete_swarm(conn, db, swarm, now)?;
+            let removed = super::remove_worktrees(Path::new(&swarm.workspace), &deleted.worktrees);
+            Ok(deleted.note(&swarm.id, &removed))
+        }
         SwarmVerb::Replan | SwarmVerb::Close | SwarmVerb::Restart => {
             unreachable!("needs the TUI")
         }
     }
+}
+
+/// What [`delete_swarm`] removed from the store, and what the caller cleans
+/// up after it: the worktree checkouts to remove (`bus::swarm::remove_worktrees`)
+/// and the branches that are kept.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Deleted {
+    pub tasks: usize,
+    pub worktrees: Vec<PathBuf>,
+    pub branches: Vec<String>,
+}
+
+impl Deleted {
+    /// One line for the operator: what went, what the worktree cleanup did,
+    /// and the branches that stay.
+    pub fn note(&self, swarm_id: &str, removed: &[(PathBuf, Result<(), String>)]) -> String {
+        let mut out = format!("deleted {swarm_id}: {} task(s)", self.tasks);
+        let gone = removed.iter().filter(|(_, r)| r.is_ok()).count();
+        let failed: Vec<String> = removed
+            .iter()
+            .filter_map(|(p, r)| r.as_ref().err().map(|e| format!("{}: {e}", p.display())))
+            .collect();
+        if gone > 0 {
+            out.push_str(&format!(", {gone} worktree(s) removed"));
+        }
+        if !failed.is_empty() {
+            out.push_str(&format!(", worktree(s) left: {}", failed.join("; ")));
+        }
+        if !self.branches.is_empty() {
+            out.push_str(&format!(", branch(es) kept: {}", self.branches.join(", ")));
+        }
+        out
+    }
+}
+
+/// Removes a closed swarm from the store: its `swarms` row with everything
+/// hanging off it (coordinator, settings, decisions, events, reviews) and
+/// its board (`agent_tasks` with `swarm_tasks`, `swarm_dispatch`,
+/// `swarm_task_reviews`, `agent_leases`, `swarm_reviews`). Launches, turns
+/// and messages stay: they are trace history. No event or decision row is
+/// written, since they would go with the swarm. The worktree checkouts are
+/// not touched here: the answer names them, and the caller removes them
+/// with [`super::remove_worktrees`] once the rows are gone. A swarm that
+/// has not ended is refused: the TUI closes it first.
+pub fn delete_swarm(
+    conn: &Connection,
+    db: Option<&Path>,
+    swarm: &SwarmRun,
+    _now: i64,
+) -> Result<Deleted, String> {
+    if swarm.ended_ns.is_none() {
+        return Err(format!(
+            "{} is still running ({}): close it before deleting it",
+            swarm.id,
+            swarm.status.as_str()
+        ));
+    }
+    let board = board(conn, &swarm.id).map_err(|e| e.to_string())?;
+    let mut deleted = Deleted {
+        tasks: board.len(),
+        ..Default::default()
+    };
+    for t in &board {
+        if let Some(p) = t.task.worktree.as_deref().filter(|p| !p.is_empty()) {
+            let p = PathBuf::from(p);
+            if !deleted.worktrees.contains(&p) {
+                deleted.worktrees.push(p);
+            }
+        }
+        if let Some(b) = t.task.branch.as_deref().filter(|b| !b.is_empty())
+            && !deleted.branches.iter().any(|x| x == b)
+        {
+            deleted.branches.push(b.to_string());
+        }
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    for t in &board {
+        let id = t.task.id.as_str();
+        tx.execute("DELETE FROM swarm_reviews WHERE task_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM agent_leases WHERE task_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        // cascades swarm_tasks, swarm_dispatch, swarm_task_reviews
+        tx.execute("DELETE FROM agent_tasks WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+    }
+    // cascades swarm_coordinators, swarm_settings, swarm_review_settings,
+    // swarm_decisions, swarm_events
+    tx.execute("DELETE FROM swarms WHERE id = ?1", params![swarm.id])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    poke(db);
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -2901,5 +3013,178 @@ mod tests {
             (ds[0].verb, ds[0].said.as_deref()),
             (SwarmVerb::Cancel, Some("stop a"))
         );
+    }
+
+    #[test]
+    fn delete_verb_round_trips_and_needs_no_task() {
+        assert_eq!(SwarmVerb::parse("delete"), Some(SwarmVerb::Delete));
+        assert_eq!(SwarmVerb::parse("rm"), Some(SwarmVerb::Delete));
+        assert_eq!(SwarmVerb::parse("remove"), Some(SwarmVerb::Delete));
+        assert_eq!(SwarmVerb::Delete.as_str(), "delete");
+        assert_eq!(
+            SwarmVerb::parse(SwarmVerb::Delete.as_str()),
+            Some(SwarmVerb::Delete)
+        );
+        assert!(!SwarmVerb::Delete.takes_task());
+        assert!(SwarmVerb::Delete.needs_operator_words());
+        assert!(!SwarmVerb::Delete.needs_tui());
+    }
+
+    #[test]
+    fn deleting_an_ended_swarm_removes_its_rows_and_keeps_the_others() {
+        let (dir, conn) = store();
+        let ws = dir.path().to_string_lossy().into_owned();
+        let mut n = new_swarm(&ws);
+        n.worker_pool = vec!["claude".into()];
+        let env = super::super::plan::CheckEnv {
+            harnesses: vec!["claude".into()],
+            ..Default::default()
+        };
+        let plan = Plan {
+            summary: "two".into(),
+            tasks: vec![pt("a", &[]), pt("b", &["a"])],
+            review: None,
+        };
+        let s = create_swarm(&conn, None, &n, 1).unwrap();
+        submit_plan(&conn, None, &s, &plan, &env, 2).unwrap();
+        set_coordinator_launch(&conn, None, &s.id, "coord-1", 2).unwrap();
+        let other = create_swarm(&conn, None, &n, 3).unwrap();
+        submit_plan(&conn, None, &other, &plan, &env, 4).unwrap();
+        set_coordinator_launch(&conn, None, &other.id, "coord-2", 4).unwrap();
+
+        // a live swarm is refused, by the store and by the verb
+        let live = get_swarm(&conn, &s.id).unwrap().unwrap();
+        assert!(live.ended_ns.is_none());
+        let err = delete_swarm(&conn, None, &live, 5).unwrap_err();
+        assert!(err.contains("still running"), "{err}");
+        let err = apply(
+            &conn,
+            None,
+            &live,
+            SwarmVerb::Delete,
+            None,
+            &env,
+            &Decider::CLI,
+            5,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("still running") && err.contains("Swarm screen"),
+            "{err}"
+        );
+
+        // `a` ran in a worktree, was dispatched, reviewed, decided on and logged
+        let b = board(&conn, &s.id).unwrap();
+        let a = b[0].task.id.clone();
+        let wt = dir.path().join(".loop-worktrees").join("bus-a");
+        bstore::update_task(
+            &conn,
+            None,
+            &a,
+            "w1",
+            TaskStatus::Done,
+            Some(serde_json::json!("done")),
+            None,
+            Some(wt.to_string_lossy().into_owned()),
+            Some("loop/bus-a".into()),
+            6,
+        )
+        .unwrap();
+        offer_task(&conn, &a, 6).unwrap();
+        conn.execute(
+            "INSERT INTO swarm_task_reviews (task_id, skip, updated_ns) VALUES (?1, 1, 6)",
+            params![a],
+        )
+        .unwrap();
+        bstore::record_review(&conn, None, &ws, &a, true, Some("loop/bus-a"), None, 7).unwrap();
+        decide(&conn, &s.id, Some(&a), SwarmVerb::Merge, &Decider::TUI, 7).unwrap();
+        event(&conn, &s.id, Some(&a), "review.merged", None, None, 7).unwrap();
+        let ended = {
+            end_swarm(&conn, None, &live, 8).unwrap();
+            get_swarm(&conn, &s.id).unwrap().unwrap()
+        };
+        assert!(ended.ended_ns.is_some());
+
+        let count = |sql: &str, id: &str| -> i64 {
+            conn.query_row(sql, params![id], |r| r.get(0)).unwrap()
+        };
+        let by_swarm = [
+            "SELECT COUNT(*) FROM swarms WHERE id = ?1",
+            "SELECT COUNT(*) FROM swarm_tasks WHERE swarm_id = ?1",
+            "SELECT COUNT(*) FROM swarm_events WHERE swarm_id = ?1",
+            "SELECT COUNT(*) FROM swarm_decisions WHERE swarm_id = ?1",
+            "SELECT COUNT(*) FROM swarm_coordinators WHERE swarm_id = ?1",
+            "SELECT COUNT(*) FROM swarm_settings WHERE swarm_id = ?1",
+        ];
+        let by_task = [
+            "SELECT COUNT(*) FROM agent_tasks WHERE id = ?1",
+            "SELECT COUNT(*) FROM swarm_dispatch WHERE task_id = ?1",
+            "SELECT COUNT(*) FROM swarm_task_reviews WHERE task_id = ?1",
+            "SELECT COUNT(*) FROM swarm_reviews WHERE task_id = ?1",
+        ];
+        for sql in by_swarm {
+            assert!(count(sql, &s.id) > 0, "{sql}");
+        }
+        for sql in by_task {
+            assert_eq!(count(sql, &a), 1, "{sql}");
+        }
+        let other_before: Vec<i64> = by_swarm.iter().map(|sql| count(sql, &other.id)).collect();
+
+        let deleted = delete_swarm(&conn, None, &ended, 9).unwrap();
+        assert_eq!(deleted.tasks, 2);
+        assert_eq!(deleted.worktrees, vec![wt.clone()]);
+        assert_eq!(deleted.branches, vec!["loop/bus-a".to_string()]);
+        for sql in by_swarm {
+            assert_eq!(count(sql, &s.id), 0, "{sql}");
+        }
+        for sql in by_task {
+            assert_eq!(count(sql, &a), 0, "{sql}");
+        }
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM agent_tasks WHERE id = ?1",
+                &b[1].task.id
+            ),
+            0
+        );
+        // the other swarm of the workspace keeps everything
+        let other_after: Vec<i64> = by_swarm.iter().map(|sql| count(sql, &other.id)).collect();
+        assert_eq!(other_before, other_after);
+        assert_eq!(board(&conn, &other.id).unwrap().len(), 2);
+        assert!(get_swarm(&conn, &s.id).unwrap().is_none());
+
+        // the verb's line, from a shell, names what went (no checkout existed)
+        let o = get_swarm(&conn, &other.id).unwrap().unwrap();
+        end_swarm(&conn, None, &o, 10).unwrap();
+        let o = get_swarm(&conn, &other.id).unwrap().unwrap();
+        let line = apply(
+            &conn,
+            None,
+            &o,
+            SwarmVerb::Delete,
+            None,
+            &env,
+            &Decider::CLI,
+            11,
+        )
+        .unwrap();
+        assert_eq!(line, format!("deleted {}: 2 task(s)", other.id));
+        assert!(get_swarm(&conn, &other.id).unwrap().is_none());
+        // a coordinator relaying it must quote the operator
+        let s3 = create_swarm(&conn, None, &n, 12).unwrap();
+        end_swarm(&conn, None, &s3, 13).unwrap();
+        let s3 = get_swarm(&conn, &s3.id).unwrap().unwrap();
+        let err = apply(
+            &conn,
+            None,
+            &s3,
+            SwarmVerb::Delete,
+            None,
+            &env,
+            &Decider::chat(None, None),
+            14,
+        )
+        .unwrap_err();
+        assert!(err.contains("operator_said"), "{err}");
     }
 }
