@@ -55,7 +55,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "agent_mux_swarm_action",
-            description: "Relay an operator decision on the swarm: pause, resume, retry <task>, cancel <task>, review <task> (review a finished task again, after a fix round), merge <task>, set-aside <task>, accept <task>, drop <task>, close. Merge, set-aside, cancel and close need the operator's words in operator_said; the decision is recorded with them.",
+            description: "Relay an operator decision on the swarm: pause, resume, retry <task>, cancel <task>, review <task> (review a finished task again, after a fix round), merge <task>, set-aside <task>, accept <task>, drop <task>, close, delete. delete: remove the swarm; a live one is closed first, which ends your session too. Merge, set-aside, cancel, close and delete need the operator's words in operator_said; the decision is recorded with them.",
             input_schema: schema_of::<SwarmActionArgs>(),
             read_only: false,
         },
@@ -534,13 +534,13 @@ fn get_swarm(service: &TraceService, arguments: Value) -> Value {
 #[serde(deny_unknown_fields)]
 pub struct SwarmActionArgs {
     /// `pause`, `resume`, `retry`, `cancel`, `review`, `merge`, `set-aside`, `accept`,
-    /// `drop`, `close` (also `launch`, `approve`: see agent_mux_swarm_launch).
+    /// `drop`, `close`, `delete` (also `launch`, `approve`: see agent_mux_swarm_launch).
     pub verb: String,
     /// The task (plan key, id or prefix) for the verbs that take one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
-    /// The operator's words, quoted; required for merge, set-aside, cancel
-    /// and close.
+    /// The operator's words, quoted; required for merge, set-aside, cancel,
+    /// close and delete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_said: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -560,7 +560,7 @@ fn action(service: &TraceService, arguments: Value) -> Value {
     };
     let Some(verb) = SwarmVerb::parse(args.verb.trim()) else {
         return tool_error(&ServiceError::InvalidArgument(format!(
-            "unknown verb `{}`: pause, resume, retry, cancel, review, merge, set-aside, accept, drop, close",
+            "unknown verb `{}`: pause, resume, retry, cancel, review, merge, set-aside, accept, drop, close, delete",
             args.verb
         )));
     };
