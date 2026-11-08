@@ -408,11 +408,63 @@ pub enum Confirm {
         session_idx: usize,
         key: String,
     },
+    /// Delete the swarm: a live one is closed first (`d` on any of its rows).
+    Delete {
+        swarm_id: String,
+        goal: String,
+        live: bool,
+        sessions: usize,
+        open_tasks: usize,
+        worktrees: usize,
+    },
 }
 
 impl Confirm {
+    /// The delete confirmation for `swarm` with its `board` and the
+    /// number of its live `sessions`.
+    pub fn delete_of(swarm: &SwarmRun, board: &[BoardTask], sessions: usize) -> Confirm {
+        let mut worktrees: Vec<&str> = board
+            .iter()
+            .filter_map(|t| t.task.worktree.as_deref())
+            .filter(|p| !p.is_empty())
+            .collect();
+        worktrees.sort_unstable();
+        worktrees.dedup();
+        Confirm::Delete {
+            swarm_id: swarm.id.clone(),
+            goal: swarm.goal.clone(),
+            live: swarm.ended_ns.is_none(),
+            sessions,
+            open_tasks: board
+                .iter()
+                .filter(|t| !t.task.status.is_terminal())
+                .count(),
+            worktrees: worktrees.len(),
+        }
+    }
+
     pub fn question(&self) -> String {
         match self {
+            Confirm::Delete {
+                swarm_id,
+                goal,
+                live,
+                sessions,
+                open_tasks,
+                worktrees,
+            } => {
+                let id = crate::bus::short_id(swarm_id);
+                let goal = goal.lines().next().unwrap_or_default();
+                if *live {
+                    format!(
+                        "Delete swarm {id} \"{goal}\"? It is running: {sessions} session(s) stop, {open_tasks} task(s) are cancelled, {worktrees} worktree(s) are removed (branches kept). [y/n]"
+                    )
+                } else {
+                    format!(
+                        "Delete swarm {id} \"{goal}\"? Its {worktrees} worktree(s) are removed (branches kept); traces stay. [y/n]"
+                    )
+                }
+            }
             Confirm::Approve { tasks } => {
                 format!("Approve the plan? {tasks} task(s); workers start now.")
             }
@@ -2152,11 +2204,17 @@ impl SwarmBoard {
                 self.open_launch();
                 Outcome::None
             }
-            KeyCode::Char('e')
-            | KeyCode::Char('d')
-            | KeyCode::Char('p')
-            | KeyCode::Char('b')
-            | KeyCode::Char('a') => {
+            KeyCode::Char('d') => {
+                match &self.swarm {
+                    Some(sw) => {
+                        let sessions = self.live_tiles().len();
+                        self.confirm = Some(Confirm::delete_of(sw, &self.board, sessions));
+                    }
+                    None => self.status_msg = Some("No swarm to delete.".into()),
+                }
+                Outcome::None
+            }
+            KeyCode::Char('e') | KeyCode::Char('p') | KeyCode::Char('b') | KeyCode::Char('a') => {
                 self.status_msg = Some(
                     "Changes to the plan are said to the coordinator (Enter on ★). > writes to workers; 5 on the swarm row is Activity."
                         .into(),
@@ -2449,6 +2507,7 @@ impl SwarmBoard {
             Confirm::Close => self.verb(SwarmVerb::Close, None),
             Confirm::Cancel { task_id, .. } => Outcome::CancelTask(task_id),
             Confirm::Stop { session_idx, .. } => Outcome::StopSession(session_idx),
+            Confirm::Delete { .. } => self.verb(SwarmVerb::Delete, None),
         }
     }
 
@@ -3867,7 +3926,7 @@ mod tests {
             vec![task("a", TaskStatus::Open, None)],
             &[],
         );
-        for c in ['p', 'e', 'd', 'b', 'a'] {
+        for c in ['p', 'e', 'b', 'a'] {
             assert_eq!(v.handle_key(key(KeyCode::Char(c))), Outcome::None);
             assert!(!v.text_entry_active(), "{c}");
             assert!(
@@ -3878,8 +3937,22 @@ mod tests {
                 v.status_msg
             );
         }
-        // n is always a new swarm, even inside one
+        // d asks to delete the whole swarm, on any row; only y does it
         v.handle_key(key(KeyCode::Down));
+        assert_eq!(v.handle_key(key(KeyCode::Char('d'))), Outcome::None);
+        assert!(matches!(
+            v.confirm,
+            Some(Confirm::Delete { live: true, .. })
+        ));
+        assert_eq!(
+            v.handle_key(key(KeyCode::Char('y'))),
+            Outcome::Verb {
+                verb: SwarmVerb::Delete,
+                task: None,
+                notes: None
+            }
+        );
+        // n is always a new swarm, even inside one
         v.handle_key(key(KeyCode::Char('n')));
         assert!(matches!(v.modal, Some(Modal::Launch { .. })));
     }

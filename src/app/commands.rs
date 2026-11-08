@@ -90,10 +90,10 @@ impl App {
                     || runs_item.is_some()
                     || matches!(self.mode, Mode::Markdown(_) | Mode::AgentEditor(_))
                     || workspace_node.is_some_and(|n| n.customization.primary_doc.is_some())
-                    || in_swarm
             }
             Delete => {
                 matches!(row, Some(AgentKind::Loop(_)))
+                    || matches!(&row, Some(AgentKind::Run(k)) if k.starts_with("swarm:"))
                     || (main_list
                         && self.sidebar_section == super::SidebarSection::Workflows
                         && matches!(
@@ -190,6 +190,7 @@ impl App {
                         "No session available"
                     }
                     ToggleSidebar => "This screen has no sidebar control",
+                    Edit if in_swarm => "Changes to the plan are said to the coordinator",
                     _ => "Unavailable for this screen or selection",
                 }
                 .into(),
@@ -325,6 +326,12 @@ pub enum Overlay {
     Commands(CommandMenu),
     Help(usize),
     DeleteSession(usize),
+    /// `d` on a swarm group in the Agents sidebar: the swarm's id and the
+    /// confirmation's text (the Swarm screen's).
+    DeleteSwarm {
+        swarm_id: String,
+        question: String,
+    },
     Navigation(NavigationTarget),
 }
 
@@ -485,6 +492,16 @@ impl App {
                             self.apply(super::Action::RemoveSelected, key, now);
                         }
                     } else if matches!(key.code, KeyCode::Esc | KeyCode::Char('n')) {
+                        close = true;
+                    }
+                }
+                Some(Overlay::DeleteSwarm { swarm_id, .. }) => {
+                    if key.code == KeyCode::Char('y') && key.modifiers.is_empty() {
+                        let id = swarm_id.clone();
+                        self.command_overlay = None;
+                        self.delete_swarm_from_sidebar(&id);
+                    } else {
+                        self.notice = Some(Notice::info("Not done."));
                         close = true;
                     }
                 }

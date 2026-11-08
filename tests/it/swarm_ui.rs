@@ -1,7 +1,7 @@
 //! The Swarm screen drawn into a test terminal and driven through the App
 //! (`app::swarm_board`, `ui::swarm_board`), in the Agents layout: a plan in
 //! review drawn as a tree beside the swarm's card with what needs you, `y` approving only a plan without
-//! errors, `d` deleting a draft task, `y` merging a finished branch, the
+//! errors, `d` deleting the swarm (screen and sidebar), `y` merging a finished branch, the
 //! launch card and form, and a refresh only when the store moved.
 
 #![cfg(unix)]
@@ -323,15 +323,17 @@ fn y_never_approves_a_plan_it_points_at_the_chat_and_the_plan_keys_are_gone() {
         "fix the plan first: docs: harness `gemini` is not installed"
     );
 
-    // d, e and p no longer edit the plan: that is said to the coordinator.
+    // e and p no longer edit the plan: that is said to the coordinator.
     press(&mut f, KeyCode::Char('G'));
-    press(&mut f, KeyCode::Char('d'));
-    assert!(view(&f.app).confirm.is_none());
-    assert!(
-        notice(&f.app).contains("said to the coordinator"),
-        "{}",
-        notice(&f.app)
-    );
+    for c in ['e', 'p'] {
+        press(&mut f, KeyCode::Char(c));
+        assert!(view(&f.app).confirm.is_none(), "{c}");
+        assert!(
+            notice(&f.app).contains("said to the coordinator"),
+            "{c}: {}",
+            notice(&f.app)
+        );
+    }
     assert_eq!(view(&f.app).board.len(), 2);
 
     // A clean plan: y does not approve it (coordinator-first §5.3); it says
@@ -1256,5 +1258,197 @@ fn a_restart_reconnects_the_coordinator_to_its_swarm() {
     open_screen(&mut f);
     f.app.open_swarm_view();
     assert_eq!(view(&f.app).pane(), PaneView::Session(0));
+    f.app.kill_all();
+}
+
+/// Starts one session of the fixture's fake `claude` and makes it a worker
+/// of `swarm`'s first task (its sidebar group and its board row).
+fn seed_worker(f: &mut Fixture, swarm: &SwarmRun) -> usize {
+    f.app.focus_list();
+    press(f, KeyCode::Char('n'));
+    press(f, KeyCode::Enter);
+    press(f, KeyCode::Enter);
+    let idx = f.app.sessions.len() - 1;
+    let s = &mut f.app.sessions[idx];
+    s.group = Some(agent_mux::tree::GroupRef {
+        kind: agent_mux::tree::GroupKind::Swarm,
+        id: swarm.id.clone(),
+        title: "the follow-ups".into(),
+        detail: agent_mux::bus::short_id(&swarm.id).into(),
+        label: "schema".into(),
+    });
+    let launch = format!("session-{}", s.id);
+    let conn = open_aux(&f.db).unwrap();
+    let board = record::board(&conn, &swarm.id).unwrap();
+    conn.execute(
+        "UPDATE agent_tasks SET status = 'running', assigned_to = ?1 WHERE id = ?2",
+        rusqlite::params![launch, board[0].task.id],
+    )
+    .unwrap();
+    idx
+}
+
+/// The screen on a closed swarm, chosen in the picker (`o`) as the
+/// operator does: a closed swarm is not shown by default.
+fn open_closed(f: &mut Fixture, swarm: &SwarmRun) {
+    open_screen(f);
+    press(f, KeyCode::Char('o'));
+    let Some(Modal::Picker { swarms, .. }) = &view(&f.app).modal else {
+        panic!("no picker: {:?}", view(&f.app).status_msg);
+    };
+    let at = swarms
+        .iter()
+        .position(|s| s.id == swarm.id)
+        .expect("listed");
+    for _ in 0..at {
+        press(f, KeyCode::Down);
+    }
+    press(f, KeyCode::Enter);
+}
+
+fn closed_swarm(f: &Fixture) -> SwarmRun {
+    let swarm = seed(f, SwarmStatus::Running, vec![task("schema", &[])]);
+    let conn = open_aux(&f.db).unwrap();
+    record::end_swarm(&conn, None, &swarm, now_ns()).unwrap();
+    record::get_swarm(&conn, &swarm.id).unwrap().unwrap()
+}
+
+#[test]
+fn d_then_y_deletes_a_closed_swarm_and_the_screen_shows_no_swarm() {
+    let mut f = fixture();
+    let swarm = closed_swarm(&f);
+    open_closed(&mut f, &swarm);
+    assert_eq!(view(&f.app).swarm.as_ref().map(|s| &s.id), Some(&swarm.id));
+    let out = render(&f.app, 140, 32);
+    assert!(
+        out.contains("d deletes it"),
+        "the closed swarm's hint:\n{out}"
+    );
+    // d on a task row asks too, for the whole swarm
+    press(&mut f, KeyCode::Char('G'));
+    press(&mut f, KeyCode::Char('d'));
+    let q = view(&f.app)
+        .confirm
+        .as_ref()
+        .map(|c| c.question())
+        .unwrap_or_default();
+    assert!(q.starts_with("Delete swarm "), "{q}");
+    assert!(q.contains("\"Ship the follow-ups\""), "{q}");
+    assert!(q.contains("traces stay"), "{q}");
+    assert!(!q.contains("It is running"), "{q}");
+    let out = render(&f.app, 140, 32);
+    assert!(out.contains("Delete swarm"), "the confirmation:\n{out}");
+    press(&mut f, KeyCode::Char('y'));
+    let conn = open_aux(&f.db).unwrap();
+    assert!(record::get_swarm(&conn, &swarm.id).unwrap().is_none());
+    assert!(notice(&f.app).starts_with("deleted"), "{}", notice(&f.app));
+    assert!(view(&f.app).swarm.is_none());
+    assert!(view(&f.app).scope.is_none());
+    let out = render(&f.app, 140, 32);
+    assert!(out.contains("No swarm in this workspace"), "{out}");
+}
+
+#[test]
+fn d_then_anything_but_y_deletes_nothing() {
+    for no in [KeyCode::Char('n'), KeyCode::Esc] {
+        let mut f = fixture();
+        let swarm = closed_swarm(&f);
+        open_closed(&mut f, &swarm);
+        press(&mut f, KeyCode::Char('d'));
+        assert!(view(&f.app).confirm.is_some());
+        press(&mut f, no);
+        assert!(view(&f.app).confirm.is_none());
+        assert_eq!(notice(&f.app), "Not done.");
+        let conn = open_aux(&f.db).unwrap();
+        assert!(record::get_swarm(&conn, &swarm.id).unwrap().is_some());
+    }
+}
+
+#[test]
+fn d_on_a_running_swarm_stops_its_sessions_then_deletes_it() {
+    let mut f = fixture();
+    let swarm = seed(&f, SwarmStatus::Running, vec![task("schema", &[])]);
+    let idx = seed_worker(&mut f, &swarm);
+    let worker = f.app.sessions[idx].id;
+    open_screen(&mut f);
+    press(&mut f, KeyCode::Char('d'));
+    let q = view(&f.app)
+        .confirm
+        .as_ref()
+        .map(|c| c.question())
+        .unwrap_or_default();
+    assert!(q.contains("It is running"), "{q}");
+    assert!(q.contains("1 task(s) are cancelled"), "{q}");
+    press(&mut f, KeyCode::Char('y'));
+    assert!(
+        notice(&f.app).starts_with(&format!("deleted {}", swarm.id)),
+        "{}",
+        notice(&f.app)
+    );
+    assert!(
+        notice(&f.app).contains("stopped 1 session(s)"),
+        "{}",
+        notice(&f.app)
+    );
+    assert!(f.app.sessions.iter().all(|s| s.id != worker));
+    let conn = open_aux(&f.db).unwrap();
+    assert!(record::get_swarm(&conn, &swarm.id).unwrap().is_none());
+    let left: i64 = conn
+        .query_row("SELECT COUNT(*) FROM swarm_tasks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
+    f.app.kill_all();
+}
+
+#[test]
+fn edit_is_unavailable_on_the_swarm_screen_and_delete_is() {
+    let mut f = fixture();
+    seed(&f, SwarmStatus::Running, vec![task("schema", &[])]);
+    open_screen(&mut f);
+    use agent_mux::keymap::ActionId;
+    assert_eq!(
+        f.app.command_availability(ActionId::Edit).reason(),
+        Some("Changes to the plan are said to the coordinator")
+    );
+    assert!(f.app.command_availability(ActionId::Delete).enabled());
+    press(&mut f, KeyCode::Char('e'));
+    assert!(view(&f.app).confirm.is_none());
+    assert!(
+        notice(&f.app).contains("said to the coordinator"),
+        "{}",
+        notice(&f.app)
+    );
+}
+
+#[test]
+fn d_on_a_swarm_group_in_the_agents_sidebar_deletes_it() {
+    use agent_mux::app::agents_list::AgentKind;
+    let mut f = fixture();
+    let swarm = closed_swarm(&f);
+    seed_worker(&mut f, &swarm);
+    f.app.agents.show_swarm = true;
+    f.app.focus_list();
+    let group = AgentKind::Run(format!("swarm:{}", swarm.id));
+    let lines = f.app.agent_lines();
+    let at = lines
+        .iter()
+        .position(|l| l.kind == group)
+        .expect("the swarm's group row");
+    f.app.select_agent_line(&lines, at);
+    assert_eq!(f.app.agent_row(), Some(group.clone()));
+    assert!(
+        f.app
+            .command_availability(agent_mux::keymap::ActionId::Delete)
+            .enabled()
+    );
+    press(&mut f, KeyCode::Char('d'));
+    let out = render(&f.app, 140, 32);
+    assert!(out.contains("Delete swarm"), "the confirmation:\n{out}");
+    press(&mut f, KeyCode::Char('y'));
+    assert!(notice(&f.app).starts_with("deleted"), "{}", notice(&f.app));
+    let conn = open_aux(&f.db).unwrap();
+    assert!(record::get_swarm(&conn, &swarm.id).unwrap().is_none());
+    assert!(f.app.sessions.is_empty());
+    assert!(!f.app.agent_lines().iter().any(|l| l.kind == group));
     f.app.kill_all();
 }

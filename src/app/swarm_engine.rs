@@ -757,7 +757,7 @@ impl App {
             Some(s) => s,
             None => record::resolve_swarm(&conn, &norm, swarm_id)?,
         };
-        if swarm.ended_ns.is_some() {
+        if swarm.ended_ns.is_some() && verb != SwarmVerb::Delete {
             return Err(format!("{} has ended", swarm.id));
         }
         let now = crate::tracing::store::now_ns();
@@ -768,9 +768,10 @@ impl App {
             ));
         }
         match verb {
+            SwarmVerb::Delete => self.delete_swarm_run(&conn, &db, &swarm),
             SwarmVerb::Close => {
                 let _ = record::decide(&conn, &swarm.id, None, verb, who, now);
-                let (stopped, records) = self.stop_swarm_run(&swarm);
+                let (stopped, records) = self.stop_swarm_run(&swarm, true);
                 let (cancelled, released) = records?;
                 Ok(format!(
                     "closed: stopped {stopped} session(s), cancelled {cancelled} task(s), released {released} lease(s)"
@@ -1451,6 +1452,183 @@ impl App {
             Instant::now(),
         );
         let _ = record::mark_events_told(conn, &swarm.id, newest, now_ns);
+    }
+
+    /// The indexes in `self.sessions` of `swarm`'s sessions: its
+    /// coordinator, its workers and their reconnections (by sidebar group,
+    /// by the launch's swarm metadata, or by a launch the board names).
+    pub fn swarm_session_indexes(
+        &self,
+        conn: &rusqlite::Connection,
+        swarm: &SwarmRun,
+    ) -> Vec<usize> {
+        let mut launches: Vec<String> = record::board(conn, &swarm.id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|t| t.task.assigned_to)
+            .collect();
+        if let Some(c) = record::coordinator(conn, &swarm.id)
+            .ok()
+            .flatten()
+            .and_then(|c| c.launch)
+        {
+            launches.push(c);
+        }
+        launches.extend(swarm.planner_launch.clone());
+        self.sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                s.group
+                    .as_ref()
+                    .is_some_and(|g| g.kind == crate::tree::GroupKind::Swarm && g.id == swarm.id)
+                    || s.swarm.as_ref().is_some_and(|l| l.swarm_id == swarm.id)
+                    || s.trace
+                        .as_ref()
+                        .is_some_and(|t| launches.contains(&t.launch_id))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The confirmation `d` asks before deleting `swarm_id` (the Swarm
+    /// screen's and the Agents sidebar's): what stops and what is removed.
+    pub fn swarm_delete_confirm(
+        &self,
+        swarm_id: &str,
+    ) -> Result<crate::app::swarm_board::Confirm, String> {
+        let db = self.trace_db_path.clone().ok_or("no trace store")?;
+        let conn = crate::tracing::store::open_aux(&db)?;
+        let swarm = record::get_swarm(&conn, swarm_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no swarm {swarm_id}"))?;
+        let board = record::board(&conn, &swarm.id).unwrap_or_default();
+        let now = Instant::now();
+        let sessions = self
+            .swarm_session_indexes(&conn, &swarm)
+            .into_iter()
+            .filter(|&i| !matches!(self.sessions[i].status(now), Status::Exited(_)))
+            .count();
+        Ok(crate::app::swarm_board::Confirm::delete_of(
+            &swarm, &board, sessions,
+        ))
+    }
+
+    /// `y` on the Agents sidebar's delete confirmation: the same engine
+    /// path as the Swarm screen's (`swarm_action_on`, the TUI decider);
+    /// the answer is the notice.
+    pub fn delete_swarm_from_sidebar(&mut self, swarm_id: &str) {
+        let workspace = self
+            .trace_db_path
+            .clone()
+            .and_then(|db| crate::tracing::store::open_aux(&db).ok())
+            .and_then(|conn| record::get_swarm(&conn, swarm_id).ok().flatten())
+            .map(|s| PathBuf::from(s.workspace))
+            .unwrap_or_default();
+        let done = self.swarm_action_on(
+            Some(swarm_id),
+            &workspace,
+            SwarmVerb::Delete,
+            None,
+            None,
+            &Decider::TUI,
+        );
+        self.notice = Some(match done {
+            Ok(m) => Notice::info(m),
+            Err(e) => Notice::error(format!("✗ {e}")),
+        });
+    }
+
+    /// `SwarmVerb::Delete` from the TUI: a live swarm is closed first (its
+    /// sessions stop, no Langfuse export), then its rows go
+    /// (`record::delete_swarm`), its sessions leave the sidebar and its
+    /// worktree checkouts are removed; branches and traces are kept.
+    fn delete_swarm_run(
+        &mut self,
+        conn: &rusqlite::Connection,
+        db: &Path,
+        swarm: &SwarmRun,
+    ) -> Result<String, String> {
+        let indexes = self.swarm_session_indexes(conn, swarm);
+        let at = Instant::now();
+        let mut stopped = 0;
+        for &i in &indexes {
+            if let Some(s) = self.sessions.get_mut(i)
+                && !matches!(s.status(at), Status::Exited(_))
+            {
+                s.kill();
+                stopped += 1;
+            }
+        }
+        let mut cancelled = 0;
+        if swarm.ended_ns.is_none() {
+            // kills what is left (a session it knows by launch only) and
+            // ends the swarm
+            let (n, ended) = self.stop_swarm_run(swarm, false);
+            cancelled = ended?.0;
+            stopped = stopped.max(n);
+        }
+        let swarm = record::get_swarm(conn, &swarm.id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("no swarm {}", swarm.id))?;
+        let now = crate::tracing::store::now_ns();
+        let deleted = record::delete_swarm(conn, Some(db), &swarm, now)?;
+        // its sessions leave the sidebar; the selection stays on the same
+        // session when it was another one
+        let keep_selected = self
+            .sessions
+            .get(self.selected)
+            .map(|s| s.id)
+            .filter(|_| !indexes.contains(&self.selected));
+        let mut i = 0;
+        self.sessions.retain(|_| {
+            let keep = !indexes.contains(&i);
+            i += 1;
+            keep
+        });
+        if !indexes.is_empty() {
+            self.selection = None;
+            self.selected = keep_selected
+                .and_then(|id| self.sessions.iter().position(|s| s.id == id))
+                .unwrap_or(self.selected)
+                .min(self.sessions.len().saturating_sub(1));
+            let _ = self.save_active_sessions();
+        }
+        let removed =
+            crate::bus::swarm::remove_worktrees(Path::new(&swarm.workspace), &deleted.worktrees);
+        if let crate::app::Mode::Swarm(v) = &mut self.mode
+            && v.scope.as_deref() == Some(swarm.id.as_str())
+        {
+            v.scope = None;
+        }
+        let group = crate::app::agents_list::AgentKind::Run(format!("swarm:{}", swarm.id));
+        if self.agent_focus.as_ref().is_some_and(|f| f.kind == group) {
+            self.agent_focus = None;
+        }
+        self.last_swarm_engine_pass = None;
+        let gone = removed.iter().filter(|(_, r)| r.is_ok()).count();
+        let mut out = format!(
+            "deleted {}: stopped {stopped} session(s), cancelled {cancelled} task(s), removed {gone} worktree(s)",
+            swarm.id
+        );
+        let failed: Vec<String> = removed
+            .iter()
+            .filter_map(|(p, r)| r.as_ref().err().map(|e| format!("{}: {e}", p.display())))
+            .collect();
+        if !failed.is_empty() {
+            out.push_str(&format!("; worktree(s) left: {}", failed.join("; ")));
+        }
+        if !deleted.branches.is_empty() {
+            out.push_str(&format!(
+                "; {} branch(es) kept: {}",
+                deleted.branches.len(),
+                deleted.branches.join(", ")
+            ));
+        }
+        if let crate::app::Mode::Swarm(v) = &mut self.mode {
+            v.status_msg = Some(out.clone());
+        }
+        Ok(out)
     }
 }
 

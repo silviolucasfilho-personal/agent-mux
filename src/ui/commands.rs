@@ -129,6 +129,11 @@ pub(super) fn draw(f: &mut Frame, app: &App) {
             None,
             vec![ListItem::new("Enter does not remove the session.")],
         ),
+        Overlay::DeleteSwarm { question, .. } => (
+            "Delete swarm? · y delete · any other key no".into(),
+            None,
+            vec![ListItem::new(question.clone())],
+        ),
         Overlay::Navigation(_) => (
             "Unsaved changes · y discard and continue · n/Esc stay".into(),
             None,
