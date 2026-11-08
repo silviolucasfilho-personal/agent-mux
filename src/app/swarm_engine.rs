@@ -536,6 +536,149 @@ impl App {
         ))
     }
 
+    /// A saved session of a swarm, at agent-mux's start: a worker is
+    /// reconnected to its task ([`App::reconnect_swarm_worker`]), the
+    /// swarm's coordinator to the swarm ([`App::reconnect_swarm_coordinator`]),
+    /// each resuming its conversation under a new launch the swarm records.
+    /// `Err` when it cannot be (the swarm ended, the task moved on, agy):
+    /// the caller restores it as a plain session.
+    pub fn reconnect_saved_swarm_session(
+        &mut self,
+        link: &SwarmLaunch,
+        launch: &str,
+    ) -> Result<String, String> {
+        let db = self.trace_db_path.clone().ok_or("no trace store")?;
+        let conn = crate::tracing::store::open_aux(&db)?;
+        let swarm = record::get_swarm(&conn, &link.swarm_id)
+            .map_err(|e| e.to_string())?
+            .filter(|s| s.ended_ns.is_none())
+            .ok_or("the swarm is closed")?;
+        match link.role {
+            crate::bus::swarm::SwarmRole::Coordinator => {
+                if swarm.planner_launch.as_deref() != Some(launch) {
+                    return Err("the swarm has another coordinator now".into());
+                }
+                self.reconnect_swarm_coordinator(&swarm, launch)
+            }
+            crate::bus::swarm::SwarmRole::Worker => {
+                let task_id = link.task_id.as_deref().ok_or("no task")?;
+                let task = crate::bus::store::get_task(&conn, task_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("no such task")?;
+                if task.assigned_to.as_deref() != Some(launch) {
+                    return Err("the task has another worker now".into());
+                }
+                self.reconnect_swarm_worker(task_id, launch)
+            }
+        }
+    }
+
+    /// The coordinator of `swarm`, whose session `launch` ended (an
+    /// agent-mux restart): the same harness resumes the same conversation in
+    /// a new session, in the swarm's group, recorded as the swarm's
+    /// coordinator, so `★` on the Swarm screen is its terminal again.
+    pub fn reconnect_swarm_coordinator(
+        &mut self,
+        swarm: &SwarmRun,
+        launch: &str,
+    ) -> Result<String, String> {
+        let db = self.trace_db_path.clone().ok_or("no trace store")?;
+        let conn = crate::tracing::store::open_aux(&db)?;
+        let (provider, session_id): (String, Option<String>) = conn
+            .query_row(
+                "SELECT l.provider, s.session_id FROM launches l
+                 LEFT JOIN sessions s ON s.key = l.session_key WHERE l.id = ?1",
+                rusqlite::params![launch],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| format!("no launch row for {launch}"))?;
+        let harness: Harness = provider.parse()?;
+        if harness == Harness::Antigravity {
+            return Err("agy cannot resume a conversation".into());
+        }
+        let session_id = session_id.ok_or("its conversation id was never recorded")?;
+        let ctx_path = self.write_planner_context(swarm, None)?;
+        let mut profile = self
+            .profiles
+            .iter()
+            .find(|p| Harness::detect(&p.command) == Some(harness))
+            .cloned()
+            .unwrap_or_else(|| crate::config::Profile {
+                name: harness.as_str().to_string(),
+                command: harness.as_str().to_string(),
+                args: Vec::new(),
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: Some(self.bypass_approvals_default),
+            });
+        profile.name = format!("{} · coordinator", harness.as_str());
+        let options = LaunchOptions {
+            model: profile.model.clone(),
+            bypass_approvals: profile
+                .bypass_approvals
+                .unwrap_or(self.bypass_approvals_default),
+            resume: crate::harness::Resume::Id(session_id.clone()),
+            ..Default::default()
+        };
+        profile.args = compose(&profile.args, &options.render(harness));
+        let env: Vec<(String, String)> = vec![
+            (
+                "AGENT_MUX_SWARM_CONTEXT".into(),
+                ctx_path.to_string_lossy().into_owned(),
+            ),
+            (
+                "AGENT_MUX_SWARM_PLAN".into(),
+                ctx_path.to_string_lossy().into_owned(),
+            ),
+            ("AGENT_MUX_SWARM_ID".into(), swarm.id.clone()),
+            ("AGENT_MUX_WORKSPACE".into(), swarm.workspace.clone()),
+        ];
+        let id = self.next_id;
+        let mut session = self
+            .spawn_traced_full(
+                id,
+                profile,
+                PathBuf::from(&swarm.workspace),
+                &env,
+                Some(SWARM_PLAN_SKILL),
+                None,
+                None,
+                Some(SwarmLaunch::coordinator(&swarm.id, None)),
+                &[],
+            )
+            .map_err(|e| format!("spawn: {e}"))?;
+        session.group = Some(crate::tree::GroupRef {
+            kind: crate::tree::GroupKind::Swarm,
+            id: swarm.id.clone(),
+            title: swarm_group_title(swarm),
+            detail: crate::bus::short_id(&swarm.id).to_string(),
+            label: "★ coordinator".into(),
+        });
+        let new_launch = session
+            .trace
+            .as_ref()
+            .map(|t| t.launch_id.clone())
+            .unwrap_or_else(|| format!("session-{id}"));
+        self.next_id += 1;
+        self.sessions.push(session);
+        let now = crate::tracing::store::now_ns();
+        let _ = record::set_coordinator_launch(&conn, Some(&db), &swarm.id, &new_launch, now);
+        let _ = record::event(
+            &conn,
+            &swarm.id,
+            None,
+            "coordinator.reconnected",
+            Some(&new_launch),
+            Some(serde_json::json!({ "from": launch, "harness": harness.as_str() })),
+            now,
+        );
+        Ok(format!(
+            "the coordinator is back: {} resumes its conversation",
+            harness.as_str()
+        ))
+    }
+
     /// The coordinator's launch while its session is open here.
     fn live_coordinator(&self, swarm: &SwarmRun) -> Option<String> {
         let launch = swarm.planner_launch.clone()?;

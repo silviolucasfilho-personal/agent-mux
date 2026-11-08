@@ -224,6 +224,10 @@ pub struct Session {
     /// The session this one continues (`f`), as the sidebar names it:
     /// `Claude Code · agent-mux`.
     pub continued_from: Option<String>,
+    /// The swarm this session is a coordinator or worker of (the launch's
+    /// `swarm_*` metadata), kept so `sessions.json` can reconnect it after
+    /// a restart.
+    pub swarm: Option<crate::bus::swarm::SwarmLaunch>,
     /// The saved entry this session was restored from at startup, kept
     /// while a failed restore (one that exited within
     /// `RESTORE_GRACE`) should stay saved for the next start rather
@@ -394,6 +398,7 @@ impl Session {
             started_at: std::time::SystemTime::now(),
             opening_args: Vec::new(),
             continued_from: None,
+            swarm: None,
             restored_from: None,
             group: None,
             briefing_path: None,

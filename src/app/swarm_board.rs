@@ -570,6 +570,27 @@ pub const PLAN_TIMEOUT_NS: i64 = 15 * 60 * 1_000_000_000;
 /// Swarms that ended within this long stay in the tree, folded.
 pub const RECENT_NS: i64 = 7 * 24 * 3_600 * 1_000_000_000;
 
+/// The screen's areas in the last frame (set by `ui::swarm_board`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Drawn {
+    pub tree: ratatui::layout::Rect,
+    /// The tree's row at the top of its list.
+    pub tree_start: usize,
+    /// The main pane, where a session's terminal is drawn.
+    pub pane: ratatui::layout::Rect,
+}
+
+/// What a click on the screen asks of the App.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Click {
+    /// Nothing to do (a click on a border, or with a form open).
+    None,
+    /// The cursor moved to a tree row; the tree has the keyboard.
+    Row,
+    /// The pane's terminal takes the keyboard: this session's.
+    FocusPane(usize),
+}
+
 pub struct SwarmBoard {
     /// The folder the screen was opened from: its swarm comes first, and a
     /// new swarm starts there.
@@ -649,6 +670,9 @@ pub struct SwarmBoard {
     pub harnesses: Vec<Harness>,
     pub default_harness: Harness,
     pub now_ns: i64,
+    /// Where the last frame drew the tree and the pane, and the tree's first
+    /// row shown: what a click lands on ([`SwarmBoard::click`]).
+    pub drawn: std::cell::Cell<Drawn>,
     conn: Option<Connection>,
     last_change_seq: Option<i64>,
     live_fingerprint: u64,
@@ -760,6 +784,7 @@ impl SwarmBoard {
             last_change_seq: None,
             live_fingerprint: 0,
             last_check: None,
+            drawn: std::cell::Cell::new(Drawn::default()),
         };
         v.refresh(live, env, now_ns);
         v
@@ -1699,6 +1724,59 @@ impl SwarmBoard {
         self
     }
 
+    /// A left click at (`col`, `row`): on a tree row it moves the cursor
+    /// there and gives the tree the keyboard; on the pane, while it shows a
+    /// session, it gives that session the keyboard (as `Enter` does). A
+    /// form, a confirmation or the command line keeps the click.
+    pub fn click(&mut self, col: u16, row: u16) -> Click {
+        if self.modal.is_some() || self.confirm.is_some() || self.command.is_some() {
+            return Click::None;
+        }
+        let d = self.drawn.get();
+        let at = ratatui::layout::Position::new(col, row);
+        if d.tree.contains(at) {
+            // inside the border: one list row per line
+            if row <= d.tree.y || row + 1 >= d.tree.y + d.tree.height {
+                return Click::None;
+            }
+            let n = d.tree_start + usize::from(row - d.tree.y - 1);
+            if n >= self.rows.len() {
+                return Click::None;
+            }
+            self.pane_focused = false;
+            self.focus = Focus::Board;
+            self.set_cursor(n);
+            return Click::Row;
+        }
+        if d.pane.contains(at)
+            && let Some(idx) = self.pane_session()
+        {
+            self.pane_focused = true;
+            return Click::FocusPane(idx);
+        }
+        Click::None
+    }
+
+    /// Where the screen opens: on `launch`'s row (the session selected when
+    /// it opened: the coordinator or a worker of this swarm), else on the
+    /// coordinator, where the operator talks to the swarm, so `Enter` types
+    /// into its chat at once.
+    pub fn open_on(&mut self, launch: Option<&str>) {
+        let at = launch
+            .and_then(|l| self.row_of_launch(l))
+            .or_else(|| self.coordinator_row());
+        if let Some(at) = at {
+            self.set_cursor(at);
+        }
+    }
+
+    /// The current swarm's coordinator row.
+    fn coordinator_row(&self) -> Option<usize> {
+        let (Row::Swarm(i) | Row::Coordinator(i) | Row::Task(i, _) | Row::Agent(i, ..)) =
+            *self.rows.get(self.cursor)?;
+        self.rows.iter().position(|r| *r == Row::Coordinator(i))
+    }
+
     /// Moves the cursor to the current swarm's coordinator row now.
     fn cursor_to_coordinator(&mut self) -> bool {
         let Some(Row::Swarm(i) | Row::Coordinator(i) | Row::Task(i, _) | Row::Agent(i, ..)) =
@@ -2169,10 +2247,29 @@ impl SwarmBoard {
                     launch: t.task.assigned_to.clone().unwrap_or_default(),
                 }
             }
+            PaneView::SwarmCard
+                if matches!(self.rows.get(self.cursor), Some(Row::Swarm(_)))
+                    && let Some(idx) = self.coordinator_session().map(|w| w.session_idx)
+                    && let Some(at) = self.coordinator_row() =>
+            {
+                // the swarm is steered from its coordinator's chat: Enter
+                // goes there (←/→ fold the swarm)
+                self.set_cursor(at);
+                self.pane_focused = true;
+                Outcome::FocusPane(idx)
+            }
             PaneView::SwarmCard => {
-                if let Some(Row::Swarm(i)) = self.rows.get(self.cursor).copied() {
-                    let folded = self.is_folded(i);
-                    self.fold(!folded);
+                match self.rows.get(self.cursor).copied() {
+                    Some(Row::Swarm(i)) => {
+                        let folded = self.is_folded(i);
+                        self.fold(!folded);
+                    }
+                    Some(Row::Coordinator(_)) => {
+                        self.status_msg = Some(
+                            "The coordinator has no live session here: r starts a new one.".into(),
+                        );
+                    }
+                    _ => {}
                 }
                 Outcome::None
             }
@@ -2427,7 +2524,7 @@ impl SwarmBoard {
                     let id = swarms.get(*cursor).map(|s| s.id.clone());
                     self.modal = None;
                     if let Some(id) = id {
-                        self.select_swarm(&id);
+                        self.select_coordinator(&id);
                         self.focus = Focus::Board;
                         self.pane_focused = false;
                         return Outcome::Reload;

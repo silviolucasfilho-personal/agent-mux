@@ -89,6 +89,8 @@ async fn restoring_a_saved_antigravity_session_resumes_its_conversation() {
     agent_mux::persistence::save_sessions(
         &sessions_path,
         &[agent_mux::persistence::SavedSession {
+            swarm: None,
+            launch: None,
             profile: agy.clone(),
             dir: temp_dir.path().to_path_buf(),
             skill_id: None,
@@ -177,6 +179,8 @@ async fn a_conversation_running_in_claudes_background_is_attached_not_resumed() 
         bypass_approvals: None,
     };
     let saved = |conversation: &str| agent_mux::persistence::SavedSession {
+        swarm: None,
+        launch: None,
         profile: claude.clone(),
         dir: temp_dir.path().to_path_buf(),
         skill_id: None,
@@ -226,6 +230,8 @@ async fn a_restored_session_that_exits_at_once_stays_saved() {
     std::fs::write(&agy, "#!/bin/sh\nexit 1\n").unwrap();
     std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
     let entry = agent_mux::persistence::SavedSession {
+        swarm: None,
+        launch: None,
         profile: Profile {
             name: "Antigravity".into(),
             command: agy.display().to_string(),

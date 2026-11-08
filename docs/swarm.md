@@ -44,7 +44,7 @@ For example, Claude as coordinator with agy and Codex in the pool gives a plan w
 
 ## The screen
 
-The Swarm screen shows **one swarm**: its coordinator, the agents it started and their sub-agents, each a real terminal you can watch and type into. It opens on the swarm of the session you have selected (its coordinator or one of its workers), else on the swarm that needs you, else on the folder's newest live one; `o` picks another swarm (any folder's, live or closed in the last week) and `n` starts a new one. A swarm's coordinator and workers are seen here only: the Agents sidebar leaves them out. With `[agents] show_swarm = true` in `profiles.toml`, every swarm is also a group in the Agents sidebar (`◆ <goal>`, with `★ coordinator` and the workers under it), where `Enter` opens this screen on it. The layout is the Agents screen's: a tree on the left, the selected row in the main pane on the right.
+The Swarm screen shows **one swarm**: its coordinator, the agents it started and their sub-agents, each a real terminal you can watch and type into. It opens on the swarm of the session you have selected (its coordinator or one of its workers), else on the swarm that needs you, else on the folder's newest live one, with the cursor on the selected session's row or else on `★`, so `Enter` types into the coordinator's chat at once; `o` picks another swarm (any folder's, live or closed in the last week) and `n` starts a new one. A swarm's coordinator and workers are seen here only: the Agents sidebar leaves them out. With `[agents] show_swarm = true` in `profiles.toml`, every swarm is also a group in the Agents sidebar (`◆ <goal>`, with `★ coordinator` and the workers under it), where `Enter` opens this screen on it. The layout is the Agents screen's: a tree on the left, the selected row in the main pane on the right.
 
 ```
 ┌ Swarms • Keyboard focus ───┐┌ ◆ add OAuth login ─────────────────────────────────────────────┐
@@ -72,7 +72,8 @@ The Swarm screen shows **one swarm**: its coordinator, the agents it started and
   - **A worker** shows its terminal while it has one; its tabs are `1 Task` (instructions, done-when, files, dependencies, result or error, branch), `2 Live`, `3 Thread` (its messages), `4 Trace` (its turns from the store, each with its tool calls, generations and sub-agents, duration, tokens and cost) and `5 Changes` (its diff). The pane opens on the tab that matters.
   - **A sub-agent** (`↳`) opens on the Trace tab with its own rows only; `Enter` goes to its worker's terminal.
   - **A worker whose session ended** keeps its row: `Enter` **reconnects** — the same harness resumes the same conversation in a new session on the task (Claude Code, Codex and OpenCode; agy cannot, `r` retries instead).
-- **`Enter` on a terminal** gives it the keyboard: the pane's title says `Keyboard goes to …`. `⌘L` (`Ctrl+Shift+L`) brings the keyboard back to the tree.
+- **`Enter` on a terminal** gives it the keyboard: the pane's title says `Keyboard goes to …`. `Enter` on the swarm row goes to the coordinator's chat (`←`/`→` fold it). Clicking a row selects it, clicking the terminal in the pane types into it, and the wheel scrolls the terminal or moves the cursor. `⌘L` (`Ctrl+Shift+L`) or a click on the tree brings the keyboard back to the tree.
+- **After a restart** agent-mux reconnects the swarm's coordinator and workers it had open: each resumes its conversation in a new session, which the swarm records, so `★` is its terminal again (agy cannot resume; `r` on `★` starts a new coordinator).
 - **Cost** reads `—` when a harness's cost isn't priced (agy isn't), and `≥$x` when only part of it is.
 
 ### What the task words mean
@@ -151,7 +152,8 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | --- | --- |
 | `↑` `↓` `g` `G` | choose a row |
 | `←` `→` | fold or unfold: a worker's ended sub-agents (`→` on it), `←` on a child climbs to its parent |
-| `Enter` | type into the row's terminal · reconnect a worker whose session ended · connect to a Live tile · start a swarm when there is none |
+| `Enter` | type into the row's terminal (on the swarm row, the coordinator's) · reconnect a worker whose session ended · connect to a Live tile · start a swarm when there is none |
+| click | a row selects it · the terminal in the pane types into it |
 | `Tab` | tree ↔ pane (in Activity or Thread, `↑`/`↓` choose a message, `Enter` reads it in full, `m` answers it; in Live, `↑↓←→` choose a tile; in Timeline, `←`/`→` pan, `-`/`+` zoom, `0` all; in Log, `↑`/`↓` choose a line, `t` the kinds, `/` a text filter, `Enter` opens the row it is about) |
 | `1`–`6` | the swarm row's tab (Board, Live, Timeline, Log, Activity, Changes) or a worker's (Task, Live, Thread, Trace, Changes) |
 | `y` | confirm the one thing on the row: merge a branch in `review` · accept a proposal · close a finished swarm. Never the plan: on a plan in review, `y` moves the keyboard to the coordinator's chat. |

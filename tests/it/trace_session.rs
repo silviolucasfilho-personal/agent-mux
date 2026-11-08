@@ -985,6 +985,8 @@ async fn sessions_sharing_one_conversation_restore_only_one_onto_it() {
         bypass_approvals: None,
     };
     let entry = agent_mux::persistence::SavedSession {
+        swarm: None,
+        launch: None,
         profile,
         dir: workdir.clone(),
         skill_id: None,
@@ -1099,6 +1101,8 @@ async fn restored_agy_sessions_take_their_own_workspace_conversation_from_the_st
             args.extend(["--conversation".into(), conv.into()]);
         }
         agent_mux::persistence::SavedSession {
+            swarm: None,
+            launch: None,
             profile: Profile {
                 name: "Antigravity".into(),
                 command: agy_bin.to_string_lossy().into_owned(),
