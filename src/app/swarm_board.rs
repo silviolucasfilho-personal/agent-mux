@@ -3926,7 +3926,7 @@ mod tests {
             vec![task("a", TaskStatus::Open, None)],
             &[],
         );
-        for c in ['p', 'e', 'd', 'b', 'a'] {
+        for c in ['p', 'e', 'b', 'a'] {
             assert_eq!(v.handle_key(key(KeyCode::Char(c))), Outcome::None);
             assert!(!v.text_entry_active(), "{c}");
             assert!(
@@ -3937,8 +3937,22 @@ mod tests {
                 v.status_msg
             );
         }
-        // n is always a new swarm, even inside one
+        // d asks to delete the whole swarm, on any row; only y does it
         v.handle_key(key(KeyCode::Down));
+        assert_eq!(v.handle_key(key(KeyCode::Char('d'))), Outcome::None);
+        assert!(matches!(
+            v.confirm,
+            Some(Confirm::Delete { live: true, .. })
+        ));
+        assert_eq!(
+            v.handle_key(key(KeyCode::Char('y'))),
+            Outcome::Verb {
+                verb: SwarmVerb::Delete,
+                task: None,
+                notes: None
+            }
+        );
+        // n is always a new swarm, even inside one
         v.handle_key(key(KeyCode::Char('n')));
         assert!(matches!(v.modal, Some(Modal::Launch { .. })));
     }
