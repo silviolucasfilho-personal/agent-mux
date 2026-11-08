@@ -120,7 +120,7 @@ size, uncut.
 | `p` | re-plan with notes |
 | `n` | new swarm (a swarm row or empty space) · new task (inside a swarm) |
 | `e` | edit a task (§4) |
-| `d` | delete a task that never started |
+| `d` | delete a task that never started (superseded 2026-11-05: `d` deletes the swarm; plan changes are said to the coordinator) |
 | `r` | retry a task |
 | `x` | stop a worker · cancel a task · set a branch aside · drop a proposal |
 | `space` | pause or resume |
