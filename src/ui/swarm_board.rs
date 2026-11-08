@@ -128,6 +128,11 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
     let inner_w = usize::from(area.width.saturating_sub(2));
     let visible = usize::from(area.height.saturating_sub(2));
     let start = super::sidebar_window(v.cursor, v.rows.len(), visible.saturating_sub(1).max(1));
+    v.drawn.set(crate::app::swarm_board::Drawn {
+        tree: area,
+        tree_start: start,
+        ..v.drawn.get()
+    });
     let mut items: Vec<ListItem> = Vec::new();
     for (n, row) in v.rows.iter().enumerate().skip(start).take(visible) {
         let is_cursor = n == v.cursor;
@@ -332,6 +337,10 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
 /// The main pane: the selected row's terminal or card, the command line,
 /// and the forms and confirmations over them.
 pub fn draw_pane(f: &mut Frame, area: Rect, v: &SwarmBoard, app: &App, now: Instant) {
+    v.drawn.set(crate::app::swarm_board::Drawn {
+        pane: area,
+        ..v.drawn.get()
+    });
     let (body, line) = if v.command.is_some() {
         let [b, l] = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(area);
         (b, Some(l))

@@ -3776,7 +3776,12 @@ impl App {
                 if duplicate {
                     conversation = None;
                 }
+                // a swarm's session: its link and the launch it runs as
+                let launch = s.trace.as_ref().map(|t| t.launch_id.clone());
+                let swarm = s.swarm.clone().filter(|_| launch.is_some());
                 Some(persistence::SavedSession {
+                    launch: launch.filter(|_| swarm.is_some()),
+                    swarm,
                     // the first message this launch sent is not sent again
                     profile: {
                         let mut p = s.profile.clone();
@@ -3857,6 +3862,39 @@ impl App {
         Some(rt.start_session(id, plan))
     }
 
+    /// The swarm link of a saved session that does not carry one (a file
+    /// written before it was kept): the newest swarm launch of the same
+    /// conversation, or, with none known, of the same swarm profile in the
+    /// same folder.
+    fn saved_swarm_link(
+        conn: &rusqlite::Connection,
+        s: &persistence::SavedSession,
+    ) -> Option<(crate::bus::swarm::SwarmLaunch, String)> {
+        let (id, meta): (String, String) = match s.conversation.as_deref() {
+            Some(conv) => conn.query_row(
+                "SELECT l.id, l.metadata FROM launches l JOIN sessions s ON s.key = l.session_key
+                 WHERE s.session_id = ?1 AND json_extract(l.metadata, '$.swarm_id') IS NOT NULL
+                 ORDER BY l.started_ns DESC LIMIT 1",
+                rusqlite::params![conv],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ),
+            // only the profiles agent-mux names for a swarm's sessions
+            // (`claude · coordinator`, `codex · store`): a plain session
+            // is never taken for one
+            None if s.profile.name.contains(" · ") => conn.query_row(
+                "SELECT id, metadata FROM launches
+                 WHERE profile = ?1 AND cwd = ?2 AND json_extract(metadata, '$.swarm_id') IS NOT NULL
+                 ORDER BY started_ns DESC LIMIT 1",
+                rusqlite::params![s.profile.name, s.dir.to_string_lossy()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ),
+            None => return None,
+        }
+        .ok()?;
+        let meta = serde_json::from_str::<serde_json::Value>(&meta).ok()?;
+        Some((crate::bus::swarm::SwarmLaunch::from_metadata(&meta)?, id))
+    }
+
     /// Restores saved sessions from disk upon application startup.
     pub fn restore_saved_sessions(&mut self) {
         let Some(path) = self.sessions_file.clone() else {
@@ -3885,7 +3923,29 @@ impl App {
                 owners.insert(i);
             }
         }
+        let mut reconnected = 0usize;
+        let mut linked: std::collections::HashSet<(String, Option<String>)> =
+            std::collections::HashSet::new();
         for (i, s) in saved.into_iter().enumerate() {
+            // a swarm's coordinator or worker goes back to its swarm; a file
+            // saved before the link was kept finds it in the store
+            let link = s
+                .swarm
+                .clone()
+                .zip(s.launch.clone())
+                .or_else(|| Self::saved_swarm_link(conn.as_ref()?, &s));
+            if let Some((link, launch)) = link {
+                let key = (link.swarm_id.clone(), link.task_id.clone());
+                if linked.contains(&key) {
+                    // a second entry for the same coordinator or worker
+                    continue;
+                }
+                if self.reconnect_saved_swarm_session(&link, &launch).is_ok() {
+                    linked.insert(key);
+                    reconnected += 1;
+                    continue;
+                }
+            }
             let mut entry = s.clone();
             let dir = if s.dir.is_dir() {
                 s.dir
@@ -3943,8 +4003,16 @@ impl App {
                 }
             }
         }
+        if reconnected > 0 {
+            self.notice = Some(Notice::info(format!(
+                "{reconnected} swarm session(s) reconnected: F1 → Open swarm"
+            )));
+        }
         if !self.sessions.is_empty() {
-            self.selected = 0;
+            // the first session the Agents list shows
+            self.selected = (0..self.sessions.len())
+                .find(|i| self.session_listed(*i))
+                .unwrap_or(0);
             self.sidebar_section = SidebarSection::Active;
         } else if !self.history_sessions.is_empty() {
             self.sidebar_section = SidebarSection::History;
@@ -4019,7 +4087,7 @@ impl App {
             let home = self.skill_home();
             p.attach_loop(launch, &home);
         }
-        if let (Some(p), Some(sw)) = (plan.as_mut(), swarm_launch) {
+        if let (Some(p), Some(sw)) = (plan.as_mut(), swarm_launch.clone()) {
             p.swarm = Some(sw);
         }
         let mut extra_args: Vec<String> = match &plan {
@@ -4108,6 +4176,7 @@ impl App {
         session.profile = profile;
         session.briefing_path = briefing_path;
         session.group = group;
+        session.swarm = swarm_launch;
         if let (Some(rt), Some(plan)) = (self.tracing.as_mut(), plan) {
             session.trace = Some(rt.start_session(id, plan));
         }
@@ -4381,7 +4450,10 @@ impl App {
         if self.handle_ux_key(key) {
             return;
         }
+        // Alt/⌘ letters are the session's when a pane has the keyboard (the
+        // Swarm screen's too), and nobody's elsewhere
         if (!matches!(self.mode, Mode::Main) || self.focus == Focus::List)
+            && self.pane_session().is_none()
             && matches!(key.code, KeyCode::Char(_))
             && key
                 .modifiers
@@ -4541,7 +4613,6 @@ impl App {
         true
     }
 
-    /// `⌘↑` / `⌘↓`: the previous or next session in list order, without
     /// The listed session (`session_listed`) `step` away from the
     /// selected one, wrapping round with `wrap`; `None` when there is none.
     fn adjacent_listed_session(&self, step: isize, wrap: bool) -> Option<usize> {
@@ -4564,6 +4635,7 @@ impl App {
         None
     }
 
+    /// `⌘↑` / `⌘↓`: the previous or next session in list order, without
     /// moving the focus; with the pane focused the pane follows.
     fn select_adjacent_session(&mut self, step: i32) {
         if self.sessions.is_empty() {
@@ -4987,9 +5059,21 @@ impl App {
         )
         .scoped(scope);
         view.writing_agents = self.swarm_writing_agents(&ws);
+        // the session selected now: the screen opens on its row if it is
+        // one of the swarm's, else on the coordinator's
+        let launch = self.sessions.get(self.selected).map(|s| {
+            s.trace
+                .as_ref()
+                .map(|t| t.launch_id.clone())
+                .unwrap_or_else(|| format!("session-{}", s.id))
+        });
         self.mode = Mode::Swarm(Box::new(view));
         // The plan's checks need the App: a second read with them.
         self.refresh_swarm_board();
+        if let Mode::Swarm(v) = &mut self.mode {
+            v.open_on(launch.as_deref());
+        }
+        self.sync_swarm_pane_selection();
     }
 
     /// Gathers live session telemetry for all active sessions in `workspace` (including worktrees).
@@ -5509,6 +5593,46 @@ impl App {
         self.refresh_swarm_board();
     }
 
+    /// The mouse on the Swarm screen: a click on a tree row selects it, a
+    /// click on a terminal in the pane types into it, and the wheel scrolls
+    /// what it is over (the terminal's scrollback, or the tree's cursor).
+    fn swarm_mouse(&mut self, ev: MouseEvent) {
+        let Mode::Swarm(view) = &mut self.mode else {
+            return;
+        };
+        let drawn = view.drawn.get();
+        let at = ratatui::layout::Position::new(ev.column, ev.row);
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => match view.click(ev.column, ev.row) {
+                swarm_board::Click::FocusPane(idx) if idx < self.sessions.len() => {
+                    self.selected = idx;
+                    if let Some(s) = self.sessions.get_mut(idx) {
+                        s.tracker.on_attach();
+                    }
+                    self.notice = Some(Notice::info(
+                        "keys go to the session · ⌘L (Ctrl+Shift+L) returns to the swarm tree",
+                    ));
+                }
+                swarm_board::Click::Row => self.sync_swarm_pane_selection(),
+                _ => {}
+            },
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = matches!(ev.kind, MouseEventKind::ScrollUp);
+                if drawn.pane.contains(at) && view.pane_session().is_some() {
+                    self.sync_swarm_pane_selection();
+                    self.scroll_selected(if up { 3 } else { -3 });
+                } else if drawn.tree.contains(at) && !view.text_entry_active() {
+                    view.handle_key(KeyEvent::new(
+                        if up { KeyCode::Up } else { KeyCode::Down },
+                        KeyModifiers::NONE,
+                    ));
+                    self.sync_swarm_pane_selection();
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn open_new_session_in_dir(&mut self, dir: &std::path::Path, agent: Option<String>) {
         self.open_new_session_dialog(None);
         if let Mode::NewSession(d) = &mut self.mode {
@@ -5602,6 +5726,10 @@ impl App {
                 self.execute_command(id, _now);
                 return;
             }
+        }
+        if matches!(self.mode, Mode::Swarm(_)) {
+            self.swarm_mouse(ev);
+            return;
         }
         if let Mode::Markdown(ref mut view) = self.mode {
             let outcome = view.handle_mouse(&ev);

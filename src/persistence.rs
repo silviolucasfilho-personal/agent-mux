@@ -19,6 +19,14 @@ pub struct SavedSession {
     /// The session it continues (`f`), as the sidebar names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continued_from: Option<String>,
+    /// The swarm the session was a coordinator or worker of, and the launch
+    /// it ran as: a restart reconnects it to the swarm (the same
+    /// conversation, the new launch recorded) instead of restoring a plain
+    /// session the swarm no longer knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm: Option<crate::bus::swarm::SwarmLaunch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<String>,
 }
 
 pub fn sessions_file_path() -> Option<PathBuf> {
@@ -64,6 +72,8 @@ mod tests {
         let path = dir.path().join("sessions.json");
         let sessions = vec![
             SavedSession {
+                swarm: None,
+                launch: None,
                 profile: Profile {
                     name: "agent-1".into(),
                     command: "claude".into(),
@@ -79,6 +89,8 @@ mod tests {
                 conversation: Some("uuid-123".into()),
             },
             SavedSession {
+                swarm: None,
+                launch: None,
                 profile: Profile {
                     name: "bash".into(),
                     command: "bash".into(),

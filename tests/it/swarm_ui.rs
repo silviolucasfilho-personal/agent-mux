@@ -1081,3 +1081,180 @@ fn o_picks_another_swarm_to_show() {
     );
     f.app.kill_all();
 }
+
+/// The operator's own session, then a swarm started from the screen: its
+/// coordinator's session is the last one.
+fn start_swarm_beside_a_session(f: &mut Fixture) -> usize {
+    f.app.focus_list();
+    press(f, KeyCode::Char('n'));
+    press(f, KeyCode::Enter);
+    press(f, KeyCode::Enter);
+    assert_eq!(f.app.sessions.len(), 1);
+    open_screen(f);
+    press(f, KeyCode::Enter); // the launch form
+    press(f, KeyCode::Enter); // start
+    assert_eq!(f.app.sessions.len(), 2, "{}", notice(&f.app));
+    1
+}
+
+fn back_to_tree(f: &mut Fixture) {
+    f.app.handle_key(
+        &KeyEvent::new(
+            KeyCode::Char('L'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ),
+        Instant::now(),
+    );
+    assert!(!view(&f.app).pane_focused);
+}
+
+#[test]
+fn the_screen_reopens_on_the_coordinator_and_enter_on_the_swarm_types_into_it() {
+    use agent_mux::app::swarm_board::{PaneView, Row};
+    let mut f = fixture();
+    let coord = start_swarm_beside_a_session(&mut f);
+    assert_eq!(f.app.pane_session(), Some(coord));
+    back_to_tree(&mut f);
+    // leave the screen with another session selected, and come back from F1
+    f.app.mode = Mode::Main;
+    f.app.selected = 0;
+    f.app.open_swarm_view();
+    let v = view(&f.app);
+    assert_eq!(
+        v.rows.get(v.cursor),
+        Some(&Row::Coordinator(0)),
+        "{:?}",
+        v.rows
+    );
+    assert_eq!(v.pane(), PaneView::Session(coord));
+    assert_eq!(
+        f.app.selected, coord,
+        "the pane's session is the selected one"
+    );
+    press(&mut f, KeyCode::Enter);
+    assert_eq!(f.app.pane_session(), Some(coord));
+    back_to_tree(&mut f);
+    // Enter on the swarm row goes to the coordinator's chat too
+    press(&mut f, KeyCode::Char('g'));
+    assert_eq!(
+        view(&f.app).rows.get(view(&f.app).cursor),
+        Some(&Row::Swarm(0))
+    );
+    press(&mut f, KeyCode::Enter);
+    let v = view(&f.app);
+    assert!(v.pane_focused);
+    assert_eq!(v.rows.get(v.cursor), Some(&Row::Coordinator(0)));
+    assert_eq!(f.app.pane_session(), Some(coord));
+    // Alt+letter is the session's, as on the Agents screen
+    assert!(view(&f.app).text_entry_active());
+    f.app.handle_key(
+        &KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+        Instant::now(),
+    );
+    assert_eq!(f.app.pane_session(), Some(coord));
+    f.app.kill_all();
+}
+
+#[test]
+fn a_click_selects_a_tree_row_and_a_click_on_the_terminal_types_into_it() {
+    use agent_mux::app::swarm_board::Row;
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut f = fixture();
+    let coord = start_swarm_beside_a_session(&mut f);
+    back_to_tree(&mut f);
+    press(&mut f, KeyCode::Char('g'));
+    let _ = render(&f.app, 140, 40);
+    let click = |f: &mut Fixture, column: u16, row: u16| {
+        f.app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            Instant::now(),
+        );
+    };
+    let d = view(&f.app).drawn.get();
+    // the tree's second row is the coordinator's
+    click(&mut f, d.tree.x + 3, d.tree.y + 2);
+    let v = view(&f.app);
+    assert_eq!(v.rows.get(v.cursor), Some(&Row::Coordinator(0)));
+    assert!(!v.pane_focused);
+    let _ = render(&f.app, 140, 40);
+    // a click on its terminal gives it the keyboard
+    let d = view(&f.app).drawn.get();
+    click(&mut f, d.pane.x + 10, d.pane.y + 5);
+    assert!(view(&f.app).pane_focused);
+    assert_eq!(f.app.pane_session(), Some(coord));
+    // a click on the tree takes the keyboard back
+    click(&mut f, d.tree.x + 3, d.tree.y + 1);
+    let v = view(&f.app);
+    assert!(!v.pane_focused);
+    assert_eq!(v.rows.get(v.cursor), Some(&Row::Swarm(0)));
+    f.app.kill_all();
+}
+
+#[test]
+fn a_restart_reconnects_the_coordinator_to_its_swarm() {
+    use agent_mux::app::swarm_board::PaneView;
+    let mut f = fixture();
+    let swarm = seed(&f, SwarmStatus::Running, vec![task("a", &[])]);
+    let conn = open_aux(&f.db).unwrap();
+    // the coordinator as the last run left it: a launch with its swarm
+    // metadata and a known conversation
+    record::set_coordinator_launch(&conn, None, &swarm.id, "old-coord", now_ns()).unwrap();
+    conn.execute(
+        "INSERT INTO sessions (key, provider, session_id, cwd, first_seen_ns, last_seen_ns)
+         VALUES ('claude:conv-1', 'claude', 'conv-1', ?1, 1, 1)",
+        rusqlite::params![f.ws.to_string_lossy()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO launches (id, run_id, agent_mux_session, profile, provider, cwd, project_slug,
+             content_mode, correlation_plan, session_key, started_ns, ended_ns, agent_mux_version, metadata)
+         VALUES ('old-coord', 'r', 1, 'claude · coordinator', 'claude', ?1, 'p', 'metadata', 'known',
+             'claude:conv-1', 1, 2, 'test', ?2)",
+        rusqlite::params![
+            f.ws.to_string_lossy(),
+            serde_json::json!({"swarm_id": swarm.id, "swarm_role": "coordinator"}).to_string()
+        ],
+    )
+    .unwrap();
+    // a sessions.json written before the link was saved: no conversation
+    // known, no swarm (the fallback finds it by profile and folder)
+    let file = f.ws.parent().unwrap().join("sessions.json");
+    let mut profile = f.app.profiles[0].clone();
+    profile.name = "claude · coordinator".into();
+    agent_mux::persistence::save_sessions(
+        &file,
+        &[agent_mux::persistence::SavedSession {
+            swarm: None,
+            launch: None,
+            profile,
+            dir: f.ws.clone(),
+            skill_id: None,
+            conversation: None,
+            continued_from: None,
+        }],
+    )
+    .unwrap();
+    f.app.sessions_file = Some(file.clone());
+    f.app.restore_saved_sessions();
+    assert_eq!(f.app.sessions.len(), 1, "{}", notice(&f.app));
+    let s = &f.app.sessions[0];
+    assert_eq!(
+        s.group.as_ref().map(|g| g.kind),
+        Some(agent_mux::tree::GroupKind::Swarm)
+    );
+    let args = s.profile.args.join(" ");
+    assert!(args.contains("conv-1"), "resumes the conversation: {args}");
+    // the swarm records the new launch: ★ is its terminal again
+    let new_launch = format!("session-{}", s.id);
+    let run = record::get_swarm(&conn, &swarm.id).unwrap().unwrap();
+    assert_eq!(run.planner_launch.as_deref(), Some(new_launch.as_str()));
+    open_screen(&mut f);
+    f.app.open_swarm_view();
+    assert_eq!(view(&f.app).pane(), PaneView::Session(0));
+    f.app.kill_all();
+}
