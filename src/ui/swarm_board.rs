@@ -620,17 +620,19 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
     out.push(Line::raw(""));
     out.push(Line::styled(
         match (s.ended_ns.is_some(), s.status) {
-            (true, _) => "This swarm is closed. n starts a new one · o another swarm",
+            (true, _) => "This swarm is closed. d deletes it · n starts a new one.",
             (_, SwarmStatus::Review) => {
-                "y approve · p re-plan · n add a task · ↓ a task: e edit, d delete"
+                "confirm the plan in the coordinator's chat (Enter on ★) · n new swarm · d delete"
             }
             (_, SwarmStatus::Running) => {
-                "space pause · > message · ! next need · n add a task · o another swarm"
+                "space pause · > message · ! next need · n new swarm · o another swarm · d delete"
             }
             (_, SwarmStatus::Paused) => "space resume · > message · ! next need · o another swarm",
             (_, SwarmStatus::Finished) => "y close the swarm",
             (_, SwarmStatus::Integrating) => "↓ a branch: y merge, x set aside",
-            (_, SwarmStatus::Planning) => "p sends it notes · on ★: x stops it, r starts a new one",
+            (_, SwarmStatus::Planning) => {
+                "tell it in its chat (Enter on ★) · on ★: x stops it, r starts a new one"
+            }
         },
         dim(),
     ));
@@ -1321,7 +1323,7 @@ fn task_card(v: &SwarmBoard, t: &BoardTask) -> Vec<Line<'static>> {
     out.push(Line::raw(""));
     out.push(Line::styled(
         match st {
-            Shown::Draft => "e edits · d deletes · y approves the plan",
+            Shown::Draft => "changes to the plan: tell the coordinator (Enter on ★)",
             Shown::Review => "y merges the branch · x sets it aside",
             Shown::Failed | Shown::Lost | Shown::Cancelled => "r retries it",
             Shown::Proposed => "y accepts it · x drops it",
@@ -1865,7 +1867,10 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
 
 fn draw_confirm(f: &mut Frame, area: Rect, c: &Confirm) {
     let q = c.question();
-    let r = centered_rect((q.chars().count() as u16 + 6).clamp(40, 90), 5, area);
+    let width = (q.chars().count() as u16 + 6).clamp(40, 90);
+    // the question wraps inside the borders and the leading space
+    let rows = (q.chars().count() as u16 + 1).div_ceil(width.saturating_sub(2).max(1));
+    let r = centered_rect(width, rows + 3, area);
     f.render_widget(Clear, r);
     let block = Block::default()
         .borders(Borders::ALL)

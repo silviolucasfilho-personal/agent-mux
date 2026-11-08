@@ -120,7 +120,7 @@ Each task that needs you carries `!` on its row, and its swarm carries `⚑n`. T
 | `review` | a worktree task finished | `y` merge · `x` set aside |
 | `proposed` | a worker proposed a new task | `y` accept · `x` drop |
 | `check` | the final check failed | the swarm's card shows its output |
-| `finished` | everything is settled | on the swarm: `y` close |
+| `finished` | everything is settled | on the swarm: `y` close · `d` delete |
 
 A worker that goes idle on an unfinished task gets one reminder after 90 seconds. Only if it stays idle does it show up as `stalled`.
 
@@ -158,6 +158,7 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | `1`–`6` | the swarm row's tab (Board, Live, Timeline, Log, Activity, Changes) or a worker's (Task, Live, Thread, Trace, Changes) |
 | `y` | confirm the one thing on the row: merge a branch in `review` · accept a proposal · close a finished swarm. Never the plan: on a plan in review, `y` moves the keyboard to the coordinator's chat. |
 | `x` | stop a worker · cancel a task · set a branch aside · drop a proposal (confirms with `y`) |
+| `d` | delete the swarm: a closed one is removed from the store (traces stay), its worktree checkouts removed, branches kept; a running one is closed first (confirms with `y`) |
 | `r` | retry a failed, lost, cancelled or stalled task (the retry form: harness, agent, isolation) · restart an exited coordinator |
 | `space` | pause or resume: while paused, running workers continue but nothing new starts |
 | `n` | a new swarm |
@@ -167,6 +168,8 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | `Ctrl+R` | reload now (the screen refreshes on its own when anything changes) |
 | `⌘L` | from a terminal, back to the tree |
 | `Esc` | back to the tree, then close the screen |
+
+`d` on a swarm's group in the Agents sidebar does the same.
 
 Changing the plan (a task's card, adding or dropping one, re-planning) is said to the coordinator: `Enter` on `★`. Confirmations take `y` only. `Enter` never confirms. What an action did shows in the status bar.
 
@@ -190,7 +193,7 @@ Every swarm reviews each finished task before you merge it, unless you turn it o
   - `x` **sets the branch aside** without merging it. The branch is kept. Tasks that depend on it stay blocked.
 - **Finished workers stay open.** You can attach to one or message it with follow-ups until the swarm closes.
 - **The check:** when every task is settled and every branch reviewed, agent-mux runs the swarm's check command, if it has one, in the workspace (`sh -c`, at most 30 minutes). The top line reads `check running`, then `check ✓` or `check ✗`. A failed check lands in Needs you with the end of its output. The swarm still finishes, because whether to fix it is your call.
-- **Finished:** once every task is settled, every branch reviewed and the check run, the swarm is `finished` and Needs you offers to close it. `y` closes the swarm: its sessions stop, open tasks are cancelled, and leases are released.
+- **Finished:** once every task is settled, every branch reviewed and the check run, the swarm is `finished` and Needs you offers to close it. `y` closes the swarm: its sessions stop, open tasks are cancelled, and leases are released. A closed swarm stays in the sidebar until deleted.
 
 ## The trace
 
@@ -221,6 +224,7 @@ agent-mux swarm cancel <task>           # a task that has not finished; its work
 agent-mux swarm merge <task>            # or: set-aside <task>
 agent-mux swarm accept <task>           # or: drop <task>, for a task a worker proposed
 agent-mux swarm close                   # stops its sessions, cancels open tasks, releases leases
+agent-mux swarm delete                  # removes a closed swarm and its worktree checkouts; keeps traces and branches
 agent-mux swarm restart                 # a new coordinator in place of one that exited
 agent-mux swarm submit-plan --file plan.json   # what agent_mux_swarm_plan does, from a shell
 agent-mux swarm broadcast "Freeze src/api/" --urgent --wake
@@ -229,9 +233,10 @@ agent-mux langfuse export-swarm <id>    # send it to Langfuse (also sent when a 
 ```
 
 - **`<task>`** is a plan key (`bus-fix`), a task id, or a unique prefix of either.
-- **Without the TUI:** `start`, `replan`, `restart` and `close` need the agent-mux TUI running. `approve`, `pause`, `resume`, `retry`, `merge`, `set-aside`, `accept` and `drop` also work without it: they update the records, and the workers start when a TUI runs.
+- **Deleting:** without `--swarm ID`, `delete` selects the folder's live swarm, or its most recently ended one when none is live; the output names it.
+- **Without the TUI:** `delete` works for a closed swarm; a running swarm must be closed first. `start`, `replan`, `restart` and `close` need the agent-mux TUI running. `approve`, `pause`, `resume`, `retry`, `merge`, `set-aside`, `accept` and `drop` also work without it: they update the records, and the workers start when a TUI runs.
 - **`stop`** is like `close`. Without a TUI, it only updates the records and says so.
-- **Options:** every command takes `--workspace DIR` (default: the current folder) and `--json`. `--gate off` starts the workers as soon as the plan passes its checks. `--said "<words>"` on `approve`, `launch`, `merge`, `set-aside`, `cancel` and `close` records your words with the decision; a coordinator without MCP relays them with `--as-coordinator --said`. (`--planner` and `--no-plan-gate` are still accepted as the old spellings of `--coordinator` and `--gate off`, for one more release.)
+- **Options:** every command takes `--workspace DIR` (default: the current folder) and `--json`. `--gate off` starts the workers as soon as the plan passes its checks. `--said "<words>"` on `approve`, `launch`, `merge`, `set-aside`, `cancel`, `close` and `delete` records your words with the decision; a coordinator without MCP relays them with `--as-coordinator --said`. (`--planner` and `--no-plan-gate` are still accepted as the old spellings of `--coordinator` and `--gate off`, for one more release.)
 
 ## The coordinator
 
@@ -241,7 +246,7 @@ The coordinator is an interactive session on the harness you picked, in the swar
 - **It starts the workers at your word** with `agent_mux_swarm_launch`, quoting what you said; it cannot launch without a quotable yes, and the Board shows `confirmed in the chat 12:31 “go”`. As tasks finish it launches the ones they unblocked; if it doesn't within two minutes, agent-mux does.
 - **It follows the swarm** with `agent_mux_swarm_wait`, which returns as soon as something happens (a task finished, failed, asked, a decision, the check). A wait that returns empty after five minutes is a **check-in**, not a stop: the coordinator tells you where things stand and asks whether to keep waiting. Nothing is ever killed on a timeout; stopping is your call.
 - **It answers** the workers' questions (`to = "coordinator"`), or forwards them to you with its recommendation. A question it leaves unanswered for 5 minutes lands in your Needs you.
-- **It relays your decisions** with `agent_mux_swarm_action` (retry, cancel, merge, set aside, accept, drop, pause, resume, close), quoting you for merge, set-aside, cancel and close. It may propose follow-up tasks (`agent_mux_task_split`), which land on the board as proposals.
+- **It relays your decisions** with `agent_mux_swarm_action` (retry, cancel, merge, set aside, accept, drop, pause, resume, close, delete), quoting you for merge, set-aside, cancel, close and delete. It prefers close unless you explicitly ask to delete. It may propose follow-up tasks (`agent_mux_task_split`), which land on the board as proposals.
 - **It summarises at the end**, asks which branches to merge and closes the swarm when you say so.
 - **It never does the work itself** and never edits a file.
 - **If it stops,** the swarm keeps running: agent-mux still supervises every worker. Its `★` row shows it, and `r` there starts a new coordinator with the board as it stands (`x` stops a running one first).

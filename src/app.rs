@@ -260,6 +260,8 @@ pub enum Action {
     OpenRunsView,
     /// Enter on a swarm's group in the Agents sidebar: the Swarm screen on it.
     OpenSwarmGroup,
+    /// `d` on a swarm group in the Agents sidebar: confirm deleting it.
+    ConfirmDeleteSwarm,
     RunsKey,
     OpenInbox,
     InboxKey,
@@ -654,7 +656,10 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 KeyCode::Enter if in_list && ctx.agent_row == RowTag::SwarmGroup => {
                     Action::OpenSwarmGroup
                 }
-                KeyCode::Char('x' | 'd' | 'r' | 't' | 'h' | ' ')
+                KeyCode::Char('d') if in_list && ctx.agent_row == RowTag::SwarmGroup => {
+                    Action::ConfirmDeleteSwarm
+                }
+                KeyCode::Char('x' | 'r' | 't' | 'h' | ' ')
                     if in_list && ctx.agent_row == RowTag::SwarmGroup =>
                 {
                     Action::None
@@ -5167,9 +5172,12 @@ impl App {
 
     /// Ends one swarm: stops its coordinator and its tasks' workers, then
     /// `record::end_swarm`; the workspace's other swarms keep running. Answers the sessions stopped and the store's result.
+    /// `export` sends the closed swarm's summary to Langfuse (a close does,
+    /// a delete does not: its rows are about to go).
     pub fn stop_swarm_run(
         &mut self,
         swarm: &crate::bus::swarm::record::SwarmRun,
+        export: bool,
     ) -> (usize, Result<(usize, usize), String>) {
         let Some(db) = self.trace_db_path.clone() else {
             return (0, Err("no trace store".into()));
@@ -5205,7 +5213,7 @@ impl App {
         }
         let now = crate::tracing::store::now_ns();
         let ended = crate::bus::swarm::record::end_swarm(&conn, Some(&db), swarm, now);
-        if ended.is_ok() {
+        if ended.is_ok() && export {
             self.export_swarm_trace(&swarm.id);
         }
         (stopped, ended)
@@ -6303,6 +6311,22 @@ impl App {
                 {
                     let id = id.to_string();
                     self.open_swarm_view_on(&id);
+                }
+            }
+            Action::ConfirmDeleteSwarm => {
+                if let Some(agents_list::AgentKind::Run(k)) = self.agent_row()
+                    && let Some(id) = k.strip_prefix("swarm:")
+                {
+                    let id = id.to_string();
+                    match self.swarm_delete_confirm(&id) {
+                        Ok(c) => {
+                            self.command_overlay = Some(commands::Overlay::DeleteSwarm {
+                                swarm_id: id,
+                                question: c.question(),
+                            })
+                        }
+                        Err(e) => self.notice = Some(Notice::error(e)),
+                    }
                 }
             }
             Action::RunsKey => self.handle_runs_view_key(key),

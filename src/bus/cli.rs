@@ -700,6 +700,7 @@ commands:
                                 merge a finished task's branch into the workspace, or keep it unmerged
   accept <task> | drop <task>   accept or drop a task a worker proposed
   close                         end the swarm: stop its sessions, cancel open tasks, release leases
+  delete [--swarm ID]           remove the swarm: a closed one from the store (its traces stay) and its worktree checkouts (branches kept); a running one is closed first (needs the TUI)
   restart                       start a new coordinator in place of one that exited
   submit-plan --file PLAN.json [--from LAUNCH_ID]
                                 submit a plan as the coordinator does (agent_mux_swarm_plan): checked,
@@ -711,6 +712,7 @@ commands:
 
 <task> is a plan key (`bus-fix`), a task id or a unique prefix of either.
 The verbs take --workspace DIR (default: the current folder), --swarm ID when the folder runs several swarms, and --json.
+approve, launch, merge, set-aside, cancel, close and delete take --said.
 Decisions from here are recorded as the CLI's (`by = cli`); --said \"<words>\" keeps what the operator said.
 A coordinator without MCP relays from its chat with --as-coordinator --said \"<words>\" (recorded as `by = chat`).";
 
@@ -914,6 +916,47 @@ fn print_board(
     Ok(())
 }
 
+/// Delete defaults to the latest closed swarm only when no live swarm exists.
+fn resolve_delete_swarm(
+    conn: &rusqlite::Connection,
+    workspace: &str,
+    id: Option<&str>,
+) -> Result<super::swarm::record::SwarmRun, String> {
+    use super::swarm::record;
+    match record::resolve_swarm(conn, workspace, id) {
+        Ok(swarm) => Ok(swarm),
+        Err(error) => {
+            if id.is_some()
+                || !record::live_swarms_in(conn, workspace)
+                    .map_err(|e| e.to_string())?
+                    .is_empty()
+            {
+                return Err(error);
+            }
+            if let Some(swarm) = record::ended_swarms_since(conn, 0)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|swarm| swarm.workspace == workspace)
+            {
+                return Ok(swarm);
+            }
+            // The recent list is capped globally; this folder may be older.
+            use rusqlite::OptionalExtension;
+            let latest: Option<String> = conn.query_row(
+                "SELECT id FROM swarms WHERE workspace = ?1 AND ended_ns IS NOT NULL ORDER BY ended_ns DESC LIMIT 1",
+                [workspace],
+                |row| row.get(0),
+            ).optional().map_err(|e| e.to_string())?;
+            match latest {
+                Some(id) => record::get_swarm(conn, &id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or(error),
+                None => Err(error),
+            }
+        }
+    }
+}
+
 pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
     use super::swarm::record::{self, SwarmVerb};
     let cmd = raw.first().map(String::as_str).unwrap_or("status");
@@ -975,12 +1018,22 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
         let from = as_coordinator
             .then(|| bstore::resolve_caller_launch(args.value("from")))
             .flatten();
+        let named_swarm = if verb == SwarmVerb::Delete {
+            let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
+            Some(
+                resolve_delete_swarm(&conn, &workspace, args.value("swarm"))
+                    .map_err(|e| anyhow::anyhow!(e))?
+                    .id,
+            )
+        } else {
+            args.value("swarm").map(str::to_string)
+        };
         let req = ControlRequest::SwarmAction {
             workspace: workspace.clone(),
             verb,
             task: task.clone(),
             notes,
-            swarm: args.value("swarm").map(str::to_string),
+            swarm: named_swarm.clone(),
             by: Some(decider.by),
             said: said.clone(),
             from: from.clone(),
@@ -993,7 +1046,7 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             }
             Err(_) => {
                 let conn = open_aux(&db_path).map_err(|e| anyhow::anyhow!(e))?;
-                let swarm = record::resolve_swarm(&conn, &workspace, args.value("swarm"))
+                let swarm = record::resolve_swarm(&conn, &workspace, named_swarm.as_deref())
                     .map_err(|e| anyhow::anyhow!(e))?;
                 let env = cli_check_env(&swarm.workspace, swarm.isolation);
                 let d = record::apply(
@@ -1010,7 +1063,11 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                     now,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
-                format!("{d} (no agent-mux TUI is running: workers start when one does)")
+                if verb == SwarmVerb::Delete {
+                    d
+                } else {
+                    format!("{d} (no agent-mux TUI is running: workers start when one does)")
+                }
             }
         };
         if args.has("json") {
@@ -1290,4 +1347,62 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swarm_cli_delete_resolves_closed_and_live_swarms() {
+        use crate::tracing::store::{OpenOptions, open_rw};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("traces.db");
+        let _store = open_rw(&db, OpenOptions::default()).unwrap();
+        let conn = open_aux(&db).unwrap();
+        let insert = |id: &str, ws: &str, ended: Option<i64>| {
+            conn.execute(
+                "INSERT INTO swarms (id, workspace, goal, status, planner_harness, max_workers, isolation, gate, started_ns, updated_ns, ended_ns) VALUES (?1, ?2, 'goal', 'finished', 'claude', 1, 'shared', 1, 0, 0, ?3)",
+                rusqlite::params![id, ws, ended],
+            ).unwrap();
+        };
+        insert("swarm-old", "/project", Some(1));
+        insert("swarm-latest", "/project", Some(2));
+        for i in 3..25 {
+            insert(&format!("swarm-other-{i}"), "/other", Some(i));
+        }
+        assert_eq!(
+            resolve_delete_swarm(&conn, "/project", None).unwrap().id,
+            "swarm-latest"
+        );
+        assert_eq!(
+            resolve_delete_swarm(&conn, "/project", Some("old"))
+                .unwrap()
+                .id,
+            "swarm-old"
+        );
+        assert!(resolve_delete_swarm(&conn, "/project", Some("missing")).is_err());
+        insert("swarm-live", "/project", None);
+        assert_eq!(
+            resolve_delete_swarm(&conn, "/project", None).unwrap().id,
+            "swarm-live"
+        );
+        insert("swarm-live2", "/project", None);
+        assert!(
+            resolve_delete_swarm(&conn, "/project", None)
+                .unwrap_err()
+                .contains("name one")
+        );
+    }
+
+    #[test]
+    fn swarm_cli_delete_is_documented_and_dispatched() {
+        use super::super::swarm::record::SwarmVerb;
+        assert!(SWARM_USAGE.contains("delete [--swarm ID]"));
+        let cmd = "delete";
+        assert_eq!(
+            SwarmVerb::parse(cmd).filter(|v| *v != SwarmVerb::Close || cmd == "close"),
+            Some(SwarmVerb::Delete)
+        );
+    }
 }

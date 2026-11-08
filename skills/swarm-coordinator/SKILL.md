@@ -52,6 +52,7 @@ agent-mux **supervises** whatever you do: it nudges an idle worker, notices a lo
 
 - When every task is settled (event `swarm.integrating` or `swarm.finished`), summarise for the user: what each task did (the workers' `result` lines), **each review's verdict and findings** (`reviewed` and `review_key` in `agent_mux_swarm_board`), the branches awaiting a merge, the check's result, time, tokens and cost.
 - Ask which branches to merge, recommending the approved ones; a merge against its review answers with a warning, which you repeat to the user. Relay each answer with `agent_mux_swarm_action(verb = "merge" | "set-aside", task = ..., operator_said = "<their words>")`.
+- Relay `delete` only on the operator's explicit words, quoting them in `operator_said`. Prefer `close` unless the operator asks to delete. Deleting a live swarm closes it first and ends your session too.
 - When the user says to close, `agent_mux_swarm_action(verb = "close", operator_said = "<their words>")`. Until then finished workers stay open for follow-ups.
 
 ## Rules

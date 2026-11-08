@@ -554,3 +554,40 @@ fn merging_a_branch_makes_a_merge_commit_and_a_conflict_changes_nothing() {
     let err = agent_mux::bus::swarm::merge_branch(clean.path(), "no-such-branch").unwrap_err();
     assert!(!err.is_empty());
 }
+
+#[test]
+fn removing_a_worktree_keeps_its_branch_and_leaves_other_folders_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    repo(dir.path(), false);
+    let wt = dir.path().join(".loop-worktrees").join("bus-task-x");
+    git(
+        dir.path(),
+        &[
+            "worktree",
+            "add",
+            &wt.to_string_lossy(),
+            "-b",
+            "loop/bus-task-x",
+        ],
+    );
+    assert!(wt.join("file").exists());
+    // a folder outside the worktrees root is refused, a missing one skipped
+    let outside = dir.path().join("elsewhere");
+    std::fs::create_dir(&outside).unwrap();
+    let missing = dir.path().join(".loop-worktrees").join("gone");
+    let done = agent_mux::bus::swarm::remove_worktrees(
+        dir.path(),
+        &[wt.clone(), outside.clone(), missing],
+    );
+    assert_eq!(done.len(), 2, "{done:?}");
+    assert_eq!(done[0].0, wt);
+    assert!(done[0].1.is_ok(), "{done:?}");
+    assert_eq!(done[1].0, outside);
+    assert!(done[1].1.is_err(), "{done:?}");
+    assert!(!wt.exists());
+    assert!(outside.exists());
+    let branches = git(dir.path(), &["branch", "--list", "loop/bus-task-x"]);
+    assert!(branches.contains("loop/bus-task-x"), "{branches}");
+    let trees = git(dir.path(), &["worktree", "list", "--porcelain"]);
+    assert!(!trees.contains("bus-task-x"), "{trees}");
+}
