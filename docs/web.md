@@ -50,6 +50,8 @@ area's own document; an error is `{"ok": false, "error": "<message>"}` with a
 | `POST /api/runs/…` | | Loop and workflow runs; see below. |
 | `POST /api/library/…` | | The configuration library; see below. |
 | `GET /api/live` | | Server-Sent Events: the store changed; see [Live](#live). |
+| `GET /api/session/<key>/transcript` | `?launch_id=&from_turn=&limit=&turn=` | The session viewer's transcript; see [Session viewer](#session-viewer). |
+| `GET /api/export/session/<key>.html` | `?launch_id=&download=1` | The transcript as one self-contained HTML file. |
 | `GET /api/resolve?id=<id>` | | `{ok, session_key, launch_id}` for a session key or a launch id (`launches.session_key`, else the traces that carry the launch); `launch_id` is set only when the session's traces carry it, so the pair passes `get_session`. `404` for an unknown id, `400` for an empty one. |
 | `POST /api/usage/…` | `UsageArgs` | Token, cost and activity aggregates; see [Usage](#usage). |
 | `/api/tools/…` | | A slot for the Tools area (no routes yet). |
@@ -261,15 +263,12 @@ The five trace pages read the trace API above and nothing else.
   the workspace filter is applied in the browser since the service has no
   such argument. The list follows `next_cursor` up to twenty pages. Columns
   sort on click; a session key opens its page.
-- **Session** calls `get_session` and `get_timeline` together: the summary
-  cards (turns, tools, tokens, cost, duration), the card's facts (state,
-  outcome, initial goal, current activity, active tools), the tool counts,
-  the sub-agents (timeline observations of type `agent`), files modified,
-  recent commands, the last assistant output, then the turns with their
-  input and output snippets and an observation table each (type, name,
-  duration, error).
+- **Session** is the session viewer; see [Session viewer](#session-viewer).
 - **Search** is `search_traces` over prompts and outputs with harness and
-  since filters; a match links to its session.
+  since filters. A match links to its session and, in the "where" column
+  (`turn input` / `turn output`), to the exact turn it was found in
+  (`#/sessions/<key>?turn=<trace id>&launch_id=<launch>`, from the match's
+  `source_id` `trace:<id>:input|output`); `Enter` on a row opens the turn.
 - **Skills & Agents** is `analyze_skills` (turns loaded, attributed calls,
   tokens, cost, errors, p50/p95/max, slow calls, limitations) with skill,
   harness and since filters.
@@ -564,3 +563,112 @@ write to the store or invoke a harness.
 Session links use `?turn=<trace id>` for the session viewer’s exact-turn deep link.
 
 ## Session viewer
+
+`#/sessions/<key>` (`web/trace.js`, the `session` page) reads one session,
+or one launch of it with `?launch_id=`, from two routes: `get_session` (the
+runtime state, outcome, initial goal and current activity) and
+`GET /api/session/<key>/transcript` (everything else).
+
+**Header.** Cards for duration, turns, tokens (input, output and cache),
+cost, lines added/removed (the launches' `reported_lines_*`) and tool
+calls with their errors; then the harness, the models (generations' `model`,
+most used first), the workspace, each launch with its profile, start and
+termination, and links to what it belongs to, read from
+`launches.metadata`: `swarm_id` → `#/swarms/<id>` (with the task key),
+`loop_run_id` → `#/runs/loop/<id>`, `workflow_run_id` →
+`#/runs/workflow/<id>` (with the step). A session traced with
+`content_mode = metadata` says so in a banner: prompts, outputs and tool
+inputs and outputs were not stored, and only turns, timings, tools, tokens
+and cost are shown (`mixed` when its launches differ).
+
+**Charts** (`M.charts`): tokens per turn (stacked input, cache read, cache
+write, output), cost per turn (a bar opens its turn) and the context per
+generation: input plus cache read plus cache write tokens of every
+generation, labelled `<turn>.<n>`, which shows the context growing and
+dropping at a compaction.
+
+**Transcript.** One card per turn: the user prompt, the turn's thinking
+(collapsed), then its observations as a tree (`parent_id`): a generation
+shows its assistant text and thinking and holds its tool calls; a tool call
+is a collapsed row (name, path or command, duration) with its input
+(pretty-printed JSON) and output; a failed call (`level = ERROR`) is red,
+opened, with its status message; a skill load (`kind = skill_load` or
+`skill`) and the turn's `skills` carry a skill badge; an agent invocation
+nests its sub-agent's turns and calls in an indented block with its prompt
+and result. The turn's final output is shown when no generation carries
+text. Long texts show the first 1,500 characters or 24 lines behind
+**Show all**; the endpoint itself cuts a field at 32,000 characters
+(`TRANSCRIPT_MAX_CHARS`) and the card says so. Each turn header links to
+itself (`#`).
+
+**Outline.** A sticky list of the turns beside the transcript (prompt,
+errors in red, a bar for its tokens); a click scrolls to the turn. `j`/`k`
+and `]`/`[` step to the next/previous turn (taken before the shell's row
+keys while the page is open). `?turn=<trace id>` opens the page at that
+turn, loading as many turns as it takes (the endpoint's `turn_index` says
+where it is), so Search and the Tools pages link to an exact turn.
+
+**Files touched.** Every `observations.path` of the session: calls, tools,
+errors and when it was last touched, newest first.
+
+**Live.** While the session is live (a `working`, `waiting_for_user` or
+`idle` runtime state, an open turn, or activity read from the live
+process) the page subscribes to `M.live`, and on a store change fetches the
+turns from the first open one (or the last) to the end, page after page
+however many arrived (`drainTurns`), and replaces those cards in place
+(when the reader has not loaded every turn, only the header and the **Load
+more** count change): the reader's scroll position (anchored on the first visible turn),
+opened details and loaded turns stay; a reader at the bottom follows new
+turns. It unsubscribes once the session is no longer live, and on leaving.
+
+**Paging.** The page loads 200 turns and offers **Load more**.
+
+**Export.** **Open export** and **Download HTML** fetch
+`GET /api/export/session/<key>.html`: the whole transcript (every turn and every stored character, read 200
+turns at a time; only the JSON transcript pages and clips) as one HTML
+document with
+inline CSS, light and dark, thinking and tool calls in `<details>`, no
+script and no external resource (`Content-Security-Policy: default-src
+'none'; style-src 'unsafe-inline'`). Every stored text is HTML-escaped
+(`web::trace::escape_html`). `download=1` sends
+`Content-Disposition: attachment; filename="session-<key>.html"` (the key
+with characters outside `[A-Za-z0-9._-]` as `_`).
+
+### Transcript API
+
+`GET /api/session/<key>/transcript` opens the store read-only, applies the
+server's workspace scope (403 outside it, as `get_session`), refuses a
+`launch_id` the session's traces do not carry (400), and answers 404 for an
+unknown session and 400 for an unknown query key.
+
+| Query | Meaning |
+|---|---|
+| `launch_id` | Only that launch's turns, totals and files. |
+| `from_turn`, `limit` | Turns `from_turn..from_turn+limit` in start order (default 0 and 200, at most 2,000). |
+| `turn` | A trace id; its index comes back in `turn_index` (`null` when it is not this session's). |
+
+The answer (`web::trace::Transcript`): `ok`, `session_key`, `launch_id`,
+`title`, `provider`, `cwd`, `content_mode` (`full`, `metadata`, `mixed`,
+`unknown`), `launches` (`id`, `provider`, `profile`, `content_mode`,
+`started_ns`, `ended_ns`, `termination`, `exit_code`, `cost_usd`,
+`lines_added`, `lines_removed`, `swarm {id, role, task, task_key}`,
+`loop_run {run_id, loop_id, pattern}`, `workflow {run_id, name, step,
+phase}`), `models`, `started_ns`, `ended_ns`, `duration_ms`, `totals`
+(generation tokens by kind, `cost_usd`, `generations`, `tool_calls`,
+`errors`, `lines_added`, `lines_removed`; over every turn, not the page),
+`files` (`path`, `count`, `tools`, `errors`, `first_ns`, `last_ns`),
+`total_turns`, `from_turn`, `turn_index` and `turns`. A turn has `index`,
+`id`, `ordinal`, `launch_id`, `status`, times, `input`, `output`,
+`thinking`, `skills`, its generation tokens and cost, `errors` and
+`observations`; an observation has `id`, `parent_id`, `type`, `kind`,
+`name`, times, `error`, `level`, `status_message`, `model`, `input` (never
+for a generation: that is its whole context), `output`, `thinking`, tokens,
+`cost_usd`, `tool_name`, `skill`, `mcp_server` and `path`. A cut text is
+named in its item's `truncated` list with its stored length in `lengths`.
+
+```sh
+curl -s 'localhost:7331/api/session/claude%3As1/transcript?limit=5'
+curl -s -o session.html 'localhost:7331/api/export/session/claude%3As1.html'
+```
+
+Tests: `tests/it/web/session.rs`.
