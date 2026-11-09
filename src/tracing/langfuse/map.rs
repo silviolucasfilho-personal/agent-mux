@@ -1003,6 +1003,7 @@ mod tests {
                 errors: 0,
                 tokens: Some(500),
                 cost_usd: Some(0.02),
+                unpriced: false,
             }],
             tools: 4,
             errors: 0,

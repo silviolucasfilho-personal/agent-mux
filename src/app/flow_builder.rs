@@ -128,7 +128,7 @@ impl Field {
     }
 }
 
-const HARNESSES: [&str; 4] = ["", "claude", "codex", "agy"];
+const HARNESSES: [&str; 5] = ["", "claude", "codex", "agy", "opencode"];
 pub(crate) const EFFORTS: [&str; 5] = ["", "low", "medium", "high", "max"];
 
 /// What an inline text edit writes back to.
@@ -187,13 +187,14 @@ pub enum AgentField {
     ModelClaude,
     ModelCodex,
     ModelAgy,
+    ModelOpenCode,
     EffortCodex,
     EffortAgy,
     SaveTo,
 }
 
 impl AgentField {
-    pub const ALL: [AgentField; 11] = [
+    pub const ALL: [AgentField; 12] = [
         AgentField::Name,
         AgentField::Purpose,
         AgentField::Instructions,
@@ -202,6 +203,7 @@ impl AgentField {
         AgentField::ModelClaude,
         AgentField::ModelCodex,
         AgentField::ModelAgy,
+        AgentField::ModelOpenCode,
         AgentField::EffortCodex,
         AgentField::EffortAgy,
         AgentField::SaveTo,
@@ -220,7 +222,8 @@ pub struct AgentForm {
     pub tools: [bool; 4],
     pub tool_cursor: usize,
     pub mcp: TextArea,
-    pub models: [TextArea; 3],
+    /// One per `agents::HARNESSES`, in its order.
+    pub models: [TextArea; 4],
     /// Codex's and Antigravity's effort, indexes into `EFFORTS`.
     pub efforts: [usize; 2],
     pub to_workspace: bool,
@@ -273,11 +276,12 @@ impl AgentForm {
                 .and_then(|b| b.model.clone())
                 .or_else(|| spec.model.clone());
             f.models[i].set(model.unwrap_or_default());
-            if i > 0 {
+            // efforts for codex and agy only: opencode has no effort flag
+            if let Some(slot) = i.checked_sub(1).and_then(|k| f.efforts.get_mut(k)) {
                 let effort = b
                     .and_then(|b| b.effort.clone())
                     .or_else(|| spec.effort.clone());
-                f.efforts[i - 1] = EFFORTS
+                *slot = EFFORTS
                     .iter()
                     .position(|e| Some(*e) == effort.as_deref())
                     .unwrap_or(0);
@@ -296,6 +300,7 @@ impl AgentForm {
             AgentField::ModelClaude => Some(&mut self.models[0]),
             AgentField::ModelCodex => Some(&mut self.models[1]),
             AgentField::ModelAgy => Some(&mut self.models[2]),
+            AgentField::ModelOpenCode => Some(&mut self.models[3]),
             _ => None,
         }
     }
@@ -2186,4 +2191,31 @@ pub(crate) fn text_key(t: &mut TextArea, key: &KeyEvent, _ctrl: bool) {
         return;
     }
     crate::keymap::apply_text(t, key);
+}
+
+#[cfg(test)]
+mod opencode_form_tests {
+    use super::*;
+
+    #[test]
+    fn an_opencode_backend_round_trips_through_the_agent_form() {
+        let text = "name = \"rev\"\ndescription = \"Reviews.\"\ninstructions = \"Review.\"\n\n[backends.opencode]\nmodel = \"opencode/big-pickle\"\n\n[backends.codex]\neffort = \"high\"\n";
+        let spec = agents::AgentSpec::parse(text).expect("parses");
+        let form = AgentForm::from_spec(&spec);
+        assert_eq!(form.models[3].text, "opencode/big-pickle");
+        let out = form.render();
+        assert!(
+            out.contains("[backends.opencode]\nmodel = \"opencode/big-pickle\"\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("[backends.codex]\neffort = \"high\"\n"),
+            "{out}"
+        );
+        let again = agents::AgentSpec::parse(&out).expect("the rendered file parses");
+        assert_eq!(
+            again.model_for("opencode").as_deref(),
+            Some("opencode/big-pickle")
+        );
+    }
 }

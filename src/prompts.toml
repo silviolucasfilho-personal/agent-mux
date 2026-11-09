@@ -10,7 +10,7 @@
 #   {state_file}  absolute path of the state file the run rewrites
 #   {workspace}   absolute path of the workspace
 #   {level}       the effective level of the run (L1, L2, L3)
-#   {harness}     claude or codex
+#   {harness}     claude, codex or opencode
 # A pattern's own `prompt` in loops/registry.toml replaces this text for that pattern.
 run = "{invocation} Run the {pattern} loop for this workspace. Facts for this run are in $AGENT_MUX_LOOP_CONTEXT (read it first). Update the state file at {state_file}. Finish with a loop-result block."
 

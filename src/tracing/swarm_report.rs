@@ -15,7 +15,7 @@ use crate::bus::swarm::view::{self, QuestionView, TaskView};
 use crate::bus::{BusMessage, short_id, store as bstore};
 use crate::tracing::cli::{fmt_cost, fmt_time, fmt_tokens};
 use crate::tracing::view::{Window, axis, bar};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -66,6 +66,9 @@ pub struct TurnReport {
     pub tokens: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// Generations with usage but no price (the launch's cost is short).
+    #[serde(skip)]
+    pub unpriced: bool,
 }
 
 /// A sub-agent of a launch: an `agent` observation (a Claude `Task` run,
@@ -171,37 +174,32 @@ pub fn launches(conn: &Connection, swarm_id: &str) -> rusqlite::Result<Vec<Launc
         let cost: f64 = l.turns.iter().filter_map(|t| t.cost_usd).sum();
         l.tokens = (tokens > 0).then_some(tokens);
         l.cost_usd = (cost > 0.0).then_some(cost);
-        l.unpriced = conn
-            .query_row(
-                "SELECT COALESCE(SUM(unpriced_generations), 0) > 0 FROM trace_stats WHERE launch_id = ?1",
-                params![l.launch_id],
-                |r| r.get::<_, bool>(0),
-            )
-            .optional()?
-            .unwrap_or(false);
+        l.unpriced = l.turns.iter().any(|t| t.unpriced);
         out.push(l);
     }
     Ok(out)
 }
 
 fn turns(conn: &Connection, launch_id: &str) -> rusqlite::Result<Vec<TurnReport>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, ordinal, name, status, start_ns, end_ns, tool_count, error_count,
-                total_tokens, total_cost_usd
-         FROM trace_stats WHERE launch_id = ?1 ORDER BY ordinal, rid",
-    )?;
+    // `trace_stats` narrowed to the launch before grouping: the view itself
+    // groups the whole store first (see `store::query`'s module docs)
+    let mut stmt = conn.prepare(&crate::tracing::store::query::trace_stats_sql(
+        "t.launch_id = ?1",
+        "ORDER BY t.ordinal, t.rid",
+    ))?;
     let rows = stmt.query_map(params![launch_id], |r| {
         Ok(TurnReport {
-            id: r.get(0)?,
-            ordinal: r.get(1)?,
-            name: r.get(2)?,
-            status: r.get(3)?,
-            start_ns: r.get(4)?,
-            end_ns: r.get(5)?,
-            tools: r.get(6)?,
-            errors: r.get(7)?,
-            tokens: r.get(8)?,
-            cost_usd: r.get(9)?,
+            id: r.get("id")?,
+            ordinal: r.get("ordinal")?,
+            name: r.get("name")?,
+            status: r.get("status")?,
+            start_ns: r.get("start_ns")?,
+            end_ns: r.get("end_ns")?,
+            tools: r.get("tool_count")?,
+            errors: r.get("error_count")?,
+            tokens: r.get("total_tokens")?,
+            cost_usd: r.get("total_cost_usd")?,
+            unpriced: r.get::<_, i64>("unpriced_generations")? > 0,
         })
     })?;
     rows.collect()

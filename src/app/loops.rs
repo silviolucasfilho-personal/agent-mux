@@ -863,7 +863,9 @@ impl App {
                 );
                 st.installed && !st.stale
             }
-            Harness::Antigravity | Harness::OpenCode => false,
+            // agent-mux's plugin rides on every traced launch
+            Harness::OpenCode => crate::tracing::hooks::register::current_exe().is_some(),
+            Harness::Antigravity => false,
         }
     }
 
@@ -1438,8 +1440,9 @@ impl App {
                 }
             }
             Harness::Codex => {}
+            // no per-run budget flag: the loop's own caps and the guard apply
+            Harness::OpenCode => {}
             Harness::Antigravity => return Err("Antigravity is not supported for loops".into()),
-            Harness::OpenCode => return Err("OpenCode is not supported for loops".into()),
         }
         if Harness::detect(&profile.command) != Some(harness) {
             profile.command = harness.as_str().to_string();

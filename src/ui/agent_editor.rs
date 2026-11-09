@@ -482,7 +482,7 @@ fn scheduled_facts(st: &AgentEditorState, d: &LoopDialogState) -> (String, Vec<L
                 ),
                 gap(),
                 l(
-                    "A task that checks its work asks the loop-verifier sub-agent; its model is set here (Claude Code only).",
+                    "A task that checks its work asks the loop-verifier sub-agent; its model is set here (Claude Code, and OpenCode with a provider/model id).",
                 ),
                 gap(),
                 Line::styled(
@@ -639,6 +639,7 @@ fn persona_fields(
                     AgentField::Mcp => &form.mcp,
                     AgentField::ModelClaude => &form.models[0],
                     AgentField::ModelCodex => &form.models[1],
+                    AgentField::ModelOpenCode => &form.models[3],
                     _ => &form.models[2],
                 };
                 let v = if typing {

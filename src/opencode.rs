@@ -44,13 +44,21 @@ pub fn mcp_fragment(name: &str, exe: &Path, argv: &[String]) -> Value {
     json!({ "mcp": { "servers": { name: { "type": "local", "command": command } } } })
 }
 
-/// Deep-merges `from` into `into`: objects merge key by key, anything
+/// Deep-merges `from` into `into`: objects merge key by key, a `plugins`
+/// list is appended to (each fragment brings its own plugin), anything
 /// else is replaced.
 pub fn merge(into: &mut Value, from: Value) {
     match (into, from) {
         (Value::Object(a), Value::Object(b)) => {
             for (k, v) in b {
                 match a.get_mut(&k) {
+                    Some(Value::Array(have)) if k == "plugins" && v.is_array() => {
+                        for item in v.as_array().into_iter().flatten() {
+                            if !have.contains(item) {
+                                have.push(item.clone());
+                            }
+                        }
+                    }
                     Some(slot) => merge(slot, v),
                     None => {
                         a.insert(k, v);
@@ -60,6 +68,115 @@ pub fn merge(into: &mut Value, from: Value) {
         }
         (slot, v) => *slot = v,
     }
+}
+
+/// agent-mux's OpenCode plugin (`src/opencode_plugin.js`): OpenCode 2 has
+/// plugins, not hooks, and this one relays its tool and session hooks to
+/// `agent-mux trace hook opencode` (probed on 2.0.32, 2026-11-09).
+pub const PLUGIN_JS: &str = include_str!("opencode_plugin.js");
+const PLUGIN_PACKAGE_JSON: &str =
+    r#"{"name":"agent-mux-opencode","private":true,"type":"module","main":"index.js"}"#;
+
+/// Where the plugin package lives: `<home>/.agent-mux/opencode-plugin/`.
+/// OpenCode loads a configured plugin from a package directory, never
+/// from a lone file.
+pub fn plugin_dir(home: &Path) -> std::path::PathBuf {
+    home.join(".agent-mux").join("opencode-plugin")
+}
+
+/// Writes the plugin package when it is missing or differs from the one
+/// compiled in (an upgrade), and returns its directory. A relative home
+/// (no `HOME` resolved: tracing falls back to `.`) is refused, so the
+/// package never lands in whatever folder agent-mux runs in.
+pub fn install_plugin(home: &Path) -> std::io::Result<std::path::PathBuf> {
+    if !home.is_absolute() {
+        return Err(std::io::Error::other(format!(
+            "no home directory to write the plugin under ({})",
+            home.display()
+        )));
+    }
+    let dir = plugin_dir(home);
+    std::fs::create_dir_all(&dir)?;
+    for (name, text) in [
+        ("index.js", PLUGIN_JS),
+        ("package.json", PLUGIN_PACKAGE_JSON),
+    ] {
+        let path = dir.join(name);
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+            std::fs::write(&path, text)?;
+        }
+    }
+    Ok(dir)
+}
+
+/// What the plugin needs to know about one launch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginOptions {
+    /// The agent-mux binary and the `trace hook opencode …` arguments.
+    pub exe: String,
+    pub args: Vec<String>,
+    /// The launch directory: the `cwd` of every payload.
+    pub cwd: String,
+    /// Normalized event names to send (`PreToolUse`, `PostToolUse`,
+    /// `SessionStart`, `UserPromptSubmit`).
+    pub events: Vec<String>,
+    /// `PreToolUse` carries `--guard` (budget or write guard).
+    pub guard: bool,
+    /// `PreToolUse` carries `--loop` (the loop policy, fail-closed).
+    pub loop_guard: bool,
+}
+
+/// The fragment that loads the plugin for one launch.
+pub fn plugin_fragment(dir: &Path, opts: &PluginOptions) -> Value {
+    json!({ "plugins": [ {
+        "package": dir.to_string_lossy(),
+        "options": {
+            "exe": opts.exe,
+            "args": opts.args,
+            "cwd": opts.cwd,
+            "events": opts.events,
+            "guard": opts.guard,
+            "loop": opts.loop_guard,
+        },
+    } ] })
+}
+
+/// Whether a `plugins` entry is agent-mux's own package.
+fn is_our_plugin(entry: &Value) -> bool {
+    entry
+        .get("package")
+        .and_then(Value::as_str)
+        .is_some_and(|p| Path::new(p).ends_with(Path::new(".agent-mux").join("opencode-plugin")))
+}
+
+/// Replaces the fragment carrying agent-mux's plugin in `env` (a loop run
+/// re-registers with `--loop`), keeping the package path it named, or
+/// adds one at `dir`.
+pub fn replace_plugin_fragment(env: &mut Vec<(String, String)>, dir: &Path, opts: &PluginOptions) {
+    let mut package: Option<String> = None;
+    env.retain(|(k, v)| {
+        if k != CONFIG_ENV {
+            return true;
+        }
+        let Ok(f) = serde_json::from_str::<Value>(v) else {
+            return true;
+        };
+        let ours = f
+            .get("plugins")
+            .and_then(Value::as_array)
+            .and_then(|ps| ps.iter().find(|p| is_our_plugin(p)));
+        match ours {
+            Some(p) => {
+                package = p.get("package").and_then(Value::as_str).map(str::to_string);
+                false
+            }
+            None => true,
+        }
+    });
+    let dir = package
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| dir.to_path_buf());
+    env.push(config_env(&plugin_fragment(&dir, opts)));
 }
 
 /// Takes `--flag value` and `--flag=value` out of `args`, returning the
@@ -211,6 +328,108 @@ mod tests {
         adapt_launch(&mut p, &mut x, &mut env);
         assert_eq!(p, v(&["--standalone"]));
         assert!(x.is_empty());
+    }
+
+    fn opts(loop_guard: bool) -> PluginOptions {
+        PluginOptions {
+            exe: "/opt/am".into(),
+            args: v(&["trace", "hook", "opencode", "--launch", "L1"]),
+            cwd: "/ws".into(),
+            events: v(&["PreToolUse", "PostToolUse"]),
+            guard: false,
+            loop_guard,
+        }
+    }
+
+    #[test]
+    fn plugin_fragments_append_to_the_users_plugins_and_force_standalone() {
+        let mut p = v(&["--auto"]);
+        let mut x = Vec::new();
+        let mut env = vec![
+            config_env(&json!({ "plugins": ["/theirs"] })),
+            config_env(&plugin_fragment(
+                Path::new("/h/.agent-mux/opencode-plugin"),
+                &opts(false),
+            )),
+        ];
+        adapt_launch(&mut p, &mut x, &mut env);
+        assert_eq!(x, v(&[STANDALONE]));
+        let d = doc(&env);
+        let plugins = d["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 2, "{d}");
+        assert_eq!(plugins[0], "/theirs");
+        assert_eq!(plugins[1]["package"], "/h/.agent-mux/opencode-plugin");
+        assert_eq!(plugins[1]["options"]["exe"], "/opt/am");
+        assert_eq!(plugins[1]["options"]["cwd"], "/ws");
+        assert_eq!(plugins[1]["options"]["events"][0], "PreToolUse");
+        assert_eq!(plugins[1]["options"]["loop"], false);
+    }
+
+    #[test]
+    fn a_loop_replaces_the_plugin_fragment() {
+        let dir = Path::new("/h/.agent-mux/opencode-plugin");
+        let mut env = vec![
+            ("AGENT_MUX".to_string(), "1".to_string()),
+            config_env(&plugin_fragment(dir, &opts(false))),
+            config_env(&json!({ "agent": { "x": {} } })),
+        ];
+        // another home at loop time still replaces, never doubles, the entry
+        replace_plugin_fragment(
+            &mut env,
+            Path::new("/other/.agent-mux/opencode-plugin"),
+            &opts(true),
+        );
+        let fragments: Vec<Value> = env
+            .iter()
+            .filter(|(k, _)| k == CONFIG_ENV)
+            .map(|(_, t)| serde_json::from_str(t).unwrap())
+            .collect();
+        assert_eq!(fragments.len(), 2, "the agent fragment stays");
+        let plugin = fragments
+            .iter()
+            .find(|f| f.get("plugins").is_some())
+            .unwrap();
+        assert_eq!(plugin["plugins"][0]["options"]["loop"], true);
+        assert_eq!(
+            plugin["plugins"][0]["package"],
+            "/h/.agent-mux/opencode-plugin"
+        );
+    }
+
+    #[test]
+    fn the_plugin_package_is_written_once_and_refreshed_when_it_differs() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = install_plugin(home.path()).unwrap();
+        assert_eq!(dir, plugin_dir(home.path()));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("index.js")).unwrap(),
+            PLUGIN_JS
+        );
+        let pkg: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(pkg["main"], "index.js");
+        assert!(
+            install_plugin(Path::new(".")).is_err(),
+            "never under a relative home"
+        );
+        std::fs::write(dir.join("index.js"), "old").unwrap();
+        install_plugin(home.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("index.js")).unwrap(),
+            PLUGIN_JS
+        );
+    }
+
+    #[test]
+    fn the_plugin_exports_a_v2_definition() {
+        // OpenCode 2 refuses a module without `default: { id, setup }`
+        assert!(PLUGIN_JS.contains("export default {"));
+        assert!(PLUGIN_JS.contains("id: \"agent-mux\""));
+        assert!(PLUGIN_JS.contains("setup: (ctx)"));
+        for hook in ["\"execute.before\"", "\"execute.after\"", "\"context\""] {
+            assert!(PLUGIN_JS.contains(hook), "{hook}");
+        }
     }
 
     #[test]

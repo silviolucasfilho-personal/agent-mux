@@ -19,6 +19,9 @@ use crate::bus::swarm::record::{
 };
 use crate::harness::{Harness, LaunchOptions, compose};
 use crate::status::Status;
+
+/// How long [`App::swarm_catalog_facts`] keeps what it read.
+const CATALOG_FACTS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -86,8 +89,27 @@ impl App {
 
     /// What `plan::check` needs for this workspace.
     pub fn swarm_check_env(&self, workspace: &Path, isolation: TaskIsolation) -> CheckEnv {
-        let catalog = crate::agents::Catalog::load(&self.library_root(), Some(workspace));
         CheckEnv {
+            default_isolation: isolation,
+            ..self.swarm_catalog_facts(workspace)
+        }
+    }
+
+    /// What the plan's checks read from disk (the agent catalog, the
+    /// installed harnesses, whether the workspace is a git repository),
+    /// kept for [`CATALOG_FACTS_TTL`] per workspace: the Swarm screen asks
+    /// on every refresh, and the catalog walk and `git rev-parse` are not
+    /// for the UI thread twice a second.
+    pub(crate) fn swarm_catalog_facts(&self, workspace: &Path) -> CheckEnv {
+        let mut cache = self.swarm_catalog_cache.borrow_mut();
+        if let Some((ws, at, env)) = cache.as_ref()
+            && ws == workspace
+            && at.elapsed() < CATALOG_FACTS_TTL
+        {
+            return env.clone();
+        }
+        let catalog = crate::agents::Catalog::load(&self.library_root(), Some(workspace));
+        let env = CheckEnv {
             harnesses: self
                 .installed_harnesses()
                 .iter()
@@ -96,9 +118,15 @@ impl App {
             agents: catalog.entries.iter().map(|e| e.name.clone()).collect(),
             writing_agents: crate::bus::swarm::plan::writing_agents(&catalog),
             git_repo: crate::loops::worktree::is_git_repo(workspace),
-            default_isolation: isolation,
+            default_isolation: TaskIsolation::default(),
             pool: Vec::new(),
-        }
+        };
+        *cache = Some((
+            workspace.to_path_buf(),
+            std::time::Instant::now(),
+            env.clone(),
+        ));
+        env
     }
 
     /// Starts a swarm: its row, then its coordinator session. With a goal the

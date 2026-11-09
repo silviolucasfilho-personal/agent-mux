@@ -42,8 +42,9 @@ const TRACE_AGGREGATES: &str = "\
        COALESCE(SUM(o.status_message = 'declined by the user'), 0) AS declined";
 
 /// `trace_stats` over the traces `where_clause` keeps, with `tail` (an
-/// `ORDER BY`, a `LIMIT`) appended.
-fn trace_stats_sql(where_clause: &str, tail: &str) -> String {
+/// `ORDER BY`, a `LIMIT`) appended. Use it, not the view, whenever the
+/// filter narrows to a session or a launch (see the module docs).
+pub(crate) fn trace_stats_sql(where_clause: &str, tail: &str) -> String {
     format!(
         "SELECT t.*, {TRACE_AGGREGATES}
          FROM traces t LEFT JOIN observations o ON o.trace_id = t.id
@@ -755,10 +756,21 @@ impl LaunchStats {
 }
 
 pub fn launch_stats(conn: &Connection, launch_id: &str) -> rusqlite::Result<LaunchStats> {
+    // the launch's traces first (index `traces_launch`), then their
+    // observations: the `trace_stats` view would group the whole store
     let (turns, total_tokens, cost_usd) = conn.query_row(
-        "SELECT COUNT(*), SUM(total_tokens), SUM(total_cost_usd) FROM trace_stats WHERE launch_id = ?1",
+        "SELECT (SELECT COUNT(*) FROM traces WHERE launch_id = ?1),
+                SUM(o.total_tokens), SUM(o.total_cost_usd)
+         FROM traces t JOIN observations o ON o.trace_id = t.id
+         WHERE t.launch_id = ?1",
         params![launch_id],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<f64>>(2)?)),
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<f64>>(2)?,
+            ))
+        },
     )?;
     let reported_cost_usd: Option<f64> = conn
         .query_row(
@@ -1137,7 +1149,8 @@ pub fn skill_launches(
                 l.session_key,
                 json_extract(l.metadata, '$.skill_id') IS NOT NULL AS by_id,
                 (SELECT COUNT(*) FROM traces t WHERE t.launch_id = l.id) AS turns,
-                (SELECT SUM(ts.total_cost_usd) FROM trace_stats ts WHERE ts.launch_id = l.id) AS total_cost_usd,
+                (SELECT SUM(o.total_cost_usd) FROM traces t JOIN observations o ON o.trace_id = t.id
+                  WHERE t.launch_id = l.id) AS total_cost_usd,
                 (l.ended_ns IS NULL AND EXISTS (SELECT 1 FROM runs r WHERE r.id = l.run_id AND r.ended_ns IS NULL)) AS live
          FROM launches l
          WHERE (json_extract(l.metadata, '$.skill_id') = ?1
@@ -1317,6 +1330,70 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    /// `seeded` with each session's turns under launch `L<s>`.
+    fn seeded_with_launches(sessions: usize) -> Connection {
+        let conn = seeded(sessions);
+        // the launches rows themselves are not read: no need to satisfy
+        // `traces.launch_id`'s reference
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             UPDATE traces SET launch_id = 'L' || substr(session_key, 9);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn launch_queries_match_the_trace_stats_view() {
+        let conn = seeded_with_launches(3);
+        for s in 0..3 {
+            let launch = format!("L{s}");
+            // the swarm report's per-launch turns
+            let mut stmt = conn
+                .prepare(&trace_stats_sql(
+                    "t.launch_id = ?1",
+                    "ORDER BY t.ordinal, t.rid",
+                ))
+                .unwrap();
+            let filtered: Vec<TraceStat> = stmt
+                .query_map(params![launch], trace_from_row)
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let mut stmt = conn
+                .prepare("SELECT * FROM trace_stats WHERE launch_id = ?1 ORDER BY ordinal, rid")
+                .unwrap();
+            let view: Vec<TraceStat> = stmt
+                .query_map(params![launch], trace_from_row)
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(filtered.len(), 2);
+            assert_eq!(filtered, view, "turns of {launch}");
+            // the live badges' totals
+            let stats = launch_stats(&conn, &launch).unwrap();
+            let (turns, tokens, cost): (i64, Option<i64>, Option<f64>) = conn
+                .query_row(
+                    "SELECT COUNT(*), SUM(total_tokens), SUM(total_cost_usd)
+                     FROM trace_stats WHERE launch_id = ?1",
+                    params![launch],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (stats.turns, stats.total_tokens, stats.cost_usd),
+                (turns, tokens, cost),
+                "launch_stats of {launch}"
+            );
+        }
+        // a launch with no turns: no row from either
+        let stats = launch_stats(&conn, "nope").unwrap();
+        assert_eq!(
+            (stats.turns, stats.total_tokens, stats.cost_usd),
+            (0, None, None)
+        );
     }
 
     #[test]
