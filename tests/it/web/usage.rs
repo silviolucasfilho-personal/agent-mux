@@ -406,9 +406,9 @@ fn overview_counts_only_usage_inside_the_window() {
     server.abort();
 }
 
-#[test]
-fn a_turn_crossing_midnight_counts_its_session_on_both_days() {
-    // a turn that starts Nov 8 23:59Z and makes its call Nov 9 00:01Z
+/// A store in a fresh temporary folder holding `ops(dir)`; returns the
+/// folder (kept alive) and the store path.
+fn small_store(ops: impl FnOnce(&Path) -> Vec<StoreOp>) -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path().canonicalize().unwrap();
     let db = dir.join("traces.db");
@@ -416,29 +416,36 @@ fn a_turn_crossing_midnight_counts_its_session_on_both_days() {
         &db,
         OpenOptions {
             prices: PriceTable::builtin(),
-            run_id: "run-midnight".into(),
+            run_id: "run-small".into(),
             retention_days: 0,
             agent_mux_version: "test".into(),
         },
     )
     .unwrap();
+    store.apply(&ops(&dir)).unwrap();
+    (temp, db)
+}
+
+/// Session `claude:m`: a turn Nov 8 23:59Z whose only call is Nov 9 00:01Z.
+fn midnight_turn(dir: &Path) -> Vec<StoreOp> {
     let turn = ns("2026-11-08T23:59:00Z");
-    let call_at = ns("2026-11-09T00:01:00Z");
-    store
-        .apply(&[
-            StoreOp::Session(session("claude:m", "claude", "m", &dir, turn)),
-            StoreOp::Trace(trace("m1", "claude:m", "claude", "m", 1, turn)),
-            StoreOp::Observation(generation(
-                "gm",
-                "m1",
-                "claude-opus",
-                call_at,
-                [1_000, 100, 0, 0, 0],
-                Some([0.01, 0.01, 0.0, 0.0, 0.02]),
-            )),
-        ])
-        .unwrap();
-    drop(store);
+    vec![
+        StoreOp::Session(session("claude:m", "claude", "m", dir, turn)),
+        StoreOp::Trace(trace("m1", "claude:m", "claude", "m", 1, turn)),
+        StoreOp::Observation(generation(
+            "gm",
+            "m1",
+            "claude-opus",
+            ns("2026-11-09T00:01:00Z"),
+            [1_000, 100, 0, 0, 0],
+            Some([0.01, 0.01, 0.0, 0.0, 0.02]),
+        )),
+    ]
+}
+
+#[test]
+fn a_turn_crossing_midnight_counts_its_session_on_both_days() {
+    let (_temp, db) = small_store(midnight_turn);
     let (base, server) = start(&db);
 
     // a Nov 9 window holds the call but not the turn's start
@@ -470,6 +477,56 @@ fn a_turn_crossing_midnight_counts_its_session_on_both_days() {
         (json!(1), json!(0))
     );
     close(&nov9["cost_usd"], 0.02);
+    server.abort();
+}
+
+#[test]
+fn breakdown_tables_count_sessions_with_turns_but_no_calls() {
+    // claude:m (above) plus claude:n in the same folder: a turn on Nov 8
+    // with no call at all
+    let (_temp, db) = small_store(|dir| {
+        let mut ops = midnight_turn(dir);
+        let t = ns("2026-11-08T12:00:00Z");
+        ops.push(StoreOp::Session(session("claude:n", "claude", "n", dir, t)));
+        ops.push(StoreOp::Trace(trace("n1", "claude:n", "claude", "n", 1, t)));
+        ops
+    });
+    let (base, server) = start(&db);
+    let row = |v: &Value, table: &str, i: usize| v[table][i].clone();
+
+    // Nov 8 holds both turns and no call: two sessions, nothing spent
+    let v = call(
+        &base,
+        "breakdown",
+        json!({"since": NOV8, "until": "2026-11-09T00:00:00Z"}),
+    );
+    assert_eq!(v["totals"]["sessions"], 2);
+    for table in ["projects", "harnesses"] {
+        assert_eq!(v[table].as_array().unwrap().len(), 1, "{table}: {v}");
+        let r = row(&v, table, 0);
+        assert_eq!(r["sessions"], 2, "{table}: {r}");
+        assert_eq!(r["turns"], 2, "{table}: {r}");
+        close(&r["cost_usd"], 0.0);
+    }
+    assert_eq!(v["models"], json!([]), "a turn without a call has no model");
+    let o = call(
+        &base,
+        "overview",
+        json!({"since": NOV8, "until": "2026-11-09T00:00:00Z"}),
+    );
+    assert_eq!(o["top_projects"][0]["sessions"], 2);
+    assert_eq!(o["top_harnesses"][0]["sessions"], 2);
+
+    // over both days: one session spent, both count
+    let v = call(&base, "breakdown", json!({"since": NOV8, "until": NOV10}));
+    assert_eq!(v["totals"]["sessions"], 2);
+    for table in ["projects", "harnesses"] {
+        let r = row(&v, table, 0);
+        assert_eq!(r["sessions"], 2, "{table}: {r}");
+        assert_eq!(r["generations"], 1, "{table}: {r}");
+        close(&r["cost_usd"], 0.02);
+    }
+    assert_eq!(row(&v, "models", 0)["sessions"], 1);
     server.abort();
 }
 

@@ -538,10 +538,32 @@ fn turns_by(conn: &Connection, f: &Filter, key: &str) -> rusqlite::Result<HashMa
     .collect())
 }
 
+/// Distinct sessions per group, active in the window by a turn start or a
+/// generation (as the totals count them). `key` reads the session `s` only.
+fn sessions_by(conn: &Connection, f: &Filter, key: &str) -> rusqlite::Result<HashMap<String, i64>> {
+    Ok(rows(
+        conn,
+        &format!(
+            "SELECT g, COUNT(DISTINCT k) FROM (
+               SELECT {key} AS g, t.session_key AS k {}
+               UNION SELECT {key}, t.session_key {}
+             ) GROUP BY 1",
+            turn_from(),
+            gen_from()
+        ),
+        f,
+        &[],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?
+    .into_iter()
+    .collect())
+}
+
 /// The harness rows: generation sums, turns, launches, reported cost, lines.
 fn harnesses(conn: &Connection, f: &Filter, total_cost: f64) -> rusqlite::Result<Vec<Value>> {
     let gens = grouped(conn, f, "s.provider")?;
     let turns = turns_by(conn, f, "s.provider")?;
+    let sessions = sessions_by(conn, f, "s.provider")?;
     let launches = launch_by_provider(conn, f)?;
     let mut keys: Vec<String> = gens.iter().map(|(k, _)| k.clone()).collect();
     for k in turns.keys().chain(launches.keys()) {
@@ -557,6 +579,7 @@ fn harnesses(conn: &Connection, f: &Filter, total_cost: f64) -> rusqlite::Result
             let s = by.get(k.as_str()).copied().unwrap_or(&empty);
             let mut v = group_json("provider", &[(k.clone(), s.clone())], total_cost).remove(0);
             v["turns"] = json!(turns.get(k).copied().unwrap_or(0));
+            v["sessions"] = json!(sessions.get(k).copied().unwrap_or(0));
             let (n, reported, added, removed) = launches.get(k).cloned().unwrap_or_default();
             v["launches"] = json!(n);
             v["reported_cost_usd"] = json!(reported);
@@ -571,19 +594,23 @@ fn harnesses(conn: &Connection, f: &Filter, total_cost: f64) -> rusqlite::Result
 fn projects(conn: &Connection, f: &Filter, total_cost: f64) -> rusqlite::Result<Vec<Value>> {
     let gens = grouped(conn, f, PROJECT_KEY)?;
     let turns = turns_by(conn, f, PROJECT_KEY)?;
+    let sessions = sessions_by(conn, f, PROJECT_KEY)?;
     let mut out = group_json("project", &gens, total_cost);
+    let mut rest: Vec<&String> = turns
+        .keys()
+        .filter(|k| !gens.iter().any(|(g, _)| g == *k))
+        .collect();
+    rest.sort();
+    for k in rest {
+        let mut v = Sums::default().json();
+        v["project"] = json!(k);
+        v["share"] = json!(0.0);
+        out.push(v);
+    }
     for v in &mut out {
         let k = v["project"].as_str().unwrap_or_default().to_string();
         v["turns"] = json!(turns.get(&k).copied().unwrap_or(0));
-    }
-    for (k, n) in &turns {
-        if !gens.iter().any(|(g, _)| g == k) {
-            let mut v = Sums::default().json();
-            v["project"] = json!(k);
-            v["share"] = json!(0.0);
-            v["turns"] = json!(n);
-            out.push(v);
-        }
+        v["sessions"] = json!(sessions.get(&k).copied().unwrap_or(0));
     }
     Ok(out)
 }
