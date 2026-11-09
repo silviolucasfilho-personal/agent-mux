@@ -16,6 +16,7 @@ dependencies = [
  "arboard",
  "axum",
  "crossterm",
+ "futures-util",
  "globset",
  "image",
  "portable-pty",

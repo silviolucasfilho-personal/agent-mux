@@ -49,6 +49,9 @@ area's own document; an error is `{"ok": false, "error": "<message>"}` with a
 | `POST /api/swarm/…` | | Swarms and the bus; see below. |
 | `POST /api/runs/…` | | Loop and workflow runs; see below. |
 | `POST /api/library/…` | | The configuration library; see below. |
+| `GET /api/live` | | Server-Sent Events: the store changed; see [Live](#live). |
+| `GET /api/resolve?id=<id>` | | `{ok, session_key, launch_id}` for a session key or a launch id (`launches.session_key`, else the traces that carry the launch); `launch_id` is set only when the session's traces carry it, so the pair passes `get_session`. `404` for an unknown id, `400` for an empty one. |
+| `/api/usage/…`, `/api/tools/…` | | Slots for the Usage and Tools areas (no routes yet). |
 
 The trace envelope is the one the MCP server returns as `structuredContent`
 (`schema_version`, `as_of`, `scope`, `window`, `data`, `coverage`, `warnings`,
@@ -66,16 +69,30 @@ curl -s -X POST localhost:7331/api/trace/get_health
 
 ## The app
 
-`web/index.html` loads `app.css`, then `app.js`, then `trace.js`, `swarm.js`,
-`runs.js` and `library.js`, in that order. `app.js` owns the shell; every
-other script only registers pages.
+`web/index.html` loads `app.css`, then `app.js`, then `trace.js`, `usage.js`,
+`tools.js`, `swarm.js`, `runs.js` and `library.js`, in that order. `app.js`
+owns the shell; every other script only registers pages.
+
+**Layout.** A sidebar of grouped pages (Overview, Sessions, Usage, Tools,
+Swarms/Runs, Library, Health; an empty group is not drawn), a top bar with
+the page title, the command palette button and `?`, and the page. At phone
+width (≤ 760px) the sidebar folds into a bar with a menu button. The live
+indicator beside the brand is green while `/api/live` is connected.
+
+**Themes.** Light and dark follow `prefers-color-scheme`; the toggle at the
+bottom of the sidebar (or `t`) cycles auto → light → dark, stored in
+`localStorage` (`agent-mux-theme`) and applied as `html[data-theme]` before
+the first paint. Every colour is a CSS variable on `:root`, redefined for
+dark under `@media (prefers-color-scheme: dark)` (`:root:not([data-theme=light])`)
+and under `:root[data-theme=dark]`; chart series read `--c1` … `--c8` and the
+heatmap `--heat-0` … `--heat-4`, so charts redraw on a theme change.
 
 **Hash routing.** A page lives at `#/<path>`; parameters are `:name`
 segments (`#/sessions/claude%3As1`) and an optional query string
-(`#/sessions?provider=codex&since=24h`). The nav lists the registered pages
-in registration order; with no hash the first page opens.
+(`#/sessions?provider=codex&since=24h`). With no hash the first nav page
+(Overview) opens.
 
-**Page registry.** `window.AgentMux.registerPage({id, title, path, render(el, params), nav})`:
+**Page registry.** `window.AgentMux.registerPage({id, title, path, render(el, params), nav, navId, group, key, live})`:
 
 | Field | Meaning |
 |---|---|
@@ -84,36 +101,154 @@ in registration order; with no hash the first page opens.
 | `path` | `'/sessions'` or `'/sessions/:key'`; one `:name` per segment. |
 | `render(el, params)` | Fills `el` (emptied first); `params` merges the path parameters and the query string. May be async; a thrown error is shown in place. |
 | `nav` | `false` keeps a detail page out of the nav; `navId` names the nav entry it belongs to. |
+| `group` | The nav group (`AgentMux.groups`). Defaults by id (`sessions`/`search` → Sessions, `skills` → Tools, `swarms`/`bus`/`runs`/`inbox` → Swarms/Runs, `library`/`agents` → Library, `health` → Health), else Tools. |
+| `key` | The letter after `g` that jumps to the page (defaults: `o` Overview, `s` Sessions, `f` Search, `u` Usage, `t` Tools, `k` Skills, `w` Swarms, `b` Bus, `r` Runs, `i` Inbox, `l` Library, `a` Agents, `h` Health). |
+| `live` | `true` re-renders the page when the store changes: quietly (into a detached element swapped in when done, keeping the selected row), debounced, and never while a field has focus or an overlay is open. Overview and Sessions are live. |
+
+`AgentMux.onLeave(fn)` runs `fn` when the current page is left or
+re-rendered (to drop a subscription or a timer).
 
 **Client.** `AgentMux.api(path, body)` POSTs JSON and returns the parsed
 answer; it throws (`err.status`, `err.body`) on a non-2xx status or an
-`{ok: false}` body. Helpers: `fmtTokens`, `fmtCost`, `fmtDuration`, `fmtTime`
-(RFC 3339 or nanoseconds), `sinceToRfc3339` (`24h`, `7d`, a date),
-`shortPath`; DOM: `h(tag, attrs, ...children)`, `link(path, text, query)`,
-`table({columns, rows, sortKey, sortDesc, empty, onRow})` (client-side
-sortable columns: `{key, label, num, render, sort, class, title}`), `kv(pairs)`,
-`cards(pairs)`, `loading()`, `errorBox()`, `envelopeNote(envelope)` (coverage
-and warnings), and `navigate(path, query)`.
+`{ok: false}` body.
 
-Pages: `trace.js` registers Sessions (`/sessions`), Session (`/sessions/:key`),
-Search (`/search`), Skills & Agents (`/skills`) and Health (`/health`);
-`swarm.js` Swarms (`/swarms`), `runs.js` Runs (`/runs`), `library.js` Library
-(`/library`).
+**Formatting.** `fmtTokens` (`950`, `12.3k`, `1.2M`, `3.4B`), `fmtNum`
+(`1,234,567`), `fmtCost` (`$3.41`, `$0.0042`, `$12.5k`), `fmtPercent`
+(ratio → `42%`), `fmtDuration` (ms → `850ms`, `12.4s`, `3m05s`, `2h07m`,
+`3d4h`), `fmtTime` (RFC 3339 or nanoseconds → local
+`YYYY-MM-DD HH:MM:SS`), `fmtAgo` (`5h ago`), `dayKey` (local `YYYY-MM-DD`),
+`sinceToRfc3339` (`24h`, `7d`, a date), `shortPath`. Every formatter answers
+`–` for a missing value.
 
-**Server side.** `web::router(state)` serves `/`, `/static/{*path}` and merges
-`trace::routes()`, `swarm::routes()`, `runs::routes()` and `library::routes()`
-(each `pub fn routes() -> axum::Router<Arc<WebState>>`). `WebState` holds the
-store path (`db`), the library root (`library_root`, `assets::root()`) and the
+**DOM.** `h(tag, attrs, ...children)`, `svg(tag, attrs, ...children)`,
+`link(path, text, query)`, `hrefFor(path, query)`,
+`table({columns, rows, sortKey, sortDesc, empty, emptyHint, onRow})`
+(client-side sortable columns: `{key, label, num, render, sort, class, title}`;
+rows take part in `j`/`k`, and `Enter` calls `onRow` or follows the row's
+first link), `kv(pairs)`, `cards([[label, value, extra]])` (`extra`: a
+sparkline or a hint), `panel(title, ...children)`, `loading(text)`,
+`empty(text, hint)`, `errorBox()`, `envelopeNote(envelope)` (coverage and
+warnings), `navigate(path, query)` and `setQuery(changes)` (merge into the
+current route's query; `null` removes a key).
+
+### Filter bar
+
+`AgentMux.filterBar({params, fields, providers, workspaces, defaults})`
+returns a form that keeps the shared filters in the hash query string, so a
+filtered view is a link:
+
+| Query key | Control |
+|---|---|
+| `range` | Presets `24h`, `7d` (the default), `30d`, `90d`, `custom`. |
+| `from`, `to` | Local days (`YYYY-MM-DD`) of a `custom` range; `to` is inclusive. |
+| `provider` | The harness (`claude`, `codex`, `antigravity`, `opencode`; `providers` overrides the list). |
+| `workspace` | A workspace or project fragment; `workspaces` fills the suggestions. |
+
+`fields` picks among `'range'`, `'provider'` and `'workspace'` (default all
+three). A change navigates, so the page renders again with the new params.
+`AgentMux.filters(params, defaults)` reads them back as
+`{range, from, to, since, until, provider, workspace}` with `since`/`until`
+in RFC 3339 (`''` when open), ready for a trace call's arguments.
+
+### Charts (`M.charts`)
+
+Dependency-free SVG, drawn at the container's width (redrawn on resize and on
+a theme change), coloured from the theme's CSS variables. Every mark carries a
+`data-tip` the shared tooltip shows on hover. An empty input draws the empty
+state instead.
+
+| Helper | Draws |
+|---|---|
+| `charts.bar({labels, series: [{name, values}], stacked, height, format, onClick(i), empty})` | Grouped bars, or one stacked bar per label with `stacked: true`; a legend when there are several series. |
+| `charts.line({labels, series: [{name, values}], area, height, format})` | Lines, filled below with `area: true`; one hover column per label shows every series. |
+| `charts.heatmap({values: {'YYYY-MM-DD': n}, from, to, format, onClick(day)})` | A calendar of weeks by weekday in five shades, with month labels and a less/more legend. |
+| `charts.hbars({items: [{label, value, href, hint, title}], format, limit, color})` | A ranked horizontal bar list (HTML), the value and its share in the tooltip. |
+| `charts.sparkline(values, {width, height, area, format, labels, color})` | An inline SVG trend for a card or a table cell. |
+
+`format` formats axis ticks and tooltips (`M.fmtTokens`, `M.fmtCost`…;
+default `fmtNum`). Helpers: `charts.color(i)` (the series colour),
+`charts.dayRange(since, until)` (the local days in between, for bucketing),
+`charts.niceMax(v)`.
+
+```js
+const M = window.AgentMux;
+const days = M.charts.dayRange(M.filters(params).since);
+el.appendChild(M.panel('Tokens per day', M.charts.bar({
+  labels: days.map((d) => d.slice(5)),
+  series: [{ name: 'input', values: inputs }, { name: 'output', values: outputs }],
+  stacked: true, format: M.fmtTokens,
+})));
+```
+
+### Keyboard
+
+| Keys | Action |
+|---|---|
+| `Ctrl+K` / `⌘K` | Command palette: the pages, toggle theme, the shortcuts, and the most recent sessions; typing filters them, and any text can be opened as a session key or launch id (resolved through `/api/resolve`, then `#/sessions/<key>?launch_id=<id>`; an unknown id stays in the palette with the reason). `↑`/`↓` move, `Enter` opens, `Esc` closes. |
+| `j` / `k` | Next / previous table row on the page. |
+| `Enter` | Open the selected row. |
+| `/` | Focus the page's search or first filter field (else open the palette). |
+| `g` then a letter | Jump to a page (its `key`). |
+| `t` | Toggle the theme. |
+| `?` | The shortcuts overlay, listing every page's `g` key. |
+| `Esc` | Close an overlay, or leave a field. |
+
+Single letters are ignored while a field has focus.
+
+### Live
+
+`GET /api/live` is a Server-Sent Events stream (`text/event-stream`) over the
+store's change feed. The server reads `MAX(seq)` of `trace_changes` with a
+read-only connection (`tracing::store::latest_change_seq`) every
+`WebState::live_poll` (`web::LIVE_POLL`, one second) on a blocking thread, and
+sends:
+
+- `event: ready` once on connect, `data: {"seq": n, "previous": n}`;
+- `event: change` whenever the sequence differs from the last one sent,
+  `data: {"seq": n, "previous": m}` (also when it goes down: a replaced store);
+- a comment every 15 seconds to keep an idle connection open.
+
+The `id:` of each event is its sequence. A missing store, or one without the
+feed, reads as `0`, and the stream starts sending once a writer creates it;
+the route never creates or writes the store.
+
+In the app, `AgentMux.live.subscribe(fn)` calls `fn({seq, previous})` on each
+change and returns the unsubscribe function; one `EventSource` serves every
+subscriber, and a reconnect that missed changes counts as one.
+`AgentMux.live.status` is `connecting`, `live` or `offline`. A page with
+`live: true` subscribes through the shell.
+
+```sh
+curl -N localhost:7331/api/live
+```
+
+**Pages.** `app.js` registers Overview (`/overview`: the filter bar, cards
+with sparklines, sessions per day by harness, cost per day, an activity
+heatmap and the top workspaces by cost, from `list_sessions`). `trace.js`
+registers Sessions (`/sessions`), Session (`/sessions/:key`), Search
+(`/search`), Skills & Agents (`/skills`) and Health (`/health`); `swarm.js`
+Swarms (`/swarms`) and Bus (`/bus`), `runs.js` Runs (`/runs`) and Inbox
+(`/inbox`), `library.js` Library (`/library`) and Agents (`/agents`).
+`usage.js` and `tools.js` are empty slots for the Usage and Tools areas.
+
+**Server side.** `web::router(state)` serves `/`, `/static/{*path}`,
+`/api/live` and merges `trace::routes()`, `swarm::routes()`, `runs::routes()`,
+`library::routes()`, `usage::routes()` and `tools::routes()` (each
+`pub fn routes() -> axum::Router<Arc<WebState>>`). `WebState` holds the
+store path (`db`), the library root (`library_root`, `assets::root()`), the
 one `TraceService` (`trace`) every trace call runs through, so cursors stay
-valid between requests; `WebState::new(db, library_root)` scopes it to every
-workspace, `with_scope` to one. Routes answer `ApiResult<T>`; `ApiError`
-carries the status and renders the JSON error, and a `ServiceError` converts
-into it. Store reads go through `tracing::store::open_ro` or the service;
-nothing writes. The integration tests start a server with
-`tests/it/web/support.rs`: `start(db: &Path) -> (String, JoinHandle<()>)` on a
-free port of a runtime shared by the test binary (abort the handle to stop
-it), `seeded_store(dir) -> (db, workspace)` with two sessions, and `get` /
-`post` helpers over `ureq`.
+valid between requests, and the live poll interval (`live_poll`);
+`WebState::new(db, library_root)` scopes it to every workspace, `with_scope`
+to one. Routes answer `ApiResult<T>`; `ApiError` carries the status and
+renders the JSON error, and a `ServiceError` converts into it. Store reads go
+through `tracing::store::open_ro` or the service; nothing writes. A new
+static file is added to `web::ASSETS` (`include_str!`). The integration tests
+start a server with `tests/it/web/support.rs`: `start(db: &Path) -> (String,
+JoinHandle<()>)` on a free port of a runtime shared by the test binary (abort
+the handle to stop it), `seeded_store(dir) -> (db, workspace)` with two
+sessions, and `get` / `post` helpers over `ureq`. Each area has its own test
+file (`core.rs`, `usage.rs`, `tools.rs`, `session.rs`, `swarm.rs`, `runs.rs`,
+`library.rs`).
 
 ## Trace store
 
@@ -273,3 +408,9 @@ without writing, resetting, or modifying any files.
 | `/api/library/items` | `GET` | Lists all configuration items (`id`, `kind`, `name`, `source`, `path`, `size`), optionally filtered by `?kind=` and grouped by kind. |
 | `/api/library/items/{id}` | `GET` | Returns an asset's effective text, kind, source, whether an override shadows a built-in, and the override path. |
 | `/api/library/agents` | `GET` | Returns the agent registry with name, description, tools, model, task kind, and schedule. |
+
+## Usage
+
+## Tools
+
+## Session viewer

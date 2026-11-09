@@ -23,6 +23,7 @@
     id: 'sessions',
     title: 'Sessions',
     path: '/sessions',
+    live: true, // re-rendered by the shell when the store changes (M.live)
     async render(el, params) {
       const filters = { provider: params.provider || '', workspace: params.workspace || '', since: params.since || '', state: params.state || '' };
       const form = h('form', { class: 'filters' },

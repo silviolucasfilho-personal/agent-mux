@@ -14,7 +14,15 @@ fn the_spa_and_its_assets_are_served() {
     assert_eq!(status, 200);
     assert!(ctype.starts_with("text/html"), "{ctype}");
     assert!(body.contains("<div id=\"app\">"));
-    for script in ["app.js", "trace.js", "swarm.js", "runs.js", "library.js"] {
+    for script in [
+        "app.js",
+        "trace.js",
+        "usage.js",
+        "tools.js",
+        "swarm.js",
+        "runs.js",
+        "library.js",
+    ] {
         assert!(body.contains(&format!("/static/{script}")), "{script}");
         let (status, ctype, text) = get(&base, &format!("/static/{script}"));
         assert_eq!(status, 200, "{script}");
@@ -31,6 +39,11 @@ fn the_spa_and_its_assets_are_served() {
         "fmtDuration",
         "fmtTime",
         "table",
+        "charts",
+        "filterBar",
+        "live",
+        "subscribe",
+        "EventSource",
     ] {
         assert!(app.contains(name), "app.js exposes {name}");
     }
@@ -246,4 +259,236 @@ fn the_binary_prints_a_loopback_url_and_serves_it() {
     let (status, env) = post(base, "/api/trace/list_sessions", &json!({}));
     assert_eq!(status, 200, "{env}");
     assert_eq!(env["data"]["total_matching"], 2);
+}
+
+/// Reads `/api/live` on a thread and hands over each event as (name, data).
+fn live_events(base: &str) -> std::sync::mpsc::Receiver<(String, serde_json::Value)> {
+    use std::io::{BufRead, BufReader};
+    let (tx, rx) = std::sync::mpsc::channel();
+    let res = ureq::get(format!("{base}/api/live"))
+        .call()
+        .expect("a live stream");
+    let ctype = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(ctype.starts_with("text/event-stream"), "{ctype}");
+    let reader = BufReader::new(res.into_body().into_reader());
+    std::thread::spawn(move || {
+        let mut event = String::new();
+        for line in reader.lines() {
+            let Ok(line) = line else { return };
+            if let Some(name) = line.strip_prefix("event:") {
+                event = name.trim().to_string();
+            } else if let Some(data) = line.strip_prefix("data:") {
+                let data = serde_json::from_str(data.trim()).unwrap_or_default();
+                if tx.send((std::mem::take(&mut event), data)).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    rx
+}
+
+#[test]
+fn live_streams_a_change_when_the_feed_advances() {
+    use agent_mux::tracing::pricing::PriceTable;
+    use agent_mux::tracing::store::model::{SessionRow, StoreOp};
+    use agent_mux::tracing::store::{OpenOptions, open_rw};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (db, ws) = seeded_store(temp.path());
+    let (base, server) = start(&db);
+    let events = live_events(&base);
+
+    let (name, ready) = events.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(name, "ready");
+    let first = ready["seq"].as_i64().unwrap();
+    assert!(first > 0, "{ready}");
+
+    // nothing moves: no change event
+    assert!(events.recv_timeout(Duration::from_millis(1500)).is_err());
+
+    let mut store = open_rw(
+        &db,
+        OpenOptions {
+            prices: PriceTable::builtin(),
+            run_id: "run-live".into(),
+            retention_days: 0,
+            agent_mux_version: "test".into(),
+        },
+    )
+    .unwrap();
+    store
+        .apply(&[StoreOp::Session(SessionRow {
+            key: "claude:s3".into(),
+            provider: "claude".into(),
+            session_id: "s3".into(),
+            user_id: None,
+            cwd: Some(ws.to_string_lossy().into_owned()),
+            project_slug: None,
+            transcript_path: None,
+            title: Some("a new one".into()),
+            seen_ns: agent_mux::tracing::store::now_ns(),
+            extra: None,
+        })])
+        .unwrap();
+
+    let (name, change) = events.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(name, "change");
+    assert_eq!(change["previous"].as_i64(), Some(first));
+    assert!(change["seq"].as_i64().unwrap() > first, "{change}");
+    server.abort();
+}
+
+#[test]
+fn live_answers_ready_without_a_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("absent.db");
+    let (base, server) = start(&db);
+    let events = live_events(&base);
+    let (name, ready) = events
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(name, "ready");
+    assert_eq!(ready["seq"], 0);
+    assert!(!db.exists(), "the stream never creates a store");
+    server.abort();
+}
+
+#[test]
+fn resolve_turns_a_launch_id_into_its_session_key() {
+    use agent_mux::tracing::pricing::PriceTable;
+    use agent_mux::tracing::store::model::{LaunchRow, StoreOp, TraceRow, TraceStatus};
+    use agent_mux::tracing::store::{OpenOptions, now_ns, open_rw};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (db, ws) = seeded_store(temp.path());
+    let mut store = open_rw(
+        &db,
+        OpenOptions {
+            prices: PriceTable::builtin(),
+            run_id: "run-resolve".into(),
+            retention_days: 0,
+            agent_mux_version: "test".into(),
+        },
+    )
+    .unwrap();
+    let launch = |id: &str| LaunchRow {
+        id: id.into(),
+        run_id: "run-resolve".into(),
+        agent_mux_session: 1,
+        profile: "Claude Code".into(),
+        provider: "claude".into(),
+        cwd: ws.to_string_lossy().into_owned(),
+        project_slug: "-ws".into(),
+        content_mode: "full".into(),
+        correlation_plan: "deterministic".into(),
+        correlation: Some("deterministic".into()),
+        session_key: Some("claude:s1".into()),
+        injected_session_id: true,
+        attached: false,
+        started_ns: now_ns(),
+        ended_ns: None,
+        termination: None,
+        exit_code: None,
+        parse_errors: None,
+        dropped_ops: None,
+        reported_cost_usd: None,
+        reported_lines_added: None,
+        reported_lines_removed: None,
+        agent_mux_version: "test".into(),
+        user_id: None,
+        release: None,
+        environment: None,
+        tags: vec![],
+        metadata: None,
+    };
+    let t0 = now_ns();
+    store
+        .apply(&[
+            // a launch row whose traces do not carry it
+            StoreOp::Launch(launch("launch-a")),
+            // a launch its session's traces carry
+            StoreOp::Launch(launch("launch-b")),
+            StoreOp::Trace(TraceRow {
+                id: "t-b".into(),
+                session_key: "claude:s1".into(),
+                provider: "claude".into(),
+                session_id: "s1".into(),
+                launch_id: Some("launch-b".into()),
+                ordinal: 3,
+                name: "turn 3".into(),
+                status: TraceStatus::Closed,
+                start_ns: t0,
+                end_ns: Some(t0 + 1_000_000_000),
+                input: Some("again".into()),
+                output: Some("ok".into()),
+                thinking: None,
+                skills: None,
+                reported_duration_ms: None,
+                reported_message_count: None,
+                session_cost_usd: None,
+                timing_approx: false,
+                metadata: None,
+            }),
+        ])
+        .unwrap();
+    drop(store);
+    let (base, server) = start(&db);
+
+    let json = |path: &str| {
+        let (status, _, body) = get(&base, path);
+        (
+            status,
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        )
+    };
+
+    // a session key resolves to itself
+    let (status, r) = json("/api/resolve?id=claude%3As1");
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["session_key"], "claude:s1");
+    assert!(r["launch_id"].is_null(), "{r}");
+
+    // a launch id resolves to its session; the launch travels on only when
+    // the session's traces carry it, so get_session accepts the pair
+    let (status, r) = json("/api/resolve?id=launch-a");
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["session_key"], "claude:s1");
+    assert!(r["launch_id"].is_null(), "{r}");
+    let (status, r) = json("/api/resolve?id=launch-b");
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["session_key"], "claude:s1");
+    assert_eq!(r["launch_id"], "launch-b");
+    let (status, env) = post(
+        &base,
+        "/api/trace/get_session",
+        &json!({"session_key": r["session_key"], "launch_id": r["launch_id"]}),
+    );
+    assert_eq!(status, 200, "{env}");
+    // the raw launch id is not a session key: what the palette used to send
+    let (status, _) = post(
+        &base,
+        "/api/trace/get_session",
+        &json!({"session_key": "launch-b"}),
+    );
+    assert_eq!(status, 404);
+
+    let (status, r) = json("/api/resolve?id=nope");
+    assert_eq!(status, 404, "{r}");
+    assert_eq!(r["ok"], false);
+    let (status, r) = json("/api/resolve?id=");
+    assert_eq!(status, 400, "{r}");
+    let (status, r) = json("/api/resolve");
+    assert_eq!(status, 400, "{r}");
+
+    // app.js opens a typed id through the route
+    let (_, _, app) = get(&base, "/static/app.js");
+    assert!(app.contains("/api/resolve?id="));
+    server.abort();
 }
