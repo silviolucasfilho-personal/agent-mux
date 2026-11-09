@@ -407,6 +407,73 @@ fn overview_counts_only_usage_inside_the_window() {
 }
 
 #[test]
+fn a_turn_crossing_midnight_counts_its_session_on_both_days() {
+    // a turn that starts Nov 8 23:59Z and makes its call Nov 9 00:01Z
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().canonicalize().unwrap();
+    let db = dir.join("traces.db");
+    let mut store = open_rw(
+        &db,
+        OpenOptions {
+            prices: PriceTable::builtin(),
+            run_id: "run-midnight".into(),
+            retention_days: 0,
+            agent_mux_version: "test".into(),
+        },
+    )
+    .unwrap();
+    let turn = ns("2026-11-08T23:59:00Z");
+    let call_at = ns("2026-11-09T00:01:00Z");
+    store
+        .apply(&[
+            StoreOp::Session(session("claude:m", "claude", "m", &dir, turn)),
+            StoreOp::Trace(trace("m1", "claude:m", "claude", "m", 1, turn)),
+            StoreOp::Observation(generation(
+                "gm",
+                "m1",
+                "claude-opus",
+                call_at,
+                [1_000, 100, 0, 0, 0],
+                Some([0.01, 0.01, 0.0, 0.0, 0.02]),
+            )),
+        ])
+        .unwrap();
+    drop(store);
+    let (base, server) = start(&db);
+
+    // a Nov 9 window holds the call but not the turn's start
+    let v = call(
+        &base,
+        "overview",
+        json!({"since": "2026-11-09T00:00:00Z", "until": NOV10}),
+    );
+    assert_eq!(v["totals"]["sessions"], 1);
+    assert_eq!(v["totals"]["turns"], 0);
+    let nov9 = day(&v["daily"], "2026-11-09").unwrap();
+    close(&nov9["cost_usd"], 0.02);
+    assert_eq!(nov9["sessions"], 1, "{nov9}");
+    assert_eq!(nov9["turns"], 0);
+
+    // over both days the session is active on each, once per day
+    let v = call(&base, "overview", json!({"since": NOV8, "until": NOV10}));
+    assert_eq!(v["totals"]["sessions"], 1);
+    let days = &v["daily"];
+    let nov8 = day(days, "2026-11-08").unwrap();
+    let nov9 = day(days, "2026-11-09").unwrap();
+    assert_eq!(
+        (nov8["sessions"].clone(), nov8["turns"].clone()),
+        (json!(1), json!(1))
+    );
+    close(&nov8["cost_usd"], 0.0);
+    assert_eq!(
+        (nov9["sessions"].clone(), nov9["turns"].clone()),
+        (json!(1), json!(0))
+    );
+    close(&nov9["cost_usd"], 0.02);
+    server.abort();
+}
+
+#[test]
 fn filters_apply_to_every_aggregate() {
     let s = seed();
     let (base, server) = start(&s.db);

@@ -420,20 +420,38 @@ pub fn per_day(conn: &Connection, f: &Filter) -> rusqlite::Result<Vec<Value>> {
     )? {
         days.entry(day).or_default().0 = s;
     }
-    for (day, turns, sessions) in rows(
+    for (day, turns) in rows(
         conn,
         &format!(
-            "SELECT {d}, COUNT(*), COUNT(DISTINCT t.session_key) {} GROUP BY 1",
+            "SELECT {d}, COUNT(*) {} GROUP BY 1",
             turn_from(),
             d = day_of("t.start_ns")
         ),
         f,
         &[],
-        |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?)),
+        |r| Ok((r.get::<_, String>(0)?, r.get(1)?)),
     )? {
-        let e = days.entry(day).or_default();
-        e.1 = turns;
-        e.2 = sessions;
+        days.entry(day).or_default().1 = turns;
+    }
+    // A session counts on every day it was active: a turn that started
+    // that day, or a generation made that day (a turn may cross midnight).
+    for (day, sessions) in rows(
+        conn,
+        &format!(
+            "SELECT day, COUNT(DISTINCT key) FROM (
+               SELECT {td} AS day, t.session_key AS key {}
+               UNION SELECT {gd}, t.session_key {}
+             ) GROUP BY 1",
+            turn_from(),
+            gen_from(),
+            td = day_of("t.start_ns"),
+            gd = day_of("o.start_ns")
+        ),
+        f,
+        &[],
+        |r| Ok((r.get::<_, String>(0)?, r.get(1)?)),
+    )? {
+        days.entry(day).or_default().2 = sessions;
     }
     Ok(days
         .into_iter()
