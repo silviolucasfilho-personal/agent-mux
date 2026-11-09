@@ -252,7 +252,7 @@ pub struct NewSwarm {
 }
 
 /// The plan's side of one board task.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SwarmTaskExt {
     pub task_id: String,
     pub plan_key: String,
@@ -275,6 +275,12 @@ pub struct SwarmTaskExt {
     /// This task is the review of that one (v25).
     #[serde(default)]
     pub review_of: Option<String>,
+    /// Its automatic-retry bookkeeping (v26, `recovery`).
+    #[serde(default)]
+    pub recovery: super::recovery::Recovery,
+    /// Its branch's merge behind the check command (v26, `gate`).
+    #[serde(default)]
+    pub gate: Option<super::gate::MergeGate>,
 }
 
 /// A board task with its plan extension and, for a finished worktree
@@ -317,7 +323,7 @@ fn row_to_swarm(r: &rusqlite::Row<'_>) -> rusqlite::Result<SwarmRun> {
     })
 }
 
-fn poke(db: Option<&Path>) {
+pub(crate) fn poke(db: Option<&Path>) {
     if let Some(p) = db {
         crate::tracing::store::poke_wake(p);
     }
@@ -624,6 +630,17 @@ fn row_to_ext(r: &rusqlite::Row<'_>) -> rusqlite::Result<SwarmTaskExt> {
         review_skip: r.get::<_, Option<i64>>(11)?.unwrap_or(0) != 0,
         review_task: r.get(12)?,
         review_of: r.get(13)?,
+        recovery: super::recovery::Recovery {
+            lost_ns: r.get(14)?,
+            retries: r.get::<_, Option<i64>>(15)?.unwrap_or(0),
+            retried_ns: r.get(16)?,
+            reason: r.get(17)?,
+            held_ns: r.get(18)?,
+        },
+        gate: match r.get::<_, Option<String>>(19)? {
+            Some(_) => Some(super::gate::row(r, 19)?),
+            None => None,
+        },
     })
 }
 
@@ -632,11 +649,15 @@ pub fn board(conn: &Connection, swarm_id: &str) -> rusqlite::Result<Vec<BoardTas
     let mut stmt = conn.prepare(
         "SELECT st.task_id, st.plan_key, st.position, st.depends_on_json, st.acceptance,
                 st.proposed, st.attempts, st.nudged_ns, d.offered_ns, d.launched_by, r.verdict,
-                rv.skip, rv.review_task, ro.task_id
+                rv.skip, rv.review_task, ro.task_id,
+                rc.lost_ns, rc.retries, rc.retried_ns, rc.reason, rc.held_ns,
+                g.state, g.queued_ns, g.started_ns, g.ended_ns, g.base, g.detail, g.result
          FROM swarm_tasks st LEFT JOIN swarm_reviews r ON r.task_id = st.task_id
                              LEFT JOIN swarm_dispatch d ON d.task_id = st.task_id
                              LEFT JOIN swarm_task_reviews rv ON rv.task_id = st.task_id
                              LEFT JOIN swarm_task_reviews ro ON ro.review_task = st.task_id
+                             LEFT JOIN swarm_task_recovery rc ON rc.task_id = st.task_id
+                             LEFT JOIN swarm_merge_gates g ON g.task_id = st.task_id
          WHERE st.swarm_id = ?1 ORDER BY st.position ASC, st.task_id ASC",
     )?;
     let rows: Vec<(SwarmTaskExt, Option<String>)> = stmt
@@ -1457,7 +1478,8 @@ pub struct SwarmEvent {
     pub task_id: Option<String>,
     /// `started`, `plan.proposed`, `plan.revised`, `decision.<verb>`,
     /// `task.offered`, `task.spawned`, `task.nudged`, `task.done`,
-    /// `task.failed`, `task.lost`, `check.started`, `check.done`,
+    /// `task.failed`, `task.lost`, `task.retried`, `merge.queued`,
+    /// `merge.failed`, `merge.requeued`, `check.started`, `check.done`,
     /// `swarm.<status>`, `closed`.
     pub kind: String,
     /// A launch id, `operator`, `engine`, or none.
@@ -1898,6 +1920,8 @@ pub enum SwarmVerb {
     Retry,
     /// Merge a finished task's branch into the workspace.
     Merge,
+    /// Merge a finished task's branch at once, past the merge gate (v26).
+    ForceMerge,
     /// Keep a finished task's branch without merging it.
     SetAside,
     /// Accept a task a worker proposed.
@@ -1928,6 +1952,7 @@ impl SwarmVerb {
             "resume" => SwarmVerb::Resume,
             "retry" => SwarmVerb::Retry,
             "merge" => SwarmVerb::Merge,
+            "force-merge" | "merge-now" => SwarmVerb::ForceMerge,
             "set-aside" | "setaside" => SwarmVerb::SetAside,
             "accept" => SwarmVerb::Accept,
             "drop" => SwarmVerb::Drop,
@@ -1948,6 +1973,7 @@ impl SwarmVerb {
             SwarmVerb::Resume => "resume",
             SwarmVerb::Retry => "retry",
             SwarmVerb::Merge => "merge",
+            SwarmVerb::ForceMerge => "force-merge",
             SwarmVerb::SetAside => "set-aside",
             SwarmVerb::Accept => "accept",
             SwarmVerb::Drop => "drop",
@@ -1964,6 +1990,7 @@ impl SwarmVerb {
             SwarmVerb::Retry
                 | SwarmVerb::Cancel
                 | SwarmVerb::Merge
+                | SwarmVerb::ForceMerge
                 | SwarmVerb::SetAside
                 | SwarmVerb::Accept
                 | SwarmVerb::Drop
@@ -1979,6 +2006,7 @@ impl SwarmVerb {
             SwarmVerb::Approve
                 | SwarmVerb::Launch
                 | SwarmVerb::Merge
+                | SwarmVerb::ForceMerge
                 | SwarmVerb::SetAside
                 | SwarmVerb::Cancel
                 | SwarmVerb::Close
@@ -2132,6 +2160,8 @@ pub fn apply(
             let t = target.expect("takes a task");
             bstore::reopen_task(conn, db, &t.task.id, now)?;
             reset_dispatch(conn, &t.task.id).map_err(|e| e.to_string())?;
+            // the operator's retry: a fresh start with its own automatic retry
+            super::recovery::reset(conn, &t.task.id).map_err(|e| e.to_string())?;
             clear_check(conn, &swarm.id).map_err(|e| e.to_string())?;
             decide(conn, &swarm.id, task_id, verb, who, now).map_err(|e| e.to_string())?;
             if matches!(status, SwarmStatus::Integrating | SwarmStatus::Finished) {
@@ -2140,7 +2170,7 @@ pub fn apply(
             }
             Ok(format!("`{}` is back on the board", t.ext.plan_key))
         }
-        SwarmVerb::Merge | SwarmVerb::SetAside => {
+        SwarmVerb::Merge | SwarmVerb::ForceMerge | SwarmVerb::SetAside => {
             let t = target.expect("takes a task");
             if !super::engine::awaits_review(t) {
                 return Err(format!(
@@ -2149,7 +2179,12 @@ pub fn apply(
                 ));
             }
             let branch = t.task.branch.clone().unwrap_or_default();
-            let merged = verb == SwarmVerb::Merge;
+            if verb == SwarmVerb::Merge
+                && let Some(cmd) = swarm.check_cmd.as_deref()
+            {
+                return queue_merge(conn, db, swarm, t, &board, cmd, verb, who, now);
+            }
+            let merged = verb != SwarmVerb::SetAside;
             let detail = if merged {
                 Some(super::merge_branch(Path::new(&swarm.workspace), &branch)?)
             } else {
@@ -2269,6 +2304,72 @@ pub fn apply(
             unreachable!("needs the TUI")
         }
     }
+}
+
+/// `merge` with a check command (v26): the branch is queued behind the
+/// check (`gate`); the engine merges it once the check passes on it.
+#[allow(clippy::too_many_arguments)]
+fn queue_merge(
+    conn: &Connection,
+    db: Option<&Path>,
+    swarm: &SwarmRun,
+    t: &BoardTask,
+    board: &[BoardTask],
+    cmd: &str,
+    verb: SwarmVerb,
+    who: &Decider<'_>,
+    now: i64,
+) -> Result<String, String> {
+    use super::gate::GateState;
+    match t.ext.gate.as_ref().map(|g| g.state) {
+        Some(GateState::Queued) => {
+            return Err(format!(
+                "`{}` is already queued for its merge",
+                t.ext.plan_key
+            ));
+        }
+        Some(GateState::Running) => {
+            return Err(format!(
+                "`{}` is being checked now: it merges if `{cmd}` passes",
+                t.ext.plan_key
+            ));
+        }
+        _ => {}
+    }
+    super::gate::queue(conn, db, &t.task.id, now).map_err(|e| e.to_string())?;
+    decide(conn, &swarm.id, Some(&t.task.id), verb, who, now).map_err(|e| e.to_string())?;
+    let ahead = board
+        .iter()
+        .filter(|o| {
+            o.task.id != t.task.id
+                && o.ext
+                    .gate
+                    .as_ref()
+                    .is_some_and(|g| matches!(g.state, GateState::Queued | GateState::Running))
+        })
+        .count();
+    let _ = event(
+        conn,
+        &swarm.id,
+        Some(&t.task.id),
+        "merge.queued",
+        Some(who.actor()),
+        Some(serde_json::json!({ "key": t.ext.plan_key, "branch": t.task.branch, "ahead": ahead })),
+        now,
+    );
+    let mut out = format!(
+        "queued `{}`: `{cmd}` runs on {} brought up to date with the workspace, and it is merged if the check passes{}",
+        t.ext.plan_key,
+        t.task.branch.as_deref().unwrap_or("its branch"),
+        match ahead {
+            0 => String::new(),
+            n => format!(" ({n} merge(s) ahead of it)"),
+        }
+    );
+    if let Some(w) = unreviewed_warning(conn, swarm, t, board) {
+        out.push_str(&format!(" — {w}"));
+    }
+    Ok(out)
 }
 
 /// What [`delete_swarm`] removed from the store, and what the caller cleans

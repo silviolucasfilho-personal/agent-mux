@@ -1033,6 +1033,10 @@ mod tests {
                 branch: None,
                 review: None,
                 question: None,
+                auto_retries: 0,
+                held: false,
+                merge_gate: None,
+                merge_gate_detail: None,
                 updated_ns: 8_000,
                 ended_ns: Some(8_000),
             }

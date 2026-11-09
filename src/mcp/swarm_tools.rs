@@ -55,7 +55,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "agent_mux_swarm_action",
-            description: "Relay an operator decision on the swarm: pause, resume, retry <task>, cancel <task>, review <task> (review a finished task again, after a fix round), merge <task>, set-aside <task>, accept <task>, drop <task>, close, delete. delete: remove the swarm; a live one is closed first, which ends your session too. Merge, set-aside, cancel, close and delete need the operator's words in operator_said; the decision is recorded with them.",
+            description: "Relay an operator decision on the swarm: pause, resume, retry <task>, cancel <task>, review <task> (review a finished task again, after a fix round), merge <task> (with a check command: queued, merged once the check passes on the branch brought up to date with the workspace), force-merge <task> (merge at once, past the check), set-aside <task>, accept <task>, drop <task>, close, delete. delete: remove the swarm; a live one is closed first, which ends your session too. Merge, force-merge, set-aside, cancel, close and delete need the operator's words in operator_said; the decision is recorded with them.",
             input_schema: schema_of::<SwarmActionArgs>(),
             read_only: false,
         },
@@ -533,7 +533,7 @@ fn get_swarm(service: &TraceService, arguments: Value) -> Value {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SwarmActionArgs {
-    /// `pause`, `resume`, `retry`, `cancel`, `review`, `merge`, `set-aside`, `accept`,
+    /// `pause`, `resume`, `retry`, `cancel`, `review`, `merge`, `force-merge`, `set-aside`, `accept`,
     /// `drop`, `close`, `delete` (also `launch`, `approve`: see agent_mux_swarm_launch).
     pub verb: String,
     /// The task (plan key, id or prefix) for the verbs that take one.
@@ -560,7 +560,7 @@ fn action(service: &TraceService, arguments: Value) -> Value {
     };
     let Some(verb) = SwarmVerb::parse(args.verb.trim()) else {
         return tool_error(&ServiceError::InvalidArgument(format!(
-            "unknown verb `{}`: pause, resume, retry, cancel, review, merge, set-aside, accept, drop, close, delete",
+            "unknown verb `{}`: pause, resume, retry, cancel, review, merge, force-merge, set-aside, accept, drop, close, delete",
             args.verb
         )));
     };

@@ -114,8 +114,8 @@ Each task that needs you carries `!` on its row, and its swarm carries `⚑n`. T
 | `plan` | the plan waits for your go in the coordinator's chat | `Enter` on `★` and say go, or what to change |
 | `coordinator` | the coordinator has not submitted a plan after 15 minutes | `Enter` on `★` to see what it is doing and talk to it · `x` stops it, `r` starts a new one |
 | `coordinator quiet` | a ready task waited two minutes and agent-mux started it itself | `Enter` on `★`: ask the coordinator to keep steering, or let agent-mux start the rest |
-| `failed` | a task failed | `r` retry |
-| `lost` | a worker's session exited mid-task | `r` retry |
+| `failed` | a task failed, and its automatic retry is spent (or it failed long ago) | `r` retry |
+| `lost` | a worker's session exited mid-task, and its automatic retry is spent, or you stopped it | `r` retry |
 | `stalled` | a worker stopped without reporting, even after a reminder | `Enter` types into its terminal · `r` stops it, then `r` retries |
 | `review` | a worktree task finished | `y` merge · `x` set aside |
 | `proposed` | a worker proposed a new task | `y` accept · `x` drop |
@@ -123,6 +123,15 @@ Each task that needs you carries `!` on its row, and its swarm carries `⚑n`. T
 | `finished` | everything is settled | on the swarm: `y` close · `d` delete |
 
 A worker that goes idle on an unfinished task gets one reminder after 90 seconds. Only if it stays idle does it show up as `stalled`.
+
+**Automatic retries.** A failed or lost task is started again once without you, and the coordinator is told:
+
+- **Failed:** a task that just failed (its worker reported failure, or no worker could start) goes back on the board on another harness of the workers' pool (agy last, and never agy for a task with an agent).
+- **Lost:** a task whose worker has been gone for 60 seconds (its session exited, or is not among the live sessions) is started again on the same harness. The grace period covers an agent-mux restart, which reconnects its workers first.
+- **What the next worker knows:** it starts in the same worktree, and its opening prompt says why it is running again: the failure's reason, or that the worker before it stopped.
+- **When it gives up:** if the retry fails or is lost too, the task fails for good. The coordinator hears which tasks it blocks, and the task shows in Needs you. Independent tasks keep running.
+- **What is never retried automatically:** a worker you stopped yourself (`x` on its session, the stop on the Swarm screen, closing all sessions). That task waits for you. A failure older than ten minutes is not retried either.
+- **Your retry resets it:** `r` gives the task a fresh start, including its one automatic retry.
 
 **Retry** (`r`) opens the task's form on its harness, agent and isolation, so a task that got stuck on one harness can move to another. Saving it stops its worker if it still has one and puts the task back on the board, and agent-mux starts a new worker. A worktree task keeps its worktree, so the new worker continues the work already there.
 
@@ -190,6 +199,14 @@ Every swarm reviews each finished task before you merge it, unless you turn it o
 
 - **Worktree tasks** end on a branch (`loop/bus-…`). Each appears in Needs you as `review`, and the swarm reads `integrating` once nothing else is left.
   - `y` **merges** the branch into the branch your workspace has checked out, with a merge commit, after asking first. Git refuses if your uncommitted changes would be overwritten. A conflict aborts the merge and leaves your workspace as it was: resolve it by hand, then merge again.
+  - **With a check command, a merge waits for the check.** `y` (or `merge`) queues the branch, and agent-mux runs the queue one branch at a time, each on top of the merges before it:
+    1. It merges your workspace's `HEAD` into the branch, in the task's worktree (a temporary one when that is gone).
+    2. It runs the check there.
+    3. The branch is merged into the workspace only if the check passes.
+    - **Failures:** a conflict, uncommitted changes in the worktree, or a failing check leave your workspace untouched. The task's card shows `✗ not merged` with the end of the output, and the coordinator is told. Message the worker to fix it, then merge again.
+    - **Workspace moved:** if the workspace moved while the check ran, the branch is queued again.
+    - **The row shows** `⧗` queued, `⟳` checking, `✓` merged, `✗` not merged.
+    - **To merge past the check,** use `agent-mux swarm force-merge <task>` or `agent_mux_swarm_action(verb = "force-merge")`.
   - `x` **sets the branch aside** without merging it. The branch is kept. Tasks that depend on it stay blocked.
 - **Finished workers stay open.** You can attach to one or message it with follow-ups until the swarm closes.
 - **The check:** when every task is settled and every branch reviewed, agent-mux runs the swarm's check command, if it has one, in the workspace (`sh -c`, at most 30 minutes). The top line reads `check running`, then `check ✓` or `check ✗`. A failed check lands in Needs you with the end of its output. The swarm still finishes, because whether to fix it is your call.
@@ -281,7 +298,8 @@ The full list and the matching `agent-mux bus …` commands are in [bus.md](bus.
 | "coordinator quiet" on the swarm | The coordinator did not launch a ready task within two minutes, so agent-mux started it. Fine if you want; otherwise `Enter` on `★` and ask it to keep steering. |
 | The coordinator says a wait timed out | Nothing happened for five minutes. Answer it: keep waiting, or look at the Board (`!` jumps to what needs you). Nothing was stopped. |
 | A task stays `⋯` blocked | A task it depends on isn't done, or its branch isn't merged. The card says which. A failed dependency needs `r`. |
-| A task shows `!` lost | Its session exited mid-task. `r` retries it with a new worker. |
+| A task shows `!` lost | Its session exited mid-task, and its automatic retry was spent (or you stopped it). `r` retries it with a new worker. |
+| A task's merge shows `✗ not merged` | Its check failed on the branch brought up to date with the workspace (or it conflicts). The card shows why. Message its worker to fix and commit, then merge again, or `force-merge` it. |
 | A task shows `○` stalled | The worker stopped without reporting, even after a reminder. Attach (`Enter`) to see why, message it, or `r` to stop it and `r` again to retry. |
 | "a swarm runs inside the running agent-mux TUI" from `swarm start` | The TUI isn't running. Start `agent-mux` first. |
 | Merge says "CONFLICT … (merge aborted, nothing changed)" | Merge the branch by hand (`git merge loop/bus-…`), resolve the conflict and commit, then `x` to mark it handled. |

@@ -263,6 +263,11 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                     .filter(|g| !g.is_empty())
                     .map(|g| format!(" {g}"))
                     .unwrap_or_default();
+                // its merge behind the check (v26)
+                let reviewed = match &t.ext.gate {
+                    Some(g) if t.review.is_none() => format!("{reviewed} {}", g.state.glyph()),
+                    _ => reviewed,
+                };
                 let lead = if t.ext.review_of.is_some() {
                     "      ↳"
                 } else {
@@ -1316,6 +1321,56 @@ fn task_card(v: &SwarmBoard, t: &BoardTask) -> Vec<Line<'static>> {
                 .map(|r| format!(" ({r})"))
                 .unwrap_or_default()
         )));
+    }
+    // its merge behind the check (v26)
+    if let Some(g) = &t.ext.gate {
+        use crate::bus::swarm::gate::GateState as G;
+        out.push(Line::raw(""));
+        out.push(section("Merge"));
+        let color = match g.state {
+            G::Passed => Color::Green,
+            G::Failed => Color::Red,
+            _ => Color::Gray,
+        };
+        out.push(Line::styled(
+            format!(
+                "  {} {}",
+                g.state.glyph(),
+                g.summary(v.swarm.as_ref().and_then(|s| s.check_cmd.as_deref()))
+            ),
+            Style::default().fg(color),
+        ));
+        if g.state == G::Failed
+            && let Some(r) = &g.result
+        {
+            out.extend(
+                r.tail
+                    .lines()
+                    .rev()
+                    .take(12)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .map(|l| Line::styled(format!("  {l}"), dim())),
+            );
+        }
+    }
+    // started again on its own, or held for the operator (v26)
+    if t.ext.recovery.retries > 0 {
+        out.push(Line::styled(
+            format!(
+                "started again automatically ({} of {})",
+                t.ext.recovery.retries,
+                crate::bus::swarm::recovery::MAX_AUTO_RETRIES
+            ),
+            dim(),
+        ));
+    }
+    if t.ext.recovery.held_ns.is_some() && !t.task.status.is_terminal() {
+        out.push(Line::styled(
+            "its worker was stopped: it waits for you (r retries it)",
+            dim(),
+        ));
     }
     if t.ext.attempts > 1 {
         out.push(Line::styled(format!("attempt {}", t.ext.attempts), dim()));

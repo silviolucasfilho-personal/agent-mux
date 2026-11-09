@@ -75,6 +75,16 @@ pub fn worker_prompt(swarm: &SwarmRun, t: &BoardTask, board: &[BoardTask]) -> St
             p.push('\n');
         }
     }
+    // started again on its own (v26): why, before anything else it does
+    if let Some(r) = t
+        .ext
+        .recovery
+        .reason
+        .as_deref()
+        .filter(|_| t.ext.recovery.retried_ns.is_some())
+    {
+        p.push_str(&format!("\n### This task is running again\n{r}\n"));
+    }
     p.push_str(&format!(
         "\n### Finishing\n\
          Your task is not over until you report it. When it is done, call \
@@ -227,7 +237,7 @@ impl Default for Tools {
                 "agent-mux swarm launch [<task>...] --as-coordinator --said \"<words>\"",
                 "agent-mux swarm wait [--timeout MS] [--after ID] --json",
                 "agent-mux swarm status --json",
-                "agent-mux swarm <pause|resume|retry|cancel|merge|set-aside|accept|drop|close> [<task>] --as-coordinator --said \"<words>\"",
+                "agent-mux swarm <pause|resume|retry|cancel|merge|force-merge|set-aside|accept|drop|close> [<task>] --as-coordinator --said \"<words>\"",
                 "agent-mux bus send --to <launch> --reply-to <id> --wake <body>",
             ],
         }

@@ -5531,6 +5531,7 @@ impl App {
                 .map(|t| format!("cancelled `{}`", t.title))
             })),
             Outcome::StopSession(idx) => {
+                self.hold_swarm_worker(idx);
                 if let Some(s) = self.sessions.get_mut(idx) {
                     s.kill();
                 }
@@ -6407,6 +6408,7 @@ impl App {
             Action::OpenHelp => self.command_overlay = Some(commands::Overlay::Help(0)),
             Action::EnterConfirmKill => self.mode = Mode::ConfirmKill,
             Action::KillSelected => {
+                self.hold_swarm_worker(self.selected);
                 if let Some(s) = self.sessions.get_mut(self.selected) {
                     s.kill();
                 }
@@ -8158,6 +8160,11 @@ impl App {
     /// arrives, after `handle_pty_exit` has recorded it.
     pub fn close_all_sessions(&mut self) {
         let now = Instant::now();
+        for i in 0..self.sessions.len() {
+            if !matches!(self.sessions[i].status(now), Status::Exited(_)) {
+                self.hold_swarm_worker(i);
+            }
+        }
         let (mut live, mut exited) = (0usize, 0usize);
         for s in &mut self.sessions {
             if matches!(s.status(now), Status::Exited(_)) {

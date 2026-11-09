@@ -697,7 +697,10 @@ commands:
   cancel <task>                 cancel a task that has not finished; its worker is stopped
   review <task>                 review a finished task again (a new review, after a fix round)
   merge <task> | set-aside <task>
-                                merge a finished task's branch into the workspace, or keep it unmerged
+                                merge a finished task's branch into the workspace, or keep it unmerged;
+                                with a check command the merge is queued and happens once the check
+                                passes on the branch brought up to date with the workspace
+  force-merge <task>            merge a finished task's branch at once, past the check
   accept <task> | drop <task>   accept or drop a task a worker proposed
   close                         end the swarm: stop its sessions, cancel open tasks, release leases
   delete [--swarm ID]           remove the swarm: a closed one from the store (its traces stay) and its worktree checkouts (branches kept); a running one is closed first (needs the TUI)
@@ -712,7 +715,7 @@ commands:
 
 <task> is a plan key (`bus-fix`), a task id or a unique prefix of either.
 The verbs take --workspace DIR (default: the current folder), --swarm ID when the folder runs several swarms, and --json.
-approve, launch, merge, set-aside, cancel, close and delete take --said.
+approve, launch, merge, force-merge, set-aside, cancel, close and delete take --said.
 Decisions from here are recorded as the CLI's (`by = cli`); --said \"<words>\" keeps what the operator said.
 A coordinator without MCP relays from its chat with --as-coordinator --said \"<words>\" (recorded as `by = chat`).";
 
