@@ -3425,8 +3425,10 @@ fn extract_agent_info(raw_tool_name: &str, args: &Value) -> Option<AgentInfo> {
         || tool_name == "dispatch_agent"
         || tool_name == "subagent"
     {
+        // OpenCode's `subagent` names it `agent` (2.0.32)
         let sub_type = args
             .get("subagent_type")
+            .or_else(|| args.get("agent"))
             .or_else(|| args.get("type"))
             .or_else(|| args.get("role"))
             .and_then(clean_json_str);

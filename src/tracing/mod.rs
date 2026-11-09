@@ -167,9 +167,29 @@ impl LaunchPlan {
 
     /// Marks the plan as a loop run. On Claude the per-launch `--settings`
     /// hook document is recomputed so `PreToolUse` waits for the guard
-    /// with `--loop` (fail-closed for write tools); Codex reads the same
-    /// policy through its installed hooks and needs no argument.
+    /// with `--loop` (fail-closed for write tools); OpenCode's plugin
+    /// fragment is replaced the same way; Codex reads the same policy
+    /// through its installed hooks and needs no argument.
     pub fn attach_loop(&mut self, launch: crate::loops::LoopLaunch, home: &Path) {
+        if self.provider == Provider::OpenCode
+            && self.hooks_registered
+            && let Some(exe) = hooks::register::current_exe()
+        {
+            let reg = hooks::register::Registration {
+                exe,
+                home: home.to_path_buf(),
+                content_mode: self.content_mode,
+                profile: self.hooks_profile.for_loop(),
+                guard: self.guard.is_some() || self.write_policy.is_some(),
+                loop_guard: true,
+            };
+            let opts = hooks::register::opencode_plugin_options(&reg, &self.launch_id, &self.dir);
+            crate::opencode::replace_plugin_fragment(
+                &mut self.extra_env,
+                &crate::opencode::plugin_dir(home),
+                &opts,
+            );
+        }
         if self.provider == Provider::Claude
             && self.hooks_registered
             && let Some(exe) = hooks::register::current_exe()
@@ -856,7 +876,8 @@ impl TraceRuntime {
                 }
                 Provider::Codex => Some("Codex needs `agent-mux trace hooks install codex`"),
                 Provider::Antigravity => Some("agy's PreToolUse hook is not registered"),
-                Provider::OpenCode => Some("opencode has no PreToolUse hook"),
+                Provider::OpenCode if hooks_wanted => None,
+                Provider::OpenCode => Some("hooks are off for this launch"),
             };
             if let Some(why) = why {
                 let _ = self.status_tx.try_send(AppEvent::TraceStatus(format!(
@@ -902,9 +923,27 @@ impl TraceRuntime {
                     ));
                     hooks_registered = true;
                 }
+                // opencode has plugins, not hooks: agent-mux's own plugin,
+                // named in the launch's `OPENCODE_CONFIG_CONTENT`, relays
+                // its tool and session hooks to `trace hook opencode`
+                Provider::OpenCode => match crate::opencode::install_plugin(&self.settings.home) {
+                    Ok(plugin) => {
+                        let opts = hooks::register::opencode_plugin_options(&reg, &launch_id, dir);
+                        extra_env.push(crate::opencode::config_env(
+                            &crate::opencode::plugin_fragment(&plugin, &opts),
+                        ));
+                        hooks_registered = true;
+                    }
+                    Err(e) => {
+                        let _ = self.status_tx.try_send(AppEvent::TraceStatus(format!(
+                            "opencode plugin not installed for '{}': {e}",
+                            profile.name
+                        )));
+                    }
+                },
                 // agy loads hooks only from customization roots: see
-                // `trace hooks install agy`; opencode has plugins, not hooks
-                Provider::Antigravity | Provider::OpenCode => {}
+                // `trace hooks install agy`
+                Provider::Antigravity => {}
             }
         }
 

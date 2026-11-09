@@ -240,6 +240,51 @@ pub fn claude_settings_json(reg: &Registration, user_files: &[PathBuf]) -> Strin
     json!({ "hooks": Value::Object(hooks) }).to_string()
 }
 
+/// Events the OpenCode plugin can send (`src/opencode_plugin.js`):
+/// `PostToolUse` covers `PostToolUseFailure` too. OpenCode 2.0.32's
+/// plugin hooks have no stop, compaction or session-end point; its turns
+/// are read from its database.
+pub const OPENCODE_EVENTS: [&str; 4] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+];
+
+/// The plugin options of one OpenCode launch: the same `trace hook`
+/// command line a Claude handler gets, the events the profile keeps, and
+/// whether `PreToolUse` carries `--guard`/`--loop`. The plugin always
+/// waits for `PreToolUse`, so the bus lease guard and urgent messages
+/// reach OpenCode even without a budget or write guard.
+pub fn opencode_plugin_options(
+    reg: &Registration,
+    launch_id: &str,
+    cwd: &Path,
+) -> crate::opencode::PluginOptions {
+    crate::opencode::PluginOptions {
+        exe: reg.exe.to_string_lossy().into_owned(),
+        args: vec![
+            "trace".into(),
+            "hook".into(),
+            "opencode".into(),
+            "--home".into(),
+            reg.home.to_string_lossy().into_owned(),
+            "--content-mode".into(),
+            reg.content_mode.as_str().into(),
+            "--launch".into(),
+            launch_id.into(),
+        ],
+        cwd: cwd.to_string_lossy().into_owned(),
+        events: OPENCODE_EVENTS
+            .iter()
+            .filter(|e| reg.profile.includes(e))
+            .map(|e| e.to_string())
+            .collect(),
+        guard: reg.guard,
+        loop_guard: reg.loop_guard,
+    }
+}
+
 /// A TOML basic string.
 pub fn toml_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -527,5 +572,35 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(args.iter().any(|a| a == "--guard") && args.iter().any(|a| a == "--loop"));
+    }
+
+    #[test]
+    fn opencode_plugin_options_follow_the_profile_and_the_guards() {
+        let mut r = reg();
+        let o = opencode_plugin_options(&r, "L1", Path::new("/ws"));
+        assert_eq!(o.exe, "/opt/agent-mux");
+        assert_eq!(
+            o.args,
+            [
+                "trace",
+                "hook",
+                "opencode",
+                "--home",
+                "/home/me",
+                "--content-mode",
+                "full",
+                "--launch",
+                "L1"
+            ]
+        );
+        assert_eq!(o.cwd, "/ws");
+        assert_eq!(o.events, OPENCODE_EVENTS);
+        assert!(!o.guard && !o.loop_guard);
+        r.profile = HooksProfile::Minimal;
+        r.guard = true;
+        r.loop_guard = true;
+        let o = opencode_plugin_options(&r, "L1", Path::new("/ws"));
+        assert_eq!(o.events, ["SessionStart"]);
+        assert!(o.guard && o.loop_guard);
     }
 }

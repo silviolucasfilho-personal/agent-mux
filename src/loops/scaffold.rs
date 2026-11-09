@@ -290,13 +290,71 @@ pub fn with_preamble(body: &str, preamble: &str) -> String {
 }
 
 /// The file a harness receives for a loop agent: the Claude text with the
-/// preamble, or its Codex TOML.
+/// preamble, its Codex TOML, or its OpenCode Markdown.
 pub fn agent_file(harness: Harness, name: &str, body: &str, preamble: &str) -> String {
     let text = with_preamble(body, preamble);
     match harness {
         Harness::Codex => codex_agent_toml(name, &text),
+        Harness::OpenCode => opencode_agent_md(&text),
         _ => text,
     }
+}
+
+/// Rewrites a Claude-shaped agent file for OpenCode 2, which reads
+/// `.opencode/agents/<name>.md` (the name is the file's) and validates the
+/// frontmatter: `description`, `mode: subagent`, a `model` only when it is
+/// an OpenCode id (`provider/model`, never a Claude alias), and Claude's
+/// `tools:` list as OpenCode's `tools` map, every tool of a kind the list
+/// lacks switched off (`agents::launch::opencode_tools`).
+pub fn opencode_agent_md(text: &str) -> String {
+    use crate::agents::Tool;
+    let parts = split_agent_frontmatter(text);
+    let tools: Option<Vec<Tool>> = split_front_lines(text).and_then(|(front, _)| {
+        let line = front.iter().find_map(|l| l.strip_prefix("tools:"))?;
+        let mut kinds = Vec::new();
+        for name in line.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            let kind = match name.to_ascii_lowercase().as_str() {
+                "read" | "grep" | "glob" | "ls" => Tool::Read,
+                "edit" | "write" | "multiedit" | "notebookedit" => Tool::Edit,
+                "bash" => Tool::Shell,
+                "webfetch" | "websearch" => Tool::Web,
+                _ => continue,
+            };
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        Some(kinds)
+    });
+    let mut out = String::from("---\n");
+    out.push_str(&format!(
+        "description: {}\n",
+        serde_json::Value::from(parts.description.replace('\n', " "))
+    ));
+    out.push_str("mode: subagent\n");
+    if let Some(model) = parts
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| m.contains('/'))
+    {
+        out.push_str(&format!("model: {model}\n"));
+    }
+    if let Some(tools) = tools {
+        out.push_str("tools:\n");
+        for kind in [Tool::Read, Tool::Edit, Tool::Shell, Tool::Web] {
+            let on = tools.contains(&kind);
+            for name in crate::agents::launch::opencode_tools(&kind) {
+                out.push_str(&format!("  {name}: {on}\n"));
+            }
+        }
+    }
+    out.push_str("---\n\n");
+    out.push_str(&parts.body);
+    if !parts.body.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 fn project_name(workspace: &Path) -> String {
@@ -313,7 +371,9 @@ pub fn project_skills_dir(harness: Harness, workspace: &Path) -> Option<PathBuf>
     match harness {
         Harness::Claude => Some(workspace.join(".claude").join("skills")),
         Harness::Codex => Some(workspace.join(".codex").join("skills")),
-        Harness::Antigravity | Harness::OpenCode => None,
+        // OpenCode 2.0.32 scans `{skill,skills}/` under `.opencode/`
+        Harness::OpenCode => Some(workspace.join(".opencode").join("skills")),
+        Harness::Antigravity => None,
     }
 }
 
@@ -332,7 +392,13 @@ pub fn verifier_path(harness: Harness, workspace: &Path) -> Option<PathBuf> {
                 .join("agents")
                 .join("verifier.toml"),
         ),
-        Harness::Antigravity | Harness::OpenCode => None,
+        Harness::OpenCode => Some(
+            workspace
+                .join(".opencode")
+                .join("agents")
+                .join("loop-verifier.md"),
+        ),
+        Harness::Antigravity => None,
     }
 }
 
@@ -355,7 +421,14 @@ pub fn agent_path(harness: Harness, workspace: &Path, name: &str) -> Option<Path
                 .join("agents")
                 .join(format!("{name}.toml")),
         ),
-        Harness::Antigravity | Harness::OpenCode => None,
+        // OpenCode 2.0.32 scans `{agent,agents}/**/*.md` under `.opencode/`
+        Harness::OpenCode => Some(
+            workspace
+                .join(".opencode")
+                .join("agents")
+                .join(format!("{name}.md")),
+        ),
+        Harness::Antigravity => None,
     }
 }
 
@@ -718,12 +791,53 @@ mod tests {
                 .iter()
                 .any(|p| p.ends_with("loop-ledger.json"))
         );
+        // opencode: `.opencode/skills` and a subagent Markdown file
+        let ws3 = temp.path().join("third");
+        std::fs::create_dir_all(&ws3).unwrap();
+        scaffold(&ws3, daily, Harness::OpenCode, Level::L1, &caps).unwrap();
+        assert!(
+            ws3.join(".opencode/skills/loop-changelog/SKILL.md")
+                .is_file()
+        );
+        let verifier =
+            std::fs::read_to_string(ws3.join(".opencode/agents/loop-verifier.md")).unwrap();
+        assert!(verifier.starts_with("---\ndescription: \""), "{verifier}");
+        assert!(verifier.contains("\nmode: subagent\n"), "{verifier}");
+        // `bash` is the key OpenCode 2.0.32 maps to its `shell` permission
+        assert!(
+            verifier.contains("  bash: true\n"),
+            "the verifier runs tests: {verifier}"
+        );
+        assert!(
+            verifier.contains("  edit: false\n"),
+            "and never edits: {verifier}"
+        );
+        assert!(!verifier.contains("model: inherit"), "{verifier}");
+        assert!(verifier.contains("# loop-verifier"), "{verifier}");
         assert!(
             scaffold(&ws2, daily, Harness::Antigravity, Level::L1, &caps)
                 .unwrap_err()
                 .to_string()
                 .contains("Antigravity")
         );
+    }
+
+    #[test]
+    fn opencode_agent_files_keep_only_what_opencode_validates() {
+        let claude = "---\nname: x\ndescription: Reads: \"quoted\"\ntools: Read, Grep\nmodel: opencode/big-pickle\n---\n\n# Body\n";
+        let md = opencode_agent_md(claude);
+        assert!(md.starts_with("---\ndescription: \"Reads: \\\"quoted\\\"\"\nmode: subagent\nmodel: opencode/big-pickle\ntools:\n"), "{md}");
+        assert!(
+            md.contains("  read: true\n") && md.contains("  write: false\n"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("name:"),
+            "the file name is the agent's name: {md}"
+        );
+        assert!(md.ends_with("---\n\n# Body\n"), "{md}");
+        // no tools line: the harness's own tool set
+        assert!(!opencode_agent_md("---\ndescription: d\n---\nb").contains("tools:"));
     }
 
     #[test]

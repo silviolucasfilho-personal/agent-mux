@@ -86,7 +86,9 @@ pub fn check(db: &Path, launch_id: &str, budget: Duration) -> Verdict {
 }
 
 /// Tools that only read: never refused by the fail-closed loop guard.
-const READ_TOOLS: [&str; 16] = [
+/// OpenCode's are matched case-insensitively with Claude's (`read`,
+/// `grep`, `glob`, `webfetch`, `websearch`) plus its own below.
+const READ_TOOLS: [&str; 20] = [
     "Read",
     "Grep",
     "Glob",
@@ -103,6 +105,10 @@ const READ_TOOLS: [&str; 16] = [
     "view_image",
     "web_search",
     "fetch",
+    "list",
+    "skill",
+    "question",
+    "subagent",
 ];
 
 fn is_read_tool(name: &str) -> bool {
@@ -621,6 +627,51 @@ mod tests {
             ),
             Verdict::Permit
         );
+    }
+
+    #[test]
+    fn opencode_tools_are_guarded_by_their_own_names_and_inputs() {
+        // probed on OpenCode 2.0.32: `write`/`edit` take `path`, `patch`
+        // takes Codex-style text under `patchText`, `shell` a `command`
+        let policy = LoopPolicy {
+            report_only: false,
+            reason: None,
+            state_file: String::new(),
+            run_log: String::new(),
+            denylist: vec!["secrets/**".into()],
+            max_files: None,
+            worktree: Some("/ws".into()),
+        };
+        let blocked = |tool: &str, input: Value| {
+            matches!(
+                write_verdict(&policy, tool, Some(&input)),
+                Verdict::Block(_)
+            )
+        };
+        assert!(blocked(
+            "write",
+            json!({ "path": "secrets/a.env", "content": "x" })
+        ));
+        assert!(blocked(
+            "edit",
+            json!({ "path": "/ws/secrets/a.env", "oldString": "a", "newString": "b" })
+        ));
+        assert!(blocked(
+            "patch",
+            json!({ "patchText": "*** Begin Patch\n*** Update File: secrets/a.env\n@@\n-a\n+b\n*** End Patch" })
+        ));
+        assert!(!blocked("read", json!({ "path": "secrets/a.env" })));
+        assert!(!blocked(
+            "write",
+            json!({ "path": "src/a.rs", "content": "x" })
+        ));
+        for read in [
+            "read", "grep", "glob", "list", "webfetch", "skill", "question", "subagent",
+        ] {
+            assert!(is_read_tool(read), "{read}");
+        }
+        assert!(is_shell_tool("shell"));
+        assert!(!is_read_tool("patch"));
     }
 
     #[test]

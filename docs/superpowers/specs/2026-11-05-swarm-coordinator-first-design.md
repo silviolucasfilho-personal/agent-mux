@@ -677,4 +677,6 @@ either order.
 - Resuming a swarm after agent-mux restarts: the engine's existing behaviour
   (workers found by their launches, `owner_run`) applies, unchanged.
 - OpenCode as a worker's harness with a `PreToolUse` guard (still no guard on
-  2.0.32; leases are not enforced for it).
+  2.0.32; leases are not enforced for it). Since done: agent-mux's OpenCode
+  plugin (2026-11-09, `docs/tracing.md`) enforces leases and delivers urgent
+  messages.

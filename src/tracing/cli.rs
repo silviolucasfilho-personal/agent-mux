@@ -49,7 +49,7 @@ commands:
                                with no value: the scores on it
   experiments [name]           the experiment registry, or one experiment's variants
   (see also: agent-mux run --experiment <name> --variant <label> --prompt <text> …)
-  hook <claude|codex|codex-notify|agy> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
+  hook <claude|codex|codex-notify|agy|opencode> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
                                hook entry point invoked by the CLIs (reads the payload from stdin or the last argument)
   hooks install|uninstall|status [codex|agy]
                                the opt-in hook installers (Claude and Codex notify need none: they register per launch)";
@@ -1463,7 +1463,11 @@ fn doctor() -> anyhow::Result<()> {
     println!("\nhooks (mode: {}):", resolved.hooks.as_str());
     if resolved.hooks.registers() {
         println!(
-            "  claude: registered per launch through --settings; codex notify: per launch through -c"
+            "  claude: registered per launch through --settings; codex notify: per launch through -c;"
+        );
+        println!(
+            "  opencode: agent-mux's plugin ({}) named per launch in OPENCODE_CONFIG_CONTENT",
+            crate::opencode::plugin_dir(&resolved.home).display()
         );
     } else {
         println!("  per-launch registrations are off; installed hooks still write rows");

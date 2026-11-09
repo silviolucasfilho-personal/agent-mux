@@ -270,6 +270,7 @@ impl EdField {
                 AgentField::ModelClaude => "Claude model",
                 AgentField::ModelCodex => "Codex model",
                 AgentField::ModelAgy => "Antigravity model",
+                AgentField::ModelOpenCode => "OpenCode model",
                 AgentField::EffortCodex => "Codex effort",
                 AgentField::EffortAgy => "Antigravity effort",
                 AgentField::SaveTo => "Saved in",
@@ -307,6 +308,7 @@ impl EdField {
                     | AgentField::ModelClaude
                     | AgentField::ModelCodex
                     | AgentField::ModelAgy
+                    | AgentField::ModelOpenCode
             ),
             EdField::Task(f) => {
                 matches!(f, TaskField::Text | TaskField::Every | TaskField::Workspace)
@@ -401,6 +403,7 @@ impl AgentEditorState {
                                 A::ModelClaude,
                                 A::ModelCodex,
                                 A::ModelAgy,
+                                A::ModelOpenCode,
                                 A::EffortCodex,
                                 A::EffortAgy,
                             ])
@@ -542,7 +545,7 @@ impl App {
         self.mode = Mode::AgentEditor(Box::new(st));
     }
 
-    /// The profiles a schedule can run on: Claude Code and Codex.
+    /// The profiles a schedule can run on: Claude Code, Codex and OpenCode.
     fn schedule_profiles(&self) -> Vec<(String, String)> {
         self.profiles
             .iter()
@@ -551,7 +554,9 @@ impl App {
                     .filter(|h| {
                         matches!(
                             h,
-                            crate::harness::Harness::Claude | crate::harness::Harness::Codex
+                            crate::harness::Harness::Claude
+                                | crate::harness::Harness::Codex
+                                | crate::harness::Harness::OpenCode
                         )
                     })
                     .map(|h| (p.name.clone(), h.as_str().to_string()))

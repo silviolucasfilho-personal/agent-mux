@@ -271,13 +271,36 @@ the session id, so running it again rewrites the same rows, and a session
 still running imports up to its message in progress. A subagent's session
 imports as a session of its own.
 
-**No hooks.** OpenCode has plugins, not hooks; on 2.0.32 a plugin file in
-its `plugins/` directory is not loaded by a standalone server and hangs
-`opencode run --standalone`, so agent-mux registers none: the write guard,
-the budget guard and the urgent-message injection do not reach OpenCode
-(`trace doctor` lists `opencode on PATH` and `opencode session db`). Its
-`parent_id` on subagent sessions and its `session_pending` (compaction)
-rows are not read yet.
+**Hooks through a plugin.** OpenCode has plugins, not hooks. agent-mux
+ships its own (`src/opencode_plugin.js`, OpenCode 2's plugin shape:
+`export default { id, setup }`), writes it to
+`~/.agent-mux/opencode-plugin/` and names it in every traced launch's
+`OPENCODE_CONFIG_CONTENT` (`plugins: [{ package, options }]`, which also
+forces `--standalone`), so nothing lands in the user's OpenCode files. Its
+options carry this binary, the `trace hook opencode` arguments of the
+launch and the events the hooks profile keeps. The plugin sends
+Claude-shaped payloads, parsed by the Claude parser under provider
+`opencode`:
+
+| OpenCode plugin hook | Event |
+| --- | --- |
+| `tool.execute.before` | `PreToolUse`, waited for (2 s): a `deny` throws, which OpenCode reports to the model as a failed tool call; `additionalContext` (urgent bus messages) goes into the next request's system prompt |
+| `tool.execute.after` | `PostToolUse`, or `PostToolUseFailure` when the call failed |
+| `session.hook("context")` | `SessionStart` on a session's first request, `UserPromptSubmit` on a user message not seen before |
+
+So the write guard, the budget guard, the loop guard, the bus lease guard
+and urgent-message injection all reach OpenCode. `PreToolUse` always waits
+for agent-mux's answer, even without a guard, so leases and messages work
+on every launch. A subagent's events report under its root session with
+`agent_id` naming the subagent's own session, the way Claude reports a
+subagent. OpenCode 2.0.32's plugin hooks have no stop, compaction or
+session-end point; turns come from its database as before. A plugin package
+must be a directory (a lone file is refused) and is read only by a
+standalone server, never through `opencode service`. Earlier notes said a
+plugin hangs `opencode run --standalone`: that was a shell call waiting at
+the approval prompt of a run without `--auto`. Its `parent_id` on subagent
+sessions (a subagent session still imports as one of its own) and its
+`session_pending` (compaction) rows are not read yet (probed 2026-11-09).
 
 ## Content, privacy, and destinations
 
