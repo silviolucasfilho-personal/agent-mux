@@ -413,4 +413,43 @@ without writing, resetting, or modifying any files.
 
 ## Tools
 
+The **Tools** group has Tools, Agents & skills activity, and Recent edits pages.
+All use the shared date, harness and workspace filter bar. Activity links to the
+existing Skills & Agents analysis at `#/skills`.
+
+Read-only `POST /api/tools/{endpoint}` accepts a JSON object with optional
+`since` and `until` (RFC 3339, inclusive/exclusive), `provider`, `workspace`
+(case-insensitive path fragment; `project` is an alias) and `model` filters. The server's `--workspace`
+scope always applies, even when a request names another project. Responses
+are `{ok: true, data: ...}`; invalid dates/fields return 400 JSON errors.
+
+- `workspaces`: sorted distinct project directories with observed activity in
+  the date/harness/model and server workspace scope. The typed workspace
+  fragment is ignored here so the filter bar can suggest matching projects.
+- `summary`: `tools`, `providers`, `models`, `provider_mix`, `model_mix`, `days`, `mix` and `mcp_servers`.
+  Aggregates include count, errors, error_rate (0–1), nearest-rank p50/p95
+  duration in milliseconds, total duration and recorded cost (null if unknown).
+  Mix keys are UTC day-start nanoseconds followed by `|tool`; day keys are UTC
+  day-start nanoseconds. Harness/model mix keys use `group|tool`. Missing tool models fall back to a model in that turn.
+- `failures`: `total` and the latest 500 failing `calls`, including error text,
+  session_key and turn_id. Errors use the current schema's `level = ERROR`.
+- `sequences`: `retry_count`, `recovery_count`, latest 500 `retries` and
+  `recoveries` (each with `from`/`to` calls), and frequency-sorted `switches`.
+  These compare adjacent tool calls within a session, across turns: a retry
+  repeats the failed tool, recovery follows an error with success, and a
+  switch changes tools. Filters apply before sequence construction.
+- `activity`: `agents`, `skills`, `agent_days`, `skill_days`; observation-level
+  usage, recorded cost and duration. Agent/skill costs include their direct
+  child observations, as in agent_stats; missing costs stay unknown.
+  Concurrent durations may overlap.
+- `edits`: `total` project/path groups and latest 500 `edits`, newest first.
+  Successful edit/write/patch tools with an observed path contribute; each
+  group has its count and latest call's session and turn. Workspace filters
+  select a project. Paths are trace metadata, never read from disk.
+
+These queries open `WebState.db` read-only on a blocking thread and never
+write to the store or invoke a harness.
+
+Session links use `?turn=<trace id>` for the session viewer’s exact-turn deep link.
+
 ## Session viewer
