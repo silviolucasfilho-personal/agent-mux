@@ -104,6 +104,8 @@ FROM observations o
 JOIN traces t ON t.id=o.trace_id
 JOIN sessions s ON s.key=t.session_key
 WHERE (?1 IS NULL OR o.start_ns>=?1) AND (?2 IS NULL OR o.start_ns<?2)
+  -- a sub-agent's turns, imported under its delegation, are not calls
+  AND COALESCE(o.kind,'')<>'subagent_turn'
 ORDER BY t.session_key, o.start_ns, o.id";
 
 async fn query(

@@ -12,6 +12,10 @@ fn tools_metrics_sequences_activity_and_recent_edits() {
     conn.execute("INSERT INTO observations (id,trace_id,type,name,tool_name,start_ns,end_ns,level,path,skill,total_cost_usd) SELECT 'retry','t2','tool','Edit','Edit',start_ns-1000000000,start_ns-600000000,'DEFAULT','src/a.rs','fix',0.25 FROM observations WHERE id='o2'", []).unwrap();
     conn.execute("INSERT INTO observations (id,trace_id,type,name,start_ns,end_ns,level,total_cost_usd) SELECT 'agent','t2','agent','reviewer',start_ns,start_ns+1000000000,'DEFAULT',0.5 FROM observations WHERE id='o2'", []).unwrap();
     conn.execute("INSERT INTO observations (id,trace_id,parent_id,type,name,start_ns,level,total_cost_usd) SELECT 'child','t2','agent','generation','child',start_ns,'DEFAULT',0.75 FROM observations WHERE id='o2'", []).unwrap();
+    // the turns its sub-agent ran, imported under the delegation: not calls
+    for i in 0..3 {
+        conn.execute(&format!("INSERT INTO observations (id,trace_id,parent_id,type,kind,name,start_ns,end_ns,level) SELECT 'turn{i}','t2','agent','agent','subagent_turn','reviewer',start_ns+{i},start_ns+{i}+1000,'DEFAULT' FROM observations WHERE id='o2'"), []).unwrap();
+    }
     drop(conn);
     let (base, server) = start(&db);
     let ask = |area: &str, filter: serde_json::Value| {
@@ -57,6 +61,8 @@ fn tools_metrics_sequences_activity_and_recent_edits() {
     assert_eq!(q["switches"][0]["name"], "Edit → Bash");
     let a = ask("activity", json!({}));
     assert_eq!(a["agents"][0]["name"], "reviewer");
+    assert_eq!(a["agents"].as_array().unwrap().len(), 1);
+    assert_eq!(a["agents"][0]["count"], 1, "one delegation, not its turns");
     assert_eq!(a["agents"][0]["cost_usd"], 1.25);
     assert_eq!(a["skills"][0]["name"], "fix");
     assert_eq!(a["skill_days"][0]["duration_ms"], 400.0);
