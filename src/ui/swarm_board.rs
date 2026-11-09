@@ -204,6 +204,7 @@ pub fn draw_tree(f: &mut Frame, area: Rect, v: &SwarmBoard) {
                     now_ns: v.now_ns,
                     dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
                     review: d.review.enabled,
+                    merge_check: None,
                 };
                 let st = engine::shown(t, &input);
                 let needs = v.row_needs(*row);
@@ -589,6 +590,13 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
         ),
         dim(),
     ));
+    if let Some(cmd) = v.merge_check() {
+        out.push(Line::raw(""));
+        out.push(section("Merge gate"));
+        out.push(Line::raw(format!(
+            "  each merge waits for `{cmd}` on the branch brought up to date (Y merges past it)"
+        )));
+    }
     if let Some(cmd) = &s.check_cmd {
         out.push(Line::raw(""));
         out.push(section("Check when done"));
@@ -634,7 +642,7 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
             }
             (_, SwarmStatus::Paused) => "space resume · > message · ! next need · o another swarm",
             (_, SwarmStatus::Finished) => "y close the swarm",
-            (_, SwarmStatus::Integrating) if s.check_cmd.is_some() => {
+            (_, SwarmStatus::Integrating) if v.merge_check().is_some() => {
                 "↓ a branch: y merge after the check, Y merge now, x set aside"
             }
             (_, SwarmStatus::Integrating) => "↓ a branch: y merge, x set aside",
@@ -1339,7 +1347,7 @@ fn task_card(v: &SwarmBoard, t: &BoardTask) -> Vec<Line<'static>> {
             format!(
                 "  {} {}",
                 g.state.glyph(),
-                g.summary(v.swarm.as_ref().and_then(|s| s.check_cmd.as_deref()))
+                g.summary(v.merge_check().as_deref())
             ),
             Style::default().fg(color),
         ));
@@ -1382,7 +1390,7 @@ fn task_card(v: &SwarmBoard, t: &BoardTask) -> Vec<Line<'static>> {
     out.push(Line::styled(
         match st {
             Shown::Draft => "changes to the plan: tell the coordinator (Enter on ★)",
-            Shown::Review if v.swarm.as_ref().is_some_and(|s| s.check_cmd.is_some()) => {
+            Shown::Review if v.merge_check().is_some() => {
                 "y merges the branch once the check passes on it · Y merges it now · x sets it aside"
             }
             Shown::Review => "y merges the branch · x sets it aside",
@@ -1697,6 +1705,7 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
             isolation,
             gate,
             check,
+            merge_gate,
             field,
             error,
             advanced,
@@ -1736,7 +1745,7 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
             l.push(Line::raw(""));
             l.push(field_line(
                 &format!(
-                    "{} Advanced: goal now, workers' pool, limits, isolation, gate, check",
+                    "{} Advanced: goal now, workers' pool, limits, isolation, gate, check, merge gate",
                     if *advanced { "▾" } else { "▸" }
                 ),
                 *field == LaunchField::Advanced,
@@ -1778,6 +1787,11 @@ fn draw_modal(f: &mut Frame, area: Rect, m: &Modal, v: &SwarmBoard) {
                     *field == LaunchField::Check,
                 ));
                 l.extend(text_lines(check, *field == LaunchField::Check, 1));
+                l.push(field_line(
+                    "Merge gate (empty: off · on: each merge waits for the check above · or its own command)",
+                    *field == LaunchField::MergeGate,
+                ));
+                l.extend(text_lines(merge_gate, *field == LaunchField::MergeGate, 1));
             }
             (
                 " New swarm ",

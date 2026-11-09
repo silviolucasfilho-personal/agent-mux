@@ -165,8 +165,8 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | click | a row selects it · the terminal in the pane types into it |
 | `Tab` | tree ↔ pane (in Activity or Thread, `↑`/`↓` choose a message, `Enter` reads it in full, `m` answers it; in Live, `↑↓←→` choose a tile; in Timeline, `←`/`→` pan, `-`/`+` zoom, `0` all; in Log, `↑`/`↓` choose a line, `t` the kinds, `/` a text filter, `Enter` opens the row it is about) |
 | `1`–`6` | the swarm row's tab (Board, Live, Timeline, Log, Activity, Changes) or a worker's (Task, Live, Thread, Trace, Changes) |
-| `y` | confirm the one thing on the row: merge a branch in `review` (with a check command: queue it behind the check) · accept a proposal · close a finished swarm. Never the plan: on a plan in review, `y` moves the keyboard to the coordinator's chat. |
-| `Y` | merge a branch in `review` now, past the swarm's check command (`force-merge`; confirms with `y`) |
+| `y` | confirm the one thing on the row: merge a branch in `review` (with the merge gate on: queue it behind the gate's check) · accept a proposal · close a finished swarm. Never the plan: on a plan in review, `y` moves the keyboard to the coordinator's chat. |
+| `Y` | merge a branch in `review` now, past the merge gate (`force-merge`; confirms with `y`) |
 | `x` | stop a worker · cancel a task · set a branch aside · drop a proposal (confirms with `y`) |
 | `d` | delete the swarm: a closed one is removed from the store (traces stay), its worktree checkouts removed, branches kept; a running one is closed first (confirms with `y`) |
 | `r` | retry a failed, lost, cancelled or stalled task (the retry form: harness, agent, isolation) · restart an exited coordinator |
@@ -200,7 +200,12 @@ Every swarm reviews each finished task before you merge it, unless you turn it o
 
 - **Worktree tasks** end on a branch (`loop/bus-…`). Each appears in Needs you as `review`, and the swarm reads `integrating` once nothing else is left.
   - `y` **merges** the branch into the branch your workspace has checked out, with a merge commit, after asking first. Git refuses if your uncommitted changes would be overwritten. A conflict aborts the merge and leaves your workspace as it was: resolve it by hand, then merge again.
-  - **With a check command, a merge waits for the check.** `y` (or `merge`) queues the branch, and agent-mux runs the queue one branch at a time, each on top of the merges before it:
+  - **The merge gate** (off unless you turn it on) makes a merge wait for a check. Set it in the launch form's Advanced **Merge gate** field, with `agent-mux swarm start --merge-gate on|<command>`, or with `agent_mux_swarm_start(merge_gate = …)`:
+    - **`on`** runs the swarm's check command.
+    - **A command of its own** (say, a quick `cargo test --lib`) can gate each merge while the full check still runs at the end.
+    - **Without it,** a check command runs only once, when every task is settled.
+
+    With the gate on, `y` (or `merge`) queues the branch, and agent-mux runs the queue one branch at a time, each on top of the merges before it:
     1. It merges your workspace's `HEAD` into the branch, in the task's worktree (a temporary one when that is gone).
     2. It runs the check there.
     3. The branch is merged into the workspace only if the check passes.
@@ -228,6 +233,7 @@ agent-mux swarm start "Add OAuth login" --coordinator claude --worker-harness ag
 #   a goal here makes the swarm headless; without one the coordinator opens and you say it in its chat
 #   --coordinator: its harness · --gate chat|off · --worker-harness: the workers' pool, the first for tasks that name none
 #   --review auto|off|<harness>: how finished tasks are reviewed (default auto)
+#   --check <command>: run when every task is settled · --merge-gate off|on|<command>: each merge waits for a check (default off; on: --check)
 agent-mux swarm status                  # the swarm and its board, each task's state (--json for scripts)
 agent-mux swarm plan                    # the board with the plan's errors and warnings
 agent-mux swarm approve                 # from a shell: every ready task starts
@@ -300,7 +306,7 @@ The full list and the matching `agent-mux bus …` commands are in [bus.md](bus.
 | The coordinator says a wait timed out | Nothing happened for five minutes. Answer it: keep waiting, or look at the Board (`!` jumps to what needs you). Nothing was stopped. |
 | A task stays `⋯` blocked | A task it depends on isn't done, or its branch isn't merged. The card says which. A failed dependency needs `r`. |
 | A task shows `!` lost | Its session exited mid-task, and its automatic retry was spent (or you stopped it). `r` retries it with a new worker. |
-| A task's merge shows `✗ not merged` | Its check failed on the branch brought up to date with the workspace (or it conflicts). The card shows why. Message its worker to fix and commit, then merge again, or `force-merge` it. |
+| A task's merge shows `✗ not merged` | The merge gate's check failed on the branch brought up to date with the workspace (or it conflicts). The card shows why. Message its worker to fix and commit, then merge again, or `force-merge` it. |
 | A task shows `○` stalled | The worker stopped without reporting, even after a reminder. Attach (`Enter`) to see why, message it, or `r` to stop it and `r` again to retry. |
 | "a swarm runs inside the running agent-mux TUI" from `swarm start` | The TUI isn't running. Start `agent-mux` first. |
 | Merge says "CONFLICT … (merge aborted, nothing changed)" | Merge the branch by hand (`git merge loop/bus-…`), resolve the conflict and commit, then `x` to mark it handled. |

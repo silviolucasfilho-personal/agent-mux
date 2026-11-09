@@ -1146,6 +1146,7 @@ mod tests {
                 worker_pool: Vec::new(),
                 headless: false,
                 review: crate::bus::swarm::review::ReviewSettings::off(),
+                merge_gate: Default::default(),
             },
             t0,
         )

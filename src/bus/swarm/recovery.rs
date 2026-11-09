@@ -435,6 +435,7 @@ mod tests {
             worker_pool: vec!["claude".into(), "codex".into()],
             headless: false,
             review: crate::bus::swarm::review::ReviewSettings::off(),
+            merge_gate: Default::default(),
         };
         let s = record::create_swarm(&conn, None, &n, 1).unwrap();
         let plan = Plan {

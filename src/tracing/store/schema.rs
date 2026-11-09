@@ -1326,8 +1326,10 @@ END;
 // when the operator stopped the worker (no automatic retry then).
 // `swarm_merge_gates` is a branch's merge queued behind the swarm's check
 // command: `queued`, `running`, `passed` (merged), `failed`, the workspace
-// commit it was tested on and the check's result. Side tables, as v24 and
-// v25, so a replay is harmless.
+// commit it was tested on and the check's result. `swarm_merge_settings`
+// turns the gate on per swarm (`on`: the swarm's check command; or a
+// command of its own); no row means off. Side tables, as v24 and v25, so a
+// replay is harmless.
 const V26: &str = r#"
 CREATE TABLE IF NOT EXISTS swarm_task_recovery (
   task_id     TEXT PRIMARY KEY REFERENCES agent_tasks (id) ON DELETE CASCADE,
@@ -1348,6 +1350,13 @@ CREATE TABLE IF NOT EXISTS swarm_merge_gates (
   base        TEXT,
   detail      TEXT,
   result      TEXT,
+  updated_ns  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS swarm_merge_settings (
+  swarm_id    TEXT PRIMARY KEY REFERENCES swarms (id) ON DELETE CASCADE,
+  mode        TEXT NOT NULL CHECK (mode IN ('on','off')),
+  command     TEXT,
   updated_ns  INTEGER NOT NULL
 );
 

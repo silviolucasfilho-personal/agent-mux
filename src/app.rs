@@ -5416,9 +5416,11 @@ impl App {
                 gate,
                 check,
                 review,
+                merge_gate,
             } => {
                 let started = self.start_orchestrated_swarm(swarm_engine::StartSwarm {
                     review: Some(review),
+                    merge_gate,
                     workspace: ws_path.clone(),
                     goal,
                     planner: Some(planner.as_str().to_string()),

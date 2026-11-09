@@ -24,6 +24,123 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+/// Whether a swarm gates its merges, and on what (`swarm_merge_settings`).
+/// Off unless the operator turns it on: a check command alone runs only at
+/// the end, as it did before the gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeGateSettings {
+    pub enabled: bool,
+    /// The gate's own command; `None`: the swarm's check command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+impl MergeGateSettings {
+    pub fn off() -> Self {
+        Self::default()
+    }
+
+    /// `off` (or empty), `on` (the swarm's check command), or a command of
+    /// its own.
+    pub fn parse(s: &str) -> Self {
+        let t = s.trim();
+        match t.to_ascii_lowercase().as_str() {
+            "" | "off" | "no" | "none" | "false" => Self::off(),
+            "on" | "yes" | "true" | "check" => MergeGateSettings {
+                enabled: true,
+                command: None,
+            },
+            _ => MergeGateSettings {
+                enabled: true,
+                command: Some(t.to_string()),
+            },
+        }
+    }
+
+    /// The setting as [`MergeGateSettings::parse`] reads it back.
+    pub fn as_choice(&self) -> String {
+        match (self.enabled, &self.command) {
+            (false, _) => "off".into(),
+            (true, None) => "on".into(),
+            (true, Some(c)) => c.clone(),
+        }
+    }
+
+    /// The command a gate runs for `swarm`, when its merges are gated.
+    pub fn command_for(&self, swarm: &SwarmRun) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        self.command
+            .clone()
+            .or_else(|| swarm.check_cmd.clone())
+            .filter(|c| !c.trim().is_empty())
+    }
+
+    /// One line for the coordinator's context and the screen.
+    pub fn describe(&self, swarm: &SwarmRun) -> String {
+        match (self.enabled, self.command_for(swarm)) {
+            (false, _) => "off: merge merges at once".into(),
+            (true, Some(c)) => format!(
+                "on: merge queues the branch and merges it once `{c}` passes on it brought up to date with the workspace"
+            ),
+            (true, None) => "on, but the swarm has no check command: merge merges at once".into(),
+        }
+    }
+
+    /// Refused when it is on without a command to run.
+    pub fn check(&self, check_cmd: Option<&str>) -> Result<(), String> {
+        if self.enabled && self.command.is_none() && check_cmd.is_none_or(|c| c.trim().is_empty()) {
+            return Err(
+                "merge gate: `on` runs the swarm's check command, and there is none: give a check command, or the gate's own command".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// A swarm's merge gate setting; no row: off.
+pub fn settings(conn: &Connection, swarm_id: &str) -> MergeGateSettings {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT mode, command FROM swarm_merge_settings WHERE swarm_id = ?1",
+        params![swarm_id],
+        |r| {
+            Ok(MergeGateSettings {
+                enabled: r.get::<_, String>(0)? == "on",
+                command: r
+                    .get::<_, Option<String>>(1)?
+                    .filter(|c| !c.trim().is_empty()),
+            })
+        },
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
+pub fn set_settings(
+    conn: &Connection,
+    swarm_id: &str,
+    s: &MergeGateSettings,
+    now: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO swarm_merge_settings (swarm_id, mode, command, updated_ns)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (swarm_id) DO UPDATE SET mode = excluded.mode, command = excluded.command,
+             updated_ns = excluded.updated_ns",
+        params![
+            swarm_id,
+            if s.enabled { "on" } else { "off" },
+            s.command,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GateState {
@@ -561,6 +678,14 @@ mod tests {
     /// A running swarm over `ws` with `check`, and one finished worktree
     /// task on the `feature` branch.
     fn swarm(ws: &Path, check: &str) -> (tempfile::TempDir, Connection, SwarmRun, String) {
+        swarm_with(ws, Some(check), &MergeGateSettings::parse("on"))
+    }
+
+    fn swarm_with(
+        ws: &Path,
+        check: Option<&str>,
+        gate_setting: &MergeGateSettings,
+    ) -> (tempfile::TempDir, Connection, SwarmRun, String) {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("traces.db");
         let _ = open_rw(&db, OpenOptions::default()).unwrap();
@@ -572,11 +697,12 @@ mod tests {
             max_workers: 2,
             isolation: TaskIsolation::Worktree,
             gate: true,
-            check_cmd: Some(check.into()),
+            check_cmd: check.map(str::to_string),
             owner_run: None,
             worker_pool: vec![],
             headless: false,
             review: crate::bus::swarm::review::ReviewSettings::off(),
+            merge_gate: gate_setting.clone(),
         };
         let s = record::create_swarm(&conn, None, &n, 1).unwrap();
         let plan = Plan {
@@ -785,5 +911,39 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn the_gate_is_a_setting_of_its_own() {
+        let off = MergeGateSettings::parse("");
+        assert_eq!((off.enabled, off.as_choice()), (false, "off".to_string()));
+        let on = MergeGateSettings::parse("On");
+        assert_eq!((on.enabled, on.command.clone()), (true, None));
+        let own = MergeGateSettings::parse("  cargo test --lib ");
+        assert_eq!(own.as_choice(), "cargo test --lib");
+        // `on` needs the swarm's check; a command of its own does not
+        assert!(on.check(None).unwrap_err().contains("there is none"));
+        assert!(on.check(Some("make")).is_ok() && own.check(None).is_ok());
+
+        // off: a check command alone merges at once, as before the gate
+        let ws = tempfile::tempdir().unwrap();
+        repo(ws.path(), false);
+        let (_d, conn, s, id) = swarm_with(ws.path(), Some("exit 1"), &off);
+        assert_eq!(settings(&conn, &s.id), off);
+        assert_eq!(off.command_for(&s), None);
+        let merged = verb(&conn, &s, SwarmVerb::Merge).unwrap();
+        assert!(merged.starts_with("merged feature"), "{merged}");
+        assert!(task(&conn, &s, &id).ext.gate.is_none());
+
+        // its own command: queued behind it, whatever the check command is
+        let ws = tempfile::tempdir().unwrap();
+        repo(ws.path(), false);
+        let (_d, conn, s, _) = swarm_with(ws.path(), Some("cargo test"), &own);
+        assert_eq!(
+            settings(&conn, &s.id).command_for(&s).as_deref(),
+            Some("cargo test --lib")
+        );
+        let queued = verb(&conn, &s, SwarmVerb::Merge).unwrap();
+        assert!(queued.contains("`cargo test --lib` runs"), "{queued}");
     }
 }

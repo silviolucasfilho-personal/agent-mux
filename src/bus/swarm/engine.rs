@@ -56,6 +56,9 @@ pub struct Input<'a> {
     pub dispatch_grace_ns: i64,
     /// The swarm reviews its finished tasks (`review::settings`, v25).
     pub review: bool,
+    /// The command its merges wait for, when they are gated
+    /// (`gate::MergeGateSettings::command_for`, v26).
+    pub merge_check: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,7 +250,7 @@ pub fn recovery_due(t: &BoardTask, input: &Input<'_>) -> Option<Cause> {
 /// first queued (an abandoned run counts as queued), of the tasks still
 /// waiting for the operator, with a check command to run.
 pub fn gate_due<'a>(input: &Input<'a>) -> Option<&'a BoardTask> {
-    input.swarm.check_cmd.as_ref()?;
+    input.merge_check.as_ref()?;
     let waiting = |t: &&BoardTask| awaits_review(t);
     let running = input.board.iter().filter(waiting).any(|t| {
         t.ext
@@ -568,6 +571,8 @@ mod tests {
             now_ns: 1_000 * 1_000_000_000,
             dispatch_grace_ns: 120 * 1_000_000_000,
             review: false,
+            // the gate follows the check command in these tests
+            merge_check: s.check_cmd.clone(),
         })
     }
 
@@ -580,6 +585,7 @@ mod tests {
             now_ns: 1_000 * 1_000_000_000,
             dispatch_grace_ns: 120 * 1_000_000_000,
             review: true,
+            merge_check: None,
         })
     }
 
@@ -1064,6 +1070,7 @@ mod tests {
             now_ns: 0,
             dispatch_grace_ns: DISPATCH_GRACE_NS,
             review: false,
+            merge_check: None,
         };
         let got: Vec<&str> = board.iter().map(|t| shown(t, &input).as_str()).collect();
         assert_eq!(
@@ -1082,6 +1089,7 @@ mod tests {
             now_ns: 0,
             dispatch_grace_ns: DISPATCH_GRACE_NS,
             review: false,
+            merge_check: None,
         };
         assert_eq!(shown(&board[1], &input), Shown::Draft);
     }

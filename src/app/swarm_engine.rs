@@ -49,6 +49,9 @@ pub struct StartSwarm {
     pub workers: Option<String>,
     /// How finished tasks are reviewed: `auto` (`None`), `off` or a harness.
     pub review: Option<String>,
+    /// Whether merges wait for a check: `off` (`None`), `on` (the check
+    /// command) or a command of its own.
+    pub merge_gate: Option<String>,
 }
 
 impl App {
@@ -127,6 +130,10 @@ impl App {
         }
         let review =
             crate::bus::swarm::review::ReviewSettings::parse(req.review.as_deref().unwrap_or(""))?;
+        let merge_gate = crate::bus::swarm::gate::MergeGateSettings::parse(
+            req.merge_gate.as_deref().unwrap_or(""),
+        );
+        merge_gate.check(req.check.as_deref())?;
         let db = self
             .trace_db_path
             .clone()
@@ -147,6 +154,7 @@ impl App {
                 worker_pool,
                 headless: !req.goal.trim().is_empty(),
                 review,
+                merge_gate,
             },
             crate::tracing::store::now_ns(),
         )?;
@@ -188,6 +196,10 @@ impl App {
             .as_ref()
             .map(|c| crate::bus::swarm::review::settings(c, &swarm.id))
             .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off);
+        let merge_gate = ro
+            .as_ref()
+            .map(|c| crate::bus::swarm::gate::settings(c, &swarm.id))
+            .unwrap_or_default();
         let ctx = PlannerContext {
             goal: swarm.goal.clone(),
             workspace: crate::workflows::planner::inventory(&workspace),
@@ -218,6 +230,8 @@ impl App {
                 headless: swarm.headless,
                 review: review.as_choice(),
                 review_step: review.describe(),
+                merge_gate: merge_gate.as_choice(),
+                merge_gate_step: merge_gate.describe(swarm),
             },
             tools: Tools {
                 dispatch_grace_s: self.swarm_dispatch_grace_ns / 1_000_000_000,
@@ -903,6 +917,7 @@ impl App {
                 check,
                 workers,
                 review,
+                merge_gate,
             } => match self.start_orchestrated_swarm(StartSwarm {
                 workspace: PathBuf::from(workspace),
                 goal,
@@ -913,6 +928,7 @@ impl App {
                 check,
                 workers,
                 review,
+                merge_gate,
             }) {
                 Ok(s) => ok(
                     if s.headless {
@@ -1052,6 +1068,7 @@ impl App {
             .map(|m| m.from_launch.clone())
             .collect();
         let review = crate::bus::swarm::review::settings(conn, &swarm.id);
+        let merge_gate = crate::bus::swarm::gate::settings(conn, &swarm.id);
         let actions = engine::next_actions(&engine::Input {
             swarm,
             board: &board,
@@ -1060,6 +1077,7 @@ impl App {
             now_ns: crate::tracing::store::now_ns(),
             dispatch_grace_ns: self.swarm_dispatch_grace_ns,
             review: review.enabled,
+            merge_check: merge_gate.command_for(swarm),
         });
         let data = crate::app::swarm_board::SwarmData {
             run: swarm.clone(),
@@ -1073,6 +1091,7 @@ impl App {
             events: Vec::new(),
             timeline: None,
             review: review.clone(),
+            merge_gate: merge_gate.clone(),
         };
         let needs =
             crate::app::swarm_board::needs_for(&data, &workers, crate::tracing::store::now_ns())
@@ -1349,7 +1368,7 @@ impl App {
                 Action::RunGate { task_id } => {
                     let (Some(t), Some(cmd)) = (
                         board.iter().find(|t| t.task.id == task_id),
-                        swarm.check_cmd.clone(),
+                        merge_gate.command_for(swarm),
                     ) else {
                         continue;
                     };

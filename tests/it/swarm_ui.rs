@@ -133,6 +133,7 @@ fn seed(f: &Fixture, status: SwarmStatus, tasks: Vec<PlannedTask>) -> SwarmRun {
             worker_pool: vec![],
             headless: false,
             review: agent_mux::bus::swarm::review::ReviewSettings::off(),
+            merge_gate: Default::default(),
         },
         now_ns(),
     )

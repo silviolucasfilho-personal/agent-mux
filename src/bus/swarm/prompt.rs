@@ -202,6 +202,11 @@ pub struct Limits {
     pub review: String,
     /// The same, in one sentence.
     pub review_step: String,
+    /// Whether merges wait for a check: `off`, `on` (the check command) or
+    /// the gate's own command (`bus::swarm::gate`).
+    pub merge_gate: String,
+    /// The same, in one sentence.
+    pub merge_gate_step: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

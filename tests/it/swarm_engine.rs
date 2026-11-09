@@ -246,6 +246,7 @@ fn start_reviewed(f: &mut Fixture, gate: bool, check: Option<&str>, review: &str
             check: check.map(str::to_string),
             workers: None,
             review: Some(review.into()),
+            merge_gate: None,
         })
         .unwrap_or_else(|e| panic!("the swarm did not start: {e}"));
 }

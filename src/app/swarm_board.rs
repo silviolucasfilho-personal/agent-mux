@@ -239,10 +239,13 @@ pub enum LaunchField {
     Isolation,
     Gate,
     Check,
+    /// Whether merges wait for a check: empty or `off`, `on` (the check
+    /// above), or a command of its own (`bus::swarm::gate`, v26).
+    MergeGate,
 }
 
 impl LaunchField {
-    const ORDER: [LaunchField; 9] = [
+    const ORDER: [LaunchField; 10] = [
         LaunchField::Planner,
         LaunchField::Review,
         LaunchField::Advanced,
@@ -252,6 +255,7 @@ impl LaunchField {
         LaunchField::Isolation,
         LaunchField::Gate,
         LaunchField::Check,
+        LaunchField::MergeGate,
     ];
     /// The next field: folded, Tab moves between the coordinator, the
     /// review and the Advanced fold only.
@@ -339,6 +343,8 @@ pub enum Modal {
         isolation: TaskIsolation,
         gate: bool,
         check: TextArea,
+        /// The merge gate: empty or `off`, `on`, or its own command.
+        merge_gate: TextArea,
         /// The review: 0 `auto`, 1..=n the harnesses, n+1 `off`
         /// ([`SwarmBoard::review_choice`]).
         review: usize,
@@ -549,6 +555,8 @@ pub enum Outcome {
         check: Option<String>,
         /// `auto`, a harness or `off`.
         review: String,
+        /// `off` (`None`), `on` or the gate's own command.
+        merge_gate: Option<String>,
     },
     Verb {
         verb: SwarmVerb,
@@ -614,6 +622,8 @@ pub struct SwarmData {
     pub timeline: Option<crate::tracing::swarm_report::Timeline>,
     /// How the swarm reviews finished tasks (v25).
     pub review: crate::bus::swarm::review::ReviewSettings,
+    /// Whether its merges wait for a check (v26).
+    pub merge_gate: crate::bus::swarm::gate::MergeGateSettings,
 }
 
 /// A row of the tree.
@@ -1046,6 +1056,11 @@ impl SwarmBoard {
                     .as_ref()
                     .map(|c| crate::bus::swarm::review::settings(c, &run.id))
                     .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off);
+                let merge_gate = self
+                    .conn
+                    .as_ref()
+                    .map(|c| crate::bus::swarm::gate::settings(c, &run.id))
+                    .unwrap_or_default();
                 let mut d = SwarmData {
                     run,
                     board,
@@ -1058,6 +1073,7 @@ impl SwarmBoard {
                     events,
                     timeline,
                     review,
+                    merge_gate,
                 };
                 d.needs = needs_for(&d, &self.workers, now_ns);
                 swarms.push(d);
@@ -1368,6 +1384,7 @@ impl SwarmBoard {
             now_ns: self.now_ns,
             dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
             review: self.review_settings().enabled,
+            merge_check: None,
         })
     }
 
@@ -1378,6 +1395,16 @@ impl SwarmBoard {
             .and_then(|s| self.swarms.iter().find(|d| d.run.id == s.id))
             .map(|d| d.review.clone())
             .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off)
+    }
+
+    /// The command the selected swarm's merges wait for, when they are
+    /// gated (v26).
+    pub fn merge_check(&self) -> Option<String> {
+        let s = self.swarm.as_ref()?;
+        self.swarms
+            .iter()
+            .find(|d| d.run.id == s.id)
+            .and_then(|d| d.merge_gate.command_for(s))
     }
 
     /// How the board shows `t`.
@@ -1723,6 +1750,7 @@ impl SwarmBoard {
             isolation: TaskIsolation::Shared,
             gate: true,
             check: TextArea::new(""),
+            merge_gate: TextArea::new(""),
             review: 0,
             field: LaunchField::Planner,
             error: None,
@@ -2012,11 +2040,16 @@ impl SwarmBoard {
         if let Some(line) = &mut self.command {
             line.text.insert_str(text);
         } else if let Some(Modal::Launch {
-            goal, field, check, ..
+            goal,
+            field,
+            check,
+            merge_gate,
+            ..
         }) = &mut self.modal
         {
             match field {
                 LaunchField::Check => check.insert_str(text),
+                LaunchField::MergeGate => merge_gate.insert_str(text),
                 _ => goal.insert_str(text),
             }
         } else if let Some(Modal::Task {
@@ -2404,7 +2437,7 @@ impl SwarmBoard {
                         branch: t.task.branch.clone().unwrap_or_default(),
                         warning: crate::bus::swarm::review::merge_warning(state)
                             .map(str::to_string),
-                        check: swarm.check_cmd.clone(),
+                        check: self.merge_check(),
                     });
                     return Outcome::None;
                 }
@@ -2462,8 +2495,8 @@ impl SwarmBoard {
                 Some("Y merges a finished branch past the check: choose one in review.".into());
             return Outcome::None;
         }
-        let Some(check) = self.swarm.as_ref().and_then(|s| s.check_cmd.clone()) else {
-            self.status_msg = Some("This swarm has no check: y merges at once.".into());
+        let Some(check) = self.merge_check() else {
+            self.status_msg = Some("This swarm's merges are not gated: y merges at once.".into());
             return Outcome::None;
         };
         let state =
@@ -2707,6 +2740,7 @@ impl SwarmBoard {
                 isolation,
                 gate,
                 check,
+                merge_gate,
                 review,
                 field,
                 advanced,
@@ -2742,6 +2776,9 @@ impl SwarmBoard {
                     }
                     LaunchField::Check => {
                         crate::keymap::apply_text(check, &key);
+                    }
+                    LaunchField::MergeGate => {
+                        crate::keymap::apply_text(merge_gate, &key);
                     }
                     LaunchField::Planner => {
                         let d = match key.code {
@@ -2881,6 +2918,7 @@ impl SwarmBoard {
                 isolation,
                 gate,
                 check,
+                merge_gate,
                 review,
                 field,
                 advanced,
@@ -2905,10 +2943,12 @@ impl SwarmBoard {
                 }
                 // the goal is optional: without one the operator says it in
                 // the coordinator's chat (coordinator-first §4.1)
+                let gate_s = crate::bus::swarm::gate::MergeGateSettings::parse(&merge_gate.text);
+                let check_s = Some(check.text.trim()).filter(|c| !c.is_empty());
                 let why = if chosen.is_empty() {
-                    Some("Tick at least one harness for the workers (Space).")
+                    Some("Tick at least one harness for the workers (Space).".to_string())
                 } else {
-                    None
+                    gate_s.check(check_s).err()
                 };
                 let form = Modal::Launch {
                     goal,
@@ -2920,16 +2960,23 @@ impl SwarmBoard {
                     isolation,
                     gate,
                     check,
+                    merge_gate,
                     review,
                     field,
-                    error: why.map(str::to_string),
+                    error: why.clone(),
                     advanced,
                 };
                 if why.is_some() {
                     self.modal = Some(form);
                     return Outcome::None;
                 }
-                let Modal::Launch { goal, check, .. } = &form else {
+                let Modal::Launch {
+                    goal,
+                    check,
+                    merge_gate,
+                    ..
+                } = &form
+                else {
                     unreachable!()
                 };
                 let out = Outcome::Start {
@@ -2941,6 +2988,7 @@ impl SwarmBoard {
                     gate,
                     check: Some(check.text.trim().to_string()).filter(|c| !c.is_empty()),
                     review: review_s,
+                    merge_gate: Some(merge_gate.text.trim().to_string()).filter(|g| !g.is_empty()),
                 };
                 self.last_launch = Some(form);
                 out
@@ -3190,6 +3238,7 @@ pub fn needs_for(d: &SwarmData, workers: &HashMap<String, Worker>, now_ns: i64) 
         now_ns,
         dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
         review: d.review.enabled,
+        merge_check: None,
     };
     let name_of = |launch: &str| -> String {
         if launch == "user" {
@@ -3772,6 +3821,7 @@ mod tests {
             events: Vec::new(),
             timeline: None,
             review: crate::bus::swarm::review::ReviewSettings::off(),
+            merge_gate: Default::default(),
         };
         d.needs = needs_for(&d, &v.workers, v.now_ns);
         v.swarms = vec![d];
@@ -4099,7 +4149,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_y_merges_a_branch_past_the_check_and_y_queues_it() {
+    fn shift_y_merges_a_branch_past_the_gate_and_y_queues_it() {
         let mut wt = task("a", TaskStatus::Done, Some("L1"));
         wt.task.branch = Some("loop/bus-a".into());
         let tasks = vec![wt.clone()];
@@ -4109,13 +4159,16 @@ mod tests {
         assert_eq!(v.confirm, None);
         assert_eq!(
             v.status_msg.as_deref(),
-            Some("This swarm has no check: y merges at once.")
+            Some("This swarm's merges are not gated: y merges at once.")
         );
-        // with one: y queues it behind the check, Y merges now after a y
+        // a check command alone does not gate the merges
         let mut run = swarm(SwarmStatus::Integrating);
         run.check_cmd = Some("make test".into());
         set_data(&mut v, run, tasks, vec![]);
         v.set_cursor(1);
+        assert_eq!(v.merge_check(), None);
+        // the gate on: y queues it behind the check, Y merges now after a y
+        v.swarms[0].merge_gate = crate::bus::swarm::gate::MergeGateSettings::parse("on");
         v.handle_key(key(KeyCode::Char('y')));
         let Some(c) = v.confirm.clone() else {
             panic!("y asks first")
@@ -4252,6 +4305,7 @@ mod tests {
                 gate: true,
                 check: None,
                 review: "auto".into(),
+                merge_gate: None,
             }
         );
         // Advanced unfolds the goal and the limits; Tab stays within the

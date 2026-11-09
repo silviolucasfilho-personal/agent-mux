@@ -682,6 +682,7 @@ commands:
                                 --coordinator: its harness (default claude when installed); --gate chat (default: you confirm in the chat) or off;
                                 --worker-harness: the workers' pool, e.g. agy,codex; the first runs tasks that name none (default: the coordinator's)
                                 --review auto|off|<harness>: each finished task is reviewed read-only before the merge (default auto: a harness other than the worker's)
+                                --merge-gate off|on|<command>: each merge waits for a check on the branch brought up to date with the workspace (default off; on: the --check command)
   status [--workspace DIR] [--db PATH] [--json]
                                 the swarm, its board (each task's state) and what waits for you
   plan [--workspace DIR] [--db PATH] [--json]
@@ -698,9 +699,9 @@ commands:
   review <task>                 review a finished task again (a new review, after a fix round)
   merge <task> | set-aside <task>
                                 merge a finished task's branch into the workspace, or keep it unmerged;
-                                with a check command the merge is queued and happens once the check
-                                passes on the branch brought up to date with the workspace
-  force-merge <task>            merge a finished task's branch at once, past the check
+                                with the swarm's merge gate on (--merge-gate) the merge is queued and
+                                happens once its check passes on the branch brought up to date
+  force-merge <task>            merge a finished task's branch at once, past the merge gate
   accept <task> | drop <task>   accept or drop a task a worker proposed
   close                         end the swarm: stop its sessions, cancel open tasks, release leases
   delete [--swarm ID]           remove the swarm: a closed one from the store (its traces stay) and its worktree checkouts (branches kept); a running one is closed first (needs the TUI)
@@ -753,6 +754,7 @@ fn print_board(
         now_ns: now_ns(),
         dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
         review: super::swarm::review::settings(conn, &swarm.id).enabled,
+        merge_check: None,
     };
     let problems = with_problems.then(|| {
         plan::check(
@@ -1240,6 +1242,7 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                 check: args.value("check").map(str::to_string),
                 workers: args.value("worker-harness").map(str::to_string),
                 review: args.value("review").map(str::to_string),
+                merge_gate: args.value("merge-gate").map(str::to_string),
             };
             match control::send_request(None, &req, Duration::from_secs(10)) {
                 Ok(resp) if resp.ok => {

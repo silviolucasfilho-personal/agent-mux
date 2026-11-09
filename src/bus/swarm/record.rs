@@ -249,6 +249,8 @@ pub struct NewSwarm {
     pub headless: bool,
     /// How finished tasks are reviewed (v25).
     pub review: super::review::ReviewSettings,
+    /// Whether merges wait for a check (v26, `gate`).
+    pub merge_gate: super::gate::MergeGateSettings,
 }
 
 /// The plan's side of one board task.
@@ -378,6 +380,7 @@ pub fn create_swarm(
     )
     .map_err(|e| e.to_string())?;
     super::review::set_settings(conn, &id, &new.review, now).map_err(|e| e.to_string())?;
+    super::gate::set_settings(conn, &id, &new.merge_gate, now).map_err(|e| e.to_string())?;
     let _ = event(
         conn,
         &id,
@@ -2180,9 +2183,9 @@ pub fn apply(
             }
             let branch = t.task.branch.clone().unwrap_or_default();
             if verb == SwarmVerb::Merge
-                && let Some(cmd) = swarm.check_cmd.as_deref()
+                && let Some(cmd) = super::gate::settings(conn, &swarm.id).command_for(swarm)
             {
-                return queue_merge(conn, db, swarm, t, &board, cmd, verb, who, now);
+                return queue_merge(conn, db, swarm, t, &board, &cmd, verb, who, now);
             }
             let merged = verb != SwarmVerb::SetAside;
             let detail = if merged {
@@ -2491,6 +2494,7 @@ mod tests {
             worker_pool: vec![],
             headless: false,
             review: crate::bus::swarm::review::ReviewSettings::off(),
+            merge_gate: Default::default(),
         }
     }
 

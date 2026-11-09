@@ -179,6 +179,7 @@ pub fn board_view(
         now_ns,
         dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
         review: settings.enabled,
+        merge_check: None,
     };
     let task_of = |launch: &str| -> Option<String> {
         board
