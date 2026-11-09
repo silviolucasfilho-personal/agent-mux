@@ -14,7 +14,15 @@ fn the_spa_and_its_assets_are_served() {
     assert_eq!(status, 200);
     assert!(ctype.starts_with("text/html"), "{ctype}");
     assert!(body.contains("<div id=\"app\">"));
-    for script in ["app.js", "trace.js", "swarm.js", "runs.js", "library.js"] {
+    for script in [
+        "app.js",
+        "trace.js",
+        "usage.js",
+        "tools.js",
+        "swarm.js",
+        "runs.js",
+        "library.js",
+    ] {
         assert!(body.contains(&format!("/static/{script}")), "{script}");
         let (status, ctype, text) = get(&base, &format!("/static/{script}"));
         assert_eq!(status, 200, "{script}");
@@ -31,6 +39,11 @@ fn the_spa_and_its_assets_are_served() {
         "fmtDuration",
         "fmtTime",
         "table",
+        "charts",
+        "filterBar",
+        "live",
+        "subscribe",
+        "EventSource",
     ] {
         assert!(app.contains(name), "app.js exposes {name}");
     }
@@ -246,4 +259,103 @@ fn the_binary_prints_a_loopback_url_and_serves_it() {
     let (status, env) = post(base, "/api/trace/list_sessions", &json!({}));
     assert_eq!(status, 200, "{env}");
     assert_eq!(env["data"]["total_matching"], 2);
+}
+
+/// Reads `/api/live` on a thread and hands over each event as (name, data).
+fn live_events(base: &str) -> std::sync::mpsc::Receiver<(String, serde_json::Value)> {
+    use std::io::{BufRead, BufReader};
+    let (tx, rx) = std::sync::mpsc::channel();
+    let res = ureq::get(format!("{base}/api/live"))
+        .call()
+        .expect("a live stream");
+    let ctype = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(ctype.starts_with("text/event-stream"), "{ctype}");
+    let reader = BufReader::new(res.into_body().into_reader());
+    std::thread::spawn(move || {
+        let mut event = String::new();
+        for line in reader.lines() {
+            let Ok(line) = line else { return };
+            if let Some(name) = line.strip_prefix("event:") {
+                event = name.trim().to_string();
+            } else if let Some(data) = line.strip_prefix("data:") {
+                let data = serde_json::from_str(data.trim()).unwrap_or_default();
+                if tx.send((std::mem::take(&mut event), data)).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    rx
+}
+
+#[test]
+fn live_streams_a_change_when_the_feed_advances() {
+    use agent_mux::tracing::pricing::PriceTable;
+    use agent_mux::tracing::store::model::{SessionRow, StoreOp};
+    use agent_mux::tracing::store::{OpenOptions, open_rw};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let (db, ws) = seeded_store(temp.path());
+    let (base, server) = start(&db);
+    let events = live_events(&base);
+
+    let (name, ready) = events.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(name, "ready");
+    let first = ready["seq"].as_i64().unwrap();
+    assert!(first > 0, "{ready}");
+
+    // nothing moves: no change event
+    assert!(events.recv_timeout(Duration::from_millis(1500)).is_err());
+
+    let mut store = open_rw(
+        &db,
+        OpenOptions {
+            prices: PriceTable::builtin(),
+            run_id: "run-live".into(),
+            retention_days: 0,
+            agent_mux_version: "test".into(),
+        },
+    )
+    .unwrap();
+    store
+        .apply(&[StoreOp::Session(SessionRow {
+            key: "claude:s3".into(),
+            provider: "claude".into(),
+            session_id: "s3".into(),
+            user_id: None,
+            cwd: Some(ws.to_string_lossy().into_owned()),
+            project_slug: None,
+            transcript_path: None,
+            title: Some("a new one".into()),
+            seen_ns: agent_mux::tracing::store::now_ns(),
+            extra: None,
+        })])
+        .unwrap();
+
+    let (name, change) = events.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(name, "change");
+    assert_eq!(change["previous"].as_i64(), Some(first));
+    assert!(change["seq"].as_i64().unwrap() > first, "{change}");
+    server.abort();
+}
+
+#[test]
+fn live_answers_ready_without_a_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("absent.db");
+    let (base, server) = start(&db);
+    let events = live_events(&base);
+    let (name, ready) = events
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(name, "ready");
+    assert_eq!(ready["seq"], 0);
+    assert!(!db.exists(), "the stream never creates a store");
+    server.abort();
 }

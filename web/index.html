@@ -3,23 +3,62 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>agent-mux</title>
+  <script>
+    // the stored theme before the first paint, so a dark choice never flashes light
+    try { var t = localStorage.getItem('agent-mux-theme'); if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); } catch (_) {}
+  </script>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+  <a class="skip" href="#page">Skip to content</a>
   <div id="app">
     <nav id="nav" aria-label="Pages">
-      <div class="brand">agent-mux</div>
-      <ul id="nav-pages"></ul>
-      <div class="nav-foot">read-only explorer</div>
+      <div class="brand">
+        <button id="menu-button" type="button" class="icon" aria-label="Menu" aria-controls="nav-pages">☰</button>
+        <span class="brand-name">agent-mux</span>
+        <span id="live-status" class="live-dot connecting" role="status" aria-label="Connecting to the live channel…" title="Connecting to the live channel…"></span>
+      </div>
+      <div id="nav-pages"></div>
+      <div class="nav-foot">
+        <button id="theme-toggle" type="button" class="ghost">◐ auto</button>
+        <span class="muted">read-only explorer</span>
+      </div>
     </nav>
     <main id="main">
-      <h1 id="page-title"></h1>
-      <div id="page"></div>
+      <header class="topbar">
+        <h1 id="page-title"></h1>
+        <div class="topbar-actions">
+          <button id="palette-button" type="button" class="search-button" aria-label="Command palette">
+            <span>Search or jump to…</span><kbd id="palette-kbd">⌘K</kbd>
+          </button>
+          <button id="help-button" type="button" class="icon" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">?</button>
+        </div>
+      </header>
+      <div id="page" tabindex="-1"></div>
     </main>
   </div>
+
+  <div id="palette" class="overlay" hidden>
+    <div class="dialog palette" role="dialog" aria-modal="true" aria-label="Command palette">
+      <input id="palette-input" type="text" autocomplete="off" spellcheck="false" placeholder="Go to a page, run an action, or type a session key…" role="combobox" aria-expanded="true" aria-controls="palette-list">
+      <ul id="palette-list" role="listbox"></ul>
+      <div class="dialog-foot muted"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> open · <kbd>Esc</kbd> close</div>
+    </div>
+  </div>
+
+  <div id="shortcuts" class="overlay" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <div class="dialog-head"><h2 id="shortcuts-title">Keyboard shortcuts</h2><button type="button" class="close icon" aria-label="Close">×</button></div>
+      <div id="shortcuts-body"></div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
   <script src="/static/trace.js"></script>
+  <script src="/static/usage.js"></script>
+  <script src="/static/tools.js"></script>
   <script src="/static/swarm.js"></script>
   <script src="/static/runs.js"></script>
   <script src="/static/library.js"></script>

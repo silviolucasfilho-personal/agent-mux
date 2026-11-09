@@ -5,8 +5,11 @@
 //! CDN) and answers JSON under `/api/`. Every area owns one Rust module and
 //! one script: `trace` (`/api/trace/`, `web/trace.js`), `swarm`
 //! (`/api/swarm/`, `web/swarm.js`), `runs` (`/api/runs/`, `web/runs.js`)
-//! and `library` (`/api/library/`, `web/library.js`); each exposes
+//! `library` (`/api/library/`, `web/library.js`), `usage` (`/api/usage/`,
+//! `web/usage.js`) and `tools` (`/api/tools/`, `web/tools.js`); each exposes
 //! `pub fn routes() -> Router<Arc<WebState>>` and `router` merges them.
+//! `GET /api/live` is a Server-Sent Events stream that says when the
+//! store's `trace_changes` feed advances (`live`).
 //!
 //! Nothing here writes to the store or starts a harness: connections are
 //! `tracing::store::open_ro`, and the trace API is `TraceService`, the
@@ -18,15 +21,21 @@
 pub mod library;
 pub mod runs;
 pub mod swarm;
+pub mod tools;
 pub mod trace;
+pub mod usage;
 
 use crate::tracing::analysis::{Scope, ServiceConfig, ServiceError, TraceService};
 use axum::Router;
+use axum::extract::State;
 use axum::http::{StatusCode, header};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Shared state of one server, `Arc`ed into every route.
 pub struct WebState {
@@ -37,7 +46,12 @@ pub struct WebState {
     /// The trace service every `/api/trace/` call runs through. One per
     /// server, so pagination cursors stay valid across requests.
     pub trace: TraceService,
+    /// How often `/api/live` reads the change feed.
+    pub live_poll: Duration,
 }
+
+/// Default `/api/live` poll interval.
+pub const LIVE_POLL: Duration = Duration::from_millis(1000);
 
 impl WebState {
     /// A state over `db` scoped to every workspace.
@@ -55,6 +69,7 @@ impl WebState {
             db,
             library_root,
             trace,
+            live_poll: LIVE_POLL,
         })
     }
 }
@@ -161,6 +176,16 @@ pub const ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
         include_str!("../../web/library.js"),
     ),
+    (
+        "usage.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../web/usage.js"),
+    ),
+    (
+        "tools.js",
+        "text/javascript; charset=utf-8",
+        include_str!("../../web/tools.js"),
+    ),
 ];
 
 /// One embedded asset by its published name.
@@ -190,6 +215,86 @@ async fn static_file(axum::extract::Path(path): axum::extract::Path<String>) -> 
     }
 }
 
+/// The highest `trace_changes` sequence of the store at `db`, read-only:
+/// `0` while the store or the feed does not exist. `conn` is kept between
+/// polls and dropped on an error so the next poll reopens it.
+fn live_seq(db: &Path, conn: &mut Option<rusqlite::Connection>) -> i64 {
+    if conn.is_none() {
+        *conn = crate::tracing::store::open_ro(db).ok();
+    }
+    let Some(c) = conn.as_ref() else {
+        return 0;
+    };
+    match crate::tracing::store::latest_change_seq(c) {
+        Ok(seq) => seq,
+        Err(_) => {
+            *conn = None;
+            0
+        }
+    }
+}
+
+/// A `/api/live` event: `ready` once with the current sequence, then
+/// `change` whenever it moves (`{"seq": n, "previous": m}`).
+fn live_event(kind: &str, seq: i64, previous: i64) -> Event {
+    Event::default()
+        .event(kind)
+        .id(seq.to_string())
+        .data(serde_json::json!({ "seq": seq, "previous": previous }).to_string())
+}
+
+/// `GET /api/live`: Server-Sent Events over the store's change feed. Polls
+/// `MAX(seq)` of `trace_changes` every `WebState::live_poll` on a blocking
+/// thread (read-only connection) and emits `change` when it differs from
+/// the last value sent; a comment line keeps idle connections open.
+async fn live(State(state): State<Arc<WebState>>) -> impl IntoResponse {
+    struct Poll {
+        state: Arc<WebState>,
+        conn: Option<rusqlite::Connection>,
+        last: Option<i64>,
+    }
+    async fn read(mut p: Poll) -> (Poll, i64) {
+        let db = p.state.db.clone();
+        let conn = p.conn.take();
+        let (conn, seq) = tokio::task::spawn_blocking(move || {
+            let mut conn = conn;
+            let seq = live_seq(&db, &mut conn);
+            (conn, seq)
+        })
+        .await
+        .unwrap_or((None, 0));
+        p.conn = conn;
+        (p, seq)
+    }
+    let start = Poll {
+        state,
+        conn: None,
+        last: None,
+    };
+    let stream = futures_util::stream::unfold(start, |p| async move {
+        let mut p = p;
+        loop {
+            if p.last.is_some() {
+                tokio::time::sleep(p.state.live_poll).await;
+            }
+            let (next, seq) = read(p).await;
+            p = next;
+            match p.last {
+                None => {
+                    p.last = Some(seq);
+                    return Some((Ok::<_, Infallible>(live_event("ready", seq, seq)), p));
+                }
+                Some(prev) if prev != seq => {
+                    p.last = Some(seq);
+                    return Some((Ok(live_event("change", seq, prev)), p));
+                }
+                Some(_) => {}
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
 async fn api_not_found() -> Response {
     ApiError::not_found("no such route").into_response()
 }
@@ -204,6 +309,9 @@ pub fn router(state: Arc<WebState>) -> Router {
         .merge(swarm::routes())
         .merge(runs::routes())
         .merge(library::routes())
+        .merge(usage::routes())
+        .merge(tools::routes())
+        .route("/api/live", get(live))
         .route("/api/{*rest}", axum::routing::any(api_not_found))
         .with_state(state)
 }
@@ -361,18 +469,28 @@ mod tests {
             "swarm.js",
             "runs.js",
             "library.js",
+            "usage.js",
+            "tools.js",
         ] {
             assert!(asset(name).is_some(), "{name} is embedded");
         }
         let (_, index) = asset("index.html").unwrap();
-        let order: Vec<usize> = ["app.js", "trace.js", "swarm.js", "runs.js", "library.js"]
-            .iter()
-            .map(|s| {
-                index
-                    .find(&format!("/static/{s}"))
-                    .unwrap_or_else(|| panic!("{s}"))
-            })
-            .collect();
+        let order: Vec<usize> = [
+            "app.js",
+            "trace.js",
+            "usage.js",
+            "tools.js",
+            "swarm.js",
+            "runs.js",
+            "library.js",
+        ]
+        .iter()
+        .map(|s| {
+            index
+                .find(&format!("/static/{s}"))
+                .unwrap_or_else(|| panic!("{s}"))
+        })
+        .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
     }
 
