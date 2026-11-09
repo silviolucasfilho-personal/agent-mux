@@ -32,8 +32,21 @@ pub fn start(db: &Path) -> (String, tokio::task::JoinHandle<()>) {
 
 /// `start` with an explicit configuration library root.
 pub fn start_with_library(db: &Path, library_root: &Path) -> (String, tokio::task::JoinHandle<()>) {
+    let state = WebState::new(db.to_path_buf(), library_root.to_path_buf()).expect("a web state");
+    start_state(state)
+}
+
+/// `start` scoped to one workspace, as `agent-mux web --workspace DIR`.
+pub fn start_scoped(db: &Path, workspace: &Path) -> (String, tokio::task::JoinHandle<()>) {
+    let scope = agent_mux::tracing::analysis::Scope::workspace(workspace).expect("a scope");
     let state =
-        Arc::new(WebState::new(db.to_path_buf(), library_root.to_path_buf()).expect("a web state"));
+        WebState::with_scope(db.to_path_buf(), std::env::temp_dir(), scope).expect("a web state");
+    start_state(state)
+}
+
+/// Serves `state` on a free port of the shared runtime.
+pub fn start_state(state: WebState) -> (String, tokio::task::JoinHandle<()>) {
+    let state = Arc::new(state);
     let rt = runtime();
     let listener = rt
         .block_on(tokio::net::TcpListener::bind(("127.0.0.1", 0)))

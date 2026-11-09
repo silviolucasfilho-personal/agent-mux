@@ -6,4 +6,7 @@ pub mod support;
 mod core;
 mod library;
 mod runs;
+mod session;
 mod swarm;
+mod tools;
+mod usage;

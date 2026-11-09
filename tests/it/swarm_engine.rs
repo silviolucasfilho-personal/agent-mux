@@ -7,6 +7,9 @@
 
 #![cfg(unix)]
 
+#[path = "support/hermetic_env.rs"]
+mod hermetic_env;
+
 use agent_mux::app::App;
 use agent_mux::app::swarm_engine::StartSwarm;
 use agent_mux::bus::TaskIsolation;
@@ -54,6 +57,8 @@ fn fake_claude(bin: &Path, db: &Path, ws: &Path, plan: Option<&str>, bad: bool) 
         &script,
         format!(
             r#"#!/bin/sh
+# drop the agent-mux identity `cargo test` may have inherited
+{hermetic}
 r='{calls}'
 # The dispatcher records a worker's task (assigned_to) just after starting
 # its process; a real harness boots for seconds first, this one does not:
@@ -65,6 +70,9 @@ retry() {{
     [ "$i" -ge 40 ] && return 1
     sleep 0.25
   done
+}}
+assigned() {{
+  '{mux}' bus tasks --assigned-to "$AGENT_MUX_SESSION_ID" --workspace '{ws}' --db '{db}' | grep -q "^$AGENT_MUX_TASK_ID "
 }}
 if [ -n "$AGENT_MUX_SWARM_PLAN" ]; then
   cp "$AGENT_MUX_SWARM_PLAN" "$r/planner-context.json"
@@ -91,6 +99,9 @@ if [ -n "$AGENT_MUX_TASK_ID" ]; then
   fi
   if [ -f '{bin}/propose' ] && [ ! -f "$r/proposed-once" ]; then
     touch "$r/proposed-once"
+    # a split before the dispatcher assigned the task to this launch would
+    # succeed as a plain task, not a proposal: wait for the assignment
+    retry assigned
     retry '{mux}' bus split --title "Follow-up found by the worker" --instructions "Tidy it." --workspace '{ws}' --db '{db}' > "$r/split.txt" 2>&1
   fi
   result="did $AGENT_MUX_TASK_ID"
@@ -106,6 +117,7 @@ if [ -n "$AGENT_MUX_TASK_ID" ]; then
 fi
 exit 0
 "#,
+            hermetic = hermetic_env::shell_unset_inherited(),
             calls = bin.join("calls").display(),
             bin = bin.display(),
             mux = env!("CARGO_BIN_EXE_agent-mux"),
