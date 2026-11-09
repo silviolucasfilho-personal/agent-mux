@@ -550,3 +550,77 @@ exit 0
     assert!(tool_meta.contains("\"hook_timed\":true"), "{tool_meta}");
     assert!(tool_end.is_some());
 }
+
+/// An OpenCode launch gets agent-mux's plugin through its per-launch
+/// configuration document: the package is written under the tracing
+/// home, and the fragment names this binary, the launch and the events.
+#[tokio::test]
+async fn an_opencode_launch_carries_the_plugin_fragment() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let workdir = temp.path().join("proj");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let toml = format!(
+        r#"
+        [tracing]
+        db_path = "{db}"
+        opencode_db = "{oc}"
+
+        [[profiles]]
+        name = "OpenCode"
+        command = "opencode"
+        args = ["--auto"]
+
+        [profiles.tracing]
+        write_denylist = ["secrets/**"]
+        "#,
+        db = temp.path().join("traces.db").display(),
+        oc = temp.path().join("opencode.db").display(),
+    );
+    let cfg = config::parse(&toml).unwrap();
+    let home_s = home.to_string_lossy().into_owned();
+    let resolved = config::resolve_tracing(cfg.tracing.as_ref(), &|k| match k {
+        "HOME" => Some(home_s.clone()),
+        _ => None,
+    })
+    .unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let rt = TraceRuntime::new(resolved, tx).unwrap();
+    let plan = rt.plan_launch(&cfg.profiles[0], &workdir).unwrap();
+    assert!(
+        plan.extra_args.iter().any(|a| a == "--session"),
+        "{:?}",
+        plan.extra_args
+    );
+    let fragment: serde_json::Value = plan
+        .extra_env
+        .iter()
+        .find(|(k, _)| k == agent_mux::opencode::CONFIG_ENV)
+        .map(|(_, v)| serde_json::from_str(v).unwrap())
+        .expect("a plugin fragment");
+    let plugin = &fragment["plugins"][0];
+    let dir = agent_mux::opencode::plugin_dir(&home);
+    assert_eq!(plugin["package"], dir.to_string_lossy().as_ref());
+    assert!(dir.join("index.js").is_file() && dir.join("package.json").is_file());
+    let o = &plugin["options"];
+    assert!(!o["exe"].as_str().unwrap().is_empty());
+    assert_eq!(o["cwd"], workdir.to_string_lossy().as_ref());
+    assert_eq!(
+        o["guard"], true,
+        "the write denylist needs a waiting PreToolUse"
+    );
+    assert_eq!(o["loop"], false);
+    let args: Vec<&str> = o["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert_eq!(&args[..3], ["trace", "hook", "opencode"]);
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["--launch", plan.launch_id.as_str()])
+    );
+    assert_eq!(o["events"].as_array().unwrap().len(), 4);
+    rt.shutdown(Duration::from_secs(3)).await;
+}

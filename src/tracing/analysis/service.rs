@@ -788,7 +788,12 @@ impl TraceService {
             db_path: self.config.db_path.to_string_lossy().to_string(),
             collector_freshness,
             content_mode: "full".to_string(),
-            provider_coverage: vec!["claude".into(), "codex".into(), "antigravity".into()],
+            provider_coverage: vec![
+                "claude".into(),
+                "codex".into(),
+                "antigravity".into(),
+                "opencode".into(),
+            ],
             features,
         })
     }

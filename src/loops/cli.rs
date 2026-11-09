@@ -40,8 +40,8 @@ pub const USAGE: &str = "agent-mux loop <command>
 Patterns: daily-triage, pr-babysitter, ci-sweeper, post-merge-cleanup,
 dependency-sweeper, changelog-drafter, issue-triage, continuous-pr,
 harness-audit. The registry lives in
-~/.agent-mux/loops.json (AGENT_MUX_LOOPS_FILE overrides). Antigravity is not
-supported for loops yet (docs/loops.md).";
+~/.agent-mux/loops.json (AGENT_MUX_LOOPS_FILE overrides). Loops run on Claude
+Code, Codex and OpenCode; Antigravity is not supported yet (docs/loops.md).";
 
 /// `--flag value` pairs, `--flag` switches and positionals.
 struct Args {
@@ -144,7 +144,9 @@ fn guard_available(harness: Harness, home: &Path) -> bool {
             let st = crate::tracing::hooks::install::codex_status(home, exe.as_deref());
             st.installed && !st.stale
         }
-        Harness::Antigravity | Harness::OpenCode => false,
+        // agent-mux's plugin rides on every traced launch
+        Harness::OpenCode => exe.is_some(),
+        Harness::Antigravity => false,
     }
 }
 
@@ -169,8 +171,8 @@ fn parse_harness(s: &str) -> anyhow::Result<Harness> {
         "claude" | "claude-code" => Ok(Harness::Claude),
         "codex" => Ok(Harness::Codex),
         "agy" | "antigravity" => anyhow::bail!("Antigravity is not supported for loops"),
-        "opencode" | "open-code" => anyhow::bail!("OpenCode is not supported for loops"),
-        other => anyhow::bail!("unknown harness {other:?}: claude or codex"),
+        "opencode" | "open-code" => Ok(Harness::OpenCode),
+        other => anyhow::bail!("unknown harness {other:?}: claude, codex or opencode"),
     }
 }
 
@@ -495,9 +497,6 @@ fn pick_profile(
             .ok_or_else(|| anyhow::anyhow!("profile {n:?} runs {}, not a harness", p.command))?;
         if h == Harness::Antigravity {
             anyhow::bail!("Antigravity is not supported for loops");
-        }
-        if h == Harness::OpenCode {
-            anyhow::bail!("OpenCode is not supported for loops");
         }
         if let Some(want) = harness
             && parse_harness(want)? != h

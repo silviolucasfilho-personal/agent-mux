@@ -42,6 +42,7 @@ fn provider_from(s: &str) -> Provider {
     match s {
         "codex" => Provider::Codex,
         "antigravity" => Provider::Antigravity,
+        "opencode" => Provider::OpenCode,
         _ => Provider::Claude,
     }
 }

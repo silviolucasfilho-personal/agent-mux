@@ -21,12 +21,15 @@ use serde_json::{Map, Value};
 
 /// Which registration delivered the payload. Codex has two shapes: hook
 /// events on stdin and the `notify` program's single JSON argument.
+/// OpenCode has no hooks: agent-mux's own plugin (`src/opencode_plugin.js`)
+/// sends Claude-shaped payloads from its plugin hooks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookSource {
     Claude,
     Codex,
     CodexNotify,
     Antigravity,
+    OpenCode,
 }
 
 impl HookSource {
@@ -36,6 +39,7 @@ impl HookSource {
             "codex" => Some(HookSource::Codex),
             "codex-notify" | "codex_notify" | "notify" => Some(HookSource::CodexNotify),
             "agy" | "antigravity" => Some(HookSource::Antigravity),
+            "opencode" | "open-code" => Some(HookSource::OpenCode),
             _ => None,
         }
     }
@@ -45,6 +49,7 @@ impl HookSource {
             HookSource::Claude => Provider::Claude,
             HookSource::Codex | HookSource::CodexNotify => Provider::Codex,
             HookSource::Antigravity => Provider::Antigravity,
+            HookSource::OpenCode => Provider::OpenCode,
         }
     }
 
@@ -54,6 +59,7 @@ impl HookSource {
             HookSource::Codex => "codex",
             HookSource::CodexNotify => "codex-notify",
             HookSource::Antigravity => "agy",
+            HookSource::OpenCode => "opencode",
         }
     }
 }
@@ -256,14 +262,17 @@ pub fn parse(
     launch_id: Option<String>,
 ) -> Option<HookEvent> {
     match source {
-        HookSource::Claude => parse_claude(payload, policy, ts_ns, launch_id),
+        HookSource::Claude => parse_claude(Provider::Claude, payload, policy, ts_ns, launch_id),
+        HookSource::OpenCode => parse_claude(Provider::OpenCode, payload, policy, ts_ns, launch_id),
         HookSource::Codex => parse_codex(payload, policy, ts_ns, launch_id),
         HookSource::CodexNotify => parse_codex_notify(payload, policy, ts_ns, launch_id),
         HookSource::Antigravity => parse_agy(event_override?, payload, policy, ts_ns, launch_id),
     }
 }
 
+/// Claude's payloads, and the OpenCode plugin's, which copies their shape.
 fn parse_claude(
+    provider: Provider,
     v: &Value,
     policy: &ContentPolicy,
     ts_ns: i64,
@@ -271,7 +280,7 @@ fn parse_claude(
 ) -> Option<HookEvent> {
     let event = str_field(v, "hook_event_name")?;
     let session_id = str_field(v, "session_id")?;
-    let mut ev = HookEvent::new(Provider::Claude, session_id, &event, ts_ns, launch_id);
+    let mut ev = HookEvent::new(provider, session_id, &event, ts_ns, launch_id);
     ev.cwd = str_field(v, "cwd");
     ev.transcript_path = str_field(v, "transcript_path");
     ev.turn_key = str_field(v, "prompt_id");
@@ -492,6 +501,57 @@ mod tests {
             "tool_input": {"command": "export KEY=sk-live-topsecret && cargo test"},
             "tool_response": {"stdout": "ok", "stderr": ""}
         })
+    }
+
+    #[test]
+    fn opencode_plugin_payloads_parse_like_claudes() {
+        // what `src/opencode_plugin.js` sends from `tool.execute.after`
+        let v = serde_json::json!({
+            "hook_event_name": "PostToolUseFailure",
+            "session_id": "ses_root",
+            "agent_id": "ses_child",
+            "agent_type": "explore",
+            "cwd": "/ws",
+            "tool_name": "shell",
+            "tool_use_id": "call_1",
+            "tool_input": {"command": "cargo test"},
+            "tool_response": {"output": "boom"},
+            "error": "exit 101"
+        });
+        let ev = parse(
+            HookSource::parse("opencode").unwrap(),
+            None,
+            &v,
+            &ContentPolicy::full(),
+            7,
+            Some("L".into()),
+        )
+        .unwrap();
+        assert_eq!(ev.provider, Provider::OpenCode);
+        assert_eq!(ev.session_id, "ses_root");
+        assert_eq!(ev.agent_id.as_deref(), Some("ses_child"));
+        assert_eq!(ev.tool_name.as_deref(), Some("shell"));
+        assert_eq!(ev.tool_use_id.as_deref(), Some("call_1"));
+        assert_eq!(ev.cwd.as_deref(), Some("/ws"));
+        assert!(ev.is_error);
+        assert_eq!(ev.payload["tool_error"], "exit 101");
+        let prompt = parse(
+            HookSource::OpenCode,
+            None,
+            &serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "ses_root",
+                "prompt": "fix it",
+                "prompt_id": "msg_1"
+            }),
+            &ContentPolicy::full(),
+            8,
+            None,
+        )
+        .unwrap();
+        assert_eq!(prompt.turn_key.as_deref(), Some("msg_1"));
+        assert_eq!(prompt.payload["prompt"], "fix it");
+        assert_eq!(HookSource::OpenCode.as_str(), "opencode");
     }
 
     #[test]

@@ -324,13 +324,16 @@ pub struct RunFacts {
 }
 
 /// Tool names that write files, per harness.
-pub const WRITE_TOOLS: [&str; 6] = [
+/// OpenCode's `write` and `edit` match Claude's names; its `patch` takes
+/// Codex-style patch text under `patchText`.
+pub const WRITE_TOOLS: [&str; 7] = [
     "Write",
     "Edit",
     "MultiEdit",
     "NotebookEdit",
     "apply_patch",
     "write_file",
+    "patch",
 ];
 
 /// The verdict line a verifier prints, if any.
@@ -366,11 +369,12 @@ pub fn paths_in_tool_input(input: &Value) -> Vec<String> {
             push(p);
         }
     }
-    // apply_patch: the patch text lives under `input`, `patch` or the
-    // whole value is a string
+    // apply_patch: the patch text lives under `input`, `patch`
+    // (OpenCode's `patch`: `patchText`) or the whole value is a string
     let patch = input
         .get("input")
         .or_else(|| input.get("patch"))
+        .or_else(|| input.get("patchText"))
         .and_then(Value::as_str)
         .or_else(|| input.as_str());
     if let Some(text) = patch {
