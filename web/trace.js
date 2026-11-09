@@ -589,16 +589,19 @@ details.sv-think { border-style: dashed; }
           if (!allLoaded) {
             const top = await page(0); // header and totals only
             state.tx = Object.assign({}, top, { turns: [] });
+            if (!el.isConnected) return;
+            drawMore();
           } else {
             let from = state.turns.findIndex((t) => t.status === 'open');
             if (from < 0) from = Math.max(0, state.turns.length - 1);
             const fromIndex = state.turns.length ? state.turns[from].index : 0;
-            const fresh = await page(fromIndex);
+            // every turn from there to the end, however many arrived
+            const fresh = await drainTurns(page, fromIndex);
             if (!el.isConnected) return;
             const anchor = scrollAnchor(turnsBox);
             const nearBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 40;
             state.turns = state.turns.slice(0, from).concat(fresh.turns);
-            state.tx = fresh;
+            state.tx = fresh.tx;
             for (const t of fresh.turns) {
               const old = turnsBox.querySelector('[data-index="' + t.index + '"]');
               const neu = turnElement(t, ctx);
@@ -644,6 +647,23 @@ details.sv-think { border-style: dashed; }
       M.onLeave(stopLive);
     },
   });
+
+  // <drain-turns> (run on its own by tests/it/web/session.rs)
+  // Every turn from index `from` to the end of the session: the first page,
+  // then more pages until the store's `total_turns` is reached, so a live
+  // refresh catches up however many turns arrived since the last one.
+  // `page(from, extra)` answers the transcript endpoint's JSON.
+  async function drainTurns(page, from) {
+    let tx = await page(from);
+    let turns = tx.turns.slice();
+    let guard = 0;
+    while (tx.turns.length && from + turns.length < tx.total_turns && guard++ < 100) {
+      tx = await page(from + turns.length, { limit: '2000' });
+      turns = turns.concat(tx.turns);
+    }
+    return { tx, turns };
+  }
+  // </drain-turns>
 
   // The first turn at or below the top of the viewport and its offset, to
   // put the reader back where they were after the turns change.

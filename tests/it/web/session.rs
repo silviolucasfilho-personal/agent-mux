@@ -471,3 +471,114 @@ fn the_export_keeps_every_turn_and_every_character() {
     let all = agent_mux::web::trace::export_session_html(&conn, "claude:s1", None, 5_000).unwrap();
     assert_eq!(strip(one), strip(all));
 }
+
+/// The live refresh's catch-up (`drainTurns` in `web/trace.js`), run under
+/// Node against a mocked transcript endpoint: a refresh from the last loaded
+/// turn reads every turn that arrived, past the 200-turn page. Skipped when
+/// `node` is not installed.
+#[test]
+fn a_live_refresh_reads_every_new_turn_past_one_page() {
+    let Ok(out) = std::process::Command::new("node").arg("--version").output() else {
+        eprintln!("node not installed: skipping");
+        return;
+    };
+    assert!(out.status.success());
+    let js = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("web/trace.js"))
+        .unwrap();
+    let start = js.find("// <drain-turns>").expect("the drain-turns marker");
+    let end = js
+        .find("// </drain-turns>")
+        .expect("the drain-turns end marker");
+    let script = format!(
+        "{}\n{}",
+        &js[start..end],
+        r#"
+const store = { total: 0 };
+const calls = [];
+// the transcript endpoint: `limit` turns from `from_turn`, 200 by default
+async function page(from, extra) {
+  const limit = Math.min(2000, Number((extra || {}).limit || 200));
+  calls.push([from, limit]);
+  const turns = [];
+  for (let i = from; i < Math.min(store.total, from + limit); i++) turns.push({ index: i, id: 't' + i });
+  return { total_turns: store.total, from_turn: from, turns };
+}
+(async () => {
+  const check = (cond, msg) => { if (!cond) { console.error(msg); process.exit(1); } };
+  // 200 closed turns loaded, then the store jumps to 401 and then 4,650
+  let loaded = Array.from({ length: 200 }, (_, i) => ({ index: i, id: 't' + i }));
+  for (const total of [401, 4650]) {
+    store.total = total;
+    const from = loaded.length - 1;
+    const fresh = await drainTurns(page, loaded[from].index);
+    loaded = loaded.slice(0, from).concat(fresh.turns);
+    check(loaded.length === total, 'loaded ' + loaded.length + ' of ' + total);
+    check(loaded.every((t, i) => t.index === i), 'contiguous at ' + total);
+    check(fresh.tx.total_turns === total, 'header total');
+  }
+  // nothing new: one request
+  calls.length = 0;
+  const same = await drainTurns(page, loaded.length - 1);
+  check(same.turns.length === 1 && calls.length === 1, 'one page when nothing changed');
+  // an empty session
+  store.total = 0;
+  const none = await drainTurns(page, 0);
+  check(none.turns.length === 0, 'empty session');
+  console.log('ok');
+})();
+"#
+    );
+    let out = std::process::Command::new("node")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "ok",
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The paging the live refresh relies on: pages from any index are
+/// contiguous, `total_turns` counts the turns stored since, and a page past
+/// the end is empty.
+#[test]
+fn transcript_pages_are_contiguous_as_turns_arrive() {
+    let temp = tempfile::tempdir().unwrap();
+    let (db, _) = viewer_store(temp.path());
+    let (base, server) = start(&db);
+    let (_, t) = transcript(&base, "claude:s1", "");
+    assert_eq!(t["total_turns"], 3);
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let last: i64 = conn
+            .query_row("SELECT MAX(start_ns) FROM traces", [], |r| r.get(0))
+            .unwrap();
+        for i in 0..450i64 {
+            conn.execute(
+                "INSERT INTO traces (id, session_key, launch_id, ordinal, name, status, start_ns,
+                     skills)
+                 VALUES (?1, 'claude:s1', 'L1', ?2, 'new', 'closed', ?3, '[]')",
+                params![format!("new-{i:03}"), 10 + i, last + 1_000 * (i + 1)],
+            )
+            .unwrap();
+        }
+    }
+    // the refresh re-reads from the last loaded turn (index 2)
+    let (_, a) = transcript(&base, "claude:s1", "?from_turn=2");
+    assert_eq!(a["total_turns"], 453);
+    assert_eq!(a["turns"].as_array().unwrap().len(), 200);
+    assert_eq!(a["turns"][0]["id"], "t9");
+    let next = 2 + 200;
+    let (_, b) = transcript(&base, "claude:s1", &format!("?from_turn={next}&limit=2000"));
+    let b = b["turns"].as_array().unwrap();
+    assert_eq!(b.len(), 453 - next);
+    assert_eq!(b[0]["index"], next);
+    assert_eq!(a["turns"][199]["index"], next - 1);
+    assert_eq!(b.last().unwrap()["id"], "new-449");
+    let (_, c) = transcript(&base, "claude:s1", "?from_turn=453");
+    assert!(c["turns"].as_array().unwrap().is_empty());
+    server.abort();
+}

@@ -464,8 +464,10 @@ errors and when it was last touched, newest first.
 **Live.** While the session is live (a `working`, `waiting_for_user` or
 `idle` runtime state, an open turn, or activity read from the live
 process) the page subscribes to `M.live`, and on a store change fetches the
-turns from the first open one (or the last) and replaces those cards in
-place: the reader's scroll position (anchored on the first visible turn),
+turns from the first open one (or the last) to the end, page after page
+however many arrived (`drainTurns`), and replaces those cards in place
+(when the reader has not loaded every turn, only the header and the **Load
+more** count change): the reader's scroll position (anchored on the first visible turn),
 opened details and loaded turns stay; a reader at the bottom follows new
 turns. It unsubscribes once the session is no longer live, and on leaving.
 
