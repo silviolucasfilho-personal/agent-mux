@@ -25,7 +25,13 @@
   function register(id, title, render) {
     M.registerPage({ id, title, path: '/' + id, group: 'Tools', live: true,
       async render(el, params) {
-        el.appendChild(M.filterBar({ params }));
+        const filters = h('div');
+        filters.appendChild(M.filterBar({ params }));
+        el.appendChild(filters);
+        // Suggestions retain the date/harness scope but ignore the typed fragment.
+        fetchArea('workspaces', params).then(data => {
+          filters.replaceChildren(M.filterBar({ params, workspaces: data.workspaces }));
+        }).catch(() => {});
         const out = h('div'); el.appendChild(out); out.appendChild(M.loading());
         try { await render(out, params); } catch (e) { out.replaceChildren(M.errorBox(e)); }
       } });

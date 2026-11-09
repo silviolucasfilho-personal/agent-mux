@@ -419,10 +419,13 @@ existing Skills & Agents analysis at `#/skills`.
 
 Read-only `POST /api/tools/{endpoint}` accepts a JSON object with optional
 `since` and `until` (RFC 3339, inclusive/exclusive), `provider`, `workspace`
-(exact project directory; `project` is an alias) and `model` filters. The server's `--workspace`
+(case-insensitive path fragment; `project` is an alias) and `model` filters. The server's `--workspace`
 scope always applies, even when a request names another project. Responses
 are `{ok: true, data: ...}`; invalid dates/fields return 400 JSON errors.
 
+- `workspaces`: sorted distinct project directories with observed activity in
+  the date/harness/model and server workspace scope. The typed workspace
+  fragment is ignored here so the filter bar can suggest matching projects.
 - `summary`: `tools`, `providers`, `models`, `provider_mix`, `model_mix`, `days`, `mix` and `mcp_servers`.
   Aggregates include count, errors, error_rate (0–1), nearest-rank p50/p95
   duration in milliseconds, total duration and recorded cost (null if unknown).

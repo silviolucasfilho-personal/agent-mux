@@ -7,7 +7,11 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::Path as FsPath, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path as FsPath,
+    sync::Arc,
+};
 
 pub fn routes() -> Router<Arc<WebState>> {
     Router::new().route("/api/tools/{area}", post(query))
@@ -107,7 +111,16 @@ async fn query(
     Path(area): Path<String>,
     body: Result<Json<Filters>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<Value> {
-    if !["summary", "failures", "sequences", "activity", "edits"].contains(&area.as_str()) {
+    if ![
+        "summary",
+        "failures",
+        "sequences",
+        "activity",
+        "edits",
+        "workspaces",
+    ]
+    .contains(&area.as_str())
+    {
         return Err(ApiError::not_found("no such tools endpoint"));
     }
     let Json(f) = body.map_err(|e| ApiError::bad_request(e.to_string()))?;
@@ -171,9 +184,9 @@ fn read(
             && f.provider
                 .as_ref()
                 .is_none_or(|p| p.is_empty() || *p == c.provider)
-            && f.workspace
-                .as_ref()
-                .is_none_or(|w| w.is_empty() || *w == c.project)
+            && f.workspace.as_ref().is_none_or(|w| {
+                area == "workspaces" || c.project.to_lowercase().contains(&w.to_lowercase())
+            })
             && f.model
                 .as_ref()
                 .is_none_or(|m| m.is_empty() || *m == c.model)
@@ -184,6 +197,9 @@ fn read(
     let tools: Vec<_> = calls.iter().filter(|c| c.kind == "tool").cloned().collect();
     let day = |c: &Call| (c.start.div_euclid(86_400_000_000_000) * 86_400_000_000_000).to_string();
     let value = match area {
+        "workspaces" => {
+            json!({"workspaces": calls.iter().filter(|c| !c.project.is_empty()).map(|c| &c.project).collect::<BTreeSet<_>>()})
+        }
         "summary" => {
             json!({"tools":aggregate(tools.iter(),|c|c.name.clone()),"providers":aggregate(tools.iter(),|c|c.provider.clone()),"models":aggregate(tools.iter(),|c|c.model.clone()),"provider_mix":aggregate(tools.iter(),|c|format!("{}|{}",c.provider,c.name)),"model_mix":aggregate(tools.iter(),|c|format!("{}|{}",c.model,c.name)),"days":aggregate(tools.iter(),day),"mix":aggregate(tools.iter(),|c|format!("{}|{}",day(c),c.name)),"mcp_servers":aggregate(tools.iter().filter(|c|c.server.is_some()),|c|c.server.clone().unwrap_or_default())})
         }

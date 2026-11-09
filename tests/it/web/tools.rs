@@ -19,6 +19,21 @@ fn tools_metrics_sequences_activity_and_recent_edits() {
         assert_eq!(status, 200, "{value}");
         value["data"].clone()
     };
+    for area in ["summary", "failures", "sequences", "activity", "edits"] {
+        assert_eq!(
+            ask(area, json!({"workspace":"/WS"})),
+            ask(area, json!({"workspace":ws.to_str()})),
+            "{area}: mixed-case path fragment"
+        );
+    }
+    assert_eq!(
+        ask("workspaces", json!({}))["workspaces"],
+        json!([ws.to_str()])
+    );
+    assert_eq!(
+        ask("workspaces", json!({"workspace":"missing"}))["workspaces"],
+        json!([ws.to_str()])
+    );
     let s = ask("summary", json!({}));
     let edit = s["tools"]
         .as_array()
@@ -99,9 +114,23 @@ fn every_tools_endpoint_honours_server_workspace_scope() {
     let server = rt.spawn(async move {
         serve(state, listener).await.unwrap();
     });
-    for area in ["summary", "failures", "sequences", "activity", "edits"] {
-        let (status, value) = post(&base, &format!("/api/tools/{area}"), &json!({}));
+    for area in [
+        "summary",
+        "failures",
+        "sequences",
+        "activity",
+        "edits",
+        "workspaces",
+    ] {
+        let (status, value) = post(
+            &base,
+            &format!("/api/tools/{area}"),
+            &json!({"workspace":"/WS"}),
+        );
         assert_eq!(status, 200);
+        if area == "workspaces" {
+            assert_eq!(value["data"]["workspaces"], json!([]));
+        }
         let text = value.to_string();
         assert!(!text.contains("Edit"), "{text}");
         assert!(!text.contains("claude:s1"), "{text}");
