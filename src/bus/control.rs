@@ -210,11 +210,37 @@ pub fn send_request(
 /// Guard removing the control socket file when dropped.
 pub struct ControlListenerGuard {
     pub path: PathBuf,
+    /// The socket file this listener bound (device, inode): a second
+    /// agent-mux that bound the same path since owns the file now, and this
+    /// one's exit must not remove it.
+    pub bound: Option<(u64, u64)>,
+}
+
+/// The (device, inode) of `path`, when it exists.
+pub fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path)
+            .ok()
+            .map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 impl Drop for ControlListenerGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let ours = match self.bound {
+            Some(id) => file_identity(&self.path) == Some(id),
+            None => true,
+        };
+        if ours {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -231,6 +257,7 @@ pub fn spawn_listener(path: PathBuf, tx: Sender<AppEvent>) -> Option<ControlList
     let _ = std::fs::remove_file(&path);
     let listener = tokio::net::UnixListener::bind(&path).ok()?;
     let guard_path = path.clone();
+    let bound = file_identity(&path);
     tokio::spawn(async move {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         while let Ok((stream, _)) = listener.accept().await {
@@ -270,7 +297,10 @@ pub fn spawn_listener(path: PathBuf, tx: Sender<AppEvent>) -> Option<ControlList
             });
         }
     });
-    Some(ControlListenerGuard { path: guard_path })
+    Some(ControlListenerGuard {
+        path: guard_path,
+        bound,
+    })
 }
 
 #[cfg(not(unix))]
@@ -310,4 +340,34 @@ pub fn compose_worker_prompt(
          - Or via CLI: `agent-mux bus done {task_id} --result '<json>'`."
     ));
     prompt
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_guard_leaves_a_socket_another_agent_mux_bound_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bus.sock");
+        std::fs::write(&path, "first").unwrap();
+        let first = ControlListenerGuard {
+            path: path.clone(),
+            bound: file_identity(&path),
+        };
+        // a second agent-mux replaces the file with its own
+        std::fs::remove_file(&path).unwrap();
+        let keep = dir.path().join("keep");
+        std::fs::write(&keep, "x").unwrap();
+        std::fs::write(&path, "second").unwrap();
+        drop(first);
+        assert!(path.exists(), "the newer listener's socket stays");
+
+        let second = ControlListenerGuard {
+            path: path.clone(),
+            bound: file_identity(&path),
+        };
+        drop(second);
+        assert!(!path.exists(), "its own socket is removed");
+    }
 }

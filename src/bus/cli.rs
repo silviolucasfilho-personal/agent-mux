@@ -264,6 +264,7 @@ pub fn run(raw: &[String]) -> anyhow::Result<()> {
                     &db_path,
                     &workspace,
                     &caller,
+                    None,
                     unread_only,
                     ack,
                     limit,

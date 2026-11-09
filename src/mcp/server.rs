@@ -528,6 +528,12 @@ fn resolve_task_prefix(
     workspace: &str,
     prefix: &str,
 ) -> Result<String, ServiceError> {
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        // an empty prefix would match every task, and a board of one would
+        // resolve to it
+        return Err(ServiceError::InvalidArgument("'task_id' is empty".into()));
+    }
     let tasks = crate::bus::store::list_tasks(conn, workspace, None, None, None)
         .map_err(|e| ServiceError::DbUnavailable(e.to_string()))?;
     if tasks.iter().any(|t| t.id == prefix) {
@@ -724,11 +730,12 @@ fn bus_recv_messages_result(service: &TraceService, arguments: Value) -> Value {
     let wait_ms = args.wait_ms.unwrap_or(0).min(30_000);
     let config = service.config();
 
-    let mut messages = if wait_ms > 0 {
+    let messages = if wait_ms > 0 {
         match crate::bus::store::recv_messages_wait(
             &config.db_path,
             &ws_str,
             &recipient,
+            args.topic.as_deref(),
             unread_only,
             mark_read,
             limit,
@@ -742,10 +749,11 @@ fn bus_recv_messages_result(service: &TraceService, arguments: Value) -> Value {
             Ok(c) => c,
             Err(e) => return tool_error(&ServiceError::DbUnavailable(e)),
         };
-        match crate::bus::store::recv_messages(
+        match crate::bus::store::recv_messages_on(
             &conn,
             &ws_str,
             &recipient,
+            args.topic.as_deref(),
             unread_only,
             mark_read,
             limit,
@@ -755,10 +763,6 @@ fn bus_recv_messages_result(service: &TraceService, arguments: Value) -> Value {
             Err(e) => return tool_error(&ServiceError::DbUnavailable(e.to_string())),
         }
     };
-    if let Some(topic) = args.topic.as_deref() {
-        messages.retain(|m| m.topic == topic);
-    }
-
     bus_ok_envelope(
         &ws,
         json!({

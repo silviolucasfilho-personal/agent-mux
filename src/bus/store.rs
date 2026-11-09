@@ -163,10 +163,15 @@ pub fn release_leases(
     task_id: Option<&str>,
     patterns: &[String],
 ) -> rusqlite::Result<usize> {
-    if let Some(tid) = task_id {
+    if let Some(tid) = task_id
+        && patterns.is_empty()
+    {
+        // only the caller's own leases of that task: naming a task must not
+        // release another peer's leases (a task's ending releases them all,
+        // `release_task_leases`)
         return conn.execute(
-            "DELETE FROM agent_leases WHERE workspace = ?1 AND task_id = ?2",
-            params![workspace, tid],
+            "DELETE FROM agent_leases WHERE workspace = ?1 AND task_id = ?2 AND owner_launch = ?3",
+            params![workspace, tid, owner_launch],
         );
     }
     if patterns.is_empty() {
@@ -184,6 +189,19 @@ pub fn release_leases(
         )?;
     }
     Ok(removed)
+}
+
+/// Releases every lease of `task_id` in `workspace`, whoever holds it: what a
+/// task's ending does.
+pub fn release_task_leases(
+    conn: &Connection,
+    workspace: &str,
+    task_id: &str,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM agent_leases WHERE workspace = ?1 AND task_id = ?2",
+        params![workspace, task_id],
+    )
 }
 
 /// Lists active (non-expired) file leases in `workspace`.
@@ -500,12 +518,39 @@ pub fn recv_messages(
     limit: usize,
     now: i64,
 ) -> rusqlite::Result<Vec<BusMessage>> {
+    recv_messages_on(
+        conn,
+        workspace,
+        to_launch,
+        None,
+        unread_only,
+        ack,
+        limit,
+        now,
+    )
+}
+
+/// [`recv_messages`] narrowed to one `topic`: only the messages returned
+/// are acknowledged, so the other topics stay unread.
+#[allow(clippy::too_many_arguments)]
+pub fn recv_messages_on(
+    conn: &Connection,
+    workspace: &str,
+    to_launch: &str,
+    topic: Option<&str>,
+    unread_only: bool,
+    ack: bool,
+    limit: usize,
+    now: i64,
+) -> rusqlite::Result<Vec<BusMessage>> {
     let limit = limit.clamp(1, 200) as i64;
+    let topic = topic.map(str::trim).filter(|t| !t.is_empty());
     let sql = if unread_only {
         "SELECT id, workspace, from_launch, to_launch, topic, body, reply_to, created_ns, delivered_ns, acked_ns
          FROM agent_messages
          WHERE workspace = ?1
            AND (to_launch = ?2 OR (to_launch IS NULL AND from_launch != ?2))
+           AND (?4 IS NULL OR topic = ?4)
            AND acked_ns IS NULL
          ORDER BY created_ns ASC
          LIMIT ?3"
@@ -514,11 +559,12 @@ pub fn recv_messages(
          FROM agent_messages
          WHERE workspace = ?1
            AND (to_launch = ?2 OR (to_launch IS NULL AND from_launch != ?2))
+           AND (?4 IS NULL OR topic = ?4)
          ORDER BY created_ns DESC
          LIMIT ?3"
     };
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![workspace, to_launch, limit], |r| {
+    let rows = stmt.query_map(params![workspace, to_launch, limit, topic], |r| {
         Ok(BusMessage {
             id: r.get(0)?,
             workspace: r.get(1)?,
@@ -555,10 +601,12 @@ pub fn recv_messages(
 }
 
 /// Long-polls for unread messages up to `wait_ms` (bounded by `MAX_WAIT_MS`).
+#[allow(clippy::too_many_arguments)]
 pub fn recv_messages_wait(
     db_path: &Path,
     workspace: &str,
     to_launch: &str,
+    topic: Option<&str>,
     unread_only: bool,
     ack: bool,
     limit: usize,
@@ -569,10 +617,11 @@ pub fn recv_messages_wait(
     let deadline = Duration::from_millis(wait_ms);
     loop {
         let conn = crate::tracing::store::open_aux(db_path)?;
-        let msgs = recv_messages(
+        let msgs = recv_messages_on(
             &conn,
             workspace,
             to_launch,
+            topic,
             unread_only,
             ack,
             limit,
@@ -723,6 +772,33 @@ pub fn split_tasks(
         return Err("at least one task spec is required".into());
     }
     let _ = prune_stale_leases(conn, now);
+    // all or nothing: a later task's lease conflict or empty title must not
+    // leave the earlier ones on the board
+    conn.execute_batch("SAVEPOINT bus_split_tasks")
+        .map_err(|e| e.to_string())?;
+    match split_tasks_inner(conn, workspace, created_by, specs, now) {
+        Ok(created) => {
+            conn.execute_batch("RELEASE bus_split_tasks")
+                .map_err(|e| e.to_string())?;
+            if let Some(p) = db_path {
+                crate::tracing::store::poke_wake(p);
+            }
+            Ok(created)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO bus_split_tasks; RELEASE bus_split_tasks");
+            Err(e)
+        }
+    }
+}
+
+fn split_tasks_inner(
+    conn: &Connection,
+    workspace: &str,
+    created_by: &str,
+    specs: &[NewTaskSpec],
+    now: i64,
+) -> Result<Vec<BusTask>, String> {
     let mut created = Vec::with_capacity(specs.len());
     for spec in specs {
         let title = spec.title.trim();
@@ -784,7 +860,6 @@ pub fn split_tasks(
                 now,
             )
         {
-            let _ = conn.execute("DELETE FROM agent_tasks WHERE id = ?1", params![id]);
             return Err(e);
         }
 
@@ -809,9 +884,6 @@ pub fn split_tasks(
             updated_ns: now,
             ended_ns: None,
         });
-    }
-    if let Some(p) = db_path {
-        crate::tracing::store::poke_wake(p);
     }
     Ok(created)
 }
@@ -941,6 +1013,18 @@ pub fn update_task(
     let Some(before) = get_task(conn, task_id).map_err(|e| e.to_string())? else {
         return Err(format!("no task '{task_id}'"));
     };
+    // a finished task stays finished: a worker's late `done` must not undo
+    // the operator's cancel, nor a `fail` a task already done (a retry goes
+    // through `reopen_task`). Saying the same ending again only amends it.
+    if before.status.is_terminal() && status != before.status {
+        return Err(format!(
+            "task '{}' ({task_id}) is already {}; it cannot become {}",
+            before.title,
+            before.status.as_str(),
+            status.as_str()
+        ));
+    }
+    let repeated = before.status.is_terminal() && status == before.status;
     let ended_ns = status.is_terminal().then_some(now);
     let result_str = result.as_ref().map(Value::to_string);
     conn.execute(
@@ -952,7 +1036,7 @@ pub fn update_task(
              worktree = COALESCE(?5, worktree),
              branch = COALESCE(?6, branch),
              updated_ns = ?7,
-             ended_ns = COALESCE(?8, ended_ns)
+             ended_ns = COALESCE(ended_ns, ?8)
          WHERE id = ?9",
         params![
             status.as_str(),
@@ -969,8 +1053,8 @@ pub fn update_task(
     .map_err(|e| e.to_string())?;
 
     if status.is_terminal() {
-        let _ = release_leases(conn, &before.workspace, actor_launch, Some(task_id), &[]);
-        if before.created_by != actor_launch {
+        let _ = release_task_leases(conn, &before.workspace, task_id);
+        if before.created_by != actor_launch && !repeated {
             let summary = match status {
                 TaskStatus::Done => format!(
                     "Task '{}' ({}) finished: {}",
@@ -1008,6 +1092,7 @@ pub fn update_task(
     // spec §7.2): `task.done`, `task.failed`, `task.cancelled`; what
     // `agent_mux_swarm_wait` wakes on and the Log and Timeline tabs show
     if status.is_terminal()
+        && !repeated
         && let Some(swarm_id) = swarm_of_task_id(conn, task_id)
     {
         let what = match (&result, &error) {
@@ -1491,5 +1576,219 @@ mod tests {
         let lead_inbox = recv_messages(&conn, "/ws", "lead-1", true, true, 10, 3_200).unwrap();
         assert_eq!(lead_inbox.len(), 1);
         assert_eq!(lead_inbox[0].topic, "task-update");
+    }
+
+    #[test]
+    fn a_finished_task_stays_finished_and_a_repeat_only_amends_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = test_db(temp.path());
+        let conn = open_aux(&db).unwrap();
+        let t = split_tasks(
+            &conn,
+            Some(&db),
+            "/ws",
+            "lead",
+            &[NewTaskSpec {
+                title: "x".into(),
+                instructions: "i".into(),
+                assigned_to: Some("w".into()),
+                ..Default::default()
+            }],
+            1,
+        )
+        .unwrap()
+        .remove(0);
+        update_task(
+            &conn,
+            None,
+            &t.id,
+            "user",
+            TaskStatus::Cancelled,
+            None,
+            None,
+            None,
+            None,
+            2,
+        )
+        .unwrap();
+        // the worker's late `done` does not undo the cancel
+        let err = update_task(
+            &conn,
+            None,
+            &t.id,
+            "w",
+            TaskStatus::Done,
+            Some(serde_json::json!("ok")),
+            None,
+            None,
+            None,
+            3,
+        )
+        .unwrap_err();
+        assert!(err.contains("already cancelled"), "{err}");
+        let after = get_task(&conn, &t.id).unwrap().unwrap();
+        assert_eq!(after.status, TaskStatus::Cancelled);
+        assert_eq!(after.ended_ns, Some(2));
+
+        // done twice: one notice to the creator, the first ending kept
+        let t2 = split_tasks(
+            &conn,
+            None,
+            "/ws",
+            "lead",
+            &[NewTaskSpec {
+                title: "y".into(),
+                instructions: "i".into(),
+                ..Default::default()
+            }],
+            4,
+        )
+        .unwrap()
+        .remove(0);
+        for now in [5, 6] {
+            update_task(
+                &conn,
+                None,
+                &t2.id,
+                "w",
+                TaskStatus::Done,
+                Some(serde_json::json!(format!("r{now}"))),
+                None,
+                None,
+                None,
+                now,
+            )
+            .unwrap();
+        }
+        let done = get_task(&conn, &t2.id).unwrap().unwrap();
+        assert_eq!(done.ended_ns, Some(5));
+        assert_eq!(done.result, Some(serde_json::json!("r6")));
+        let inbox = recv_messages(&conn, "/ws", "lead", true, true, 50, 7).unwrap();
+        assert_eq!(
+            inbox.iter().filter(|m| m.body.contains(&t2.id)).count(),
+            1,
+            "{inbox:?}"
+        );
+    }
+
+    #[test]
+    fn naming_a_task_releases_only_the_callers_own_leases() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = test_db(temp.path());
+        let conn = open_aux(&db).unwrap();
+        let task = split_tasks(
+            &conn,
+            None,
+            "/ws",
+            "lead",
+            &[NewTaskSpec {
+                title: "t".into(),
+                instructions: "i".into(),
+                ..Default::default()
+            }],
+            1,
+        )
+        .unwrap()
+        .remove(0);
+        acquire_leases(
+            &conn,
+            "/ws",
+            "a",
+            Some(task.id.as_str()),
+            &["src/a.rs".into()],
+            1_000_000_000_000,
+            1,
+        )
+        .unwrap();
+        acquire_leases(
+            &conn,
+            "/ws",
+            "b",
+            Some(task.id.as_str()),
+            &["src/b.rs".into()],
+            1_000_000_000_000,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            release_leases(&conn, "/ws", "b", Some(task.id.as_str()), &[]).unwrap(),
+            1
+        );
+        let left = list_leases(&conn, "/ws", 2).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].owner_launch, "a");
+        // a task's ending releases them all
+        assert_eq!(release_task_leases(&conn, "/ws", &task.id).unwrap(), 1);
+    }
+
+    #[test]
+    fn reading_one_topic_leaves_the_others_unread() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = test_db(temp.path());
+        let conn = open_aux(&db).unwrap();
+        send_message(
+            &conn,
+            None,
+            "/ws",
+            "a",
+            Some("b"),
+            "message",
+            "hello",
+            None,
+            1,
+        )
+        .unwrap();
+        send_message(&conn, None, "/ws", "a", Some("b"), "answer", "42", None, 2).unwrap();
+        let got = recv_messages_on(&conn, "/ws", "b", Some("answer"), true, true, 50, 3).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].body, "42");
+        let rest = recv_messages(&conn, "/ws", "b", true, true, 50, 4).unwrap();
+        assert_eq!(rest.len(), 1, "the other topic is still unread");
+        assert_eq!(rest[0].body, "hello");
+    }
+
+    #[test]
+    fn a_split_with_a_lease_conflict_creates_no_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = test_db(temp.path());
+        let conn = open_aux(&db).unwrap();
+        acquire_leases(
+            &conn,
+            "/ws",
+            "other",
+            None,
+            &["src/x.rs".into()],
+            1_000_000_000_000,
+            1,
+        )
+        .unwrap();
+        let err = split_tasks(
+            &conn,
+            None,
+            "/ws",
+            "lead",
+            &[
+                NewTaskSpec {
+                    title: "first".into(),
+                    instructions: "i".into(),
+                    ..Default::default()
+                },
+                NewTaskSpec {
+                    title: "second".into(),
+                    instructions: "i".into(),
+                    assigned_to: Some("w".into()),
+                    files: vec!["src/x.rs".into()],
+                    ..Default::default()
+                },
+            ],
+            2,
+        )
+        .unwrap_err();
+        assert!(err.contains("conflicts"), "{err}");
+        assert!(
+            list_tasks(&conn, "/ws", None, None, None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
