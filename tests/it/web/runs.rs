@@ -326,6 +326,14 @@ fn loop_runs_are_listed_and_read_with_their_launch_facts() {
     assert_eq!(status, 200);
     assert_eq!(one["runs"].as_array().unwrap().len(), 1);
 
+    // a malformed query answers the JSON error envelope, not plain text
+    for path in ["/api/runs/loops?limit=abc", "/api/runs/workflows?limit=-1"] {
+        let (status, bad) = get_json(&base, path);
+        assert_eq!(status, 400, "{path}: {bad}");
+        assert_eq!(bad["ok"], false, "{path}");
+        assert!(bad["error"].is_string(), "{path}");
+    }
+
     let (status, detail) = get_json(
         &base,
         &format!("/api/runs/loops/{}", LOOP_RUN.replace(':', "%3A")),
