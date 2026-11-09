@@ -723,6 +723,9 @@ pub fn validate(doc: &Workflow, skills: Option<&[SkillInfo]>) -> Vec<String> {
     if doc.description.trim().is_empty() {
         problems.push("workflow.description is empty".into());
     }
+    if doc.max_concurrent == Some(0) {
+        problems.push("workflow.max_concurrent must be at least 1".into());
+    }
     if doc.steps.is_empty() {
         problems.push("no steps".into());
         return problems;
@@ -746,6 +749,9 @@ pub fn validate(doc: &Workflow, skills: Option<&[SkillInfo]>) -> Vec<String> {
         }
         if matches!(s.id.as_str(), "args" | "item" | "index" | "steps") {
             problems.push(format!("{ctx}: id is a reserved word"));
+        }
+        if s.concurrency == Some(0) {
+            problems.push(format!("{ctx}: concurrency must be at least 1"));
         }
         let earlier: Vec<&str> = ids[..i].to_vec();
         // actor requirements
@@ -1739,6 +1745,24 @@ input = "confirmed"
         );
         let js = doc.schemas["findings"].to_json_schema(&doc.schemas);
         assert_eq!(js["properties"]["findings"]["items"]["required"][0], "file");
+    }
+
+    #[test]
+    fn validation_rejects_zero_concurrency_instead_of_stalling() {
+        let doc = parse(
+            "[workflow]\nname = 'w'\ndescription = 'd'\nmax_concurrent = 0\n[[steps]]\nid = 'one'\nprompt = 'p'\nconcurrency = 0",
+        ).unwrap();
+        let problems = validate(&doc, None);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("workflow.max_concurrent")),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("step one: concurrency")),
+            "{problems:?}"
+        );
     }
 
     #[test]

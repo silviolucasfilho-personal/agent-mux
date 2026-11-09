@@ -217,11 +217,7 @@ pub fn live(
         crate::loops::to_ns(crate::loops::utc_midnight(now)),
     )
     .unwrap_or_default();
-    let percent = if entry.max_tokens_per_day == 0 {
-        0
-    } else {
-        ((spend.tokens.max(0) as u128 * 100) / entry.max_tokens_per_day as u128) as u32
-    };
+    let percent = super::run::budget_percent(spend.tokens, entry.max_tokens_per_day);
     let breaker = if pattern.breaker {
         match crate::loops::breaker::load(&entry.workspace.join(crate::loops::LEDGER_JSON)) {
             Ok(l) => {

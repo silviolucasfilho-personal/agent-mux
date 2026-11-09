@@ -450,22 +450,22 @@ impl RunState {
                     continue;
                 }
                 let step_cap = self.doc.steps[i].concurrency.unwrap_or(usize::MAX);
-                let mut issued: Vec<SessionSpec> = Vec::new();
                 loop {
-                    let in_step =
-                        self.in_flight.values().filter(|(j, _)| *j == i).count() + issued.len();
-                    if out.len() + issued.len() >= slots || in_step >= step_cap {
+                    // Replays complete inline and can exhaust the budget before
+                    // another item or step is issued in this same pass.
+                    if self.budget_exhausted() {
+                        return out;
+                    }
+                    let in_step = self.in_flight.values().filter(|(j, _)| *j == i).count();
+                    if out.len() >= slots || in_step >= step_cap {
                         break;
                     }
-                    if self.sessions_started + issued.len() >= self.caps.max_sessions {
+                    let Some(spec) = self.issue_one(i) else { break };
+                    if self.sessions_started >= self.caps.max_sessions {
                         self.failed =
                             Some(format!("session cap of {} reached", self.caps.max_sessions));
                         return out;
                     }
-                    let Some(spec) = self.issue_one(i) else { break };
-                    issued.push(spec);
-                }
-                for spec in issued {
                     let key = spec.key.clone();
                     self.in_flight.insert(key.clone(), (i, spec.phase.clone()));
                     self.sessions_started += 1;
@@ -940,7 +940,7 @@ impl RunState {
         let Some((i, phase)) = self.in_flight.remove(key) else {
             return;
         };
-        self.tokens_spent += done.tokens;
+        self.tokens_spent = self.tokens_spent.saturating_add(done.tokens);
         self.cost_spent += done.cost_usd;
         self.records.push(SessionRecord {
             key: key.clone(),
@@ -1554,6 +1554,93 @@ input = "confirmed"
         assert_eq!(more.len(), 1, "one finder left");
         assert!(st.next(5).is_empty(), "confirmed waits for find");
         assert_eq!(st.status(), RunStatus::Running);
+    }
+
+    #[test]
+    fn session_cap_allows_exactly_the_required_sessions() {
+        let (st, labels) = drive(
+            "[workflow]\nname = 'w'\ndescription = 'd'\n[[steps]]\nid = 'one'\nprompt = 'p'",
+            serde_json::json!({}),
+            Caps {
+                max_sessions: 1,
+                budget_tokens: None,
+            },
+            |_| Outcome::Text("done".into()),
+        );
+        assert_eq!(labels.len(), 1);
+        assert!(
+            matches!(st.status(), RunStatus::Finished(_)),
+            "{:?}",
+            st.status()
+        );
+    }
+
+    #[test]
+    fn session_cap_registers_sessions_already_prepared() {
+        let mut st = RunState::new(
+            parse(REVIEW).unwrap(),
+            serde_json::json!({}),
+            Caps {
+                max_sessions: 1,
+                budget_tokens: None,
+            },
+        );
+        let specs = st.next(4);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(st.in_flight(), 1);
+        assert_eq!(st.sessions_started, 1);
+    }
+
+    #[test]
+    fn replay_exhausting_budget_does_not_launch_another_step() {
+        let doc = parse("[workflow]\nname = 'w'\ndescription = 'd'\n[[steps]]\nid = 'one'\nprompt = 'p'\n[[steps]]\nid = 'two'\nprompt = 'p'").unwrap();
+        let replay = BTreeMap::from([(
+            "one".into(),
+            SessionDone {
+                outcome: Outcome::Text("done".into()),
+                tokens: 10,
+                cost_usd: 0.0,
+            },
+        )]);
+        let mut st = RunState::new(
+            doc,
+            serde_json::json!({}),
+            Caps {
+                max_sessions: 1000,
+                budget_tokens: Some(10),
+            },
+        )
+        .with_replay(replay);
+        assert!(st.next(4).is_empty());
+        assert!(st.budget_exhausted());
+        assert_eq!(st.in_flight(), 0);
+    }
+
+    #[test]
+    fn token_accounting_saturates_when_in_flight_sessions_exceed_u64() {
+        let mut st = RunState::new(
+            parse(REVIEW).unwrap(),
+            serde_json::json!({}),
+            Caps {
+                max_sessions: 1000,
+                budget_tokens: Some(u64::MAX),
+            },
+        );
+        let specs = st.next(4);
+        assert_eq!(specs.len(), 2);
+        for spec in specs {
+            st.complete(
+                &spec.key,
+                SessionDone {
+                    outcome: obj(serde_json::json!({"findings": []})),
+                    tokens: u64::MAX,
+                    cost_usd: 0.0,
+                },
+            );
+        }
+        assert_eq!(st.tokens_spent, u64::MAX);
+        assert!(st.budget_exhausted());
+        assert!(st.next(4).is_empty());
     }
 
     #[test]

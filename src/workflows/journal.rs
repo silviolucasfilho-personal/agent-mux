@@ -153,8 +153,9 @@ pub fn replayable(
     let stale = entries
         .iter()
         .filter(|e| {
-            let now = agent_of(doc, &e.step, &e.key).and_then(|a| hash_of(a));
-            now != e.agent_hash
+            let agent = agent_of(doc, &e.step, &e.key);
+            let now = agent.and_then(|a| hash_of(a));
+            agent != e.agent.as_ref() || now != e.agent_hash
         })
         .filter_map(|e| doc.step_index(&e.step).map(|i| (i, e.step.clone())))
         .min();
@@ -241,6 +242,31 @@ mod tests {
         assert_eq!(truncate_after(&path, "find[1]", false).unwrap(), 1);
         assert_eq!(load(&path).len(), 1);
         assert!(load(Path::new("/nonexistent")).is_empty());
+    }
+
+    #[test]
+    fn replay_requires_the_same_agent_even_without_a_resolved_hash() {
+        let doc = crate::workflows::parse(
+            "[workflow]\nname = 'w'\ndescription = 'd'\n[[steps]]\nid = 'one'\nprompt = 'p'\nagent = 'new'",
+        ).unwrap();
+        let entry = Entry::from_outcome(
+            "one",
+            "one",
+            "P",
+            &Outcome::Text("old".into()),
+            None,
+            0,
+            0.0,
+        );
+        // An unresolved newly configured agent must not replay an unassigned session.
+        let (kept, stale) = replayable(vec![entry.clone()], &doc, |_| None);
+        assert!(kept.is_empty());
+        assert_eq!(stale.as_deref(), Some("one"));
+        // Distinct agent names may resolve to identical content hashes.
+        let entry = entry.with_agent(Some(("old".into(), "same".into())));
+        let (kept, stale) = replayable(vec![entry], &doc, |_| Some("same".into()));
+        assert!(kept.is_empty());
+        assert_eq!(stale.as_deref(), Some("one"));
     }
 
     #[test]

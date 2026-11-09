@@ -78,6 +78,16 @@ pub enum Preflight {
     },
 }
 
+/// Percentage of the daily token cap consumed. Zero means no token cap;
+/// very large totals saturate instead of wrapping below the stop threshold.
+pub fn budget_percent(tokens: i64, cap: u64) -> u32 {
+    if cap == 0 {
+        return 0;
+    }
+    let percent = tokens.max(0) as u128 * 100 / u128::from(cap);
+    percent.min(u128::from(u32::MAX)) as u32
+}
+
 /// The spec's pre-flight, section 8.2, in order.
 pub fn preflight(entry: &LoopEntry, input: &PreflightInput) -> Preflight {
     if input.pause_all {
@@ -114,11 +124,7 @@ pub fn preflight(entry: &LoopEntry, input: &PreflightInput) -> Preflight {
             false,
         );
     }
-    let percent = if entry.max_tokens_per_day == 0 {
-        0
-    } else {
-        ((input.tokens_today.max(0) as u128 * 100) / entry.max_tokens_per_day as u128) as u32
-    };
+    let percent = budget_percent(input.tokens_today, entry.max_tokens_per_day);
     if percent >= 100 {
         return blocked(
             &format!(
@@ -447,6 +453,16 @@ mod tests {
             harness_resolves: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn preflight_large_token_usage_cannot_wrap_below_the_cap() {
+        let mut e = entry(Level::L2);
+        e.max_tokens_per_day = 1;
+        let mut input = ok_input();
+        // 100 * 2^30 wraps to zero when narrowed to u32.
+        input.tokens_today = 1 << 30;
+        assert!(matches!(preflight(&e, &input), Preflight::Blocked { .. }));
     }
 
     #[test]
