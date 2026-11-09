@@ -110,6 +110,10 @@ pub struct BoardView {
     pub review: String,
     /// Each finished task's review (v25), in board order.
     pub reviews: Vec<ReviewView>,
+    /// Whether merges wait for a check (v26): `off`, `on` or the gate's
+    /// own command; `merge_gate_step` says it in one sentence.
+    pub merge_gate: String,
+    pub merge_gate_step: String,
     /// The decision that approved the plan, if it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved: Option<record::SwarmDecision>,
@@ -217,6 +221,8 @@ pub fn board_view(
         coordinator,
         worker_pool: record::worker_pool(conn, swarm),
         review: settings.as_choice(),
+        merge_gate: super::gate::settings(conn, &swarm.id).as_choice(),
+        merge_gate_step: super::gate::settings(conn, &swarm.id).describe(swarm),
         reviews: board
             .iter()
             .filter_map(|t| {

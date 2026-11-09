@@ -702,6 +702,8 @@ commands:
                                 with the swarm's merge gate on (--merge-gate) the merge is queued and
                                 happens once its check passes on the branch brought up to date
   force-merge <task>            merge a finished task's branch at once, past the merge gate
+  merge-gate off|on|<command>   change whether merges wait for a check (on: the swarm's check
+                                command); off puts queued merges back to waiting for you
   accept <task> | drop <task>   accept or drop a task a worker proposed
   close                         end the swarm: stop its sessions, cancel open tasks, release leases
   delete [--swarm ID]           remove the swarm: a closed one from the store (its traces stay) and its worktree checkouts (branches kept); a running one is closed first (needs the TUI)
@@ -716,7 +718,7 @@ commands:
 
 <task> is a plan key (`bus-fix`), a task id or a unique prefix of either.
 The verbs take --workspace DIR (default: the current folder), --swarm ID when the folder runs several swarms, and --json.
-approve, launch, merge, force-merge, set-aside, cancel, close and delete take --said.
+approve, launch, merge, force-merge, merge-gate, set-aside, cancel, close and delete take --said.
 Decisions from here are recorded as the CLI's (`by = cli`); --said \"<words>\" keeps what the operator said.
 A coordinator without MCP relays from its chat with --as-coordinator --said \"<words>\" (recorded as `by = chat`).";
 
@@ -1003,7 +1005,8 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
         if verb.takes_task() && task.is_none() {
             anyhow::bail!("swarm {cmd} needs a task (its key or id)\n\n{SWARM_USAGE}");
         }
-        let notes = (verb == SwarmVerb::Replan).then(|| args.positional.join(" "));
+        let notes = matches!(verb, SwarmVerb::Replan | SwarmVerb::MergeGate)
+            .then(|| args.positional.join(" "));
         // --as-coordinator: a coordinator without MCP relays from its chat
         // (`by = chat`, its launch from $AGENT_MUX_SESSION_ID); it must quote
         // the operator for what starts, merges, discards or ends work
@@ -1037,7 +1040,7 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
             workspace: workspace.clone(),
             verb,
             task: task.clone(),
-            notes,
+            notes: notes.clone(),
             swarm: named_swarm.clone(),
             by: Some(decider.by),
             said: said.clone(),
@@ -1054,12 +1057,13 @@ pub fn run_swarm(raw: &[String]) -> anyhow::Result<()> {
                 let swarm = record::resolve_swarm(&conn, &workspace, named_swarm.as_deref())
                     .map_err(|e| anyhow::anyhow!(e))?;
                 let env = cli_check_env(&swarm.workspace, swarm.isolation);
-                let d = record::apply(
+                let d = record::apply_with(
                     &conn,
                     Some(&db_path),
                     &swarm,
                     verb,
                     task.as_deref(),
+                    notes.as_deref(),
                     &env,
                     &record::Decider {
                         launch: from.as_deref(),

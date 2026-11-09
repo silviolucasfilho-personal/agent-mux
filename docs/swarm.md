@@ -167,6 +167,7 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | `1`–`6` | the swarm row's tab (Board, Live, Timeline, Log, Activity, Changes) or a worker's (Task, Live, Thread, Trace, Changes) |
 | `y` | confirm the one thing on the row: merge a branch in `review` (with the merge gate on: queue it behind the gate's check) · accept a proposal · close a finished swarm. Never the plan: on a plan in review, `y` moves the keyboard to the coordinator's chat. |
 | `Y` | merge a branch in `review` now, past the merge gate (`force-merge`; confirms with `y`) |
+| `M` | change the merge gate: the command line opens with it as it is; type `off`, `on` or a command and `Enter` |
 | `x` | stop a worker · cancel a task · set a branch aside · drop a proposal (confirms with `y`) |
 | `d` | delete the swarm: a closed one is removed from the store (traces stay), its worktree checkouts removed, branches kept; a running one is closed first (confirms with `y`) |
 | `r` | retry a failed, lost, cancelled or stalled task (the retry form: harness, agent, isolation) · restart an exited coordinator |
@@ -204,6 +205,7 @@ Every swarm reviews each finished task before you merge it, unless you turn it o
     - **`on`** runs the swarm's check command.
     - **A command of its own** (say, a quick `cargo test --lib`) can gate each merge while the full check still runs at the end.
     - **Without it,** a check command runs only once, when every task is settled.
+    - **On a running swarm,** change it with `M` on the Swarm screen, `agent-mux swarm merge-gate off|on|<command>`, or by telling the coordinator (`agent_mux_swarm_action(verb = "merge-gate", notes = …)`). Turning it off puts merges still queued back to waiting for you (`y` then merges at once); a check already running finishes, and merges its branch if it passes. A new command applies from the next merge that starts. The swarm card shows the gate; the coordinator is told of each change.
 
     With the gate on, `y` (or `merge`) queues the branch, and agent-mux runs the queue one branch at a time, each on top of the merges before it:
     1. It merges your workspace's `HEAD` into the branch, in the task's worktree (a temporary one when that is gone).

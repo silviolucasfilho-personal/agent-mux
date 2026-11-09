@@ -1925,6 +1925,9 @@ pub enum SwarmVerb {
     Merge,
     /// Merge a finished task's branch at once, past the merge gate (v26).
     ForceMerge,
+    /// Change the swarm's merge gate: `off`, `on` or a command, in the
+    /// verb's notes (v26).
+    MergeGate,
     /// Keep a finished task's branch without merging it.
     SetAside,
     /// Accept a task a worker proposed.
@@ -1956,6 +1959,7 @@ impl SwarmVerb {
             "retry" => SwarmVerb::Retry,
             "merge" => SwarmVerb::Merge,
             "force-merge" | "merge-now" => SwarmVerb::ForceMerge,
+            "merge-gate" => SwarmVerb::MergeGate,
             "set-aside" | "setaside" => SwarmVerb::SetAside,
             "accept" => SwarmVerb::Accept,
             "drop" => SwarmVerb::Drop,
@@ -1977,6 +1981,7 @@ impl SwarmVerb {
             SwarmVerb::Retry => "retry",
             SwarmVerb::Merge => "merge",
             SwarmVerb::ForceMerge => "force-merge",
+            SwarmVerb::MergeGate => "merge-gate",
             SwarmVerb::SetAside => "set-aside",
             SwarmVerb::Accept => "accept",
             SwarmVerb::Drop => "drop",
@@ -2010,6 +2015,7 @@ impl SwarmVerb {
                 | SwarmVerb::Launch
                 | SwarmVerb::Merge
                 | SwarmVerb::ForceMerge
+                | SwarmVerb::MergeGate
                 | SwarmVerb::SetAside
                 | SwarmVerb::Cancel
                 | SwarmVerb::Close
@@ -2061,6 +2067,22 @@ pub fn apply(
     swarm: &SwarmRun,
     verb: SwarmVerb,
     task: Option<&str>,
+    env: &super::plan::CheckEnv,
+    who: &Decider<'_>,
+    now: i64,
+) -> Result<String, String> {
+    apply_with(conn, db, swarm, verb, task, None, env, who, now)
+}
+
+/// [`apply`] with the verb's notes: the value of `merge-gate`.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_with(
+    conn: &Connection,
+    db: Option<&Path>,
+    swarm: &SwarmRun,
+    verb: SwarmVerb,
+    task: Option<&str>,
+    notes: Option<&str>,
     env: &super::plan::CheckEnv,
     who: &Decider<'_>,
     now: i64,
@@ -2227,6 +2249,7 @@ pub fn apply(
             }
             Ok(out)
         }
+        SwarmVerb::MergeGate => change_merge_gate(conn, db, swarm, &board, notes, who, now),
         SwarmVerb::Accept | SwarmVerb::Drop => {
             let t = target.expect("takes a task");
             if !t.ext.proposed {
@@ -2307,6 +2330,81 @@ pub fn apply(
             unreachable!("needs the TUI")
         }
     }
+}
+
+/// `merge-gate <off|on|command>` (v26): the operator changes the swarm's
+/// merge gate. Off, the merges still queued go back to waiting for the
+/// operator (`y` merges them at once); a check already running finishes,
+/// and merges its branch if it passes. A new command applies from the next
+/// gate that starts.
+#[allow(clippy::too_many_arguments)]
+fn change_merge_gate(
+    conn: &Connection,
+    db: Option<&Path>,
+    swarm: &SwarmRun,
+    board: &[BoardTask],
+    value: Option<&str>,
+    who: &Decider<'_>,
+    now: i64,
+) -> Result<String, String> {
+    use super::gate::{self, GateState, MergeGateSettings};
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or("say the merge gate: off, on (the swarm's check command) or a command of its own")?;
+    let new = MergeGateSettings::parse(value);
+    new.check(swarm.check_cmd.as_deref())?;
+    let old = gate::settings(conn, &swarm.id);
+    if old == new {
+        return Ok(format!("the merge gate is already {}", new.as_choice()));
+    }
+    gate::set_settings(conn, &swarm.id, &new, now).map_err(|e| e.to_string())?;
+    let waiting = |t: &&BoardTask, s: GateState| {
+        super::engine::awaits_review(t) && t.ext.gate.as_ref().is_some_and(|g| g.state == s)
+    };
+    let mut released = Vec::new();
+    if !new.enabled {
+        for t in board.iter().filter(|t| waiting(t, GateState::Queued)) {
+            gate::unqueue(conn, &t.task.id).map_err(|e| e.to_string())?;
+            released.push(t.ext.plan_key.clone());
+        }
+    }
+    let running: Vec<&str> = board
+        .iter()
+        .filter(|t| waiting(t, GateState::Running))
+        .map(|t| t.ext.plan_key.as_str())
+        .collect();
+    decide(conn, &swarm.id, None, SwarmVerb::MergeGate, who, now).map_err(|e| e.to_string())?;
+    let _ = event(
+        conn,
+        &swarm.id,
+        None,
+        "merge_gate.changed",
+        Some(who.actor()),
+        Some(serde_json::json!({
+            "from": old.as_choice(),
+            "to": new.as_choice(),
+            "released": released,
+            "running": running,
+        })),
+        now,
+    );
+    poke(db);
+    let mut out = format!("merge gate {}", new.describe(swarm));
+    if !released.is_empty() {
+        out.push_str(&format!(
+            "; {} queued merge(s) wait for you again ({}): y merges at once",
+            released.len(),
+            released.join(", ")
+        ));
+    }
+    if !running.is_empty() {
+        out.push_str(&format!(
+            "; the check already running on {} finishes, and merges it if it passes",
+            running.join(", ")
+        ));
+    }
+    Ok(out)
 }
 
 /// `merge` with a check command (v26): the branch is queued behind the

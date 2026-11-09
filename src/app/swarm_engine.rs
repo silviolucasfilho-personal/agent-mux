@@ -887,7 +887,31 @@ impl App {
             }
             _ => {
                 let env = self.swarm_check_env(Path::new(&swarm.workspace), swarm.isolation);
-                let done = record::apply(&conn, Some(&db), &swarm, verb, task, &env, who, now)?;
+                let done = record::apply_with(
+                    &conn,
+                    Some(&db),
+                    &swarm,
+                    verb,
+                    task,
+                    notes,
+                    &env,
+                    who,
+                    now,
+                )?;
+                // the coordinator hears of a merge gate it did not relay itself
+                if verb == SwarmVerb::MergeGate
+                    && who.by != record::DecidedBy::Chat
+                    && !done.starts_with("the merge gate is already")
+                {
+                    self.tell_coordinator(
+                        &swarm,
+                        "merge-gate",
+                        &format!("The operator changed the merge gate: {done}"),
+                        &format!(
+                            "[agent-mux swarm] The operator changed the merge gate: {done}. Merges follow it from now on."
+                        ),
+                    );
+                }
                 self.last_swarm_engine_pass = None; // act on it at the next tick
                 Ok(done)
             }

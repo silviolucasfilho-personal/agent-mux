@@ -242,7 +242,7 @@ impl Default for Tools {
                 "agent-mux swarm launch [<task>...] --as-coordinator --said \"<words>\"",
                 "agent-mux swarm wait [--timeout MS] [--after ID] --json",
                 "agent-mux swarm status --json",
-                "agent-mux swarm <pause|resume|retry|cancel|merge|force-merge|set-aside|accept|drop|close> [<task>] --as-coordinator --said \"<words>\"",
+                "agent-mux swarm <pause|resume|retry|cancel|merge|force-merge|merge-gate|set-aside|accept|drop|close> [<task>|<value>] --as-coordinator --said \"<words>\"",
                 "agent-mux bus send --to <launch> --reply-to <id> --wake <body>",
             ],
         }

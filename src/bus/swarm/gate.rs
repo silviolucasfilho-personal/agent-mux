@@ -249,6 +249,15 @@ pub fn queue(
     Ok(())
 }
 
+/// The gate is off now: a merge still queued waits for the operator again.
+pub fn unqueue(conn: &Connection, task_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM swarm_merge_gates WHERE task_id = ?1 AND state = 'queued'",
+        params![task_id],
+    )?;
+    Ok(())
+}
+
 /// The engine started the gate.
 pub fn start(
     conn: &Connection,
@@ -945,5 +954,105 @@ mod tests {
         );
         let queued = verb(&conn, &s, SwarmVerb::Merge).unwrap();
         assert!(queued.contains("`cargo test --lib` runs"), "{queued}");
+    }
+
+    fn set_gate(conn: &Connection, s: &SwarmRun, value: &str) -> Result<String, String> {
+        record::apply_with(
+            conn,
+            None,
+            s,
+            SwarmVerb::MergeGate,
+            None,
+            Some(value),
+            &CheckEnv::default(),
+            &Decider::TUI,
+            20,
+        )
+    }
+
+    #[test]
+    fn the_operator_changes_the_gate_on_a_running_swarm() {
+        let ws = tempfile::tempdir().unwrap();
+        repo(ws.path(), false);
+        let (_d, conn, s, id) = swarm_with(ws.path(), None, &MergeGateSettings::off());
+        // `on` needs a check command; a command of its own does not
+        assert!(
+            set_gate(&conn, &s, "on")
+                .unwrap_err()
+                .contains("there is none")
+        );
+        assert!(
+            set_gate(&conn, &s, "  ")
+                .unwrap_err()
+                .contains("say the merge gate")
+        );
+        let on = set_gate(&conn, &s, "grep -q feature file").unwrap();
+        assert!(
+            on.starts_with("merge gate on: merge queues the branch"),
+            "{on}"
+        );
+        assert_eq!(
+            set_gate(&conn, &s, "grep -q feature file").unwrap(),
+            "the merge gate is already grep -q feature file"
+        );
+        // merges queue now
+        assert!(
+            verb(&conn, &s, SwarmVerb::Merge)
+                .unwrap()
+                .starts_with("queued `a`")
+        );
+        // off: the queued merge waits for the operator again, nothing merged
+        let off = set_gate(&conn, &s, "off").unwrap();
+        assert!(
+            off.contains("1 queued merge(s) wait for you again (a)"),
+            "{off}"
+        );
+        let t = task(&conn, &s, &id);
+        assert!(t.ext.gate.is_none() && t.review.is_none());
+        assert_eq!(file(ws.path()), "base\n");
+        assert!(
+            verb(&conn, &s, SwarmVerb::Merge)
+                .unwrap()
+                .starts_with("merged feature")
+        );
+        // every change is a decision and an event
+        let decided = record::decisions(&conn, &s.id).unwrap();
+        assert_eq!(
+            decided
+                .iter()
+                .filter(|d| d.verb == SwarmVerb::MergeGate)
+                .count(),
+            2,
+            "{decided:?}"
+        );
+        let events = record::recent_events(&conn, &s.id, 20).unwrap();
+        assert!(events.iter().any(|e| e.kind == "merge_gate.changed"));
+        assert_eq!(settings(&conn, &s.id), MergeGateSettings::off());
+    }
+
+    #[test]
+    fn turning_the_gate_off_lets_a_running_check_finish() {
+        let ws = tempfile::tempdir().unwrap();
+        repo(ws.path(), false);
+        let (_d, conn, s, id) = swarm(ws.path(), "true");
+        verb(&conn, &s, SwarmVerb::Merge).unwrap();
+        start(&conn, None, &id, 11).unwrap();
+        let off = set_gate(&conn, &s, "off").unwrap();
+        assert!(
+            off.contains("the check already running on a finishes"),
+            "{off}"
+        );
+        let tested = test_branch(
+            ws.path(),
+            None,
+            "feature",
+            "true",
+            Duration::from_secs(30),
+            11,
+        );
+        assert!(matches!(
+            land(&conn, None, &s, &id, &tested, 12).unwrap(),
+            Landed::Merged(_)
+        ));
     }
 }

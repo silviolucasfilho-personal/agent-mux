@@ -204,6 +204,8 @@ pub struct CommandLine {
 pub enum LinePurpose {
     Message,
     ReplanNotes,
+    /// The swarm's merge gate: `off`, `on` or a command (`M`, v26).
+    MergeGate,
 }
 
 /// Who a message goes to.
@@ -1397,6 +1399,34 @@ impl SwarmBoard {
             .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off)
     }
 
+    /// The selected swarm's merge gate setting (v26).
+    pub fn merge_gate_settings(&self) -> crate::bus::swarm::gate::MergeGateSettings {
+        self.swarm
+            .as_ref()
+            .and_then(|s| self.swarms.iter().find(|d| d.run.id == s.id))
+            .map(|d| d.merge_gate.clone())
+            .unwrap_or_default()
+    }
+
+    /// `M`: the command line, filled with the merge gate as it is; `Enter`
+    /// relays `merge-gate` with what it says.
+    fn open_merge_gate(&mut self) {
+        match &self.swarm {
+            Some(s) if s.ended_ns.is_none() => {
+                let mut text = TextArea::new(self.merge_gate_settings().as_choice());
+                text.end();
+                self.command = Some(CommandLine {
+                    text,
+                    reply_to: None,
+                    purpose: LinePurpose::MergeGate,
+                    completion: None,
+                });
+            }
+            Some(_) => self.status_msg = Some("This swarm is closed.".into()),
+            None => self.status_msg = Some("No swarm here.".into()),
+        }
+    }
+
     /// The command the selected swarm's merges wait for, when they are
     /// gated (v26).
     pub fn merge_check(&self) -> Option<String> {
@@ -2030,7 +2060,7 @@ impl SwarmBoard {
     /// What `Enter` would send from the command line.
     pub fn command_preview(&self) -> Option<Result<Outgoing, String>> {
         let line = self.command.as_ref()?;
-        if line.purpose == LinePurpose::ReplanNotes {
+        if line.purpose != LinePurpose::Message {
             return None;
         }
         Some(parse_command(&line.text.text, self, line.reply_to.as_ref()))
@@ -2266,6 +2296,10 @@ impl SwarmBoard {
             },
             KeyCode::Char('y') => self.yes(),
             KeyCode::Char('Y') => self.force_merge(),
+            KeyCode::Char('M') => {
+                self.open_merge_gate();
+                Outcome::None
+            }
             KeyCode::Char('n') => {
                 // a new swarm, from any row (coordinator-first §9.4): the plan
                 // itself is changed by telling the coordinator
@@ -2615,6 +2649,20 @@ impl SwarmBoard {
             (KeyCode::Esc, _) => {
                 self.command = None;
                 Outcome::None
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) if line.purpose == LinePurpose::MergeGate => {
+                let value = line.text.text.trim().to_string();
+                self.command = None;
+                if value.is_empty() {
+                    self.status_msg =
+                        Some("Say off, on (the check command) or a command of its own.".into());
+                    return Outcome::None;
+                }
+                Outcome::Verb {
+                    verb: SwarmVerb::MergeGate,
+                    task: None,
+                    notes: Some(value),
+                }
             }
             (KeyCode::Enter, KeyModifiers::NONE) if line.purpose == LinePurpose::ReplanNotes => {
                 let notes = line.text.text.trim().to_string();
@@ -4210,6 +4258,47 @@ mod tests {
         );
         v.handle_key(key(KeyCode::Char('Y')));
         assert_eq!(v.confirm, None);
+    }
+
+    #[test]
+    fn shift_m_changes_the_merge_gate_from_the_command_line() {
+        let mut v = board(
+            SwarmStatus::Running,
+            vec![task("a", TaskStatus::Running, Some("L1"))],
+            &[("L1", "working")],
+        );
+        // filled with the gate as it is
+        v.handle_key(key(KeyCode::Char('M')));
+        let line = v.command.as_ref().expect("M opens the command line");
+        assert_eq!(
+            (line.purpose, line.text.text.as_str()),
+            (LinePurpose::MergeGate, "off")
+        );
+        assert!(v.command_preview().is_none(), "not a message");
+        // typing replaces it; Enter relays merge-gate with the value
+        for _ in 0..3 {
+            v.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "cargo test --lib".chars() {
+            v.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            v.handle_key(key(KeyCode::Enter)),
+            Outcome::Verb {
+                verb: SwarmVerb::MergeGate,
+                task: None,
+                notes: Some("cargo test --lib".into())
+            }
+        );
+        assert!(v.command.is_none());
+        // an empty line says what it takes, and changes nothing
+        v.swarms[0].merge_gate = crate::bus::swarm::gate::MergeGateSettings::parse("on");
+        v.handle_key(key(KeyCode::Char('M')));
+        assert_eq!(v.command.as_ref().unwrap().text.text, "on");
+        v.handle_key(key(KeyCode::Backspace));
+        v.handle_key(key(KeyCode::Backspace));
+        assert_eq!(v.handle_key(key(KeyCode::Enter)), Outcome::None);
+        assert!(v.status_msg.as_deref().unwrap().starts_with("Say off, on"));
     }
 
     #[test]

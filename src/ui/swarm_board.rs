@@ -590,12 +590,16 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
         ),
         dim(),
     ));
-    if let Some(cmd) = v.merge_check() {
+    if s.ended_ns.is_none() {
         out.push(Line::raw(""));
         out.push(section("Merge gate"));
-        out.push(Line::raw(format!(
-            "  each merge waits for `{cmd}` on the branch brought up to date (Y merges past it)"
-        )));
+        match v.merge_check() {
+            Some(cmd) => out.push(Line::raw(format!(
+                "  each merge waits for `{cmd}` on the branch brought up to date (Y merges past it)"
+            ))),
+            None => out.push(Line::styled("  off: y merges a branch at once", dim())),
+        }
+        out.push(Line::styled("  M changes it", dim()));
     }
     if let Some(cmd) = &s.check_cmd {
         out.push(Line::raw(""));
@@ -1538,7 +1542,15 @@ fn draw_command(f: &mut Frame, area: Rect, v: &SwarmBoard) {
     let Some(line) = &v.command else {
         return;
     };
-    let preview = if line.purpose == LinePurpose::ReplanNotes {
+    let preview = if line.purpose == LinePurpose::MergeGate {
+        Line::from(vec![
+            Span::styled(" ⧗ merge gate: ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                "off · on (the check command) · or a command of its own · Enter set · Esc cancel",
+                dim(),
+            ),
+        ])
+    } else if line.purpose == LinePurpose::ReplanNotes {
         Line::from(vec![
             Span::styled(" ↻ re-plan: ", Style::default().fg(Color::Yellow)),
             Span::styled(
