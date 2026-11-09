@@ -89,11 +89,13 @@ async fn call(
 /// Turns `/api/session/{key}/transcript` answers by default, and at most.
 pub const TRANSCRIPT_PAGE: usize = 200;
 pub const TRANSCRIPT_PAGE_MAX: usize = 2000;
-/// Characters kept of one text field in the JSON transcript; the export
-/// keeps `EXPORT_MAX_CHARS`. A longer text is cut and named in the item's
-/// `truncated` list, with its full length in `lengths`.
+/// Characters kept of one text field in the JSON transcript. A longer text
+/// is cut and named in the item's `truncated` list, with its full length in
+/// `lengths`. The export keeps every turn and every character.
 pub const TRANSCRIPT_MAX_CHARS: usize = 32_000;
-pub const EXPORT_MAX_CHARS: usize = 200_000;
+/// Turns the export reads at a time: it writes each page and drops it, so
+/// only the HTML and one page are in memory.
+pub const EXPORT_PAGE: usize = 200;
 
 /// The header and turns of one session (or one launch of it).
 #[derive(Debug, Clone, Serialize)]
@@ -542,6 +544,43 @@ pub fn load_transcript(
             .map(|n| n as usize),
         None => None,
     };
+    let turns = load_turns(conn, key, lid, from_turn, opts.limit, opts.max_chars)?;
+
+    Ok(Transcript {
+        ok: true,
+        session_key: key.to_string(),
+        launch_id: launch_id.map(str::to_string),
+        title,
+        provider,
+        cwd,
+        content_mode,
+        launches,
+        models,
+        started_ns,
+        ended_ns,
+        duration_ms: match (started_ns, ended_ns) {
+            (Some(s), Some(e)) => Some((e - s).max(0) / 1_000_000),
+            _ => None,
+        },
+        totals,
+        files,
+        total_turns,
+        from_turn,
+        turn_index,
+        turns,
+    })
+}
+
+/// Turns `from_turn..from_turn+limit` of `key` (only launch `lid`'s when
+/// not empty), each text cut to `max_chars`, with their observations.
+pub fn load_turns(
+    conn: &Connection,
+    key: &str,
+    lid: &str,
+    from_turn: usize,
+    limit: usize,
+    max_chars: usize,
+) -> rusqlite::Result<Vec<Turn>> {
     let mut turns = Vec::new();
     {
         let mut stmt = conn.prepare(
@@ -551,7 +590,12 @@ pub fn load_transcript(
              ORDER BY start_ns ASC, id ASC LIMIT ?3 OFFSET ?4",
         )?;
         let rows = stmt.query_map(
-            params![key, lid, opts.limit as i64, from_turn as i64],
+            params![
+                key,
+                lid,
+                i64::try_from(limit).unwrap_or(-1),
+                from_turn as i64
+            ],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -584,7 +628,7 @@ pub fn load_transcript(
             ) = row?;
             let mut truncated = Vec::new();
             let mut lengths = BTreeMap::new();
-            let max = opts.max_chars;
+            let max = max_chars;
             let input = clip(input, "input", max, &mut truncated, &mut lengths);
             let output = clip(output, "output", max, &mut truncated, &mut lengths);
             let thinking = clip(thinking, "thinking", max, &mut truncated, &mut lengths);
@@ -664,7 +708,7 @@ pub fn load_transcript(
         })?;
         for o in rows {
             let mut o = o?;
-            let max = opts.max_chars;
+            let max = max_chars;
             o.input = clip(
                 o.input.take(),
                 "input",
@@ -700,30 +744,7 @@ pub fn load_transcript(
             turn.observations.push(o);
         }
     }
-
-    Ok(Transcript {
-        ok: true,
-        session_key: key.to_string(),
-        launch_id: launch_id.map(str::to_string),
-        title,
-        provider,
-        cwd,
-        content_mode,
-        launches,
-        models,
-        started_ns,
-        ended_ns,
-        duration_ms: match (started_ns, ended_ns) {
-            (Some(s), Some(e)) => Some((e - s).max(0) / 1_000_000),
-            _ => None,
-        },
-        totals,
-        files,
-        total_turns,
-        from_turn,
-        turn_index,
-        turns,
-    })
+    Ok(turns)
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -786,7 +807,7 @@ async fn transcript(
 }
 
 /// `GET /api/export/session/{key}.html[?launch_id=&download=1]`: the whole
-/// transcript (up to `TRANSCRIPT_PAGE_MAX` turns) as one self-contained
+/// transcript, every turn and every stored character, as one self-contained
 /// HTML file; `download=1` asks the browser to save it.
 async fn export_session(
     State(state): State<Arc<WebState>>,
@@ -799,14 +820,18 @@ async fn export_session(
         .filter(|k| !k.is_empty())
         .ok_or_else(|| ApiError::not_found("export a session as <key>.html"))?
         .to_string();
-    let opts = TranscriptOpts {
-        from_turn: 0,
-        turn: None,
-        limit: TRANSCRIPT_PAGE_MAX,
-        max_chars: EXPORT_MAX_CHARS,
-    };
-    let t = read_transcript(state, key, q.launch_id, None, opts).await?;
-    let html = export_html(&t);
+    let launch_id = q.launch_id;
+    let (session_key, html) = tokio::task::spawn_blocking(move || {
+        let conn = crate::tracing::store::open_ro(&state.db)
+            .map_err(|e| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
+        let lid = launch_id.as_deref().filter(|s| !s.is_empty());
+        check_session(&conn, &state.trace.config().scope, &key, lid)?;
+        let html = export_session_html(&conn, &key, lid, EXPORT_PAGE)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        Ok::<_, ApiError>((key, html))
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("export panicked: {e}")))??;
     let disposition = format!(
         "{}; filename=\"{}.html\"",
         if q.download.as_deref().is_some_and(|d| d != "0") {
@@ -814,7 +839,7 @@ async fn export_session(
         } else {
             "inline"
         },
-        file_stem(&t.session_key)
+        file_stem(&session_key)
     );
     Ok((
         [
@@ -938,8 +963,65 @@ footer{margin-top:40px;font-size:12px;color:var(--muted)}
 /// The transcript as one self-contained HTML document: inline CSS, no
 /// script, every stored text escaped.
 pub fn export_html(t: &Transcript) -> String {
-    let e = escape_html;
     let mut o = String::with_capacity(16 * 1024);
+    export_head(&mut o, t);
+    if t.turns.len() < t.total_turns {
+        let _ = write!(
+            o,
+            "<p class=\"cut\">The first {} of {} turns.</p>",
+            t.turns.len(),
+            t.total_turns
+        );
+    }
+    for turn in &t.turns {
+        export_turn(&mut o, turn);
+    }
+    export_foot(&mut o);
+    o
+}
+
+/// The export of `key` (only `launch_id`'s turns when given): every turn,
+/// read `page` turns at a time, and every stored character. The caller
+/// checks the scope first (`check_session`).
+pub fn export_session_html(
+    conn: &Connection,
+    key: &str,
+    launch_id: Option<&str>,
+    page: usize,
+) -> rusqlite::Result<String> {
+    let page = page.max(1);
+    let head = load_transcript(
+        conn,
+        key,
+        launch_id,
+        TranscriptOpts {
+            from_turn: 0,
+            turn: None,
+            limit: 0,
+            max_chars: usize::MAX,
+        },
+    )?;
+    let mut o = String::with_capacity(16 * 1024);
+    export_head(&mut o, &head);
+    let lid = launch_id.unwrap_or("");
+    let mut from = 0;
+    loop {
+        let turns = load_turns(conn, key, lid, from, page, usize::MAX)?;
+        for turn in &turns {
+            export_turn(&mut o, turn);
+        }
+        if turns.len() < page {
+            break;
+        }
+        from += turns.len();
+    }
+    export_foot(&mut o);
+    Ok(o)
+}
+
+/// The document head, the header facts and the files table.
+fn export_head(o: &mut String, t: &Transcript) {
+    let e = escape_html;
     let title = t.title.clone().unwrap_or_else(|| t.session_key.clone());
     let _ = write!(
         o,
@@ -1039,23 +1121,14 @@ pub fn export_html(t: &Transcript) -> String {
         o.push_str("</table>");
     }
     o.push_str("<h2>Transcript</h2>");
-    if t.turns.len() < t.total_turns {
-        let _ = write!(
-            o,
-            "<p class=\"cut\">The first {} of {} turns.</p>",
-            t.turns.len(),
-            t.total_turns
-        );
-    }
-    for turn in &t.turns {
-        export_turn(&mut o, turn);
-    }
+}
+
+fn export_foot(o: &mut String) {
     let _ = writeln!(
         o,
         "<footer>Exported by agent-mux from the trace store · {}</footer></main></body></html>",
         fmt_ns(Some(crate::tracing::store::now_ns()))
     );
-    o
 }
 
 fn cut_note(o: &mut String, lengths: &BTreeMap<&'static str, usize>, field: &str) {

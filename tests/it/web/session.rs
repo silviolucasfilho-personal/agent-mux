@@ -406,3 +406,68 @@ fn the_export_is_one_self_contained_escaped_html_file() {
     assert_eq!(status, 404, "the file must be <key>.html");
     server.abort();
 }
+
+#[test]
+fn the_export_keeps_every_turn_and_every_character() {
+    let temp = tempfile::tempdir().unwrap();
+    let (db, _) = viewer_store(temp.path());
+    // more turns than the interactive page cap, and a text longer than any
+    // clip, at the very end so a cut would lose it
+    let extra = agent_mux::web::trace::TRANSCRIPT_PAGE_MAX + 1;
+    let long = format!("{}THE-END", "x".repeat(250_000));
+    {
+        let mut conn = rusqlite::Connection::open(&db).unwrap();
+        let base: i64 = conn
+            .query_row("SELECT MAX(start_ns) FROM traces", [], |r| r.get(0))
+            .unwrap();
+        let tx = conn.transaction().unwrap();
+        for i in 0..extra {
+            let output = if i + 1 == extra {
+                long.clone()
+            } else {
+                format!("bulk answer {i}")
+            };
+            tx.execute(
+                "INSERT INTO traces (id, session_key, launch_id, ordinal, name, status, start_ns,
+                     end_ns, input, output, skills)
+                 VALUES (?1, 'claude:s1', 'L1', ?2, 'bulk', 'closed', ?3, ?3, ?4, ?5, '[]')",
+                params![
+                    format!("bulk-{i:05}"),
+                    10 + i as i64,
+                    base + 1_000 * (i as i64 + 1),
+                    format!("bulk prompt {i}"),
+                    output
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let total = 3 + extra;
+
+    let (base, server) = start(&db);
+    let (status, _, html) = get(&base, "/api/export/session/claude%3As1.html");
+    assert_eq!(status, 200);
+    assert!(
+        html.contains(&format!("id=\"turn-{total}\"")),
+        "the last turn"
+    );
+    assert!(!html.contains(&format!("id=\"turn-{}\"", total + 1)));
+    assert_eq!(html.matches("<section class=\"turn\"").count(), total);
+    assert!(html.contains("bulk prompt 0") && html.contains("bulk answer 1999"));
+    assert!(html.contains(&long), "the long text is whole");
+    assert!(!html.contains("The first "), "no partial-transcript note");
+    assert!(!html.contains("cut: "), "no clipped field");
+    // the interactive endpoint still pages and clips
+    let (_, t) = transcript(&base, "claude:s1", &format!("?from_turn={}", total - 1));
+    assert_eq!(t["turns"][0]["truncated"], json!(["output"]));
+    assert_eq!(t["turns"][0]["lengths"]["output"], long.chars().count());
+    server.abort();
+
+    // the page size does not change the document (but for the timestamp)
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let strip = |h: String| h[..h.rfind("<footer>").unwrap()].to_string();
+    let one = agent_mux::web::trace::export_session_html(&conn, "claude:s1", None, 7).unwrap();
+    let all = agent_mux::web::trace::export_session_html(&conn, "claude:s1", None, 5_000).unwrap();
+    assert_eq!(strip(one), strip(all));
+}

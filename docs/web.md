@@ -472,8 +472,9 @@ turns. It unsubscribes once the session is no longer live, and on leaving.
 **Paging.** The page loads 200 turns and offers **Load more**.
 
 **Export.** **Open export** and **Download HTML** fetch
-`GET /api/export/session/<key>.html`: the whole transcript (up to 2,000
-turns, each text up to 200,000 characters) as one HTML document with
+`GET /api/export/session/<key>.html`: the whole transcript (every turn and every stored character, read 200
+turns at a time; only the JSON transcript pages and clips) as one HTML
+document with
 inline CSS, light and dark, thinking and tool calls in `<details>`, no
 script and no external resource (`Content-Security-Policy: default-src
 'none'; style-src 'unsafe-inline'`). Every stored text is HTML-escaped
