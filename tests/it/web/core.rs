@@ -359,3 +359,136 @@ fn live_answers_ready_without_a_store() {
     assert!(!db.exists(), "the stream never creates a store");
     server.abort();
 }
+
+#[test]
+fn resolve_turns_a_launch_id_into_its_session_key() {
+    use agent_mux::tracing::pricing::PriceTable;
+    use agent_mux::tracing::store::model::{LaunchRow, StoreOp, TraceRow, TraceStatus};
+    use agent_mux::tracing::store::{OpenOptions, now_ns, open_rw};
+
+    let temp = tempfile::tempdir().unwrap();
+    let (db, ws) = seeded_store(temp.path());
+    let mut store = open_rw(
+        &db,
+        OpenOptions {
+            prices: PriceTable::builtin(),
+            run_id: "run-resolve".into(),
+            retention_days: 0,
+            agent_mux_version: "test".into(),
+        },
+    )
+    .unwrap();
+    let launch = |id: &str| LaunchRow {
+        id: id.into(),
+        run_id: "run-resolve".into(),
+        agent_mux_session: 1,
+        profile: "Claude Code".into(),
+        provider: "claude".into(),
+        cwd: ws.to_string_lossy().into_owned(),
+        project_slug: "-ws".into(),
+        content_mode: "full".into(),
+        correlation_plan: "deterministic".into(),
+        correlation: Some("deterministic".into()),
+        session_key: Some("claude:s1".into()),
+        injected_session_id: true,
+        attached: false,
+        started_ns: now_ns(),
+        ended_ns: None,
+        termination: None,
+        exit_code: None,
+        parse_errors: None,
+        dropped_ops: None,
+        reported_cost_usd: None,
+        reported_lines_added: None,
+        reported_lines_removed: None,
+        agent_mux_version: "test".into(),
+        user_id: None,
+        release: None,
+        environment: None,
+        tags: vec![],
+        metadata: None,
+    };
+    let t0 = now_ns();
+    store
+        .apply(&[
+            // a launch row whose traces do not carry it
+            StoreOp::Launch(launch("launch-a")),
+            // a launch its session's traces carry
+            StoreOp::Launch(launch("launch-b")),
+            StoreOp::Trace(TraceRow {
+                id: "t-b".into(),
+                session_key: "claude:s1".into(),
+                provider: "claude".into(),
+                session_id: "s1".into(),
+                launch_id: Some("launch-b".into()),
+                ordinal: 3,
+                name: "turn 3".into(),
+                status: TraceStatus::Closed,
+                start_ns: t0,
+                end_ns: Some(t0 + 1_000_000_000),
+                input: Some("again".into()),
+                output: Some("ok".into()),
+                thinking: None,
+                skills: None,
+                reported_duration_ms: None,
+                reported_message_count: None,
+                session_cost_usd: None,
+                timing_approx: false,
+                metadata: None,
+            }),
+        ])
+        .unwrap();
+    drop(store);
+    let (base, server) = start(&db);
+
+    let json = |path: &str| {
+        let (status, _, body) = get(&base, path);
+        (
+            status,
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        )
+    };
+
+    // a session key resolves to itself
+    let (status, r) = json("/api/resolve?id=claude%3As1");
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["session_key"], "claude:s1");
+    assert!(r["launch_id"].is_null(), "{r}");
+
+    // a launch id resolves to its session; the launch travels on only when
+    // the session's traces carry it, so get_session accepts the pair
+    let (status, r) = json("/api/resolve?id=launch-a");
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["session_key"], "claude:s1");
+    assert!(r["launch_id"].is_null(), "{r}");
+    let (status, r) = json("/api/resolve?id=launch-b");
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["session_key"], "claude:s1");
+    assert_eq!(r["launch_id"], "launch-b");
+    let (status, env) = post(
+        &base,
+        "/api/trace/get_session",
+        &json!({"session_key": r["session_key"], "launch_id": r["launch_id"]}),
+    );
+    assert_eq!(status, 200, "{env}");
+    // the raw launch id is not a session key: what the palette used to send
+    let (status, _) = post(
+        &base,
+        "/api/trace/get_session",
+        &json!({"session_key": "launch-b"}),
+    );
+    assert_eq!(status, 404);
+
+    let (status, r) = json("/api/resolve?id=nope");
+    assert_eq!(status, 404, "{r}");
+    assert_eq!(r["ok"], false);
+    let (status, r) = json("/api/resolve?id=");
+    assert_eq!(status, 400, "{r}");
+    let (status, r) = json("/api/resolve");
+    assert_eq!(status, 400, "{r}");
+
+    // app.js opens a typed id through the route
+    let (_, _, app) = get(&base, "/static/app.js");
+    assert!(app.contains("/api/resolve?id="));
+    server.abort();
+}

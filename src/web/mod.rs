@@ -295,6 +295,93 @@ async fn live(State(state): State<Arc<WebState>>) -> impl IntoResponse {
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveQuery {
+    id: String,
+}
+
+/// What `/api/resolve` answers for an id: the session key it names, and
+/// the launch id when the id was a launch whose traces carry it (so it can
+/// travel to `get_session` as `launch_id`).
+fn resolve_id(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> rusqlite::Result<Option<(String, Option<String>)>> {
+    use rusqlite::OptionalExtension;
+    let session: Option<String> = conn
+        .query_row("SELECT key FROM sessions WHERE key = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if let Some(key) = session {
+        return Ok(Some((key, None)));
+    }
+    // a launch: its own row first, else the traces it wrote
+    let mut key: Option<String> = conn
+        .query_row(
+            "SELECT session_key FROM launches WHERE id = ?1",
+            [id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    if key.is_none() {
+        key = conn
+            .query_row(
+                "SELECT session_key FROM traces WHERE launch_id = ?1 LIMIT 1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+    }
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let traced: bool = conn
+        .query_row(
+            "SELECT 1 FROM traces WHERE session_key = ?1 AND launch_id = ?2 LIMIT 1",
+            [key.as_str(), id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    Ok(Some((key, traced.then(|| id.to_string()))))
+}
+
+/// `GET /api/resolve?id=<session key or launch id>`:
+/// `{ok, session_key, launch_id}` (`launch_id` null unless the id was a
+/// launch its session's traces carry); 404 when the store knows neither.
+/// The command palette opens a session typed by either id through it.
+async fn resolve(
+    State(state): State<Arc<WebState>>,
+    query: Result<axum::extract::Query<ResolveQuery>, axum::extract::rejection::QueryRejection>,
+) -> ApiResult<serde_json::Value> {
+    let axum::extract::Query(q) = query.map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let id = q.id.trim().to_string();
+    if id.is_empty() {
+        return Err(ApiError::bad_request("id is empty"));
+    }
+    let db = state.db.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let conn = crate::tracing::store::open_ro(&db)
+            .map_err(|e| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
+        resolve_id(&conn, &id)
+            .map_err(|e| ApiError::internal(e.to_string()))
+            .map(|r| (id, r))
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
+    match found {
+        (_, Some((session_key, launch_id))) => Ok(axum::Json(serde_json::json!({
+            "ok": true,
+            "session_key": session_key,
+            "launch_id": launch_id,
+        }))),
+        (id, None) => Err(ApiError::not_found(format!("no session or launch '{id}'"))),
+    }
+}
+
 async fn api_not_found() -> Response {
     ApiError::not_found("no such route").into_response()
 }
@@ -312,6 +399,7 @@ pub fn router(state: Arc<WebState>) -> Router {
         .merge(usage::routes())
         .merge(tools::routes())
         .route("/api/live", get(live))
+        .route("/api/resolve", get(resolve).post(resolve))
         .route("/api/{*rest}", axum::routing::any(api_not_found))
         .with_state(state)
 }

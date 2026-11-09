@@ -1107,10 +1107,10 @@
       .filter((x) => x.score > (needle ? 1 : 0))
       .sort((a, b) => b.score - a.score)
       .slice(0, needle ? 8 : 5)
-      .map(({ s }) => ({ kind: 'session', label: s.session_key || s.launch_id, hint: [s.provider, shortPath(s.cwd), fmtAgo(s.last_active)].filter(Boolean).join(' · '), run: () => navigate('/sessions/' + encodeURIComponent(s.session_key || s.launch_id)) }));
+      .map(({ s }) => ({ kind: 'session', label: s.session_key || s.launch_id, hint: [s.provider, shortPath(s.cwd), fmtAgo(s.last_active)].filter(Boolean).join(' · '), run: () => (s.session_key ? navigate('/sessions/' + encodeURIComponent(s.session_key)) : openSession(s.launch_id)) }));
     items = items.concat(matches);
     if (q && !matches.some((m) => m.label === q)) {
-      items.push({ kind: 'session', label: 'Open session ' + q, hint: 'by key or launch id', run: () => navigate('/sessions/' + encodeURIComponent(q)) });
+      items.push({ kind: 'session', label: 'Open session ' + q, hint: 'by key or launch id', run: () => openSession(q), keepOpen: true });
     }
     palette.items = items;
     palette.index = Math.min(palette.index, Math.max(0, items.length - 1));
@@ -1138,8 +1138,41 @@
 
   function runPalette(i) {
     const it = palette.items[i];
-    closeOverlays();
-    if (it) it.run();
+    if (!it) return;
+    if (!it.keepOpen) closeOverlays();
+    it.run();
+  }
+
+  // GET /api/resolve?id=…: a session key or a launch id → {session_key, launch_id}.
+  async function resolveSession(id) {
+    const res = await fetch('/api/resolve?id=' + encodeURIComponent(id), { headers: { accept: 'application/json' } });
+    let data = null;
+    try { data = await res.json(); } catch (_) { data = null; }
+    if (!res.ok || !data || data.ok === false) {
+      const err = new Error((data && data.error) || res.status + ' ' + res.statusText);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+
+  // Opens a session named by its key or by one of its launch ids; an
+  // unknown id keeps the palette open with the reason.
+  async function openSession(id) {
+    try {
+      const r = await resolveSession(id);
+      closeOverlays();
+      navigate('/sessions/' + encodeURIComponent(r.session_key), r.launch_id ? { launch_id: r.launch_id } : null);
+    } catch (err) {
+      const list = document.getElementById('palette-list');
+      if (list && !document.getElementById('palette').hidden) {
+        list.replaceChildren(h('li', { class: 'muted empty-row', role: 'alert', text: err.message }));
+        palette.items = [];
+      } else {
+        closeOverlays();
+        navigate('/sessions/' + encodeURIComponent(id));
+      }
+    }
   }
 
   function showPalette() {
@@ -1295,7 +1328,7 @@
     filters, filterBar, providers: PROVIDERS,
     charts, live,
     theme: { cycle: cycleTheme, apply: applyTheme, isDark },
-    palette: { open: showPalette }, shortcuts: { open: showShortcuts },
+    palette: { open: showPalette }, openSession, resolveSession, shortcuts: { open: showShortcuts },
     render,
   };
 

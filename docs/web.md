@@ -50,6 +50,7 @@ area's own document; an error is `{"ok": false, "error": "<message>"}` with a
 | `POST /api/runs/…` | | Loop and workflow runs; see below. |
 | `POST /api/library/…` | | The configuration library; see below. |
 | `GET /api/live` | | Server-Sent Events: the store changed; see [Live](#live). |
+| `GET /api/resolve?id=<id>` | | `{ok, session_key, launch_id}` for a session key or a launch id (`launches.session_key`, else the traces that carry the launch); `launch_id` is set only when the session's traces carry it, so the pair passes `get_session`. `404` for an unknown id, `400` for an empty one. |
 | `/api/usage/…`, `/api/tools/…` | | Slots for the Usage and Tools areas (no routes yet). |
 
 The trace envelope is the one the MCP server returns as `structuredContent`
@@ -183,7 +184,7 @@ el.appendChild(M.panel('Tokens per day', M.charts.bar({
 
 | Keys | Action |
 |---|---|
-| `Ctrl+K` / `⌘K` | Command palette: the pages, toggle theme, the shortcuts, and the most recent sessions; typing filters them, and any text can be opened as a session key or launch id. `↑`/`↓` move, `Enter` opens, `Esc` closes. |
+| `Ctrl+K` / `⌘K` | Command palette: the pages, toggle theme, the shortcuts, and the most recent sessions; typing filters them, and any text can be opened as a session key or launch id (resolved through `/api/resolve`, then `#/sessions/<key>?launch_id=<id>`; an unknown id stays in the palette with the reason). `↑`/`↓` move, `Enter` opens, `Esc` closes. |
 | `j` / `k` | Next / previous table row on the page. |
 | `Enter` | Open the selected row. |
 | `/` | Focus the page's search or first filter field (else open the palette). |
