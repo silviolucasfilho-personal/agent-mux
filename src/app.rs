@@ -2805,6 +2805,15 @@ pub struct App {
     pub pending_wake_submits: Vec<(String, Instant)>,
     /// When the swarm dispatcher last looked (`swarm_engine`).
     pub last_swarm_engine_pass: Option<Instant>,
+    /// `swarm_engine::swarm_catalog_facts`' cache: (workspace, read at,
+    /// facts).
+    pub(crate) swarm_catalog_cache: std::cell::RefCell<
+        Option<(
+            std::path::PathBuf,
+            Instant,
+            crate::bus::swarm::plan::CheckEnv,
+        )>,
+    >,
     /// How long a ready task stays offered to the coordinator before the
     /// dispatcher starts it ([`crate::bus::swarm::engine::DISPATCH_GRACE_NS`];
     /// `[swarm] dispatch_grace_s`, shorter in tests).
@@ -2972,6 +2981,7 @@ impl App {
             pending_bus_wakes: Vec::new(),
             pending_wake_submits: Vec::new(),
             last_swarm_engine_pass: None,
+            swarm_catalog_cache: std::cell::RefCell::new(None),
             swarm_dispatch_grace_ns: crate::bus::swarm::engine::DISPATCH_GRACE_NS,
             last_swarm_adopt_check: None,
             swarm_needs: 0,
@@ -5320,8 +5330,7 @@ impl App {
 
     /// The agents agy cannot run with their tools (`plan::writing_agents`).
     fn swarm_writing_agents(&self, workspace: &std::path::Path) -> Vec<String> {
-        let catalog = crate::agents::Catalog::load(&self.library_root(), Some(workspace));
-        crate::bus::swarm::plan::writing_agents(&catalog)
+        self.swarm_catalog_facts(workspace).writing_agents
     }
 
     /// Re-reads the open Swarm screen now.
@@ -5339,17 +5348,37 @@ impl App {
         self.sync_swarm_pane_selection();
     }
 
+    /// The Swarm screen's periodic read: a finished background read is put
+    /// on the screen, and a due one starts on a thread, so the keyboard
+    /// never waits on the store (without a store path, it reads in place).
     pub fn refresh_swarm_if_needed(&mut self, now: Instant) {
-        if !matches!(self.mode, Mode::Swarm(_)) {
+        let Mode::Swarm(view) = &mut self.mode else {
             return;
+        };
+        if view.poll_refresh() {
+            self.sync_swarm_pane_selection();
         }
         let live = self.live_sessions_in(None);
         let due = match &mut self.mode {
             Mode::Swarm(view) => view.refresh_due(&live, now),
             _ => false,
         };
-        if due {
+        if !due {
+            return;
+        }
+        let Some(db) = self.trace_db_path.clone() else {
             self.refresh_swarm_board();
+            return;
+        };
+        let Mode::Swarm(view) = &self.mode else {
+            return;
+        };
+        let env = self.swarm_board_env(view);
+        let ws = view.current_workspace();
+        let writing = self.swarm_writing_agents(&ws);
+        if let Mode::Swarm(view) = &mut self.mode {
+            view.writing_agents = writing;
+            view.refresh_in_background(&live, env.as_ref(), crate::tracing::store::now_ns(), db);
         }
     }
 

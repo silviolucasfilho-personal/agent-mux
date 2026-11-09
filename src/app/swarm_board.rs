@@ -31,6 +31,10 @@ use std::process::Command;
 /// How often a tick may ask the store whether anything changed.
 const REFRESH_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How often the open Changes tab reads its `git` diff again while the
+/// swarm runs.
+const DIFF_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Which part of the screen has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -775,6 +779,13 @@ pub struct SwarmBoard {
     last_change_seq: Option<i64>,
     live_fingerprint: u64,
     last_check: Option<std::time::Instant>,
+    /// The periodic read in flight ([`SwarmBoard::refresh_in_background`]).
+    loading: Option<Loading>,
+    /// Bumped by every synchronous read: a background read started before
+    /// it is stale.
+    generation: u64,
+    /// When the Changes tab's diff was last read in the background.
+    diff_at: Option<std::time::Instant>,
 }
 
 impl std::fmt::Debug for SwarmBoard {
@@ -882,6 +893,9 @@ impl SwarmBoard {
             last_change_seq: None,
             live_fingerprint: 0,
             last_check: None,
+            loading: None,
+            generation: 0,
+            diff_at: None,
             drawn: std::cell::Cell::new(Drawn::default()),
         };
         v.refresh(live, env, now_ns);
@@ -903,6 +917,9 @@ impl SwarmBoard {
     /// Whether the store's change feed or a live session moved since the
     /// last read; at most one store read per [`REFRESH_CHECK_INTERVAL`].
     pub fn refresh_due(&mut self, live: &[LiveSwarmSession], tick: std::time::Instant) -> bool {
+        if self.loading.is_some() {
+            return false;
+        }
         if self
             .last_check
             .is_some_and(|t| tick.duration_since(t) < REFRESH_CHECK_INTERVAL)
@@ -945,23 +962,119 @@ impl SwarmBoard {
     }
 
     /// Re-reads every swarm, its board and messages, keeping the cursor on
-    /// the same row.
+    /// the same row. Synchronous: the screen's opening read and the read
+    /// after an operator's action. The periodic reads go through
+    /// [`SwarmBoard::refresh_in_background`].
     pub fn refresh(&mut self, live: &[LiveSwarmSession], env: Option<&CheckEnv>, now_ns: i64) {
-        let to_coordinator = std::mem::take(&mut self.select_next_coordinator);
-        let key = self
-            .select_next
-            .take()
-            .map(|id| {
-                if to_coordinator {
-                    RowKey::Coordinator(id)
-                } else {
-                    RowKey::Swarm(id)
-                }
-            })
-            .or_else(|| self.rows.get(self.cursor).and_then(|r| self.row_key(*r)));
-        let prev_len = self.list_len();
-        let at_bottom = prev_len == 0 || self.selected_message + 1 >= prev_len;
-        let current = self.swarm.as_ref().map(|s| s.id.clone());
+        // a read in flight would bring older rows than these
+        self.generation += 1;
+        self.loading = None;
+        self.set_live(live, now_ns);
+        let loaded = self
+            .conn
+            .as_ref()
+            .map(|conn| load(conn, &self.load_input(env, now_ns, None, None)));
+        self.apply(loaded);
+        if self.on_task && self.tab() == Tab::Changes {
+            self.diff_for = None;
+            self.load_diff();
+        }
+        if self.on_task && self.tab() == Tab::Trace {
+            self.trace_for = None;
+            self.load_trace();
+        }
+    }
+
+    /// Starts the periodic read on a thread of its own, reading the store at
+    /// `db`; [`SwarmBoard::poll_refresh`] applies it. The UI thread only
+    /// takes the live sessions' telemetry, which it already has: a store
+    /// of hundreds of megabytes, a swarm of dozens of launches and the
+    /// `git` calls of the Changes tab never hold the keyboard up.
+    pub fn refresh_in_background(
+        &mut self,
+        live: &[LiveSwarmSession],
+        env: Option<&CheckEnv>,
+        now_ns: i64,
+        db: PathBuf,
+    ) {
+        if self.loading.is_some() {
+            return;
+        }
+        self.set_live(live, now_ns);
+        // the open tab's own reads go along: the diff at most every
+        // `DIFF_INTERVAL` (each is several `git` processes per worktree)
+        let diff = (self.on_task
+            && self.tab() == Tab::Changes
+            && self.diff_at.is_none_or(|t| t.elapsed() >= DIFF_INTERVAL))
+        .then(|| self.diff_job())
+        .flatten();
+        let trace = (self.on_task && self.tab() == Tab::Trace)
+            .then(|| self.trace_job())
+            .flatten();
+        let input = self.load_input(env, now_ns, diff, trace);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let generation = self.generation;
+        let spawned = std::thread::Builder::new()
+            .name("swarm-screen-read".into())
+            .spawn(move || {
+                let loaded = crate::tracing::store::open_ro(&db)
+                    .ok()
+                    .map(|conn| load(&conn, &input));
+                let _ = tx.send(loaded);
+            });
+        if spawned.is_ok() {
+            self.loading = Some(Loading { generation, rx });
+        }
+    }
+
+    /// Whether a background read is under way.
+    pub fn loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// Applies a finished background read; `true` when it changed the
+    /// screen. A read started before a synchronous one is dropped.
+    pub fn poll_refresh(&mut self) -> bool {
+        let Some(l) = &self.loading else {
+            return false;
+        };
+        let loaded = match l.rx.try_recv() {
+            Ok(loaded) => loaded,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        };
+        let current = l.generation == self.generation;
+        self.loading = None;
+        let Some(loaded) = loaded.filter(|_| current) else {
+            return false;
+        };
+        let (diff, trace) = (loaded.diff.clone(), loaded.trace.clone());
+        self.apply(Some(loaded));
+        // the tab's reads land only if the cursor is still where they were
+        // asked for
+        if let Some((key, lines)) = diff {
+            self.diff_at = Some(std::time::Instant::now());
+            if self.on_task
+                && self.tab() == Tab::Changes
+                && self.diff_job().is_some_and(|j| j.key == key)
+            {
+                self.diff_lines = lines;
+                self.diff_for = Some(key);
+            }
+        }
+        if let Some((want, lines)) = trace
+            && self.on_task
+            && self.tab() == Tab::Trace
+            && self.trace_job().is_some_and(|j| j.want == want)
+        {
+            self.trace_lines = lines;
+            self.trace_for = Some(want);
+        }
+        true
+    }
+
+    /// The live sessions' telemetry, kept on the UI thread.
+    fn set_live(&mut self, live: &[LiveSwarmSession], now_ns: i64) {
         self.now_ns = now_ns;
         self.live_fingerprint = fingerprint(live);
         self.live = live
@@ -989,98 +1102,82 @@ impl SwarmBoard {
             .iter()
             .map(|(k, w)| (k.clone(), w.worker))
             .collect();
-        if let Some(conn) = &self.conn {
-            self.last_change_seq = crate::tracing::store::latest_change_seq(conn).ok();
-            let here = self.norm_workspace();
-            // One swarm per screen (§9.1): the chosen one, else the folder's
-            // newest live one, which then becomes the choice. Other swarms
-            // are reached with `o` (the picker).
+    }
+
+    fn load_input(
+        &self,
+        env: Option<&CheckEnv>,
+        now_ns: i64,
+        diff: Option<DiffJob>,
+        trace: Option<TraceJob>,
+    ) -> LoadInput {
+        LoadInput {
+            scope: self.scope.clone(),
+            here: self.norm_workspace(),
+            current: self.swarm.as_ref().map(|s| s.id.clone()),
+            workers: self.workers.clone(),
+            env: env.cloned(),
+            now_ns,
+            diff,
+            trace,
+        }
+    }
+
+    /// The Changes tab's read for the task under the cursor.
+    fn diff_job(&self) -> Option<DiffJob> {
+        let t = self.selected_task()?;
+        Some(DiffJob {
+            key: format!("{}:{:?}", t.task.id, t.task.worktree),
+            worktree: t.task.worktree.as_deref().map(PathBuf::from),
+            workspace: self.workspace.clone(),
+        })
+    }
+
+    /// The Trace tab's read for the task (or sub-agent) under the cursor.
+    fn trace_job(&self) -> Option<TraceJob> {
+        let launch = self.selected_task()?.task.assigned_to.clone()?;
+        let agent = self
+            .rows
+            .get(self.cursor)
+            .copied()
+            .and_then(|r| self.agent_of(r))
+            .map(|a| a.id.clone());
+        Some(TraceJob {
+            want: (launch, agent),
+        })
+    }
+
+    /// Puts a read on the screen, keeping the cursor on the same row (the
+    /// row it is on now: the operator may have moved while it was read).
+    fn apply(&mut self, loaded: Option<Loaded>) {
+        let to_coordinator = std::mem::take(&mut self.select_next_coordinator);
+        let key = self
+            .select_next
+            .take()
+            .map(|id| {
+                if to_coordinator {
+                    RowKey::Coordinator(id)
+                } else {
+                    RowKey::Swarm(id)
+                }
+            })
+            .or_else(|| self.rows.get(self.cursor).and_then(|r| self.row_key(*r)));
+        let prev_len = self.list_len();
+        let at_bottom = prev_len == 0 || self.selected_message + 1 >= prev_len;
+        if let Some(loaded) = loaded {
+            self.last_change_seq = loaded.change_seq;
             if self.scope.is_none() {
-                self.scope = record::live_swarm(conn, &here).ok().flatten().map(|s| s.id);
+                self.scope = loaded.scope;
             }
-            let runs: Vec<SwarmRun> = self
-                .scope
-                .as_deref()
-                .and_then(|id| record::get_swarm(conn, id).ok().flatten())
-                .into_iter()
-                .collect();
-            let mut swarms = Vec::with_capacity(runs.len());
-            for run in runs {
-                let board = record::board(conn, &run.id).unwrap_or_default();
-                let messages =
-                    crate::bus::store::list_workspace_messages(conn, &run.workspace, 500)
-                        .unwrap_or_default();
-                let asking = open_questions(&messages)
-                    .into_iter()
-                    .map(|m| m.from_launch.clone())
-                    .collect();
-                let problems = match env {
-                    Some(env)
-                        if Some(&run.id) == current.as_ref()
-                            && matches!(
-                                run.status,
-                                SwarmStatus::Planning | SwarmStatus::Review
-                            )
-                            && !board.is_empty() =>
-                    {
-                        crate::bus::swarm::plan::check(&record::board_plan(&run, &board), env)
-                    }
-                    _ => Problems::default(),
-                };
-                if !self.seen.contains(&run.id) {
-                    self.seen.insert(run.id.clone());
-                    if run.ended_ns.is_some() {
-                        self.folded.insert(run.id.clone());
+            for d in &loaded.swarms {
+                if !self.seen.contains(&d.run.id) {
+                    self.seen.insert(d.run.id.clone());
+                    if d.run.ended_ns.is_some() {
+                        self.folded.insert(d.run.id.clone());
                     }
                 }
-                let launch_decision = self
-                    .conn
-                    .as_ref()
-                    .and_then(|c| record::launch_decision(c, &run.id));
-                let agents = self
-                    .conn
-                    .as_ref()
-                    .map(|c| sub_agents(c, &board))
-                    .unwrap_or_default();
-                // the log and the timeline (§9.3), once per refresh
-                let events = self
-                    .conn
-                    .as_ref()
-                    .and_then(|c| record::recent_events(c, &run.id, 1000).ok())
-                    .unwrap_or_default();
-                let timeline = self.conn.as_ref().and_then(|c| {
-                    crate::tracing::swarm_report::report(c, &run, &self.workers, now_ns)
-                        .ok()
-                        .map(|r| crate::tracing::swarm_report::timeline(&r, now_ns))
-                });
-                let review = self
-                    .conn
-                    .as_ref()
-                    .map(|c| crate::bus::swarm::review::settings(c, &run.id))
-                    .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off);
-                let merge_gate = self
-                    .conn
-                    .as_ref()
-                    .map(|c| crate::bus::swarm::gate::settings(c, &run.id))
-                    .unwrap_or_default();
-                let mut d = SwarmData {
-                    run,
-                    board,
-                    messages,
-                    asking,
-                    problems,
-                    needs: Vec::new(),
-                    launch_decision,
-                    agents,
-                    events,
-                    timeline,
-                    review,
-                    merge_gate,
-                };
-                d.needs = needs_for(&d, &self.workers, now_ns);
-                swarms.push(d);
             }
-            self.swarms = swarms;
+            self.swarms = loaded.swarms;
         }
         self.rebuild_rows();
         self.cursor = key
@@ -1094,14 +1191,6 @@ impl SwarmBoard {
         let len = self.list_len();
         if at_bottom || self.selected_message >= len {
             self.selected_message = len.saturating_sub(1);
-        }
-        if self.on_task && self.tab() == Tab::Changes {
-            self.diff_for = None;
-            self.load_diff();
-        }
-        if self.on_task && self.tab() == Tab::Trace {
-            self.trace_for = None;
-            self.load_trace();
         }
     }
 
@@ -3198,6 +3287,143 @@ impl SwarmBoard {
             let at = step(self.cursor, self.rows.len(), delta);
             self.set_cursor(at);
         }
+    }
+}
+
+/// What a read of the screen's rows needs: built on the UI thread, read on
+/// any ([`load`]).
+#[derive(Debug, Clone)]
+struct LoadInput {
+    scope: Option<String>,
+    /// The normalized workspace the screen was opened from.
+    here: String,
+    /// The swarm the cursor is in (the plan's checks are read for it only).
+    current: Option<String>,
+    workers: HashMap<String, Worker>,
+    env: Option<CheckEnv>,
+    now_ns: i64,
+    diff: Option<DiffJob>,
+    trace: Option<TraceJob>,
+}
+
+/// The Changes tab's `git` reads for one task.
+#[derive(Debug, Clone)]
+struct DiffJob {
+    key: String,
+    worktree: Option<PathBuf>,
+    workspace: PathBuf,
+}
+
+/// The Trace tab's read for one launch (and sub-agent).
+#[derive(Debug, Clone)]
+struct TraceJob {
+    want: TraceKey,
+}
+
+/// A finished read.
+#[derive(Debug)]
+struct Loaded {
+    /// The swarm chosen when the screen had none.
+    scope: Option<String>,
+    change_seq: Option<i64>,
+    swarms: Vec<SwarmData>,
+    diff: Option<(String, Vec<String>)>,
+    trace: Option<(TraceKey, Vec<String>)>,
+}
+
+/// A trace read's subject: the worker's launch, and the sub-agent if one.
+type TraceKey = (String, Option<String>);
+
+/// A background read in flight.
+struct Loading {
+    generation: u64,
+    rx: std::sync::mpsc::Receiver<Option<Loaded>>,
+}
+
+/// Reads the screen's swarm, its board, messages, log and timeline (and the
+/// open tab's diff or trace when asked). Touches no screen state, so it runs
+/// on any thread.
+fn load(conn: &Connection, input: &LoadInput) -> Loaded {
+    let change_seq = crate::tracing::store::latest_change_seq(conn).ok();
+    // One swarm per screen (§9.1): the chosen one, else the folder's
+    // newest live one, which then becomes the choice. Other swarms are
+    // reached with `o` (the picker).
+    let scope = input.scope.clone().or_else(|| {
+        record::live_swarm(conn, &input.here)
+            .ok()
+            .flatten()
+            .map(|s| s.id)
+    });
+    let runs: Vec<SwarmRun> = scope
+        .as_deref()
+        .and_then(|id| record::get_swarm(conn, id).ok().flatten())
+        .into_iter()
+        .collect();
+    let now_ns = input.now_ns;
+    let mut swarms = Vec::with_capacity(runs.len());
+    for run in runs {
+        let board = record::board(conn, &run.id).unwrap_or_default();
+        let messages = crate::bus::store::list_workspace_messages(conn, &run.workspace, 500)
+            .unwrap_or_default();
+        let asking = open_questions(&messages)
+            .into_iter()
+            .map(|m| m.from_launch.clone())
+            .collect();
+        let problems = match &input.env {
+            Some(env)
+                if Some(&run.id) == input.current.as_ref()
+                    && matches!(run.status, SwarmStatus::Planning | SwarmStatus::Review)
+                    && !board.is_empty() =>
+            {
+                crate::bus::swarm::plan::check(&record::board_plan(&run, &board), env)
+            }
+            _ => Problems::default(),
+        };
+        let launch_decision = record::launch_decision(conn, &run.id);
+        let agents = sub_agents(conn, &board);
+        // the log and the timeline (§9.3), once per refresh
+        let events = record::recent_events(conn, &run.id, 1000).unwrap_or_default();
+        let timeline = crate::tracing::swarm_report::report(conn, &run, &input.workers, now_ns)
+            .ok()
+            .map(|r| crate::tracing::swarm_report::timeline(&r, now_ns));
+        let review = crate::bus::swarm::review::settings(conn, &run.id);
+        let merge_gate = crate::bus::swarm::gate::settings(conn, &run.id);
+        let mut d = SwarmData {
+            run,
+            board,
+            messages,
+            asking,
+            problems,
+            needs: Vec::new(),
+            launch_decision,
+            agents,
+            events,
+            timeline,
+            review,
+            merge_gate,
+        };
+        d.needs = needs_for(&d, &input.workers, now_ns);
+        swarms.push(d);
+    }
+    let diff = input.diff.as_ref().map(|j| {
+        let lines = match j.worktree.as_deref().filter(|p| p.is_dir()) {
+            Some(wt) => worktree_diff(wt, &j.workspace),
+            None => workspace_diff(&j.workspace),
+        };
+        (j.key.clone(), lines)
+    });
+    let trace = input.trace.as_ref().map(|j| {
+        let lines =
+            crate::tracing::swarm_report::launch_trace_lines(conn, &j.want.0, j.want.1.as_deref())
+                .unwrap_or_else(|e| vec![format!("  could not read the trace: {e}")]);
+        (j.want.clone(), lines)
+    });
+    Loaded {
+        scope,
+        change_seq,
+        swarms,
+        diff,
+        trace,
     }
 }
 
