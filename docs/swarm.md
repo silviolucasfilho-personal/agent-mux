@@ -117,7 +117,7 @@ Each task that needs you carries `!` on its row, and its swarm carries `⚑n`. T
 | `failed` | a task failed, and its automatic retry is spent (or it failed long ago) | `r` retry |
 | `lost` | a worker's session exited mid-task, and its automatic retry is spent, or you stopped it | `r` retry |
 | `stalled` | a worker stopped without reporting, even after a reminder | `Enter` types into its terminal · `r` stops it, then `r` retries |
-| `review` | a worktree task finished | `y` merge · `x` set aside |
+| `review` | a worktree task finished | `y` merge · `Y` merge past the check · `x` set aside |
 | `proposed` | a worker proposed a new task | `y` accept · `x` drop |
 | `check` | the final check failed | the swarm's card shows its output |
 | `finished` | everything is settled | on the swarm: `y` close · `d` delete |
@@ -165,7 +165,8 @@ Press `>` to open the command line. `m` opens it addressed to the selected task'
 | click | a row selects it · the terminal in the pane types into it |
 | `Tab` | tree ↔ pane (in Activity or Thread, `↑`/`↓` choose a message, `Enter` reads it in full, `m` answers it; in Live, `↑↓←→` choose a tile; in Timeline, `←`/`→` pan, `-`/`+` zoom, `0` all; in Log, `↑`/`↓` choose a line, `t` the kinds, `/` a text filter, `Enter` opens the row it is about) |
 | `1`–`6` | the swarm row's tab (Board, Live, Timeline, Log, Activity, Changes) or a worker's (Task, Live, Thread, Trace, Changes) |
-| `y` | confirm the one thing on the row: merge a branch in `review` · accept a proposal · close a finished swarm. Never the plan: on a plan in review, `y` moves the keyboard to the coordinator's chat. |
+| `y` | confirm the one thing on the row: merge a branch in `review` (with a check command: queue it behind the check) · accept a proposal · close a finished swarm. Never the plan: on a plan in review, `y` moves the keyboard to the coordinator's chat. |
+| `Y` | merge a branch in `review` now, past the swarm's check command (`force-merge`; confirms with `y`) |
 | `x` | stop a worker · cancel a task · set a branch aside · drop a proposal (confirms with `y`) |
 | `d` | delete the swarm: a closed one is removed from the store (traces stay), its worktree checkouts removed, branches kept; a running one is closed first (confirms with `y`) |
 | `r` | retry a failed, lost, cancelled or stalled task (the retry form: harness, agent, isolation) · restart an exited coordinator |
@@ -206,7 +207,7 @@ Every swarm reviews each finished task before you merge it, unless you turn it o
     - **Failures:** a conflict, uncommitted changes in the worktree, or a failing check leave your workspace untouched. The task's card shows `✗ not merged` with the end of the output, and the coordinator is told. Message the worker to fix it, then merge again.
     - **Workspace moved:** if the workspace moved while the check ran, the branch is queued again.
     - **The row shows** `⧗` queued, `⟳` checking, `✓` merged, `✗` not merged.
-    - **To merge past the check,** use `agent-mux swarm force-merge <task>` or `agent_mux_swarm_action(verb = "force-merge")`.
+    - **To merge past the check,** press `Y` on the task's row, or use `agent-mux swarm force-merge <task>` or `agent_mux_swarm_action(verb = "force-merge")`.
   - `x` **sets the branch aside** without merging it. The branch is kept. Tasks that depend on it stay blocked.
 - **Finished workers stay open.** You can attach to one or message it with follow-ups until the swarm closes.
 - **The check:** when every task is settled and every branch reviewed, agent-mux runs the swarm's check command, if it has one, in the workspace (`sh -c`, at most 30 minutes). The top line reads `check running`, then `check ✓` or `check ✗`. A failed check lands in Needs you with the end of its output. The swarm still finishes, because whether to fix it is your call.

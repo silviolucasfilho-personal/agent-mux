@@ -172,7 +172,7 @@ impl NeedKind {
             NeedKind::Plan => "Enter on ★: confirm in the chat",
             NeedKind::PlannerFailed => "Enter on ★: talk to it · x then r on ★ restarts it",
             NeedKind::Failed | NeedKind::Lost => "r retry",
-            NeedKind::Review => "y merge · x set aside",
+            NeedKind::Review => "y merge · Y merge past the check · x set aside",
             NeedKind::Proposed => "y accept · x drop",
             NeedKind::CheckFailed => "Enter read it · r retry a task",
             NeedKind::CoordinatorQuiet => "Enter on ★: talk to it",
@@ -394,6 +394,16 @@ pub enum Confirm {
         branch: String,
         /// Why the merge goes against the task's review, if it does.
         warning: Option<String>,
+        /// The swarm's check command: the merge is queued behind it (v26).
+        check: Option<String>,
+    },
+    /// Merge a branch at once, past the swarm's check (`Y`, v26).
+    ForceMerge {
+        task_id: String,
+        branch: String,
+        check: String,
+        /// Why the merge goes against the task's review, if it does.
+        warning: Option<String>,
     },
     SetAside {
         task_id: String,
@@ -469,6 +479,18 @@ impl Confirm {
                 format!("Approve the plan? {tasks} task(s); workers start now.")
             }
             Confirm::Merge {
+                branch,
+                warning,
+                check: Some(check),
+                ..
+            } => format!(
+                "{}Queue {branch} for its merge? `{check}` runs on it brought up to date with the workspace, and it is merged if the check passes (Y merges now).",
+                warning
+                    .as_deref()
+                    .map(|w| format!("⚠ {w}. "))
+                    .unwrap_or_default()
+            ),
+            Confirm::Merge {
                 branch, warning, ..
             } => match warning {
                 Some(w) => format!(
@@ -476,6 +498,18 @@ impl Confirm {
                 ),
                 None => format!("Merge {branch} into the workspace's branch (a merge commit)?"),
             },
+            Confirm::ForceMerge {
+                branch,
+                check,
+                warning,
+                ..
+            } => format!(
+                "{}Merge {branch} now, without running `{check}` on it first (a merge commit)?",
+                warning
+                    .as_deref()
+                    .map(|w| format!("⚠ {w}. "))
+                    .unwrap_or_default()
+            ),
             Confirm::SetAside { branch, .. } => {
                 format!("Set {branch} aside without merging? The branch is kept.")
             }
@@ -2198,6 +2232,7 @@ impl SwarmBoard {
                 }
             },
             KeyCode::Char('y') => self.yes(),
+            KeyCode::Char('Y') => self.force_merge(),
             KeyCode::Char('n') => {
                 // a new swarm, from any row (coordinator-first §9.4): the plan
                 // itself is changed by telling the coordinator
@@ -2369,6 +2404,7 @@ impl SwarmBoard {
                         branch: t.task.branch.clone().unwrap_or_default(),
                         warning: crate::bus::swarm::review::merge_warning(state)
                             .map(str::to_string),
+                        check: swarm.check_cmd.clone(),
                     });
                     return Outcome::None;
                 }
@@ -2412,6 +2448,32 @@ impl SwarmBoard {
             }
             _ => self.status_msg = Some("Nothing to approve here.".into()),
         }
+        Outcome::None
+    }
+
+    /// `Y`: merge the selected branch at once, past the swarm's check
+    /// command (`force-merge`, v26). Without a check, `y` merges at once.
+    fn force_merge(&mut self) -> Outcome {
+        let Some(t) = self.selected_task().cloned() else {
+            return Outcome::None;
+        };
+        if self.shown(&t) != Shown::Review {
+            self.status_msg =
+                Some("Y merges a finished branch past the check: choose one in review.".into());
+            return Outcome::None;
+        }
+        let Some(check) = self.swarm.as_ref().and_then(|s| s.check_cmd.clone()) else {
+            self.status_msg = Some("This swarm has no check: y merges at once.".into());
+            return Outcome::None;
+        };
+        let state =
+            crate::bus::swarm::review::state(&t, &self.board, self.review_settings().enabled);
+        self.confirm = Some(Confirm::ForceMerge {
+            task_id: t.task.id.clone(),
+            branch: t.task.branch.clone().unwrap_or_default(),
+            check,
+            warning: crate::bus::swarm::review::merge_warning(state).map(str::to_string),
+        });
         Outcome::None
     }
 
@@ -2503,6 +2565,7 @@ impl SwarmBoard {
         match c {
             Confirm::Approve { .. } => self.verb(SwarmVerb::Approve, None),
             Confirm::Merge { task_id, .. } => self.verb(SwarmVerb::Merge, Some(task_id)),
+            Confirm::ForceMerge { task_id, .. } => self.verb(SwarmVerb::ForceMerge, Some(task_id)),
             Confirm::SetAside { task_id, .. } => self.verb(SwarmVerb::SetAside, Some(task_id)),
             Confirm::Close => self.verb(SwarmVerb::Close, None),
             Confirm::Cancel { task_id, .. } => Outcome::CancelTask(task_id),
@@ -4036,6 +4099,67 @@ mod tests {
     }
 
     #[test]
+    fn shift_y_merges_a_branch_past_the_check_and_y_queues_it() {
+        let mut wt = task("a", TaskStatus::Done, Some("L1"));
+        wt.task.branch = Some("loop/bus-a".into());
+        let tasks = vec![wt.clone()];
+        // without a check: Y says y merges at once
+        let mut v = board(SwarmStatus::Integrating, tasks.clone(), &[("L1", "idle")]);
+        assert_eq!(v.handle_key(key(KeyCode::Char('Y'))), Outcome::None);
+        assert_eq!(v.confirm, None);
+        assert_eq!(
+            v.status_msg.as_deref(),
+            Some("This swarm has no check: y merges at once.")
+        );
+        // with one: y queues it behind the check, Y merges now after a y
+        let mut run = swarm(SwarmStatus::Integrating);
+        run.check_cmd = Some("make test".into());
+        set_data(&mut v, run, tasks, vec![]);
+        v.set_cursor(1);
+        v.handle_key(key(KeyCode::Char('y')));
+        let Some(c) = v.confirm.clone() else {
+            panic!("y asks first")
+        };
+        assert!(
+            c.question()
+                .starts_with("Queue loop/bus-a for its merge? `make test` runs"),
+            "{}",
+            c.question()
+        );
+        v.handle_key(key(KeyCode::Esc));
+        v.handle_key(key(KeyCode::Char('Y')));
+        assert_eq!(
+            v.confirm,
+            Some(Confirm::ForceMerge {
+                task_id: "task-a".into(),
+                branch: "loop/bus-a".into(),
+                check: "make test".into(),
+                warning: None,
+            })
+        );
+        assert_eq!(
+            v.confirm.as_ref().unwrap().question(),
+            "Merge loop/bus-a now, without running `make test` on it first (a merge commit)?"
+        );
+        assert_eq!(
+            v.handle_key(key(KeyCode::Char('y'))),
+            Outcome::Verb {
+                verb: SwarmVerb::ForceMerge,
+                task: Some("task-a".into()),
+                notes: None
+            }
+        );
+        // only a branch in review
+        let mut v = board(
+            SwarmStatus::Running,
+            vec![task("b", TaskStatus::Running, Some("L1"))],
+            &[("L1", "working")],
+        );
+        v.handle_key(key(KeyCode::Char('Y')));
+        assert_eq!(v.confirm, None);
+    }
+
+    #[test]
     fn x_and_y_act_on_a_finished_branch_and_r_retries_a_failure() {
         let mut wt = task("a", TaskStatus::Done, Some("L1"));
         wt.task.branch = Some("loop/bus-a".into());
@@ -4051,6 +4175,7 @@ mod tests {
                 task_id: "task-a".into(),
                 branch: "loop/bus-a".into(),
                 warning: None,
+                check: None,
             })
         );
         assert_eq!(

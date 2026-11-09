@@ -634,6 +634,9 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
             }
             (_, SwarmStatus::Paused) => "space resume · > message · ! next need · o another swarm",
             (_, SwarmStatus::Finished) => "y close the swarm",
+            (_, SwarmStatus::Integrating) if s.check_cmd.is_some() => {
+                "↓ a branch: y merge after the check, Y merge now, x set aside"
+            }
             (_, SwarmStatus::Integrating) => "↓ a branch: y merge, x set aside",
             (_, SwarmStatus::Planning) => {
                 "tell it in its chat (Enter on ★) · on ★: x stops it, r starts a new one"
@@ -1379,6 +1382,9 @@ fn task_card(v: &SwarmBoard, t: &BoardTask) -> Vec<Line<'static>> {
     out.push(Line::styled(
         match st {
             Shown::Draft => "changes to the plan: tell the coordinator (Enter on ★)",
+            Shown::Review if v.swarm.as_ref().is_some_and(|s| s.check_cmd.is_some()) => {
+                "y merges the branch once the check passes on it · Y merges it now · x sets it aside"
+            }
             Shown::Review => "y merges the branch · x sets it aside",
             Shown::Failed | Shown::Lost | Shown::Cancelled => "r retries it",
             Shown::Proposed => "y accepts it · x drops it",
