@@ -1,7 +1,7 @@
 // agent-mux web: the shell. Hash router, grouped nav, page registry, API
 // client, formatting and DOM helpers, themes, the shared filter bar, SVG
 // charts (M.charts), the live channel (M.live), the command palette and
-// keyboard shortcuts, and the Overview page. Every other script registers
+// keyboard shortcuts. The Overview page lives in usage.js. Every script registers
 // its pages with AgentMux.registerPage and uses these helpers; nothing here
 // is specific to one area. No dependencies, no build step.
 (function () {
@@ -164,7 +164,8 @@
     if (!el) return;
     const route = currentRoute();
     if (!route.path) {
-      const first = navPages()[0] || pages[0];
+      // the Overview is the landing page, whichever script registered it
+      const first = pages.find((p) => p.id === 'overview') || navPages()[0] || pages[0];
       if (first) {
         location.replace('#' + first.path);
         return;
@@ -1335,95 +1336,4 @@
   window.addEventListener('hashchange', () => render());
   if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', wireShell);
   else wireShell();
-
-  // ---- Overview ------------------------------------------------------------------------
-
-  // Sessions of the filter's window: list_sessions paged up to 2,000 rows.
-  async function sessionsIn(f) {
-    const body = { limit: 100 };
-    if (f.provider) body.provider = f.provider;
-    if (f.since) body.since = f.since;
-    if (f.until) body.until = f.until;
-    let env = await api('/api/trace/list_sessions', body);
-    let rows = (env.data && env.data.sessions) || [];
-    let cursor = env.next_cursor;
-    for (let n = 0; cursor && n < 19; n++) {
-      const more = await api('/api/trace/list_sessions', Object.assign({}, body, { cursor }));
-      rows = rows.concat((more.data && more.data.sessions) || []);
-      cursor = more.next_cursor;
-    }
-    if (f.workspace) {
-      const needle = f.workspace.toLowerCase();
-      rows = rows.filter((r) => (r.cwd || '').toLowerCase().includes(needle));
-    }
-    return { env, rows, more: !!cursor };
-  }
-
-  registerPage({
-    id: 'overview',
-    title: 'Overview',
-    path: '/overview',
-    group: 'Overview',
-    live: true,
-    async render(el, params) {
-      const f = filters(params);
-      const out = h('div');
-      el.appendChild(filterBar({ params }));
-      el.appendChild(out);
-      out.appendChild(loading('Loading sessions…'));
-      const { env, rows, more } = await sessionsIn(f);
-      const days = dayRange(f.since || (rows.length ? rows.reduce((a, r) => (a && a < r.first_seen ? a : r.first_seen), null) : null), f.until || null);
-      const providers = Array.from(new Set(rows.map((r) => r.provider || 'unknown'))).sort();
-      const index = new Map(days.map((d, i) => [d, i]));
-      const sessionsBy = providers.map((p) => ({ name: p, values: days.map(() => 0) }));
-      const tokensBy = days.map(() => 0);
-      const costBy = days.map(() => 0);
-      const heat = {};
-      const workspaces = new Map();
-      let tokens = 0, cost = 0, turns = 0, active = 0;
-      for (const r of rows) {
-        const day = dayKey(r.last_active || r.first_seen);
-        const i = index.get(day);
-        if (i !== undefined) {
-          sessionsBy[providers.indexOf(r.provider || 'unknown')].values[i]++;
-          tokensBy[i] += Number(r.tokens) || 0;
-          costBy[i] += Number(r.cost_usd) || 0;
-        }
-        if (day) heat[day] = (heat[day] || 0) + 1;
-        tokens += Number(r.tokens) || 0;
-        cost += Number(r.cost_usd) || 0;
-        turns += Number(r.turns) || 0;
-        if (r.runtime_state === 'working' || r.runtime_state === 'waiting_for_user') active++;
-        const ws = r.cwd || '(none)';
-        const w = workspaces.get(ws) || { label: shortPath(ws), title: ws, value: 0, n: 0 };
-        w.value += Number(r.cost_usd) || 0;
-        w.n++;
-        workspaces.set(ws, w);
-      }
-      out.innerHTML = '';
-      const note = envelopeNote(env);
-      if (note) out.appendChild(note);
-      if (!rows.length) {
-        out.appendChild(empty('No sessions in this range.', 'Widen the date range or clear the filters; sessions appear as the TUI traces them.'));
-        return;
-      }
-      const labels = days.map((d) => d.slice(5));
-      out.appendChild(cards([
-        ['Sessions', fmtNum(rows.length) + (more ? '+' : ''), sparkline(sessionsBy.reduce((acc, s) => acc.map((v, i) => v + s.values[i]), days.map(() => 0)), { labels })],
-        ['Active now', fmtNum(active), 'working or waiting'],
-        ['Turns', fmtNum(turns)],
-        ['Tokens', fmtTokens(tokens), sparkline(tokensBy, { labels, format: fmtTokens, color: 1 })],
-        ['Cost', fmtCost(cost), sparkline(costBy, { labels, format: fmtCost, color: 2 })],
-      ]));
-      const grid = h('div', { class: 'panels' });
-      grid.appendChild(panel('Sessions per day', bar({ labels, series: sessionsBy, stacked: true, onClick: (i) => navigate('/sessions', { since: days[i] }) })));
-      grid.appendChild(panel('Cost per day', line({ labels, series: [{ name: 'cost', values: costBy }], area: true, format: fmtCost })));
-      grid.appendChild(panel('Activity', heatmap({ values: heat, from: days[0], to: days[days.length - 1], format: (v) => fmtNum(v) + ' sessions' })));
-      grid.appendChild(panel('Top workspaces by cost', hbars({
-        items: Array.from(workspaces.values()).map((w) => Object.assign(w, { hint: w.n + ' sessions', href: hrefFor('/sessions', { workspace: w.title }) })),
-        format: fmtCost, limit: 8,
-      })));
-      out.appendChild(grid);
-    },
-  });
 })();

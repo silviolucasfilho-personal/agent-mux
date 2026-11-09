@@ -51,7 +51,8 @@ area's own document; an error is `{"ok": false, "error": "<message>"}` with a
 | `POST /api/library/…` | | The configuration library; see below. |
 | `GET /api/live` | | Server-Sent Events: the store changed; see [Live](#live). |
 | `GET /api/resolve?id=<id>` | | `{ok, session_key, launch_id}` for a session key or a launch id (`launches.session_key`, else the traces that carry the launch); `launch_id` is set only when the session's traces carry it, so the pair passes `get_session`. `404` for an unknown id, `400` for an empty one. |
-| `/api/usage/…`, `/api/tools/…` | | Slots for the Usage and Tools areas (no routes yet). |
+| `POST /api/usage/…` | `UsageArgs` | Token, cost and activity aggregates; see [Usage](#usage). |
+| `/api/tools/…` | | A slot for the Tools area (no routes yet). |
 
 The trace envelope is the one the MCP server returns as `structuredContent`
 (`schema_version`, `as_of`, `scope`, `window`, `data`, `coverage`, `warnings`,
@@ -89,8 +90,8 @@ heatmap `--heat-0` … `--heat-4`, so charts redraw on a theme change.
 
 **Hash routing.** A page lives at `#/<path>`; parameters are `:name`
 segments (`#/sessions/claude%3As1`) and an optional query string
-(`#/sessions?provider=codex&since=24h`). With no hash the first nav page
-(Overview) opens.
+(`#/sessions?provider=codex&since=24h`). With no hash the Overview opens (the page
+with id `overview`, else the first nav page).
 
 **Page registry.** `window.AgentMux.registerPage({id, title, path, render(el, params), nav, navId, group, key, live})`:
 
@@ -103,7 +104,7 @@ segments (`#/sessions/claude%3As1`) and an optional query string
 | `nav` | `false` keeps a detail page out of the nav; `navId` names the nav entry it belongs to. |
 | `group` | The nav group (`AgentMux.groups`). Defaults by id (`sessions`/`search` → Sessions, `skills` → Tools, `swarms`/`bus`/`runs`/`inbox` → Swarms/Runs, `library`/`agents` → Library, `health` → Health), else Tools. |
 | `key` | The letter after `g` that jumps to the page (defaults: `o` Overview, `s` Sessions, `f` Search, `u` Usage, `t` Tools, `k` Skills, `w` Swarms, `b` Bus, `r` Runs, `i` Inbox, `l` Library, `a` Agents, `h` Health). |
-| `live` | `true` re-renders the page when the store changes: quietly (into a detached element swapped in when done, keeping the selected row), debounced, and never while a field has focus or an overlay is open. Overview and Sessions are live. |
+| `live` | `true` re-renders the page when the store changes: quietly (into a detached element swapped in when done, keeping the selected row), debounced, and never while a field has focus or an overlay is open. Overview, Usage and Sessions are live. |
 
 `AgentMux.onLeave(fn)` runs `fn` when the current page is left or
 re-rendered (to drop a subscription or a timer).
@@ -222,14 +223,14 @@ subscriber, and a reconnect that missed changes counts as one.
 curl -N localhost:7331/api/live
 ```
 
-**Pages.** `app.js` registers Overview (`/overview`: the filter bar, cards
-with sparklines, sessions per day by harness, cost per day, an activity
-heatmap and the top workspaces by cost, from `list_sessions`). `trace.js`
+**Pages.** `usage.js` registers Overview (`/overview`, the landing page:
+`render` opens the page with id `overview` when the hash is empty, whichever
+script registered it) and Usage (`/usage`); see [Usage](#usage). `trace.js`
 registers Sessions (`/sessions`), Session (`/sessions/:key`), Search
 (`/search`), Skills & Agents (`/skills`) and Health (`/health`); `swarm.js`
 Swarms (`/swarms`) and Bus (`/bus`), `runs.js` Runs (`/runs`) and Inbox
 (`/inbox`), `library.js` Library (`/library`) and Agents (`/agents`).
-`usage.js` and `tools.js` are empty slots for the Usage and Tools areas.
+`tools.js` is an empty slot for the Tools area.
 
 **Server side.** `web::router(state)` serves `/`, `/static/{*path}`,
 `/api/live` and merges `trace::routes()`, `swarm::routes()`, `runs::routes()`,
@@ -410,6 +411,116 @@ without writing, resetting, or modifying any files.
 | `/api/library/agents` | `GET` | Returns the agent registry with name, description, tools, model, task kind, and schedule. |
 
 ## Usage
+
+The Overview and Usage pages (`web/usage.js`) read `/api/usage/`
+(`src/web/usage.rs`): aggregates computed in SQL over the trace store,
+opened read-only per request on a blocking thread. Nothing writes.
+
+### What is counted
+
+- **Tokens and cost** are the `generation` observations whose own
+  `start_ns` lies in the window, so a window holds only what was spent
+  inside it: a session that spent $10 on Nov 1 and $0.10 on Nov 9 adds
+  $0.10 to a Nov 8–9 window and to Nov 9's bucket. (Bucketing a session's
+  lifetime total by its last activity, as the first Overview did, does not.)
+- **Turns** are `traces` by `start_ns`; a **session** counts when it has a
+  turn or a generation in the window; **launches** by `started_ns`, with
+  their `reported_lines_added` / `reported_lines_removed`.
+- **Token kinds**: `input` (uncached), `output`, `cache_read`, `cache_write`
+  and `reasoning` (part of `output`, Codex). `total_tokens` is input +
+  output + cache read + cache write.
+- **Projects** group by the session's `cwd` (else its `project_slug`);
+  **models** by `observations.model`.
+
+### Which cost is used
+
+`cost_usd` is always the sum of the generations' own costs: agent-mux's
+price for the tokens (`total_cost_usd`, from the `models` price table), or,
+for a call whose transcript carries the provider's own cost, that figure
+(the store keeps it in `observations.provided_cost` and leaves the priced
+columns empty; usage reads `COALESCE(total_cost_usd, provided_cost.total)`,
+and the same for the input, output and cache parts). Only this cost can be
+placed on a day, an hour, a model and a project.
+
+The harness's own total (`launches.reported_cost_usd`, e.g. Claude Code's
+status line) is a figure for the whole launch, not attributable to a day or
+a model, and can differ a lot from the computed one (it covers the whole
+launch, outside the window too, and calls agent-mux did not price). It is shown
+beside the computed cost as `reported_cost_usd` (summed over the launches
+started in the window, per harness; per session the largest of its
+launches) and never replaces or adds to it. When the two differ, the
+computed cost is the one every total, chart and ranking uses.
+`unpriced_generations` counts calls with tokens but neither a price row nor
+a provider cost: their tokens are counted and their cost is missing.
+
+### Request
+
+Every route is `POST /api/usage/<name>` with one closed JSON object (an
+unknown field is a `400`; an empty body is `{}`):
+
+| Field | Meaning |
+|---|---|
+| `since`, `until` | RFC 3339, or relative before now (`24h`, `7d`, `90m`, `2w`). Default: the 7 days before now. `since` after `until` is a `400`. |
+| `provider` | Only this harness (`sessions.provider`, `launches.provider`). |
+| `project` (alias `workspace`) | A case-insensitive fragment of the session's (launch's) `cwd` or `project_slug`. |
+| `tz_offset_min` | Minutes east of UTC for day, hour and weekday buckets (the page sends `-new Date().getTimezoneOffset()`). Default 0, at most ±840. |
+| `limit` | Rows of `sessions` (default 50, at most 500); the Overview top lists show at most 8. |
+
+`agent-mux web --workspace DIR` scopes every aggregate: only sessions and
+launches whose `cwd` the server's `TraceService` scope allows
+(`Scope::allows_session_cwd`) count. Every answer carries `ok`, `window`
+(`since`, `until`, `since_ns`, `until_ns`, `tz_offset_min`) and `filters`.
+Errors are the shared JSON errors: `400` for bad arguments, `503` while the
+store does not exist (it is never created).
+
+### Routes
+
+| Route | Answer |
+|---|---|
+| `overview` | `totals` (`sessions`, `launches`, `turns`, `generations`, the five token kinds, `total_tokens`, `cost_usd`, `unpriced_generations`, `reported_cost_usd`, `lines_added`, `lines_removed`); `days` (every local day of the window); `daily` (`day`, `cost_usd`, `total_tokens`, `input_tokens`, `output_tokens`, `generations`, `turns`, `sessions`; days with data only; a session counts on every day it started a turn or made a call, so a turn that crosses midnight counts on both days); `calendar` (`from`, `to`, `turns` per day, reaching at least 12 weeks back from `until`); `top_projects`, `top_models`, `top_harnesses` (group rows, below); `live` (`available`, `sessions`: the TUI snapshots' sessions that are not exited and pass the filters and the scope: `launch_id`, `session_key`, `provider`, `cwd`, `state`, `updated_at_ns`, `active_tools`). |
+| `daily` | `days`, `models` (the 8 costliest, then `other`), `cost` and `tokens`: one `{name, values}` series per model, a value per day. |
+| `breakdown` | `totals` as above; `models`, `projects`, `harnesses`. A group row has `generations`, `sessions` (for a project or a harness, every session that started a turn or made a call in the window, as in `totals`; for a model, the sessions that called it), the token kinds, `total_tokens`, `cost_usd`, `share` (of the window's cost) and `unpriced_generations`; a project row adds `turns`; a harness row adds `turns`, `launches`, `reported_cost_usd`, `lines_added`, `lines_removed`. |
+| `cache` | `totals` and per-model rows: `hit_ratio` (cache read ÷ (input + cache read + cache write)), `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, their costs, `input_rate_per_m` (the observed uncached input price: input cost ÷ input tokens), `savings_usd` (cache-read tokens at that price, less what they cost), `write_premium_usd` (what cache writes cost above that price) and `net_savings_usd`. A model with no priced input has no estimate (`null`); the totals sum the models' own estimates. |
+| `sessions` | `total` (sessions in the window) and `sessions`, ranked by in-window `cost_usd`: `session_key`, `provider`, `cwd`, `title`, `turns`, `tools` (tool and agent calls in the window's turns), `tools_per_turn`, `first_ns`, `last_ns`, `duration_ms` (first to last activity in the window), the token kinds, `cost_usd`, `reported_cost_usd`. |
+| `distributions` | `sessions`; `archetypes` (`archetype`, `description`, `sessions`, `cost_usd`, `total_tokens`, `avg_turns`); `duration_ms`, `turns` and `tools_per_turn`, each a `histogram` (`labels`, `counts`) and `percentiles` (`p50`, `p95`, `max`, `count`; nearest rank, `tracing::analysis::metrics::completed_percentiles`). |
+| `activity` | `weekdays` (`Sun` … `Sat`); `turns`, `cost_usd` and `tokens` as 7 × 24 matrices (weekday × local hour); `turns_by_hour`, `turns_by_weekday`, `cost_by_hour`, `cost_by_weekday`, `tokens_by_hour`. |
+
+A session's **archetype** is the first rule it fits, over its activity in
+the window: `quick` (at most 2 turns and under one tool call per turn),
+`tool-heavy` (10 or more tool calls per turn), `long-running` (an hour or
+more from first to last activity), `conversation` (10 or more turns and
+under 3 tool calls per turn), else `task`.
+
+```sh
+curl -s -X POST localhost:7331/api/usage/overview -d '{"since":"30d"}'
+curl -s -X POST localhost:7331/api/usage/sessions -d '{"provider":"claude","limit":10}'
+```
+
+### Pages
+
+Both pages take the shared filter bar (range, harness, workspace/project),
+send the browser's time-zone offset, and are `live`.
+
+- **Overview** (`#/overview`, the landing page): cards for sessions, launches
+  (with lines changed), turns, tokens and cost (with daily sparklines) and
+  the live sessions now; the token kinds, unpriced calls and the reported
+  total; the daily spend as bars or a line (a toggle kept per viewer in
+  `localStorage`; a bar opens Usage on that day); the activity calendar
+  (turns per day; a day opens Usage on it); the top projects (opening
+  Usage filtered to one), models and harnesses by cost; and the table of
+  live sessions, linked to their session pages.
+- **Usage** (`#/usage`): summary cards; cost and tokens per day stacked by
+  model; sortable tables per model, per project/workspace (a row filters the
+  page to it) and per harness (with launches, the reported cost and lines
+  changed); the cache economics (cards and a per-model table); the 50
+  costliest sessions in the window, each linked to its session page; the
+  archetypes and the duration, turns and tools-per-turn histograms with
+  their percentiles; and activity by weekday × hour, by hour, by weekday and
+  cost by hour.
+
+Tests: `tests/it/web/usage.rs` seeds a store at fixed dates and checks every
+route's numbers, the filters, the scope, the time-zone buckets and the
+errors, including that out-of-window spend is not counted.
 
 ## Tools
 
