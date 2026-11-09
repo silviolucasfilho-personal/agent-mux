@@ -445,7 +445,7 @@ pub fn load_transcript(
                 COALESCE(SUM(CASE WHEN o.type = 'generation' THEN o.cache_read_tokens END), 0),
                 COALESCE(SUM(CASE WHEN o.type = 'generation' THEN o.cache_write_tokens END), 0),
                 COALESCE(SUM(CASE WHEN o.type = 'generation' THEN o.total_tokens END), 0),
-                COALESCE(SUM(o.total_cost_usd), 0.0),
+                COALESCE(SUM(COALESCE(o.total_cost_usd, json_extract(o.provided_cost, '$.total'))), 0.0),
                 COALESCE(SUM(o.type = 'generation'), 0),
                 COALESCE(SUM(o.type IN ('tool','agent') AND COALESCE(o.kind, '') <> 'subagent_turn'), 0),
                 COALESCE(SUM(o.level = 'ERROR'), 0)
@@ -663,7 +663,10 @@ pub fn load_turns(
     let mut obs_stmt = conn.prepare(
         "SELECT id, parent_id, type, kind, name, start_ns, end_ns, level, status_message, model,
                 input, output, thinking, input_tokens, output_tokens, cache_read_tokens,
-                cache_write_tokens, total_tokens, total_cost_usd, tool_name, skill, mcp_server, path
+                cache_write_tokens, total_tokens,
+                -- a provider's own cost when the store left the price empty
+                COALESCE(total_cost_usd, json_extract(provided_cost, '$.total')),
+                tool_name, skill, mcp_server, path
          FROM observations WHERE trace_id = ?1 ORDER BY start_ns ASC, id ASC",
     )?;
     for turn in &mut turns {

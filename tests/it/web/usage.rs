@@ -700,6 +700,52 @@ fn sessions_rank_by_in_window_cost() {
     server.abort();
 }
 
+/// A delegation is one call; the child turns the importer adds under it
+/// (`kind = 'subagent_turn'`) are containers, not calls.
+#[test]
+fn a_sub_agents_turns_are_not_counted_as_tool_calls() {
+    let s = seed();
+    {
+        let mut store = open_rw(
+            &s.db,
+            OpenOptions {
+                prices: PriceTable::builtin(),
+                run_id: "run-usage".into(),
+                retention_days: 0,
+                agent_mux_version: "test".into(),
+            },
+        )
+        .unwrap();
+        let b1 = ns("2026-11-09T15:00:00Z");
+        let mut call = observation("deleg", "b1", ObservationType::Agent, b1 + 20 * NS);
+        call.kind = Some("agent_invocation".into());
+        let mut ops = vec![StoreOp::Observation(call)];
+        for i in 0..5 {
+            let mut turn = observation(
+                &format!("child{i}"),
+                "b1",
+                ObservationType::Agent,
+                b1 + (21 + i) * NS,
+            );
+            turn.kind = Some("subagent_turn".into());
+            turn.parent_id = Some("deleg".into());
+            ops.push(StoreOp::Observation(turn));
+        }
+        store.apply(&ops).unwrap();
+    }
+    let (base, server) = start(&s.db);
+    let v = call(&base, "sessions", json!({"since": OCT31, "until": NOV10}));
+    let b = v["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["session_key"] == "codex:b")
+        .unwrap();
+    assert_eq!(b["tools"], 4, "three tools and one delegation");
+    close(&b["tools_per_turn"], 4.0);
+    server.abort();
+}
+
 #[test]
 fn distributions_sort_sessions_into_archetypes() {
     let s = seed();

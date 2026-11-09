@@ -259,6 +259,45 @@ fn the_transcript_carries_the_header_turns_and_files() {
     server.abort();
 }
 
+/// A generation the provider priced itself keeps its cost in
+/// `provided_cost` and leaves `total_cost_usd` empty: the header, the turn
+/// and the observation count it all the same.
+#[test]
+fn the_transcript_counts_a_providers_own_cost() {
+    let temp = tempfile::tempdir().unwrap();
+    let (db, _) = viewer_store(temp.path());
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO observations (id, trace_id, type, name, start_ns, end_ns, level,
+                 model, input_tokens, output_tokens, total_tokens, provided_cost)
+             SELECT 'g2', 't9', 'generation', 'assistant', start_ns + 1, start_ns + 2,
+                    'DEFAULT', 'gpt-5', 10, 5, 15, '{\"total\": 0.5}'
+             FROM observations WHERE id = 'g1'",
+            [],
+        )
+        .unwrap();
+    }
+    let (base, server) = start(&db);
+    let (status, t) = transcript(&base, "claude:s1", "");
+    assert_eq!(status, 200, "{t}");
+    let near = |v: &Value, want: f64| {
+        let got = v.as_f64().unwrap_or_else(|| panic!("not a number: {v}"));
+        assert!((got - want).abs() < 1e-9, "{got} != {want}");
+    };
+    near(&t["totals"]["cost_usd"], 0.75);
+    let last = &t["turns"][2];
+    near(&last["cost_usd"], 0.75);
+    let g2 = last["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "g2")
+        .unwrap();
+    near(&g2["cost_usd"], 0.5);
+    server.abort();
+}
+
 #[test]
 fn the_transcript_pages_turns_and_finds_a_deep_linked_turn() {
     let temp = tempfile::tempdir().unwrap();

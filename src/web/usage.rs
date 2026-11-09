@@ -803,6 +803,8 @@ pub fn session_facts(conn: &Connection, f: &Filter) -> rusqlite::Result<Vec<Sess
             "SELECT t.session_key, COUNT(*), MIN(t.start_ns), MAX(COALESCE(t.end_ns, t.start_ns)),
                     (SELECT COUNT(*) FROM observations x JOIN traces y ON y.id = x.trace_id
                       WHERE y.session_key = t.session_key AND x.type IN ('tool', 'agent')
+                        -- a sub-agent's turns are containers, not calls
+                        AND COALESCE(x.kind, '') <> 'subagent_turn'
                         AND y.start_ns >= :since AND y.start_ns < :until)
              {} GROUP BY 1",
             turn_from()
