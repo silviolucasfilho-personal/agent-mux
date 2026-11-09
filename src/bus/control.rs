@@ -79,6 +79,10 @@ pub enum ControlRequest {
         /// harness (`bus::swarm::review`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         review: Option<String>,
+        /// Whether merges wait for a check: `off` (absent), `on` (the
+        /// check command) or a command of its own (`bus::swarm::gate`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merge_gate: Option<String>,
     },
     /// One operator decision on `workspace`'s orchestrated swarm; `task` is
     /// a task id, id prefix or plan key, `notes` a re-plan's notes.

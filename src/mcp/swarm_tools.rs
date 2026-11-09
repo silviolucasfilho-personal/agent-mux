@@ -25,7 +25,7 @@ pub fn catalog() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "agent_mux_swarm_start",
-            description: "Become the coordinator of a new agent-mux swarm in this workspace: your session is recorded as its coordinator and the running agent-mux TUI supervises it. Give the goal when you know it; limits (max parallel workers, isolation, check command, workers' harness pool, review: auto | a harness | off) are optional; finished tasks are reviewed unless the operator turns it off. Then plan with agent_mux_swarm_plan.",
+            description: "Become the coordinator of a new agent-mux swarm in this workspace: your session is recorded as its coordinator and the running agent-mux TUI supervises it. Give the goal when you know it; limits (max parallel workers, isolation, check command, workers' harness pool, review: auto | a harness | off, merge gate: off | on | a command) are optional; finished tasks are reviewed unless the operator turns it off. Then plan with agent_mux_swarm_plan.",
             input_schema: schema_of::<SwarmStartArgs>(),
             read_only: false,
         },
@@ -55,7 +55,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "agent_mux_swarm_action",
-            description: "Relay an operator decision on the swarm: pause, resume, retry <task>, cancel <task>, review <task> (review a finished task again, after a fix round), merge <task>, set-aside <task>, accept <task>, drop <task>, close, delete. delete: remove the swarm; a live one is closed first, which ends your session too. Merge, set-aside, cancel, close and delete need the operator's words in operator_said; the decision is recorded with them.",
+            description: "Relay an operator decision on the swarm: pause, resume, retry <task>, cancel <task>, review <task> (review a finished task again, after a fix round), merge <task> (with the swarm's merge gate on: queued, merged once its check passes on the branch brought up to date with the workspace), force-merge <task> (merge at once, past the gate), merge-gate (notes = off | on | a command: change whether merges wait for a check; off puts queued merges back to waiting for the operator), set-aside <task>, accept <task>, drop <task>, close, delete. delete: remove the swarm; a live one is closed first, which ends your session too. Merge, force-merge, merge-gate, set-aside, cancel, close and delete need the operator's words in operator_said; the decision is recorded with them.",
             input_schema: schema_of::<SwarmActionArgs>(),
             read_only: false,
         },
@@ -152,6 +152,11 @@ pub struct SwarmStartArgs {
     /// a harness to review on, or `off` only when the operator asks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<String>,
+    /// Whether each merge waits for a check on the branch brought up to
+    /// date with the workspace: `off` (the default), `on` (the check
+    /// command) or a command of its own. Only when the operator asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_gate: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     /// Your launch id; defaults to `$AGENT_MUX_SESSION_ID`.
@@ -223,6 +228,11 @@ fn start(service: &TraceService, arguments: Value) -> Value {
         Ok(r) => r,
         Err(e) => return tool_error(&ServiceError::InvalidArgument(e)),
     };
+    let merge_gate =
+        crate::bus::swarm::gate::MergeGateSettings::parse(args.merge_gate.as_deref().unwrap_or(""));
+    if let Err(e) = merge_gate.check(args.check.as_deref()) {
+        return tool_error(&ServiceError::InvalidArgument(e));
+    }
     let now = crate::tracing::store::now_ns();
     let swarm = match record::create_swarm(
         &conn,
@@ -239,6 +249,7 @@ fn start(service: &TraceService, arguments: Value) -> Value {
             worker_pool: pool,
             headless: false,
             review,
+            merge_gate,
         },
         now,
     ) {
@@ -277,6 +288,8 @@ fn start(service: &TraceService, arguments: Value) -> Value {
                 "check": swarm.check_cmd,
                 "review": crate::bus::swarm::review::settings(&conn, &swarm.id).as_choice(),
                 "review_step": crate::bus::swarm::review::settings(&conn, &swarm.id).describe(),
+                "merge_gate": crate::bus::swarm::gate::settings(&conn, &swarm.id).as_choice(),
+                "merge_gate_step": crate::bus::swarm::gate::settings(&conn, &swarm.id).describe(&swarm),
             },
             "note": format!(
                 "You coordinate swarm {}. Talk the goal over with the operator, then submit the plan with agent_mux_swarm_plan; the running agent-mux TUI supervises the swarm and tells you what happens.",
@@ -533,16 +546,17 @@ fn get_swarm(service: &TraceService, arguments: Value) -> Value {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SwarmActionArgs {
-    /// `pause`, `resume`, `retry`, `cancel`, `review`, `merge`, `set-aside`, `accept`,
+    /// `pause`, `resume`, `retry`, `cancel`, `review`, `merge`, `force-merge`, `merge-gate`, `set-aside`, `accept`,
     /// `drop`, `close`, `delete` (also `launch`, `approve`: see agent_mux_swarm_launch).
     pub verb: String,
     /// The task (plan key, id or prefix) for the verbs that take one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
-    /// The operator's words, quoted; required for merge, set-aside, cancel,
-    /// close and delete.
+    /// The operator's words, quoted; required for merge, force-merge,
+    /// merge-gate, set-aside, cancel, close and delete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_said: Option<String>,
+    /// A re-plan's notes; `merge-gate`'s value (`off`, `on` or a command).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -560,7 +574,7 @@ fn action(service: &TraceService, arguments: Value) -> Value {
     };
     let Some(verb) = SwarmVerb::parse(args.verb.trim()) else {
         return tool_error(&ServiceError::InvalidArgument(format!(
-            "unknown verb `{}`: pause, resume, retry, cancel, review, merge, set-aside, accept, drop, close, delete",
+            "unknown verb `{}`: pause, resume, retry, cancel, review, merge, force-merge, merge-gate, set-aside, accept, drop, close, delete",
             args.verb
         )));
     };
@@ -634,12 +648,13 @@ fn action(service: &TraceService, arguments: Value) -> Value {
                     Path::new(&swarm.workspace),
                     swarm.isolation,
                 );
-                match record::apply(
+                match record::apply_with(
                     &conn,
                     Some(&db),
                     &swarm,
                     verb,
                     args.task.as_deref(),
+                    args.notes.as_deref(),
                     &env,
                     &Decider::chat(said, Some(&caller)),
                     crate::tracing::store::now_ns(),

@@ -82,6 +82,18 @@ pub struct TaskView {
     /// The unanswered question it asked, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
+    /// Automatic retries so far (v26); `held` when the operator stopped
+    /// its worker, so it waits for them.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub auto_retries: i64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
+    /// Its branch's merge behind the check (v26): `queued`, `running`,
+    /// `passed` (merged), `failed`, with the reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_gate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_gate_detail: Option<String>,
     pub updated_ns: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_ns: Option<i64>,
@@ -98,6 +110,10 @@ pub struct BoardView {
     pub review: String,
     /// Each finished task's review (v25), in board order.
     pub reviews: Vec<ReviewView>,
+    /// Whether merges wait for a check (v26): `off`, `on` or the gate's
+    /// own command; `merge_gate_step` says it in one sentence.
+    pub merge_gate: String,
+    pub merge_gate_step: String,
     /// The decision that approved the plan, if it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approved: Option<record::SwarmDecision>,
@@ -167,6 +183,7 @@ pub fn board_view(
         now_ns,
         dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
         review: settings.enabled,
+        merge_check: None,
     };
     let task_of = |launch: &str| -> Option<String> {
         board
@@ -204,6 +221,8 @@ pub fn board_view(
         coordinator,
         worker_pool: record::worker_pool(conn, swarm),
         review: settings.as_choice(),
+        merge_gate: super::gate::settings(conn, &swarm.id).as_choice(),
+        merge_gate_step: super::gate::settings(conn, &swarm.id).describe(swarm),
         reviews: board
             .iter()
             .filter_map(|t| {
@@ -245,8 +264,16 @@ pub fn board_view(
     })
 }
 
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
 fn task_view(t: &BoardTask, shown: Shown, question: Option<String>) -> TaskView {
     TaskView {
+        auto_retries: t.ext.recovery.retries,
+        held: t.ext.recovery.held_ns.is_some(),
+        merge_gate: t.ext.gate.as_ref().map(|g| g.state.as_str().to_string()),
+        merge_gate_detail: t.ext.gate.as_ref().and_then(|g| g.detail.clone()),
         key: t.ext.plan_key.clone(),
         id: t.task.id.clone(),
         title: t.task.title.clone(),

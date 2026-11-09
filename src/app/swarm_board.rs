@@ -172,7 +172,7 @@ impl NeedKind {
             NeedKind::Plan => "Enter on ★: confirm in the chat",
             NeedKind::PlannerFailed => "Enter on ★: talk to it · x then r on ★ restarts it",
             NeedKind::Failed | NeedKind::Lost => "r retry",
-            NeedKind::Review => "y merge · x set aside",
+            NeedKind::Review => "y merge · Y merge past the check · x set aside",
             NeedKind::Proposed => "y accept · x drop",
             NeedKind::CheckFailed => "Enter read it · r retry a task",
             NeedKind::CoordinatorQuiet => "Enter on ★: talk to it",
@@ -204,6 +204,8 @@ pub struct CommandLine {
 pub enum LinePurpose {
     Message,
     ReplanNotes,
+    /// The swarm's merge gate: `off`, `on` or a command (`M`, v26).
+    MergeGate,
 }
 
 /// Who a message goes to.
@@ -239,10 +241,13 @@ pub enum LaunchField {
     Isolation,
     Gate,
     Check,
+    /// Whether merges wait for a check: empty or `off`, `on` (the check
+    /// above), or a command of its own (`bus::swarm::gate`, v26).
+    MergeGate,
 }
 
 impl LaunchField {
-    const ORDER: [LaunchField; 9] = [
+    const ORDER: [LaunchField; 10] = [
         LaunchField::Planner,
         LaunchField::Review,
         LaunchField::Advanced,
@@ -252,6 +257,7 @@ impl LaunchField {
         LaunchField::Isolation,
         LaunchField::Gate,
         LaunchField::Check,
+        LaunchField::MergeGate,
     ];
     /// The next field: folded, Tab moves between the coordinator, the
     /// review and the Advanced fold only.
@@ -339,6 +345,8 @@ pub enum Modal {
         isolation: TaskIsolation,
         gate: bool,
         check: TextArea,
+        /// The merge gate: empty or `off`, `on`, or its own command.
+        merge_gate: TextArea,
         /// The review: 0 `auto`, 1..=n the harnesses, n+1 `off`
         /// ([`SwarmBoard::review_choice`]).
         review: usize,
@@ -392,6 +400,16 @@ pub enum Confirm {
     Merge {
         task_id: String,
         branch: String,
+        /// Why the merge goes against the task's review, if it does.
+        warning: Option<String>,
+        /// The swarm's check command: the merge is queued behind it (v26).
+        check: Option<String>,
+    },
+    /// Merge a branch at once, past the swarm's check (`Y`, v26).
+    ForceMerge {
+        task_id: String,
+        branch: String,
+        check: String,
         /// Why the merge goes against the task's review, if it does.
         warning: Option<String>,
     },
@@ -469,6 +487,18 @@ impl Confirm {
                 format!("Approve the plan? {tasks} task(s); workers start now.")
             }
             Confirm::Merge {
+                branch,
+                warning,
+                check: Some(check),
+                ..
+            } => format!(
+                "{}Queue {branch} for its merge? `{check}` runs on it brought up to date with the workspace, and it is merged if the check passes (Y merges now).",
+                warning
+                    .as_deref()
+                    .map(|w| format!("⚠ {w}. "))
+                    .unwrap_or_default()
+            ),
+            Confirm::Merge {
                 branch, warning, ..
             } => match warning {
                 Some(w) => format!(
@@ -476,6 +506,18 @@ impl Confirm {
                 ),
                 None => format!("Merge {branch} into the workspace's branch (a merge commit)?"),
             },
+            Confirm::ForceMerge {
+                branch,
+                check,
+                warning,
+                ..
+            } => format!(
+                "{}Merge {branch} now, without running `{check}` on it first (a merge commit)?",
+                warning
+                    .as_deref()
+                    .map(|w| format!("⚠ {w}. "))
+                    .unwrap_or_default()
+            ),
             Confirm::SetAside { branch, .. } => {
                 format!("Set {branch} aside without merging? The branch is kept.")
             }
@@ -515,6 +557,8 @@ pub enum Outcome {
         check: Option<String>,
         /// `auto`, a harness or `off`.
         review: String,
+        /// `off` (`None`), `on` or the gate's own command.
+        merge_gate: Option<String>,
     },
     Verb {
         verb: SwarmVerb,
@@ -580,6 +624,8 @@ pub struct SwarmData {
     pub timeline: Option<crate::tracing::swarm_report::Timeline>,
     /// How the swarm reviews finished tasks (v25).
     pub review: crate::bus::swarm::review::ReviewSettings,
+    /// Whether its merges wait for a check (v26).
+    pub merge_gate: crate::bus::swarm::gate::MergeGateSettings,
 }
 
 /// A row of the tree.
@@ -1012,6 +1058,11 @@ impl SwarmBoard {
                     .as_ref()
                     .map(|c| crate::bus::swarm::review::settings(c, &run.id))
                     .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off);
+                let merge_gate = self
+                    .conn
+                    .as_ref()
+                    .map(|c| crate::bus::swarm::gate::settings(c, &run.id))
+                    .unwrap_or_default();
                 let mut d = SwarmData {
                     run,
                     board,
@@ -1024,6 +1075,7 @@ impl SwarmBoard {
                     events,
                     timeline,
                     review,
+                    merge_gate,
                 };
                 d.needs = needs_for(&d, &self.workers, now_ns);
                 swarms.push(d);
@@ -1334,6 +1386,7 @@ impl SwarmBoard {
             now_ns: self.now_ns,
             dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
             review: self.review_settings().enabled,
+            merge_check: None,
         })
     }
 
@@ -1344,6 +1397,44 @@ impl SwarmBoard {
             .and_then(|s| self.swarms.iter().find(|d| d.run.id == s.id))
             .map(|d| d.review.clone())
             .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off)
+    }
+
+    /// The selected swarm's merge gate setting (v26).
+    pub fn merge_gate_settings(&self) -> crate::bus::swarm::gate::MergeGateSettings {
+        self.swarm
+            .as_ref()
+            .and_then(|s| self.swarms.iter().find(|d| d.run.id == s.id))
+            .map(|d| d.merge_gate.clone())
+            .unwrap_or_default()
+    }
+
+    /// `M`: the command line, filled with the merge gate as it is; `Enter`
+    /// relays `merge-gate` with what it says.
+    fn open_merge_gate(&mut self) {
+        match &self.swarm {
+            Some(s) if s.ended_ns.is_none() => {
+                let mut text = TextArea::new(self.merge_gate_settings().as_choice());
+                text.end();
+                self.command = Some(CommandLine {
+                    text,
+                    reply_to: None,
+                    purpose: LinePurpose::MergeGate,
+                    completion: None,
+                });
+            }
+            Some(_) => self.status_msg = Some("This swarm is closed.".into()),
+            None => self.status_msg = Some("No swarm here.".into()),
+        }
+    }
+
+    /// The command the selected swarm's merges wait for, when they are
+    /// gated (v26).
+    pub fn merge_check(&self) -> Option<String> {
+        let s = self.swarm.as_ref()?;
+        self.swarms
+            .iter()
+            .find(|d| d.run.id == s.id)
+            .and_then(|d| d.merge_gate.command_for(s))
     }
 
     /// How the board shows `t`.
@@ -1689,6 +1780,7 @@ impl SwarmBoard {
             isolation: TaskIsolation::Shared,
             gate: true,
             check: TextArea::new(""),
+            merge_gate: TextArea::new(""),
             review: 0,
             field: LaunchField::Planner,
             error: None,
@@ -1968,7 +2060,7 @@ impl SwarmBoard {
     /// What `Enter` would send from the command line.
     pub fn command_preview(&self) -> Option<Result<Outgoing, String>> {
         let line = self.command.as_ref()?;
-        if line.purpose == LinePurpose::ReplanNotes {
+        if line.purpose != LinePurpose::Message {
             return None;
         }
         Some(parse_command(&line.text.text, self, line.reply_to.as_ref()))
@@ -1978,11 +2070,16 @@ impl SwarmBoard {
         if let Some(line) = &mut self.command {
             line.text.insert_str(text);
         } else if let Some(Modal::Launch {
-            goal, field, check, ..
+            goal,
+            field,
+            check,
+            merge_gate,
+            ..
         }) = &mut self.modal
         {
             match field {
                 LaunchField::Check => check.insert_str(text),
+                LaunchField::MergeGate => merge_gate.insert_str(text),
                 _ => goal.insert_str(text),
             }
         } else if let Some(Modal::Task {
@@ -2198,6 +2295,11 @@ impl SwarmBoard {
                 }
             },
             KeyCode::Char('y') => self.yes(),
+            KeyCode::Char('Y') => self.force_merge(),
+            KeyCode::Char('M') => {
+                self.open_merge_gate();
+                Outcome::None
+            }
             KeyCode::Char('n') => {
                 // a new swarm, from any row (coordinator-first §9.4): the plan
                 // itself is changed by telling the coordinator
@@ -2369,6 +2471,7 @@ impl SwarmBoard {
                         branch: t.task.branch.clone().unwrap_or_default(),
                         warning: crate::bus::swarm::review::merge_warning(state)
                             .map(str::to_string),
+                        check: self.merge_check(),
                     });
                     return Outcome::None;
                 }
@@ -2412,6 +2515,32 @@ impl SwarmBoard {
             }
             _ => self.status_msg = Some("Nothing to approve here.".into()),
         }
+        Outcome::None
+    }
+
+    /// `Y`: merge the selected branch at once, past the swarm's check
+    /// command (`force-merge`, v26). Without a check, `y` merges at once.
+    fn force_merge(&mut self) -> Outcome {
+        let Some(t) = self.selected_task().cloned() else {
+            return Outcome::None;
+        };
+        if self.shown(&t) != Shown::Review {
+            self.status_msg =
+                Some("Y merges a finished branch past the check: choose one in review.".into());
+            return Outcome::None;
+        }
+        let Some(check) = self.merge_check() else {
+            self.status_msg = Some("This swarm's merges are not gated: y merges at once.".into());
+            return Outcome::None;
+        };
+        let state =
+            crate::bus::swarm::review::state(&t, &self.board, self.review_settings().enabled);
+        self.confirm = Some(Confirm::ForceMerge {
+            task_id: t.task.id.clone(),
+            branch: t.task.branch.clone().unwrap_or_default(),
+            check,
+            warning: crate::bus::swarm::review::merge_warning(state).map(str::to_string),
+        });
         Outcome::None
     }
 
@@ -2503,6 +2632,7 @@ impl SwarmBoard {
         match c {
             Confirm::Approve { .. } => self.verb(SwarmVerb::Approve, None),
             Confirm::Merge { task_id, .. } => self.verb(SwarmVerb::Merge, Some(task_id)),
+            Confirm::ForceMerge { task_id, .. } => self.verb(SwarmVerb::ForceMerge, Some(task_id)),
             Confirm::SetAside { task_id, .. } => self.verb(SwarmVerb::SetAside, Some(task_id)),
             Confirm::Close => self.verb(SwarmVerb::Close, None),
             Confirm::Cancel { task_id, .. } => Outcome::CancelTask(task_id),
@@ -2519,6 +2649,20 @@ impl SwarmBoard {
             (KeyCode::Esc, _) => {
                 self.command = None;
                 Outcome::None
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) if line.purpose == LinePurpose::MergeGate => {
+                let value = line.text.text.trim().to_string();
+                self.command = None;
+                if value.is_empty() {
+                    self.status_msg =
+                        Some("Say off, on (the check command) or a command of its own.".into());
+                    return Outcome::None;
+                }
+                Outcome::Verb {
+                    verb: SwarmVerb::MergeGate,
+                    task: None,
+                    notes: Some(value),
+                }
             }
             (KeyCode::Enter, KeyModifiers::NONE) if line.purpose == LinePurpose::ReplanNotes => {
                 let notes = line.text.text.trim().to_string();
@@ -2644,6 +2788,7 @@ impl SwarmBoard {
                 isolation,
                 gate,
                 check,
+                merge_gate,
                 review,
                 field,
                 advanced,
@@ -2679,6 +2824,9 @@ impl SwarmBoard {
                     }
                     LaunchField::Check => {
                         crate::keymap::apply_text(check, &key);
+                    }
+                    LaunchField::MergeGate => {
+                        crate::keymap::apply_text(merge_gate, &key);
                     }
                     LaunchField::Planner => {
                         let d = match key.code {
@@ -2818,6 +2966,7 @@ impl SwarmBoard {
                 isolation,
                 gate,
                 check,
+                merge_gate,
                 review,
                 field,
                 advanced,
@@ -2842,10 +2991,12 @@ impl SwarmBoard {
                 }
                 // the goal is optional: without one the operator says it in
                 // the coordinator's chat (coordinator-first §4.1)
+                let gate_s = crate::bus::swarm::gate::MergeGateSettings::parse(&merge_gate.text);
+                let check_s = Some(check.text.trim()).filter(|c| !c.is_empty());
                 let why = if chosen.is_empty() {
-                    Some("Tick at least one harness for the workers (Space).")
+                    Some("Tick at least one harness for the workers (Space).".to_string())
                 } else {
-                    None
+                    gate_s.check(check_s).err()
                 };
                 let form = Modal::Launch {
                     goal,
@@ -2857,16 +3008,23 @@ impl SwarmBoard {
                     isolation,
                     gate,
                     check,
+                    merge_gate,
                     review,
                     field,
-                    error: why.map(str::to_string),
+                    error: why.clone(),
                     advanced,
                 };
                 if why.is_some() {
                     self.modal = Some(form);
                     return Outcome::None;
                 }
-                let Modal::Launch { goal, check, .. } = &form else {
+                let Modal::Launch {
+                    goal,
+                    check,
+                    merge_gate,
+                    ..
+                } = &form
+                else {
                     unreachable!()
                 };
                 let out = Outcome::Start {
@@ -2878,6 +3036,7 @@ impl SwarmBoard {
                     gate,
                     check: Some(check.text.trim().to_string()).filter(|c| !c.is_empty()),
                     review: review_s,
+                    merge_gate: Some(merge_gate.text.trim().to_string()).filter(|g| !g.is_empty()),
                 };
                 self.last_launch = Some(form);
                 out
@@ -3127,6 +3286,7 @@ pub fn needs_for(d: &SwarmData, workers: &HashMap<String, Worker>, now_ns: i64) 
         now_ns,
         dispatch_grace_ns: engine::DISPATCH_GRACE_NS,
         review: d.review.enabled,
+        merge_check: None,
     };
     let name_of = |launch: &str| -> String {
         if launch == "user" {
@@ -3709,6 +3869,7 @@ mod tests {
             events: Vec::new(),
             timeline: None,
             review: crate::bus::swarm::review::ReviewSettings::off(),
+            merge_gate: Default::default(),
         };
         d.needs = needs_for(&d, &v.workers, v.now_ns);
         v.swarms = vec![d];
@@ -4036,6 +4197,111 @@ mod tests {
     }
 
     #[test]
+    fn shift_y_merges_a_branch_past_the_gate_and_y_queues_it() {
+        let mut wt = task("a", TaskStatus::Done, Some("L1"));
+        wt.task.branch = Some("loop/bus-a".into());
+        let tasks = vec![wt.clone()];
+        // without a check: Y says y merges at once
+        let mut v = board(SwarmStatus::Integrating, tasks.clone(), &[("L1", "idle")]);
+        assert_eq!(v.handle_key(key(KeyCode::Char('Y'))), Outcome::None);
+        assert_eq!(v.confirm, None);
+        assert_eq!(
+            v.status_msg.as_deref(),
+            Some("This swarm's merges are not gated: y merges at once.")
+        );
+        // a check command alone does not gate the merges
+        let mut run = swarm(SwarmStatus::Integrating);
+        run.check_cmd = Some("make test".into());
+        set_data(&mut v, run, tasks, vec![]);
+        v.set_cursor(1);
+        assert_eq!(v.merge_check(), None);
+        // the gate on: y queues it behind the check, Y merges now after a y
+        v.swarms[0].merge_gate = crate::bus::swarm::gate::MergeGateSettings::parse("on");
+        v.handle_key(key(KeyCode::Char('y')));
+        let Some(c) = v.confirm.clone() else {
+            panic!("y asks first")
+        };
+        assert!(
+            c.question()
+                .starts_with("Queue loop/bus-a for its merge? `make test` runs"),
+            "{}",
+            c.question()
+        );
+        v.handle_key(key(KeyCode::Esc));
+        v.handle_key(key(KeyCode::Char('Y')));
+        assert_eq!(
+            v.confirm,
+            Some(Confirm::ForceMerge {
+                task_id: "task-a".into(),
+                branch: "loop/bus-a".into(),
+                check: "make test".into(),
+                warning: None,
+            })
+        );
+        assert_eq!(
+            v.confirm.as_ref().unwrap().question(),
+            "Merge loop/bus-a now, without running `make test` on it first (a merge commit)?"
+        );
+        assert_eq!(
+            v.handle_key(key(KeyCode::Char('y'))),
+            Outcome::Verb {
+                verb: SwarmVerb::ForceMerge,
+                task: Some("task-a".into()),
+                notes: None
+            }
+        );
+        // only a branch in review
+        let mut v = board(
+            SwarmStatus::Running,
+            vec![task("b", TaskStatus::Running, Some("L1"))],
+            &[("L1", "working")],
+        );
+        v.handle_key(key(KeyCode::Char('Y')));
+        assert_eq!(v.confirm, None);
+    }
+
+    #[test]
+    fn shift_m_changes_the_merge_gate_from_the_command_line() {
+        let mut v = board(
+            SwarmStatus::Running,
+            vec![task("a", TaskStatus::Running, Some("L1"))],
+            &[("L1", "working")],
+        );
+        // filled with the gate as it is
+        v.handle_key(key(KeyCode::Char('M')));
+        let line = v.command.as_ref().expect("M opens the command line");
+        assert_eq!(
+            (line.purpose, line.text.text.as_str()),
+            (LinePurpose::MergeGate, "off")
+        );
+        assert!(v.command_preview().is_none(), "not a message");
+        // typing replaces it; Enter relays merge-gate with the value
+        for _ in 0..3 {
+            v.handle_key(key(KeyCode::Backspace));
+        }
+        for c in "cargo test --lib".chars() {
+            v.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            v.handle_key(key(KeyCode::Enter)),
+            Outcome::Verb {
+                verb: SwarmVerb::MergeGate,
+                task: None,
+                notes: Some("cargo test --lib".into())
+            }
+        );
+        assert!(v.command.is_none());
+        // an empty line says what it takes, and changes nothing
+        v.swarms[0].merge_gate = crate::bus::swarm::gate::MergeGateSettings::parse("on");
+        v.handle_key(key(KeyCode::Char('M')));
+        assert_eq!(v.command.as_ref().unwrap().text.text, "on");
+        v.handle_key(key(KeyCode::Backspace));
+        v.handle_key(key(KeyCode::Backspace));
+        assert_eq!(v.handle_key(key(KeyCode::Enter)), Outcome::None);
+        assert!(v.status_msg.as_deref().unwrap().starts_with("Say off, on"));
+    }
+
+    #[test]
     fn x_and_y_act_on_a_finished_branch_and_r_retries_a_failure() {
         let mut wt = task("a", TaskStatus::Done, Some("L1"));
         wt.task.branch = Some("loop/bus-a".into());
@@ -4051,6 +4317,7 @@ mod tests {
                 task_id: "task-a".into(),
                 branch: "loop/bus-a".into(),
                 warning: None,
+                check: None,
             })
         );
         assert_eq!(
@@ -4127,6 +4394,7 @@ mod tests {
                 gate: true,
                 check: None,
                 review: "auto".into(),
+                merge_gate: None,
             }
         );
         // Advanced unfolds the goal and the limits; Tab stays within the

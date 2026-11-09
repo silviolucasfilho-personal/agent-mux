@@ -1,11 +1,11 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 25;
+pub const SCHEMA_VERSION: i32 = 26;
 
 pub const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25,
+    V22, V23, V24, V25, V26,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -1312,6 +1312,74 @@ BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_task_reviews_update
 AFTER UPDATE ON swarm_task_reviews
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'update');
+END;
+"#;
+
+// v26: the swarm recovers on its own and gates its merges
+// (`bus::swarm::recovery`, `bus::swarm::gate`). `swarm_task_recovery` is
+// the engine's per-task bookkeeping for automatic retries: when a pass
+// first saw the task's worker gone (`lost_ns`), how many automatic
+// retries this round took and why the last one happened, and `held_ns`
+// when the operator stopped the worker (no automatic retry then).
+// `swarm_merge_gates` is a branch's merge queued behind the swarm's check
+// command: `queued`, `running`, `passed` (merged), `failed`, the workspace
+// commit it was tested on and the check's result. `swarm_merge_settings`
+// turns the gate on per swarm (`on`: the swarm's check command; or a
+// command of its own); no row means off. Side tables, as v24 and v25, so a
+// replay is harmless.
+const V26: &str = r#"
+CREATE TABLE IF NOT EXISTS swarm_task_recovery (
+  task_id     TEXT PRIMARY KEY REFERENCES agent_tasks (id) ON DELETE CASCADE,
+  lost_ns     INTEGER,
+  retries     INTEGER NOT NULL DEFAULT 0,
+  retried_ns  INTEGER,
+  reason      TEXT,
+  held_ns     INTEGER,
+  updated_ns  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS swarm_merge_gates (
+  task_id     TEXT PRIMARY KEY REFERENCES agent_tasks (id) ON DELETE CASCADE,
+  state       TEXT NOT NULL CHECK (state IN ('queued','running','passed','failed')),
+  queued_ns   INTEGER NOT NULL,
+  started_ns  INTEGER,
+  ended_ns    INTEGER,
+  base        TEXT,
+  detail      TEXT,
+  result      TEXT,
+  updated_ns  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS swarm_merge_settings (
+  swarm_id    TEXT PRIMARY KEY REFERENCES swarms (id) ON DELETE CASCADE,
+  mode        TEXT NOT NULL CHECK (mode IN ('on','off')),
+  command     TEXT,
+  updated_ns  INTEGER NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_task_recovery_insert
+AFTER INSERT ON swarm_task_recovery
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_task_recovery_update
+AFTER UPDATE ON swarm_task_recovery
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_merge_gates_insert
+AFTER INSERT ON swarm_merge_gates
+BEGIN
+  INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
+  VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'update');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_trace_changes_swarm_merge_gates_update
+AFTER UPDATE ON swarm_merge_gates
 BEGIN
   INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
   VALUES ('swarm_task', NEW.task_id, NULL, NULL, 'update');

@@ -4,7 +4,9 @@
 //! `App::swarm_engine_pass` gathers the [`Input`] and carries out the
 //! [`Action`]s; every decision is here, so it is tested without a PTY.
 
+use super::gate::GateState;
 use super::record::{BoardTask, LaunchedBy, SwarmRun, SwarmStatus};
+use super::recovery::{self, Cause};
 use crate::bus::TaskStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -17,6 +19,11 @@ pub const STALL_GRACE_NS: i64 = 90 * 1_000_000_000;
 /// dispatcher starts it itself (coordinator-first spec §5.4): the
 /// coordinator launches, agent-mux makes sure the swarm never waits on it.
 pub const DISPATCH_GRACE_NS: i64 = 2 * 60 * 1_000_000_000;
+
+/// How recent a failure must be to be retried automatically: a task that
+/// failed long ago (before agent-mux recovered tasks, or while no TUI ran
+/// the swarm) waits for the operator.
+pub const FAILED_FRESH_NS: i64 = 10 * 60 * 1_000_000_000;
 
 /// A live worker session as the dispatcher sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +56,9 @@ pub struct Input<'a> {
     pub dispatch_grace_ns: i64,
     /// The swarm reviews its finished tasks (`review::settings`, v25).
     pub review: bool,
+    /// The command its merges wait for, when they are gated
+    /// (`gate::MergeGateSettings::command_for`, v26).
+    pub merge_check: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +79,18 @@ pub enum Action {
     /// Put the review of this finished task on the board
     /// (`record::add_review`); it is offered and started like any task.
     AddReview { task_id: String },
+    /// The task's worker is gone: note when it was first seen so
+    /// (`recovery::mark_lost`); it is retried after [`recovery::LOST_GRACE_NS`].
+    MarkLost { task_id: String },
+    /// Its worker is back (reconnected): forget the sighting.
+    ClearLost { task_id: String },
+    /// Start the task again on its own (`recovery::retry`).
+    Recover { task_id: String, cause: Cause },
+    /// A lost task whose automatic retry is spent: fail it
+    /// (`recovery::give_up`), so the swarm settles around it.
+    GiveUp { task_id: String },
+    /// Run the merge gate of this queued branch (`gate`): one at a time.
+    RunGate { task_id: String },
 }
 
 /// A task's state as the board shows it (§3.2), first match wins.
@@ -192,6 +214,66 @@ fn worker_of<'a>(t: &BoardTask, workers: &'a HashMap<String, Worker>) -> Option<
         .filter(|w| w.state != WorkerState::Exited)
 }
 
+/// Whether the task holds a worker that is gone (exited, or not among the
+/// live sessions).
+pub fn worker_lost(t: &BoardTask, input: &Input<'_>) -> bool {
+    holds_worker(t.task.status) && worker_of(t, input.workers).is_none()
+}
+
+/// Why the task is due an automatic retry now, if it is: the swarm is
+/// running, the task's retry is not spent nor held by the operator, and it
+/// failed recently or its worker has been gone past the grace.
+pub fn recovery_due(t: &BoardTask, input: &Input<'_>) -> Option<Cause> {
+    if !matches!(
+        input.swarm.status,
+        SwarmStatus::Running | SwarmStatus::Integrating
+    ) || !recovery::may_retry(t)
+    {
+        return None;
+    }
+    if t.task.status == TaskStatus::Failed {
+        let fresh = t
+            .task
+            .ended_ns
+            .is_some_and(|e| input.now_ns - e <= FAILED_FRESH_NS);
+        return fresh.then_some(Cause::Failed);
+    }
+    let past_grace = t
+        .ext
+        .recovery
+        .lost_ns
+        .is_some_and(|l| input.now_ns - l >= recovery::LOST_GRACE_NS);
+    (worker_lost(t, input) && past_grace).then_some(Cause::Lost)
+}
+
+/// The queued branch whose merge gate runs next, if none runs now: the
+/// first queued (an abandoned run counts as queued), of the tasks still
+/// waiting for the operator, with a check command to run.
+pub fn gate_due<'a>(input: &Input<'a>) -> Option<&'a BoardTask> {
+    input.merge_check.as_ref()?;
+    let waiting = |t: &&BoardTask| awaits_review(t);
+    let running = input.board.iter().filter(waiting).any(|t| {
+        t.ext
+            .gate
+            .as_ref()
+            .is_some_and(|g| g.state == GateState::Running && !g.abandoned(input.now_ns))
+    });
+    if running {
+        return None;
+    }
+    input
+        .board
+        .iter()
+        .filter(waiting)
+        .filter(|t| {
+            t.ext
+                .gate
+                .as_ref()
+                .is_some_and(|g| g.state == GateState::Queued || g.abandoned(input.now_ns))
+        })
+        .min_by_key(|t| t.ext.gate.as_ref().map(|g| g.queued_ns))
+}
+
 /// How the board shows one task.
 pub fn shown(t: &BoardTask, input: &Input<'_>) -> Shown {
     let drafting = matches!(
@@ -274,6 +356,41 @@ pub fn next_actions(input: &Input<'_>) -> Vec<Action> {
             });
         }
     }
+    for t in input.board {
+        let lost = worker_lost(t, input);
+        if lost && t.ext.recovery.lost_ns.is_none() {
+            out.push(Action::MarkLost {
+                task_id: t.task.id.clone(),
+            });
+        } else if !lost && t.ext.recovery.lost_ns.is_some() {
+            out.push(Action::ClearLost {
+                task_id: t.task.id.clone(),
+            });
+        }
+        if let Some(cause) = recovery_due(t, input) {
+            out.push(Action::Recover {
+                task_id: t.task.id.clone(),
+                cause,
+            });
+        } else if lost
+            && status != SwarmStatus::Paused
+            && t.ext.recovery.held_ns.is_none()
+            && !recovery::may_retry(t)
+            && t.ext
+                .recovery
+                .lost_ns
+                .is_some_and(|l| input.now_ns - l >= recovery::LOST_GRACE_NS)
+        {
+            out.push(Action::GiveUp {
+                task_id: t.task.id.clone(),
+            });
+        }
+    }
+    if let Some(t) = gate_due(input) {
+        out.push(Action::RunGate {
+            task_id: t.task.id.clone(),
+        });
+    }
     if matches!(status, SwarmStatus::Running | SwarmStatus::Integrating) {
         for t in input.board {
             if needs_review(t, input) {
@@ -316,9 +433,13 @@ pub fn next_actions(input: &Input<'_>) -> Vec<Action> {
             }
         }
     }
-    // a review still to be put on the board keeps the swarm running
+    // a review still to be put on the board, or a failure about to be
+    // retried, keeps the swarm running
     let settled = input.board.iter().all(|t| t.task.status.is_terminal())
-        && !input.board.iter().any(|t| needs_review(t, input));
+        && !input
+            .board
+            .iter()
+            .any(|t| needs_review(t, input) || recovery_due(t, input).is_some());
     let next = if !settled {
         (status == SwarmStatus::Integrating).then_some(SwarmStatus::Running)
     } else if input.board.iter().any(awaits_review) {
@@ -450,6 +571,8 @@ mod tests {
             now_ns: 1_000 * 1_000_000_000,
             dispatch_grace_ns: 120 * 1_000_000_000,
             review: false,
+            // the gate follows the check command in these tests
+            merge_check: s.check_cmd.clone(),
         })
     }
 
@@ -462,6 +585,7 @@ mod tests {
             now_ns: 1_000 * 1_000_000_000,
             dispatch_grace_ns: 120 * 1_000_000_000,
             review: true,
+            merge_check: None,
         })
     }
 
@@ -617,12 +741,178 @@ mod tests {
             run(&swarm(SwarmStatus::Running, 3), &done, &w, &[]),
             [spawn("b"), spawn("c"), spawn("d")]
         );
-        // An exited worker holds no slot either (its task is lost).
+        // An exited worker holds no slot either (its task is lost, and
+        // the first sighting is noted for its automatic retry).
         let gone = [("L1", live(WorkerState::Exited, 0))];
         assert_eq!(
             run(&swarm(SwarmStatus::Running, 1), &board, &gone, &[]),
-            [spawn("b")]
+            [
+                Action::MarkLost {
+                    task_id: "task-a".into()
+                },
+                spawn("b")
+            ]
         );
+    }
+
+    const NOW: i64 = 1_000 * 1_000_000_000;
+    const SEC: i64 = 1_000_000_000;
+
+    fn failed(key: &str, ended_s_ago: i64) -> BoardTask {
+        let mut t = fresh(key, TaskStatus::Failed, &[]);
+        t.ext.attempts = 1;
+        t.task.error = Some("could not do it".into());
+        t.task.ended_ns = Some(NOW - ended_s_ago * SEC);
+        t
+    }
+
+    fn recover(key: &str, cause: Cause) -> Action {
+        Action::Recover {
+            task_id: format!("task-{key}"),
+            cause,
+        }
+    }
+
+    #[test]
+    fn a_fresh_failure_is_retried_once_and_keeps_the_swarm_running() {
+        let s = swarm(SwarmStatus::Running, 2);
+        let a = failed("a", 5);
+        assert_eq!(
+            run(&s, std::slice::from_ref(&a), &[], &[]),
+            [recover("a", Cause::Failed)],
+            "retried, and the swarm does not finish meanwhile"
+        );
+        // the retry spent: it settles as failed, as before
+        let mut spent = a.clone();
+        spent.ext.recovery.retries = recovery::MAX_AUTO_RETRIES;
+        assert_eq!(
+            run(&s, &[spent], &[], &[]),
+            [Action::Advance(SwarmStatus::Finished)]
+        );
+        // an old failure, a paused swarm, a held task or a proposal waits
+        assert_eq!(
+            run(&s, &[failed("a", 11 * 60)], &[], &[]),
+            [Action::Advance(SwarmStatus::Finished)]
+        );
+        assert!(
+            !run(
+                &swarm(SwarmStatus::Paused, 2),
+                std::slice::from_ref(&a),
+                &[],
+                &[]
+            )
+            .iter()
+            .any(|x| matches!(x, Action::Recover { .. }))
+        );
+        let mut held = a.clone();
+        held.ext.recovery.held_ns = Some(1);
+        assert_eq!(
+            run(&s, &[held], &[], &[]),
+            [Action::Advance(SwarmStatus::Finished)]
+        );
+        // while others wait for a merge, the failure is still retried
+        let mut b = task("b", TaskStatus::Done, &[]);
+        b.task.branch = Some("loop/b".into());
+        assert_eq!(
+            run(&swarm(SwarmStatus::Integrating, 2), &[a, b], &[], &[]),
+            [
+                recover("a", Cause::Failed),
+                Action::Advance(SwarmStatus::Running)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lost_worker_is_retried_after_the_grace_then_given_up() {
+        let s = swarm(SwarmStatus::Running, 2);
+        let mut a = running("a", "L1", &[]);
+        let gone = [("L1", live(WorkerState::Exited, 0))];
+        assert_eq!(
+            run(&s, std::slice::from_ref(&a), &gone, &[]),
+            [Action::MarkLost {
+                task_id: "task-a".into()
+            }]
+        );
+        // within the grace (a restart reconnects it): nothing yet
+        a.ext.recovery.lost_ns = Some(NOW - 30 * SEC);
+        assert_eq!(run(&s, std::slice::from_ref(&a), &[], &[]), []);
+        // past it: started again
+        a.ext.recovery.lost_ns = Some(NOW - recovery::LOST_GRACE_NS);
+        assert_eq!(
+            run(&s, std::slice::from_ref(&a), &[], &[]),
+            [recover("a", Cause::Lost)]
+        );
+        // its worker came back: the sighting is forgotten
+        let back = [("L1", live(WorkerState::Working, 0))];
+        assert_eq!(
+            run(&s, std::slice::from_ref(&a), &back, &[]),
+            [Action::ClearLost {
+                task_id: "task-a".into()
+            }]
+        );
+        // lost again after its retry: failed, so the swarm settles around it
+        let mut spent = a.clone();
+        spent.ext.recovery.retries = recovery::MAX_AUTO_RETRIES;
+        assert_eq!(
+            run(&s, std::slice::from_ref(&spent), &[], &[]),
+            [Action::GiveUp {
+                task_id: "task-a".into()
+            }]
+        );
+        // a worker the operator stopped waits for them: neither
+        let mut held = a;
+        held.ext.recovery.held_ns = Some(1);
+        assert_eq!(run(&s, &[held.clone()], &[], &[]), []);
+        held.ext.recovery.retries = 1;
+        assert_eq!(run(&s, &[held], &[], &[]), []);
+    }
+
+    fn queued(key: &str, at: i64) -> BoardTask {
+        let mut t = task(key, TaskStatus::Done, &[]);
+        t.task.branch = Some(format!("loop/{key}"));
+        t.ext.gate = Some(crate::bus::swarm::gate::MergeGate {
+            state: GateState::Queued,
+            queued_ns: at,
+            started_ns: None,
+            ended_ns: None,
+            base: None,
+            detail: None,
+            result: None,
+        });
+        t
+    }
+
+    fn gates(actions: &[Action]) -> Vec<String> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::RunGate { task_id } => Some(task_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn merge_gates_run_one_at_a_time_first_queued_first() {
+        let mut s = swarm(SwarmStatus::Integrating, 2);
+        s.check_cmd = Some("make test".into());
+        let board = [queued("a", 20), queued("b", 10)];
+        assert_eq!(gates(&run(&s, &board, &[], &[])), ["task-b"]);
+        // one running: the others wait
+        let mut busy = board.clone();
+        let g = busy[1].ext.gate.as_mut().unwrap();
+        g.state = GateState::Running;
+        g.started_ns = Some(NOW - SEC);
+        assert!(gates(&run(&s, &busy, &[], &[])).is_empty());
+        // its thread gone long ago (agent-mux stopped): it runs again
+        busy[1].ext.gate.as_mut().unwrap().started_ns = Some(NOW - 2 * 3600 * SEC);
+        assert_eq!(gates(&run(&s, &busy, &[], &[])), ["task-b"]);
+        // a branch decided meanwhile is not gated; without a check, nothing
+        let mut decided = board.clone();
+        decided[1].review = Some("discarded".into());
+        assert_eq!(gates(&run(&s, &decided, &[], &[])), ["task-a"]);
+        s.check_cmd = None;
+        assert!(gates(&run(&s, &board, &[], &[])).is_empty());
     }
 
     #[test]
@@ -780,6 +1070,7 @@ mod tests {
             now_ns: 0,
             dispatch_grace_ns: DISPATCH_GRACE_NS,
             review: false,
+            merge_check: None,
         };
         let got: Vec<&str> = board.iter().map(|t| shown(t, &input).as_str()).collect();
         assert_eq!(
@@ -798,6 +1089,7 @@ mod tests {
             now_ns: 0,
             dispatch_grace_ns: DISPATCH_GRACE_NS,
             review: false,
+            merge_check: None,
         };
         assert_eq!(shown(&board[1], &input), Shown::Draft);
     }

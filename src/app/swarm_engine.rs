@@ -49,6 +49,9 @@ pub struct StartSwarm {
     pub workers: Option<String>,
     /// How finished tasks are reviewed: `auto` (`None`), `off` or a harness.
     pub review: Option<String>,
+    /// Whether merges wait for a check: `off` (`None`), `on` (the check
+    /// command) or a command of its own.
+    pub merge_gate: Option<String>,
 }
 
 impl App {
@@ -127,6 +130,10 @@ impl App {
         }
         let review =
             crate::bus::swarm::review::ReviewSettings::parse(req.review.as_deref().unwrap_or(""))?;
+        let merge_gate = crate::bus::swarm::gate::MergeGateSettings::parse(
+            req.merge_gate.as_deref().unwrap_or(""),
+        );
+        merge_gate.check(req.check.as_deref())?;
         let db = self
             .trace_db_path
             .clone()
@@ -147,6 +154,7 @@ impl App {
                 worker_pool,
                 headless: !req.goal.trim().is_empty(),
                 review,
+                merge_gate,
             },
             crate::tracing::store::now_ns(),
         )?;
@@ -188,6 +196,10 @@ impl App {
             .as_ref()
             .map(|c| crate::bus::swarm::review::settings(c, &swarm.id))
             .unwrap_or_else(crate::bus::swarm::review::ReviewSettings::off);
+        let merge_gate = ro
+            .as_ref()
+            .map(|c| crate::bus::swarm::gate::settings(c, &swarm.id))
+            .unwrap_or_default();
         let ctx = PlannerContext {
             goal: swarm.goal.clone(),
             workspace: crate::workflows::planner::inventory(&workspace),
@@ -218,6 +230,8 @@ impl App {
                 headless: swarm.headless,
                 review: review.as_choice(),
                 review_step: review.describe(),
+                merge_gate: merge_gate.as_choice(),
+                merge_gate_step: merge_gate.describe(swarm),
             },
             tools: Tools {
                 dispatch_grace_s: self.swarm_dispatch_grace_ns / 1_000_000_000,
@@ -873,7 +887,31 @@ impl App {
             }
             _ => {
                 let env = self.swarm_check_env(Path::new(&swarm.workspace), swarm.isolation);
-                let done = record::apply(&conn, Some(&db), &swarm, verb, task, &env, who, now)?;
+                let done = record::apply_with(
+                    &conn,
+                    Some(&db),
+                    &swarm,
+                    verb,
+                    task,
+                    notes,
+                    &env,
+                    who,
+                    now,
+                )?;
+                // the coordinator hears of a merge gate it did not relay itself
+                if verb == SwarmVerb::MergeGate
+                    && who.by != record::DecidedBy::Chat
+                    && !done.starts_with("the merge gate is already")
+                {
+                    self.tell_coordinator(
+                        &swarm,
+                        "merge-gate",
+                        &format!("The operator changed the merge gate: {done}"),
+                        &format!(
+                            "[agent-mux swarm] The operator changed the merge gate: {done}. Merges follow it from now on."
+                        ),
+                    );
+                }
                 self.last_swarm_engine_pass = None; // act on it at the next tick
                 Ok(done)
             }
@@ -903,6 +941,7 @@ impl App {
                 check,
                 workers,
                 review,
+                merge_gate,
             } => match self.start_orchestrated_swarm(StartSwarm {
                 workspace: PathBuf::from(workspace),
                 goal,
@@ -913,6 +952,7 @@ impl App {
                 check,
                 workers,
                 review,
+                merge_gate,
             }) {
                 Ok(s) => ok(
                     if s.headless {
@@ -1017,8 +1057,8 @@ impl App {
     fn swarm_workers(&self, now: Instant) -> HashMap<String, Worker> {
         self.sessions
             .iter()
-            .filter_map(|s| {
-                let launch = s.trace.as_ref()?.launch_id.clone();
+            .map(|s| {
+                let launch = bus_launch_id(s);
                 let state = match s.status(now) {
                     Status::Working => WorkerState::Working,
                     Status::Idle => WorkerState::Idle,
@@ -1029,7 +1069,7 @@ impl App {
                     .quiet_for(now)
                     .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
                     .unwrap_or(0);
-                Some((launch, Worker { state, quiet_ns }))
+                (launch, Worker { state, quiet_ns })
             })
             .collect()
     }
@@ -1052,6 +1092,7 @@ impl App {
             .map(|m| m.from_launch.clone())
             .collect();
         let review = crate::bus::swarm::review::settings(conn, &swarm.id);
+        let merge_gate = crate::bus::swarm::gate::settings(conn, &swarm.id);
         let actions = engine::next_actions(&engine::Input {
             swarm,
             board: &board,
@@ -1060,6 +1101,7 @@ impl App {
             now_ns: crate::tracing::store::now_ns(),
             dispatch_grace_ns: self.swarm_dispatch_grace_ns,
             review: review.enabled,
+            merge_check: merge_gate.command_for(swarm),
         });
         let data = crate::app::swarm_board::SwarmData {
             run: swarm.clone(),
@@ -1073,6 +1115,7 @@ impl App {
             events: Vec::new(),
             timeline: None,
             review: review.clone(),
+            merge_gate: merge_gate.clone(),
         };
         let needs =
             crate::app::swarm_board::needs_for(&data, &workers, crate::tracing::store::now_ns())
@@ -1295,6 +1338,109 @@ impl App {
                         )
                     )));
                 }
+                Action::MarkLost { task_id } => {
+                    let _ = crate::bus::swarm::recovery::mark_lost(conn, &task_id, now_ns);
+                }
+                Action::ClearLost { task_id } => {
+                    let _ = crate::bus::swarm::recovery::clear_lost(conn, &task_id, now_ns);
+                }
+                Action::Recover { task_id, cause } => {
+                    let Some(t) = board.iter().find(|t| t.task.id == task_id) else {
+                        continue;
+                    };
+                    match crate::bus::swarm::recovery::retry(
+                        conn,
+                        Some(db),
+                        swarm,
+                        t,
+                        cause,
+                        now_ns,
+                    ) {
+                        Ok(r) => {
+                            self.notice = Some(Notice::info(format!(
+                                "swarm: `{}` {} — started again on {}",
+                                r.key,
+                                cause.as_str(),
+                                r.harness.as_deref().unwrap_or("the workers' harness")
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = record::event(
+                                conn,
+                                &swarm.id,
+                                Some(&task_id),
+                                "task.retry_failed",
+                                Some("engine"),
+                                Some(serde_json::json!({ "key": t.ext.plan_key, "error": e })),
+                                now_ns,
+                            );
+                            // once: hold it for the operator
+                            let _ = crate::bus::swarm::recovery::hold(conn, &task_id, now_ns);
+                        }
+                    }
+                }
+                Action::GiveUp { task_id } => {
+                    let Some(t) = board.iter().find(|t| t.task.id == task_id) else {
+                        continue;
+                    };
+                    if crate::bus::swarm::recovery::give_up(conn, Some(db), swarm, t, now_ns)
+                        .is_err()
+                    {
+                        let _ = crate::bus::swarm::recovery::hold(conn, &task_id, now_ns);
+                    }
+                }
+                Action::RunGate { task_id } => {
+                    let (Some(t), Some(cmd)) = (
+                        board.iter().find(|t| t.task.id == task_id),
+                        merge_gate.command_for(swarm),
+                    ) else {
+                        continue;
+                    };
+                    let Some(branch) = t.task.branch.clone() else {
+                        continue;
+                    };
+                    if crate::bus::swarm::gate::start(conn, Some(db), &task_id, now_ns).is_err() {
+                        continue;
+                    }
+                    let _ = record::event(
+                        conn,
+                        &swarm.id,
+                        Some(&task_id),
+                        "merge.started",
+                        Some("engine"),
+                        Some(
+                            serde_json::json!({ "key": t.ext.plan_key, "branch": branch, "command": cmd }),
+                        ),
+                        now_ns,
+                    );
+                    self.notice = Some(Notice::info(format!(
+                        "swarm: checking `{}` before its merge (`{}`)",
+                        t.ext.plan_key,
+                        crate::app::workflows::short_task(&cmd)
+                    )));
+                    let worktree = t.task.worktree.clone().map(PathBuf::from);
+                    let (db, run) = (db.to_path_buf(), swarm.clone());
+                    std::thread::spawn(move || {
+                        let tested = crate::bus::swarm::gate::test_branch(
+                            Path::new(&run.workspace),
+                            worktree.as_deref(),
+                            &branch,
+                            &cmd,
+                            crate::bus::swarm::check::CHECK_TIMEOUT,
+                            now_ns,
+                        );
+                        if let Ok(conn) = crate::tracing::store::open_aux(&db) {
+                            let _ = crate::bus::swarm::gate::land(
+                                &conn,
+                                Some(&db),
+                                &run,
+                                &task_id,
+                                &tested,
+                                crate::tracing::store::now_ns(),
+                            );
+                        }
+                    });
+                }
                 Action::Advance(status) => {
                     let _ = record::set_status(conn, Some(db), &swarm.id, status, now_ns);
                     let _ = record::event(
@@ -1398,8 +1544,48 @@ impl App {
                     ),
                     _ => what,
                 };
+                // failed for good: its automatic retry is spent (v26)
+                let what = match crate::bus::swarm::recovery::gave_up_note(t, board) {
+                    Some(note) => format!("{what} — {note}"),
+                    None => what,
+                };
                 events.push(what);
                 newest = newest.max(ended);
+            }
+            // started again on its own (v26)
+            if let Some(at) = t.ext.recovery.retried_ns
+                && at > c.events_seen_ns
+            {
+                events.push(format!(
+                    "{key} started again automatically on {}: {} (one automatic retry; tell the operator)",
+                    t.task.target_harness.as_deref().unwrap_or("the workers' harness"),
+                    t.ext
+                        .recovery
+                        .reason
+                        .as_deref()
+                        .map(first_line)
+                        .unwrap_or_default()
+                ));
+                newest = newest.max(at);
+            }
+            // its merge gate ended (v26)
+            if let Some(g) = &t.ext.gate
+                && let Some(at) = g.ended_ns
+                && at > c.events_seen_ns
+            {
+                use crate::bus::swarm::gate::GateState;
+                match g.state {
+                    GateState::Passed => events.push(format!(
+                        "{key} merged ({}) after the check passed on its branch",
+                        g.detail.as_deref().unwrap_or("?")
+                    )),
+                    GateState::Failed => events.push(format!(
+                        "{key} NOT merged: {}. Tell the operator; to fix it, message its worker (its session stays open) and `merge` again once it committed, or force-merge / set-aside on their word",
+                        g.detail.as_deref().unwrap_or("the check failed")
+                    )),
+                    _ => {}
+                }
+                newest = newest.max(at);
             }
             if t.ext.proposed && t.task.created_ns > c.events_seen_ns {
                 events.push(format!("{key} proposed by a worker: {}", t.task.title));
@@ -1452,6 +1638,36 @@ impl App {
             Instant::now(),
         );
         let _ = record::mark_events_told(conn, &swarm.id, newest, now_ns);
+    }
+
+    /// The operator stops session `idx` on purpose: when it is a swarm
+    /// worker still holding its task, the task is held for them, so the
+    /// engine does not start it again on its own (v26, `recovery::hold`).
+    pub fn hold_swarm_worker(&mut self, idx: usize) {
+        let Some(s) = self.sessions.get(idx) else {
+            return;
+        };
+        let launch = bus_launch_id(s);
+        let Some(link) = &s.swarm else {
+            return;
+        };
+        let Some(task_id) = link.task_id.clone() else {
+            return;
+        };
+        let Some(db) = self.trace_db_path.clone() else {
+            return;
+        };
+        let Ok(conn) = crate::tracing::store::open_aux(&db) else {
+            return;
+        };
+        let holds = crate::bus::store::get_task(&conn, &task_id)
+            .ok()
+            .flatten()
+            .is_some_and(|t| !t.status.is_terminal() && t.assigned_to.as_deref() == Some(&launch));
+        if holds {
+            let _ =
+                crate::bus::swarm::recovery::hold(&conn, &task_id, crate::tracing::store::now_ns());
+        }
     }
 
     /// The indexes in `self.sessions` of `swarm`'s sessions: its
@@ -1667,4 +1883,48 @@ fn workspace_branch(ws: &Path) -> Option<String> {
         .ok()?;
     let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !b.is_empty() && b != "HEAD").then_some(b)
+}
+
+/// The id a session goes by on the bus: its trace's launch id, else the
+/// `session-<n>` placeholder an untraced worker is assigned its task under.
+/// The dispatcher looks workers up by it, so an untraced worker is not
+/// mistaken for a lost one.
+pub(crate) fn bus_launch_id(s: &crate::session::Session) -> String {
+    s.trace
+        .as_ref()
+        .map(|t| t.launch_id.clone())
+        .unwrap_or_else(|| format!("session-{}", s.id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Profile;
+    use crate::session::Session;
+
+    #[tokio::test]
+    async fn an_untraced_worker_is_found_under_its_placeholder_id() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let profile = Profile {
+            name: "shell".into(),
+            command: "sh".into(),
+            args: vec![],
+            default_dir: None,
+            tracing: None,
+            model: None,
+            bypass_approvals: None,
+        };
+        let mut app = App::new(vec![profile.clone()], None, tx.clone());
+        let session =
+            Session::spawn(7, profile, std::env::temp_dir(), 10, 80, tx, &[], &[]).unwrap();
+        assert!(session.trace.is_none());
+        assert_eq!(bus_launch_id(&session), "session-7");
+        app.sessions.push(session);
+
+        let workers = app.swarm_workers(Instant::now());
+        let worker = workers
+            .get("session-7")
+            .expect("the dispatcher sees the untraced worker, so it is not lost");
+        assert_ne!(worker.state, WorkerState::Exited);
+    }
 }

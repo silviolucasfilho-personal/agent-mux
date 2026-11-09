@@ -9,9 +9,11 @@
 
 pub mod check;
 pub mod engine;
+pub mod gate;
 pub mod plan;
 pub mod prompt;
 pub mod record;
+pub mod recovery;
 pub mod review;
 pub mod view;
 
