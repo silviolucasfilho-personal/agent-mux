@@ -1057,8 +1057,8 @@ impl App {
     fn swarm_workers(&self, now: Instant) -> HashMap<String, Worker> {
         self.sessions
             .iter()
-            .filter_map(|s| {
-                let launch = s.trace.as_ref()?.launch_id.clone();
+            .map(|s| {
+                let launch = bus_launch_id(s);
                 let state = match s.status(now) {
                     Status::Working => WorkerState::Working,
                     Status::Idle => WorkerState::Idle,
@@ -1069,7 +1069,7 @@ impl App {
                     .quiet_for(now)
                     .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
                     .unwrap_or(0);
-                Some((launch, Worker { state, quiet_ns }))
+                (launch, Worker { state, quiet_ns })
             })
             .collect()
     }
@@ -1647,8 +1647,8 @@ impl App {
         let Some(s) = self.sessions.get(idx) else {
             return;
         };
-        let (Some(link), Some(launch)) = (&s.swarm, s.trace.as_ref().map(|t| t.launch_id.clone()))
-        else {
+        let launch = bus_launch_id(s);
+        let Some(link) = &s.swarm else {
             return;
         };
         let Some(task_id) = link.task_id.clone() else {
@@ -1883,4 +1883,48 @@ fn workspace_branch(ws: &Path) -> Option<String> {
         .ok()?;
     let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !b.is_empty() && b != "HEAD").then_some(b)
+}
+
+/// The id a session goes by on the bus: its trace's launch id, else the
+/// `session-<n>` placeholder an untraced worker is assigned its task under.
+/// The dispatcher looks workers up by it, so an untraced worker is not
+/// mistaken for a lost one.
+pub(crate) fn bus_launch_id(s: &crate::session::Session) -> String {
+    s.trace
+        .as_ref()
+        .map(|t| t.launch_id.clone())
+        .unwrap_or_else(|| format!("session-{}", s.id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Profile;
+    use crate::session::Session;
+
+    #[tokio::test]
+    async fn an_untraced_worker_is_found_under_its_placeholder_id() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let profile = Profile {
+            name: "shell".into(),
+            command: "sh".into(),
+            args: vec![],
+            default_dir: None,
+            tracing: None,
+            model: None,
+            bypass_approvals: None,
+        };
+        let mut app = App::new(vec![profile.clone()], None, tx.clone());
+        let session =
+            Session::spawn(7, profile, std::env::temp_dir(), 10, 80, tx, &[], &[]).unwrap();
+        assert!(session.trace.is_none());
+        assert_eq!(bus_launch_id(&session), "session-7");
+        app.sessions.push(session);
+
+        let workers = app.swarm_workers(Instant::now());
+        let worker = workers
+            .get("session-7")
+            .expect("the dispatcher sees the untraced worker, so it is not lost");
+        assert_ne!(worker.state, WorkerState::Exited);
+    }
 }
