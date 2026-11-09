@@ -158,7 +158,8 @@ pub fn experiment_summary(conn: &Connection, name: &str) -> rusqlite::Result<Vec
     let mut stmt = conn.prepare(
         "SELECT r.variant, r.outcome, l.started_ns, l.ended_ns,
                 (SELECT COUNT(*) FROM traces t WHERE t.launch_id = r.launch_id),
-                (SELECT SUM(ts.total_cost_usd) FROM trace_stats ts WHERE ts.launch_id = r.launch_id),
+                (SELECT SUM(o.total_cost_usd) FROM traces t JOIN observations o ON o.trace_id = t.id
+                  WHERE t.launch_id = r.launch_id),
                 (SELECT AVG(s.value) FROM scores s
                   WHERE (s.target = 'launch' AND s.target_id = r.launch_id)
                      OR (s.target = 'trace' AND s.target_id IN

@@ -538,6 +538,76 @@ fn the_screen_refreshes_only_when_the_store_or_a_session_moved() {
     assert!(!v.refresh_due(&[], t0 + Duration::from_secs(3)));
 }
 
+/// The periodic read runs on a thread: the screen keeps its rows (and the
+/// keyboard) until it lands, then shows what a synchronous read shows; a
+/// synchronous read in between makes the older background one stale.
+#[test]
+fn the_periodic_read_runs_off_the_ui_thread() {
+    let f = fixture();
+    let swarm = seed(&f, SwarmStatus::Review, vec![task("a", &[])]);
+    let conn = open_aux(&f.db).unwrap();
+    let mut v = SwarmBoard::open(
+        f.ws.clone(),
+        Some(open_aux(&f.db).unwrap()),
+        &[],
+        None,
+        vec![Harness::Claude],
+        Harness::Claude,
+        now_ns(),
+    );
+    let send = |body: &str| {
+        bstore::send_message(
+            &conn,
+            None,
+            &swarm.workspace,
+            "user",
+            None,
+            "directive",
+            body,
+            None,
+            now_ns(),
+        )
+        .unwrap();
+    };
+    let wait = |v: &mut SwarmBoard| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while v.loading() {
+            assert!(
+                Instant::now() < deadline,
+                "the background read never landed"
+            );
+            if v.poll_refresh() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    };
+    send("one");
+    v.refresh_in_background(&[], None, now_ns(), f.db.clone());
+    assert!(v.loading());
+    assert!(
+        !v.refresh_due(&[], Instant::now() + Duration::from_secs(5)),
+        "one read at a time"
+    );
+    assert!(wait(&mut v), "the read is applied");
+    assert_eq!(v.messages.len(), 1);
+    assert_eq!(v.board.len(), 1);
+    assert_eq!(
+        v.swarm.as_ref().map(|s| s.id.clone()),
+        Some(swarm.id.clone())
+    );
+
+    // a synchronous read after it was started wins
+    v.refresh_in_background(&[], None, now_ns(), f.db.clone());
+    send("two");
+    v.refresh(&[], None, now_ns());
+    assert_eq!(v.messages.len(), 2);
+    assert!(!v.loading(), "the older read is dropped");
+    assert!(!v.poll_refresh());
+    assert_eq!(v.messages.len(), 2);
+}
+
 fn pump(
     rx: &mut mpsc::Receiver<agent_mux::events::AppEvent>,
     app: &mut App,
