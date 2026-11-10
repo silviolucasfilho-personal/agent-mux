@@ -8,7 +8,10 @@
 //! / `.args=[…]`; agy 1.2.3 `agy mcp add <name> <cmd> -- <args…>` writing
 //! `~/.gemini/config/mcp_config.json`, no per-launch flag; opencode 2.0.32
 //! (2026-10-31) `mcp.servers.<name>` in `OPENCODE_CONFIG_CONTENT`, read by a
-//! `--standalone` launch (`crate::opencode`).
+//! `--standalone` launch (`crate::opencode`). 2026-11-10: grok 1.0.70 has
+//! no per-launch route for its TUI and gets a user-level entry through
+//! `grok mcp add` (`install`); pi 0.73.1 has no MCP client and gets
+//! agent-mux's client extension with `-e` (`crate::pi`).
 
 pub mod install;
 pub mod register;
@@ -24,13 +27,13 @@ pub const USAGE: &str = "agent-mux mcp <command>
 
   serve --stdio [--db PATH] [--workspace DIR | --all-workspaces | --workspace-from-env]
                                 serve the ten read-only trace tools over stdio
-  install agy                   register this binary with `agy mcp add` (no per-launch flag exists)
-  uninstall agy                 remove it with `agy mcp remove`
-  status [claude|codex|agy|opencode]
+  install agy|grok              register this binary with `agy|grok mcp add` (no per-launch flag exists)
+  uninstall agy|grok            remove it with `agy|grok mcp remove`
+  status [claude|codex|agy|opencode|grok|pi]
                                 how each harness reaches the server
 
-Claude Code, Codex and OpenCode are registered per launch by the Agents sidebar;
-nothing under ~/.claude, ~/.codex or ~/.config/opencode is modified.";
+Claude Code, Codex, OpenCode and Pi are registered per launch by the Agents sidebar;
+nothing under ~/.claude, ~/.codex, ~/.config/opencode or ~/.pi is modified.";
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
@@ -76,5 +79,10 @@ pub fn doctor_lines(db: &Path, home: &Path) -> Vec<(bool, String, String)> {
         "agy".into(),
         agy.note(),
     ));
+    // Grok only where it is installed: most machines have none.
+    let grok = install::grok_status(home, exe.as_deref());
+    if grok.installed || crate::session::install_fallback("grok", home).is_some() {
+        out.push((grok.usable() && grok.current, "grok".into(), grok.note()));
+    }
     out
 }
