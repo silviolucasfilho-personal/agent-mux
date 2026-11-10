@@ -286,7 +286,8 @@ pub fn session_name(def: &SkillDefinition, harness: Harness) -> String {
 
 /// Composes the argv for `harness`, verified against the installed CLIs:
 /// Claude Code and Codex take the prompt as the last positional argument,
-/// Antigravity through `--prompt-interactive`. Model and permission
+/// Antigravity through `--prompt-interactive`, OpenCode through `--prompt`,
+/// Grok and Pi positionally. Model and permission
 /// settings come from the base profile.
 pub fn build_skill_launch(
     def: &SkillDefinition,
@@ -341,8 +342,9 @@ pub fn build_skill_launch_full(
     }
     // `auto_approve` in skill.toml is the package's own demand, so it wins
     // over a base profile that leaves approvals on: the flags below are the
-    // four CLIs' spellings of the same thing (checked against `--help` on
-    // claude 2.1.274, codex 0.154.0, agy 1.2.4 and opencode 2.0.32).
+    // CLIs' spellings of the same thing (checked against `--help` on
+    // claude 2.1.274, codex 0.154.0, agy 1.2.4, opencode 2.0.32 and grok
+    // 1.0.70; pi 0.73.1 never asks).
     let bypass = def.auto_approve || base.bypass_approvals.unwrap_or(false);
     match harness {
         Harness::Claude => {
@@ -371,8 +373,17 @@ pub fn build_skill_launch_full(
             args.push("--prompt".into());
             args.push(prompt);
         }
-        // TODO(skills): launch a skill on Grok and Pi
-        Harness::Grok | Harness::Pi => return Err(LaunchError::UnsupportedHarness(harness)),
+        // grok 1.0.70: `--always-approve`, opening message positional
+        Harness::Grok => {
+            if bypass {
+                args.push("--always-approve".into());
+            }
+            args.push(prompt);
+        }
+        // pi 0.73.1 has no approval prompts, so no flag; the positional
+        // opening message goes through the same `/skill:` expansion as a
+        // typed one
+        Harness::Pi => args.push(prompt),
     }
     let mut profile = base.clone();
     profile.name = session_name(def, harness);

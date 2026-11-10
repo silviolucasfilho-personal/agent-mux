@@ -5,9 +5,33 @@
 //! `~/.gemini/config/skills/`, OpenCode `~/.config/opencode/skill/`
 //! (`$OPENCODE_CONFIG_DIR/skill/`; opencode 2.0.32 also reads `skills/`
 //! and `.claude/skills/`, at user and project level — probed 2026-10-31
-//! by loading skills from each). agent-mux marks the directories it
-//! writes with a manifest and never overwrites a directory it did not
-//! write.
+//! by loading skills from each), Grok `~/.grok/skills/` (`$GROK_HOME/skills/`)
+//! and Pi `~/.pi/agent/skills/` (`$PI_CODING_AGENT_DIR/skills/`).
+//! agent-mux marks the directories it writes with a manifest and never
+//! overwrites a directory it did not write.
+//!
+//! Grok 1.0.70 and Pi 0.73.1, probed 2026-11-10 with a test skill under a
+//! temporary `HOME` (never the real `~/.grok` or `~/.pi`):
+//!
+//! - **Grok** reads the same `SKILL.md` shape (`name`, `description`
+//!   frontmatter; `name` defaults to the directory) from
+//!   `$GROK_HOME/skills/<name>/` (default `~/.grok/skills/`) at user level and
+//!   `.grok/skills/<name>/` at project level (the working directory and every
+//!   directory up to the repository root), and also scans `.agents/skills/`,
+//!   `.claude/skills/` and `.cursor/skills/`; `grok inspect --json` listed
+//!   both test skills, sources `user` and `project`. Project skills load only
+//!   in a folder the user trusted (`~/.grok/trusted_folders.toml`). Every
+//!   skill is a slash command, `/<name>`, which the opening prompt can carry
+//!   (`~/.grok/docs/user-guide/08-skills.md`).
+//! - **Pi** follows the Agent Skills standard: `<agent dir>/skills/<name>/`
+//!   (agent dir `$PI_CODING_AGENT_DIR`, default `~/.pi/agent`; `~/.agents/skills/`
+//!   too) at user level and `.pi/skills/<name>/` (and `.agents/skills/`) at
+//!   project level; `pi --mode rpc` answered `get_commands` with both test
+//!   skills, scopes `user` and `project`. A skill is invoked as
+//!   `/skill:<name>`, which pi expands into the skill's body in any prompt,
+//!   the positional opening message included (`AgentSession._expandSkillCommand`).
+//! - DeepSeek has no harness variant yet (see `src/harness.rs`), so it has
+//!   no arm here.
 
 use super::SkillDefinition;
 use super::render::render_skill_md;
@@ -31,8 +55,8 @@ pub fn skills_root(harness: Harness, home: &Path) -> Option<PathBuf> {
         Harness::Codex => Some(home.join(".codex").join("skills")),
         Harness::Antigravity => Some(home.join(".gemini").join("config").join("skills")),
         Harness::OpenCode => Some(opencode_config_dir(home).join("skill")),
-        // TODO(skills): Grok and Pi skill directories
-        Harness::Grok | Harness::Pi => None,
+        Harness::Grok => Some(grok_home(home).join("skills")),
+        Harness::Pi => Some(pi_agent_dir(home).join("skills")),
     }
 }
 
@@ -62,6 +86,24 @@ pub fn opencode_config_dir(home: &Path) -> PathBuf {
         .unwrap_or_else(|| home.join(".config").join("opencode"))
 }
 
+/// Grok's home: `$GROK_HOME`, else `~/.grok` (grok 1.0.70 configuration
+/// reference).
+pub fn grok_home(home: &Path) -> PathBuf {
+    env_dir("GROK_HOME").unwrap_or_else(|| home.join(".grok"))
+}
+
+/// Pi's agent directory: `$PI_CODING_AGENT_DIR`, else `~/.pi/agent`
+/// (`getAgentDir` in pi 0.73.1).
+pub fn pi_agent_dir(home: &Path) -> PathBuf {
+    env_dir("PI_CODING_AGENT_DIR").unwrap_or_else(|| home.join(".pi").join("agent"))
+}
+
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The directory a harness scans for project-level skills under a
 /// workspace. Antigravity reads skills at user level only (probed with
 /// agy 1.2.3), so it has none.
@@ -71,8 +113,8 @@ pub fn project_skills_root(harness: Harness, workspace: &Path) -> Option<PathBuf
         Harness::Codex => Some(workspace.join(".codex").join("skills")),
         Harness::Antigravity => None,
         Harness::OpenCode => Some(workspace.join(".opencode").join("skill")),
-        // TODO(skills): Grok and Pi project skill directories
-        Harness::Grok | Harness::Pi => None,
+        Harness::Grok => Some(workspace.join(".grok").join("skills")),
+        Harness::Pi => Some(workspace.join(".pi").join("skills")),
     }
 }
 
@@ -302,5 +344,36 @@ mod tests {
             Err(InstallError::Foreign(_))
         ));
         assert!(install_project(&other, Harness::Claude, ws, true).is_ok());
+    }
+
+    #[test]
+    fn grok_and_pi_install_at_user_and_project_level() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let ws = temp.path().join("ws");
+        let d = def();
+        // the env overrides are read only when set; the test leaves them alone
+        if std::env::var_os("GROK_HOME").is_none() {
+            let r = install(&d, Harness::Grok, &home, false).unwrap();
+            assert_eq!(r.dir, home.join(".grok/skills/loop-rules"));
+            let md = std::fs::read_to_string(r.dir.join("SKILL.md")).unwrap();
+            assert!(md.contains("Invoke with /loop-rules."), "{md}");
+            assert!(status(&d, Harness::Grok, &home).current);
+            assert!(uninstall("loop-rules", Harness::Grok, &home).unwrap());
+        }
+        if std::env::var_os("PI_CODING_AGENT_DIR").is_none() {
+            let r = install(&d, Harness::Pi, &home, false).unwrap();
+            assert_eq!(r.dir, home.join(".pi/agent/skills/loop-rules"));
+            let md = std::fs::read_to_string(r.dir.join("SKILL.md")).unwrap();
+            assert!(md.contains("Invoke with /skill:loop-rules."), "{md}");
+        }
+        let g = install_project(&d, Harness::Grok, &ws, false).unwrap();
+        assert_eq!(g.dir, ws.join(".grok/skills/loop-rules"));
+        let p = install_project(&d, Harness::Pi, &ws, false).unwrap();
+        assert_eq!(p.dir, ws.join(".pi/skills/loop-rules"));
+        assert!(p.dir.join(MANIFEST).is_file());
+        assert!(supports(Harness::Grok) && supports(Harness::Pi));
+        assert!(supported_harnesses().contains(&Harness::Grok));
+        assert!(supported_harnesses().contains(&Harness::Pi));
     }
 }

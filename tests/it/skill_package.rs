@@ -237,10 +237,14 @@ fn render_uses_each_harness_invocation_syntax() {
     assert_eq!(invocation("heimdall", Harness::Claude), "/heimdall");
     assert_eq!(invocation("heimdall", Harness::Antigravity), "/heimdall");
     assert_eq!(invocation("heimdall", Harness::Codex), "$heimdall");
+    assert_eq!(invocation("heimdall", Harness::Grok), "/heimdall");
+    assert_eq!(invocation("heimdall", Harness::Pi), "/skill:heimdall");
     for (harness, hint) in [
         (Harness::Claude, "Invoke with /heimdall."),
         (Harness::Codex, "Invoke with $heimdall."),
         (Harness::Antigravity, "Invoke with /heimdall."),
+        (Harness::Grok, "Invoke with /heimdall."),
+        (Harness::Pi, "Invoke with /skill:heimdall."),
     ] {
         let md = render_skill_md(&h, harness);
         assert!(md.starts_with("---\nname: heimdall\ndescription: "));
@@ -268,8 +272,19 @@ fn install_writes_into_each_harness_root_and_refuses_foreign_dirs() {
         skills_root(Harness::Antigravity, home.path()).unwrap(),
         home.path().join(".gemini/config/skills")
     );
-    assert_eq!(skills_root(Harness::Grok, home.path()), None);
-    assert!(install(&h, Harness::Pi, home.path(), false).is_err());
+    assert_eq!(
+        skills_root(Harness::OpenCode, home.path()).unwrap(),
+        agent_mux::skill::install::opencode_config_dir(home.path()).join("skill")
+    );
+    assert_eq!(
+        skills_root(Harness::Grok, home.path()).unwrap(),
+        agent_mux::skill::install::grok_home(home.path()).join("skills")
+    );
+    assert_eq!(
+        skills_root(Harness::Pi, home.path()).unwrap(),
+        agent_mux::skill::install::pi_agent_dir(home.path()).join("skills")
+    );
+    assert!(supports(Harness::Grok) && supports(Harness::Pi));
 
     for harness in Harness::ALL.into_iter().filter(|h| supports(*h)) {
         let r = install(&h, harness, home.path(), false).unwrap();
@@ -359,6 +374,21 @@ fn launch_composes_each_harness_command_line() {
     assert_eq!(a.profile.args[n - 2], "--prompt-interactive");
     assert!(a.profile.args[n - 1].starts_with("/heimdall "));
 
+    let g = build_skill_launch(&h, Harness::Grok, &base, Path::new("/ws")).unwrap();
+    assert_eq!(g.profile.name, "Heimdall (grok)");
+    assert_eq!(g.profile.command, "grok");
+    assert_eq!(g.profile.args[..3], ["--model", "m1", "--always-approve"]);
+    assert_eq!(g.profile.args.len(), 4);
+    assert!(g.profile.args[3].starts_with("/heimdall "));
+
+    // pi has no approval prompts: model, then the positional opening
+    // message, which pi expands as `/skill:<id>`
+    let p = build_skill_launch(&h, Harness::Pi, &base, Path::new("/ws")).unwrap();
+    assert_eq!(p.profile.command, "pi");
+    assert_eq!(p.profile.args.len(), 3);
+    assert_eq!(p.profile.args[..2], ["--model", "m1"]);
+    assert!(p.profile.args[2].starts_with("/skill:heimdall "));
+
     let get = |k: &str| a.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     assert_eq!(get("AGENT_MUX_SKILL_ID").as_deref(), Some("heimdall"));
     assert!(get("AGENT_MUX_BIN").is_some());
@@ -376,6 +406,7 @@ fn launch_composes_each_harness_command_line() {
         (Harness::Claude, "--dangerously-skip-permissions"),
         (Harness::Codex, "--yolo"),
         (Harness::Antigravity, "--dangerously-skip-permissions"),
+        (Harness::Grok, "--always-approve"),
     ] {
         let l = build_skill_launch(&h, harness, &asks, Path::new("/ws")).unwrap();
         assert!(
