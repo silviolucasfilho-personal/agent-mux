@@ -121,7 +121,7 @@ The card and the Setup tab name what is still missing, in those words. An older 
 
 A loop run passes `--dangerously-skip-permissions` (Claude Code), `--yolo` (Codex) or `--auto` (OpenCode) whatever the profile says: print mode cannot answer an approval prompt, and the guard, the gate and the worktree are the controls instead.
 
-Per harness: Claude Code may edit (per-launch guard with `--loop`, fail-closed for write tools); OpenCode may edit too (agent-mux's plugin carries the same guard per launch, section 10); Codex may edit with `agent-mux trace hooks install codex`, else it only reports; Antigravity is not supported (section 10).
+Per harness: Claude Code may edit (per-launch guard with `--loop`, fail-closed for write tools); OpenCode may edit too (agent-mux's plugin carries the same guard per launch, section 10); Codex may edit with `agent-mux trace hooks install codex`, else it only reports; Antigravity, Grok, Pi, and DeepSeek are not supported (section 10).
 
 A loop that edits can still run as report-only for one run: tokens today at 80 % or more of the cap, a circuit breaker one attempt short of tripping (two identical errors where three trip it, nine attempts where ten are the cap), a stale state file (`Last run` older than 14 days), a readiness gate that no longer holds, or a missing guard make that run report only; the reason travels in the context (`run.level_reason`, `breaker.near_trip`) and the preview, so the loop reports instead of spending its last attempt.
 
@@ -208,11 +208,13 @@ The **Setup** tab (`3`) is everything about the loop that is not a run: what it 
 - **Loops**: runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. For a run with a branch, `a` marks it **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed. A run that asked for a decision without a branch reads `a` done and `x` dismiss; both record the decision. `Enter` opens its loop's History, `T` its traces.
 - **Workflows**: plans the planner wrote that wait for you (`Enter` opens one in the runs view, `d` discards it) and runs since startup that did not finish cleanly (`Enter` opens the run, `x` dismisses it from the inbox for this session).
 
-## 10. OpenCode and Antigravity
+## 10. OpenCode, Antigravity, Grok, Pi, and DeepSeek
 
 **OpenCode** runs loops like Claude Code. It has plugins, not hooks, and agent-mux's own plugin (`docs/tracing.md`, OpenCode) is named in every traced launch's `OPENCODE_CONFIG_CONTENT`; a loop run registers it with `--loop`, so its `PreToolUse` waits for the guard and a write tool (`write`, `edit`, `patch`) fails closed when the guard cannot answer. The scaffolder installs the skills under `.opencode/skills/` and the checkers as subagents under `.opencode/agents/<name>.md` (`loops::scaffold::opencode_agent_md`: `description`, `mode: subagent`, Claude's `tools:` list as OpenCode's `tools` map, a `model` only when it is a `provider/model` id); the run is `opencode run --auto <prompt>`, whose prompt asks for the skill by name (`load skill <name>`). OpenCode has no per-run budget flag: the loop's own caps apply. Probed on OpenCode 2.0.32.
 
 **Antigravity** is not supported for loops in this version. agy 1.2.3 requires a `decision` in every `PreToolUse` reply and each value changes permission behaviour, so no selective path guard can be registered; its hooks and MCP entry are global installs, its skills and agents are user-level only, and sub-agent spawning is unverified. The spec's section 16 lists the probes and the two deliveries that bring it in.
+
+**Grok, Pi, and DeepSeek** are not supported for loops. Neither Grok nor Pi has a loop hook or `PreToolUse` guard pipeline, and neither has loop scaffolding (`loops::scaffold` and `loops::cli` treat both as unsupported). DeepSeek has no harness variant in agent-mux yet.
 
 ## 11. When something trips
 
