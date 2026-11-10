@@ -4,6 +4,9 @@
 //! Claude Code and Antigravity expand `/name`, Codex mentions `$name`,
 //! and OpenCode has no syntax at all: its model loads a skill through its
 //! `skill` tool when the prompt asks for it by name (probed on 2.0.32).
+//! Grok 1.0.70 makes every skill a slash command `/name`; Pi 0.73.1
+//! registers `/skill:name` and expands it into the skill's body (probed
+//! 2026-11-10, see `install.rs`).
 
 use super::SkillDefinition;
 use crate::harness::Harness;
@@ -11,11 +14,10 @@ use crate::harness::Harness;
 /// How a user (or an opening prompt) invokes the skill in this harness.
 pub fn invocation(id: &str, harness: Harness) -> String {
     match harness {
-        Harness::Claude | Harness::Antigravity => format!("/{id}"),
+        Harness::Claude | Harness::Antigravity | Harness::Grok => format!("/{id}"),
         Harness::Codex => format!("${id}"),
         Harness::OpenCode => format!("load skill {id}"),
-        // TODO(skills): Grok and Pi have no skill install yet; ask by name
-        Harness::Grok | Harness::Pi => format!("load skill {id}"),
+        Harness::Pi => format!("/skill:{id}"),
     }
 }
 

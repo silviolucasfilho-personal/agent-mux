@@ -12,7 +12,7 @@ fn harness_args(args: &[String]) -> Result<Vec<Harness>, String> {
         if args[i] == "--harness" {
             let v = args
                 .get(i + 1)
-                .ok_or("--harness needs a value: claude, codex, agy or all")?;
+                .ok_or("--harness needs a value: claude, codex, agy, opencode, grok, pi or all")?;
             if v == "all" {
                 out.extend(Harness::ALL);
             } else {
@@ -86,7 +86,7 @@ pub fn handle_skill_cli(args: &[String]) -> Result<(), String> {
         }
         "install" => {
             let id = args.get(1).ok_or(
-                "usage: agent-mux skill install <id> [--harness claude|codex|agy|all] [--force]",
+                "usage: agent-mux skill install <id> [--harness claude|codex|agy|opencode|grok|pi|all] [--force]",
             )?;
             let def = find(id)?;
             let force = args.iter().any(|a| a == "--force");
@@ -99,6 +99,13 @@ pub fn handle_skill_cli(args: &[String]) -> Result<(), String> {
                 if !def.harnesses.contains(&h) {
                     println!(
                         "{}: skill does not declare this harness, skipped",
+                        h.as_str()
+                    );
+                    continue;
+                }
+                if !super::install::supports(h) {
+                    println!(
+                        "{}: agent-mux does not install skills for this harness, skipped",
                         h.as_str()
                     );
                     continue;
@@ -121,7 +128,7 @@ pub fn handle_skill_cli(args: &[String]) -> Result<(), String> {
         "uninstall" => {
             let id = args
                 .get(1)
-                .ok_or("usage: agent-mux skill uninstall <id> [--harness claude|codex|agy|all]")?;
+                .ok_or("usage: agent-mux skill uninstall <id> [--harness claude|codex|agy|opencode|grok|pi|all]")?;
             let mut targets = harness_args(&args[2..])?;
             if targets.is_empty() {
                 targets = Harness::ALL.to_vec();
