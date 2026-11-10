@@ -2726,6 +2726,8 @@ pub struct App {
     /// Antigravity keeps its MCP servers in a global file, so agent-mux
     /// writes the entry once per run rather than on every launch.
     agy_mcp_checked: bool,
+    /// The Grok counterpart of `agy_mcp_checked`.
+    grok_mcp_checked: bool,
     /// Whether a launch bypasses the harness's approval prompts when the
     /// profile does not say. From `bypass_approvals` in profiles.toml.
     pub bypass_approvals_default: bool,
@@ -2940,6 +2942,7 @@ impl App {
             skill_workbench: None,
             agents: crate::config::AgentsSettings::default(),
             agy_mcp_checked: false,
+            grok_mcp_checked: false,
             bypass_approvals_default: DEFAULT_BYPASS_APPROVALS,
             runtime_dir: None,
             cached_briefing: None,
@@ -4221,7 +4224,8 @@ impl App {
 
     /// How this launch reaches the agent-mux MCP server, installing what
     /// the harness needs first. Claude Code and Codex take the server on
-    /// their command line; Antigravity reads a global file, so the entry is
+    /// their command line (Pi through agent-mux's extension); Antigravity
+    /// and Grok read a global file, so the entry is
     /// written once per run — the same just-in-time install the Agents
     /// sidebar does for a skill. Never fails a launch.
     pub fn ensure_mcp(
@@ -4259,6 +4263,23 @@ impl App {
                 }
             } else {
                 self.agy_mcp_checked = true;
+            }
+        }
+        // Grok 1.0.70 has no per-launch route either (`mcp::install`): the
+        // same once-per-run user-level entry, through `grok mcp add`.
+        if harness == Some(crate::harness::Harness::Grok)
+            && !self.grok_mcp_checked
+            && self.trace_db_path.is_some()
+            && self.may_install_globally()
+            && let Some(exe) = exe.as_deref().filter(|e| e.is_absolute())
+        {
+            self.grok_mcp_checked = true;
+            let st = crate::mcp::install::grok_status(&home, Some(exe));
+            if !st.installed || !st.current || st.disabled {
+                self.notice = Some(match crate::mcp::install::install_grok(exe, &home) {
+                    Ok(_) => Notice::info("registered the agent-mux MCP server with Grok"),
+                    Err(e) => Notice::warn(format!("Grok gets no MCP tools: {e}")),
+                });
             }
         }
         crate::mcp::register::plan(
