@@ -723,6 +723,24 @@ impl Config {
                 model: None,
                 bypass_approvals: None,
             },
+            Profile {
+                name: "Grok".into(),
+                command: "grok".into(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            },
+            Profile {
+                name: "Pi".into(),
+                command: "pi".into(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            },
         ]
     }
 }

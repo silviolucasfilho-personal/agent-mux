@@ -1,7 +1,7 @@
 //! Which CLI a profile launches, and how each one spells the launch
 //! options the new-session dialog offers.
 //!
-//! The four harnesses agree on the *concepts* — a model, skipping
+//! The harnesses agree on the *concepts* — a model, skipping
 //! approval prompts, resuming, a one-shot prompt — and disagree on almost
 //! every spelling. Codex and OpenCode are the odd ones structurally: they
 //! say one-shot as a subcommand that has to lead the command line (`codex
@@ -23,6 +23,32 @@
 //! (see `crate::opencode`), which `render` leaves to the spawn step: it
 //! renders `--model` for both forms and `opencode::adapt_launch` moves it
 //! out of an interactive command line.
+//!
+//! Grok 1.0.70 (`grok`, installed at `~/.grok/bin/grok`; probed
+//! 2026-11-10 with `grok --help` and the help of its subcommands): the
+//! interactive command is `grok [OPTIONS] [PROMPT]`, the positional being
+//! the opening message. `-c`/`--continue` continues the most recent
+//! session of the working directory, `-r`/`--resume [<id or title>]`
+//! resumes one (bare: the most recent), `--fork-session` makes a resume a
+//! copy under a new id, and `-s`/`--session-id <uuid>` names a *new*
+//! conversation. `-m`/`--model`, `--always-approve` (auto-approve every
+//! tool), `-p`/`--single <PROMPT>` (one turn, printed, exit; with
+//! `--output-format plain|json|streaming-json|…`). `grok agent stdio|
+//! headless|serve` runs without the UI; `grok mcp add|list|…` manages MCP
+//! servers; `grok sessions list|search|delete`.
+//!
+//! Pi 0.73.1 (`pi`, npm `@mariozechner/pi-coding-agent`, at
+//! `/opt/homebrew/bin/pi`; probed 2026-11-10 with `pi --help`):
+//! `pi [options] [@files…] [messages…]`, the positionals being opening
+//! messages of an interactive session. `--continue`/`-c` continues the
+//! previous session, `--resume`/`-r` opens a picker (no value),
+//! `--session <path|id>` uses one session, `--fork <path|id>` forks one
+//! into a new session (a top-level option, so interactive too).
+//! `--model <pattern>` (also `provider/id[:thinking]`), `--print`/`-p`
+//! one-shot. Pi has no approval prompts, hence no flag to skip them:
+//! `bypass_approvals` renders nothing. Its subcommands
+//! (`install|remove|update|list|config`) manage extensions; there is no
+//! MCP subcommand.
 
 use std::path::Path;
 
@@ -32,6 +58,8 @@ pub enum Harness {
     Codex,
     Antigravity,
     OpenCode,
+    Grok,
+    Pi,
 }
 
 impl Harness {
@@ -49,15 +77,19 @@ impl Harness {
             "codex" => Some(Harness::Codex),
             "agy" => Some(Harness::Antigravity),
             "opencode" => Some(Harness::OpenCode),
+            "grok" => Some(Harness::Grok),
+            "pi" => Some(Harness::Pi),
             _ => None,
         }
     }
 
-    pub const ALL: [Harness; 4] = [
+    pub const ALL: [Harness; 6] = [
         Harness::Claude,
         Harness::Codex,
         Harness::Antigravity,
         Harness::OpenCode,
+        Harness::Grok,
+        Harness::Pi,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -66,6 +98,8 @@ impl Harness {
             Harness::Codex => "codex",
             Harness::Antigravity => "agy",
             Harness::OpenCode => "opencode",
+            Harness::Grok => "grok",
+            Harness::Pi => "pi",
         }
     }
 
@@ -83,6 +117,8 @@ impl Harness {
             Harness::Codex => "Codex CLI (codex)",
             Harness::Antigravity => "Google Antigravity (agy)",
             Harness::OpenCode => "OpenCode (opencode)",
+            Harness::Grok => "Grok (grok)",
+            Harness::Pi => "Pi (pi)",
         }
     }
 
@@ -92,7 +128,7 @@ impl Harness {
     /// directory). A one-shot prompt is `LaunchOptions::one_shot`.
     pub fn opening_args(self, message: String) -> Vec<String> {
         match self {
-            Harness::Claude | Harness::Codex => vec![message],
+            Harness::Claude | Harness::Codex | Harness::Grok | Harness::Pi => vec![message],
             Harness::Antigravity => vec!["--prompt-interactive".into(), message],
             Harness::OpenCode => vec!["--prompt".into(), message],
         }
@@ -118,6 +154,8 @@ impl std::str::FromStr for Harness {
             "codex" => Ok(Harness::Codex),
             "agy" | "antigravity" => Ok(Harness::Antigravity),
             "opencode" | "open-code" => Ok(Harness::OpenCode),
+            "grok" => Ok(Harness::Grok),
+            "pi" | "pi-coding-agent" => Ok(Harness::Pi),
             other => Err(format!("unknown harness '{other}'")),
         }
     }
@@ -313,6 +351,58 @@ impl LaunchOptions {
                     out.trailing.push(prompt.to_string());
                 }
             }
+            Harness::Grok => {
+                match &self.resume {
+                    Resume::Off => {}
+                    Resume::Last => out.trailing.push("--continue".into()),
+                    Resume::Id(id) => {
+                        out.trailing.push("--resume".into());
+                        out.trailing.push(id.clone());
+                    }
+                    Resume::Fork(id) => {
+                        out.trailing.push("--resume".into());
+                        out.trailing.push(id.clone());
+                        out.trailing.push("--fork-session".into());
+                    }
+                }
+                if let Some(model) = self.model() {
+                    out.trailing.push("--model".into());
+                    out.trailing.push(model.to_string());
+                }
+                if self.bypass_approvals {
+                    out.trailing.push("--always-approve".into());
+                }
+                if let Some(prompt) = prompt {
+                    // `-p`/`--single` takes the prompt as its value
+                    out.trailing.push("--single".into());
+                    out.trailing.push(prompt.to_string());
+                }
+            }
+            Harness::Pi => {
+                match &self.resume {
+                    Resume::Off => {}
+                    // bare `--resume` opens a picker
+                    Resume::Last => out.trailing.push("--continue".into()),
+                    Resume::Id(id) => {
+                        out.trailing.push("--session".into());
+                        out.trailing.push(id.clone());
+                    }
+                    Resume::Fork(id) => {
+                        out.trailing.push("--fork".into());
+                        out.trailing.push(id.clone());
+                    }
+                }
+                if let Some(model) = self.model() {
+                    out.trailing.push("--model".into());
+                    out.trailing.push(model.to_string());
+                }
+                // pi asks no approvals: nothing to skip
+                if let Some(prompt) = prompt {
+                    // `--print` is a switch; the message is positional
+                    out.trailing.push("--print".into());
+                    out.trailing.push(prompt.to_string());
+                }
+            }
         }
         out
     }
@@ -320,7 +410,10 @@ impl LaunchOptions {
 
 /// Whether `harness` can fork a conversation itself (`Resume::Fork`).
 pub fn can_fork(harness: Harness) -> bool {
-    matches!(harness, Harness::Claude | Harness::Codex)
+    matches!(
+        harness,
+        Harness::Claude | Harness::Codex | Harness::Grok | Harness::Pi
+    )
 }
 
 /// The arguments that resume one recorded conversation — the whole
@@ -371,14 +464,21 @@ fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
         };
     }
     let valued: &[&str] = match harness {
-        Harness::Claude => &["--resume", "-r"],
+        Harness::Claude | Harness::Grok => &["--resume", "-r"],
         Harness::OpenCode => &["--session", "-s"],
+        // pi's `--resume`/`-r` is a bare picker, dropped as a switch
+        Harness::Pi => &["--session", "--fork"],
         _ => &["--conversation"],
     };
     let mut out = Vec::with_capacity(args.len());
     let mut it = args.iter().peekable();
     while let Some(arg) = it.next() {
-        if arg == "--continue" || arg == "-c" || arg == "--fork-session" || arg == "--fork" {
+        let switch = arg == "--continue"
+            || arg == "-c"
+            || arg == "--fork-session"
+            || (arg == "--fork" && harness != Harness::Pi)
+            || (harness == Harness::Pi && (arg == "--resume" || arg == "-r"));
+        if switch {
             continue;
         }
         if valued.contains(&arg.as_str()) {
@@ -512,6 +612,12 @@ mod tests {
         assert_eq!(Harness::detect("codex"), Some(Harness::Codex));
         assert_eq!(Harness::detect("agy"), Some(Harness::Antigravity));
         assert_eq!(Harness::detect("opencode"), Some(Harness::OpenCode));
+        assert_eq!(Harness::detect("grok"), Some(Harness::Grok));
+        assert_eq!(
+            Harness::detect("/Users/me/.grok/bin/grok"),
+            Some(Harness::Grok)
+        );
+        assert_eq!(Harness::detect("pi"), Some(Harness::Pi));
         assert_eq!(
             Harness::detect("/home/me/.local/bin/claude"),
             Some(Harness::Claude)
@@ -570,6 +676,12 @@ mod tests {
             rendered(&o, Harness::OpenCode),
             vec!["--model", "claude-opus-5", "--auto"]
         );
+        assert_eq!(
+            rendered(&o, Harness::Grok),
+            vec!["--model", "claude-opus-5", "--always-approve"]
+        );
+        // pi asks no approvals, so there is nothing to bypass
+        assert_eq!(rendered(&o, Harness::Pi), vec!["--model", "claude-opus-5"]);
         // the model is trimmed, not quoted or defaulted
         let padded = LaunchOptions {
             model: Some("  gpt-5.6  ".into()),
@@ -591,6 +703,9 @@ mod tests {
         assert_eq!(rendered(&last, Harness::Antigravity), vec!["--continue"]);
         assert_eq!(rendered(&last, Harness::Codex), vec!["resume", "--last"]);
         assert_eq!(rendered(&last, Harness::OpenCode), vec!["--continue"]);
+        assert_eq!(rendered(&last, Harness::Grok), vec!["--continue"]);
+        // pi's bare `--resume` is a picker
+        assert_eq!(rendered(&last, Harness::Pi), vec!["--continue"]);
 
         let by_id = LaunchOptions {
             resume: Resume::Id("abc-123".into()),
@@ -610,6 +725,83 @@ mod tests {
             rendered(&by_id, Harness::OpenCode),
             vec!["--session", "abc-123"]
         );
+        assert_eq!(
+            rendered(&by_id, Harness::Grok),
+            vec!["--resume", "abc-123"],
+            "grok's --session-id names a new conversation"
+        );
+        assert_eq!(rendered(&by_id, Harness::Pi), vec!["--session", "abc-123"]);
+    }
+
+    #[test]
+    fn grok_and_pi_are_spelled_and_parsed() {
+        for (h, id, name) in [
+            (Harness::Grok, "grok", "Grok (grok)"),
+            (Harness::Pi, "pi", "Pi (pi)"),
+        ] {
+            assert_eq!(h.as_str(), id);
+            assert_eq!(h.store_provider(), id);
+            assert_eq!(h.display_name(), name);
+            assert_eq!(id.parse::<Harness>(), Ok(h));
+            assert_eq!(id.to_uppercase().parse::<Harness>(), Ok(h));
+            assert!(Harness::ALL.contains(&h));
+        }
+        assert_eq!("pi-coding-agent".parse::<Harness>(), Ok(Harness::Pi));
+        // the opening message is positional on both
+        assert_eq!(Harness::Grok.opening_args("hi".into()), ["hi"]);
+        assert_eq!(Harness::Pi.opening_args("hi".into()), ["hi"]);
+    }
+
+    #[test]
+    fn grok_and_pi_take_a_one_shot_prompt_as_a_flag_value() {
+        let o = LaunchOptions {
+            one_shot: Some("fix it".into()),
+            model: Some("grok-5".into()),
+            ..Default::default()
+        };
+        let r = o.render(Harness::Grok);
+        assert!(r.leading.is_empty());
+        assert_eq!(r.trailing, ["--model", "grok-5", "--single", "fix it"]);
+        let r = o.render(Harness::Pi);
+        assert!(r.leading.is_empty());
+        assert_eq!(r.trailing, ["--model", "grok-5", "--print", "fix it"]);
+        let resumed = LaunchOptions {
+            resume: Resume::Last,
+            ..o
+        };
+        assert_eq!(
+            rendered(&resumed, Harness::Grok),
+            ["--continue", "--model", "grok-5", "--single", "fix it"]
+        );
+    }
+
+    #[test]
+    fn restoring_grok_and_pi_replaces_their_resume() {
+        let grok = args(&["-c", "--always-approve", "-r", "old", "--fork-session"]);
+        assert_eq!(
+            restore_args(Harness::Grok, &grok, "new"),
+            ["--always-approve", "--resume", "new"]
+        );
+        assert_eq!(
+            restore_args(Harness::Grok, &args(&["--resume=old", "-m", "m"]), "new"),
+            ["-m", "m", "--resume", "new"]
+        );
+        // pi's --fork takes a value, its --resume does not
+        let pi = args(&["--fork", "old", "--resume", "--model", "m"]);
+        assert_eq!(
+            restore_args(Harness::Pi, &pi, "new"),
+            ["--model", "m", "--session", "new"]
+        );
+        assert_eq!(
+            restore_args(Harness::Pi, &args(&["--session=old", "-c"]), "new"),
+            ["--session", "new"]
+        );
+        assert_eq!(
+            fresh_args(Harness::Pi, &args(&["-r", "--thinking", "high"])),
+            ["--thinking", "high"]
+        );
+        assert_eq!(resume_args(Harness::Grok, "x"), ["--resume", "x"]);
+        assert_eq!(resume_args(Harness::Pi, "x"), ["--session", "x"]);
     }
 
     #[test]
@@ -657,6 +849,13 @@ mod tests {
         );
         assert!(can_fork(Harness::Codex) && !can_fork(Harness::Antigravity));
         assert!(!can_fork(Harness::OpenCode));
+        // grok forks a resume with --fork-session, pi with --fork <id>
+        assert_eq!(
+            rendered(&fork, Harness::Grok),
+            ["--resume", "abc", "--fork-session"]
+        );
+        assert_eq!(rendered(&fork, Harness::Pi), ["--fork", "abc"]);
+        assert!(can_fork(Harness::Grok) && can_fork(Harness::Pi));
     }
 
     #[test]

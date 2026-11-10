@@ -23,14 +23,34 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// The directory a harness scans for user skills.
-pub fn skills_root(harness: Harness, home: &Path) -> PathBuf {
+/// The directory a harness scans for user skills; `None` where agent-mux
+/// does not install skills yet.
+pub fn skills_root(harness: Harness, home: &Path) -> Option<PathBuf> {
     match harness {
-        Harness::Claude => home.join(".claude").join("skills"),
-        Harness::Codex => home.join(".codex").join("skills"),
-        Harness::Antigravity => home.join(".gemini").join("config").join("skills"),
-        Harness::OpenCode => opencode_config_dir(home).join("skill"),
+        Harness::Claude => Some(home.join(".claude").join("skills")),
+        Harness::Codex => Some(home.join(".codex").join("skills")),
+        Harness::Antigravity => Some(home.join(".gemini").join("config").join("skills")),
+        Harness::OpenCode => Some(opencode_config_dir(home).join("skill")),
+        // TODO(skills): Grok and Pi skill directories
+        Harness::Grok | Harness::Pi => None,
     }
+}
+
+/// Whether agent-mux installs skills for `harness` at all.
+pub fn supports(harness: Harness) -> bool {
+    skills_root(harness, Path::new("")).is_some()
+}
+
+/// Every harness agent-mux installs skills for, in `Harness::ALL` order.
+pub fn supported_harnesses() -> Vec<Harness> {
+    Harness::ALL.into_iter().filter(|h| supports(*h)).collect()
+}
+
+fn unsupported(harness: Harness) -> InstallError {
+    InstallError::Io(std::io::Error::other(format!(
+        "skills are not supported on {} yet",
+        harness.as_str()
+    )))
 }
 
 /// OpenCode's configuration directory: `$OPENCODE_CONFIG_DIR`, else
@@ -51,6 +71,8 @@ pub fn project_skills_root(harness: Harness, workspace: &Path) -> Option<PathBuf
         Harness::Codex => Some(workspace.join(".codex").join("skills")),
         Harness::Antigravity => None,
         Harness::OpenCode => Some(workspace.join(".opencode").join("skill")),
+        // TODO(skills): Grok and Pi project skill directories
+        Harness::Grok | Harness::Pi => None,
     }
 }
 
@@ -108,7 +130,9 @@ fn manifest_hash(dir: &Path) -> Option<String> {
 }
 
 pub fn status(def: &SkillDefinition, harness: Harness, home: &Path) -> InstallStatus {
-    let dir = skills_root(harness, home).join(&def.id);
+    let dir = skills_root(harness, home)
+        .map(|root| root.join(&def.id))
+        .unwrap_or_default();
     let installed = dir.join("SKILL.md").is_file();
     let hash = manifest_hash(&dir);
     InstallStatus {
@@ -128,12 +152,8 @@ pub fn install(
     home: &Path,
     force: bool,
 ) -> Result<InstallReport, InstallError> {
-    install_into(
-        def,
-        harness,
-        &skills_root(harness, home).join(&def.id),
-        force,
-    )
+    let root = skills_root(harness, home).ok_or_else(|| unsupported(harness))?;
+    install_into(def, harness, &root.join(&def.id), force)
 }
 
 /// Writes the package under the workspace's project-level skill
@@ -146,6 +166,9 @@ pub fn install_project(
     force: bool,
 ) -> Result<InstallReport, InstallError> {
     let Some(root) = project_skills_root(harness, workspace) else {
+        if !supports(harness) {
+            return Err(unsupported(harness));
+        }
         return Err(InstallError::Io(std::io::Error::other(
             "Antigravity reads skills at user level only; no project install",
         )));
@@ -207,7 +230,10 @@ fn install_into(
 /// Removes an installed copy. Only directories carrying the manifest are
 /// removed; returns `Ok(false)` when there was nothing managed to remove.
 pub fn uninstall(id: &str, harness: Harness, home: &Path) -> Result<bool, InstallError> {
-    let dir = skills_root(harness, home).join(id);
+    let Some(root) = skills_root(harness, home) else {
+        return Ok(false);
+    };
+    let dir = root.join(id);
     if !dir.is_dir() {
         return Ok(false);
     }

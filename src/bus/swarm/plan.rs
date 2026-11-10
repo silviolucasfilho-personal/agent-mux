@@ -140,6 +140,16 @@ pub struct Problems {
     pub warnings: Vec<(String, String)>,
 }
 
+/// The harnesses a swarm may run on: every one but Grok and Pi, whose
+/// sessions cannot reach agent-mux's MCP server yet.
+// TODO(mcp): admit Grok and Pi once their MCP registration exists
+pub fn swarm_harnesses() -> impl Iterator<Item = crate::harness::Harness> {
+    use crate::harness::Harness;
+    Harness::ALL
+        .into_iter()
+        .filter(|h| !matches!(h, Harness::Grok | Harness::Pi))
+}
+
 impl CheckEnv {
     /// The checks for `workspace` from this machine: the harnesses on
     /// `PATH` (or where their installers put them), the agent catalog of
@@ -151,8 +161,7 @@ impl CheckEnv {
     ) -> CheckEnv {
         let catalog = crate::agents::Catalog::load(&crate::assets::root(), Some(workspace));
         CheckEnv {
-            harnesses: crate::harness::Harness::ALL
-                .iter()
+            harnesses: swarm_harnesses()
                 .filter(|h| crate::session::command_available(h.as_str()))
                 .map(|h| h.as_str().to_string())
                 .collect(),

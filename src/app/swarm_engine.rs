@@ -61,8 +61,7 @@ impl App {
     /// Harnesses this machine can launch: a profile's command or the
     /// harness's own name resolves.
     pub fn installed_harnesses(&self) -> Vec<Harness> {
-        Harness::ALL
-            .into_iter()
+        crate::bus::swarm::plan::swarm_harnesses()
             .filter(|h| {
                 self.profiles.iter().any(|p| {
                     Harness::detect(&p.command) == Some(*h)

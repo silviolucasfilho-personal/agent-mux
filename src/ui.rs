@@ -6671,11 +6671,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let mut app = App::new(Config::default_profiles(), None, tx);
         app.mode = crate::app::Mode::NewSession(crate::app::DialogState::new(&app.profiles));
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        // six default profiles, then the directory picker and the options
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|f| draw(f, &app, Instant::now())).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("New session"), "got: {text}");
         assert!(text.contains("Claude Code"), "got: {text}");
+        assert!(text.contains("Grok") && text.contains("Pi"), "got: {text}");
         assert!(text.contains("Tracing:"), "got: {text}");
         assert!(text.contains("Content Mode:"), "got: {text}");
         // the default profiles run real CLIs, so the options show

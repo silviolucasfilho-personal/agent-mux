@@ -53,6 +53,9 @@ pub fn extra_args(
             v.push("--format".into());
             v.push("json".into());
         }
+        // TODO(workflows): not a workflow harness yet (its step skills
+        // cannot be installed, so a run stops before reaching here)
+        Harness::Grok | Harness::Pi => {}
     }
     v
 }
@@ -73,7 +76,7 @@ pub fn effort_args(harness: Harness, effort: &str) -> Option<Vec<String>> {
         Harness::Antigravity => ["low", "medium", "high", "max"]
             .contains(&effort)
             .then(|| vec!["--effort".into(), effort.to_string()]),
-        Harness::Claude | Harness::OpenCode => None,
+        Harness::Claude | Harness::OpenCode | Harness::Grok | Harness::Pi => None,
     }
 }
 
@@ -82,7 +85,8 @@ pub fn effort_args(harness: Harness, effort: &str) -> Option<Vec<String>> {
 /// Codex and OpenCode).
 pub fn insert_before_prompt(args: &mut Vec<String>, harness: Harness, extra: Vec<String>) {
     let tail = match harness {
-        Harness::Claude | Harness::Antigravity => 2,
+        // `--single <prompt>` on Grok, `--print <prompt>` on Pi
+        Harness::Claude | Harness::Antigravity | Harness::Grok | Harness::Pi => 2,
         Harness::Codex | Harness::OpenCode => 1,
     };
     let at = args.len().saturating_sub(tail);
@@ -221,6 +225,8 @@ pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
                 .filter(|s| !s.is_empty()),
             ..Default::default()
         },
+        // TODO(workflows): not a workflow harness yet
+        Harness::Grok | Harness::Pi => Envelope::default(),
         Harness::Claude | Harness::Antigravity => {
             let cleaned = clean_terminal(stdout);
             let Some(v) = last_json_object(&cleaned) else {

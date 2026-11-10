@@ -72,6 +72,7 @@ fn fake_harness(
   printf '{"type":"text","sessionID":"ses_fake","part":{"type":"text","text":"%s"}}\n' "$esc"
 }"#
         }
+        Harness::Grok | Harness::Pi => unreachable!("not a workflow harness yet"),
     };
     let find_out = if harness == Harness::Codex {
         r#"OUT_FILE=""; prev=""

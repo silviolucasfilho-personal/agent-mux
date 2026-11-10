@@ -68,7 +68,8 @@ impl App {
             FindNext | FindPrev => {
                 matches!(&self.mode, Mode::TraceBrowser(b) if b.zoomed && b.find.is_some())
             }
-            FilterClaude | FilterCodex | FilterAntigravity | FilterOpenCode => {
+            FilterClaude | FilterCodex | FilterAntigravity | FilterOpenCode | FilterGrok
+            | FilterPi => {
                 matches!(self.mode, Mode::SkillsView(_))
             }
             Save => {
@@ -247,12 +248,15 @@ impl App {
             History => self.request_navigation(NavigationTarget::History, now),
             Langfuse => self.request_navigation(NavigationTarget::Langfuse, now),
             OpenLangfuseWeb => self.request_navigation(NavigationTarget::LangfuseWeb, now),
-            FilterClaude | FilterCodex | FilterAntigravity | FilterOpenCode => {
+            FilterClaude | FilterCodex | FilterAntigravity | FilterOpenCode | FilterGrok
+            | FilterPi => {
                 if let Mode::SkillsView(v) = &mut self.mode {
                     v.toggle_filter(match id {
                         FilterClaude => crate::harness::Harness::Claude,
                         FilterCodex => crate::harness::Harness::Codex,
                         FilterOpenCode => crate::harness::Harness::OpenCode,
+                        FilterGrok => crate::harness::Harness::Grok,
+                        FilterPi => crate::harness::Harness::Pi,
                         _ => crate::harness::Harness::Antigravity,
                     });
                 }

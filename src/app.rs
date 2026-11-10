@@ -379,7 +379,7 @@ impl Default for SkillLauncherState {
             error: None,
             skill_id: String::new(),
             skill_name: String::new(),
-            harnesses: crate::harness::Harness::ALL.to_vec(),
+            harnesses: crate::skill::install::supported_harnesses(),
             dir_picker: dir_picker::DirPicker::for_path(&workspace),
             workspace,
             field: SkillLauncherField::Workspace,
@@ -400,7 +400,7 @@ impl SkillLauncherState {
         workspace: String,
     ) -> Self {
         let harnesses = if skill.harnesses.is_empty() {
-            crate::harness::Harness::ALL.to_vec()
+            crate::skill::install::supported_harnesses()
         } else {
             skill.harnesses.clone()
         };
@@ -427,7 +427,7 @@ impl SkillLauncherState {
         harnesses: Vec<crate::harness::Harness>,
     ) -> Self {
         let h = if harnesses.is_empty() {
-            crate::harness::Harness::ALL.to_vec()
+            crate::skill::install::supported_harnesses()
         } else {
             harnesses
         };
@@ -3066,7 +3066,7 @@ impl App {
                     plan.full_content()
                         && crate::tracing::hooks::install::codex_status(&home, None).installed
                 }
-                Harness::Antigravity | Harness::OpenCode => false,
+                Harness::Antigravity | Harness::OpenCode | Harness::Grok | Harness::Pi => false,
             };
         if !feed::should_own(&home, harness, complete) {
             return Vec::new();
@@ -3718,7 +3718,13 @@ impl App {
                 crate::tracing::opencode_db::newest_session_in(&db, &session.dir, 0)
                     .map(|(id, _)| id)
             }
-            Some(crate::harness::Harness::Codex) | None => None,
+            // not traced yet: no conversation to name from disk
+            Some(
+                crate::harness::Harness::Codex
+                | crate::harness::Harness::Grok
+                | crate::harness::Harness::Pi,
+            )
+            | None => None,
         };
 
         let disk_claimed_by_other = disk_conv.as_deref().is_some_and(held_by_other);
@@ -5061,7 +5067,7 @@ impl App {
             .and_then(|p| crate::tracing::store::open_aux(p).ok());
         let mut harnesses = self.installed_harnesses();
         if harnesses.is_empty() {
-            harnesses = crate::harness::Harness::ALL.to_vec();
+            harnesses = crate::bus::swarm::plan::swarm_harnesses().collect();
         }
         let mut view = swarm_board::SwarmBoard::open(
             ws.clone(),
@@ -7985,6 +7991,8 @@ impl App {
             crate::harness::Harness::Codex => "codex",
             crate::harness::Harness::Antigravity => "antigravity",
             crate::harness::Harness::OpenCode => "opencode",
+            crate::harness::Harness::Grok => "grok",
+            crate::harness::Harness::Pi => "pi",
         };
         let mut profile = self
             .profiles

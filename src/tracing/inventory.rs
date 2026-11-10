@@ -383,6 +383,8 @@ fn roots(harness: Harness, cwd: &Path, home: &Path) -> Vec<Root> {
                 scope: Scope::Project,
             });
         }
+        // not inventoried yet (out of scope for the harness itself)
+        Harness::Grok | Harness::Pi => {}
     }
     r
 }
@@ -656,7 +658,9 @@ pub fn known_tools(harness: Harness, seen: impl IntoIterator<Item = String>) -> 
     let mut set: HashSet<String> = match harness {
         Harness::Claude => CLAUDE_TOOLS.iter().map(|t| t.to_string()).collect(),
         // no verified floor for these: only what was measured
-        Harness::Codex | Harness::Antigravity | Harness::OpenCode => HashSet::new(),
+        Harness::Codex | Harness::Antigravity | Harness::OpenCode | Harness::Grok | Harness::Pi => {
+            HashSet::new()
+        }
     };
     set.extend(seen);
     set

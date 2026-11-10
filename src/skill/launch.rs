@@ -371,6 +371,8 @@ pub fn build_skill_launch_full(
             args.push("--prompt".into());
             args.push(prompt);
         }
+        // TODO(skills): launch a skill on Grok and Pi
+        Harness::Grok | Harness::Pi => return Err(LaunchError::UnsupportedHarness(harness)),
     }
     let mut profile = base.clone();
     profile.name = session_name(def, harness);
