@@ -49,6 +49,19 @@
 //! `bypass_approvals` renders nothing. Its subcommands
 //! (`install|remove|update|list|config`) manage extensions; there is no
 //! MCP subcommand.
+//!
+//! Not yet supported: DeepSeek Harness (`dsh` 0.2.2-rc.1, Homebrew cask
+//! `deepseek-harness`, launcher at `/Applications/DeepSeek
+//! Harness.app/Contents/Resources/runtime/cli/bin/dsh`; probed 2026-11-10
+//! with a temporary `HOME`/`DSH_HOME`). `dsh [--profile] <name> [options]
+//! [app-args…]` boots a profile under `$DSH_HOME/profiles` (default
+//! `~/.dsh`). The shipped templates (`--from-default-profile`) are `acp`,
+//! `headless`, `sdk`, `sdk-minimal` and `web`; there is no terminal UI
+//! (`dsh tui` fails: profile "tui" does not exist) without a plugin.
+//! `dsh headless [--json] [--session-id <id>] [--permission-mode <preset>]
+//! [--approval-policy ask|never] [--add-dir <path>] <task…>` answers one
+//! task on stdout and exits; `dsh web [--no-open] [--port N]` serves a
+//! browser UI. Deferred to a follow-up task.
 
 use std::path::Path;
 
