@@ -2,7 +2,8 @@
 
 agent-mux does not keep a memory itself. It installs and wires
 [ai-memory](https://github.com/akitaonrails/ai-memory), so Claude Code, Codex,
-Antigravity and OpenCode share one memory per project.
+Antigravity and OpenCode share one memory per project. (Grok, Pi and DeepSeek
+are not supported by the ai-memory integration yet).
 
 ai-memory works in three parts:
 

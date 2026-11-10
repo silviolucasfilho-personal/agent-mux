@@ -307,6 +307,8 @@ agent-mux validates it against the schema and retries the session once with the 
 | Path guard | per launch | per launch (after `trace hooks install codex`) | none: rely on isolation and budgets | none: rely on isolation and budgets |
 | Worktree isolation | yes | yes | not applied | yes |
 
+Grok, Pi, and DeepSeek do not run workflow steps yet (`src/agents/fit.rs` and `src/workflows/harness.rs` treat Grok and Pi as unsupported for workflows; DeepSeek is deferred).
+
 Step skills are agent-mux packages (`wf-review-dimensions`, `wf-review-find`, `wf-refute`, `wf-synthesize`, `wf-read-map`, `wf-search`, `wf-deep-read`, `wf-critic`, `wf-find`, `wf-attempt`, `wf-judge`, `wf-discover-sites`, `wf-transform`, `wf-verify-site`, `wf-classify`, `wf-triage-bug`, `wf-triage-feature`, `wf-grimoire-brief`, `wf-grimoire-lens`, `wf-grimoire-verdict`) with `hidden = true` in their `skill.toml`, so they stay out of the Agents sidebar. They are installed user-level for the run's harness before the first session. `writes = true` marks a skill that edits files; a step running it must have `isolation = "worktree"`, which the validator enforces.
 
 Mixed harnesses: a step's `harness = "codex"` runs it on Codex whatever the run's harness; `profile` picks a named profile. For one run, the run dialog's Steps rows and `--step <id>.harness=<h>` do the same without editing the document. Such a choice must be one `workflow.harness` allows, or the run is refused before it launches, and a `profile` the document named for another CLI is dropped, so the step launches with the chosen harness's own profile. Refuters and judges keep their own `harness` and are not changed by the step's row.
