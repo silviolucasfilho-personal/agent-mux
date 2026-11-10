@@ -146,7 +146,7 @@ fn guard_available(harness: Harness, home: &Path) -> bool {
         }
         // agent-mux's plugin rides on every traced launch
         Harness::OpenCode => exe.is_some(),
-        Harness::Antigravity => false,
+        Harness::Antigravity | Harness::Grok | Harness::Pi => false,
     }
 }
 

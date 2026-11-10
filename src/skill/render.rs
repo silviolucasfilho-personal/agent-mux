@@ -14,6 +14,8 @@ pub fn invocation(id: &str, harness: Harness) -> String {
         Harness::Claude | Harness::Antigravity => format!("/{id}"),
         Harness::Codex => format!("${id}"),
         Harness::OpenCode => format!("load skill {id}"),
+        // TODO(skills): Grok and Pi have no skill install yet; ask by name
+        Harness::Grok | Harness::Pi => format!("load skill {id}"),
     }
 }
 

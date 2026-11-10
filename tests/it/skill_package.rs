@@ -3,7 +3,9 @@
 
 use agent_mux::config::Profile;
 use agent_mux::harness::Harness;
-use agent_mux::skill::install::{MANIFEST, install, skills_root, status, uninstall};
+use agent_mux::skill::install::{
+    MANIFEST, install, skills_root, status, supported_harnesses, supports, uninstall,
+};
 use agent_mux::skill::launch::{
     HYDRATION_HINT, build_skill_launch, build_skill_launch_full, opening_prompt,
 };
@@ -37,7 +39,7 @@ fn builtin_heimdall_is_a_complete_package() {
     assert_eq!(h.id, "heimdall");
     assert_eq!(h.name, "Heimdall");
     assert!(h.is_builtin && h.dir.is_none());
-    assert_eq!(h.harnesses, Harness::ALL.to_vec());
+    assert_eq!(h.harnesses, supported_harnesses());
     assert_eq!(h.default_harness, Harness::Antigravity);
     assert!(h.capabilities.iter().any(|c| c == "trace.read"));
     assert!(h.startup_prompt.is_some());
@@ -106,7 +108,7 @@ fn parse_validates_frontmatter_and_directory_name() {
     .unwrap();
     assert_eq!(ok.id, "audit");
     assert_eq!(ok.name, "Audit");
-    assert_eq!(ok.harnesses, Harness::ALL.to_vec());
+    assert_eq!(ok.harnesses, supported_harnesses());
 
     let mismatch = parse_skill(
         "---\nname: audit\ndescription: Use it.\n---\nBody.\n",
@@ -255,22 +257,24 @@ fn install_writes_into_each_harness_root_and_refuses_foreign_dirs() {
     let home = tempdir().unwrap();
     let h = builtin_skills().remove(0);
     assert_eq!(
-        skills_root(Harness::Claude, home.path()),
+        skills_root(Harness::Claude, home.path()).unwrap(),
         home.path().join(".claude/skills")
     );
     assert_eq!(
-        skills_root(Harness::Codex, home.path()),
+        skills_root(Harness::Codex, home.path()).unwrap(),
         home.path().join(".codex/skills")
     );
     assert_eq!(
-        skills_root(Harness::Antigravity, home.path()),
+        skills_root(Harness::Antigravity, home.path()).unwrap(),
         home.path().join(".gemini/config/skills")
     );
+    assert_eq!(skills_root(Harness::Grok, home.path()), None);
+    assert!(install(&h, Harness::Pi, home.path(), false).is_err());
 
-    for harness in Harness::ALL {
+    for harness in Harness::ALL.into_iter().filter(|h| supports(*h)) {
         let r = install(&h, harness, home.path(), false).unwrap();
         assert!(!r.unchanged);
-        let dir = skills_root(harness, home.path()).join("heimdall");
+        let dir = skills_root(harness, home.path()).unwrap().join("heimdall");
         assert_eq!(r.dir, dir);
         assert!(dir.join("SKILL.md").is_file());
         assert!(dir.join("reference/sessions.md").is_file());
@@ -284,7 +288,9 @@ fn install_writes_into_each_harness_root_and_refuses_foreign_dirs() {
     }
 
     // A directory the user made is never overwritten without --force.
-    let foreign = skills_root(Harness::Claude, home.path()).join("mine");
+    let foreign = skills_root(Harness::Claude, home.path())
+        .unwrap()
+        .join("mine");
     fs::create_dir_all(&foreign).unwrap();
     fs::write(
         foreign.join("SKILL.md"),
@@ -300,6 +306,7 @@ fn install_writes_into_each_harness_root_and_refuses_foreign_dirs() {
     assert!(uninstall("heimdall", Harness::Codex, home.path()).unwrap());
     assert!(
         !skills_root(Harness::Codex, home.path())
+            .unwrap()
             .join("heimdall")
             .exists()
     );

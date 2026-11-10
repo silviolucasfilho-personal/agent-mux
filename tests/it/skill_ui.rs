@@ -136,7 +136,10 @@ async fn heimdall_is_listed_in_the_agents_section_and_the_picker_defaults_to_its
     };
     assert_eq!(state.skill_id, "heimdall");
     assert_eq!(state.selected_harness(), Harness::Antigravity);
-    assert_eq!(state.harnesses, Harness::ALL.to_vec());
+    assert_eq!(
+        state.harnesses,
+        agent_mux::skill::install::supported_harnesses()
+    );
 
     // Tab leaves the Workspace text field; the shortcut then selects.
     app.handle_key(&key(KeyCode::Tab), Instant::now());

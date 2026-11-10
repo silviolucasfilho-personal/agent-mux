@@ -126,6 +126,11 @@ pub fn plan(
                 )
             }
         }
+        // TODO(mcp): Grok (`grok mcp add`) and Pi register the server
+        Some(h @ (Harness::Grok | Harness::Pi)) => Registration::Unavailable(format!(
+            "MCP registration is not supported on {} yet",
+            h.as_str()
+        )),
         None => Registration::Unavailable("the command is not a known harness".into()),
     }
 }

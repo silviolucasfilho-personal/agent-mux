@@ -153,13 +153,23 @@ pub fn command_available(command: &str) -> bool {
 /// launch would fail with "No such file or directory". OpenCode's
 /// installer (`curl -fsSL https://opencode.ai/install | bash`, 2.0.32)
 /// writes `~/.opencode/bin/opencode` and appends that folder to the
-/// shell's rc file.
+/// shell's rc file. Grok 1.0.70's installer writes `~/.grok/bin/grok`
+/// (seen on this machine, 2026-11-10). Pi is an npm package
+/// (`@mariozechner/pi-coding-agent`): the user-level npm prefixes people
+/// put on `PATH` from an rc file (`~/.npm-global`, `~/.local`) and bun's
+/// global bin folder are tried in turn.
 pub fn install_fallback(command: &str, home: &Path) -> Option<PathBuf> {
-    let candidate = match command {
-        "opencode" => home.join(".opencode").join("bin").join("opencode"),
+    let candidates: Vec<PathBuf> = match command {
+        "opencode" => vec![home.join(".opencode").join("bin").join("opencode")],
+        "grok" => vec![home.join(".grok").join("bin").join("grok")],
+        "pi" => vec![
+            home.join(".npm-global").join("bin").join("pi"),
+            home.join(".local").join("bin").join("pi"),
+            home.join(".bun").join("bin").join("pi"),
+        ],
         _ => return None,
     };
-    is_runnable(&candidate).then_some(candidate)
+    candidates.into_iter().find(|c| is_runnable(c))
 }
 
 /// An existing file with an execute bit (any existing file off Unix).
@@ -726,6 +736,25 @@ mod resolve_tests {
 
     #[cfg(unix)]
     #[test]
+    fn grok_and_pi_off_path_fall_back_to_their_install_dirs() {
+        let home = tempfile::tempdir().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+        let grok = home.path().join(".grok/bin/grok");
+        executable(&grok);
+        let (program, _) =
+            resolve_command_with("grok", empty.path().as_os_str(), Some(home.path())).unwrap();
+        assert_eq!(program, grok.to_string_lossy());
+        // the first runnable of pi's candidates
+        let pi = home.path().join(".local/bin/pi");
+        executable(&pi);
+        assert_eq!(install_fallback("pi", home.path()), Some(pi.clone()));
+        let npm = home.path().join(".npm-global/bin/pi");
+        executable(&npm);
+        assert_eq!(install_fallback("pi", home.path()), Some(npm));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn opencode_on_path_wins_over_the_fallback() {
         let home = tempfile::tempdir().unwrap();
         let path = tempfile::tempdir().unwrap();
@@ -752,6 +781,8 @@ mod resolve_tests {
         assert_eq!(install_fallback("opencode", home.path()), None);
         // other commands and explicit paths have none
         assert_eq!(install_fallback("claude", home.path()), None);
+        assert_eq!(install_fallback("grok", home.path()), None);
+        assert_eq!(install_fallback("pi", home.path()), None);
         let (program, _) =
             resolve_command_with("./opencode", empty.path().as_os_str(), Some(home.path()))
                 .unwrap();
