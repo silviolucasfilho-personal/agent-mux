@@ -661,11 +661,7 @@ fn status_card(
 ) -> (Vec<String>, serde_json::Value) {
     let pattern = patterns::find(&l.pattern);
     let spend = spend_today(conn, &l.id);
-    let percent = if l.max_tokens_per_day == 0 {
-        0
-    } else {
-        (spend.tokens.max(0) as u128 * 100 / l.max_tokens_per_day as u128) as u32
-    };
+    let percent = super::run::budget_percent(spend.tokens, l.max_tokens_per_day);
     let recent = conn
         .and_then(|c| lstore::recent_runs(c, &l.id, 5).ok())
         .unwrap_or_default();

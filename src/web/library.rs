@@ -103,8 +103,9 @@ fn kind_matches(kind: Kind, filter: &str) -> bool {
 
 async fn list_items(
     State(state): State<Arc<WebState>>,
-    Query(query): Query<ItemsQuery>,
+    query: Result<Query<ItemsQuery>, axum::extract::rejection::QueryRejection>,
 ) -> ApiResult<ItemsResponse> {
+    let Query(query) = query.map_err(|e| ApiError::bad_request(e.to_string()))?;
     let catalog = Catalog::load(&state.library_root, None);
     let mut items = Vec::new();
     let mut grouped: BTreeMap<String, Vec<ItemSummary>> = BTreeMap::new();
@@ -163,34 +164,27 @@ pub struct ItemDetail {
     pub placeholders: Vec<String>,
 }
 
+/// Percent-decodes `s` once more (an id the SPA encoded twice). Bytes are
+/// collected first so a multi-byte UTF-8 sequence (`%C3%A9`) decodes to
+/// its character; a malformed escape is kept as written.
 fn decode_path(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let h1 = chars.next();
-            let h2 = chars.next();
-            if let (Some(c1), Some(c2)) = (h1, h2) {
-                let hex = format!("{c1}{c2}");
-                if let Ok(b) = u8::from_str_radix(&hex, 16) {
-                    out.push(b as char);
-                    continue;
-                }
-                out.push('%');
-                out.push(c1);
-                out.push(c2);
-                continue;
-            } else {
-                out.push('%');
-                if let Some(c1) = h1 {
-                    out.push(c1);
-                }
-                continue;
-            }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(hex) = bytes.get(i + 1..i + 3)
+            && let Ok(hex) = std::str::from_utf8(hex)
+            && let Ok(b) = u8::from_str_radix(hex, 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
         }
-        out.push(c);
+        out.push(bytes[i]);
+        i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 async fn get_item(
@@ -362,4 +356,19 @@ async fn agents(State(state): State<Arc<WebState>>) -> ApiResult<AgentsResponse>
         agents: out,
         problems,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_path;
+
+    #[test]
+    fn decode_path_keeps_utf8_and_malformed_escapes() {
+        assert_eq!(decode_path("prompts%2Fswarm"), "prompts/swarm");
+        assert_eq!(decode_path("caf%C3%A9"), "café");
+        assert_eq!(decode_path("100%"), "100%");
+        assert_eq!(decode_path("a%zzb"), "a%zzb");
+        assert_eq!(decode_path("%4"), "%4");
+        assert_eq!(decode_path("plain"), "plain");
+    }
 }

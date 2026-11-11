@@ -366,8 +366,11 @@ pub fn swarms_since(
         let norm = bstore::normalize_workspace(std::path::Path::new(ws));
         all.retain(|s| s.workspace == norm || s.workspace == ws);
     }
+    // a swarm can appear in both lists; `dedup_by` only drops neighbours,
+    // so drop repeats by id before sorting
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|s| seen.insert(s.id.clone()));
     all.sort_by_key(|s| std::cmp::Reverse(s.started_ns));
-    all.dedup_by(|a, b| a.id == b.id);
     all.truncate(limit);
     Ok(all)
 }

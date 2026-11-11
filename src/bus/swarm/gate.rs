@@ -429,6 +429,9 @@ pub fn test_branch(
                 workspace,
                 &["worktree", "remove", "--force", &p.to_string_lossy()],
             );
+            // a task worktree whose folder was deleted still holds the
+            // branch for git ("already checked out"): forget it first
+            let _ = git(workspace, &["worktree", "prune"]);
             match git(
                 workspace,
                 &["worktree", "add", &p.to_string_lossy(), branch],

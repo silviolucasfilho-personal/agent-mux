@@ -394,7 +394,12 @@ pub fn detect_tech_stack(dir: &Path) -> TechStack {
     // 3. Python (pyproject.toml, requirements.txt, setup.py)
     let pyproject = dir.join("pyproject.toml");
     let requirements = dir.join("requirements.txt");
-    if pyproject.is_file() || requirements.is_file() || dir.join("setup.py").is_file() {
+    if pyproject.is_file()
+        || requirements.is_file()
+        || dir.join("setup.py").is_file()
+        || dir.join("setup.cfg").is_file()
+        || dir.join("Pipfile").is_file()
+    {
         push_unique(&mut stack.languages, "Python");
         if dir.join("uv.lock").is_file() {
             push_unique(&mut stack.tools, "uv");
@@ -499,9 +504,15 @@ pub fn detect_tech_stack(dir: &Path) -> TechStack {
     }
 
     // 6. Infra & build helpers
-    if dir.join("Dockerfile").is_file()
-        || dir.join("docker-compose.yml").is_file()
-        || dir.join("compose.yaml").is_file()
+    if [
+        "Dockerfile",
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+    ]
+    .iter()
+    .any(|f| dir.join(f).is_file())
     {
         push_unique(&mut stack.tools, "Docker");
     }
@@ -510,7 +521,10 @@ pub fn detect_tech_stack(dir: &Path) -> TechStack {
     }
     if dir.join("justfile").is_file() || dir.join("Justfile").is_file() {
         push_unique(&mut stack.tools, "Just");
-    } else if dir.join("Makefile").is_file() {
+    } else if ["Makefile", "makefile", "GNUmakefile"]
+        .iter()
+        .any(|f| dir.join(f).is_file())
+    {
         push_unique(&mut stack.tools, "Make");
     }
 
@@ -566,10 +580,11 @@ fn read_head_branch(head_path: &Path) -> Option<String> {
     let line = raw.lines().next()?.trim();
     if let Some(rest) = line.strip_prefix("ref: refs/heads/") {
         Some(rest.trim().to_string())
-    } else if line.len() >= 7 {
-        Some(line[..7].to_string())
     } else {
-        None
+        // a detached HEAD is a hex object id; anything else is not a branch
+        line.get(..7)
+            .filter(|id| id.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(str::to_string)
     }
 }
 
@@ -841,5 +856,37 @@ fn truncate_summary(s: &str, max_chars: usize) -> String {
         let mut head: String = s.chars().take(max_chars.saturating_sub(1)).collect();
         head.push('…');
         head
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn head_branch_reads_refs_and_detached_ids_and_never_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let head = dir.path().join("HEAD");
+        fs::write(&head, "ref: refs/heads/feat/x\n").unwrap();
+        assert_eq!(read_head_branch(&head).as_deref(), Some("feat/x"));
+        fs::write(&head, "0123456789abcdef0123456789abcdef01234567\n").unwrap();
+        assert_eq!(read_head_branch(&head).as_deref(), Some("0123456"));
+        // multi-byte text across byte 7 used to panic on the slice
+        fs::write(&head, "abcdeféééé\n").unwrap();
+        assert_eq!(read_head_branch(&head), None);
+        fs::write(&head, "abc\n").unwrap();
+        assert_eq!(read_head_branch(&head), None);
+    }
+
+    #[test]
+    fn detects_compose_pipfile_and_lowercase_makefile() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("compose.yml"), "services: {}\n").unwrap();
+        fs::write(dir.path().join("Pipfile"), "[packages]\ndjango = \"*\"\n").unwrap();
+        fs::write(dir.path().join("makefile"), "all:\n").unwrap();
+        let stack = detect_tech_stack(dir.path());
+        assert!(stack.languages.iter().any(|l| l == "Python"), "{stack:?}");
+        assert!(stack.tools.iter().any(|t| t == "Docker"), "{stack:?}");
+        assert!(stack.tools.iter().any(|t| t == "Make"), "{stack:?}");
     }
 }

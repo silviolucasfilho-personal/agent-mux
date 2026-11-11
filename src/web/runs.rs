@@ -19,6 +19,7 @@ use super::{ApiError, ApiResult, WebState};
 use crate::loops::store::{self as lstore, LoopRun, RunFacts};
 use crate::workflows::store::{self as wstore, WorkflowRun, WorkflowStep};
 use axum::Router;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -46,6 +47,14 @@ struct ListQuery {
     limit: Option<usize>,
 }
 
+/// A list query, or the JSON 400 a malformed one (`?limit=abc`) answers.
+type ListQueryResult = Result<Query<ListQuery>, QueryRejection>;
+
+fn list_query(q: ListQueryResult) -> Result<ListQuery, ApiError> {
+    q.map(|Query(q)| q)
+        .map_err(|e| ApiError::bad_request(e.to_string()))
+}
+
 impl ListQuery {
     fn limit(&self) -> usize {
         self.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
@@ -61,10 +70,8 @@ fn db_err(e: rusqlite::Error) -> ApiError {
     ApiError::internal(e.to_string())
 }
 
-async fn list_loops(
-    State(state): State<Arc<WebState>>,
-    Query(q): Query<ListQuery>,
-) -> ApiResult<Value> {
+async fn list_loops(State(state): State<Arc<WebState>>, q: ListQueryResult) -> ApiResult<Value> {
+    let q = list_query(q)?;
     let conn = open(&state)?;
     let runs = lstore::all_recent_runs(&conn, q.limit()).map_err(db_err)?;
     let runs: Vec<Value> = runs.iter().map(loop_run_json).collect();
@@ -94,8 +101,9 @@ async fn get_loop(State(state): State<Arc<WebState>>, Path(id): Path<String>) ->
 
 async fn list_workflows(
     State(state): State<Arc<WebState>>,
-    Query(q): Query<ListQuery>,
+    q: ListQueryResult,
 ) -> ApiResult<Value> {
+    let q = list_query(q)?;
     let conn = open(&state)?;
     let runs = wstore::recent_runs(&conn, None, q.limit()).map_err(db_err)?;
     let runs: Vec<Value> = runs.iter().map(|r| workflow_run_json(r, false)).collect();

@@ -165,15 +165,29 @@ impl PriceTable {
 
     /// Exact pattern match on the normalized name first, then the longest
     /// matching prefix pattern. `<synthetic>` and empty names never match.
+    /// A `provider/model` id from a router (OpenCode's
+    /// `openrouter/anthropic/claude-…`, `github-copilot/…`) that matches
+    /// nothing as a whole is tried again by its last segment.
     pub fn find(&self, model: &str) -> Option<&ModelPrice> {
         let name = normalize_model_name(model);
         if name.is_empty() || name.starts_with('<') {
             return None;
         }
+        self.find_normalized(&name).or_else(|| {
+            let (_, last) = name.rsplit_once('/')?;
+            let tail = normalize_model_name(last);
+            if tail.is_empty() || tail.starts_with('<') {
+                return None;
+            }
+            self.find_normalized(&tail)
+        })
+    }
+
+    fn find_normalized(&self, name: &str) -> Option<&ModelPrice> {
         if let Some(exact) = self
             .models
             .iter()
-            .find(|m| m.matches.iter().any(|p| !p.ends_with('*') && *p == name))
+            .find(|m| m.matches.iter().any(|p| !p.ends_with('*') && p == name))
         {
             return Some(exact);
         }
@@ -352,6 +366,40 @@ mod tests {
         ] {
             assert_eq!(normalize_model_name(input), want, "{input}");
         }
+    }
+
+    #[test]
+    fn a_routed_provider_model_id_is_priced_by_its_last_segment() {
+        let table = PriceTable::builtin();
+        for routed in [
+            "openrouter/anthropic/claude-sonnet-4-5",
+            "github-copilot/claude-sonnet-4-5-20250929",
+            "amazon-bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        ] {
+            assert_eq!(
+                table.find(routed).map(|m| m.id.as_str()),
+                Some("claude-sonnet-4-5"),
+                "{routed}"
+            );
+        }
+        assert!(table.find("opencode/big-pickle").is_none());
+        assert!(table.find("openrouter/").is_none());
+        // a configured pattern naming the whole id still wins
+        let custom = PriceTable::empty().with_overrides(&[ModelPriceConfig {
+            id: "pickle".into(),
+            provider: None,
+            matches: vec!["opencode/big-pickle".into()],
+            input: 1.0,
+            output: 2.0,
+            cache_read: None,
+            cache_write: None,
+            cache_write_1h: None,
+            reasoning: None,
+        }]);
+        assert_eq!(
+            custom.find("opencode/big-pickle").map(|m| m.id.as_str()),
+            Some("pickle")
+        );
     }
 
     #[test]
