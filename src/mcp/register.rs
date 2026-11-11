@@ -2,8 +2,12 @@
 //! `tracing::hooks::register`, they touch no user file: Claude gets an
 //! inline `--mcp-config` document, Codex two `-c` overrides, OpenCode an
 //! `OPENCODE_CONFIG_CONTENT` fragment (`crate::opencode`, which also adds
-//! the `--standalone` the fragment needs; probed on opencode 2.0.32).
-//! Antigravity has no per-launch flag and relies on the installed entry.
+//! the `--standalone` the fragment needs; probed on opencode 2.0.32), Pi
+//! agent-mux's MCP-client extension with `-e` and the server in
+//! `AGENT_MUX_PI_MCP` (`crate::pi`; Pi 0.73.1 has no MCP of its own; the
+//! extension file is written under `~/.agent-mux/pi-extension/`).
+//! Antigravity and Grok have no per-launch way and rely on the installed
+//! user-level entry (`super::install`; Grok 1.0.70's reasons are there).
 
 use crate::harness::Harness;
 use crate::tracing::hooks::register::toml_string;
@@ -126,6 +130,28 @@ pub fn plan(
                 )
             }
         }
+        Some(Harness::Grok) => {
+            if super::install::grok_status(home, Some(exe)).usable() {
+                Registration::Installed
+            } else {
+                Registration::Unavailable(
+                    "grok has no per-launch MCP flag: run `agent-mux mcp install grok`".into(),
+                )
+            }
+        }
+        Some(Harness::Pi) => match crate::pi::install_extension(home) {
+            Ok(path) => Registration::PerLaunch {
+                args: vec![
+                    crate::pi::EXTENSION_FLAG.into(),
+                    path.to_string_lossy().into_owned(),
+                ],
+                env: vec![(
+                    crate::pi::MCP_ENV.into(),
+                    crate::pi::mcp_spec(super::SERVER_NAME, exe, &argv),
+                )],
+            },
+            Err(e) => Registration::Unavailable(format!("cannot write the Pi extension: {e}")),
+        },
         None => Registration::Unavailable("the command is not a known harness".into()),
     }
 }
@@ -218,6 +244,69 @@ mod tests {
         assert!(
             matches!(agy, Registration::Unavailable(ref why) if why.contains("mcp install agy"))
         );
+        // grok: the user-level entry, read from a temporary home
+        let temp = tempfile::tempdir().unwrap();
+        let grok = plan(
+            Some(Harness::Grok),
+            Some(Path::new("/x/agent-mux")),
+            Some(Path::new("/db")),
+            ws,
+            temp.path(),
+        );
+        assert!(
+            matches!(grok, Registration::Unavailable(ref why) if why.contains("mcp install grok"))
+        );
+        let cfg = super::super::install::grok_config_path(temp.path());
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cfg,
+            "[mcp_servers.agent-mux]\ncommand = \"/x/agent-mux\"\nargs = [\"mcp\", \"serve\", \"--stdio\", \"--workspace-from-env\"]\nenabled = true\n",
+        )
+        .unwrap();
+        let grok = plan(
+            Some(Harness::Grok),
+            Some(Path::new("/x/agent-mux")),
+            Some(Path::new("/db")),
+            ws,
+            temp.path(),
+        );
+        assert_eq!(grok, Registration::Installed);
+        assert_eq!(grok.env_value(), "installed");
+        // pi: agent-mux's extension, written under the (temporary) home,
+        // and the server in the environment
+        let pi = plan(
+            Some(Harness::Pi),
+            Some(Path::new("/x/agent-mux")),
+            Some(Path::new("/db")),
+            ws,
+            temp.path(),
+        );
+        let Registration::PerLaunch { args, env } = &pi else {
+            panic!("{pi:?}");
+        };
+        let ext = crate::pi::extension_path(temp.path());
+        assert_eq!(
+            args,
+            &["-e".to_string(), ext.to_string_lossy().into_owned()]
+        );
+        assert!(ext.is_file());
+        assert_eq!(env[0].0, crate::pi::MCP_ENV);
+        let spec: serde_json::Value = serde_json::from_str(&env[0].1).unwrap();
+        assert_eq!(spec["command"], "/x/agent-mux");
+        assert_eq!(spec["args"][4], "/db");
+        assert_eq!(spec["args"][6], "/ws");
+        assert!(!temp.path().join(".pi").exists());
+        // a relative home cannot hold the extension
+        assert!(matches!(
+            plan(
+                Some(Harness::Pi),
+                Some(Path::new("/x/agent-mux")),
+                Some(Path::new("/db")),
+                ws,
+                Path::new("rel"),
+            ),
+            Registration::Unavailable(_)
+        ));
         assert_eq!(
             plan(
                 None,

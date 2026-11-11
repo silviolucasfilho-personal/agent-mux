@@ -32,6 +32,8 @@ fn candidates(named: Option<&str>, filter: &HarnessFilter) -> Vec<Harness> {
         Some(h) => vec![h],
         None => Harness::ALL
             .into_iter()
+            // TODO(workflows): Grok and Pi do not run workflow steps yet
+            .filter(|h| !matches!(h, Harness::Grok | Harness::Pi))
             .filter(|h| filter.allows(h.as_str()))
             .collect(),
     }

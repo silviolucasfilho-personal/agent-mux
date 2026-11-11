@@ -379,7 +379,7 @@ impl Default for SkillLauncherState {
             error: None,
             skill_id: String::new(),
             skill_name: String::new(),
-            harnesses: crate::harness::Harness::ALL.to_vec(),
+            harnesses: crate::skill::install::supported_harnesses(),
             dir_picker: dir_picker::DirPicker::for_path(&workspace),
             workspace,
             field: SkillLauncherField::Workspace,
@@ -400,7 +400,7 @@ impl SkillLauncherState {
         workspace: String,
     ) -> Self {
         let harnesses = if skill.harnesses.is_empty() {
-            crate::harness::Harness::ALL.to_vec()
+            crate::skill::install::supported_harnesses()
         } else {
             skill.harnesses.clone()
         };
@@ -427,7 +427,7 @@ impl SkillLauncherState {
         harnesses: Vec<crate::harness::Harness>,
     ) -> Self {
         let h = if harnesses.is_empty() {
-            crate::harness::Harness::ALL.to_vec()
+            crate::skill::install::supported_harnesses()
         } else {
             harnesses
         };
@@ -2726,6 +2726,8 @@ pub struct App {
     /// Antigravity keeps its MCP servers in a global file, so agent-mux
     /// writes the entry once per run rather than on every launch.
     agy_mcp_checked: bool,
+    /// The Grok counterpart of `agy_mcp_checked`.
+    grok_mcp_checked: bool,
     /// Whether a launch bypasses the harness's approval prompts when the
     /// profile does not say. From `bypass_approvals` in profiles.toml.
     pub bypass_approvals_default: bool,
@@ -2940,6 +2942,7 @@ impl App {
             skill_workbench: None,
             agents: crate::config::AgentsSettings::default(),
             agy_mcp_checked: false,
+            grok_mcp_checked: false,
             bypass_approvals_default: DEFAULT_BYPASS_APPROVALS,
             runtime_dir: None,
             cached_briefing: None,
@@ -3066,7 +3069,7 @@ impl App {
                     plan.full_content()
                         && crate::tracing::hooks::install::codex_status(&home, None).installed
                 }
-                Harness::Antigravity | Harness::OpenCode => false,
+                Harness::Antigravity | Harness::OpenCode | Harness::Grok | Harness::Pi => false,
             };
         if !feed::should_own(&home, harness, complete) {
             return Vec::new();
@@ -3718,7 +3721,13 @@ impl App {
                 crate::tracing::opencode_db::newest_session_in(&db, &session.dir, 0)
                     .map(|(id, _)| id)
             }
-            Some(crate::harness::Harness::Codex) | None => None,
+            // not traced yet: no conversation to name from disk
+            Some(
+                crate::harness::Harness::Codex
+                | crate::harness::Harness::Grok
+                | crate::harness::Harness::Pi,
+            )
+            | None => None,
         };
 
         let disk_claimed_by_other = disk_conv.as_deref().is_some_and(held_by_other);
@@ -4215,7 +4224,8 @@ impl App {
 
     /// How this launch reaches the agent-mux MCP server, installing what
     /// the harness needs first. Claude Code and Codex take the server on
-    /// their command line; Antigravity reads a global file, so the entry is
+    /// their command line (Pi through agent-mux's extension); Antigravity
+    /// and Grok read a global file, so the entry is
     /// written once per run — the same just-in-time install the Agents
     /// sidebar does for a skill. Never fails a launch.
     pub fn ensure_mcp(
@@ -4253,6 +4263,23 @@ impl App {
                 }
             } else {
                 self.agy_mcp_checked = true;
+            }
+        }
+        // Grok 1.0.70 has no per-launch route either (`mcp::install`): the
+        // same once-per-run user-level entry, through `grok mcp add`.
+        if harness == Some(crate::harness::Harness::Grok)
+            && !self.grok_mcp_checked
+            && self.trace_db_path.is_some()
+            && self.may_install_globally()
+            && let Some(exe) = exe.as_deref().filter(|e| e.is_absolute())
+        {
+            self.grok_mcp_checked = true;
+            let st = crate::mcp::install::grok_status(&home, Some(exe));
+            if !st.installed || !st.current || st.disabled {
+                self.notice = Some(match crate::mcp::install::install_grok(exe, &home) {
+                    Ok(_) => Notice::info("registered the agent-mux MCP server with Grok"),
+                    Err(e) => Notice::warn(format!("Grok gets no MCP tools: {e}")),
+                });
             }
         }
         crate::mcp::register::plan(
@@ -5061,7 +5088,7 @@ impl App {
             .and_then(|p| crate::tracing::store::open_aux(p).ok());
         let mut harnesses = self.installed_harnesses();
         if harnesses.is_empty() {
-            harnesses = crate::harness::Harness::ALL.to_vec();
+            harnesses = crate::bus::swarm::plan::swarm_harnesses().collect();
         }
         let mut view = swarm_board::SwarmBoard::open(
             ws.clone(),
@@ -5635,7 +5662,8 @@ impl App {
 
     /// The mouse on the Swarm screen: a click on a tree row selects it, a
     /// click on a terminal in the pane types into it, and the wheel scrolls
-    /// what it is over (the terminal's scrollback, or the tree's cursor).
+    /// what it is over (the terminal's scrollback, a card's text or list, or
+    /// the tree's cursor).
     fn swarm_mouse(&mut self, ev: MouseEvent) {
         let Mode::Swarm(view) = &mut self.mode else {
             return;
@@ -5661,6 +5689,11 @@ impl App {
                 if drawn.pane.contains(at) && view.pane_session().is_some() {
                     self.sync_swarm_pane_selection();
                     self.scroll_selected(if up { 3 } else { -3 });
+                } else if drawn.pane.contains(at) {
+                    // a card (Board, Task, Trace, Changes, Timeline, Log…)
+                    if view.modal.is_none() && view.confirm.is_none() {
+                        view.scroll_panel(if up { -3 } else { 3 });
+                    }
                 } else if drawn.tree.contains(at) && !view.text_entry_active() {
                     view.handle_key(KeyEvent::new(
                         if up { KeyCode::Up } else { KeyCode::Down },
@@ -7985,6 +8018,8 @@ impl App {
             crate::harness::Harness::Codex => "codex",
             crate::harness::Harness::Antigravity => "antigravity",
             crate::harness::Harness::OpenCode => "opencode",
+            crate::harness::Harness::Grok => "grok",
+            crate::harness::Harness::Pi => "pi",
         };
         let mut profile = self
             .profiles

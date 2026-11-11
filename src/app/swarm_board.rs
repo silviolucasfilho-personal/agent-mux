@@ -760,6 +760,10 @@ pub struct SwarmBoard {
     chosen_tab: Option<(String, Tab)>,
     pub activity: bool,
     pub panel_scroll: usize,
+    /// The card's furthest scroll and its visible height, from the last
+    /// frame (`None` before the first: no clamp yet).
+    pub panel_max: std::cell::Cell<Option<usize>>,
+    pub panel_page: std::cell::Cell<usize>,
     pub selected_message: usize,
     pub needs: Vec<Need>,
     pub diff_lines: Vec<String>,
@@ -878,6 +882,8 @@ impl SwarmBoard {
             chosen_tab: None,
             activity: false,
             panel_scroll: 0,
+            panel_max: std::cell::Cell::new(None),
+            panel_page: std::cell::Cell::new(10),
             selected_message: 0,
             needs: Vec::new(),
             diff_lines: Vec::new(),
@@ -2322,6 +2328,16 @@ impl SwarmBoard {
                 self.tile_cursor = step(self.tile_cursor, n, d);
                 Outcome::None
             }
+            KeyCode::PageUp | KeyCode::PageDown => {
+                // the card scrolls a page whichever side has the keyboard
+                let page = self.panel_page.get().saturating_sub(1).max(1) as isize;
+                self.scroll_panel(if key.code == KeyCode::PageUp {
+                    -page
+                } else {
+                    page
+                });
+                Outcome::None
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.move_cursor(-1, in_list);
                 Outcome::None
@@ -3277,12 +3293,37 @@ impl SwarmBoard {
         }
     }
 
+    /// Scrolls the card the pane shows by `delta` lines (the mouse wheel,
+    /// `PgUp`/`PgDn`), whichever side has the keyboard: a list (Log,
+    /// Activity, Thread) moves its selection, any other card its text,
+    /// within what the last frame drew.
+    pub fn scroll_panel(&mut self, delta: isize) {
+        if self.pane_session().is_some() {
+            return;
+        }
+        let list = self.activity
+            || (!self.on_task && self.swarm.is_some() && self.swarm_tab == SwarmTab::Log)
+            || (self.on_task && self.tab() == Tab::Thread);
+        if list {
+            let len = self.list_len();
+            self.selected_message = step(self.selected_message, len, delta);
+        } else {
+            self.scroll_card(delta);
+        }
+    }
+
+    /// Moves the card's text by `delta` lines, clamped to its last line.
+    fn scroll_card(&mut self, delta: isize) {
+        let max = self.panel_max.get().unwrap_or(usize::MAX / 4);
+        self.panel_scroll = step(self.panel_scroll.min(max), max + 1, delta);
+    }
+
     fn move_cursor(&mut self, delta: isize, in_list: bool) {
         if in_list {
             let len = self.list_len();
             self.selected_message = step(self.selected_message, len, delta);
         } else if self.focus == Focus::Panel {
-            self.panel_scroll = step(self.panel_scroll, usize::MAX / 4, delta);
+            self.scroll_card(delta);
         } else {
             let at = step(self.cursor, self.rows.len(), delta);
             self.set_cursor(at);

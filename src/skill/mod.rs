@@ -411,7 +411,7 @@ pub fn parse_skill(
         None => SkillMeta::default(),
     };
     let harnesses: Vec<Harness> = if meta.harnesses.is_empty() {
-        Harness::ALL.to_vec()
+        install::supported_harnesses()
     } else {
         let mut out = Vec::new();
         for h in &meta.harnesses {

@@ -1,6 +1,6 @@
 # agent-mux
 
-A terminal multiplexer for AI coding harnesses, with local trace capture, a SQLite analysis store, and portable skills. Run Claude Code (`claude`), Codex CLI (`codex`), Google Antigravity (`agy`), and OpenCode (`opencode`) in separate pseudo-terminals, switch between them, resume provider sessions, inspect turns and tool calls, and compare recorded work.
+A terminal multiplexer for AI coding harnesses, with local trace capture, a SQLite analysis store, and portable skills. Run Claude Code (`claude`), Codex CLI (`codex`), Google Antigravity (`agy`), OpenCode (`opencode`), Grok (`grok`), and Pi (`pi`) in separate pseudo-terminals, switch between them, resume provider sessions, inspect turns and tool calls, and compare recorded work. (DeepSeek `dsh` is not yet supported).
 
 This README is the developer onboarding guide to the **implemented code in this checkout**. Every screen, panel, query, capture step, hook and SQL statement below was read from the source at the time of writing; file paths are given so you can verify and extend. Design documents under `docs/superpowers/` record development history and are not a guarantee that a proposed feature shipped.
 
@@ -30,7 +30,7 @@ This README is the developer onboarding guide to the **implemented code in this 
 
 ### Build and run
 
-The project is a Rust 2024-edition binary and library (`src/lib.rs` exports the modules; `src/main.rs` is the entry point). SQLite is bundled by `rusqlite`, so no system SQLite is needed. Install and authenticate the harnesses you intend to launch separately; agent-mux invokes their executables from `PATH`.
+The project is a Rust 2024-edition binary and library (`src/lib.rs` exports the modules; `src/main.rs` is the entry point). SQLite is bundled by `rusqlite`, so no system SQLite is needed. Install and authenticate the harnesses you intend to launch separately; agent-mux invokes their executables from `PATH`. When an executable is not found on `PATH`, fallback directories are checked for OpenCode (`~/.opencode/bin/opencode`), Grok (`~/.grok/bin/grok`), and Pi (`~/.npm-global/bin/pi`, `~/.local/bin/pi`, `~/.bun/bin/pi`). DeepSeek (`dsh`) is not yet supported.
 
 ```sh
 cargo build
@@ -42,7 +42,7 @@ agent-mux
 agent-mux --hide-sidebar      # --full-screen and -b do the same
 ```
 
-The sidebar starts with the harnesses (Claude Code, Codex, Antigravity, OpenCode), their sessions and History; press `m` in the list to show scheduled agents, flows, skills and personas, and `m` again to hide them.
+The sidebar starts with the harnesses (Claude Code, Codex, Antigravity, OpenCode, Grok, Pi), their sessions and History; press `m` in the list to show scheduled agents, flows, skills and personas, and `m` again to hide them.
 
 One-shot commands are dispatched in [src/main.rs](src/main.rs) before any terminal setup:
 
@@ -226,6 +226,14 @@ command = "agy"
 name = "OpenCode"
 command = "opencode"
 
+[[profiles]]
+name = "Grok"
+command = "grok"
+
+[[profiles]]
+name = "Pi"
+command = "pi"
+
 [tracing]
 enabled = true
 content_mode = "full"
@@ -255,8 +263,8 @@ show_swarm = false  # list swarm coordinators and workers in the Agents sidebar
 
 | Setting | Resolution (`config::resolve_tracing`) |
 | --- | --- |
-| Profile `name`, `command` | Required. The command is launched as an argument vector, never through a shell. Provider detection uses the file stem of `command` (`claude`, `codex`, `agy`, `opencode`; `.exe` stripped). |
-| Profile `args`, `default_dir`, `model`, `bypass_approvals` | Empty args; optional initial directory; an unset model passes no flag. Approvals are bypassed unless the profile or the top-level `bypass_approvals` says otherwise (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex, `--auto` on OpenCode). The launch dialog can override per launch. |
+| Profile `name`, `command` | Required. The command is launched as an argument vector, never through a shell. Provider detection uses the file stem of `command` (`claude`, `codex`, `agy`, `opencode`, `grok`, `pi`; `.exe` stripped). |
+| Profile `args`, `default_dir`, `model`, `bypass_approvals` | Empty args; optional initial directory; an unset model passes no flag. Approvals are bypassed unless the profile or the top-level `bypass_approvals` says otherwise (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex, `--auto` on OpenCode, `--always-approve` on Grok; Pi has no approval prompts). The launch dialog can override per launch. |
 | `tracing.enabled` | Absent or `true` traces; only `false` turns the TUI runtime off. `trace` CLI commands re-resolve with `enabled = true` so the store stays readable. |
 | `db_path` | Config value (trimmed, `~` expanded) → `AGENT_MUX_TRACE_DB` → `~/.agent-mux/traces.db` → `traces.db`. Only `db_path` gets tilde expansion. |
 | `content_mode` | `"metadata"` selects metadata-only; any other value, including typos, is `full`. |
@@ -978,6 +986,11 @@ The same per-launch pattern serves the read-only MCP server (`src/mcp/`). Every 
 | Claude Code | Per launch: `--mcp-config '{"mcpServers":{"agent-mux":{"type":"stdio","command":"<binary>","args":["mcp","serve","--stdio","--db","<store>","--workspace","<cwd>"]}}}'`. The user's own servers stay active (`--strict-mcp-config` is not passed). | `claude --help` 2.1.273 |
 | Codex | Per launch: `-c 'mcp_servers.agent-mux.command="<binary>"' -c 'mcp_servers.agent-mux.args=[…]'`. | `codex --help` 0.154.0 |
 | Antigravity | Installed once: `agy mcp add agent-mux <binary> -- mcp serve --stdio --workspace-from-env` writes `~/.gemini/config/mcp_config.json`; the launch exports `AGENT_MUX_WORKSPACE` for scoping. agent-mux runs it itself before the first agy session of a run when the entry is missing, stale or disabled, which is what `agent-mux mcp install agy` does by hand; `agent-mux mcp uninstall agy` runs `agy mcp remove`. A sandboxed run (a test, an embedded App) never writes that file. | `agy mcp add` 1.2.6 (no per-launch flag) |
+| OpenCode | Per launch: `OPENCODE_CONFIG_CONTENT` carries `mcp.servers.agent-mux` with `--standalone`. | `opencode` 2.0.32 |
+| Grok | Installed once, like Antigravity: `grok mcp add --scope user agent-mux -- <binary> mcp serve --stdio --workspace-from-env` writes `[mcp_servers.agent-mux]` in `~/.grok/config.toml`; agent-mux runs it before the first grok session of a run when the entry is missing, stale or disabled (`agent-mux mcp install\|uninstall grok` by hand). Grok has no per-launch route for the TUI: the `GROK_CONFIG` overlay drops `mcp_servers`, and `--plugin-dir` exists only on `grok agent stdio`. | `grok --help` 1.0.70 |
+| Pi | Per launch: `-e ~/.agent-mux/pi-extension/agent-mux-mcp.js` and `AGENT_MUX_PI_MCP='{"name","command","args"}'`. Pi has no MCP client; agent-mux's extension (`src/pi_mcp_extension.js`) is one, registering the server's tools as Pi tools. Nothing under `~/.pi` is written. | `pi --help` 0.73.1 |
+
+DeepSeek (`dsh` 0.2.2-rc.1) is deferred and not yet supported; no MCP registration is implemented.
 
 The child environment gets `AGENT_MUX_MCP=registered|installed|unavailable` and `AGENT_MUX_WORKSPACE`. Registration needs a trace store (tracing on) and an absolute binary path; otherwise the launch proceeds without tools, one notice says why, and the CLI remains the fallback. `agent-mux mcp status` and the `mcp` section of `trace doctor` (which spawns the server and runs `initialize`, `tools/list` and `agent_mux_get_health`) report the state.
 
@@ -1540,7 +1553,7 @@ The remaining analysis-service requests are listed in section 10.
 | `config ls [--json] \| show <id> [--builtin] \| path [<id>] \| edit <id> \| reset <id> \| new skill\|loop-skill\|loop-agent\|workflow <name> \| check \| push [--dry-run]` | The configuration library (section 16): `edit` and `new` write under `~/.agent-mux` and run the editor; `push` rewrites loop skills and agents in registered loop workspaces; `check` exits 1 on an invalid item. |
 | `workflow ls [--json] \| show <name> \| check [<name>] \| skills \| run <name> --workspace DIR [--harness H] [--profile P] [--arg k=v …] [--budget N] [--max-cost USD] [--isolation none\|worktree] [--resume RUN] [--json] \| plan "<task>" --workspace DIR [--harness H] [--run] [--save NAME] [--json] \| runs [--json] \| status <run> [--json] \| save <run> <name>` | Workflows (section 17). `run` and `plan` drive a private App headlessly; `run` exits 0 finished, 1 failed, 2 cancelled, 3 budget exhausted. |
 | `mcp serve --stdio [--db PATH] [--workspace DIR \| --all-workspaces \| --workspace-from-env]` | The read-only MCP server (section 6.7); started by harnesses, usable by hand for debugging. |
-| `mcp install \| uninstall agy`, `mcp status [claude\|codex\|agy\|opencode]` | Antigravity's installed entry through `agy mcp add|remove`; how each harness reaches the server (OpenCode: per launch through `OPENCODE_CONFIG_CONTENT` with `--standalone`). |
+| `mcp install \| uninstall agy\|grok`, `mcp status [claude\|codex\|agy\|opencode\|grok\|pi]` | Antigravity's and Grok's installed entries through `agy\|grok mcp add|remove`; how each harness reaches the server (OpenCode: per launch through `OPENCODE_CONFIG_CONTENT` with `--standalone`). |
 | `run --experiment <name> --variant <label> --prompt <text> [--harness H] [--profile P] [--model M] [--bypass] [--cwd DIR] [--check CMD] [--repeat N] [--timeout SECS] [--max-cost USD] [--max-turns N]` | Section 12. |
 | `loop ls [--json]`, `loop add --workspace DIR --pattern ID [--profile P] [--harness claude\|codex] [--every 1d] [--level L1] [--max-runs-per-day N] [--max-tokens-per-day N] [--max-cost USD] [--no-scaffold]`, `loop rm ID`, `loop run ID [--now]`, `loop pause [ID\|--all]`, `loop resume [ID\|--all]`, `loop init DIR --pattern ID --harness H`, `loop audit DIR [--json]`, `loop status [ID] [--json]`, `loop cost --pattern ID [--every 15m] [--level L2] [--with-caching] [--json]`, `loop inbox [--json]`, `loop decide RUN applied\|rejected` | Section 15. `loop run` exits 0 report-only/no-op, 3 fix-proposed, 4 escalated, 1 blocked, 2 failed. |
 
@@ -1621,6 +1634,11 @@ A skill package is:
 | Claude Code | `~/.claude/skills/<id>/` | `/<id>` | `claude [--model M] [--dangerously-skip-permissions] "<invocation> <startup_prompt>"` |
 | Codex | `~/.codex/skills/<id>/` | `$<id>` | `codex [--model M] [--yolo] "<invocation> <startup_prompt>"` |
 | Antigravity | `~/.gemini/config/skills/<id>/` | `/<id>` | `agy [--model M] [--dangerously-skip-permissions] --prompt-interactive "<invocation> <startup_prompt>"` |
+| OpenCode | `~/.config/opencode/skill/<id>/` (`$OPENCODE_CONFIG_DIR/skill/`) | `load skill <id>` | `opencode [--auto] --prompt "<invocation> <startup_prompt>"` |
+| Grok | `~/.grok/skills/<id>/` (`$GROK_HOME/skills/`) | `/<id>` | `grok [--model M] [--always-approve] "<invocation> <startup_prompt>"` |
+| Pi | `~/.pi/agent/skills/<id>/` (`$PI_CODING_AGENT_DIR/skills/`) | `/skill:<id>` | `pi [--model M] "<invocation> <startup_prompt>"` |
+
+DeepSeek has no harness variant in agent-mux yet (`dsh 0.2.2-rc.1` is deferred per operator decision), so it has no skill directory or launch command. Note also what is not yet supported for Grok and Pi: while both launch interactively and can run skills with MCP tools, neither has a tracing pipeline (no turns or tool events in `traces.db`), loop guard, workflow runner, or swarm worker participation.
 
 `render_skill_md` writes the canonical `SKILL.md` with `Invoke with /<id>.` or `Invoke with $<id>.` appended to the description. `install` writes a `.agent-mux.json` manifest (`installed_by`, `id`, `harness`, `source_hash`, `files`); an unchanged hash skips the write; a directory without a manifest is refused unless `--force`. Launches set `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` and `AGENT_MUX_TRACE_DB`; the TUI passes the store its runtime writes (`build_skill_launch_with_db`), so a configured `db_path` reaches the skill. The session is named `<name> (<harness>)`; the base profile is the first configured profile for that harness, and its command is kept when it already detects as that harness (a wrapper path), otherwise the bare executable name is used. The launch row records `metadata.skill_id` and `skill_harness`, which is how the Skills view lists a skill's executions. A skill is a singleton by id; `Enter` attaches to the live instance, including restored ones.
 

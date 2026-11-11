@@ -204,6 +204,14 @@ pub fn tool_notes(spec: &AgentSpec, harness: Harness) -> Vec<(Level, String)> {
                 }
             }
         }
+        // TODO(agents): define agents on Grok (`--agents`/`--agent`) and Pi
+        Harness::Grok | Harness::Pi => out.push((
+            Level::Warning,
+            format!(
+                "{}: agents are not applied yet; the session runs with its default instructions and tools",
+                harness.as_str()
+            ),
+        )),
     }
     out
 }
@@ -256,6 +264,8 @@ pub fn plan(spec: &AgentSpec, harness: Harness) -> LaunchPlan {
             out.env
                 .push(crate::opencode::config_env(&opencode_fragment(spec)));
         }
+        // TODO(agents): not applied yet (see `tool_notes`)
+        Harness::Grok | Harness::Pi => {}
     }
     out
 }

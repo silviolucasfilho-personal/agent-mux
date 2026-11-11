@@ -396,6 +396,7 @@ fn table_driven_harness_launch_construction() {
                         .contains(&"--prompt-interactive".to_string())
                 );
             }
+            other => unreachable!("not in the list: {other:?}"),
         }
     }
 }

@@ -3,7 +3,9 @@
 
 use agent_mux::config::Profile;
 use agent_mux::harness::Harness;
-use agent_mux::skill::install::{MANIFEST, install, skills_root, status, uninstall};
+use agent_mux::skill::install::{
+    MANIFEST, install, skills_root, status, supported_harnesses, supports, uninstall,
+};
 use agent_mux::skill::launch::{
     HYDRATION_HINT, build_skill_launch, build_skill_launch_full, opening_prompt,
 };
@@ -37,7 +39,7 @@ fn builtin_heimdall_is_a_complete_package() {
     assert_eq!(h.id, "heimdall");
     assert_eq!(h.name, "Heimdall");
     assert!(h.is_builtin && h.dir.is_none());
-    assert_eq!(h.harnesses, Harness::ALL.to_vec());
+    assert_eq!(h.harnesses, supported_harnesses());
     assert_eq!(h.default_harness, Harness::Antigravity);
     assert!(h.capabilities.iter().any(|c| c == "trace.read"));
     assert!(h.startup_prompt.is_some());
@@ -106,7 +108,7 @@ fn parse_validates_frontmatter_and_directory_name() {
     .unwrap();
     assert_eq!(ok.id, "audit");
     assert_eq!(ok.name, "Audit");
-    assert_eq!(ok.harnesses, Harness::ALL.to_vec());
+    assert_eq!(ok.harnesses, supported_harnesses());
 
     let mismatch = parse_skill(
         "---\nname: audit\ndescription: Use it.\n---\nBody.\n",
@@ -235,10 +237,14 @@ fn render_uses_each_harness_invocation_syntax() {
     assert_eq!(invocation("heimdall", Harness::Claude), "/heimdall");
     assert_eq!(invocation("heimdall", Harness::Antigravity), "/heimdall");
     assert_eq!(invocation("heimdall", Harness::Codex), "$heimdall");
+    assert_eq!(invocation("heimdall", Harness::Grok), "/heimdall");
+    assert_eq!(invocation("heimdall", Harness::Pi), "/skill:heimdall");
     for (harness, hint) in [
         (Harness::Claude, "Invoke with /heimdall."),
         (Harness::Codex, "Invoke with $heimdall."),
         (Harness::Antigravity, "Invoke with /heimdall."),
+        (Harness::Grok, "Invoke with /heimdall."),
+        (Harness::Pi, "Invoke with /skill:heimdall."),
     ] {
         let md = render_skill_md(&h, harness);
         assert!(md.starts_with("---\nname: heimdall\ndescription: "));
@@ -255,22 +261,35 @@ fn install_writes_into_each_harness_root_and_refuses_foreign_dirs() {
     let home = tempdir().unwrap();
     let h = builtin_skills().remove(0);
     assert_eq!(
-        skills_root(Harness::Claude, home.path()),
+        skills_root(Harness::Claude, home.path()).unwrap(),
         home.path().join(".claude/skills")
     );
     assert_eq!(
-        skills_root(Harness::Codex, home.path()),
+        skills_root(Harness::Codex, home.path()).unwrap(),
         home.path().join(".codex/skills")
     );
     assert_eq!(
-        skills_root(Harness::Antigravity, home.path()),
+        skills_root(Harness::Antigravity, home.path()).unwrap(),
         home.path().join(".gemini/config/skills")
     );
+    assert_eq!(
+        skills_root(Harness::OpenCode, home.path()).unwrap(),
+        agent_mux::skill::install::opencode_config_dir(home.path()).join("skill")
+    );
+    assert_eq!(
+        skills_root(Harness::Grok, home.path()).unwrap(),
+        agent_mux::skill::install::grok_home(home.path()).join("skills")
+    );
+    assert_eq!(
+        skills_root(Harness::Pi, home.path()).unwrap(),
+        agent_mux::skill::install::pi_agent_dir(home.path()).join("skills")
+    );
+    assert!(supports(Harness::Grok) && supports(Harness::Pi));
 
-    for harness in Harness::ALL {
+    for harness in Harness::ALL.into_iter().filter(|h| supports(*h)) {
         let r = install(&h, harness, home.path(), false).unwrap();
         assert!(!r.unchanged);
-        let dir = skills_root(harness, home.path()).join("heimdall");
+        let dir = skills_root(harness, home.path()).unwrap().join("heimdall");
         assert_eq!(r.dir, dir);
         assert!(dir.join("SKILL.md").is_file());
         assert!(dir.join("reference/sessions.md").is_file());
@@ -284,7 +303,9 @@ fn install_writes_into_each_harness_root_and_refuses_foreign_dirs() {
     }
 
     // A directory the user made is never overwritten without --force.
-    let foreign = skills_root(Harness::Claude, home.path()).join("mine");
+    let foreign = skills_root(Harness::Claude, home.path())
+        .unwrap()
+        .join("mine");
     fs::create_dir_all(&foreign).unwrap();
     fs::write(
         foreign.join("SKILL.md"),
@@ -300,6 +321,7 @@ fn install_writes_into_each_harness_root_and_refuses_foreign_dirs() {
     assert!(uninstall("heimdall", Harness::Codex, home.path()).unwrap());
     assert!(
         !skills_root(Harness::Codex, home.path())
+            .unwrap()
             .join("heimdall")
             .exists()
     );
@@ -352,6 +374,21 @@ fn launch_composes_each_harness_command_line() {
     assert_eq!(a.profile.args[n - 2], "--prompt-interactive");
     assert!(a.profile.args[n - 1].starts_with("/heimdall "));
 
+    let g = build_skill_launch(&h, Harness::Grok, &base, Path::new("/ws")).unwrap();
+    assert_eq!(g.profile.name, "Heimdall (grok)");
+    assert_eq!(g.profile.command, "grok");
+    assert_eq!(g.profile.args[..3], ["--model", "m1", "--always-approve"]);
+    assert_eq!(g.profile.args.len(), 4);
+    assert!(g.profile.args[3].starts_with("/heimdall "));
+
+    // pi has no approval prompts: model, then the positional opening
+    // message, which pi expands as `/skill:<id>`
+    let p = build_skill_launch(&h, Harness::Pi, &base, Path::new("/ws")).unwrap();
+    assert_eq!(p.profile.command, "pi");
+    assert_eq!(p.profile.args.len(), 3);
+    assert_eq!(p.profile.args[..2], ["--model", "m1"]);
+    assert!(p.profile.args[2].starts_with("/skill:heimdall "));
+
     let get = |k: &str| a.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     assert_eq!(get("AGENT_MUX_SKILL_ID").as_deref(), Some("heimdall"));
     assert!(get("AGENT_MUX_BIN").is_some());
@@ -369,6 +406,7 @@ fn launch_composes_each_harness_command_line() {
         (Harness::Claude, "--dangerously-skip-permissions"),
         (Harness::Codex, "--yolo"),
         (Harness::Antigravity, "--dangerously-skip-permissions"),
+        (Harness::Grok, "--always-approve"),
     ] {
         let l = build_skill_launch(&h, harness, &asks, Path::new("/ws")).unwrap();
         assert!(

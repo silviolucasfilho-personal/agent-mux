@@ -373,7 +373,7 @@ pub fn project_skills_dir(harness: Harness, workspace: &Path) -> Option<PathBuf>
         Harness::Codex => Some(workspace.join(".codex").join("skills")),
         // OpenCode 2.0.32 scans `{skill,skills}/` under `.opencode/`
         Harness::OpenCode => Some(workspace.join(".opencode").join("skills")),
-        Harness::Antigravity => None,
+        Harness::Antigravity | Harness::Grok | Harness::Pi => None,
     }
 }
 
@@ -398,7 +398,7 @@ pub fn verifier_path(harness: Harness, workspace: &Path) -> Option<PathBuf> {
                 .join("agents")
                 .join("loop-verifier.md"),
         ),
-        Harness::Antigravity => None,
+        Harness::Antigravity | Harness::Grok | Harness::Pi => None,
     }
 }
 
@@ -428,7 +428,7 @@ pub fn agent_path(harness: Harness, workspace: &Path, name: &str) -> Option<Path
                 .join("agents")
                 .join(format!("{name}.md")),
         ),
-        Harness::Antigravity => None,
+        Harness::Antigravity | Harness::Grok | Harness::Pi => None,
     }
 }
 

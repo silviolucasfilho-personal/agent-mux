@@ -98,6 +98,8 @@ pub fn provider_of(harness: Harness) -> &'static str {
         Harness::Codex => "codex",
         Harness::Antigravity => "antigravity",
         Harness::OpenCode => "opencode",
+        Harness::Grok => "grok",
+        Harness::Pi => "pi",
     }
 }
 
@@ -271,6 +273,11 @@ impl SkillsViewState {
         let mut rows = Vec::new();
         for h in Harness::ALL {
             if self.harness_filter.is_some_and(|f| f != h) {
+                continue;
+            }
+            // a harness without skill support has no section of its own
+            // unless the filter asks for it
+            if self.harness_filter.is_none() && !crate::skill::install::supports(h) {
                 continue;
             }
             rows.push(SkillRow::Header(h));

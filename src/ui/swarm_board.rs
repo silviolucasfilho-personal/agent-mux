@@ -347,6 +347,9 @@ pub fn draw_pane(f: &mut Frame, area: Rect, v: &SwarmBoard, app: &App, now: Inst
         pane: area,
         ..v.drawn.get()
     });
+    // a card that scrolls says how far (`scrolled`); the others do not
+    v.panel_max.set(Some(0));
+    v.panel_page.set(usize::from(area.height));
     let (body, line) = if v.command.is_some() {
         let [b, l] = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(area);
         (b, Some(l))
@@ -656,11 +659,8 @@ fn draw_swarm_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
         },
         dim(),
     ));
-    let lines: Vec<Line<'static>> = out.into_iter().skip(v.panel_scroll).collect();
-    f.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }),
-        indented(inner),
-    );
+    let area = indented(inner);
+    f.render_widget(scrolled(v, out, area, true), area);
 }
 
 /// A task's card: its tabs (Task, Live, Thread, Changes) and the chosen one.
@@ -863,9 +863,11 @@ fn draw_swarm_changes(f: &mut Frame, area: Rect, v: &SwarmBoard) {
 
 /// `diff_lines` coloured as a diff, from the panel's scroll.
 fn diff_lines(v: &SwarmBoard, height: usize) -> Vec<Line<'static>> {
+    let max = v.diff_lines.len().saturating_sub(height);
+    set_scroll(v, max, height);
     v.diff_lines
         .iter()
-        .skip(v.panel_scroll)
+        .skip(v.panel_scroll.min(max))
         .take(height)
         .map(|l| {
             let style = if l.starts_with('+') && !l.starts_with("+++") {
@@ -921,12 +923,8 @@ fn draw_task_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
     f.render_widget(Paragraph::new(Line::from(spans)), tabs_area);
     match current {
         Tab::Task => {
-            let lines: Vec<Line<'static>> =
-                task_card(v, t).into_iter().skip(v.panel_scroll).collect();
-            f.render_widget(
-                Paragraph::new(lines).wrap(Wrap { trim: false }),
-                indented(content),
-            );
+            let area = indented(content);
+            f.render_widget(scrolled(v, task_card(v, t), area, true), area);
         }
         Tab::Live => f.render_widget(
             Paragraph::new(vec![
@@ -959,11 +957,14 @@ fn draw_task_card(f: &mut Frame, area: Rect, v: &SwarmBoard) {
             }
         }
         Tab::Trace => {
+            let height = usize::from(content.height);
+            let max = v.trace_lines.len().saturating_sub(height);
+            set_scroll(v, max, height);
             let lines: Vec<Line<'static>> = v
                 .trace_lines
                 .iter()
-                .skip(v.panel_scroll)
-                .take(content.height as usize)
+                .skip(v.panel_scroll.min(max))
+                .take(height)
                 .map(|l| {
                     if l.starts_with("turn ") {
                         Line::styled(l.clone(), head())
@@ -1046,7 +1047,11 @@ fn draw_swarm_timeline(f: &mut Frame, area: Rect, v: &SwarmBoard) {
         ),
         dim(),
     )];
-    for lane in tl.lanes.iter().skip(v.panel_scroll) {
+    // a header line above the lanes, the legend below them
+    let shown = usize::from(inner.height).saturating_sub(2).max(1);
+    let max = tl.lanes.len().saturating_sub(shown);
+    set_scroll(v, max, shown);
+    for lane in tl.lanes.iter().skip(v.panel_scroll.min(max)) {
         let label = format!("{}{}", "  ".repeat(lane.depth.min(3)), lane.label);
         let cells = lane_cells(lane, &w, track, v.now_ns);
         let mut spans = vec![Span::styled(
@@ -2021,6 +2026,32 @@ fn picker_lines(v: &SwarmBoard, swarms: &[SwarmRun], cursor: usize) -> Vec<Line<
         ));
     }
     out
+}
+
+/// Records how far the card can scroll and how tall a page is, for the
+/// next key or wheel turn ([`SwarmBoard::scroll_panel`]).
+fn set_scroll(v: &SwarmBoard, max: usize, page: usize) {
+    v.panel_max.set(Some(max));
+    v.panel_page.set(page);
+}
+
+/// `lines` as a paragraph scrolled to the card's offset, clamped so the last
+/// line stays at the bottom (counted after wrapping when `wrap`).
+fn scrolled(
+    v: &SwarmBoard,
+    lines: Vec<Line<'static>>,
+    area: Rect,
+    wrap: bool,
+) -> Paragraph<'static> {
+    let mut p = Paragraph::new(lines);
+    if wrap {
+        p = p.wrap(Wrap { trim: false });
+    }
+    let height = usize::from(area.height);
+    let max = p.line_count(area.width).saturating_sub(height);
+    set_scroll(v, max, height);
+    let off = u16::try_from(v.panel_scroll.min(max)).unwrap_or(u16::MAX);
+    p.scroll((off, 0))
 }
 
 fn indented(r: Rect) -> Rect {

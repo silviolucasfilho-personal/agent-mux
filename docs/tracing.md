@@ -10,6 +10,8 @@ implementations:
 | Antigravity | `agy` | `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript_full.jsonl` (falling back to `transcript.jsonl`) |
 | OpenCode | `opencode` | `~/.local/share/opencode/opencode.db` (`[tracing] opencode_db`): the session's rows in `session_message`, read in place |
 
+Grok (`grok`), Pi (`pi`), and DeepSeek (`dsh`) are not supported for tracing yet. Grok and Pi launch interactively in the TUI, support skill installation, and connect to the agent-mux MCP server, but write no parsed transcripts or events into `traces.db` and have no hook pipeline. DeepSeek integration is deferred.
+
 Tracing is enabled by default. It is deliberately *fail-open*: a missing
 transcript, unavailable database, malformed line, full queue, or failed
 remote exporter must not block, slow, or prevent the agent session itself.
@@ -19,7 +21,7 @@ remote exporter must not block, slow, or prevent the agent session itself.
 At application startup, `TraceRuntime` resolves `[tracing]` configuration and
 opens the local SQLite trace store (by default
 `~/.agent-mux/traces.db`). A profile launch is recognized as traceable from
-its command name (`claude`, `codex`, `agy`, or `opencode`), or from
+its command name (`claude`, `codex`, `agy`, or `opencode`; Grok and Pi are not traceable yet), or from
 `[profiles.tracing].provider` for wrapper commands.
 
 For each traceable launch, agent-mux:

@@ -1,6 +1,6 @@
 # Inter-Agent Bus (`agent-mux bus …` · MCP coordination tools)
 
-The **Inter-Agent Bus** (`src/bus/`, schema `v16` in `src/tracing/store/schema.rs`) connects live and newly delegated harness sessions (`claude`, `codex`, `agy`, `opencode`) across a workspace. On OpenCode the lease guard and urgent messages arrive through agent-mux's plugin (`docs/tracing.md`, OpenCode). It combines a shared SQLite coordination store (`agent_messages`, `agent_tasks`, `agent_leases` in `traces.db`) with a live TUI Unix domain control socket (`$AGENT_MUX_CONTROL_SOCK`, default `~/.agent-mux/snapshots/bus.sock`).
+The **Inter-Agent Bus** (`src/bus/`, schema `v16` in `src/tracing/store/schema.rs`) connects live and newly delegated harness sessions (`claude`, `codex`, `agy`, `opencode`) across a workspace. (Grok, Pi and DeepSeek are not supported as swarm workers or bus peers yet: `swarm_harnesses` excludes Grok and Pi, and DeepSeek is deferred). On OpenCode the lease guard and urgent messages arrive through agent-mux's plugin (`docs/tracing.md`, OpenCode). It combines a shared SQLite coordination store (`agent_messages`, `agent_tasks`, `agent_leases` in `traces.db`) with a live TUI Unix domain control socket (`$AGENT_MUX_CONTROL_SOCK`, default `~/.agent-mux/snapshots/bus.sock`).
 
 It supports two workflows simultaneously:
 
