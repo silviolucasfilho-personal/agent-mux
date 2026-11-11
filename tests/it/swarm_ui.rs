@@ -1523,3 +1523,59 @@ fn d_on_a_swarm_group_in_the_agents_sidebar_deletes_it() {
     assert!(!f.app.agent_lines().iter().any(|l| l.kind == group));
     f.app.kill_all();
 }
+
+fn wheel(f: &mut Fixture, down: bool, column: u16, row: u16) {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+    f.app.handle_mouse(
+        MouseEvent {
+            kind: if down {
+                MouseEventKind::ScrollDown
+            } else {
+                MouseEventKind::ScrollUp
+            },
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        },
+        Instant::now(),
+    );
+}
+
+#[test]
+fn the_wheel_and_page_keys_scroll_the_swarms_card_and_stop_at_its_end() {
+    let mut f = fixture();
+    let tasks: Vec<PlannedTask> = (1..=30).map(|n| task(&format!("t{n:02}"), &[])).collect();
+    seed(&f, SwarmStatus::Review, tasks);
+    open_screen(&mut f);
+    let out = render(&f.app, 120, 20);
+    assert!(!out.contains("t30"), "the plan overflows the card:\n{out}");
+    let pane = view(&f.app).drawn.get().pane;
+    let (col, row) = (pane.x + pane.width / 2, pane.y + pane.height / 2);
+
+    // the wheel over the card scrolls it, without Tab first
+    wheel(&mut f, true, col, row);
+    assert_eq!(view(&f.app).panel_scroll, 3);
+    // far past the end: it stops with the last line at the bottom
+    for _ in 0..100 {
+        wheel(&mut f, true, col, row);
+        render(&f.app, 120, 20);
+    }
+    let v = view(&f.app);
+    let max = v.panel_max.get().unwrap();
+    assert!(max > 0);
+    assert_eq!(v.panel_scroll, max, "clamped to the card's end");
+    let out = render(&f.app, 120, 20);
+    assert!(out.contains("t30"), "the end is in view:\n{out}");
+
+    // one wheel turn up moves at once (no backlog past the end)
+    wheel(&mut f, false, col, row);
+    assert_eq!(view(&f.app).panel_scroll, max - 3);
+
+    // PgUp from the tree scrolls the card back to the top
+    for _ in 0..20 {
+        press(&mut f, KeyCode::PageUp);
+    }
+    assert_eq!(view(&f.app).panel_scroll, 0);
+    press(&mut f, KeyCode::PageDown);
+    assert!(view(&f.app).panel_scroll > 3, "a page, not a line");
+}

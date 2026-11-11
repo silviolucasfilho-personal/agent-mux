@@ -5662,7 +5662,8 @@ impl App {
 
     /// The mouse on the Swarm screen: a click on a tree row selects it, a
     /// click on a terminal in the pane types into it, and the wheel scrolls
-    /// what it is over (the terminal's scrollback, or the tree's cursor).
+    /// what it is over (the terminal's scrollback, a card's text or list, or
+    /// the tree's cursor).
     fn swarm_mouse(&mut self, ev: MouseEvent) {
         let Mode::Swarm(view) = &mut self.mode else {
             return;
@@ -5688,6 +5689,11 @@ impl App {
                 if drawn.pane.contains(at) && view.pane_session().is_some() {
                     self.sync_swarm_pane_selection();
                     self.scroll_selected(if up { 3 } else { -3 });
+                } else if drawn.pane.contains(at) {
+                    // a card (Board, Task, Trace, Changes, Timeline, Log…)
+                    if view.modal.is_none() && view.confirm.is_none() {
+                        view.scroll_panel(if up { -3 } else { 3 });
+                    }
                 } else if drawn.tree.contains(at) && !view.text_entry_active() {
                     view.handle_key(KeyEvent::new(
                         if up { KeyCode::Up } else { KeyCode::Down },
