@@ -305,6 +305,10 @@ async fn codex_wheel_uses_the_enclosing_scrollback_even_with_mouse_capture() {
 #[tokio::test]
 async fn wheel_over_sidebar_scrolls_selected_session_locally() {
     let (mut app, _rx) = app_with_history(100).await;
+    // a tall terminal: the whole Agents list fits, so the wheel over it
+    // goes to the selected session (an overflowing list scrolls itself:
+    // wheel_over_an_overflowing_agents_list_scrolls_the_list)
+    app.set_pane_size(60, 80);
     let ev = MouseEvent {
         kind: MouseEventKind::ScrollUp,
         column: 5, // inside the sidebar
@@ -898,4 +902,85 @@ async fn a_click_on_a_markdown_file_in_the_pane_opens_the_viewer() {
     app.sessions[0].dir = dir.path().join("elsewhere");
     click(&mut app, 31 + 8, 1);
     assert!(opened(&app).is_none());
+}
+
+#[tokio::test]
+async fn wheel_over_an_overflowing_agents_list_scrolls_the_list() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let (tx, _rx) = mpsc::channel(16);
+    let profiles: Vec<Profile> = (0..30)
+        .map(|n| Profile {
+            name: format!("harness-{n:02}"),
+            ..shell_profile()
+        })
+        .collect();
+    let mut app = App::new(profiles, None, tx);
+    app.set_pane_size(14, 80);
+    let (w, h) = (app.terminal_size.1, app.terminal_size.0);
+    let render = |app: &App| {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| agent_mux::ui::draw(f, app, Instant::now()))
+            .unwrap();
+        // the sidebar only: the pane's title names the selected harness
+        let b = t.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..agent_mux::ui::SIDEBAR_WIDTH)
+                    .map(|x| b[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect::<String>()
+    };
+    let before = render(&app);
+    assert!(before.contains("harness-00"), "{before}");
+    assert!(
+        !before.contains("harness-29"),
+        "the list overflows:\n{before}"
+    );
+    let wheel_at = |app: &mut App, kind| {
+        app.handle_mouse(
+            MouseEvent {
+                kind,
+                column: 5,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            },
+            Instant::now(),
+        )
+    };
+
+    // the wheel moves the list, not the cursor
+    wheel_at(&mut app, MouseEventKind::ScrollDown);
+    assert_eq!(app.agents_scroll.map(|s| s.start), Some(3));
+    let out = render(&app);
+    assert!(!out.contains("harness-00"), "scrolled past the top:\n{out}");
+    assert!(out.contains("harness-03"), "{out}");
+
+    // it reaches the end of the list (the personas, below the harnesses)
+    // and stops there
+    for _ in 0..60 {
+        wheel_at(&mut app, MouseEventKind::ScrollDown);
+    }
+    let out = render(&app);
+    assert!(out.contains("PERSONAS"), "the end is in view:\n{out}");
+    let at_end = app.agents_scroll.unwrap().start;
+    wheel_at(&mut app, MouseEventKind::ScrollUp);
+    assert_eq!(app.agents_scroll.unwrap().start, at_end - 3, "no backlog");
+
+    // a key that moves the cursor brings the list back to it
+    app.handle_key(
+        &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        Instant::now(),
+    );
+    let out = render(&app);
+    assert!(out.contains("harness-01"), "{out}");
+    assert!(!out.contains("PERSONAS"), "back at the cursor:\n{out}");
+    wheel_at(&mut app, MouseEventKind::ScrollDown);
+
+    // and back to the top
+    for _ in 0..60 {
+        wheel_at(&mut app, MouseEventKind::ScrollUp);
+    }
+    assert!(render(&app).contains("harness-00"));
 }
