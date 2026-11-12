@@ -336,10 +336,69 @@ fn trace_span(t: &TraceRow, ctx: &MapCtx) -> Event {
     }
 }
 
+/// Identifies whether a tool operation is a retrieval/lookup step.
+fn is_retriever(name: &str, tool_name: Option<&str>) -> bool {
+    let check = |s: &str| {
+        let lower = s.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "read_file"
+                | "view"
+                | "read"
+                | "grep"
+                | "glob"
+                | "ls"
+                | "list_dir"
+                | "list_directory"
+                | "search_files"
+                | "search_web"
+                | "websearch"
+                | "web_search"
+                | "webfetch"
+                | "web_fetch"
+                | "fetch"
+                | "fetch_web_page"
+                | "read_resource"
+                | "list_resources"
+                | "search"
+                | "toolsearch"
+        )
+    };
+    tool_name.is_some_and(check) || check(name)
+}
+
+/// Identifies whether a tool/step is an evaluation or verification step.
+fn is_evaluator(name: &str, tool_name: Option<&str>, skill: Option<&str>) -> bool {
+    let check = |s: &str| {
+        let lower = s.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "wf-judge"
+                | "wf-critic"
+                | "wf-refute"
+                | "judge"
+                | "critic"
+                | "refute"
+                | "evaluator"
+                | "evaluate"
+                | "score"
+        )
+    };
+    skill.is_some_and(check) || tool_name.is_some_and(check) || check(name)
+}
+
 fn observation_span(o: &ObservationRow, ctx: &MapCtx) -> Event {
     let kind: &'static str = match o.obs_type {
         ObservationType::Generation => "generation",
-        ObservationType::Tool => "tool",
+        ObservationType::Tool => {
+            if is_retriever(&o.name, o.tool_name.as_deref()) {
+                "retriever"
+            } else if is_evaluator(&o.name, o.tool_name.as_deref(), o.skill.as_deref()) {
+                "evaluator"
+            } else {
+                "tool"
+            }
+        }
         ObservationType::Agent => "agent",
         ObservationType::Event => "event",
         ObservationType::Span => "span",
@@ -438,8 +497,12 @@ pub fn swarm_summary(r: &SwarmReport, ctx: &MapCtx) -> Vec<Event> {
     let s = &r.swarm;
     let trace_id = swarm_trace_id(&s.id);
     let root_id = ids::span_id_hex(&format!("amx1|swarm|root|{}", s.id));
-    let goal = text(r.swarm.goal.lines().next().unwrap_or(""), 120);
-    let name = format!("swarm {goal}");
+    let goal = text(r.swarm.goal.lines().next().unwrap_or("").trim(), 120);
+    let name = if goal.is_empty() {
+        format!("swarm {}", s.id)
+    } else {
+        format!("swarm {goal}")
+    };
     let now = crate::tracing::store::now_ns();
     let end = s.ended_ns.unwrap_or(now);
     let launch_of = |id: Option<&str>| r.launches.iter().find(|l| Some(l.launch_id.as_str()) == id);
@@ -606,7 +669,7 @@ pub fn swarm_summary(r: &SwarmReport, ctx: &MapCtx) -> Vec<Event> {
             );
         }
         let mut attrs = common_attrs(ctx);
-        attrs.push(attr(OBSERVATION_TYPE, any_str("span")));
+        attrs.push(attr(OBSERVATION_TYPE, any_str("agent")));
         push_str_attr(&mut attrs, OBSERVATION_INPUT, t.acceptance.clone());
         let out = match (&t.result, &t.error) {
             (_, Some(e)) => Some(text(e, 4000)),
@@ -1105,6 +1168,7 @@ mod tests {
         let t1 = &t1;
         assert_eq!(t1["traceId"], swarm_trace_id("swarm-abc"));
         assert_eq!(t1["parentSpanId"], r["spanId"]);
+        assert_eq!(attr_str(t1, "langfuse.observation.type"), Some("agent"));
         assert_eq!(t1["name"], "schema Task schema");
         assert_eq!(t1["startTimeUnixNano"], "3000");
         assert_eq!(t1["endTimeUnixNano"], "8000");
@@ -1139,6 +1203,12 @@ mod tests {
             again.iter().map(|e| &e.entity_id).collect::<Vec<_>>(),
             events.iter().map(|e| &e.entity_id).collect::<Vec<_>>()
         );
+
+        // empty goal falls back to swarm id without trailing whitespace
+        let mut empty_goal_report = report;
+        empty_goal_report.swarm.goal = "   ".into();
+        let empty_events = swarm_summary(&empty_goal_report, &ctx());
+        assert_eq!(parsed(&empty_events[0])["name"], "swarm swarm-abc");
     }
 
     #[test]
@@ -1216,6 +1286,28 @@ mod tests {
                 Some(expected)
             );
         }
+
+        // lookup / retrieval tools map to "retriever" observation type per Langfuse best practices
+        for tool in ["read_file", "Read", "ToolSearch"] {
+            let mut retriever = observation(ObservationType::Tool);
+            retriever.name = tool.into();
+            let e = event_for(&StoreOp::Observation(retriever), &ctx()).unwrap();
+            assert_eq!(e.kind, "retriever");
+            assert_eq!(
+                attr_str(&parsed(&e), "langfuse.observation.type"),
+                Some("retriever")
+            );
+        }
+
+        // evaluation tools / skills map to "evaluator" observation type
+        let mut evaluator = observation(ObservationType::Tool);
+        evaluator.name = "wf-judge".into();
+        let e = event_for(&StoreOp::Observation(evaluator), &ctx()).unwrap();
+        assert_eq!(e.kind, "evaluator");
+        assert_eq!(
+            attr_str(&parsed(&e), "langfuse.observation.type"),
+            Some("evaluator")
+        );
 
         // a running tool keeps a valid (zero-length) span until it closes
         let mut running = observation(ObservationType::Tool);
