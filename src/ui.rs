@@ -465,7 +465,7 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
                     .is_none_or(|next| next.depth < lines[i].depth || next.is_owner())
         })
         .collect();
-    let start = agent_window(&heights, cursor.unwrap_or(0), visible.saturating_sub(1));
+    let start = app.agents_start(&lines, &heights, visible);
     let mut end = start;
     let mut used_rows = 0;
     while end < lines.len() && used_rows + heights[end] <= visible.max(1) {

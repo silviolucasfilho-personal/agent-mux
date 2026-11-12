@@ -2717,6 +2717,9 @@ pub struct App {
 
     /// A heading, harness, persona, or run row under the Agents cursor.
     pub agent_focus: Option<agents_list::AgentFocus>,
+    /// The Agents list scrolled by the wheel: its first line, kept while
+    /// the cursor stays where it was (`agents_list::AgentsScroll`).
+    pub agents_scroll: Option<agents_list::AgentsScroll>,
     /// The section the Agents cursor was in when Tab went to History.
     pub list_section: SidebarSection,
     /// Last managed package inspected in the Skills workbench.
@@ -2938,6 +2941,7 @@ impl App {
             task_agents: Vec::new(),
 
             agent_focus: None,
+            agents_scroll: None,
             list_section: SidebarSection::Active,
             skill_workbench: None,
             agents: crate::config::AgentsSettings::default(),
@@ -5904,9 +5908,8 @@ impl App {
                     // the list draws a session under a harness on two rows
                     let lines = self.agent_lines();
                     let visible = usize::from(agents_rect.height.saturating_sub(2));
-                    let cursor = self.agent_cursor(&lines).unwrap_or(0);
                     let heights = ui::agent_row_heights(&lines);
-                    let start = ui::agent_window(&heights, cursor, visible.saturating_sub(1));
+                    let start = self.agents_start(&lines, &heights, visible);
                     let at =
                         ui::agent_line_at(&heights, start, usize::from(ev.row - agents_rect.y - 1));
                     if let Some(at) = at
@@ -5990,10 +5993,23 @@ impl App {
             ) =>
             {
                 if !self.sidebar_hidden && ev.column < ui::SIDEBAR_WIDTH {
-                    // over the Agents list a wheel scrolls the selected
-                    // session (a trackpad often rests there); History scrolls
-                    let (_, history_rect) =
+                    // over the Agents list a wheel scrolls the list when it
+                    // overflows, else the selected session (a trackpad often
+                    // rests there); History scrolls
+                    let (agents_rect, history_rect) =
                         ui::sidebar_areas(self.terminal_size.0, self.history_sessions.len());
+                    if ev.row < history_rect.y
+                        && self.scroll_agents_list(
+                            agents_rect,
+                            if matches!(ev.kind, MouseEventKind::ScrollUp) {
+                                -3
+                            } else {
+                                3
+                            },
+                        )
+                    {
+                        return;
+                    }
                     if ev.row >= history_rect.y && !self.history_sessions.is_empty() {
                         let delta = if matches!(ev.kind, MouseEventKind::ScrollUp) {
                             -1

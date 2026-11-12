@@ -346,6 +346,36 @@ impl App {
         self.sessions.get(self.selected).map(|s| s.id)
     }
 
+    /// The first line the Agents list draws in `visible` rows: where the
+    /// wheel scrolled it while the cursor has not moved since, else the
+    /// window that keeps the cursor in view. The drawing and the click
+    /// mapping both read it, so a click lands on the row it shows.
+    pub fn agents_start(&self, lines: &[AgentLine], heights: &[usize], visible: usize) -> usize {
+        let cursor = self.agent_cursor(lines);
+        match self.agents_scroll {
+            Some(s) if s.cursor == cursor => s.start.min(agents_max_start(heights, visible)),
+            _ => crate::ui::agent_window(heights, cursor.unwrap_or(0), visible.saturating_sub(1)),
+        }
+    }
+
+    /// Scrolls the Agents list in `area` by `delta` lines without moving
+    /// the cursor; false (nothing done) when the whole list fits.
+    pub fn scroll_agents_list(&mut self, area: ratatui::layout::Rect, delta: isize) -> bool {
+        let lines = self.agent_lines();
+        let heights = crate::ui::agent_row_heights(&lines);
+        let visible = usize::from(area.height.saturating_sub(2));
+        let max = agents_max_start(&heights, visible);
+        if max == 0 {
+            return false;
+        }
+        let start = self.agents_start(&lines, &heights, visible) as isize;
+        self.agents_scroll = Some(AgentsScroll {
+            cursor: self.agent_cursor(&lines),
+            start: start.saturating_add(delta).clamp(0, max as isize) as usize,
+        });
+        true
+    }
+
     /// The index of the cursor in `lines`, read from the selection the
     /// sections keep.
     pub fn agent_cursor(&self, lines: &[AgentLine]) -> Option<usize> {
@@ -516,4 +546,26 @@ impl App {
         self.task_agents = listed(true);
         self.personas = listed(false);
     }
+}
+
+/// The Agents list scrolled by the wheel: the first line drawn, valid
+/// while the cursor is still `cursor` (a key that moves it brings the
+/// window back to the cursor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentsScroll {
+    pub cursor: Option<usize>,
+    pub start: usize,
+}
+
+/// The furthest first line: the one from which the rest of the list just
+/// fills `visible` rows (0 when it all fits).
+pub fn agents_max_start(heights: &[usize], visible: usize) -> usize {
+    let mut rows = 0;
+    for (i, h) in heights.iter().enumerate().rev() {
+        rows += h;
+        if rows > visible {
+            return i + 1;
+        }
+    }
+    0
 }
