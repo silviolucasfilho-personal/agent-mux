@@ -16,6 +16,7 @@ pub mod library;
 pub mod planner;
 pub mod report;
 pub mod result;
+pub mod run_view;
 pub mod store;
 
 pub use document::{Workflow, parse, validate};
