@@ -302,7 +302,10 @@ async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
     let args = calls(&f.bin, Harness::Claude, "args");
     assert_eq!(args.len(), 9);
     for a in &args {
-        assert!(a.contains("--output-format\njson\n"), "{a}");
+        assert!(
+            a.contains("--output-format\nstream-json\n--verbose\n"),
+            "{a}"
+        );
         assert!(a.contains("--dangerously-skip-permissions"), "{a}");
         assert!(a.contains("\n-p\n"), "{a}");
     }
@@ -552,7 +555,7 @@ async fn one_run_can_mix_all_three_harnesses() {
     let agy_args = calls(&f.bin, Harness::Antigravity, "args");
     assert_eq!(agy_args.len(), 1);
     assert!(
-        agy_args[0].contains("--output-format\njson\n--print-timeout\n"),
+        agy_args[0].contains("--output-format\nstream-json\n--print-timeout\n"),
         "{}",
         agy_args[0]
     );
