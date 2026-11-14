@@ -64,7 +64,7 @@ The installed `SKILL.md` is the canonical file with one difference: the descript
 
 ## 4. Launching from the Library
 
-Every package is listed in the Library's skills section (`o` in the Agents list), with its harness coverage (`n/7` of the seven harnesses); Enter opens the harness picker, which lists every available harness as Ready, Degraded or Blocked with its reason — a package whose `skill.toml` restricts `harnesses` shows that restriction there instead of silently offering fewer harnesses. The Skills view (`S`) keeps the per-harness install state and executions. On confirm agent-mux:
+Every package is listed in the Library's skills section (`o` in the Agents list), with its harness coverage (`n/7` of the seven harnesses); Enter opens the harness picker, which lists every available harness as Ready, Degraded or Blocked with its reason — a package whose `skill.toml` restricts `harnesses` shows that restriction there instead of silently offering fewer harnesses. The Skills view (`S`) keeps the per-harness install state and executions. The session a launch starts is a row under its skill in the Library, with its terminal in the main pane (`Enter` types into it); it is not listed in the Agents sidebar unless `[agents] show_library = true`. On confirm agent-mux:
 
 1. installs or refreshes the skill in that harness's directory (manifest hash check; unchanged packages are left alone),
 2. builds the harness command line: the model from your profile for that harness and the permission flags from your profile or the package's `auto_approve`, then the opening prompt `<invocation> <startup_prompt>` as the positional prompt (Claude Code, Codex, Grok, Pi, Muse), via `--prompt-interactive` (Antigravity) or via `--prompt` (OpenCode),

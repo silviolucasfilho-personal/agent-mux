@@ -170,6 +170,19 @@ async fn heimdall_is_listed_in_the_library_and_the_picker_defaults_to_its_harnes
     if let Mode::SkillLauncher(ref state) = app.mode {
         assert_eq!(state.selected_harness(), Harness::Claude);
     }
+    // Esc closes the dialog and the Library is there again, on the skill
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    match &app.mode {
+        Mode::Library(st) => assert!(
+            matches!(
+                app.library_item(st),
+                Some(agent_mux::app::library::Item::Skill(_))
+            ),
+            "back on the skill's row"
+        ),
+        other => panic!("a cancelled launch returns to the Library: {other:?}"),
+    }
+    // and Esc there goes back to the Agents list
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(matches!(app.mode, Mode::Main));
     app.kill_all();
@@ -184,6 +197,68 @@ async fn a_running_agent_is_attached_to_instead_of_relaunched() {
     assert_eq!(app.running_skill_session("heimdall"), Some(session_idx));
     assert_eq!(app.running_skill_harness("heimdall"), Some(Harness::Codex));
 
+    // a skill's session is the Library's, as a swarm's is the Swarm
+    // screen's: the Agents list leaves it out and says one is going
+    app.mode = Mode::Main;
+    assert!(!app.session_listed(session_idx));
+    let text = screen(&app);
+    assert!(
+        !text.lines().any(|l| l.contains("⚡")),
+        "no skill session row in the Agents list\n{text}"
+    );
+    assert!(text.contains("library: 1 session(s)"), "{text}");
+
+    // in the Library it is a row under its skill
+    library_on_skill(&mut app, "heimdall");
+    let id = app.sessions[session_idx].id;
+    let rows = match &app.mode {
+        Mode::Library(st) => app.library_rows(st),
+        _ => unreachable!(),
+    };
+    let skill_at = rows
+        .iter()
+        .position(|r| matches!(r, agent_mux::app::library::Row::Skill(_)))
+        .unwrap();
+    assert_eq!(
+        rows.get(skill_at + 1),
+        Some(&agent_mux::app::library::Row::Session(id)),
+        "{rows:?}"
+    );
+    let text = screen(&app);
+    assert!(
+        text.contains("●1"),
+        "the skill row says one is going\n{text}"
+    );
+    assert!(
+        text.lines().any(|l| l.contains("└ codex ·")),
+        "the session under its skill, by harness and folder\n{text}"
+    );
+
+    // launching it again attaches to the same session, here: its row is
+    // selected and its terminal has the keyboard
+    pick_harness(&mut app);
+    match &app.mode {
+        Mode::Library(st) => {
+            assert!(st.pane_focused);
+            assert_eq!(
+                app.library_row(st),
+                Some(agent_mux::app::library::Row::Session(id))
+            );
+        }
+        other => panic!("the session is shown in the Library: {other:?}"),
+    }
+    assert_eq!(app.pane_session(), Some(session_idx));
+    assert_eq!(app.selected, session_idx);
+    let text = screen(&app);
+    assert!(text.contains("Keyboard goes to"), "{text}");
+
+    // the Focus Agents command takes the keyboard back to the tree
+    app.execute_command(agent_mux::keymap::ActionId::FocusAgents, Instant::now());
+    assert!(matches!(&app.mode, Mode::Library(st) if !st.pane_focused));
+    assert_eq!(app.pane_session(), None);
+
+    // with `[agents] show_library` the Agents list shows it too, badged
+    app.agents.show_library = true;
     app.mode = Mode::Main;
     let text = screen(&app);
     assert!(
@@ -191,13 +266,7 @@ async fn a_running_agent_is_attached_to_instead_of_relaunched() {
             .any(|l| l.contains("⚡") && l.contains("Heimdall")),
         "the session row is badged with its skill\n{text}"
     );
-
-    // launching it again from the Library attaches to the same session
-    library_on_skill(&mut app, "heimdall");
-    pick_harness(&mut app);
-    assert!(matches!(app.mode, Mode::Main), "{:?}", app.mode);
-    assert!(app.pane_session().is_some());
-    assert_eq!(app.selected, session_idx);
+    app.agents.show_library = false;
 
     // Any harness asked for while it runs attaches; no second process.
     let before = app.sessions.len();

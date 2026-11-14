@@ -990,6 +990,7 @@ async fn sessions_sharing_one_conversation_restore_only_one_onto_it() {
         profile,
         dir: workdir.clone(),
         skill_id: None,
+        agent: None,
         conversation: Some(conv.into()),
         continued_from: None,
     };
@@ -1114,6 +1115,7 @@ async fn restored_agy_sessions_take_their_own_workspace_conversation_from_the_st
             },
             dir: dir.to_path_buf(),
             skill_id: None,
+            agent: None,
             conversation: conv.map(Into::into),
             continued_from: None,
         }

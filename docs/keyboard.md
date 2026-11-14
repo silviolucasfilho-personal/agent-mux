@@ -60,7 +60,21 @@ The terminal may intercept a key or collapse its modifiers. Protocol support alo
 
 `i` on a session's row in the Agents list opens its run screen (`docs/agents.md`): who runs it, its terminal, its trace and its changes; `i` or `Esc` returns.
 
-The Agents list holds launched work only: harness profiles and their sessions. Definitions live in the Library: `o` in the list (or F1 → Open library) opens it, with a flows / skills / personas / scheduled tree on the left and the selected item's card on the right. In the Library, `Enter` (or `r`) opens the harness picker — every available harness with its Ready / Degraded / Blocked verdict — `e` edits the item, `n` starts a new one, `/` filters, `1`–`4` switch the item's tabs, `i` jumps to a live session, and `Esc` returns to the Agents list. A scheduled row takes its loop verbs instead: `r` run now, `p` pause or resume, `e` edit, `d` remove.
+The Agents list holds harness profiles and the plain sessions started on them. Definitions live in the Library: `o` in the list (or F1 → Open library) opens it, with a flows / skills / personas / scheduled tree on the left and the selected row in the main pane on the right, as on the Swarm screen. A session a skill or a persona launched is a row under its item there, and is not in the Agents list (`[agents] show_library = true` lists it in both); a flow's run in flight is a row under its flow.
+
+In the Library:
+
+| Key | On an item | On a session's row |
+|---|---|---|
+| `Enter` | the harness picker: every harness with its Ready / Degraded / Blocked verdict | its terminal takes the keyboard; Focus Agents (`⌘L` / `Ctrl+Shift+L`) returns to the tree |
+| `r` | the same picker | another session of its item |
+| `e` | edits the item | edits its item |
+| `x` | — | stops the session (asks first) |
+| `d` | removes a scheduled agent | removes an ended session's row |
+| `i` | goes to its first session's row | the session's run screen |
+| `1`–`4` | the item's tabs | — |
+
+`n` starts a new item in the section under the cursor, `/` filters (letters are text while it is open; `Enter` keeps the filter, `Esc` clears it), `←` goes to the row's parent and `→` to its first session, `Enter` on a heading folds its section, `Ctrl+R` reloads, and `Esc`, `q` or `o` return to the Agents list. A dialog or an editor opened from the Library returns to the Library when it closes, and a session it starts is shown there. A scheduled row takes its loop verbs: `r` run now, `p` pause or resume, `e` edit, `d` remove. A click selects a row or gives a session's terminal the keyboard; the wheel scrolls what it is over.
 
 On the Run screen (a flow's run, `docs/workflows.md`) and the Swarm screen, the tree takes `Left` / `Right` to fold and open a row and `o` to pick another run or swarm; on the Run screen `x` stops the run on its row and one session on a session's row, asking first.
 

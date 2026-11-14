@@ -324,7 +324,7 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
     if let Mode::Library(_) = &app.mode {
         // the Library: its tree where the Agents list is, the selected
         // row's card in the main pane (`ui::library`)
-        library::draw_screen(f, body, app);
+        library::draw_screen(f, body, app, now);
     } else if let Mode::Swarm(view) = &app.mode {
         // the Agents layout: the swarm tree where the Agents list is, the
         // selected row in the main pane (`ui::swarm_board`)
@@ -421,10 +421,13 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     let is_focused = app.sidebar_section != SidebarSection::History && app.list_focused();
     let lines = app.agent_lines();
     let cursor = app.agent_cursor(&lines);
+    // the sessions the list shows: a swarm's and the Library's are
+    // counted on their own screens
     let running = app
         .sessions
         .iter()
-        .filter(|s| !matches!(s.status(now), Status::Exited(_)))
+        .enumerate()
+        .filter(|(i, s)| app.session_listed(*i) && !matches!(s.status(now), Status::Exited(_)))
         .count();
     let mut title = if running > 0 {
         format!("Agents · {running} running")
@@ -780,12 +783,22 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         items.push(ListItem::new(Line::styled(" no agents: n makes one", dim)));
     } else if end == lines.len() && items.len() < visible {
         items.push(ListItem::new(Line::styled(" + new session  n", dim)));
-        // flows, skills and personas live in the Library now
+        // flows, skills and personas live in the Library, with the
+        // sessions they launched: say so when some are going
         if items.len() < visible {
-            items.push(ListItem::new(Line::styled(
-                " ⋯ flows, skills, personas o",
-                dim,
-            )));
+            let live = if app.agents.show_library {
+                0
+            } else {
+                app.library_live_sessions()
+            };
+            items.push(ListItem::new(if live > 0 {
+                Line::styled(
+                    format!(" ● library: {live} session(s)  o"),
+                    Style::default().fg(Color::Green),
+                )
+            } else {
+                Line::styled(" ⋯ flows, skills, personas o", dim)
+            }));
         }
     }
     f.render_widget(List::new(items).block(block), area);
@@ -796,7 +809,8 @@ fn harness_summary(app: &App, profile: usize, now: Instant) -> (String, Style) {
     use crate::app::agents_list::AgentKind;
     let (mut working, mut attention, mut idle, mut exited) = (0, 0, 0, 0);
     for (i, s) in app.sessions.iter().enumerate() {
-        if app.harness_of(i) != AgentKind::Harness(profile) {
+        // only the sessions the list shows under the row
+        if !app.session_listed(i) || app.harness_of(i) != AgentKind::Harness(profile) {
             continue;
         }
         match s.status(now) {
@@ -1108,6 +1122,7 @@ pub(crate) fn draw_session_pane(f: &mut Frame, area: Rect, app: &App, idx: usize
     let focused = match &app.mode {
         Mode::Swarm(v) => v.pane_focused,
         Mode::SessionRun(v) => v.pane_focused,
+        Mode::Library(v) => v.pane_focused,
         _ => app.focus == crate::app::Focus::Pane,
     };
     let (label, _) = status_label_style(session.status(now));
@@ -1158,8 +1173,11 @@ pub(crate) fn draw_session_pane(f: &mut Frame, area: Rect, app: &App, idx: usize
         session.profile.name,
         session.dir.display()
     );
-    let title = if focused && matches!(app.mode, Mode::Main | Mode::Swarm(_) | Mode::SessionRun(_))
-    {
+    let title = if focused
+        && matches!(
+            app.mode,
+            Mode::Main | Mode::Swarm(_) | Mode::SessionRun(_) | Mode::Library(_)
+        ) {
         format!("{title} • Keyboard goes to {}", session.profile.name)
     } else {
         title

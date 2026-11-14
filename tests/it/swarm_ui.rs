@@ -1304,6 +1304,7 @@ fn a_restart_reconnects_the_coordinator_to_its_swarm() {
             profile,
             dir: f.ws.clone(),
             skill_id: None,
+            agent: None,
             conversation: None,
             continued_from: None,
         }],

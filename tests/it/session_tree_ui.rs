@@ -1029,7 +1029,11 @@ fn i_opens_a_personas_session_on_its_run_screen() {
     app.sessions[0].opening_args = vec!["Refute the finding in src/app/loops.rs".into()];
     // what the rows read the harness from; the process is the shell's
     app.sessions[0].profile.command = "claude".into();
-    // the Agents list names what the session runs as, and where
+    // a persona's session is listed in the Library, under its persona
+    assert!(!app.session_listed(0));
+    // with `[agents] show_library` the Agents list names what the
+    // session runs as, and where
+    app.agents.show_library = true;
     let list = render(&app, 140, 40);
     assert!(
         list.lines().any(|l| l.contains("◇skeptic")),

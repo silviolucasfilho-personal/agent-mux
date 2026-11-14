@@ -160,6 +160,9 @@ pub struct AgentsConfig {
     /// List a swarm's coordinator and workers in the Agents sidebar
     /// (default false: they are seen on the Swarm screen only).
     pub show_swarm: Option<bool>,
+    /// List the sessions a skill or a persona launched in the Agents
+    /// sidebar too (default false: they are seen in the Library only).
+    pub show_library: Option<bool>,
 }
 
 /// Global `[loops]` table: the Loop Engineering scheduler
@@ -315,6 +318,8 @@ pub struct AgentsSettings {
     pub mcp: crate::skill::McpMode,
     /// `[agents] show_swarm`: swarm sessions in the Agents sidebar.
     pub show_swarm: bool,
+    /// `[agents] show_library`: the Library's sessions in the Agents sidebar.
+    pub show_library: bool,
 }
 
 impl Default for AgentsSettings {
@@ -323,6 +328,7 @@ impl Default for AgentsSettings {
             hydrate: true,
             mcp: crate::skill::McpMode::Auto,
             show_swarm: false,
+            show_library: false,
         }
     }
 }
@@ -338,6 +344,9 @@ pub fn resolve_agents(cfg: Option<&AgentsConfig>) -> AgentsSettings {
         }
         if let Some(v) = c.show_swarm {
             out.show_swarm = v;
+        }
+        if let Some(v) = c.show_library {
+            out.show_library = v;
         }
     }
     out
@@ -853,6 +862,14 @@ mod tests {
         assert!(!resolve_agents(cfg.agents.as_ref()).show_swarm);
         let cfg = parse("[agents]\nshow_swarm = true\n").unwrap();
         assert!(resolve_agents(cfg.agents.as_ref()).show_swarm);
+    }
+
+    #[test]
+    fn library_sessions_are_off_the_agents_sidebar_unless_asked() {
+        let cfg = parse("").unwrap();
+        assert!(!resolve_agents(cfg.agents.as_ref()).show_library);
+        let cfg = parse("[agents]\nshow_library = true\n").unwrap();
+        assert!(resolve_agents(cfg.agents.as_ref()).show_library);
     }
 
     use super::*;

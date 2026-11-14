@@ -10,6 +10,10 @@ pub struct SavedSession {
     /// `agent_id`; both are read.
     #[serde(default, alias = "agent_id", skip_serializing_if = "Option::is_none")]
     pub skill_id: Option<String>,
+    /// The persona the session was started as: a restart lists it under
+    /// its persona again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// The harness's own id for the conversation the session held (agy's
     /// `--conversation`, Claude's `--resume`, `codex resume`), so a
     /// restart resumes it instead of opening a blank one. Absent when it
@@ -85,6 +89,7 @@ mod tests {
                 },
                 dir: PathBuf::from("/tmp/project1"),
                 skill_id: Some("heimdall".into()),
+                agent: None,
                 continued_from: None,
                 conversation: Some("uuid-123".into()),
             },
@@ -102,6 +107,7 @@ mod tests {
                 },
                 dir: PathBuf::from("/tmp/project2"),
                 skill_id: None,
+                agent: None,
                 continued_from: None,
                 conversation: None,
             },

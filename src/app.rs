@@ -843,6 +843,11 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::SessionHistory(_) => Action::HistoryKey,
         Mode::TraceBrowser(_) => Action::BrowserKey,
         Mode::SkillsView(_) => Action::SkillsKey,
+        // a session's terminal has the keyboard: the session's, as on Agents
+        Mode::Library(v) if v.pane_focused => match encode_key_with_mode(key, ctx.app_cursor) {
+            Some(bytes) => Action::ForwardBytes(bytes),
+            None => Action::None,
+        },
         Mode::Library(_) => Action::LibraryKey,
         Mode::SkillLauncher(_) => Action::SkillLauncherKey,
         Mode::About(_) => match key.code {
@@ -2648,6 +2653,9 @@ pub struct App {
     /// dialog's launch, taken by the spawn, which records it on the
     /// launch row (`metadata.agent`).
     pub(crate) launch_agent: Option<String>,
+    /// The Library screen as it was when it opened a dialog or an editor:
+    /// it comes back when that closes (`App::library_resume`).
+    pub(crate) library_return: Option<Box<library::LibraryState>>,
     pub profiles: Vec<Profile>,
     pub pane_size: (u16, u16), // (rows, cols)
     pub selection: Option<ActiveSelection>,
@@ -2927,6 +2935,7 @@ impl App {
             closing_sessions: std::collections::HashSet::new(),
             notice: None,
             launch_agent: None,
+            library_return: None,
             profiles,
             pane_size: (24, 80),
             selection: None,
@@ -3184,10 +3193,7 @@ impl App {
 
     /// Selects session `idx` and gives the pane the keyboard.
     fn attach_to_session(&mut self, idx: usize) {
-        self.selected = idx;
-        self.sidebar_section = SidebarSection::Active;
-        self.mode = Mode::Main;
-        self.focus_pane();
+        self.reveal_session(idx);
     }
 
     /// Gives the pane the keyboard. With no session to type into the
@@ -3291,6 +3297,20 @@ impl App {
             {
                 let bytes = paste_bytes(text, s.parser.screen().bracketed_paste());
                 let _ = s.write_bytes(&bytes);
+            }
+            return;
+        }
+        if let Mode::Library(view) = &mut self.mode {
+            if view.pane_focused {
+                // the terminal has the keyboard: the paste is the session's
+                if let Some(s) = self.sessions.get_mut(self.selected) {
+                    let bytes = paste_bytes(text, s.parser.screen().bracketed_paste());
+                    let _ = s.write_bytes(&bytes);
+                }
+            } else if view.filtering {
+                view.filter.extend(text.chars().filter(|c| !c.is_control()));
+                view.cursor = 0;
+                view.anchor = None;
             }
             return;
         }
@@ -3509,6 +3529,8 @@ impl App {
         self.refresh_runs_view(now);
         self.refresh_run_screen(now);
         self.refresh_session_screen(now);
+        self.library_resume();
+        self.library_sync();
         self.swarm_engine_pass(now);
         self.flush_pending_bus_wakes(now);
     }
@@ -3899,6 +3921,7 @@ impl App {
                     continued_from: s.continued_from.clone(),
                     dir: s.dir.clone(),
                     skill_id: s.skill_id.clone(),
+                    agent: s.agent.clone(),
                     conversation,
                 })
             })
@@ -4088,13 +4111,17 @@ impl App {
                 .as_deref()
                 .and_then(|conv| background.find(&profile, conv));
             let id = self.next_id;
+            // a persona's session is recorded as one again
+            self.launch_agent = s.agent.clone();
             let spawned = match &attach {
                 Some(bg) => self.spawn_attached(id, &profile, bg, dir),
                 None => self.spawn_traced_with_env(id, profile, dir, &[], s.skill_id.as_deref()),
             };
+            self.launch_agent = None;
             match spawned {
                 Ok(mut session) => {
                     session.skill_id = s.skill_id;
+                    session.agent = s.agent;
                     session.conversation = conversation;
                     session.continued_from = s.continued_from;
                     session.restored_from = Some(entry);
@@ -4456,7 +4483,8 @@ impl App {
     /// The session the pane's keyboard goes to, when the pane has it.
     pub fn pane_session(&self) -> Option<usize> {
         let swarm_pane = matches!(&self.mode, Mode::Swarm(v) if v.pane_focused)
-            || matches!(&self.mode, Mode::SessionRun(v) if v.pane_focused);
+            || matches!(&self.mode, Mode::SessionRun(v) if v.pane_focused)
+            || matches!(&self.mode, Mode::Library(v) if v.pane_focused);
         ((matches!(self.mode, Mode::Main) && self.focus == Focus::Pane) || swarm_pane)
             .then_some(self.selected)
             .filter(|i| *i < self.sessions.len())
@@ -4655,6 +4683,8 @@ impl App {
         };
         let action = dispatch(&self.mode, key, &ctx);
         self.apply(action, key, now);
+        // a dialog the Library opened has closed: back to the Library
+        self.library_resume();
     }
 
     /// The list views, when no text is being typed: they take the
@@ -5889,14 +5919,7 @@ impl App {
             }
         }
         if matches!(self.mode, Mode::Library(_)) {
-            // the wheel scrolls the card; clicks are the keyboard's for now
-            if let Mode::Library(st) = &mut self.mode {
-                match ev.kind {
-                    MouseEventKind::ScrollDown => st.scroll = st.scroll.saturating_add(3),
-                    MouseEventKind::ScrollUp => st.scroll = st.scroll.saturating_sub(3),
-                    _ => {}
-                }
-            }
+            self.library_mouse(ev);
             return;
         }
         if matches!(self.mode, Mode::Swarm(_)) {
@@ -6927,10 +6950,8 @@ impl App {
         session.continued_from = l.continued_from;
         self.next_id += 1;
         self.sessions.push(session);
-        self.selected = self.sessions.len() - 1;
-        self.sidebar_section = SidebarSection::Active;
-        self.mode = Mode::Main;
-        self.focus_pane();
+        // a persona's session is shown in the Library, any other in Agents
+        self.reveal_session(self.sessions.len() - 1);
         let _ = self.save_active_sessions();
         if let Some(link) = l.link {
             self.experiment_links.insert(id, link);
@@ -7317,11 +7338,8 @@ impl App {
                 }
                 let launch_res = self.launch_skill_in_dir(&skill_id, harness, workspace);
                 match launch_res {
-                    Ok(_) => {
-                        self.sidebar_section = SidebarSection::Active;
-                        self.mode = Mode::Main;
-                        self.focus_pane();
-                    }
+                    // the launch put the session on screen (`reveal_session`)
+                    Ok(_) => {}
                     Err(e) => {
                         self.mode = Mode::Main;
                         self.notice = Some(Notice::error(format!("Skill launch failed: {e}")));

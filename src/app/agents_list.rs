@@ -1,9 +1,11 @@
-//! The Agents list: launched work only — the harness profiles and,
-//! under each, its running sessions (spec
+//! The Agents list: the harness profiles and, under each, the plain
+//! sessions started on it (spec
 //! `docs/superpowers/specs/2026-11-14-library-screen-flows-skills-personas-design.md`,
 //! section 4). Flows, skills and personas are definitions; they live
-//! in the Library (`crate::app::library`), and a session they launched
-//! sits under its harness here.
+//! in the Library (`crate::app::library`), and so do the sessions they
+//! launched, under their item, as a swarm's sessions live on the Swarm
+//! screen (`session_listed`; `[agents] show_library = true` lists them
+//! here too).
 //!
 //! Moving the cursor onto a row selects the same thing the old
 //! sections selected (a session, a loop, a workflow row, a skill), so
@@ -170,14 +172,19 @@ impl App {
 
     /// Whether session `i` is listed in the Agents sidebar: a swarm's
     /// coordinator and workers are seen on the Swarm screen only, unless
-    /// `[agents] show_swarm = true`.
+    /// `[agents] show_swarm = true`; a session a skill or a persona
+    /// launched is seen in the Library only (under its item), unless
+    /// `[agents] show_library = true`.
     pub fn session_listed(&self, i: usize) -> bool {
-        self.agents.show_swarm
-            || !self
-                .sessions
-                .get(i)
-                .and_then(|s| s.group.as_ref())
-                .is_some_and(|g| g.kind == crate::tree::GroupKind::Swarm)
+        let swarm = self
+            .sessions
+            .get(i)
+            .and_then(|s| s.group.as_ref())
+            .is_some_and(|g| g.kind == crate::tree::GroupKind::Swarm);
+        if swarm {
+            return self.agents.show_swarm;
+        }
+        self.agents.show_library || self.library_item_of(i).is_none()
     }
 
     /// The harness row a session sits under in the Agents list: by
@@ -194,10 +201,11 @@ impl App {
     }
 
     /// Every row of the Agents list, in order: the harness profiles
-    /// and, under each, its launched sessions — launched work only.
-    /// Flows, skills and personas are definitions and live in the
-    /// Library (`Mode::Library`); a session they launched sits under
-    /// its harness here, badged with the item's name in the drawing.
+    /// and, under each, its sessions. Flows, skills and personas are
+    /// definitions and live in the Library (`Mode::Library`), with the
+    /// sessions they launched (`session_listed`); with
+    /// `[agents] show_library` those sit under their harness here,
+    /// badged with the item's name in the drawing.
     pub fn agent_lines(&self) -> Vec<AgentLine> {
         // `None`: a session the list leaves out (`session_listed`)
         let owners: Vec<Option<AgentKind>> = (0..self.sessions.len())
