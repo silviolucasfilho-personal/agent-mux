@@ -24,67 +24,102 @@ const PASS_EVERY: Duration = Duration::from_millis(500);
 /// Raw stdout kept per session; envelopes are small, tool output is not.
 const CAPTURE_CAP: usize = 4 * 1024 * 1024;
 
-/// Retain the first few complete lines (including a stream's session id)
-/// plus a recent tail. The explicit gap keeps unrelated line fragments apart.
-fn append_capture(stdout: &mut Vec<u8>, bytes: &[u8]) {
-    use crate::workflows::live::CAPTURE_GAP;
-    const HEAD_CAP: usize = 8 * 1024;
-    let gap = CAPTURE_GAP.as_bytes();
-    let gap_at = stdout[..stdout.len().min(HEAD_CAP + gap.len())]
-        .windows(gap.len())
-        .position(|window| window == gap);
-    if gap_at.is_none() && stdout.len().saturating_add(bytes.len()) <= CAPTURE_CAP {
-        stdout.extend_from_slice(bytes);
-        return;
-    }
-    let mut head = stdout[..stdout.len().min(HEAD_CAP)].to_vec();
-    if gap_at.is_none() && head.len() < HEAD_CAP {
-        head.extend_from_slice(&bytes[..bytes.len().min(HEAD_CAP - head.len())]);
-    }
-    let head_end = gap_at.unwrap_or_else(|| {
-        head.iter()
-            .rposition(|b| *b == b'\n')
-            .map(|i| i + 1)
-            .unwrap_or(0)
-    });
-    head.truncate(head_end);
-    let old_tail = &stdout[gap_at
-        .map(|i| i + gap.len())
-        .unwrap_or(head_end.min(stdout.len()))..];
-    let bytes = &bytes[head_end.saturating_sub(stdout.len())..];
-    let room = CAPTURE_CAP - head_end - gap.len();
-    let dropped = old_tail
-        .len()
-        .saturating_add(bytes.len())
-        .saturating_sub(room);
-    let at_boundary = dropped == 0
-        || if dropped <= old_tail.len() {
-            old_tail[dropped - 1] == b'\n'
+/// Bounded stream storage. Appends touch only incoming/evicted bytes; the
+/// contiguous head + gap + tail view is built lazily when a reader needs it.
+#[derive(Debug, Default, Clone)]
+pub struct CapturedOutput {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    truncated: bool,
+    tail_boundary: bool,
+    view: std::sync::OnceLock<Vec<u8>>,
+}
+
+impl CapturedOutput {
+    fn append(&mut self, mut bytes: &[u8]) {
+        use crate::workflows::live::CAPTURE_GAP;
+        const HEAD_CAP: usize = 8 * 1024;
+        self.view.take();
+        if !self.truncated && self.tail.len().saturating_add(bytes.len()) <= CAPTURE_CAP {
+            self.tail.extend(bytes);
+            return;
+        }
+        if !self.truncated {
+            // This runs once, when the stream first exceeds the cap. The
+            // prefix can span the old buffer and a single large first chunk.
+            let mut prefix: Vec<u8> = self.tail.iter().take(HEAD_CAP).copied().collect();
+            prefix.extend_from_slice(&bytes[..bytes.len().min(HEAD_CAP - prefix.len())]);
+            let end = prefix
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            prefix.truncate(end);
+            self.head = prefix;
+            let old_prefix = end.min(self.tail.len());
+            self.tail.drain(..old_prefix);
+            bytes = &bytes[end - old_prefix..];
+            self.truncated = true;
+            self.tail_boundary = true;
+        }
+        let room = CAPTURE_CAP - self.head.len() - CAPTURE_GAP.len();
+        let dropped = self
+            .tail
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(room);
+        if dropped > 0 {
+            self.tail_boundary = if dropped <= self.tail.len() {
+                self.tail[dropped - 1] == b'\n'
+            } else {
+                bytes[dropped - self.tail.len() - 1] == b'\n'
+            };
+        }
+        if bytes.len() >= room {
+            self.tail.clear();
+            self.tail.extend(&bytes[bytes.len() - room..]);
         } else {
-            bytes[dropped - old_tail.len() - 1] == b'\n'
-        };
-    let mut tail = Vec::with_capacity(room);
-    if bytes.len() >= room {
-        tail.extend_from_slice(&bytes[bytes.len() - room..]);
-    } else {
-        let keep = old_tail.len().min(room - bytes.len());
-        tail.extend_from_slice(&old_tail[old_tail.len() - keep..]);
-        tail.extend_from_slice(bytes);
+            self.tail.drain(..dropped);
+            self.tail.extend(bytes);
+        }
     }
-    let start = if !at_boundary {
-        // The suffix may start inside JSON or a UTF-8 character. Drop the
-        // fragment rather than join it to the preserved head or display it.
-        tail.iter()
-            .position(|b| *b == b'\n')
-            .map(|i| i + 1)
-            .unwrap_or(tail.len())
-    } else {
-        0
-    };
-    stdout.clear();
-    stdout.extend_from_slice(&head);
-    stdout.extend_from_slice(gap);
-    stdout.extend_from_slice(&tail[start..]);
+
+    /// A read-only view compatible with the envelope and Live decoders.
+    /// Discard a leading tail fragment at read time, so both retained ranges
+    /// are exact source ranges beginning on line and UTF-8 boundaries.
+    pub fn snapshot(&self) -> &[u8] {
+        self.view.get_or_init(|| {
+            let mut out = Vec::with_capacity(CAPTURE_CAP.min(
+                self.head.len() + self.tail.len() + crate::workflows::live::CAPTURE_GAP.len(),
+            ));
+            if self.truncated {
+                out.extend_from_slice(&self.head);
+                out.extend_from_slice(crate::workflows::live::CAPTURE_GAP.as_bytes());
+            }
+            let skip = if self.truncated && !self.tail_boundary {
+                self.tail
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map(|i| i + 1)
+                    .unwrap_or(self.tail.len())
+            } else {
+                0
+            };
+            out.extend(self.tail.iter().skip(skip));
+            out
+        })
+    }
+}
+
+impl std::ops::Deref for CapturedOutput {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.snapshot()
+    }
+}
+
+fn append_capture(stdout: &mut CapturedOutput, bytes: &[u8]) {
+    stdout.append(bytes);
 }
 
 /// What starts a run.
@@ -121,7 +156,7 @@ pub struct LiveWorkflowSession {
     pub timeout: Duration,
     pub exited_at: Option<Instant>,
     pub timed_out: bool,
-    pub stdout: Vec<u8>,
+    pub stdout: CapturedOutput,
     pub out_file: PathBuf,
     pub context_path: PathBuf,
     pub retried: bool,
@@ -999,7 +1034,7 @@ impl App {
                 timeout: Duration::from_secs(timeout_s),
                 exited_at: None,
                 timed_out: false,
-                stdout: Vec::new(),
+                stdout: CapturedOutput::default(),
                 out_file,
                 context_path,
                 retried: false,
@@ -1084,7 +1119,7 @@ impl App {
                 s.spec.clone(),
                 s.harness,
                 s.launch_id.clone(),
-                s.stdout.clone(),
+                s.stdout.to_vec(),
                 s.out_file.clone(),
                 s.retried,
                 s.timed_out,
@@ -1392,7 +1427,7 @@ pub struct LivePlan {
     pub started: Instant,
     pub timeout: Duration,
     pub exited_at: Option<Instant>,
-    pub stdout: Vec<u8>,
+    pub stdout: CapturedOutput,
     pub out_file: PathBuf,
     pub launch_id: Option<String>,
     /// Start the run as soon as the document validates.
@@ -1559,7 +1594,7 @@ impl App {
             started: Instant::now(),
             timeout: Duration::from_secs(timeout_s),
             exited_at: None,
-            stdout: Vec::new(),
+            stdout: CapturedOutput::default(),
             out_file,
             launch_id,
             auto_run: req.auto_run,
@@ -2622,7 +2657,7 @@ mod tests {
             raw.extend_from_slice(result.as_bytes());
             raw.push(b'\n');
             for chunk_size in [raw.len(), 7777] {
-                let mut captured = Vec::new();
+                let mut captured = super::CapturedOutput::default();
                 for chunk in raw.chunks(chunk_size) {
                     append_capture(&mut captured, chunk);
                 }
@@ -2637,6 +2672,44 @@ mod tests {
                     "final answer"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn ring_capture_is_an_exact_bounded_prefix_and_suffix() {
+        use super::{CAPTURE_CAP, CapturedOutput};
+        use crate::workflows::live::CAPTURE_GAP;
+        let mut raw = "é🙂 streaming line\n".repeat(CAPTURE_CAP / 9).into_bytes();
+        raw.extend_from_slice(b"last complete line\nlast partial");
+        for chunk_size in [4096, 7777, raw.len()] {
+            let mut capture = CapturedOutput::default();
+            for chunk in raw.chunks(chunk_size) {
+                capture.append(chunk);
+                assert!(
+                    capture.head.len()
+                        + capture.tail.len()
+                        + if capture.truncated {
+                            CAPTURE_GAP.len()
+                        } else {
+                            0
+                        }
+                        <= CAPTURE_CAP
+                );
+            }
+            let snapshot = capture.snapshot();
+            assert!(std::str::from_utf8(snapshot).is_ok());
+            let gap = snapshot
+                .windows(CAPTURE_GAP.len())
+                .position(|w| w == CAPTURE_GAP.as_bytes())
+                .unwrap();
+            let head = &snapshot[..gap];
+            let tail = &snapshot[gap + CAPTURE_GAP.len()..];
+            assert!(raw.starts_with(head));
+            assert!(raw.ends_with(tail));
+            assert_eq!(head.last(), Some(&b'\n'));
+            let start = raw.len() - tail.len();
+            assert_eq!(raw[start - 1], b'\n');
+            assert!(tail.ends_with(b"last complete line\nlast partial"));
         }
     }
 
