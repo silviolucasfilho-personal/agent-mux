@@ -3101,7 +3101,11 @@ impl App {
                     plan.full_content()
                         && crate::tracing::hooks::install::codex_status(&home, None).installed
                 }
-                Harness::Antigravity | Harness::OpenCode | Harness::Grok | Harness::Pi => false,
+                Harness::Antigravity
+                | Harness::OpenCode
+                | Harness::Grok
+                | Harness::Pi
+                | Harness::Muse => false,
             };
         if !feed::should_own(&home, harness, complete) {
             return Vec::new();
@@ -3769,7 +3773,8 @@ impl App {
             Some(
                 crate::harness::Harness::Codex
                 | crate::harness::Harness::Grok
-                | crate::harness::Harness::Pi,
+                | crate::harness::Harness::Pi
+                | crate::harness::Harness::Muse,
             )
             | None => None,
         };
@@ -5039,6 +5044,7 @@ impl App {
                     "codex" => crate::harness::Harness::Codex,
                     "antigravity" | "agy" => crate::harness::Harness::Antigravity,
                     "opencode" => crate::harness::Harness::OpenCode,
+                    "muse" | "muse-code" => crate::harness::Harness::Muse,
                     other => {
                         self.notice = Some(Notice::warn(format!(
                             "resume is not supported for {other} sessions"
@@ -7106,6 +7112,7 @@ impl App {
             "codex" => crate::harness::Harness::Codex,
             "antigravity" => crate::harness::Harness::Antigravity,
             "opencode" => crate::harness::Harness::OpenCode,
+            "muse" => crate::harness::Harness::Muse,
             other => {
                 self.notice = Some(Notice::warn(format!(
                     "resume is not supported for {other} sessions"
@@ -8112,6 +8119,7 @@ impl App {
             crate::harness::Harness::OpenCode => "opencode",
             crate::harness::Harness::Grok => "grok",
             crate::harness::Harness::Pi => "pi",
+            crate::harness::Harness::Muse => "muse",
         };
         let mut profile = self
             .profiles

@@ -48,6 +48,8 @@ pub struct TracingConfig {
     pub claude_dir: Option<String>,
     pub codex_dir: Option<String>,
     pub antigravity_dir: Option<String>,
+    /// Muse Code's data directory (default `$XDG_DATA_HOME/muse` else `~/.local/share/muse`).
+    pub muse_dir: Option<String>,
     /// OpenCode's session database (default
     /// `~/.local/share/opencode/opencode.db`).
     pub opencode_db: Option<String>,
@@ -562,6 +564,7 @@ pub struct ResolvedTracing {
     pub claude_dir: Option<PathBuf>,
     pub codex_dir: Option<PathBuf>,
     pub antigravity_dir: Option<PathBuf>,
+    pub muse_dir: Option<PathBuf>,
     pub opencode_db: Option<PathBuf>,
     pub models: Vec<ModelPriceConfig>,
     pub hooks: HookMode,
@@ -650,6 +653,7 @@ pub fn resolve_tracing(
         claude_dir: lf.claude_dir.clone().map(PathBuf::from),
         codex_dir: lf.codex_dir.clone().map(PathBuf::from),
         antigravity_dir: lf.antigravity_dir.clone().map(PathBuf::from),
+        muse_dir: lf.muse_dir.clone().map(PathBuf::from),
         opencode_db: lf.opencode_db.clone().map(PathBuf::from),
         models: lf
             .models
@@ -735,6 +739,15 @@ impl Config {
             Profile {
                 name: "Pi".into(),
                 command: "pi".into(),
+                args: vec![],
+                default_dir: None,
+                tracing: None,
+                model: None,
+                bypass_approvals: None,
+            },
+            Profile {
+                name: "Muse".into(),
+                command: "muse".into(),
                 args: vec![],
                 default_dir: None,
                 tracing: None,

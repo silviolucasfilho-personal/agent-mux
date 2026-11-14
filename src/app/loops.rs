@@ -865,6 +865,8 @@ impl App {
             }
             // agent-mux's plugin rides on every traced launch
             Harness::OpenCode => crate::tracing::hooks::register::current_exe().is_some(),
+            // Muse hooks attach per launch via `-c hooks=...`
+            Harness::Muse => crate::tracing::hooks::register::current_exe().is_some(),
             Harness::Antigravity | Harness::Grok | Harness::Pi => false,
         }
     }
@@ -1442,6 +1444,18 @@ impl App {
             Harness::Codex => {}
             // no per-run budget flag: the loop's own caps and the guard apply
             Harness::OpenCode => {}
+            Harness::Muse => {
+                if let Some(json) = crate::loops::scaffold::muse_agents_json(
+                    &entry.workspace,
+                    &self.library_root(),
+                    pattern,
+                    &entry.verifier_model,
+                ) {
+                    let at = args.len().saturating_sub(1);
+                    args.insert(at, "--agents".into());
+                    args.insert(at + 1, json);
+                }
+            }
             Harness::Antigravity => return Err("Antigravity is not supported for loops".into()),
             Harness::Grok | Harness::Pi => {
                 return Err(format!("{} is not supported for loops", harness.as_str()));

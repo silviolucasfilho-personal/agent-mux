@@ -1,6 +1,6 @@
 # Agents in agent-mux
 
-A **workflow** decides the order: which sessions run, what each one reads, what it must answer. An **agent** decides who runs a session: a persona with its own instructions, tools and model, defined once and used on Claude Code, Codex CLI, Antigravity or OpenCode. (Grok, Pi and DeepSeek do not support agent definitions yet). A step names an agent the same way it names a skill:
+A **workflow** decides the order: which sessions run, what each one reads, what it must answer. An **agent** decides who runs a session: a persona with its own instructions, tools and model, defined once and used on Claude Code, Codex CLI, Antigravity, OpenCode or Muse. (Grok, Pi and DeepSeek do not support agent definitions yet). A step names an agent the same way it names a skill:
 
 ```toml
 [[steps]]
@@ -75,17 +75,17 @@ model = "gpt-5"
 model = "pro"
 ```
 
-| Tool | Claude Code | Codex CLI | Antigravity | OpenCode |
-| --- | --- | --- | --- | --- |
-| `read` | `Read`, `Glob`, `Grep` | always | not enforced | `read`, `glob`, `grep`, `list` |
-| `edit` | `Edit`, `Write`, `NotebookEdit` | without it: `-s read-only` in place of `--yolo` | not enforced | `edit`, `write`, `patch` |
-| `shell` | `Bash` | always has a shell (warned) | not enforced | `bash` |
-| `web` | `WebFetch`, `WebSearch` | not mapped (warned) | not enforced | `webfetch`, `websearch` |
-| `mcp:<server>` | `mcp__<server>` | configure it in `~/.codex/config.toml` (warned) | not enforced | not mapped (warned) |
+| Tool | Claude Code | Codex CLI | Antigravity | OpenCode | Muse |
+| --- | --- | --- | --- | --- | --- |
+| `read` | `Read`, `Glob`, `Grep` | always | not enforced | `read`, `glob`, `grep`, `list` | always (warned if excluded) |
+| `edit` | `Edit`, `Write`, `NotebookEdit` | without it: `-s read-only` in place of `--yolo` | not enforced | `edit`, `write`, `patch` | without it: `--disable-write` |
+| `shell` | `Bash` | always has a shell (warned) | not enforced | `bash` | without it: `--disable-shell` |
+| `web` | `WebFetch`, `WebSearch` | not mapped (warned) | not enforced | `webfetch`, `websearch` | without it: `--disable-web-tools` on `muse exec`; warned interactively |
+| `mcp:<server>` | `mcp__<server>` | configure it in `~/.codex/config.toml` (warned) | not enforced | not mapped (warned) | not restricted per-agent (warned) |
 
 On OpenCode the list becomes the agent's `tools` map, every tool of a canonical kind the agent lacks switched off; `bash` was probed (an agent without `shell` reported no shell tool), the other names are from OpenCode's documentation.
 
-"Not enforced" means the session gets that harness's own tools, and `workflow check` says so. Antigravity tool names are not written into the agent file because they have not been verified, and a misspelled agy tool name can hang the session.
+"Not enforced" means the session gets that harness's own tools, and `workflow check` says so. Antigravity tool names are not written into the agent file because they have not been verified, and a misspelled agy tool name can hang the session. On Muse, non-empty `instructions` also emit a fit note because `muse` has no CLI system-prompt flag for primary sessions.
 
 ### A task agent, on demand or on a schedule
 
@@ -131,7 +131,7 @@ verifier_model = "claude-sonnet-5"     # optional; the loop-verifier's model
 every = "1d"                           # <n>m, <n>h or <n>d, at least 5m
 workspace = "~/code/api"
 profile = "Codex"                      # the harness profile the runs launch with
-harness = "codex"                      # claude or codex
+harness = "codex"                      # claude, codex, opencode or muse
 
 [limits]                               # optional; absent values take the pattern's
 runs_per_day = 2
@@ -160,6 +160,7 @@ An agent answer is a draft (`PlannedWorkflow.agent`): it is listed under **Needs
 | Codex CLI | `-c developer_instructions="…"`; `-s read-only` when the agent has no `edit` | none |
 | Antigravity | `--agent agent-mux-<name>` | `~/.gemini/config/agents/agent-mux-<name>/agent.md`, written before the session and rewritten when the agent changes. A directory agent-mux did not write is never touched. |
 | OpenCode | `run --agent agent-mux-<name>` for a one-shot session; for an interactive one `default_agent` in the same document, since its TUI rejects `--agent` | none: the agent (`description`, `mode: primary`, `prompt`, `tools`) is defined inline in the `OPENCODE_CONFIG_CONTENT` document the launch sets, with `--standalone` so it is read (`docs/workflows.md`, OpenCode) |
+| Muse | `[--disable-write] [--disable-shell]` plus `[--disable-web-tools]` on `muse exec` (MCP and hooks passed via `-c` overrides with `--trust-workspace`) | none (workflow/persona instructions are not passed on the primary CLI; loop subagents are written under `.muse/agents/<name>.md` and passed via `--agents`) |
 
 These were checked against the installed CLIs on 2026-09-25. On Claude Code 2.1.282, the agent's prompt, tools and model all applied in print mode, and a `/skill` in the prompt still loaded when the tool list was restricted. On Codex 0.155.1, a probe was answered from the developer instructions. The Antigravity file shape was probed on agy 1.2.2. OpenCode 2.0.32 was probed on 2026-10-31: an inline agent answered from its prompt both through `run --agent` and through `default_agent`, and one without `shell` had no shell tool. Two things were not re-probed: the file shape on the installed agy 1.2.10, and a Codex `-s read-only` session that has to run tools. `src/agents/launch.rs` records these checks. Grok, Pi and DeepSeek do not support custom agent definitions yet (`src/agents/launch.rs` leaves Grok and Pi agent configuration as a TODO; DeepSeek is deferred).
 

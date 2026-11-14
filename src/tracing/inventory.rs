@@ -385,6 +385,39 @@ fn roots(harness: Harness, cwd: &Path, home: &Path) -> Vec<Root> {
         }
         // not inventoried yet (out of scope for the harness itself)
         Harness::Grok | Harness::Pi => {}
+        Harness::Muse => {
+            r.push(Root {
+                dir: cwd.join("AGENTS.md"),
+                kind: Kind::Instructions,
+                layout: Layout::File,
+                scope: Scope::Project,
+            });
+            r.push(Root {
+                dir: cwd.join(".agents").join("skills"),
+                kind: Kind::Skill,
+                layout: Layout::SkillDirs,
+                scope: Scope::Project,
+            });
+            r.push(Root {
+                dir: cwd.join(".claude").join("skills"),
+                kind: Kind::Skill,
+                layout: Layout::SkillDirs,
+                scope: Scope::Project,
+            });
+            let cfg = crate::skill::install::muse_config_dir(home);
+            r.push(Root {
+                dir: cfg.join("AGENTS.md"),
+                kind: Kind::Instructions,
+                layout: Layout::File,
+                scope: Scope::Home,
+            });
+            r.push(Root {
+                dir: cfg.join("skills"),
+                kind: Kind::Skill,
+                layout: Layout::SkillDirs,
+                scope: Scope::Home,
+            });
+        }
     }
     r
 }
@@ -658,9 +691,12 @@ pub fn known_tools(harness: Harness, seen: impl IntoIterator<Item = String>) -> 
     let mut set: HashSet<String> = match harness {
         Harness::Claude => CLAUDE_TOOLS.iter().map(|t| t.to_string()).collect(),
         // no verified floor for these: only what was measured
-        Harness::Codex | Harness::Antigravity | Harness::OpenCode | Harness::Grok | Harness::Pi => {
-            HashSet::new()
-        }
+        Harness::Codex
+        | Harness::Antigravity
+        | Harness::OpenCode
+        | Harness::Grok
+        | Harness::Pi
+        | Harness::Muse => HashSet::new(),
     };
     set.extend(seen);
     set
@@ -1046,6 +1082,45 @@ mod tests {
         assert!(
             inventory_all(&temp.path().join("nowhere"), &temp.path().join("nohome")).is_empty()
         );
+
+        let muse_ws = temp.path().join("muse-proj");
+        write(&muse_ws.join("AGENTS.md"), "# Muse rules\n");
+        write(
+            &muse_ws.join(".claude/skills/compat/SKILL.md"),
+            "---\nname: compat\ndescription: compat skill\n---\n",
+        );
+        if std::env::var_os("XDG_CONFIG_HOME").is_none() {
+            write(&home.join(".config/muse/AGENTS.md"), "# Home rules\n");
+            write(
+                &home.join(".config/muse/skills/user-skill/SKILL.md"),
+                "---\nname: user-skill\ndescription: home muse skill\n---\n",
+            );
+            let muse = inventory(Harness::Muse, &muse_ws, &home);
+            let names: Vec<(Kind, &str, String)> = muse
+                .iter()
+                .map(|d| (d.kind, d.name.as_str(), d.scope.label()))
+                .collect();
+            assert_eq!(
+                names,
+                vec![
+                    (Kind::Instructions, "AGENTS.md", "project".to_string()),
+                    (Kind::Skill, "compat", "project".to_string()),
+                    (Kind::Skill, "user-skill", "home".to_string()),
+                ]
+            );
+            let muse_home = inventory(Harness::Muse, &temp.path().join("empty-muse-ws"), &home);
+            let home_names: Vec<(Kind, &str, String)> = muse_home
+                .iter()
+                .map(|d| (d.kind, d.name.as_str(), d.scope.label()))
+                .collect();
+            assert_eq!(
+                home_names,
+                vec![
+                    (Kind::Instructions, "AGENTS.md", "home".to_string()),
+                    (Kind::Skill, "user-skill", "home".to_string()),
+                ]
+            );
+        }
     }
 
     fn def(kind: Kind, name: &str, text: &str) -> Definition {

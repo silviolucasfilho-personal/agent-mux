@@ -221,6 +221,31 @@ impl LaunchPlan {
                 }
             }
         }
+        if self.provider == Provider::Muse
+            && self.hooks_registered
+            && let Some(exe) = hooks::register::current_exe()
+        {
+            let reg = hooks::register::Registration {
+                exe,
+                home: home.to_path_buf(),
+                content_mode: self.content_mode,
+                profile: self.hooks_profile.for_loop(),
+                guard: self.guard.is_some() || self.write_policy.is_some(),
+                loop_guard: true,
+            };
+            let hooks_arg = hooks::register::muse_cli_arg(&reg);
+            let existing = self
+                .extra_args
+                .windows(2)
+                .position(|w| w[0] == "-c" && w[1].starts_with("hooks="));
+            match existing {
+                Some(i) => self.extra_args[i + 1] = hooks_arg,
+                None => {
+                    self.extra_args.push("-c".into());
+                    self.extra_args.push(hooks_arg);
+                }
+            }
+        }
         self.loop_launch = Some(launch);
     }
 
@@ -301,6 +326,12 @@ fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
             .filter(|v| !v.is_empty());
     }
     None
+}
+
+fn muse_resume_id(args: &[String]) -> Option<&str> {
+    let at = args.iter().position(|a| a == "resume")?;
+    let value = args.get(at + 1)?;
+    (!value.starts_with('-')).then_some(value.as_str())
 }
 
 /// True when `arg` is `flag` itself or its `--flag=value` form.
@@ -510,6 +541,13 @@ impl TraceRuntime {
             .or_else(|| home_dir().map(|h| opencode_db::default_db_path(&h)))
     }
 
+    fn muse_dir(&self) -> Option<PathBuf> {
+        self.settings
+            .muse_dir
+            .clone()
+            .or_else(|| Some(correlate::muse_data_dir(&self.settings.home)))
+    }
+
     /// Decides how (and whether) to trace one launch. `None` = fully
     /// untraced: no extras, no markers, no pipeline, no launch row.
     pub fn plan_launch(&self, profile: &Profile, dir: &Path) -> Option<LaunchPlan> {
@@ -526,6 +564,7 @@ impl TraceRuntime {
             Some("codex") => Provider::Codex,
             Some("antigravity") => Provider::Antigravity,
             Some("opencode") => Provider::OpenCode,
+            Some("muse") => Provider::Muse,
             Some("none") => return None,
             Some(_) => return None,
             None => match basename(&profile.command) {
@@ -533,6 +572,7 @@ impl TraceRuntime {
                 "codex" => Provider::Codex,
                 "agy" => Provider::Antigravity,
                 "opencode" => Provider::OpenCode,
+                "muse" => Provider::Muse,
                 _ => return None,
             },
         };
@@ -637,6 +677,29 @@ impl TraceRuntime {
                     )
                 }
             }
+            Provider::Muse => {
+                let data_dir = self.muse_dir()?;
+                if let Some(id) = muse_resume_id(&profile.args) {
+                    known_session_id = Some(id.to_string());
+                    (
+                        CorrelationSpec::KnownMuse {
+                            session_id: id.to_string(),
+                            data_dir,
+                            resume: true,
+                        },
+                        "deterministic",
+                    )
+                } else {
+                    (
+                        CorrelationSpec::WatchMuse {
+                            data_dir,
+                            cwd: dir.to_path_buf(),
+                            t0,
+                        },
+                        "watched",
+                    )
+                }
+            }
         };
 
         let (backend, backend_requested) = self.resolve_backend(profile);
@@ -682,6 +745,7 @@ impl TraceRuntime {
             Some("codex") => Provider::Codex,
             Some("antigravity") => Provider::Antigravity,
             Some("opencode") => Provider::OpenCode,
+            Some("muse") => Provider::Muse,
             Some("none") => return None,
             Some(_) => return None, // unknown override: fail safe, untraced
             None => match basename(&profile.command) {
@@ -689,6 +753,7 @@ impl TraceRuntime {
                 "codex" => Provider::Codex,
                 "agy" => Provider::Antigravity,
                 "opencode" => Provider::OpenCode,
+                "muse" => Provider::Muse,
                 _ => return None,
             },
         };
@@ -844,6 +909,29 @@ impl TraceRuntime {
                     )
                 }
             }
+            Provider::Muse => {
+                let data_dir = self.muse_dir()?;
+                if let Some(id) = muse_resume_id(&profile.args) {
+                    known_session_id = Some(id.to_string());
+                    (
+                        CorrelationSpec::KnownMuse {
+                            session_id: id.to_string(),
+                            data_dir,
+                            resume: true,
+                        },
+                        "deterministic",
+                    )
+                } else {
+                    (
+                        CorrelationSpec::WatchMuse {
+                            data_dir,
+                            cwd: dir.to_path_buf(),
+                            t0: SystemTime::now(),
+                        },
+                        "watched",
+                    )
+                }
+            }
         };
 
         // Per-launch hook registrations: nothing is written anywhere, and a
@@ -884,6 +972,8 @@ impl TraceRuntime {
                 Provider::Antigravity => Some("agy's PreToolUse hook is not registered"),
                 Provider::OpenCode if hooks_wanted => None,
                 Provider::OpenCode => Some("hooks are off for this launch"),
+                Provider::Muse if hooks_wanted => None,
+                Provider::Muse => Some("hooks are off for this launch"),
             };
             if let Some(why) = why {
                 let _ = self.status_tx.try_send(AppEvent::TraceStatus(format!(
@@ -950,6 +1040,11 @@ impl TraceRuntime {
                 // agy loads hooks only from customization roots: see
                 // `trace hooks install agy`
                 Provider::Antigravity => {}
+                Provider::Muse => {
+                    extra_args.push("-c".into());
+                    extra_args.push(hooks::register::muse_cli_arg(&reg));
+                    hooks_registered = true;
+                }
             }
         }
 
@@ -1151,15 +1246,22 @@ impl TraceRuntime {
             CorrelationSpec::KnownClaude { resume: true, .. }
                 | CorrelationSpec::KnownAntigravity { .. }
                 | CorrelationSpec::KnownOpenCode { resume: true, .. }
+                | CorrelationSpec::KnownMuse { resume: true, .. }
         );
         let codex_sessions_dir = match &plan.correlation {
             CorrelationSpec::WatchCodex { sessions_dir, .. } => Some(sessions_dir.clone()),
+            _ => None,
+        };
+        let muse_data_dir = match &plan.correlation {
+            CorrelationSpec::KnownMuse { data_dir, .. }
+            | CorrelationSpec::WatchMuse { data_dir, .. } => Some(data_dir.clone()),
             _ => None,
         };
         let ctx = PipelineCtx {
             db_path: self.settings.db_path.clone(),
             known_resume,
             codex_sessions_dir,
+            muse_data_dir,
             claims: Arc::clone(&self.claims),
             op_tx: self.writer.tx.clone(),
             dropped: Arc::clone(&self.writer.dropped),
@@ -1242,6 +1344,8 @@ struct PipelineCtx {
     known_resume: bool,
     /// Codex: where to look a hook-announced thread id up.
     codex_sessions_dir: Option<PathBuf>,
+    /// Muse: where to look a hook-announced session id up.
+    muse_data_dir: Option<PathBuf>,
     claims: Arc<ClaimRegistry>,
     op_tx: std::sync::mpsc::SyncSender<StoreOp>,
     dropped: Arc<AtomicU64>,
@@ -1512,6 +1616,10 @@ impl Pipeline {
                 self.ctx.codex_sessions_dir.as_deref()?,
                 &ann.session_id,
             )?,
+            None if self.ctx.provider == Provider::Muse => correlate::muse_session_log_by_id(
+                self.ctx.muse_data_dir.as_deref()?,
+                &ann.session_id,
+            )?,
             None => return None,
         };
         if !path.is_file() {
@@ -1538,6 +1646,17 @@ impl Pipeline {
         self.hook_events += events.len() as u64;
         let mut ops = Vec::new();
         for ev in &events {
+            if self.ctx.provider == Provider::Muse
+                && ev.agent_id.is_some()
+                && self
+                    .adopted
+                    .as_ref()
+                    .is_some_and(|a| !ev.session_id.trim().is_empty() && a.session_id != ev.session_id)
+            {
+                // Internal Muse reminder child sessions must not hijack the
+                // parent pipeline or overwrite parent launch metadata.
+                continue;
+            }
             if let Some(adopted) = self.adopted.as_ref()
                 && !ev.session_id.trim().is_empty()
                 && adopted.session_id != ev.session_id
@@ -1646,6 +1765,15 @@ impl Pipeline {
                 return;
             };
             let Some(p) = correlate::codex_rollout_by_thread(dir, &pending.session_id) else {
+                return; // wait for file to appear
+            };
+            p
+        } else if self.ctx.provider == Provider::Muse {
+            let Some(dir) = self.ctx.muse_data_dir.as_deref() else {
+                self.pending_continuation = None;
+                return;
+            };
+            let Some(p) = correlate::muse_session_log_by_id(dir, &pending.session_id) else {
                 return; // wait for file to appear
             };
             p
@@ -2031,6 +2159,7 @@ mod plan_tests {
             claude_dir: Some("/tmp/fake-claude".into()),
             codex_dir: Some("/tmp/fake-codex".into()),
             antigravity_dir: Some("/tmp/fake-agy".into()),
+            muse_dir: Some("/tmp/fake-muse".into()),
             hooks: hooks.map(str::to_string),
             ..Default::default()
         };

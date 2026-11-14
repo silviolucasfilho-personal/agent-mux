@@ -373,6 +373,7 @@ pub fn project_skills_dir(harness: Harness, workspace: &Path) -> Option<PathBuf>
         Harness::Codex => Some(workspace.join(".codex").join("skills")),
         // OpenCode 2.0.32 scans `{skill,skills}/` under `.opencode/`
         Harness::OpenCode => Some(workspace.join(".opencode").join("skills")),
+        Harness::Muse => Some(workspace.join(".agents").join("skills")),
         Harness::Antigravity | Harness::Grok | Harness::Pi => None,
     }
 }
@@ -395,6 +396,12 @@ pub fn verifier_path(harness: Harness, workspace: &Path) -> Option<PathBuf> {
         Harness::OpenCode => Some(
             workspace
                 .join(".opencode")
+                .join("agents")
+                .join("loop-verifier.md"),
+        ),
+        Harness::Muse => Some(
+            workspace
+                .join(".muse")
                 .join("agents")
                 .join("loop-verifier.md"),
         ),
@@ -428,8 +435,65 @@ pub fn agent_path(harness: Harness, workspace: &Path, name: &str) -> Option<Path
                 .join("agents")
                 .join(format!("{name}.md")),
         ),
+        Harness::Muse => Some(
+            workspace
+                .join(".muse")
+                .join("agents")
+                .join(format!("{name}.md")),
+        ),
         Harness::Antigravity | Harness::Grok | Harness::Pi => None,
     }
+}
+
+/// Builds the JSON payload for `muse --agents <JSON>` covering every loop
+/// agent `pattern` uses, reading scaffolded files under `.muse/agents/` when
+/// present and falling back to `library`.
+pub fn muse_agents_json(
+    workspace: &Path,
+    library: &Path,
+    pattern: &Pattern,
+    verifier_model: &str,
+) -> Option<String> {
+    let preamble = crate::prompts::Prompts::load(library).agent_preamble;
+    let available = crate::assets::loop_agents(library);
+    let mut agents = serde_json::Map::new();
+    for name in pattern.effective_agents() {
+        let on_disk = agent_path(Harness::Muse, workspace, &name)
+            .and_then(|p| std::fs::read_to_string(p).ok());
+        let text = match on_disk {
+            Some(t) => t,
+            None => {
+                let Some((_, body)) = available.iter().find(|(n, _)| *n == name) else {
+                    continue;
+                };
+                let body = if name == "loop-verifier" && !verifier_model.trim().is_empty() {
+                    set_agent_model(body, verifier_model.trim())
+                } else {
+                    body.to_string()
+                };
+                with_preamble(&body, &preamble)
+            }
+        };
+        let parts = split_agent_frontmatter(&text);
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "description".into(),
+            serde_json::Value::String(parts.description),
+        );
+        entry.insert("prompt".into(), serde_json::Value::String(parts.body));
+        let model = if name == "loop-verifier" && !verifier_model.trim().is_empty() {
+            Some(verifier_model.trim())
+        } else {
+            parts.model.as_deref().map(str::trim)
+        };
+        if let Some(m) = model.filter(|m| {
+            !m.is_empty() && !CLAUDE_MODEL_ALIASES.contains(&m.to_ascii_lowercase().as_str())
+        }) {
+            entry.insert("model".into(), serde_json::Value::String(m.to_string()));
+        }
+        agents.insert(name, serde_json::Value::Object(entry));
+    }
+    (!agents.is_empty()).then(|| serde_json::Value::Object(agents).to_string())
 }
 
 fn not_supported() -> std::io::Error {
@@ -948,5 +1012,39 @@ mod tests {
                 .iter()
                 .any(|f| f.name == "loop-ledger.json")
         );
+    }
+
+    #[test]
+    fn muse_scaffolds_skills_under_dot_agents_and_builds_agents_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let lib = temp.path().join("lib");
+        let ws = temp.path().join("ws");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        let pattern = patterns::find("ci-sweeper").unwrap();
+        let caps = Caps {
+            max_runs_per_day: 6,
+            max_tokens_per_day: 250_000,
+            verifier_model: "muse-spark-1.3".into(),
+        };
+        scaffold_with_library(&lib, &ws, pattern, Harness::Muse, Level::L2, &caps).unwrap();
+        assert!(ws.join(".agents/skills/loop-ci-triage/SKILL.md").is_file());
+        let verifier = ws.join(".muse/agents/loop-verifier.md");
+        assert!(verifier.is_file());
+        let json = muse_agents_json(&ws, &lib, pattern, "muse-spark-1.3").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["loop-verifier"]["model"], "muse-spark-1.3");
+        assert!(
+            v["loop-verifier"]["prompt"]
+                .as_str()
+                .unwrap()
+                .contains("## Verdict")
+        );
+        // Without a scaffolded file on disk (e.g. --no-scaffold), library fallback works too.
+        let bare = temp.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let fallback = muse_agents_json(&bare, &lib, pattern, "inherit").unwrap();
+        let fv: serde_json::Value = serde_json::from_str(&fallback).unwrap();
+        assert!(fv["loop-verifier"].get("model").is_none());
     }
 }

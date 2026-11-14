@@ -326,13 +326,14 @@ pub struct RunFacts {
 /// Tool names that write files, per harness.
 /// OpenCode's `write` and `edit` match Claude's names; its `patch` takes
 /// Codex-style patch text under `patchText`.
-pub const WRITE_TOOLS: [&str; 7] = [
+pub const WRITE_TOOLS: [&str; 8] = [
     "Write",
     "Edit",
     "MultiEdit",
     "NotebookEdit",
     "apply_patch",
     "write_file",
+    "edit_file",
     "patch",
 ];
 

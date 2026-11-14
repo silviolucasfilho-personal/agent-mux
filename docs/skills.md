@@ -26,7 +26,7 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 | :--- | :--- | :--- |
 | `name` | id capitalized | Display name in the sidebar and the session name `<name> (<harness>)`. |
 | `icon` | `⚡` | Sidebar icon. |
-| `harnesses` | all | Harnesses offered in the picker: `claude`, `codex`, `agy`, `opencode`, `grok`, `pi` (default: every harness agent-mux installs skills for). |
+| `harnesses` | all | Harnesses offered in the picker: `claude`, `codex`, `agy`, `opencode`, `grok`, `pi`, `muse` (default: every harness agent-mux installs skills for). |
 | `default_harness` | first | Preselected in the picker; must be in `harnesses`. |
 | `capabilities` | none | `trace.read` switches the preview pane to the telemetry dashboard. |
 | `startup_prompt` | none | Appended to the invocation as the session's first message. |
@@ -34,9 +34,9 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 | `[agent] mcp` | `auto` with `trace.read`, else `off` | Recorded on the package, but the server is attached to every session whatever a package says: the store is local, read-only and scoped to the launch's workspace. Claude Code and Codex take it on the command line, OpenCode in `OPENCODE_CONFIG_CONTENT`, Pi through agent-mux's MCP-client extension (`-e`); Antigravity and Grok read a global entry, which agent-mux writes before the first agy or grok session of a run (what `agent-mux mcp install agy|grok` does). `[agents] mcp = "off"` in profiles.toml is the one switch that turns it off, for every session and every harness. |
 | `hidden` | `false` | Not listed in the Agents sidebar or the Skills view; still installed and launched by workflows (the `wf-*` step skills, `workflow-author`). |
 | `writes` | `false` | The skill edits files; a workflow step running it must be isolated in a worktree (`docs/workflows.md`). |
-| `auto_approve` | `false` | The session launches with every tool permission pre-granted, whichever harness runs it (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex, `--auto` on OpenCode, `--always-approve` on Grok; Pi never asks). The package's own demand: it wins over a profile that leaves approvals on, never the other way round. |
+| `auto_approve` | `false` | The session launches with every tool permission pre-granted, whichever harness runs it (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex and Muse, `--auto` on OpenCode, `--always-approve` on Grok; Pi never asks). The package's own demand: it wins over a profile that leaves approvals on, never the other way round. |
 
-Loop skills (`loops/skills/loop-*`) are **not** packages of this kind: they are installed at project level into a workspace by the loop scaffolder (`<workspace>/.claude/skills/<name>/SKILL.md`, `<workspace>/.codex/skills/<name>/SKILL.md`, plus the `loop-verifier` agent) and never appear in the Agents sidebar. See `docs/loops.md`.
+Loop skills (`loops/skills/loop-*`) are **not** packages of this kind: they are installed at project level into a workspace by the loop scaffolder (`<workspace>/.claude/skills/<name>/SKILL.md`, `<workspace>/.codex/skills/<name>/SKILL.md`, `<workspace>/.opencode/skills/<name>/SKILL.md`, `<workspace>/.agents/skills/<name>/SKILL.md`, plus the `loop-verifier` agent) and never appear in the Agents sidebar. See `docs/loops.md`.
 
 ## 2. Discovery
 
@@ -56,6 +56,7 @@ Verified against the installed CLIs (Claude Code 2.1.x, Codex CLI 0.154.x, Antig
 | OpenCode | `~/.config/opencode/skill/<name>/SKILL.md` (`$OPENCODE_CONFIG_DIR/skill/`; project level `.opencode/skill/`) | no syntax: the model loads a skill through its `skill` tool when asked, so the opening prompt says `load skill <name>` (through `--prompt`). OpenCode 2.0.32 also reads `skills/` and `.claude/skills/` at both levels. |
 | Grok | `~/.grok/skills/<name>/SKILL.md` (`$GROK_HOME/skills/`; project level `.grok/skills/`, read only in a folder the user trusted) | `/<name>` slash command, including as the positional opening prompt. Grok also reads `.agents/skills/`, `.claude/skills/` and `.cursor/skills/`, deduplicated by name. |
 | Pi | `~/.pi/agent/skills/<name>/SKILL.md` (`$PI_CODING_AGENT_DIR/skills/`; project level `.pi/skills/`) | `/skill:<name>`, which pi expands into the skill's body, including in the positional opening prompt. Pi also reads `~/.agents/skills/` and `.agents/skills/`. |
+| Muse | `~/.config/muse/skills/<name>/SKILL.md` (`$XDG_CONFIG_HOME/muse/skills/`; project level `.agents/skills/` and `.claude/skills/`) | `/<name>` slash command, including as the positional opening prompt. |
 
 DeepSeek has no harness in agent-mux yet (`dsh 0.2.2-rc.1` was probed but deferred), so it has no skill directory or invocation. Note also what is not yet supported for Grok and Pi: while both support skill installation and MCP registration, sessions running on Grok or Pi do not have tracing pipelines yet, so turn-level telemetry and tool events will not appear in the Skills view Executions tab.
 
@@ -66,7 +67,7 @@ The installed `SKILL.md` is the canonical file with one difference: the descript
 Every package is listed in the Agents section of the sidebar; a `trace.read` package such as Heimdall previews its telemetry briefing in the main pane. Enter opens the harness picker. On confirm agent-mux:
 
 1. installs or refreshes the skill in that harness's directory (manifest hash check; unchanged packages are left alone),
-2. builds the harness command line: the model from your profile for that harness and the permission flags from your profile or the package's `auto_approve`, then the opening prompt `<invocation> <startup_prompt>` as the positional prompt (Claude Code, Codex, Grok, Pi), via `--prompt-interactive` (Antigravity) or via `--prompt` (OpenCode),
+2. builds the harness command line: the model from your profile for that harness and the permission flags from your profile or the package's `auto_approve`, then the opening prompt `<invocation> <startup_prompt>` as the positional prompt (Claude Code, Codex, Grok, Pi, Muse), via `--prompt-interactive` (Antigravity) or via `--prompt` (OpenCode),
 3. for a package with `[agent] hydrate`, computes the briefing in Rust and writes it to a snapshot file; the prompt ends with a sentence pointing at `$AGENT_MUX_BRIEFING`,
 4. registers the read-only MCP server for the harness, as it does for every session (`$AGENT_MUX_MCP` says `registered`, `installed` or `unavailable`),
 5. spawns the session with `AGENT_MUX_SKILL_ID`, `AGENT_MUX_BIN` (this executable), `AGENT_MUX_TRACE_DB` (the store the TUI writes) and `AGENT_MUX_WORKSPACE` in its environment, and records `skill_id` / `skill_harness` on the launch row so the Executions tab can find it later.
@@ -101,7 +102,7 @@ For an agent-mux package, `e` opens its `SKILL.md` in the configured external ed
 ```sh
 agent-mux skill list                          # compiled-in and ~/.agent-mux/skills packages
 agent-mux skill show heimdall --harness codex # SKILL.md as written for that harness
-agent-mux skill install heimdall [--harness claude|codex|agy|opencode|grok|pi|all] [--force]
+agent-mux skill install heimdall [--harness claude|codex|agy|opencode|grok|pi|muse|all] [--force]
 agent-mux skill uninstall heimdall [--harness …]
 agent-mux skill status [heimdall]             # installed / stale / not managed, per harness
 agent-mux skill import <dir> [--force]        # bring a package written for one harness into ~/.agent-mux/skills
@@ -113,4 +114,4 @@ agent-mux skill import <dir> [--force]        # bring a package written for one 
 
 ## 7. Heimdall
 
-Heimdall declares `auto_approve = true`: it only reads, and it is usually launched to report rather than to be watched, so every harness starts it with tool permissions already granted (Claude Code and Antigravity `--dangerously-skip-permissions`, Codex `--yolo`, OpenCode `--auto`, Grok `--always-approve`; Pi never prompts). Heimdall starts from the startup dossier in `$AGENT_MUX_BRIEFING` (`$AGENT_MUX_BRIEFING_SCHEMA=2`, details in `docs/heimdall-dossier.md`), answering its default startup briefing and evaluation reports without tool calls. It asks follow-up drill-down questions through the ten `agent_mux_*` MCP tools when `$AGENT_MUX_MCP` is not `unavailable`, and otherwise uses the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`). It never writes. `SKILL.md` carries the tool-to-CLI table and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); the `reference/` files hold thresholds and report shapes. Ad-hoc SQL lives in `docs/trace-sql-examples.md`. See `skills/heimdall/`.
+Heimdall declares `auto_approve = true`: it only reads, and it is usually launched to report rather than to be watched, so every harness starts it with tool permissions already granted (Claude Code and Antigravity `--dangerously-skip-permissions`, Codex `--yolo`, OpenCode `--auto`, Grok `--always-approve`, Muse `--yolo`; Pi never prompts). Heimdall starts from the startup dossier in `$AGENT_MUX_BRIEFING` (`$AGENT_MUX_BRIEFING_SCHEMA=2`, details in `docs/heimdall-dossier.md`), answering its default startup briefing and evaluation reports without tool calls. It asks follow-up drill-down questions through the ten `agent_mux_*` MCP tools when `$AGENT_MUX_MCP` is not `unavailable`, and otherwise uses the `agent-mux trace` CLI (`doctor`, `briefing`, `ls`, `show`, `search`, `loops`, `skills`, `skills lint`, `agents`, `compare`, `sql`). It never writes. `SKILL.md` carries the tool-to-CLI table and four playbooks (session briefing, skill evaluation, agent evaluation, drill-down); the `reference/` files hold thresholds and report shapes. Ad-hoc SQL lives in `docs/trace-sql-examples.md`. See `skills/heimdall/`.

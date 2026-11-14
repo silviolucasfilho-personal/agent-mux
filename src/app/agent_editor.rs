@@ -274,8 +274,10 @@ impl EdField {
                 AgentField::ModelCodex => "Codex model",
                 AgentField::ModelAgy => "Antigravity model",
                 AgentField::ModelOpenCode => "OpenCode model",
+                AgentField::ModelMuse => "Muse model",
                 AgentField::EffortCodex => "Codex effort",
                 AgentField::EffortAgy => "Antigravity effort",
+                AgentField::EffortMuse => "Muse effort",
                 AgentField::SaveTo => "Saved in",
             },
             EdField::Task(f) => match f {
@@ -312,6 +314,7 @@ impl EdField {
                     | AgentField::ModelCodex
                     | AgentField::ModelAgy
                     | AgentField::ModelOpenCode
+                    | AgentField::ModelMuse
             ),
             EdField::Task(f) => {
                 matches!(f, TaskField::Text | TaskField::Every | TaskField::Workspace)
@@ -407,8 +410,10 @@ impl AgentEditorState {
                                 A::ModelCodex,
                                 A::ModelAgy,
                                 A::ModelOpenCode,
+                                A::ModelMuse,
                                 A::EffortCodex,
                                 A::EffortAgy,
+                                A::EffortMuse,
                             ])
                             .collect(),
                     ),
@@ -1057,8 +1062,8 @@ impl App {
                             return;
                         }
                     }
-                    EdField::Agent(f @ (AgentField::EffortCodex | AgentField::EffortAgy)) => {
-                        let k = usize::from(f == AgentField::EffortAgy);
+                    EdField::Agent(f) if AgentForm::effort_index(f).is_some() => {
+                        let k = AgentForm::effort_index(f).unwrap();
                         form.efforts[k] = (form.efforts[k] as isize + delta)
                             .rem_euclid(super::flow_builder::EFFORTS.len() as isize)
                             as usize;

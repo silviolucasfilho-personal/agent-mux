@@ -793,6 +793,7 @@ impl TraceService {
                 "codex".into(),
                 "antigravity".into(),
                 "opencode".into(),
+                "muse".into(),
             ],
             features,
         })

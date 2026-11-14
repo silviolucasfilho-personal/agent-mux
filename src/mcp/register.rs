@@ -62,6 +62,21 @@ pub fn codex_overrides(exe: &Path, argv: &[String]) -> Vec<String> {
     ]
 }
 
+/// The `-c mcpServers.<name>=<json>` + `--trust-workspace` flags for
+/// Muse (`muse 1.4.20` omits `"type"` in `-c` overrides and requires
+/// `--trust-workspace` to start workspace-scoped MCP servers).
+pub fn muse_overrides(exe: &Path, argv: &[String]) -> Vec<String> {
+    let spec = json!({
+        "command": exe.to_string_lossy(),
+        "args": argv,
+    });
+    vec![
+        "-c".into(),
+        format!("mcpServers.{}={spec}", super::SERVER_NAME),
+        "--trust-workspace".into(),
+    ]
+}
+
 /// How a launch reaches the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Registration {
@@ -152,6 +167,10 @@ pub fn plan(
             },
             Err(e) => Registration::Unavailable(format!("cannot write the Pi extension: {e}")),
         },
+        Some(Harness::Muse) => Registration::PerLaunch {
+            args: muse_overrides(exe, &argv),
+            env: Vec::new(),
+        },
         None => Registration::Unavailable("the command is not a known harness".into()),
     }
 }
@@ -177,6 +196,14 @@ mod tests {
         let doc: toml::Value = toml::from_str(&codex[3]).unwrap();
         let args = doc["mcp_servers"]["agent-mux"]["args"].as_array().unwrap();
         assert_eq!(args[4].as_str(), Some("/tmp/a b/traces.db"));
+        let muse = muse_overrides(&exe, &argv);
+        assert_eq!(muse[0], "-c");
+        assert_eq!(muse[2], "--trust-workspace");
+        let spec_raw = muse[1].strip_prefix("mcpServers.agent-mux=").unwrap();
+        let spec: serde_json::Value = serde_json::from_str(spec_raw).unwrap();
+        assert!(spec.get("type").is_none(), "muse rejects type field: {spec}");
+        assert_eq!(spec["command"], "/opt/agent mux/agent-mux");
+        assert_eq!(spec["args"][6], "/tmp/a b");
     }
 
     #[test]
@@ -307,6 +334,24 @@ mod tests {
             ),
             Registration::Unavailable(_)
         ));
+        let muse = plan(
+            Some(Harness::Muse),
+            Some(Path::new("/x/agent-mux")),
+            Some(Path::new("/db")),
+            ws,
+            home,
+        );
+        let Registration::PerLaunch { args, env } = &muse else {
+            panic!("{muse:?}");
+        };
+        assert!(env.is_empty());
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[2], "--trust-workspace");
+        let spec: serde_json::Value =
+            serde_json::from_str(args[1].strip_prefix("mcpServers.agent-mux=").unwrap()).unwrap();
+        assert!(spec.get("type").is_none());
+        assert_eq!(spec["command"], "/x/agent-mux");
         assert_eq!(
             plan(
                 None,

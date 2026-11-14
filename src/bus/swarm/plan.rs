@@ -118,7 +118,7 @@ pub fn parse(text: &str) -> Result<Plan, String> {
 /// What [`check`] needs to know about the machine and the workspace.
 #[derive(Debug, Clone, Default)]
 pub struct CheckEnv {
-    /// Harnesses installed here (`claude`, `codex`, `agy`, `opencode`).
+    /// Harnesses installed here (`claude`, `codex`, `agy`, `opencode`, `muse`).
     pub harnesses: Vec<String>,
     /// Agent names the catalog knows.
     pub agents: Vec<String>,

@@ -43,6 +43,7 @@ fn provider_from(s: &str) -> Provider {
         "codex" => Provider::Codex,
         "antigravity" => Provider::Antigravity,
         "opencode" => Provider::OpenCode,
+        "muse" => Provider::Muse,
         _ => Provider::Claude,
     }
 }

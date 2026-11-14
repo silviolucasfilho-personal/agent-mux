@@ -103,7 +103,9 @@ impl Args {
 }
 
 fn parse_harness(s: &str) -> anyhow::Result<Harness> {
-    Harness::detect(s).ok_or_else(|| anyhow::anyhow!("unknown harness {s:?}: claude, codex or agy"))
+    Harness::detect(s).ok_or_else(|| {
+        anyhow::anyhow!("unknown harness {s:?}: claude, codex, agy, opencode or muse")
+    })
 }
 
 fn workspace_of(args: &Args) -> anyhow::Result<PathBuf> {

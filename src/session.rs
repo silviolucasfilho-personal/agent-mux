@@ -167,6 +167,7 @@ pub fn install_fallback(command: &str, home: &Path) -> Option<PathBuf> {
             home.join(".local").join("bin").join("pi"),
             home.join(".bun").join("bin").join("pi"),
         ],
+        "muse" => vec![home.join(".local").join("bin").join("muse")],
         _ => return None,
     };
     candidates.into_iter().find(|c| is_runnable(c))
@@ -751,6 +752,11 @@ mod resolve_tests {
         let npm = home.path().join(".npm-global/bin/pi");
         executable(&npm);
         assert_eq!(install_fallback("pi", home.path()), Some(npm));
+        let muse = home.path().join(".local/bin/muse");
+        executable(&muse);
+        let (program, _) =
+            resolve_command_with("muse", empty.path().as_os_str(), Some(home.path())).unwrap();
+        assert_eq!(program, muse.to_string_lossy());
     }
 
     #[cfg(unix)]

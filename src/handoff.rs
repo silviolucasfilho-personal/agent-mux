@@ -51,6 +51,7 @@ pub fn provider_of(name: &str) -> Option<Provider> {
         "codex" => Some(Provider::Codex),
         "antigravity" | "agy" => Some(Provider::Antigravity),
         "opencode" => Some(Provider::OpenCode),
+        "muse" => Some(Provider::Muse),
         _ => None,
     }
 }
@@ -61,6 +62,7 @@ fn provider_label(p: Provider) -> &'static str {
         Provider::Codex => "Codex",
         Provider::Antigravity => "Antigravity",
         Provider::OpenCode => "OpenCode",
+        Provider::Muse => "Muse Code",
     }
 }
 
@@ -366,6 +368,10 @@ pub fn transcript_by_id(provider: Provider, id: &str) -> Option<PathBuf> {
         // opencode keeps its conversations in a database, not in files:
         // the trace store is the only source (`tracing::opencode_db`)
         Provider::OpenCode => None,
+        Provider::Muse => crate::tracing::correlate::muse_session_log_by_id(
+            &crate::tracing::correlate::muse_data_dir(&crate::skill::install::home_dir()),
+            id,
+        ),
     }
 }
 
@@ -383,6 +389,9 @@ pub fn find_on_disk(
             claude: None,
             antigravity: None,
             codex: codex_sessions_dir(),
+            muse: Some(crate::tracing::correlate::muse_data_dir(
+                &crate::skill::install::home_dir(),
+            )),
         },
         provider,
         dir,
@@ -399,6 +408,8 @@ pub struct Roots {
     pub antigravity: Option<PathBuf>,
     /// Codex's `sessions` folder.
     pub codex: Option<PathBuf>,
+    /// Muse's data dir (`~/.local/share/muse`).
+    pub muse: Option<PathBuf>,
 }
 
 /// `find_on_disk` over explicit folders.
@@ -444,6 +455,37 @@ pub fn find_in(
             .collect(),
         // no files: an untraced opencode session has nothing to hand over
         Provider::OpenCode => Vec::new(),
+        Provider::Muse => roots
+            .muse
+            .as_deref()
+            .map(|r| {
+                let want = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+                crate::tracing::correlate::all_date_dirs(&r.join("sessions"))
+                    .into_iter()
+                    .flat_map(|day| std::fs::read_dir(day).ok().into_iter().flatten())
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| {
+                        let log = e.path().join("session.jsonl");
+                        if !log.is_file() || !recent(&log) {
+                            return None;
+                        }
+                        let (id, meta_cwd) =
+                            crate::tracing::correlate::read_muse_session_meta(&log, 256 * 1024)?;
+                        let meta_cwd = meta_cwd?;
+                        let meta_path = Path::new(&meta_cwd);
+                        let meta_canon = meta_path
+                            .canonicalize()
+                            .unwrap_or_else(|_| meta_path.to_path_buf());
+                        (meta_canon == want || meta_path == dir).then(|| {
+                            (
+                                id.unwrap_or_else(|| e.file_name().to_string_lossy().into_owned()),
+                                log,
+                            )
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
     match found.len() {
         0 => Err(format!(
@@ -609,6 +651,7 @@ mod tests {
             claude: Some(t.path().join(".claude")),
             antigravity: Some(t.path().join("brain")),
             codex: Some(t.path().join("codex")),
+            muse: Some(t.path().join("muse")),
         };
         // nothing yet: it has not had a turn
         let e = find_in(&roots, Provider::Claude, &ws, before).unwrap_err();

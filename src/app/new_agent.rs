@@ -330,7 +330,7 @@ impl App {
     ) -> Result<crate::handoff::Continue, String> {
         use crate::handoff::{self, Continue, Source};
         use crate::harness::Harness;
-        let harness = harness.ok_or("continue on a Claude Code, Codex or Antigravity profile")?;
+        let harness = harness.ok_or("continue on a Claude Code, Codex, Antigravity or Muse profile")?;
         let s = self
             .sessions
             .iter()

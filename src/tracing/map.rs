@@ -3299,6 +3299,7 @@ fn extract_skill_info(raw_tool_name: &str, args: &Value) -> Option<(String, Stri
         || tool_name == "load_skill"
         || tool_name == "use_skill"
         || tool_name == "activate_skill"
+        || tool_name == "read_skill"
     {
         let name = args
             .get("skill")
@@ -3327,6 +3328,7 @@ fn extract_skill_info(raw_tool_name: &str, args: &Value) -> Option<(String, Stri
         || path_lower.contains(".claude/skills")
         || path_lower.contains(".gemini/skills")
         || path_lower.contains(".agent/skills")
+        || path_lower.contains(".muse/skills")
     {
         let p = std::path::Path::new(&path);
         let skill_name = if p

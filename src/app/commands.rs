@@ -73,7 +73,7 @@ impl App {
                 matches!(&self.mode, Mode::TraceBrowser(b) if b.zoomed && b.find.is_some())
             }
             FilterClaude | FilterCodex | FilterAntigravity | FilterOpenCode | FilterGrok
-            | FilterPi => {
+            | FilterPi | FilterMuse => {
                 matches!(self.mode, Mode::SkillsView(_))
             }
             Save => {
@@ -265,7 +265,7 @@ impl App {
             Langfuse => self.request_navigation(NavigationTarget::Langfuse, now),
             OpenLangfuseWeb => self.request_navigation(NavigationTarget::LangfuseWeb, now),
             FilterClaude | FilterCodex | FilterAntigravity | FilterOpenCode | FilterGrok
-            | FilterPi => {
+            | FilterPi | FilterMuse => {
                 if let Mode::SkillsView(v) = &mut self.mode {
                     v.toggle_filter(match id {
                         FilterClaude => crate::harness::Harness::Claude,
@@ -273,6 +273,7 @@ impl App {
                         FilterOpenCode => crate::harness::Harness::OpenCode,
                         FilterGrok => crate::harness::Harness::Grok,
                         FilterPi => crate::harness::Harness::Pi,
+                        FilterMuse => crate::harness::Harness::Muse,
                         _ => crate::harness::Harness::Antigravity,
                     });
                 }

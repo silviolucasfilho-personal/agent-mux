@@ -384,6 +384,17 @@ pub fn build_skill_launch_full(
         // opening message goes through the same `/skill:` expansion as a
         // typed one
         Harness::Pi => args.push(prompt),
+        // muse 1.4.20: `--yolo` skips approval/sandbox and trusts the
+        // workspace; otherwise `--trust-workspace` loads project skills.
+        // Opening prompt is positional.
+        Harness::Muse => {
+            if bypass {
+                args.push("--yolo".into());
+            } else {
+                args.push("--trust-workspace".into());
+            }
+            args.push(prompt);
+        }
     }
     let mut profile = base.clone();
     profile.name = session_name(def, harness);

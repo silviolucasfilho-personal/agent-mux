@@ -62,6 +62,7 @@ pub fn agent_name(h: Harness) -> &'static str {
         // not wired (not in `HARNESSES`)
         Harness::Grok => "grok",
         Harness::Pi => "pi",
+        Harness::Muse => "muse",
     }
 }
 
@@ -74,6 +75,7 @@ pub fn label(h: Harness) -> &'static str {
         Harness::OpenCode => "OpenCode",
         Harness::Grok => "Grok",
         Harness::Pi => "Pi",
+        Harness::Muse => "Muse Code",
     }
 }
 
@@ -275,7 +277,7 @@ pub fn config_files(home: &Path, h: Harness) -> (PathBuf, PathBuf) {
             )
         }
         // not wired (not in `HARNESSES`): no files, so nothing reads as set up
-        Harness::Grok | Harness::Pi => (PathBuf::new(), PathBuf::new()),
+        Harness::Grok | Harness::Pi | Harness::Muse => (PathBuf::new(), PathBuf::new()),
     }
 }
 

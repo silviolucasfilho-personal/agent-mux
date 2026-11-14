@@ -50,6 +50,16 @@
 //! (`install|remove|update|list|config`) manage extensions; there is no
 //! MCP subcommand.
 //!
+//! Muse Code 1.4.20 (`muse`, launcher at `~/.local/bin/muse`, real binary
+//! `~/.local/bin/muse-bin-1.4.20-R8619.1`; probed 2026-11-14 with `--help`
+//! and temporary-HOME runs): the interactive command is `muse [OPTIONS] [PROMPT]`,
+//! with positional opening prompt. `muse resume --last` and `muse resume <id>`
+//! are leading subcommands (there is no CLI fork flag); `muse exec [OPTIONS] [PROMPT]`
+//! is the leading one-shot subcommand (does not compose with `resume`).
+//! `--model <MODEL>`, `--reasoning-effort <EFFORT>` (workflows/agents),
+//! `--yolo` (skips approvals + sandbox + trusts workspace for the run), and
+//! `--trust-workspace` (trusts workspace for skills/rules/MCPs for this run).
+//!
 //! Not yet supported: DeepSeek Harness (`dsh` 0.2.2-rc.1, Homebrew cask
 //! `deepseek-harness`, launcher at `/Applications/DeepSeek
 //! Harness.app/Contents/Resources/runtime/cli/bin/dsh`; probed 2026-11-10
@@ -73,6 +83,7 @@ pub enum Harness {
     OpenCode,
     Grok,
     Pi,
+    Muse,
 }
 
 impl Harness {
@@ -92,17 +103,19 @@ impl Harness {
             "opencode" => Some(Harness::OpenCode),
             "grok" => Some(Harness::Grok),
             "pi" => Some(Harness::Pi),
+            s if s == "muse" || s.starts_with("muse-bin") => Some(Harness::Muse),
             _ => None,
         }
     }
 
-    pub const ALL: [Harness; 6] = [
+    pub const ALL: [Harness; 7] = [
         Harness::Claude,
         Harness::Codex,
         Harness::Antigravity,
         Harness::OpenCode,
         Harness::Grok,
         Harness::Pi,
+        Harness::Muse,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -113,6 +126,7 @@ impl Harness {
             Harness::OpenCode => "opencode",
             Harness::Grok => "grok",
             Harness::Pi => "pi",
+            Harness::Muse => "muse",
         }
     }
 
@@ -132,6 +146,7 @@ impl Harness {
             Harness::OpenCode => "OpenCode (opencode)",
             Harness::Grok => "Grok (grok)",
             Harness::Pi => "Pi (pi)",
+            Harness::Muse => "Muse Code (muse)",
         }
     }
 
@@ -141,7 +156,9 @@ impl Harness {
     /// directory). A one-shot prompt is `LaunchOptions::one_shot`.
     pub fn opening_args(self, message: String) -> Vec<String> {
         match self {
-            Harness::Claude | Harness::Codex | Harness::Grok | Harness::Pi => vec![message],
+            Harness::Claude | Harness::Codex | Harness::Grok | Harness::Pi | Harness::Muse => {
+                vec![message]
+            }
             Harness::Antigravity => vec!["--prompt-interactive".into(), message],
             Harness::OpenCode => vec!["--prompt".into(), message],
         }
@@ -169,6 +186,7 @@ impl std::str::FromStr for Harness {
             "opencode" | "open-code" => Ok(Harness::OpenCode),
             "grok" => Ok(Harness::Grok),
             "pi" | "pi-coding-agent" => Ok(Harness::Pi),
+            "muse" | "muse-code" => Ok(Harness::Muse),
             other => Err(format!("unknown harness '{other}'")),
         }
     }
@@ -410,9 +428,40 @@ impl LaunchOptions {
                     out.trailing.push(model.to_string());
                 }
                 // pi asks no approvals: nothing to skip
+                // `--print` is a switch; the message is positional
                 if let Some(prompt) = prompt {
-                    // `--print` is a switch; the message is positional
                     out.trailing.push("--print".into());
+                    out.trailing.push(prompt.to_string());
+                }
+            }
+            Harness::Muse => {
+                // `exec` and `resume` are leading subcommands that do not compose:
+                // `muse exec` takes `--session-id` (for a new session), whereas
+                // interactive resume uses `muse resume --last` or `muse resume <id>`.
+                if prompt.is_some() {
+                    out.leading.push("exec".into());
+                } else {
+                    match &self.resume {
+                        Resume::Off | Resume::Fork(_) => {}
+                        Resume::Last => {
+                            out.leading.push("resume".into());
+                            out.leading.push("--last".into());
+                        }
+                        Resume::Id(id) => {
+                            out.leading.push("resume".into());
+                            out.leading.push(id.clone());
+                        }
+                    }
+                }
+                if let Some(model) = self.model() {
+                    out.trailing.push("--model".into());
+                    out.trailing.push(model.to_string());
+                }
+                if self.bypass_approvals {
+                    out.trailing.push("--yolo".into());
+                }
+                if let Some(prompt) = prompt {
+                    // positional, and last
                     out.trailing.push(prompt.to_string());
                 }
             }
@@ -469,7 +518,7 @@ pub fn fresh_args(harness: Harness, saved: &[String]) -> Vec<String> {
 /// `--continue`/`-c`, `--session`/`-s` with its value and `--fork`, and
 /// Codex's leading `resume` subcommand with `--last` or the id after it.
 fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
-    if harness == Harness::Codex {
+    if matches!(harness, Harness::Codex | Harness::Muse) {
         // a fork is a resume that copies: restoring one must not fork again
         return match args {
             [sub, _target, rest @ ..] if sub == "resume" || sub == "fork" => rest.to_vec(),
@@ -631,6 +680,15 @@ mod tests {
             Some(Harness::Grok)
         );
         assert_eq!(Harness::detect("pi"), Some(Harness::Pi));
+        assert_eq!(Harness::detect("muse"), Some(Harness::Muse));
+        assert_eq!(
+            Harness::detect("/Users/me/.local/bin/muse"),
+            Some(Harness::Muse)
+        );
+        assert_eq!(
+            Harness::detect("/Users/me/.local/bin/muse-bin-1.4.20-R8619.1"),
+            Some(Harness::Muse)
+        );
         assert_eq!(
             Harness::detect("/home/me/.local/bin/claude"),
             Some(Harness::Claude)
@@ -1057,6 +1115,60 @@ mod tests {
         assert_eq!(
             compose(&profile_args, &o.render(Harness::Claude)),
             vec!["--search", "--dangerously-skip-permissions", "-p", "go"]
+        );
+    }
+
+    #[test]
+    fn muse_spells_subcommands_approvals_and_restore() {
+        assert_eq!(Harness::Muse.as_str(), "muse");
+        assert_eq!(Harness::Muse.store_provider(), "muse");
+        assert_eq!("muse".parse::<Harness>(), Ok(Harness::Muse));
+        assert_eq!("muse-code".parse::<Harness>(), Ok(Harness::Muse));
+        assert!(Harness::ALL.contains(&Harness::Muse));
+        assert_eq!(Harness::Muse.opening_args("hi".into()), ["hi"]);
+        assert!(!can_fork(Harness::Muse));
+
+        let interactive = LaunchOptions {
+            model: Some("muse-wonder-1.0".into()),
+            bypass_approvals: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            rendered(&interactive, Harness::Muse),
+            vec!["--model", "muse-wonder-1.0", "--yolo"]
+        );
+
+        let last = LaunchOptions {
+            resume: Resume::Last,
+            ..Default::default()
+        };
+        assert_eq!(rendered(&last, Harness::Muse), vec!["resume", "--last"]);
+
+        let by_id = LaunchOptions {
+            resume: Resume::Id("01a1da19-3bbf".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            rendered(&by_id, Harness::Muse),
+            vec!["resume", "01a1da19-3bbf"]
+        );
+
+        let one_shot = LaunchOptions {
+            one_shot: Some("fix tests".into()),
+            model: Some("muse-spark-1.3".into()),
+            bypass_approvals: true,
+            ..Default::default()
+        };
+        let r = one_shot.render(Harness::Muse);
+        assert_eq!(r.leading, vec!["exec"]);
+        assert_eq!(
+            r.trailing,
+            vec!["--model", "muse-spark-1.3", "--yolo", "fix tests"]
+        );
+
+        assert_eq!(
+            restore_args(Harness::Muse, &args(&["resume", "old", "--yolo"]), "new"),
+            args(&["resume", "new", "--yolo"])
         );
     }
 }

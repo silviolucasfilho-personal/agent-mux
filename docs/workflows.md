@@ -1,6 +1,6 @@
 # Workflows in agent-mux
 
-A **workflow** runs several harness sessions, each with its own context window and one focused goal, and composes their answers: fan out over items, refute every finding with independent votes, judge attempts pairwise, keep searching until nothing new turns up. agent-mux is the runtime: a TOML document says what runs, Rust interprets it, and every session is an ordinary traced run of **Claude Code, Codex CLI or Antigravity**, chosen per run and overridable per step. The planner (`c` in the Workflows section) composes a document for a task you type.
+A **workflow** runs several harness sessions, each with its own context window and one focused goal, and composes their answers: fan out over items, refute every finding with independent votes, judge attempts pairwise, keep searching until nothing new turns up. agent-mux is the runtime: a TOML document says what runs, Rust interprets it, and every session is an ordinary traced run of **Claude Code, Codex CLI, Antigravity, OpenCode or Muse**, chosen per run and overridable per step. The planner (`c` in the Workflows section) composes a document for a task you type.
 
 Design: `docs/superpowers/specs/2026-09-17-workflows-design.md`. The idea follows Anthropic's "dynamic workflows" for Claude Code; here the harness is a document and step skills rather than a script, so it runs on all three CLIs.
 
@@ -137,7 +137,7 @@ To compose a workflow for a task instead: `c` (or "describe it" in the `n` menu)
 `Enter` on **Who**, **Voters** or **Judge** opens the agent picker. It lists the workspace's and the library's agents with their descriptions, tools and models. `n` writes a new agent on the spot:
 - **Its text:** a name, what it is for, and its instructions (`Ctrl+O` opens your editor).
 - **What it may use:** ticked from read files, edit files, run commands, web and MCP servers.
-- **Where it runs:** a model per harness, and the effort for Codex and Antigravity (Claude Code and OpenCode take none).
+- **Where it runs:** a model per harness, and the effort for Codex, Antigravity and Muse (Claude Code and OpenCode take none).
 - **Where it is saved:** the workspace (`.agent-mux/agents/`, committed with the repository) or the library.
 
 The form shows while you type whether the agent fits the step. `Ctrl+S` saves it and puts it on the step. `Esc` steps back one level at a time. With unsaved changes, it asks before it leaves.
@@ -149,7 +149,7 @@ The form shows while you type whether the agent fits the step. `Ctrl+S` saves it
 name = "review-changes"
 description = "Find issues per dimension, refute each one with three votes, report the survivors."
 when_to_use = "Reviewing a diff or the working tree with independent verification."
-harness = "any"            # any | claude | codex | agy | opencode | ["claude", "codex"]
+harness = "any"            # any | claude | codex | agy | opencode | muse | ["claude", "codex"]
 output = "report"          # the step whose result is the run's result
 default_isolation = "none" # none | worktree, for steps that omit isolation
 budget_tokens = 400000     # optional ceiling
@@ -210,7 +210,7 @@ args = { subject = "confirmed review findings", shape = "a report grouped by sev
 | `judge` / `judge_prompt`, `n` | `tournament`: the pairwise judge and how many candidates to generate. `judge` is a skill name or a table (`{ skill \| prompt, harness, profile, model, effort }`) when the judge should run on its own model |
 | `rounds_without_new`, `max_rounds` | `until`: stop after this many quiet rounds (2) or rounds (10); needs `dedupe_by` |
 | `agent` | Who runs the step's sessions: an agent from `~/.agent-mux/agents/` or the workspace's `.agent-mux/agents/` (`docs/agents.md`). Its instructions become the system prompt; its tools limit the session where the harness can. `verify` and `judge` tables take their own `agent` and do not inherit the step's |
-| `harness`, `profile`, `model`, `effort`, `isolation`, `cwd`, `timeout_s`, `concurrency`, `phase` | Per-step overrides. `harness` and `profile` pick the CLI and its configuration, `model` becomes `--model`, and `effort` becomes Codex's `model_reasoning_effort` or Antigravity's `--effort` (`low`, `medium`, `high` or `max`; Claude Code takes none, and the run notes an effort it ignored). The step skills are installed for every harness the document names, so a step may switch CLI safely. |
+| `harness`, `profile`, `model`, `effort`, `isolation`, `cwd`, `timeout_s`, `concurrency`, `phase` | Per-step overrides. `harness` and `profile` pick the CLI and its configuration, `model` becomes `--model`, and `effort` becomes Codex's `model_reasoning_effort`, Antigravity's `--effort` (`low`, `medium`, `high` or `max`), or Muse's `--reasoning-effort` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `ultra`; Claude Code and OpenCode take none, and the run notes an effort it ignored). The step skills are installed for every harness the document names, so a step may switch CLI safely. |
 
 Paths: `find` is a step's result; `[*]` flattens one level; `.field` descends; `args.name`, `item`, `index` are the other roots. They are checked when the document loads.
 
@@ -227,7 +227,7 @@ kind = "fanout"
 over = ["correctness", "security"]
 harness = "codex"            # this step runs on Codex
 model = "gpt-5-mini"         # on a cheap model: it only has to notice things
-effort = "low"               # Codex: model_reasoning_effort; agy: --effort
+effort = "low"               # Codex: model_reasoning_effort; agy: --effort; muse: --reasoning-effort
 
 [[steps]]
 id = "confirmed"
@@ -319,12 +319,12 @@ Every session is a print-mode run with the harness's own approval prompts bypass
 
 agent-mux validates it against the schema and retries the session once with the errors when it does not match; a second failure makes the item `null`, which the view and the notes report.
 
-| | Claude Code | Codex CLI | Antigravity | OpenCode |
-| --- | --- | --- | --- | --- |
-| Command | `claude -p … --output-format json` | `codex exec … -o <file> --skip-git-repo-check` | `agy -p … --output-format json --print-timeout <s> --mode accept-edits` | `opencode run … --format json --standalone`, the MCP server and any agent in `OPENCODE_CONFIG_CONTENT` |
-| Final text | the JSON envelope, then the transcript, then the screen | the last-message file, then the transcript, then the screen | the JSON envelope, then the transcript, then the screen | the `text` events of its JSON stream (one event per line; no usage or cost in it), then the screen |
-| Path guard | per launch | per launch (after `trace hooks install codex`) | none: rely on isolation and budgets | none: rely on isolation and budgets |
-| Worktree isolation | yes | yes | not applied | yes |
+| | Claude Code | Codex CLI | Antigravity | OpenCode | Muse |
+| --- | --- | --- | --- | --- | --- |
+| Command | `claude -p … --output-format json` | `codex exec … -o <file> --skip-git-repo-check` | `agy -p … --output-format json --print-timeout <s> --mode accept-edits` | `opencode run … --format json --standalone`, the MCP server and any agent in `OPENCODE_CONFIG_CONTENT` | `muse exec … --json --yolo --trust-workspace` with MCP and hook `-c` overrides |
+| Final text | the JSON envelope, then the transcript, then the screen | the last-message file, then the transcript, then the screen | the JSON envelope, then the transcript, then the screen | the `text` events of its JSON stream (one event per line; no usage or cost in it), then the screen | the `run.terminal.completed` (or decoded stream) event of its JSONL output (and usage from `run.usage`), then the transcript, then the screen |
+| Path guard | per launch | per launch (after `trace hooks install codex`) | none: rely on isolation and budgets | none: rely on isolation and budgets | per launch |
+| Worktree isolation | yes | yes | not applied | yes | yes |
 
 Grok, Pi, and DeepSeek do not run workflow steps yet (`src/agents/fit.rs` and `src/workflows/harness.rs` treat Grok and Pi as unsupported for workflows; DeepSeek is deferred).
 
@@ -365,7 +365,7 @@ agent-mux workflow ls [--json]                       workflows, their last run a
 agent-mux workflow show <name>                       the document
 agent-mux workflow check [<name>] [--workspace DIR]  validate documents, step skills and agents; exit 1 on problems
 agent-mux workflow skills                            step skills and where they are installed
-agent-mux workflow run <name> --workspace DIR [--harness claude|codex|agy|opencode] [--profile P]
+agent-mux workflow run <name> --workspace DIR [--harness claude|codex|agy|opencode|muse] [--profile P]
     [--arg name=value …] [--budget N] [--max-cost USD] [--isolation none|worktree]
     [--resume RUN_ID] [--json]                       exit 0 finished, 1 failed, 2 cancelled, 3 budget,
                                                      4 a verdict the document does not accept

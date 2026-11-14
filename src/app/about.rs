@@ -193,6 +193,7 @@ pub fn rows(facts: &AboutFacts<'_>) -> Vec<AboutRow> {
         ("codex", "codex"),
         ("agy", "agy"),
         ("opencode", "opencode"),
+        ("muse", "muse"),
         ("git", "git"),
         ("gh", "gh"),
     ] {
