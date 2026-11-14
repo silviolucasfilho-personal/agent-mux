@@ -15,13 +15,15 @@
 //! works that out (`replayed_entries`), exactly for a run that has ended
 //! unless its budget ran out in the middle of a step.
 //!
-//! A stored run has no step phases, so `from_stored` infers them. For a
-//! finished run that is exact. For one that is still going, or that
-//! stopped early, three things are estimates: the item count of a step
-//! that reads its items from an earlier step (the rows only show the
-//! items started so far), a step that needed no session (shown as
+//! A stored run has no step phases and no item counts, so `from_stored`
+//! reads the run again (`resimulate`): the interpreter over the stored
+//! arguments, the copied entries and the answers of the run's own rows.
+//! That gives the item count of a step whose items come from the
+//! arguments or an earlier step. The phases are inferred, exactly for a
+//! finished run. For one that is still going, or that stopped early, two
+//! things are estimates: a step that needed no session (shown as
 //! waiting), and an `until` step between two rounds (shown as partly
-//! done). The live tree has the interpreter's own answer for all three.
+//! done). The live tree has the interpreter's own answer for both.
 
 use super::document::{Over, Runner, Step, StepKind, Workflow};
 use super::interp::{
@@ -916,7 +918,12 @@ pub fn from_stored(stored: &StoredRun<'_>) -> RunTree {
         }
     }
     copied.reverse();
-    for e in replayed_entries(doc.as_ref(), run, status, stored.steps, copied) {
+    // the interpreter read again over what the run stored: which copied
+    // entries it met, and how many items each step runs over
+    let sim = doc
+        .as_ref()
+        .map(|d| resimulate(d, run, stored.steps, &copied));
+    for e in replayed_entries(sim.as_ref(), run, status, stored.steps, copied) {
         let Some(key) = SessionKey::parse(&e.step, &e.key) else {
             continue;
         };
@@ -944,6 +951,13 @@ pub fn from_stored(stored: &StoredRun<'_>) -> RunTree {
     let cost: f64 = sessions.iter().map(|s| s.cost_usd).sum();
     let ids = step_ids(doc.as_ref(), sessions.iter().map(|s| s.key.step.as_str()));
     let mut steps = group(ids, sessions);
+    // the document's steps come first and in its order, as the
+    // interpreter's do
+    if let Some(sim) = &sim {
+        for (i, sf) in steps.iter_mut().enumerate() {
+            sf.items = sim.step_items(i);
+        }
+    }
     let phases = infer_phases(doc.as_ref(), &steps, status);
     for (sf, phase) in steps.iter_mut().zip(phases) {
         sf.phase = phase;
@@ -966,24 +980,81 @@ pub fn from_stored(stored: &StoredRun<'_>) -> RunTree {
     })
 }
 
+/// The interpreter run again over what a stored run left: the copied
+/// journal entries as its replay, and the answers of the run's own rows
+/// fed back as they are asked for. No budget and no session limit: the
+/// stored rows already say how far the run got.
+///
+/// It answers what the store does not keep: which copied entries the
+/// run met (`replayed_entries`), and how many items a step runs over
+/// when its items come from the arguments or an earlier step
+/// (`RunState::step_items`), so a fan-out with one answer of four reads
+/// 1/4 here as it does live.
+fn resimulate(
+    doc: &Workflow,
+    run: &WorkflowRun,
+    rows: &[WorkflowStep],
+    copied: &[&Entry],
+) -> RunState {
+    let owned: Vec<Entry> = copied.iter().map(|e| (*e).clone()).collect();
+    let caps = Caps {
+        max_sessions: usize::MAX,
+        budget_tokens: None,
+    };
+    let mut sim = RunState::new(doc.clone(), run.args.clone(), caps)
+        .with_replay(super::journal::to_replay(&owned));
+    // every pass answers at least one row, or is the last
+    for _ in 0..=rows.len() {
+        let mut fed = false;
+        for spec in sim.next(usize::MAX) {
+            let label = spec.label();
+            let Some(row) = rows
+                .iter()
+                .filter(|r| r.kind != "running")
+                .find(|r| r.session == label)
+            else {
+                continue;
+            };
+            let outcome = match row.kind.as_str() {
+                "text" => Outcome::Text(row.result.as_str().unwrap_or_default().into()),
+                "object" => Outcome::Object(row.result.clone()),
+                _ => Outcome::Null("no answer".into()),
+            };
+            sim.complete(
+                &spec.key,
+                SessionDone {
+                    outcome,
+                    tokens: 0,
+                    cost_usd: 0.0,
+                },
+            );
+            fed = true;
+        }
+        if !fed {
+            break;
+        }
+    }
+    sim
+}
+
 /// The copied journal entries the run replayed, in the order it met them.
 ///
 /// A resume copies every entry it may replay into the new run's journal
 /// before the interpreter starts, and nothing records which of them the
 /// interpreter then consumed: a run that stops early (its budget spent by
 /// the replays themselves, a cancel, a failure) leaves the rest unread.
-/// So this reads the run again: the interpreter is run over the copied
-/// entries and the answers of the run's own rows, which gives the entries
-/// it meets and their order. When the run has ended, `workflow_runs.sessions`
-/// says how many sessions it answered, and the entries are cut to that
-/// count. What is still an estimate: a run that has not ended (the count
-/// is written only at its end), where an entry behind a spent budget
-/// reads as replayed until the run's last row is written; and a budget
-/// spent in the middle of a step that also had sessions of its own, where
-/// the count is right and the entries are the first the interpreter would
-/// meet. Without a document the journal's own order stands in.
+/// So this asks the run read again (`resimulate`), which gives the
+/// entries it meets and their order. When the run has ended,
+/// `workflow_runs.sessions` says how many sessions it answered, and the
+/// entries are cut to that count. What is still an estimate: a run that
+/// has not ended (the count is written only at its end), where an entry
+/// behind a spent budget reads as replayed until the run's last row is
+/// written; and a budget spent in the middle of a step that also had
+/// sessions of its own, where the count is right and the entries are the
+/// first the interpreter would meet. Without a document the journal's
+/// own order stands in.
 fn replayed_entries<'a>(
-    doc: Option<&Workflow>,
+    sim: Option<&RunState>,
     run: &WorkflowRun,
     status: Status,
     rows: &[WorkflowStep],
@@ -992,57 +1063,20 @@ fn replayed_entries<'a>(
     if copied.is_empty() {
         return copied;
     }
-    let answered = |r: &&WorkflowStep| r.kind != "running";
-    let mut met = match doc {
+    let mut met = match sim {
         None => copied,
-        Some(doc) => {
-            let owned: Vec<Entry> = copied.iter().map(|e| (*e).clone()).collect();
-            let caps = Caps {
-                max_sessions: usize::MAX,
-                budget_tokens: None,
-            };
-            let mut sim = RunState::new(doc.clone(), run.args.clone(), caps)
-                .with_replay(super::journal::to_replay(&owned));
-            // every pass answers at least one row, or is the last
-            for _ in 0..=rows.len() {
-                let mut fed = false;
-                for spec in sim.next(usize::MAX) {
-                    let label = spec.label();
-                    let Some(row) = rows.iter().filter(answered).find(|r| r.session == label)
-                    else {
-                        continue;
-                    };
-                    let outcome = match row.kind.as_str() {
-                        "text" => Outcome::Text(row.result.as_str().unwrap_or_default().into()),
-                        "object" => Outcome::Object(row.result.clone()),
-                        _ => Outcome::Null("no answer".into()),
-                    };
-                    sim.complete(
-                        &spec.key,
-                        SessionDone {
-                            outcome,
-                            tokens: 0,
-                            cost_usd: 0.0,
-                        },
-                    );
-                    fed = true;
-                }
-                if !fed {
-                    break;
-                }
-            }
-            sim.records
-                .iter()
-                .filter(|r| sim.was_replayed(&r.key))
-                .filter_map(|r| {
-                    let label = r.key.label();
-                    copied.iter().copied().find(|e| e.key == label)
-                })
-                .collect()
-        }
+        Some(sim) => sim
+            .records
+            .iter()
+            .filter(|r| sim.was_replayed(&r.key))
+            .filter_map(|r| {
+                let label = r.key.label();
+                copied.iter().copied().find(|e| e.key == label)
+            })
+            .collect(),
     };
     if status != Status::Running {
-        let own = rows.iter().filter(answered).count();
+        let own = rows.iter().filter(|r| r.kind != "running").count();
         met.truncate((run.sessions.max(0) as usize).saturating_sub(own));
     }
     met
@@ -1105,7 +1139,10 @@ fn infer_phase(
         let ended = sf.sessions.iter().filter(|s| s.state.ended()).count();
         // an `until` step may open another round after a full one
         let open_ended = step.is_some_and(|s| s.kind == StepKind::Until);
-        if !open_ended && ended == sf.sessions.len() && ended >= planned(step, &sf.sessions, None) {
+        if !open_ended
+            && ended == sf.sessions.len()
+            && ended >= planned(step, &sf.sessions, sf.items)
+        {
             StepPhase::Done
         } else {
             StepPhase::Active
@@ -1125,6 +1162,7 @@ mod tests {
     /// would have written.
     struct Sim {
         text: String,
+        args: Value,
         state: RunState,
         /// (spec, harness, exited, launch, started, ended)
         live: Vec<(SessionSpec, String, bool, String, i64, Option<i64>)>,
@@ -1135,6 +1173,11 @@ mod tests {
 
     impl Sim {
         fn new(text: &str) -> Sim {
+            Sim::with_args(text, serde_json::json!({}))
+        }
+
+        /// A run started with arguments.
+        fn with_args(text: &str, args: Value) -> Sim {
             let doc = parse(text).unwrap();
             let caps = Caps {
                 max_sessions: 1000,
@@ -1142,7 +1185,8 @@ mod tests {
             };
             Sim {
                 text: text.to_string(),
-                state: RunState::new(doc, serde_json::json!({}), caps),
+                args: args.clone(),
+                state: RunState::new(doc, args, caps),
                 live: Vec::new(),
                 rows: Vec::new(),
                 journal: Vec::new(),
@@ -1291,7 +1335,7 @@ mod tests {
                 workspace: "/ws".into(),
                 harness: "claude".into(),
                 profile: "Claude Code".into(),
-                args: serde_json::json!({}),
+                args: self.args.clone(),
                 budget_tokens: self.state.doc.budget_tokens.map(|b| b as i64),
                 started_ns: 100,
                 ended_ns: None,
@@ -1497,6 +1541,79 @@ model = "gpt-5"
                 .as_deref(),
             Some("no block")
         );
+    }
+
+    const FROM_ARGS: &str = r#"
+[workflow]
+name = "flow"
+description = "d"
+output = "find"
+[args.items]
+description = "what to look at"
+[[steps]]
+id = "find"
+kind = "fanout"
+over = "args.items"
+prompt = "look at {{item}}"
+"#;
+
+    #[test]
+    fn a_fan_out_over_the_arguments_counts_every_item_with_one_slot() {
+        // four items and one slot: one answer is 1 of 4, not the whole step
+        let mut sim = Sim::with_args(
+            FROM_ARGS,
+            serde_json::json!({"items": ["a", "b", "c", "d"]}),
+        );
+        let first = sim.start(1);
+        assert_eq!(first.len(), 1);
+        let tree = sim.tree();
+        assert_eq!(step(&tree, "find").counts(), Some((0, 4)));
+        assert_eq!(step(&tree, "find").state, State::Running);
+
+        sim.finish(&first[0], text("x"));
+        let tree = sim.tree();
+        let find = step(&tree, "find");
+        assert_eq!(
+            find.counts(),
+            Some((1, 4)),
+            "three items are still to start"
+        );
+        assert_eq!(find.state, State::PartlyDone);
+        assert_eq!((tree.run().done, tree.run().planned), (0, 1));
+
+        sim.drive(|_| text("x"));
+        let tree = sim.tree();
+        assert_eq!(step(&tree, "find").counts(), Some((4, 4)));
+        assert_eq!(step(&tree, "find").state, State::Done);
+    }
+
+    const FROM_STEP: &str = r#"
+[workflow]
+name = "flow"
+description = "d"
+output = "find"
+[[steps]]
+id = "list"
+prompt = "list them"
+[[steps]]
+id = "find"
+kind = "fanout"
+over = "list.items"
+prompt = "look at {{item}}"
+"#;
+
+    #[test]
+    fn a_fan_out_over_an_earlier_answer_counts_every_item_with_one_slot() {
+        let mut sim = Sim::new(FROM_STEP);
+        let list = sim.start(1);
+        sim.finish(&list[0], obj(serde_json::json!({"items": ["a", "b", "c"]})));
+        let first = sim.start(1);
+        assert_eq!(first[0].key.step, "find");
+        sim.finish(&first[0], text("x"));
+        let tree = sim.tree();
+        let find = step(&tree, "find");
+        assert_eq!(find.counts(), Some((1, 3)));
+        assert_eq!(find.state, State::PartlyDone);
     }
 
     const CHECK: &str = r#"
