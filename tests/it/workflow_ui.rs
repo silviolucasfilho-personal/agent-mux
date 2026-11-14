@@ -596,7 +596,7 @@ fn a_long_result_wraps_and_scrolls_in_the_result_tab() {
     // the run's own screen has its Result tab
     app.open_runs_view();
     press(&mut app, KeyCode::Enter);
-    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('4'));
     let Mode::Run(v) = &app.mode else {
         panic!("the Run screen is open: {:?}", app.mode)
     };
@@ -732,7 +732,7 @@ input = "confirmed"
     // the runs view lists the run; its report is on the run's own screen
     app.open_runs_view();
     press(&mut app, KeyCode::Enter);
-    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('4'));
     let Mode::Run(v) = &app.mode else {
         panic!("the Run screen is open: {:?}", app.mode)
     };

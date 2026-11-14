@@ -4,17 +4,19 @@
 //! by `ui::step_row`, the function the flow editor's chain uses.
 
 use super::step_row::{self, Columns, StepLine};
+use crate::app::run_screen::Picker;
 use crate::app::run_screen::{
     Focus, RunScreen, RunTab, StepTab, changes_lines, document_lines, elapsed, step_lines,
 };
 use crate::tracing::swarm_report::{Lane, lane_cells};
 use crate::tracing::view::{Window, axis};
+use crate::workflows::live::{LiveKind, LiveLine};
 use crate::workflows::run_view::{Row, RowKind, State, tokens_short};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 fn dim() -> Style {
@@ -171,6 +173,9 @@ pub fn draw_tree(f: &mut Frame, area: Rect, st: &RunScreen) {
             ),
             dim(),
         )));
+        if rows + 2 < visible {
+            items.push(ListItem::new(Line::styled("o other runs", dim())));
+        }
     }
     f.render_widget(List::new(items).block(block), area);
 }
@@ -431,6 +436,190 @@ pub fn timeline_lines(st: &RunScreen, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// One decoded line of a session's output: a tool call, its outcome,
+/// the agent's text.
+fn live_line(l: &LiveLine) -> Line<'static> {
+    let style = match l.kind {
+        LiveKind::Text => Style::default(),
+        LiveKind::Tool => Style::default().fg(Color::Cyan),
+        LiveKind::Outcome => dim(),
+        LiveKind::Error => Style::default().fg(Color::Red),
+    };
+    Line::styled(format!("  {}", l.text), style)
+}
+
+/// The Live tab of a step or session row: what its session printed, as
+/// lines; or why there is nothing to show.
+pub fn live_lines(st: &RunScreen, row: &Row) -> Vec<Line<'static>> {
+    if row.session.is_none() {
+        return vec![Line::styled(
+            "  This step has several sessions: → opens it, and each has its own Live tab. The run's Live tab shows those running now.",
+            dim(),
+        )];
+    }
+    match st.tail().filter(|t| !t.lines.is_empty()) {
+        Some(t) => t.lines.iter().map(live_line).collect(),
+        None => vec![Line::styled(
+            match row.state {
+                State::Waiting | State::Skipped => "  It has not started.",
+                State::Running | State::PartlyDone => "  Nothing printed yet.",
+                State::Replayed => {
+                    "  Answered from the journal of the run this one resumed: it printed nothing here."
+                }
+                _ => "  No output was kept for this session.",
+            },
+            dim(),
+        )],
+    }
+}
+
+/// The Trace tab: the session's turns and tools from the trace store.
+pub fn trace_lines(st: &RunScreen, row: &Row) -> Vec<Line<'static>> {
+    if row.session.is_none() {
+        return vec![Line::styled(
+            "  This step has several sessions: → opens it, and each has its own trace.",
+            dim(),
+        )];
+    }
+    match (&row.launch_id, &st.trace) {
+        (Some(launch), Some((of, lines))) if launch == of => {
+            lines.iter().map(|l| Line::raw(l.clone())).collect()
+        }
+        (Some(_), _) => vec![Line::styled("  Reading the trace…", dim())],
+        (None, _) => vec![Line::styled(
+            "  No traced session: it has not started, or tracing is off.",
+            dim(),
+        )],
+    }
+}
+
+/// The run row's Live tab: every session running now at once, each a
+/// tail of its output in a tile (1, 1×2, 2×2, 2×3; the first six).
+fn draw_mosaic(f: &mut Frame, area: Rect, st: &RunScreen) {
+    let running = &st.data.running;
+    if running.is_empty() {
+        let text = if st.data.live {
+            "  No session is running right now."
+        } else {
+            "  The run has ended. A session's own Live tab keeps what it printed."
+        };
+        f.render_widget(Paragraph::new(Line::styled(text, dim())), area);
+        return;
+    }
+    let shown = running.len().min(6);
+    let cols = match shown {
+        1 => 1,
+        2..=4 => 2,
+        _ => 3,
+    };
+    let rows = shown.div_ceil(cols);
+    let more = running.len() - shown;
+    let (grid, foot) = if more > 0 {
+        let [g, l] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+        (g, Some(l))
+    } else {
+        (area, None)
+    };
+    let row_areas = Layout::vertical(vec![Constraint::Ratio(1, rows as u32); rows]).split(grid);
+    for (n, label) in running.iter().take(shown).enumerate() {
+        let col_areas = Layout::horizontal(vec![Constraint::Ratio(1, cols as u32); cols])
+            .split(row_areas[n / cols]);
+        let tile = col_areas[n % cols];
+        let who = st
+            .data
+            .tree
+            .rows
+            .iter()
+            .find(|r| r.session.as_deref() == Some(label.as_str()))
+            .map(|r| r.who.short())
+            .unwrap_or_default();
+        let room = usize::from(tile.width.saturating_sub(4));
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(dim())
+            .title(Span::styled(
+                format!(" {} ", cut(&format!("▶ {label} · {who}"), room)),
+                Style::default().fg(Color::Yellow),
+            ));
+        let inner = block.inner(tile);
+        f.render_widget(block, tile);
+        let height = usize::from(inner.height);
+        let width = usize::from(inner.width);
+        let lines: Vec<Line> = match st.tails.get(label).filter(|t| !t.lines.is_empty()) {
+            Some(t) => t.lines[t.lines.len().saturating_sub(height)..]
+                .iter()
+                .map(|l| {
+                    let mut line = live_line(l);
+                    for s in &mut line.spans {
+                        s.content = cut(&s.content, width).into();
+                    }
+                    line
+                })
+                .collect(),
+            None => vec![Line::styled("  Nothing printed yet.", dim())],
+        };
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+    if let Some(l) = foot {
+        f.render_widget(
+            Paragraph::new(Line::styled(
+                format!("  and {more} more running: each has its own Live tab"),
+                dim(),
+            )),
+            l,
+        );
+    }
+}
+
+/// The run picker (`o`), over the pane.
+fn draw_picker(f: &mut Frame, area: Rect, p: &Picker) {
+    let height = (p.items.len() as u16 + 2).clamp(3, 18).min(area.height);
+    let width = 64.min(area.width);
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    f.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border(true))
+        .title(Span::styled(
+            " Runs · ↑↓ · ↵ open · Esc ",
+            title_style(true),
+        ));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let visible = usize::from(inner.height).max(1);
+    let w = usize::from(inner.width);
+    let start = super::sidebar_window(p.cursor, p.items.len(), visible);
+    let mut lines: Vec<Line> = p
+        .items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(n, item)| {
+            let glyph = if item.live { "▶" } else { " " };
+            let room = w.saturating_sub(item.word.width() + 5);
+            let name = cut(&item.name, room);
+            let text = format!(" {glyph} {}{} ", pad(&name, room), item.word);
+            if n == p.cursor {
+                Line::styled(text, Style::default().add_modifier(Modifier::REVERSED))
+            } else if item.live {
+                Line::styled(text, Style::default().fg(Color::Yellow))
+            } else {
+                Line::raw(text)
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        lines.push(Line::styled(" no runs yet", dim()));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 pub fn draw_pane(f: &mut Frame, area: Rect, st: &RunScreen) {
     let focused = st.focus == Focus::Pane;
     let room = usize::from(area.width.saturating_sub(4));
@@ -447,10 +636,19 @@ pub fn draw_pane(f: &mut Frame, area: Rect, st: &RunScreen) {
     f.render_widget(Paragraph::new(tab_bar(st)), tabs);
     let width = usize::from(body.width);
     let row = st.selected();
+    if row.kind == RowKind::Run && st.run_tab == RunTab::Live {
+        st.max_scroll.set(0);
+        draw_mosaic(f, body, st);
+        if let Some(p) = &st.picker {
+            draw_picker(f, area, p);
+        }
+        return;
+    }
     // a table and a chart keep their lines; the rest wraps
     let (lines, wrap) = if row.kind == RowKind::Run {
         match st.run_tab {
             RunTab::Board => (board_lines(st, width), false),
+            RunTab::Live => (Vec::new(), false),
             RunTab::Timeline => (timeline_lines(st, width), false),
             RunTab::Result => (st.data.result.clone(), true),
             RunTab::Document => (document_lines(&st.data), true),
@@ -458,6 +656,8 @@ pub fn draw_pane(f: &mut Frame, area: Rect, st: &RunScreen) {
     } else {
         match st.step_tab {
             StepTab::Step => (step_lines(&st.data, row), true),
+            StepTab::Live => (live_lines(st, row), true),
+            StepTab::Trace => (trace_lines(st, row), false),
             StepTab::Changes => (changes_lines(&st.data, row), true),
         }
     };
@@ -469,6 +669,15 @@ pub fn draw_pane(f: &mut Frame, area: Rect, st: &RunScreen) {
         .line_count(body.width)
         .saturating_sub(usize::from(body.height));
     st.max_scroll.set(max);
-    let off = u16::try_from(st.scroll.min(max)).unwrap_or(u16::MAX);
+    // a tail stays on its newest line until the user scrolls up
+    let at = if st.on_live_tail() && st.follow {
+        max
+    } else {
+        st.scroll.min(max)
+    };
+    let off = u16::try_from(at).unwrap_or(u16::MAX);
     f.render_widget(p.scroll((off, 0)), body);
+    if let Some(p) = &st.picker {
+        draw_picker(f, area, p);
+    }
 }

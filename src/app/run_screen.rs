@@ -11,9 +11,11 @@
 //! its keys and the text of the tabs; `ui::run_screen` draws it.
 
 use super::{App, Mode, Notice};
+use crate::harness::Harness;
 use crate::keymap::{Verb, verb};
 use crate::workflows::document::{Actor, Step, Workflow};
 use crate::workflows::interp::{Role, RunStatus, SessionKey};
+use crate::workflows::live::{self, LiveLine};
 use crate::workflows::report::{self, RunView};
 use crate::workflows::run_view::{
     self, LiveRun, LiveSession, Row, RowKind, RunTree, State, Status, StoredRun, tokens_short,
@@ -44,14 +46,16 @@ pub enum Origin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunTab {
     Board,
+    Live,
     Timeline,
     Result,
     Document,
 }
 
 impl RunTab {
-    pub const ALL: [RunTab; 4] = [
+    pub const ALL: [RunTab; 5] = [
         RunTab::Board,
+        RunTab::Live,
         RunTab::Timeline,
         RunTab::Result,
         RunTab::Document,
@@ -60,6 +64,7 @@ impl RunTab {
     pub fn label(self) -> &'static str {
         match self {
             RunTab::Board => "Board",
+            RunTab::Live => "Live",
             RunTab::Timeline => "Timeline",
             RunTab::Result => "Result",
             RunTab::Document => "Document",
@@ -71,15 +76,24 @@ impl RunTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepTab {
     Step,
+    Live,
+    Trace,
     Changes,
 }
 
 impl StepTab {
-    pub const ALL: [StepTab; 2] = [StepTab::Step, StepTab::Changes];
+    pub const ALL: [StepTab; 4] = [
+        StepTab::Step,
+        StepTab::Live,
+        StepTab::Trace,
+        StepTab::Changes,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             StepTab::Step => "Step",
+            StepTab::Live => "Live",
+            StepTab::Trace => "Trace",
             StepTab::Changes => "Changes",
         }
     }
@@ -113,6 +127,35 @@ impl Confirm {
     }
 }
 
+/// What a session printed, decoded into lines (`workflows::live`). It is
+/// decoded again only when the session has printed more.
+#[derive(Debug, Clone, Default)]
+pub struct Tail {
+    /// The bytes the session had printed when this was decoded.
+    pub total: u64,
+    /// Read from the running session; else from the output the run kept.
+    pub running: bool,
+    pub lines: Vec<LiveLine>,
+}
+
+/// One run the picker (`o`) offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickItem {
+    pub run_id: String,
+    pub name: String,
+    /// `running 3m`, `finished · 2h ago`.
+    pub word: String,
+    pub live: bool,
+}
+
+/// The run picker: live runs first, this folder's first among them, then
+/// the runs that ended lately.
+#[derive(Debug, Clone, Default)]
+pub struct Picker {
+    pub items: Vec<PickItem>,
+    pub cursor: usize,
+}
+
 /// What a session received and left, by its label.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionFacts {
@@ -138,6 +181,10 @@ pub struct RunData {
     /// The run this one resumed.
     pub resumed_from: Option<String>,
     pub sessions: BTreeMap<String, SessionFacts>,
+    /// The labels of the sessions running now, for the Live mosaic.
+    pub running: Vec<String>,
+    /// The run's directory, where the output of ended sessions is kept.
+    pub run_dir: std::path::PathBuf,
     /// The Result tab, built with the run in hand.
     pub result: Vec<Line<'static>>,
     /// The stored run, which `r` resumes.
@@ -161,6 +208,13 @@ pub struct RunScreen {
     /// How far the pane can scroll, as the renderer last measured it.
     pub max_scroll: Cell<usize>,
     pub confirm: Option<Confirm>,
+    /// What each session printed, by label, as far as it was asked for.
+    pub tails: BTreeMap<String, Tail>,
+    /// The Trace tab's lines and the launch they are of.
+    pub trace: Option<(String, Vec<String>)>,
+    /// The Live tab stays on the newest line until the user scrolls up.
+    pub follow: bool,
+    pub picker: Option<Picker>,
     pub last_refresh: Instant,
 }
 
@@ -196,6 +250,10 @@ impl RunScreen {
             scroll: 0,
             max_scroll: Cell::new(usize::MAX),
             confirm: None,
+            tails: BTreeMap::new(),
+            trace: None,
+            follow: true,
+            picker: None,
             last_refresh: Instant::now(),
         }
     }
@@ -274,10 +332,12 @@ impl RunScreen {
             if let Some(t) = RunTab::ALL.get(n) {
                 self.run_tab = *t;
                 self.scroll = 0;
+                self.follow = true;
             }
         } else if let Some(t) = StepTab::ALL.get(n) {
             self.step_tab = *t;
             self.scroll = 0;
+            self.follow = true;
         }
     }
 
@@ -287,6 +347,7 @@ impl RunScreen {
         if at != self.cursor {
             self.cursor = at;
             self.scroll = 0;
+            self.follow = true;
         }
     }
 
@@ -366,11 +427,31 @@ impl RunScreen {
         }
     }
 
+    /// The pane shows a session's output as a tail.
+    pub fn on_live_tail(&self) -> bool {
+        !self.on_run_row() && self.step_tab == StepTab::Live
+    }
+
     fn scroll_by(&mut self, delta: isize) {
+        // a tail that follows is at its end: scrolling starts from there
+        if self.on_live_tail() && self.follow {
+            self.scroll = self.max_scroll.get();
+        }
         self.scroll = self
             .scroll
             .saturating_add_signed(delta)
             .min(self.max_scroll.get());
+        // up leaves the newest line; reaching the end follows it again
+        self.follow = delta > 0 && self.scroll >= self.max_scroll.get();
+    }
+
+    /// The session whose output the selected row's Live tab shows: its
+    /// label, when the row is one session.
+    pub fn tail(&self) -> Option<&Tail> {
+        self.selected()
+            .session
+            .as_ref()
+            .and_then(|l| self.tails.get(l))
     }
 
     /// The pane's title: what the row is and where the run stands.
@@ -794,6 +875,13 @@ impl App {
                 },
                 resumed_from: r.resumed_from.clone(),
                 sessions: facts,
+                running: r
+                    .sessions
+                    .iter()
+                    .filter(|s| s.exited_at.is_none())
+                    .map(|s| s.key.label())
+                    .collect(),
+                run_dir: r.run_dir.clone(),
                 result,
                 stored: None,
                 now_ns,
@@ -807,11 +895,14 @@ impl App {
             .ok_or_else(|| format!("run {run_id} is not in the store"))?;
         let dir = context::run_dir(&self.workflows_runtime_dir(), run_id);
         let entries = journal::load(&dir.join("journal.jsonl"));
+        // what the run recorded it replayed; an older run recorded none
+        let replayed = context::load_replayed(&dir);
         let tree = run_view::from_stored(&StoredRun {
             run: &run,
             steps: &rows,
             journal: &entries,
             usd_cap: None,
+            replayed: replayed.as_deref(),
         });
         let mut facts = facts_of_rows(&rows);
         // a replayed session has no row of its own: its answer is the
@@ -885,6 +976,8 @@ impl App {
             error: run.error.clone(),
             resumed_from: run.resumed_from.clone(),
             sessions: facts,
+            running: Vec::new(),
+            run_dir: dir,
             result,
             stored: Some(run),
             now_ns,
@@ -896,7 +989,9 @@ impl App {
     pub fn open_run_screen(&mut self, run_id: &str, origin: Origin) -> bool {
         match self.run_screen_data(run_id) {
             Ok(data) => {
-                self.mode = Mode::Run(Box::new(RunScreen::new(run_id, origin, data)));
+                let mut st = RunScreen::new(run_id, origin, data);
+                self.fill_run_screen(&mut st, true);
+                self.mode = Mode::Run(Box::new(st));
                 true
             }
             Err(e) => {
@@ -908,7 +1003,10 @@ impl App {
 
     fn reload_run_screen(&mut self, st: &mut RunScreen) {
         match self.run_screen_data(&st.run_id) {
-            Ok(data) => st.set_data(data),
+            Ok(data) => {
+                st.set_data(data);
+                self.fill_run_screen(st, true);
+            }
             Err(e) => {
                 // what was read stays on the screen, as the run's last word
                 st.data.live = false;
@@ -916,6 +1014,136 @@ impl App {
                 self.notice = Some(Notice::warn(e));
             }
         }
+    }
+
+    /// What the Live and Trace tabs show, as far as the screen needs it
+    /// now: the output of the sessions running (decoded again only when
+    /// one printed more), the kept output of the selected session once it
+    /// has ended, and the selected session's trace. `refresh`: the run was
+    /// just read again, so a running session's trace is read again too.
+    fn fill_run_screen(&self, st: &mut RunScreen, refresh: bool) {
+        let run = self
+            .live_workflow_runs
+            .iter()
+            .find(|r| r.run_id == st.run_id);
+        if let Some(r) = run {
+            for s in &r.sessions {
+                let label = s.key.label();
+                let total = s.stdout.total();
+                if st
+                    .tails
+                    .get(&label)
+                    .is_none_or(|t| t.total != total || !t.running)
+                {
+                    // an OpenCode stream may carry a second session's
+                    // events: the decoder keeps the first id it sees,
+                    // which is this session's own
+                    let lines = live::lines_for(s.harness, s.stdout.snapshot(), None);
+                    st.tails.insert(
+                        label,
+                        Tail {
+                            total,
+                            running: true,
+                            lines,
+                        },
+                    );
+                }
+            }
+        }
+        if st.on_run_row() {
+            return;
+        }
+        let row = st.selected().clone();
+        if st.step_tab == StepTab::Live
+            && let Some(label) = &row.session
+        {
+            let running = run.is_some_and(|r| r.sessions.iter().any(|s| s.key.label() == *label));
+            if !running && st.tails.get(label).is_none_or(|t| t.running) {
+                let bytes = std::fs::read(context::output_file(&st.data.run_dir, label))
+                    .unwrap_or_default();
+                let lines = match Harness::detect(&row.who.harness) {
+                    Some(h) => live::lines_for(h, &bytes, None),
+                    None => Vec::new(),
+                };
+                st.tails.insert(
+                    label.clone(),
+                    Tail {
+                        total: bytes.len() as u64,
+                        running: false,
+                        lines,
+                    },
+                );
+            }
+        }
+        if st.step_tab == StepTab::Trace {
+            let Some(launch) = &row.launch_id else {
+                st.trace = None;
+                return;
+            };
+            let cached = st.trace.as_ref().is_some_and(|(l, _)| l == launch);
+            if cached && (!refresh || row.state.ended()) {
+                return;
+            }
+            let lines = self
+                .trace_db_path
+                .as_deref()
+                .and_then(|p| crate::tracing::store::open_ro(p).ok())
+                .and_then(|c| {
+                    crate::tracing::swarm_report::launch_trace_lines(&c, launch, None).ok()
+                })
+                .unwrap_or_else(|| vec!["  The trace store could not be read.".into()]);
+            st.trace = Some((launch.clone(), lines));
+        }
+    }
+
+    /// The runs `o` offers: live ones first, this folder's first among
+    /// them, then the runs that ended lately.
+    fn run_picker(&self, st: &RunScreen) -> Picker {
+        let now = crate::tracing::store::now_ns();
+        let mut live: Vec<&super::workflows::LiveWorkflowRun> =
+            self.live_workflow_runs.iter().collect();
+        let here = |r: &&super::workflows::LiveWorkflowRun| {
+            r.workspace.display().to_string() != st.data.workspace
+        };
+        live.sort_by_key(here);
+        let mut items: Vec<PickItem> = live
+            .iter()
+            .map(|r| PickItem {
+                run_id: r.run_id.clone(),
+                name: r.name.clone(),
+                word: format!(
+                    "running {}",
+                    super::loops::short_duration(r.started.elapsed().as_secs())
+                ),
+                live: true,
+            })
+            .collect();
+        let stored = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|p| crate::tracing::store::open_ro(p).ok())
+            .and_then(|c| wstore::recent_runs(&c, None, 20).ok())
+            .unwrap_or_default();
+        for r in stored {
+            if items.iter().any(|i| i.run_id == r.id) {
+                continue;
+            }
+            items.push(PickItem {
+                word: format!(
+                    "{} · {}",
+                    r.status,
+                    super::runs_view::ago(r.ended_ns.unwrap_or(r.started_ns), now)
+                ),
+                run_id: r.id,
+                name: r.workflow,
+                live: false,
+            });
+        }
+        let cursor = items
+            .iter()
+            .position(|i| i.run_id == st.run_id)
+            .unwrap_or(0);
+        Picker { items, cursor }
     }
 
     /// Ticks the open screen: a run that is going moves, a finished one
@@ -954,10 +1182,38 @@ impl App {
             self.mode = Mode::Run(st);
             return;
         }
+        if let Some(mut picker) = st.picker.take() {
+            let n = picker.items.len();
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    picker.cursor = (picker.cursor + 1).min(n.saturating_sub(1))
+                }
+                KeyCode::Up | KeyCode::Char('k') => picker.cursor = picker.cursor.saturating_sub(1),
+                KeyCode::Enter => {
+                    // the other run takes the screen, opened from the same place
+                    if let Some(item) = picker.items.get(picker.cursor)
+                        && self.open_run_screen(&item.run_id, st.origin)
+                    {
+                        return;
+                    }
+                    self.mode = Mode::Run(st);
+                    return;
+                }
+                KeyCode::Esc | KeyCode::Char('o' | 'q') => {
+                    self.mode = Mode::Run(st);
+                    return;
+                }
+                _ => {}
+            }
+            st.picker = Some(picker);
+            self.mode = Mode::Run(st);
+            return;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let pane = st.focus == Focus::Pane;
         let mut stay = true;
         match key.code {
+            KeyCode::Char('o') if !ctrl => st.picker = Some(self.run_picker(&st)),
             KeyCode::Char(c @ '1'..='9') => st.set_tab(c as usize - '1' as usize),
             KeyCode::Tab | KeyCode::BackTab => {
                 st.focus = if pane { Focus::Tree } else { Focus::Pane }
@@ -983,8 +1239,14 @@ impl App {
                         );
                     }
                 }
-                Some(Verb::Top) if pane => st.scroll = 0,
-                Some(Verb::Bottom) if pane => st.scroll = st.max_scroll.get(),
+                Some(Verb::Top) if pane => {
+                    st.scroll = 0;
+                    st.follow = false;
+                }
+                Some(Verb::Bottom) if pane => {
+                    st.scroll = st.max_scroll.get();
+                    st.follow = true;
+                }
                 Some(Verb::Top) => st.put_cursor(0),
                 Some(Verb::Bottom) => st.put_cursor(usize::MAX),
                 Some(Verb::PageDown) => st.scroll_by(10),
@@ -995,6 +1257,8 @@ impl App {
         }
         // an action that opened another screen keeps it
         if stay && matches!(self.mode, Mode::Main) {
+            // the row or the tab may have changed: what it shows is read
+            self.fill_run_screen(&mut st, false);
             self.mode = Mode::Run(st);
         }
     }

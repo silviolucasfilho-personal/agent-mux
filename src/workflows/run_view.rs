@@ -10,10 +10,12 @@
 //! plain data), `from_stored` reads `workflow_runs` and `workflow_steps`.
 //! Nothing here knows the App or draws anything.
 //!
-//! A resumed run's journal starts as a copy of the entries it may replay,
-//! and the store does not say which of them the run consumed; `from_stored`
-//! works that out (`replayed_entries`), exactly for a run that has ended
-//! unless its budget ran out in the middle of a step.
+//! A resumed run's journal starts as a copy of the entries it may replay.
+//! The run records which of them it consumed (`StoredRun.replayed`, a file
+//! in its directory) and `from_stored` reads that. A run from before that
+//! record has none: `from_stored` then works it out (`replayed_entries`),
+//! exactly for a run that has ended unless its budget ran out in the
+//! middle of a step.
 //!
 //! A stored run has no step phases and no item counts, so `from_stored`
 //! reads the run again (`resimulate`): the interpreter over the stored
@@ -401,6 +403,11 @@ pub struct StoredRun<'a> {
     pub journal: &'a [Entry],
     /// The store keeps no dollar cap; the caller passes it when it knows.
     pub usd_cap: Option<f64>,
+    /// The labels of the copied entries the run replayed, as the run
+    /// recorded them (`context::replayed_file`). `None` for a run from
+    /// before that record: the entries are then worked out, as an
+    /// estimate where the module docs say so.
+    pub replayed: Option<&'a [String]>,
 }
 
 // ---- the common model -----------------------------------------------------
@@ -923,7 +930,17 @@ pub fn from_stored(stored: &StoredRun<'_>) -> RunTree {
     let sim = doc
         .as_ref()
         .map(|d| resimulate(d, run, stored.steps, &copied));
-    for e in replayed_entries(sim.as_ref(), run, status, stored.steps, copied) {
+    // the run's own record of what it replayed is exact; without it the
+    // interpreter read again says
+    let replayed = match stored.replayed {
+        Some(labels) => copied
+            .iter()
+            .copied()
+            .filter(|e| labels.contains(&e.key))
+            .collect(),
+        None => replayed_entries(sim.as_ref(), run, status, stored.steps, copied.clone()),
+    };
+    for e in replayed {
         let Some(key) = SessionKey::parse(&e.step, &e.key) else {
             continue;
         };
@@ -1168,6 +1185,8 @@ mod tests {
         live: Vec<(SessionSpec, String, bool, String, i64, Option<i64>)>,
         rows: Vec<WorkflowStep>,
         journal: Vec<Entry>,
+        /// What the run recorded as replayed, when it did.
+        replayed: Option<Vec<String>>,
         clock: i64,
     }
 
@@ -1190,6 +1209,7 @@ mod tests {
                 live: Vec::new(),
                 rows: Vec::new(),
                 journal: Vec::new(),
+                replayed: None,
                 clock: 100,
             }
         }
@@ -1352,6 +1372,7 @@ mod tests {
                 steps: &self.rows,
                 journal: &self.journal,
                 usd_cap: Some(2.0),
+                replayed: self.replayed.as_deref(),
             })
         }
 
@@ -1882,6 +1903,26 @@ prompt = "report"
     }
 
     #[test]
+    fn the_runs_own_record_of_what_it_replayed_wins_over_the_estimate() {
+        let mut first = Sim::new(ONCE);
+        first.drive(|_| text("x"));
+        let tight = ONCE.replace("budget_tokens = 200000", "budget_tokens = 1000");
+        let mut second = Sim::resuming(&tight, &first);
+        assert!(second.start(4).is_empty());
+        // the record names what the run consumed: the tree is the same
+        second.replayed = Some(vec!["scope".into()]);
+        assert_eq!(outline(&second.stored_tree()), ["↷ 1 scope", "⋯ 2 report"]);
+        // and it is what decides: a record naming both shows both
+        second.replayed = Some(vec!["scope".into(), "report".into()]);
+        let both = second.stored_tree();
+        assert_eq!(step(&both, "report").state, State::Replayed);
+        // a record naming none shows none, whatever the journal holds
+        second.replayed = Some(Vec::new());
+        let none = second.stored_tree();
+        assert!(none.rows.iter().all(|r| r.state != State::Replayed));
+    }
+
+    #[test]
     fn a_running_resumed_run_replays_only_what_it_has_reached() {
         // `report` reads `find`, whose second item is still running: its
         // copied entry waits
@@ -1994,6 +2035,7 @@ prompt = "report {find}"
             steps: &sim.rows,
             journal: &[],
             usd_cap: None,
+            replayed: None,
         });
         assert_eq!(outline(&tree), ["✗ 1 find", "  ✓ [0]", "  ✗ [1]"]);
         assert_eq!(tree.run().state, State::Failed);

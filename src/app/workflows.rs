@@ -30,6 +30,9 @@ const CAPTURE_CAP: usize = 4 * 1024 * 1024;
 pub struct CapturedOutput {
     head: Vec<u8>,
     tail: std::collections::VecDeque<u8>,
+    /// Every byte ever appended: a reader decodes again only when this
+    /// has moved.
+    total: u64,
     truncated: bool,
     tail_boundary: bool,
     view: std::sync::OnceLock<Vec<u8>>,
@@ -40,6 +43,7 @@ impl CapturedOutput {
         use crate::workflows::live::CAPTURE_GAP;
         const HEAD_CAP: usize = 8 * 1024;
         self.view.take();
+        self.total += bytes.len() as u64;
         if !self.truncated && self.tail.len().saturating_add(bytes.len()) <= CAPTURE_CAP {
             self.tail.extend(bytes);
             return;
@@ -84,6 +88,11 @@ impl CapturedOutput {
         }
     }
 
+    /// How many bytes were appended so far, kept or not.
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
     /// A read-only view compatible with the envelope and Live decoders.
     /// Discard a leading tail fragment at read time, so both retained ranges
     /// are exact source ranges beginning on line and UTF-8 boundaries.
@@ -116,6 +125,35 @@ impl std::ops::Deref for CapturedOutput {
     fn deref(&self) -> &Self::Target {
         self.snapshot()
     }
+}
+
+/// Writes what a session printed into the run's directory, where the Run
+/// screen's Live tab reads it once the session has ended.
+fn keep_output(run_dir: &std::path::Path, s: &LiveWorkflowSession) {
+    let path = context::output_file(run_dir, &s.key.label());
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, s.stdout.snapshot());
+}
+
+/// Records which copied journal entries a resumed run has replayed so
+/// far, so the stored run is read exactly (`run_view::StoredRun.replayed`).
+fn record_replayed(run: &LiveWorkflowRun) {
+    if run.resumed_from.is_none() {
+        return;
+    }
+    let labels: Vec<String> = run
+        .state
+        .records
+        .iter()
+        .filter(|r| run.state.was_replayed(&r.key))
+        .map(|r| r.key.label())
+        .collect();
+    let _ = std::fs::write(
+        context::replayed_file(&run.run_dir),
+        serde_json::to_string(&labels).unwrap_or_default(),
+    );
 }
 
 fn append_capture(stdout: &mut CapturedOutput, bytes: &[u8]) {
@@ -1285,6 +1323,7 @@ impl App {
         self.write_workflow_step_row(ri, si, Some((&outcome, tokens, cost)));
         let run = &mut self.live_workflow_runs[ri];
         let s = run.sessions.remove(si);
+        keep_output(&run.run_dir, &s);
         run.ended.push(EndedWorkflowSession {
             spec: s.spec,
             harness: s.harness,
@@ -1301,6 +1340,7 @@ impl App {
         if let Some(n) = wt_note {
             run.state.notes.push(n);
         }
+        record_replayed(run);
     }
 
     /// Records a finished run and moves it to the recent list.
@@ -1315,6 +1355,11 @@ impl App {
         };
         let ended_ns = crate::tracing::store::now_ns();
         let live = &self.live_workflow_runs[ri];
+        // a session the run ended under never answered: its output stays
+        for s in &live.sessions {
+            keep_output(&live.run_dir, s);
+        }
+        record_replayed(live);
         self.write_workflow_run_row(live, status_label, Some(ended_ns));
         let (result, error) = match &status {
             RunStatus::Finished(v) | RunStatus::BudgetExhausted(v) => (v.clone(), None),
