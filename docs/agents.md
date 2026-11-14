@@ -91,6 +91,21 @@ On OpenCode the list becomes the agent's `tools` map, every tool of a canonical 
 
 The same file can say what the agent does on its own and when. `[task]` names exactly one thing: a `pattern` (a loop pattern from the task library, `docs/loops.md` section 4), a `skill` it runs, or a `prompt` in words. Without `[schedule]` it runs when you start it: it is listed under **on demand** in the Agents list, and `Enter` there opens the New session dialog ("New session as <name>") with its persona flags on the command line and its task as the first message (the prompt, or `/skill` / `$skill`, installed first). `r` on a persona row does the same without a first message. `[schedule]` makes it run every interval instead; `[limits]` sets its budgets.
 
+### Following a session: its run screen
+
+`i` on a session's row in the Agents list opens its run screen, in the layout of a flow's Run screen (`docs/workflows.md`): the session where the list is, with its sub-agents as rows under it, and the selected row in the main pane.
+
+- **Card** says who is running and how far it got: the skill or persona and what it is for, the harness, profile and model, the tools (a persona's list; a skill takes the harness's own), the folder, what it was asked, and turns, tokens, cost and the tool running now.
+- **Live** is the session's own terminal. `Enter` gives it the keyboard; the Focus chord returns to the tree.
+- **Trace** has its turns and tools from the trace store; a sub-agent's row shows its own part of it.
+- **Changes** lists the files its tools wrote, then the folder's uncommitted changes (`git diff --stat`), which may include changes the session did not make.
+
+`1`–`4` pick a tab, `↑`/`↓` a row, `Ctrl+D`/`Ctrl+U` scroll, and `i` or `Esc` returns. Starting a skill or a persona still lands in its terminal; the screen is one key away. Any session opens it, also a plain harness session, whose card has no skill or persona line. A session that is not traced has a card and a terminal, and no trace or files.
+
+While a persona's session runs, its row in the Agents list shows the harness it runs on, and the session's pane title leads with the persona (`skeptic · Claude Code — ~/code/api [working]`).
+
+A session started as a persona records it on its launch row (`metadata.agent`), and the runs view (`E`) lists a persona's runs by it: under **Running** while the session is going, under **Earlier** afterwards. `Enter` there opens the run's screen, from the store once the session has left the list. Sessions from before this record are not listed. A skill's runs stay in the Skills view's Executions tab.
+
 ```toml
 name = "todo-digest"
 description = "Summarizes the open TODOs"

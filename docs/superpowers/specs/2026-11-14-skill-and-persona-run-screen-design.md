@@ -1,7 +1,7 @@
 # Skills and personas: a run screen for one session — design
 
-Status: draft for the operator's approval, 2026-11-14. Nothing here is
-implemented. Second round of
+Status: implemented, 2026-11-14 (branch `spec/session-run-screen`).
+Section 8 lists where the code differs from this text. Second round of
 `2026-11-13-run-screen-and-flow-editor-ux-design.md` (its section 6).
 
 Operator decisions (2026-11-14):
@@ -126,3 +126,22 @@ last screen while the session is still listed, else says it has ended.
    diff is labelled as the folder's.
 2. **Skill runs in the runs view** are left out (§3). Adding them later
    needs no new record.
+
+## 8. As built (2026-11-14)
+
+- **A mode of its own.** The screen is `Mode::SessionRun`
+  (`app::session_screen`, `ui::session_screen`), with the Run screen's
+  geometry, not a second body of `Mode::Run` (§2.1, package B): a flow's
+  tree and a session's terminal share the layout and little else.
+- **Tabs in Live.** The terminal takes the whole pane so the PTY keeps
+  its size; the tabs and the screen's keys are listed under the tree's
+  rows, and the other tabs draw a tab bar.
+- **The persona is recorded** only for a launch from the New session
+  dialog (`App.launch_agent`). A swarm's worker and a flow's session run
+  as agents too and are not listed as persona runs.
+- **A past run that has no end in the store** reads `running elsewhere`:
+  its card, trace and changes are shown, its terminal is not here.
+- **What it was asked** is the launch's opening message, which a live
+  session keeps; a past run's card has none.
+- **`x` and `r`** are not on this screen: stopping and resuming a session
+  stay in the Agents list.
