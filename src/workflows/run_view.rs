@@ -10,6 +10,11 @@
 //! plain data), `from_stored` reads `workflow_runs` and `workflow_steps`.
 //! Nothing here knows the App or draws anything.
 //!
+//! A resumed run's journal starts as a copy of the entries it may replay,
+//! and the store does not say which of them the run consumed; `from_stored`
+//! works that out (`replayed_entries`), exactly for a run that has ended
+//! unless its budget ran out in the middle of a step.
+//!
 //! A stored run has no step phases, so `from_stored` infers them. For a
 //! finished run that is exact. For one that is still going, or that
 //! stopped early, three things are estimates: the item count of a step
@@ -19,7 +24,9 @@
 //! done). The live tree has the interpreter's own answer for all three.
 
 use super::document::{Over, Runner, Step, StepKind, Workflow};
-use super::interp::{Role, RunState, RunStatus, SessionKey, SessionSpec, StepPhase};
+use super::interp::{
+    Caps, Role, RunState, RunStatus, SessionDone, SessionKey, SessionSpec, StepPhase,
+};
 use super::journal::Entry;
 use super::result::Outcome;
 use super::store::{WorkflowRun, WorkflowStep};
@@ -387,7 +394,8 @@ pub struct StoredRun<'a> {
     pub steps: &'a [WorkflowStep],
     /// The run's `journal.jsonl`: a resumed run's replayed sessions have
     /// no row of their own and are read from here, as is the reason of a
-    /// null answer. May be empty.
+    /// null answer. It also holds the copied entries the run never
+    /// reached, which are left out. May be empty.
     pub journal: &'a [Entry],
     /// The store keeps no dollar cap; the caller passes it when it knows.
     pub usd_cap: Option<f64>,
@@ -624,7 +632,20 @@ fn assemble(f: Facts<'_>) -> RunTree {
 
         // a step with one session has no child row: the step is the session
         let only = (sessions.len() == 1 && planned <= 1).then(|| sessions[0]);
-        let runner = step.map(Workflow::runner_of).unwrap_or_default();
+        // who ran a session: what the run says, else the document's answer
+        // for its role (a refuter and a judge have their own runner)
+        let runner_of_session = |s: &Sess| {
+            s.runner
+                .clone()
+                .or_else(|| step.map(|st| runner_for(st, &s.key.role)))
+                .unwrap_or_default()
+        };
+        // the step row is its one session's, so it shows that session's
+        // runner: the judge's when a tournament over two items runs one judge
+        let runner = match only {
+            Some(s) => runner_of_session(s),
+            None => step.map(Workflow::runner_of).unwrap_or_default(),
+        };
         let items = sf.items.or_else(|| {
             settled
                 .then(|| sessions.iter().map(|s| s.key.item + 1).max())
@@ -656,11 +677,7 @@ fn assemble(f: Facts<'_>) -> RunTree {
             continue;
         }
         for s in sessions {
-            let runner = s
-                .runner
-                .clone()
-                .or_else(|| step.map(|st| runner_for(st, &s.key.role)))
-                .unwrap_or_default();
+            let runner = runner_of_session(s);
             rows.push(Row {
                 kind: RowKind::Session,
                 depth: 2,
@@ -889,11 +906,17 @@ pub fn from_stored(stored: &StoredRun<'_>) -> RunTree {
                 .flatten(),
         });
     }
-    // a journaled session with no row of its own was replayed
-    for e in stored.journal {
-        if sessions.iter().any(|s| s.label == e.key) {
-            continue;
+    // a journaled session with no row of its own was copied from the run
+    // this one resumed; only those the interpreter met again were replayed
+    let mut copied: Vec<&Entry> = Vec::new();
+    for e in stored.journal.iter().rev() {
+        let has_row = sessions.iter().any(|s| s.label == e.key);
+        if !has_row && !copied.iter().any(|c| c.key == e.key) {
+            copied.push(e);
         }
+    }
+    copied.reverse();
+    for e in replayed_entries(doc.as_ref(), run, status, stored.steps, copied) {
         let Some(key) = SessionKey::parse(&e.step, &e.key) else {
             continue;
         };
@@ -941,6 +964,88 @@ pub fn from_stored(stored: &StoredRun<'_>) -> RunTree {
         started_ns: Some(run.started_ns),
         ended_ns: run.ended_ns,
     })
+}
+
+/// The copied journal entries the run replayed, in the order it met them.
+///
+/// A resume copies every entry it may replay into the new run's journal
+/// before the interpreter starts, and nothing records which of them the
+/// interpreter then consumed: a run that stops early (its budget spent by
+/// the replays themselves, a cancel, a failure) leaves the rest unread.
+/// So this reads the run again: the interpreter is run over the copied
+/// entries and the answers of the run's own rows, which gives the entries
+/// it meets and their order. When the run has ended, `workflow_runs.sessions`
+/// says how many sessions it answered, and the entries are cut to that
+/// count. What is still an estimate: a run that has not ended (the count
+/// is written only at its end), where an entry behind a spent budget
+/// reads as replayed until the run's last row is written; and a budget
+/// spent in the middle of a step that also had sessions of its own, where
+/// the count is right and the entries are the first the interpreter would
+/// meet. Without a document the journal's own order stands in.
+fn replayed_entries<'a>(
+    doc: Option<&Workflow>,
+    run: &WorkflowRun,
+    status: Status,
+    rows: &[WorkflowStep],
+    copied: Vec<&'a Entry>,
+) -> Vec<&'a Entry> {
+    if copied.is_empty() {
+        return copied;
+    }
+    let answered = |r: &&WorkflowStep| r.kind != "running";
+    let mut met = match doc {
+        None => copied,
+        Some(doc) => {
+            let owned: Vec<Entry> = copied.iter().map(|e| (*e).clone()).collect();
+            let caps = Caps {
+                max_sessions: usize::MAX,
+                budget_tokens: None,
+            };
+            let mut sim = RunState::new(doc.clone(), run.args.clone(), caps)
+                .with_replay(super::journal::to_replay(&owned));
+            // every pass answers at least one row, or is the last
+            for _ in 0..=rows.len() {
+                let mut fed = false;
+                for spec in sim.next(usize::MAX) {
+                    let label = spec.label();
+                    let Some(row) = rows.iter().filter(answered).find(|r| r.session == label)
+                    else {
+                        continue;
+                    };
+                    let outcome = match row.kind.as_str() {
+                        "text" => Outcome::Text(row.result.as_str().unwrap_or_default().into()),
+                        "object" => Outcome::Object(row.result.clone()),
+                        _ => Outcome::Null("no answer".into()),
+                    };
+                    sim.complete(
+                        &spec.key,
+                        SessionDone {
+                            outcome,
+                            tokens: 0,
+                            cost_usd: 0.0,
+                        },
+                    );
+                    fed = true;
+                }
+                if !fed {
+                    break;
+                }
+            }
+            sim.records
+                .iter()
+                .filter(|r| sim.was_replayed(&r.key))
+                .filter_map(|r| {
+                    let label = r.key.label();
+                    copied.iter().copied().find(|e| e.key == label)
+                })
+                .collect()
+        }
+    };
+    if status != Status::Running {
+        let own = rows.iter().filter(answered).count();
+        met.truncate((run.sessions.max(0) as usize).saturating_sub(own));
+    }
+    met
 }
 
 /// The phase of every step, which the store does not keep.
@@ -1014,7 +1119,6 @@ fn infer_phase(
 mod tests {
     use super::*;
     use crate::workflows::document::parse;
-    use crate::workflows::interp::{Caps, SessionDone};
 
     /// What the App keeps of a run, driven here by a fake: the
     /// interpreter, its live sessions, and the rows and journal the App
@@ -1050,7 +1154,12 @@ mod tests {
         fn resuming(text: &str, earlier: &Sim) -> Sim {
             let mut sim = Sim::new(text);
             sim.journal = earlier.journal.clone();
-            sim.state = RunState::new(parse(text).unwrap(), serde_json::json!({}), Caps::default())
+            let doc = parse(text).unwrap();
+            let caps = Caps {
+                max_sessions: 1000,
+                budget_tokens: doc.budget_tokens,
+            };
+            sim.state = RunState::new(doc, serde_json::json!({}), caps)
                 .with_replay(crate::workflows::journal::to_replay(&earlier.journal));
             sim
         }
@@ -1628,6 +1737,94 @@ prompt = "report"
         assert_eq!(
             step(&all, "report").launch_id.as_deref(),
             Some("launch-report")
+        );
+    }
+
+    #[test]
+    fn a_copied_entry_the_resumed_run_never_reached_is_not_replayed() {
+        let mut first = Sim::new(ONCE);
+        first.drive(|_| text("x"));
+        assert_eq!(first.journal.len(), 2);
+
+        // the same flow with a budget the first replayed step spends: the
+        // second entry was copied into the journal and never consumed
+        let tight = ONCE.replace("budget_tokens = 200000", "budget_tokens = 1000");
+        let mut second = Sim::resuming(&tight, &first);
+        assert!(second.start(4).is_empty());
+        assert_eq!(second.state.replayed, 1);
+        assert_eq!(second.journal.len(), 2, "both entries were copied");
+        let tree = second.tree();
+        assert_eq!(tree.status, Status::BudgetExhausted);
+        assert_eq!(outline(&tree), ["↷ 1 scope", "⋯ 2 report"]);
+        let report = step(&tree, "report");
+        assert_eq!((report.tokens, report.cost_usd), (0, 0.0));
+        assert_eq!(report.launch_id, None);
+        assert_eq!((tree.totals.tokens, tree.totals.cost_usd), (1500, 0.25));
+        assert_eq!((tree.run().done, tree.run().planned), (1, 2));
+        assert_eq!(tree.totals.sessions_done, 1);
+    }
+
+    #[test]
+    fn a_running_resumed_run_replays_only_what_it_has_reached() {
+        // `report` reads `find`, whose second item is still running: its
+        // copied entry waits
+        let mut first = Sim::new(RESUME);
+        first.drive(|_| text("x"));
+        let mut again = Sim::resuming(RESUME, &first);
+        again.journal.retain(|e| e.key != "find[1]");
+        again.state = RunState::new(
+            parse(RESUME).unwrap(),
+            serde_json::json!({}),
+            Caps::default(),
+        )
+        .with_replay(crate::workflows::journal::to_replay(&again.journal));
+        assert_eq!(again.start(4).len(), 1);
+        let tree = again.tree();
+        assert_eq!(
+            outline(&tree),
+            ["◷ 1 find", "  ↷ [0]", "  ▶ [1]", "⋯ 2 report"]
+        );
+        assert_eq!(tree.totals.tokens, 1500);
+    }
+
+    const JUDGE: &str = r#"
+[workflow]
+name = "flow"
+description = "d"
+output = "rank"
+[[steps]]
+id = "rank"
+kind = "tournament"
+over = ["a", "b"]
+harness = "codex"
+agent = "reviewer"
+model = "gpt-5"
+judge = { prompt = "pick", agent = "judge", model = "opus", effort = "high" }
+"#;
+
+    #[test]
+    fn a_step_that_is_its_one_judge_shows_the_judges_runner() {
+        let mut sim = Sim::new(JUDGE);
+        let specs = sim.start(4);
+        assert_eq!(specs.len(), 1);
+        assert!(matches!(specs[0].key.role, Role::Judge { .. }));
+        let judge = Who {
+            harness: "codex".into(),
+            inherited: false,
+            agent: Some("judge".into()),
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        };
+        let running = sim.tree();
+        assert_eq!(outline(&running), ["▶ 1 rank"]);
+        assert_eq!(step(&running, "rank").who, judge);
+        sim.finish(&specs[0], obj(serde_json::json!({ "winner": "a" })));
+        let done = sim.tree();
+        assert_eq!(outline(&done), ["✓ 1 rank"]);
+        assert_eq!(step(&done, "rank").who, judge);
+        assert_eq!(
+            step(&done, "rank").session.as_deref(),
+            Some("rank/judge1.1")
         );
     }
 
