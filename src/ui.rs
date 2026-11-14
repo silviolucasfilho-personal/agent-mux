@@ -7,6 +7,7 @@ mod loop_builder;
 pub mod markdown;
 pub mod memory;
 mod runs;
+pub mod step_row;
 pub mod swarm_board;
 pub mod workspaces;
 
