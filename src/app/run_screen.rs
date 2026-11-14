@@ -759,7 +759,7 @@ impl App {
     /// The run as it stands now: from memory while it runs here, else
     /// from the store.
     pub fn run_screen_data(&self, run_id: &str) -> Result<RunData, String> {
-        use super::workflows_view::{headline_lines, report_lines, rule, value_lines};
+        use super::run_report::{headline_lines, report_lines, rule, value_lines};
         let conn = self
             .trace_db_path
             .as_deref()

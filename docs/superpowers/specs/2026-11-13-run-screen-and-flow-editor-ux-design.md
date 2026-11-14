@@ -1,7 +1,8 @@
 # Flows: a Run screen in the swarm's layout, and a clearer flow editor — design
 
-Status: draft for the operator's approval, 2026-11-13. Nothing here is
-implemented.
+Status: implemented, 2026-11-14 (branch `spec/run-screen-ux`). Section 8
+lists where the code differs from this text. Skills and personas (§6) are
+not designed yet.
 
 Operator decisions (2026-11-13):
 - **Order:** flows first. Skills and personas follow in a second round (§6).
@@ -229,3 +230,26 @@ persona, model and tools; the Skills view's usage tabs stay.
 1. **Live output:** probed, §2.5.
 2. **Picker:** yes, `o` (§2.6).
 3. **Stopping:** both the run and one session (§2.6.1).
+
+## 8. As built (2026-11-14)
+
+- **Tabs.** The run row has Board, Live, Timeline, Result, Document; a
+  step or session row Step, Live, Trace, Changes (§2.3, §2.4).
+- **Kept output.** A session's output is written to `<run>/output/` when
+  it ends, so Live has it afterwards; a run from before this has none.
+- **A step with several sessions** has no tail or trace of its own: its
+  sessions do, and the run's Live tab shows those running.
+- **Resume.** A resumed run records the journal entries it replayed
+  (`<run>/replayed.json`); `run_view::from_stored` reads that and keeps
+  its estimate for older runs.
+- **OpenCode.** The tail keeps the first session id in the stream
+  (issue 131 covers a stream that carries a second one).
+- **The editor's settings row** reads `⚙ flow settings · <budget>`, the
+  flow's name being in the header; the chain keeps its `passes` lines.
+- **A step's own pane** keeps Votes, Keep when, Voters and Judge; the
+  refuters' and judge's rows add their harness, model and effort.
+- **The old flow run view** is gone (`WorkflowsViewState`); a plan's
+  detail in the runs view is `workflows_view::plan_lines`, and the report
+  builder is `app::run_report`.
+- **Keys.** The status bar shows four registry hints, so the tree lists
+  the screen's own keys under its rows.

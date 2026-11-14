@@ -5,16 +5,14 @@
 //! `loop_runs`, flow runs from `workflow_runs` and the live runs from the
 //! App. A flow's run keeps its line here and opens on the Run screen
 //! (`Enter`, `run_screen`); a loop run's and a plan's tabs are built by
-//! the loop and workflow detail builders (`loops_view::LoopsViewState`,
-//! `workflows_view::WorkflowsViewState`), which have no screen of their
-//! own any more.
+//! the loop detail builder (`loops_view::LoopsViewState`, which has no
+//! screen of its own any more) and `workflows_view::plan_lines`.
 
 use super::inbox::InboxItem;
-use super::workflows_view::RunRow;
 use super::{App, Mode, Notice};
 use crate::keymap::{Verb, verb};
 use crate::loops::store::{self as lstore, LoopRun};
-use crate::workflows::store::{self as wstore, WorkflowRun, WorkflowStep};
+use crate::workflows::store::{self as wstore, WorkflowRun};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use std::time::{Duration, Instant};
@@ -165,8 +163,6 @@ pub struct RunsViewState {
     pub detail_focused: bool,
     /// Why stored runs could not be read (tracing off, store error).
     pub error: Option<String>,
-    /// The selected flow run's steps, read when it is selected.
-    pub steps: Vec<WorkflowStep>,
     /// Today's runs, tokens and cost, for the header.
     pub today: (usize, i64, f64),
     /// The selected run's tab as the loop or workflow detail builder
@@ -440,7 +436,6 @@ impl App {
             scroll: 0,
             detail_focused: false,
             error,
-            steps: Vec::new(),
             today,
             detail: None,
             save_name: None,
@@ -526,30 +521,19 @@ impl App {
             return;
         }
         if item.run.is_flow() {
-            use super::workflows_view::{ViewTab, WorkflowsViewState};
-            let row = match &item.run {
-                RunRef::Inbox(InboxItem::Plan { agent: true, .. }) => return,
-                RunRef::Inbox(InboxItem::Plan { id, .. }) => RunRow::Planned(id.clone()),
-                _ => return,
-            };
-            let facts = self.view_facts();
-            let mut v = WorkflowsViewState::new(
-                self.trace_db_path.as_deref(),
-                self.runtime_dir.as_deref(),
-                &facts,
-            );
-            v.select(&row, &facts);
-            if v.selected_row() != Some(&row) {
+            // a plan that is a flow: its document, as the planner wrote it
+            let RunRef::Inbox(InboxItem::Plan {
+                id, agent: false, ..
+            }) = &item.run
+            else {
                 return;
-            }
-            let tab = match st.tab {
-                RunTab::Report => ViewTab::Report,
-                RunTab::Sessions => ViewTab::Steps,
-                RunTab::Result => ViewTab::Result,
-                _ => ViewTab::Document,
             };
-            v.set_tab(tab, &facts);
-            st.detail = Some(v.detail_lines.clone());
+            if let Some(p) = self.planned_workflows.iter().find(|p| &p.id == id) {
+                st.detail = Some(super::workflows_view::plan_lines(
+                    p,
+                    matches!(st.tab, RunTab::Report | RunTab::Setup),
+                ));
+            }
         } else {
             use super::loops_view::{LoopsTab, LoopsViewState};
             if st.tab == RunTab::Result {
@@ -590,22 +574,9 @@ impl App {
         }
     }
 
-    /// The selected flow run's steps, from the store, and the selected
-    /// tab's detail.
+    /// The selected run's tab.
     fn load_run_steps(&self, st: &mut RunsViewState) {
         self.build_run_detail(st);
-        st.steps.clear();
-        let id = match st.selected_item().map(|i| &i.run) {
-            Some(RunRef::Flow(r)) => r.id.clone(),
-            Some(RunRef::FlowLive(id)) => id.clone(),
-            Some(RunRef::Inbox(InboxItem::Run { run_id, .. })) => run_id.clone(),
-            _ => return,
-        };
-        if let Some(p) = self.trace_db_path.as_deref()
-            && let Ok(c) = crate::tracing::store::open_ro(p)
-        {
-            st.steps = wstore::steps_of(&c, &id).unwrap_or_default();
-        }
     }
 
     pub fn handle_runs_view_key(&mut self, key: &KeyEvent) {

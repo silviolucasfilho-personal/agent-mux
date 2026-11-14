@@ -29,6 +29,7 @@ pub mod harness_recap;
 pub mod inbox;
 pub mod loop_builder;
 pub mod new_agent;
+pub mod run_report;
 pub mod run_screen;
 pub mod runs_view;
 pub mod shortcut_probe;

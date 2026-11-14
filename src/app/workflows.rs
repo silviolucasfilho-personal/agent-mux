@@ -1979,9 +1979,7 @@ pub(crate) fn short_task(task: &str) -> String {
 // ---- the section, the dialog and the view -------------------------------------
 
 use crate::app::dir_picker::PickerEvent;
-use crate::app::workflows_view::{
-    DialogField, DialogPurpose, RunRow, ViewFacts, WorkflowDialogState,
-};
+use crate::app::workflows_view::{DialogField, DialogPurpose, RunRow, WorkflowDialogState};
 use crate::app::{Action, Mode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -2647,15 +2645,6 @@ impl App {
                     Err(e) => fail(self, e),
                 }
             }
-        }
-    }
-
-    pub fn view_facts(&self) -> ViewFacts<'_> {
-        ViewFacts {
-            live: &self.live_workflow_runs,
-            recent: &self.recent_workflow_runs,
-            planned: &self.planned_workflows,
-            plans_in_flight: self.live_workflow_plans.len(),
         }
     }
 

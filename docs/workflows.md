@@ -10,15 +10,38 @@ Design: `docs/superpowers/specs/2026-09-17-workflows-design.md`. The idea follow
 
 1. In the **Agents** list, the flows are the rows under the `flows` heading. The nine built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`, `santa-review`, `grimoire-review`. The main pane describes the selected one in words: each step, what it starts sessions for and what it filters or checks (the skill and any CLI it names in grey under it), the arguments it needs or takes, about how many sessions a run starts, and the last run.
 
-   Above the library the section lists what is going on, each group under its heading: **Running** (`▶ name 3/7`), **Plans to review** (`⏸`, the planner's documents waiting for you), and **Recent** (`✓ name done`, the last three runs finished since agent-mux started). `Enter` on a run or a plan opens the runs view on it; `Enter` on a library document opens the run dialog. The selection stays on its row when a run starts or ends.
-2. `Enter` opens the run dialog on what the run is for: one field per declared arg first, then the workspace (one line; the shared directory picker opens while the field has focus), the profile (one per harness the document allows) and **More ▸**, whose summary says what it hides (`no token budget · no cost cap · in place`). `Space` or `→` on **More** shows a token budget, a USD cap, the isolation default and one **Steps** row per step: the CLI that step runs on for this run (`←`/`→` or `Space`; it starts on the step's default, shown as `codex · set by the document` or `claude · the run's profile`, and offers only harnesses you have a profile for). Under the form, about how many sessions the run starts. `Enter` starts the run from any field.
+   Above the library the section lists what is going on, each group under its heading: **Running** (`▶ name 3/7`), **Plans to review** (`⏸`, the planner's documents waiting for you), and **Recent** (`✓ name done`, the last three runs finished since agent-mux started). `Enter` on a run opens its Run screen (below), on a plan the runs view; `Enter` on a library document opens the run dialog. The selection stays on its row when a run starts or ends.
+2. `Enter` opens the run dialog on what the run is for: one field per declared arg first, then the workspace (one line; the shared directory picker opens while the field has focus), the profile (one per harness the document allows) and **More ▸**, whose summary says what it hides (`no token budget · no cost cap · in place`). `Space` or `→` on **More** shows a token budget, a USD cap, the isolation default and one **Steps** row per step: the CLI that step runs on for this run (`←`/`→` or `Space`; it starts on the step's default, shown as `codex · set by the document` or `claude · the run's profile`, and offers only harnesses you have a profile for). Under the form, about how many sessions the run starts. `Enter` starts the run from any field and opens the Run screen on it.
 3. The run's sessions appear in **Active** under one header — `▾ ⚙ <workflow> <running>/<total>▶ #<run>` — with each step hanging off it by its own name; attach to any of them to watch it. `space` folds the run away into that single row, and the trace browser (`T`) groups the same run the same way. The run's row under **Running** shows `▶ done/started`.
-4. `W` opens the runs view, where the run is listed under **Running**; its tabs are the run's report, the step ledger behind it, what it changed, the result and the document.
-5. When the run finishes, the notice leads with what the run answered; the preview card shows the last run; the report is in the runs view and in `agent-mux workflow status <run>`, and the raw result in the **Result** tab and in `result.json` under the run directory.
+4. The Run screen follows the run: every step from the start, who runs each, and what each session prints. `W` opens the runs view, where the run is listed under **Running**; `Enter` there opens the same screen.
+5. When the run finishes, the notice leads with what the run answered; the preview card shows the last run; the report is on the Run screen's **Result** tab and in `agent-mux workflow status <run>`, with the answer in full under it and in `result.json` under the run directory.
 
-### Reading a run in the runs view
+### Following a run: the Run screen
 
-`Enter` on a flow run in the runs view (`W`), or on the flow's row, opens the view on the **Report** tab: what the run answered, the
+A flow's run has a screen of its own, in the Swarm screen's layout: the run as a tree where the Agents list is, and the selected row in the main pane.
+
+```text
+┌ review-pr · running 4m ────┐┌ review-pr · running 4m · step 2/5 ─────────────────────┐
+│ ◆ review-pr       2/5  41k ││  1 Board  2 Live  3 Timeline  4 Result  5 Document      │
+│   ✓ 1 scope    claude      ││                                                         │
+│ ▸ ✓ 2 find  ⇉ 4 codex 4/4  ││   # step       runs            who             state    │
+│ ▾ ◷ 3 confirmed ↓ 2/4      ││   1 scope      once            claude·planner  ✓ 42s    │
+│     ✓ [0]  claude·skeptic  ││   2 find       ⇉ 4 in parallel codex           ✓ 2m 10s │
+│     ▶ [1]  claude·skeptic  ││   3 confirmed  ↓ each · 2 votes claude·skeptic ◷ 2/4    │
+│   ⋯ 4 rank  ★ 3 codex      ││   4 rank       ★ best of 3     codex·judge     ⋯        │
+│   ⋯ 5 report   claude      ││   5 report     once            claude          ⋯        │
+└────────────────────────────┘└─────────────────────────────────────────────────────────┘
+```
+
+- **Opening it:** `Enter` on a flow's run in the Agents list, in the runs view (`W`) or in the inbox; starting or resuming a flow opens it on the new run. `Esc` returns to where it was opened from. `o` opens a picker of other runs: live ones first, this folder's first among them, then the runs that ended lately.
+- **The tree:** the run, then every step of the document from the start, in its order (a step not reached yet shows `⋯`), then the sessions of a step that has several (fan-out items, votes, judges, rounds). Each row has its state (`⋯` waiting, `▶` running, `◷` partly done, `✓` done, `✗` failed, `∅` answered null, `↷` replayed on a resume, `–` a route's branch not taken), its shape, and the harness and agent that run it. A finished step folds and the running one opens; `←` and `→` fold and open.
+- **The run's tabs:** **Board** (one line per step: shape, who, state, tokens; then tokens and cost against the budget), **Live** (a tile for every session running now, each a tail of its output), **Timeline** (one lane per step and session), **Result** (the report below, then the answer in full), **Document** (the TOML the run started from).
+- **A step's or session's tabs:** **Step** (who ran it, what it was asked, what it received, what it answered, or why it answered nothing), **Live** (what it prints, as lines: the agent's text, `▸ tool` calls and their outcome; it follows the newest line until you scroll up, and keeps the output once the session has ended), **Trace** (its turns and tools from the trace store), **Changes** (the files it changed in a worktree).
+- **Keys:** `1`–`5` the tabs, `Tab` the pane (then `↑`/`↓`, `Ctrl+D`/`Ctrl+U`, `g`/`G` scroll it), `x` stops the run on the run's row and one session on its own row (both ask first; the run goes on without that session), `r` resumes a run that has ended, `e` opens the flow in the editor, `Ctrl+R` reads the run again.
+
+A flow session is a headless print-mode run: it has no terminal to type into, so Live is a tail and not a terminal. The runs view keeps a flow run's line; its detail says `↵ opens the run`.
+
+The **Result** tab leads with the report: what the run answered, the
 evidence behind it, and what it dropped on the way. The report is built
 from the document's schemas, so a new document gets one without saying
 anything: a `file` (and `line`) field becomes an openable location, a
@@ -47,17 +70,14 @@ Notes
   · find: dropped 1 duplicate item(s)
 ```
 
-A text answer is shown as its heading outline; the **Result** tab has the
-text itself, wrapped and scrollable, with the position in the pane title
-(`12–41/380`). A harness with no prices in `pricing.toml` reads `unpriced
-(agy)`, never `$0.00`.
+A text answer is shown as its heading outline, with the text itself under
+**The answer in full**, wrapped and scrollable. A harness with no prices in
+`pricing.toml` reads `unpriced (agy)`, never `$0.00`.
 
-The **Steps** tab is the ledger: one group per step, one row per session,
-with its kind, tokens and duration, and under a session that answered
-`null` the reason it gave (read from the run's journal). The journal is
-part of this tab; there is no separate one. While a run is going the Report
-tab shows the same headline with a per-step progress line and the sessions
-in flight.
+The tree is the ledger: a row per step and per session, and a session that
+answered `null` gives its reason on its **Step** tab (read from the run's
+journal). While a run is going the Result tab shows the same headline and
+the answers of the steps that have finished.
 
 | Key | In the view |
 | --- | --- |
@@ -95,9 +115,9 @@ To compose a workflow for a task instead: `c` (or "describe it" in the `n` menu)
 
 ### Building a flow step by step
 
-`n` in the Workflows section opens the **flow builder** on a new flow. `e` opens the selected workflow or planned document in it instead (`Ctrl+O` opens the file in `$EDITOR`), so you can start from a built-in, from a document you saved, or from a draft the planner wrote. The builder writes an ordinary document (section 2) and keeps every key it has no field for, so nothing is lost when an existing workflow goes through it. It opens in the agent editor, whose tabs are `1` to `5`: **Who** is the flow settings row, **What** the steps, **When** and **Limits** say when it runs and what it may change, and **Review** is the builder's review. What passes between steps opens from a step's Answers with field. On every tab `s` saves, `r` saves and opens the run dialog, `R` restores a built-in, `Ctrl+O` opens the document in `$EDITOR`, and `Esc` (or `q`) goes back:
+`n` in the Workflows section opens the **flow builder** on a new flow. `e` opens the selected workflow or planned document in it instead (`Ctrl+O` opens the file in `$EDITOR`), so you can start from a built-in, from a document you saved, or from a draft the planner wrote. The builder writes an ordinary document (section 2) and keeps every key it has no field for, so nothing is lost when an existing workflow goes through it. It opens in the agent editor with three tabs, `1` to `3`: **Steps**, **What passes** and **Review**. The flow settings row says when the flow runs and what it may change, and the Review repeats its limits. On every tab `s` saves, `r` saves and opens the run dialog, `R` restores a built-in, `Ctrl+O` opens the document in `$EDITOR`, and `Esc` (or `q`) goes back:
 
-- **Steps.** On the left, the flow as a chain: each step, how it runs (`once`, `⇉ 3 in parallel`, `↓ each · 3 votes`, `★ best of 3`), the agent that runs it and what it passes on. On the right are the selected step's fields, in words:
+- **Steps.** On the left, the flow as a chain, drawn as the Run screen's tree is: each step, how it runs (`once`, `⇉ 3 in parallel`, `↓ each · 3 votes`, `★ best of 3`), then who runs it (its harness, the run's dimmed when the step names none, its agent, and its model when one is set) and what it passes on. The refuters of a checked step and the judge of a best-of-N are rows of their own under it (`└ 3 votes`, `└ judge`): selecting one puts its agent, harness, model and effort on the right. A row whose agent cannot run shows `!` and the reason. On the right are the selected step's fields, in words:
   - **Runs:** one of six shapes (`←`/`→` change it).
   - **For each of:** a list you type, or a list an earlier step gives.
   - **Does:** a step skill or a prompt.
@@ -108,7 +128,7 @@ To compose a workflow for a task instead: `c` (or "describe it" in the `n` menu)
   - **Harness, model, effort and isolation.**
 
   `n` adds a step after the selected one, and `J`/`K` move it. `d` deletes it. The first row, **flow settings**, holds the name, the description, the arguments (`scope=., language*`), the step whose answer the run returns, the budget and the workspace.
-- **What passes** (`Enter` on Answers with). The flow is drawn left to right with what each step gets and gives. Below it, you edit the selected step's answer field by field:
+- **What passes** (`2`, or `Enter` on Answers with). The flow is drawn left to right with what each step gets and gives. Below it, you edit the selected step's answer field by field:
   - `n` adds a field, `←`/`→` change its kind, `Space` makes it required, `e` renames it, and `Enter` edits the values of a "one of" field.
   - For a list of items, `Enter` opens the item's own fields.
   - On the right, you pick what the step reads, in words ("every finding from every review session"), and its filters, "keep only" and "drop repeats by", as the last two rows (`Enter` edits them).
@@ -231,8 +251,7 @@ model = "claude-opus-5"      # the writing is worth the strong model
 ```
 
 The Workflows section's preview lists what each step will run on under it, and
-the Steps tab of a finished run names the harness every session actually
-used. For a single run, without editing the document:
+the Run screen's tree names the harness every session actually used. For a single run, without editing the document:
 
 ```sh
 agent-mux workflow run review-changes --workspace . \
@@ -318,8 +337,8 @@ Mixed harnesses: a step's `harness = "codex"` runs it on Codex whatever the run'
 - **Worktrees.** `isolation = "worktree"` on a step (or the run dialog's default) runs the session in `git worktree` under `[loops] worktrees_dir` on branch `wf/<run>-<step>`. A worktree without changes is removed when the session ends; one with changes is kept and noted (`kept worktree … on branch …`), and the step row records the changed files. agent-mux never merges.
 - **Budget.** A token ceiling from the document, the dialog or `--budget`; once spent, no new session starts and the run ends `budget-exhausted` with the partial result. A USD cap becomes `--max-budget-usd` on Claude Code and the hook guard elsewhere.
 - **Timeouts.** `session_timeout_s` (900) per session, `run_timeout_s` (7200) per run; a timed-out session answers `null`.
-- **Cancel.** `x` (stop) in the section or the view; running sessions are killed and settle as `null`.
-- **Resume.** Every session is journaled (`journal.jsonl` in the run directory). `r` on a stored run in the runs view, or `--resume <run>` on the CLI, replays the journaled sessions and launches only what is new: same document, same args, same session keys.
+- **Cancel.** `x` (stop) in the section, the runs view or on the Run screen's run row; running sessions are killed and settle as `null`. `x` on one session's row there stops that session only.
+- **Resume.** Every session is journaled (`journal.jsonl` in the run directory). `r` on a run that has ended (on its Run screen or in the runs view), or `--resume <run>` on the CLI, replays the journaled sessions and launches only what is new: same document, same args, same session keys. The new run records which entries it replayed (`replayed.json` in its directory), and its tree marks them `↷`.
 
 ## 5. Library and configuration
 
