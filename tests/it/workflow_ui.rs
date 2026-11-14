@@ -593,14 +593,16 @@ fn a_long_result_wraps_and_scrolls_in_the_result_tab() {
     drop(conn);
     app.trace_db_path = Some(db);
 
+    // the run's own screen has its Result tab
     app.open_runs_view();
-    press(&mut app, KeyCode::Char('4'));
-    let Mode::RunsView(v) = &app.mode else {
-        panic!("the view is open")
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('3'));
+    let Mode::Run(v) = &app.mode else {
+        panic!("the Run screen is open: {:?}", app.mode)
     };
-    assert_eq!(v.tab, agent_mux::app::runs_view::RunTab::Result);
+    assert_eq!(v.run_tab, agent_mux::app::run_screen::RunTab::Result);
 
-    let top = render(&app, 140, 30);
+    let top = render(&app, 110, 30);
     assert!(top.contains("FIRSTMARK"), "the long line wraps\n{top}");
     assert!(
         !top.contains("LASTMARK"),
@@ -612,7 +614,7 @@ fn a_long_result_wraps_and_scrolls_in_the_result_tab() {
     for _ in 0..20 {
         press_mod(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
     }
-    let bottom = render(&app, 140, 30);
+    let bottom = render(&app, 110, 30);
     assert!(
         bottom.contains("LASTMARK"),
         "the end is reachable\n{bottom}"
@@ -621,7 +623,7 @@ fn a_long_result_wraps_and_scrolls_in_the_result_tab() {
     for _ in 0..20 {
         press_mod(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
     }
-    assert_eq!(render(&app, 140, 30), top);
+    assert_eq!(render(&app, 110, 30), top);
 }
 
 /// A finished review run: two findings found, one of them refuted by two of
@@ -727,13 +729,22 @@ input = "confirmed"
     drop(conn);
     app.trace_db_path = Some(db);
 
+    // the runs view lists the run; its report is on the run's own screen
     app.open_runs_view();
-    let Mode::RunsView(v) = &app.mode else {
-        panic!("the view is open")
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('3'));
+    let Mode::Run(v) = &app.mode else {
+        panic!("the Run screen is open: {:?}", app.mode)
     };
-    assert_eq!(v.tab, agent_mux::app::runs_view::RunTab::Report);
+    assert_eq!(v.run_tab, agent_mux::app::run_screen::RunTab::Result);
 
-    let out = render(&app, 180, 50);
+    let whole = render(&app, 180, 50);
+    // the report, above every word of the answer
+    let out = whole
+        .split("The answer in full")
+        .next()
+        .unwrap()
+        .to_string();
     assert!(out.contains("finished"), "{out}");
     assert!(
         out.contains("Review of the branch"),
@@ -771,20 +782,26 @@ input = "confirmed"
         "the verdict is not repeated under the report's title\n{out}"
     );
     assert!(
-        out.lines().next().unwrap().starts_with(" Runs "),
-        "the view is the whole screen\n{out}"
+        out.lines()
+            .next()
+            .unwrap()
+            .contains("review-changes · finished"),
+        "the run's screen is the whole screen\n{out}"
     );
+    assert!(whole.contains("The answer in full"), "{whole}");
     assert!(out.contains("Refuted (1)"), "{out}");
     assert!(
         out.contains("the caller checks it"),
         "a refuter's reason is on screen\n{out}"
     );
 
-    // The numbered Steps tab names every session.
-    press(&mut app, KeyCode::Char('2'));
+    // The tree names every session of a step once it is opened.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Right);
     let steps = render(&app, 120, 40);
-    assert!(steps.contains("confirmed[0]/vote1"), "{steps}");
-    assert!(steps.contains("Verify · confirmed"), "{steps}");
+    assert!(steps.contains("1 confirmed"), "{steps}");
+    assert!(steps.contains("[0]/vote1"), "{steps}");
+    assert!(steps.contains("[1]/vote3"), "{steps}");
 }
 
 /// The run dialog ends with one row per step: the harness that step runs
@@ -944,7 +961,7 @@ fn the_compose_dialog_has_no_step_rows() {
 /// since startup sits under Recent, `Enter` on it opens the view on that
 /// run, and the selection stays on its row when the lists change.
 #[test]
-fn a_recent_run_is_listed_above_the_library_and_opens_in_the_view() {
+fn a_recent_run_is_listed_above_the_library_and_opens_on_its_run_screen() {
     use agent_mux::app::workflows::{RecentWorkflowRun, WorkflowRow};
     use agent_mux::workflows::store as wstore;
 
@@ -1023,7 +1040,7 @@ fn a_recent_run_is_listed_above_the_library_and_opens_in_the_view() {
         "{text}"
     );
 
-    // Enter on the run opens the view on that run, not the run dialog
+    // Enter on the run opens its Run screen, not the run dialog
     app.select_workflow_row(0);
     let text = render(&app, 120, 40);
     assert!(
@@ -1031,11 +1048,11 @@ fn a_recent_run_is_listed_above_the_library_and_opens_in_the_view() {
         "the preview is the run's\n{text}"
     );
     press(&mut app, KeyCode::Enter);
-    let Mode::RunsView(v) = &app.mode else {
-        panic!("not the view: {:?}", app.mode)
+    let Mode::Run(v) = &app.mode else {
+        panic!("not the Run screen: {:?}", app.mode)
     };
-    assert_eq!(
-        v.selected_item().map(|i| i.run.key()).as_deref(),
-        Some("flow:run-00000009")
-    );
+    assert_eq!(v.run_id, "run-00000009");
+    // Esc returns to the Agents list
+    press(&mut app, KeyCode::Esc);
+    assert!(matches!(app.mode, Mode::Main), "{:?}", app.mode);
 }

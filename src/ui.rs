@@ -6,6 +6,7 @@ pub mod langfuse;
 mod loop_builder;
 pub mod markdown;
 pub mod memory;
+mod run_screen;
 mod runs;
 pub mod step_row;
 pub mod swarm_board;
@@ -325,6 +326,12 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
             Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
         swarm_board::draw_tree(f, side, view);
         swarm_board::draw_pane(f, main, view, app, now);
+    } else if let Mode::Run(st) = &app.mode {
+        // the same layout for a flow run: its tree, then the selected row
+        let [side, main] =
+            Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
+        run_screen::draw_tree(f, side, st);
+        run_screen::draw_pane(f, main, st);
     } else if app.sidebar_hidden || browser_alone {
         draw_main(f, body, app, now);
     } else {
@@ -350,6 +357,11 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
         Mode::Inbox(state) => draw_inbox(f, state),
         Mode::AgentEditor(state) => agent_editor::draw(f, state),
         Mode::RunsView(state) => runs::draw(f, state, app),
+        Mode::Run(st) => {
+            if let Some(c) = &st.confirm {
+                draw_confirm(f, &c.question());
+            }
+        }
         Mode::NewAgent(state) => draw_new_agent(f, state),
         Mode::Markdown(view) => {
             let full = f.area();

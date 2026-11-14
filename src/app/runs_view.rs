@@ -1,10 +1,11 @@
 //! The runs view (`E` / `W`, spec `docs/superpowers/specs/2026-09-26-agent-first-design.md`,
 //! section 4): every run of every agent in one list, **Running**, **Needs
 //! you** (the inbox's items) and **Earlier**, with the selected run's
-//! Report, History or Steps, Change, Result, and Setup or Document. Loop
-//! runs come from `loop_runs`, flow runs from `workflow_runs` and the live
-//! runs from the App. The detail tabs are built by the loop and workflow
-//! detail builders (`loops_view::LoopsViewState`,
+//! Report, History, Change, Result and Setup. Loop runs come from
+//! `loop_runs`, flow runs from `workflow_runs` and the live runs from the
+//! App. A flow's run keeps its line here and opens on the Run screen
+//! (`Enter`, `run_screen`); a loop run's and a plan's tabs are built by
+//! the loop and workflow detail builders (`loops_view::LoopsViewState`,
 //! `workflows_view::WorkflowsViewState`), which have no screen of their
 //! own any more.
 
@@ -133,6 +134,15 @@ impl RunRef {
             RunRef::FlowLive(_)
                 | RunRef::Flow(_)
                 | RunRef::Inbox(InboxItem::Plan { .. } | InboxItem::Run { .. })
+        )
+    }
+
+    /// A flow's run, which the Run screen shows (`Enter`); a plan is not
+    /// one yet.
+    pub fn is_flow_run(&self) -> bool {
+        matches!(
+            self,
+            RunRef::FlowLive(_) | RunRef::Flow(_) | RunRef::Inbox(InboxItem::Run { .. })
         )
     }
 
@@ -511,12 +521,13 @@ impl App {
         if st.tab == RunTab::Change {
             return;
         }
+        // a flow's run is read on the Run screen: this pane only points there
+        if item.run.is_flow_run() {
+            return;
+        }
         if item.run.is_flow() {
             use super::workflows_view::{ViewTab, WorkflowsViewState};
             let row = match &item.run {
-                RunRef::FlowLive(id) => RunRow::Live(id.clone()),
-                RunRef::Flow(r) => RunRow::Stored(r.id.clone()),
-                RunRef::Inbox(InboxItem::Run { run_id, .. }) => RunRow::Stored(run_id.clone()),
                 RunRef::Inbox(InboxItem::Plan { agent: true, .. }) => return,
                 RunRef::Inbox(InboxItem::Plan { id, .. }) => RunRow::Planned(id.clone()),
                 _ => return,
@@ -740,7 +751,11 @@ impl App {
             RunRef::Inbox(InboxItem::Plan { id, .. }) => {
                 match self.run_planned_workflow(&id) {
                     Ok(rid) => {
-                        self.notice = Some(Notice::info(format!("run {} started", &rid[..8])))
+                        self.notice = Some(Notice::info(format!("run {} started", &rid[..8])));
+                        // the new run is followed on its own screen
+                        if self.open_run_screen(&rid, super::run_screen::Origin::Runs) {
+                            return false;
+                        }
                     }
                     Err(e) => self.notice = Some(Notice::warn(e)),
                 }
@@ -748,21 +763,8 @@ impl App {
                 true
             }
             RunRef::LoopLive { session_id, .. } => self.runs_view_attach(session_id),
-            RunRef::FlowLive(id) => {
-                let sid = self
-                    .live_workflow_runs
-                    .iter()
-                    .find(|r| r.run_id == id)
-                    .and_then(|r| r.sessions.iter().find(|s| s.exited_at.is_none()))
-                    .map(|s| s.session_id);
-                match sid {
-                    Some(sid) => self.runs_view_attach(sid),
-                    None => {
-                        self.notice = Some(Notice::info("no session of the run is running now"));
-                        true
-                    }
-                }
-            }
+            // a flow's run has a screen of its own
+            RunRef::FlowLive(id) => !self.open_run_screen(&id, super::run_screen::Origin::Runs),
             RunRef::Inbox(InboxItem::Loop(_)) => {
                 self.notice = Some(Notice::info("d dismisses it; e edits the agent; T traces"));
                 true
@@ -771,9 +773,9 @@ impl App {
                 self.notice = Some(Notice::info("r runs it again; T its traces; 2 its history"));
                 true
             }
-            RunRef::Flow(_) | RunRef::Inbox(InboxItem::Run { .. }) => {
-                self.notice = Some(Notice::info("r resumes the run; s saves its document"));
-                true
+            RunRef::Flow(r) => !self.open_run_screen(&r.id, super::run_screen::Origin::Runs),
+            RunRef::Inbox(InboxItem::Run { run_id, .. }) => {
+                !self.open_run_screen(&run_id, super::run_screen::Origin::Runs)
             }
             RunRef::Next(_) => {
                 self.notice = Some(Notice::info("r runs it now; p pauses it; 5 its setup"));
@@ -907,10 +909,15 @@ impl App {
             _ => None,
         };
         if let Some(r) = stored {
-            self.notice = Some(match self.resume_workflow_run(&r) {
-                Ok(rid) => Notice::info(format!("resumed as {}", &rid[..8])),
-                Err(e) => Notice::warn(e),
-            });
+            match self.resume_workflow_run(&r) {
+                Ok(rid) => {
+                    self.notice = Some(Notice::info(format!("resumed as {}", &rid[..8])));
+                    if self.open_run_screen(&rid, super::run_screen::Origin::Runs) {
+                        return;
+                    }
+                }
+                Err(e) => self.notice = Some(Notice::warn(e)),
+            }
             self.reload_runs_view(st);
             return;
         }
@@ -1068,7 +1075,7 @@ pub fn tab_lines(app: &App, st: &RunsViewState) -> Vec<String> {
             None => vec!["it is no longer scheduled: Ctrl+R reloads".into()],
         },
         (RunRef::Inbox(InboxItem::Loop(r)) | RunRef::Loop(r), tab) => loop_tab(r, tab),
-        (RunRef::Flow(r), tab) => flow_tab(r, &st.steps, tab),
+        (RunRef::Flow(r), _) => flow_summary(r),
         (
             RunRef::Inbox(InboxItem::Plan {
                 id,
@@ -1134,7 +1141,7 @@ pub fn tab_lines(app: &App, st: &RunsViewState) -> Vec<String> {
             }
             v.extend(notes.iter().map(|n| format!("  · {n}")));
             v.push(String::new());
-            v.push("Enter opens the run; d dismisses it.".into());
+            v.push("↵ opens the run; d dismisses it.".into());
             v
         }
         (RunRef::LoopLive { run_id, .. }, _) => {
@@ -1149,30 +1156,20 @@ pub fn tab_lines(app: &App, st: &RunsViewState) -> Vec<String> {
                 None => vec!["finished: Ctrl+R reloads".into()],
             }
         }
-        (RunRef::FlowLive(id), tab) => {
+        (RunRef::FlowLive(id), _) => {
             let Some(r) = app.live_workflow_runs.iter().find(|r| &r.run_id == id) else {
                 return vec!["finished: Ctrl+R reloads".into()];
             };
-            match tab {
-                RunTab::Sessions => r
-                    .sessions
-                    .iter()
-                    .map(|s| {
-                        format!(
-                            "{} {}  {}",
-                            if s.exited_at.is_some() { "✓" } else { "▶" },
-                            s.key.label(),
-                            s.harness.as_str()
-                        )
-                    })
-                    .collect(),
-                _ => vec![
-                    format!("{} is running in {}", r.name, r.workspace.display()),
-                    format!("{} session(s) so far", r.sessions.len()),
-                    String::new(),
-                    "Enter attaches to a running session; x stops it.".into(),
-                ],
-            }
+            vec![
+                format!("{} is running in {}", r.name, r.workspace.display()),
+                format!(
+                    "{} session(s) running, {} answered",
+                    r.running_sessions(),
+                    r.state.records.len()
+                ),
+                String::new(),
+                "↵ opens the run; x stops it.".into(),
+            ]
         }
     }
 }
@@ -1281,76 +1278,25 @@ fn loop_tab(r: &LoopRun, tab: RunTab) -> Vec<String> {
     }
 }
 
-fn flow_tab(r: &WorkflowRun, steps: &[WorkflowStep], tab: RunTab) -> Vec<String> {
-    match tab {
-        RunTab::Setup => r.document.lines().map(str::to_string).collect(),
-        RunTab::Report => {
-            let mut v = vec![
-                format!("{} ended {}", r.workflow, r.status),
-                String::new(),
-                format!("workspace   {}", r.workspace),
-                format!("on          {} ({})", r.harness, r.profile),
-                format!(
-                    "cost        {} tokens · ${:.2} · {} session(s)",
-                    r.tokens.unwrap_or(0),
-                    r.cost_usd.unwrap_or(0.0),
-                    r.sessions
-                ),
-            ];
-            if let Some(e) = &r.error {
-                v.push(String::new());
-                v.push(e.clone());
-            }
-            v
-        }
-        RunTab::Sessions if steps.is_empty() => vec!["No sessions recorded.".into()],
-        RunTab::Sessions => steps
-            .iter()
-            .map(|s| {
-                format!(
-                    "{} {}  {} · {} tokens",
-                    if s.ended_ns.is_some() { "✓" } else { "·" },
-                    s.session,
-                    s.harness,
-                    s.tokens.unwrap_or(0)
-                )
-            })
-            .collect(),
-        RunTab::Change => {
-            let mut v: Vec<String> = Vec::new();
-            for s in steps {
-                let files: Vec<&str> = s
-                    .changed_files
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|f| f.as_str()).collect())
-                    .unwrap_or_default();
-                if !files.is_empty() {
-                    v.push(format!(
-                        "{}{}",
-                        s.session,
-                        s.worktree
-                            .as_deref()
-                            .map(|w| format!("  ({w})"))
-                            .unwrap_or_default()
-                    ));
-                    v.extend(files.iter().map(|f| format!("  {f}")));
-                }
-            }
-            if v.is_empty() {
-                v.push("No step changed files.".into());
-            }
-            v
-        }
-        RunTab::Result => {
-            if r.result.is_null() {
-                vec!["The run gave no result.".into()]
-            } else {
-                serde_json::to_string_pretty(&r.result)
-                    .unwrap_or_default()
-                    .lines()
-                    .map(str::to_string)
-                    .collect()
-            }
-        }
+/// A stored flow run in a few lines; the Run screen has the rest.
+fn flow_summary(r: &WorkflowRun) -> Vec<String> {
+    let mut v = vec![
+        format!("{} ended {}", r.workflow, r.status),
+        String::new(),
+        format!("workspace   {}", r.workspace),
+        format!("on          {} ({})", r.harness, r.profile),
+        format!(
+            "cost        {} tokens · ${:.2} · {} session(s)",
+            r.tokens.unwrap_or(0),
+            r.cost_usd.unwrap_or(0.0),
+            r.sessions
+        ),
+    ];
+    if let Some(e) = &r.error {
+        v.push(String::new());
+        v.push(e.clone());
     }
+    v.push(String::new());
+    v.push("↵ opens the run; r resumes it; s saves its document.".into());
+    v
 }

@@ -164,6 +164,17 @@ pub struct LiveWorkflowSession {
     pub worktree: Option<crate::loops::worktree::Worktree>,
 }
 
+/// A session of a live run that has answered: what the Run screen still
+/// shows of it (who ran it and when) once it has left `sessions`.
+#[derive(Debug, Clone)]
+pub struct EndedWorkflowSession {
+    pub spec: SessionSpec,
+    pub harness: Harness,
+    pub launch_id: Option<String>,
+    pub started_ns: i64,
+    pub ended_ns: i64,
+}
+
 /// A run with sessions in flight or about to start.
 pub struct LiveWorkflowRun {
     pub run_id: String,
@@ -180,6 +191,8 @@ pub struct LiveWorkflowRun {
     pub started_ns: i64,
     pub run_dir: PathBuf,
     pub sessions: Vec<LiveWorkflowSession>,
+    /// The sessions that answered, in the order they did.
+    pub ended: Vec<EndedWorkflowSession>,
     pub session_count: usize,
     pub run_timeout: Duration,
     pub resumed_from: Option<String>,
@@ -573,6 +586,7 @@ impl App {
             started_ns,
             run_dir,
             sessions: Vec::new(),
+            ended: Vec::new(),
             session_count: 0,
             run_timeout: Duration::from_secs(self.workflows.run_timeout_s),
             resumed_from: req.resume_from.clone(),
@@ -1270,7 +1284,14 @@ impl App {
         let _ = journal::append(&run.run_dir.join("journal.jsonl"), &entry);
         self.write_workflow_step_row(ri, si, Some((&outcome, tokens, cost)));
         let run = &mut self.live_workflow_runs[ri];
-        run.sessions.remove(si);
+        let s = run.sessions.remove(si);
+        run.ended.push(EndedWorkflowSession {
+            spec: s.spec,
+            harness: s.harness,
+            launch_id: s.launch_id,
+            started_ns: s.started_ns,
+            ended_ns: crate::tracing::store::now_ns(),
+        });
         run.state.complete(&key, done);
         if let Outcome::Null(why) = &outcome {
             run.state
@@ -2151,8 +2172,20 @@ impl App {
                 ));
                 return;
             }
-            Some(WorkflowRow::Live(id)) => Some(RunRow::Live(id)),
-            Some(WorkflowRow::Recent(id)) => Some(RunRow::Stored(id)),
+            // a run opens on its own screen; a recent one the store no
+            // longer has falls back to the runs view
+            Some(WorkflowRow::Live(id)) => {
+                if self.open_run_screen(&id, super::run_screen::Origin::Agents) {
+                    return;
+                }
+                Some(RunRow::Live(id))
+            }
+            Some(WorkflowRow::Recent(id)) => {
+                if self.open_run_screen(&id, super::run_screen::Origin::Agents) {
+                    return;
+                }
+                Some(RunRow::Stored(id))
+            }
             Some(WorkflowRow::Planned(id)) => Some(RunRow::Planned(id)),
             Some(WorkflowRow::Doc(_)) => None,
         };
@@ -2559,8 +2592,10 @@ impl App {
                 match self.start_workflow_run(req) {
                     Ok(id) => {
                         self.mode = Mode::Main;
+                        // the new run is followed on its own screen
+                        self.open_run_screen(&id, super::run_screen::Origin::Agents);
                         self.notice = Some(Notice::info(format!(
-                            "workflow {name} started ({}); W follows it",
+                            "workflow {name} started ({})",
                             &id[..8]
                         )));
                     }

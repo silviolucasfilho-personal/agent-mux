@@ -152,7 +152,9 @@ fn draw_detail(f: &mut Frame, area: Rect, st: &RunsViewState, app: &App) {
     let [tabs, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
     let mut spans = Vec::new();
     let flow = st.selected_item().is_some_and(|i| i.run.is_flow());
-    for (i, t) in RunTab::ALL.iter().enumerate() {
+    // a flow's run has no tabs here: its screen has them
+    let tabbed = !st.selected_item().is_some_and(|i| i.run.is_flow_run());
+    for (i, t) in RunTab::ALL.iter().enumerate().filter(|_| tabbed) {
         let text = format!(" {} {} ", i + 1, t.label(flow));
         spans.push(if *t == st.tab {
             Span::styled(
@@ -261,6 +263,7 @@ fn footer(st: &RunsViewState) -> Line<'static> {
             ("d", "discard"),
         ],
         Some(RunRef::Inbox(InboxItem::Run { .. })) => vec![
+            ("↩", "open the run"),
             ("r", "resume"),
             ("s", "save"),
             ("d", "dismiss"),
@@ -270,7 +273,7 @@ fn footer(st: &RunsViewState) -> Line<'static> {
             vec![("↩", "attach"), ("x", "stop"), ("e", "edit the agent")]
         }
         Some(RunRef::FlowLive(_)) => vec![
-            ("↩", "attach"),
+            ("↩", "open the run"),
             ("x", "stop"),
             ("s", "save"),
             ("e", "edit the agent"),
@@ -281,7 +284,12 @@ fn footer(st: &RunsViewState) -> Line<'static> {
             ("e", "edit the agent"),
             ("T", "traces"),
         ],
-        Some(RunRef::Flow(_)) => vec![("r", "resume"), ("s", "save"), ("e", "edit the agent")],
+        Some(RunRef::Flow(_)) => vec![
+            ("↩", "open the run"),
+            ("r", "resume"),
+            ("s", "save"),
+            ("e", "edit the agent"),
+        ],
         Some(RunRef::Next(_)) => vec![("r", "run now"), ("p", "pause"), ("e", "edit the agent")],
         None => vec![],
     };

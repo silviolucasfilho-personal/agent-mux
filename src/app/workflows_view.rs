@@ -1133,7 +1133,7 @@ impl WorkflowsViewState {
     }
 }
 
-fn pretty(v: &serde_json::Value) -> String {
+pub(crate) fn pretty(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Null => "(no result)".into(),
@@ -1141,7 +1141,7 @@ fn pretty(v: &serde_json::Value) -> String {
     }
 }
 
-fn value_lines(text: &str) -> Vec<Line<'static>> {
+pub(crate) fn value_lines(text: &str) -> Vec<Line<'static>> {
     text.lines().map(|l| Line::raw(format!("  {l}"))).collect()
 }
 
@@ -1223,7 +1223,7 @@ impl std::fmt::Debug for WorkflowsViewState {
     }
 }
 
-fn rule() -> Line<'static> {
+pub(crate) fn rule() -> Line<'static> {
     Line::styled(
         "  ────────────────────────────────────────",
         Style::default().fg(Color::DarkGray),
@@ -1257,7 +1257,7 @@ fn badge_style(badge: &str) -> Style {
 }
 
 /// The three lines every surface leads with: verdict, counts, cost.
-fn headline_lines(rep: &Report) -> Vec<Line<'static>> {
+pub(crate) fn headline_lines(rep: &Report) -> Vec<Line<'static>> {
     let h = &rep.headline;
     let dim = Style::default().fg(Color::DarkGray);
     vec![
@@ -1274,7 +1274,7 @@ fn headline_lines(rep: &Report) -> Vec<Line<'static>> {
 }
 
 /// The report's blocks as rows of the detail pane.
-fn report_lines(rep: &Report) -> Vec<Line<'static>> {
+pub(crate) fn report_lines(rep: &Report) -> Vec<Line<'static>> {
     let dim = Style::default().fg(Color::DarkGray);
     let key = Style::default().fg(Color::Yellow);
     let mut out: Vec<Line<'static>> = Vec::new();

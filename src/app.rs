@@ -29,6 +29,7 @@ pub mod harness_recap;
 pub mod inbox;
 pub mod loop_builder;
 pub mod new_agent;
+pub mod run_screen;
 pub mod runs_view;
 pub mod shortcut_probe;
 pub use config_view::*;
@@ -79,6 +80,9 @@ pub enum Mode {
     AgentEditor(Box<agent_editor::AgentEditorState>),
     /// The runs view (`E` / `W`): every run of every agent.
     RunsView(Box<runs_view::RunsViewState>),
+    /// The Run screen: one flow run as a tree of its steps and sessions,
+    /// in the Swarm screen's layout.
+    Run(Box<run_screen::RunScreen>),
     /// `n` in the Agents list: how to start a new agent.
     NewAgent(Box<new_agent::NewAgentState>),
     /// The Markdown viewer and editor: a `.md` link clicked in the pane.
@@ -263,6 +267,7 @@ pub enum Action {
     /// `d` on a swarm group in the Agents sidebar: confirm deleting it.
     ConfirmDeleteSwarm,
     RunsKey,
+    RunScreenKey,
     OpenInbox,
     InboxKey,
     WorkflowDialogKey,
@@ -832,6 +837,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::Inbox(_) => Action::InboxKey,
         Mode::AgentEditor(_) => Action::AgentEditorKey,
         Mode::RunsView(_) => Action::RunsKey,
+        Mode::Run(_) => Action::RunScreenKey,
         Mode::NewAgent(_) => Action::NewAgentKey,
         Mode::Markdown(_) => Action::MarkdownKey,
         Mode::Memory(_) => Action::MemoryKey,
@@ -3435,6 +3441,7 @@ impl App {
         self.workflow_pass(now);
         self.workflow_plan_pass(now);
         self.refresh_runs_view(now);
+        self.refresh_run_screen(now);
         self.swarm_engine_pass(now);
         self.flush_pending_bus_wakes(now);
     }
@@ -4586,6 +4593,7 @@ impl App {
             Mode::SessionHistory(_) | Mode::SkillsView(_) | Mode::Inbox(_) => true,
             Mode::ConfigView(v) => v.pending == Pending::None,
             Mode::Swarm(v) => !v.text_entry_active() && !v.confirmation_active(),
+            Mode::Run(v) => v.confirm.is_none(),
             _ => false,
         }
     }
@@ -5847,6 +5855,16 @@ impl App {
             }
             return;
         }
+        if let Mode::Run(ref mut view) = self.mode {
+            match ev.kind {
+                MouseEventKind::ScrollUp => view.scroll = view.scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown => {
+                    view.scroll = (view.scroll + 3).min(view.max_scroll.get())
+                }
+                _ => {}
+            }
+            return;
+        }
         if let Mode::RunsView(ref mut view) = self.mode {
             match ev.kind {
                 MouseEventKind::ScrollUp => view.scroll = view.scroll.saturating_sub(3),
@@ -6411,6 +6429,7 @@ impl App {
                 }
             }
             Action::RunsKey => self.handle_runs_view_key(key),
+            Action::RunScreenKey => self.handle_run_screen_key(key),
             Action::OpenInbox => self.open_inbox(),
             Action::InboxKey => self.handle_inbox_key(key),
             Action::WorkflowDialogKey => self.handle_workflow_dialog_key(key),
