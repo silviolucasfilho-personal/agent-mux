@@ -13,9 +13,11 @@ pub mod harness;
 pub mod interp;
 pub mod journal;
 pub mod library;
+pub mod live;
 pub mod planner;
 pub mod report;
 pub mod result;
+pub mod run_view;
 pub mod store;
 
 pub use document::{Workflow, parse, validate};

@@ -326,8 +326,29 @@ fn a_flow_is_built_step_by_step_and_saved() {
     press(&mut app, KeyCode::Left); // 3 → 2 votes
     assert_eq!(st(&app).draft.check_votes(2), Some((2, 2)));
 
+    // the chain names who runs every row: the step, then its refuters
+    let text = render(&app);
+    assert!(
+        text.lines()
+            .any(|l| l.contains("└ 2 votes") && l.contains("skeptic")),
+        "{text}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l.contains("review") && l.contains("code-reviewer")),
+        "{text}"
+    );
+    // a flow has three tabs, the builder's screens
+    for tab in ["1 Steps", "2 What passes", "3 Review"] {
+        assert!(text.contains(tab), "missing {tab:?} in\n{text}");
+    }
+    assert!(
+        !text.contains("4 Limits") && !text.contains("3 When"),
+        "{text}"
+    );
+
     // review: the flow in words, the checks, then save
-    press(&mut app, KeyCode::Char('5')); // Review
+    press(&mut app, KeyCode::Char('3')); // Review
     let text = render(&app);
     assert!(text.contains("In words"), "{text}");
     assert!(text.contains("✓ ready to run"), "{text}");
@@ -507,7 +528,7 @@ fn a_built_in_workflow_is_edited_as_a_copy_and_restored() {
     ctrl(&mut app, 'u');
     type_text(&mut app, "My stricter review");
     press(&mut app, KeyCode::Tab);
-    press(&mut app, KeyCode::Char('5')); // Review
+    press(&mut app, KeyCode::Char('3')); // Review
     press(&mut app, KeyCode::Char('s'));
     if let Mode::AgentEditor(e) = &app.mode {
         assert!(e.error.is_none(), "{:?}", e.error);
@@ -845,18 +866,16 @@ fn commands_guard_an_unsaved_agent_form_and_enter_is_multiline() {
 }
 
 #[test]
-fn commands_save_a_flow_from_when_and_limits() {
-    use agent_mux::app::agent_editor::Tab;
+fn commands_save_a_flow_from_every_screen() {
     use agent_mux::keymap::ActionId;
-    for tab in [Tab::When, Tab::Limits] {
+    for screen in ['1', '2', '3'] {
         let (mut app, _temp) = app();
         app.open_flow_builder_new();
         add_step(&mut app, "review", 0);
-        if let Mode::AgentEditor(ed) = &mut app.mode {
-            ed.set_tab(tab);
-        }
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char(screen));
         app.execute_command(ActionId::Save, Instant::now());
-        assert!(!st(&app).dirty, "{tab:?}: {:?}", app.notice);
+        assert!(!st(&app).dirty, "{screen}: {:?}", app.notice);
         assert!(
             app.library_root
                 .as_ref()
@@ -865,4 +884,114 @@ fn commands_save_a_flow_from_when_and_limits() {
                 .exists()
         );
     }
+}
+
+/// The refuters and the judge are rows of the chain: selecting one puts
+/// its own agent, harness, model and effort in the right pane.
+#[test]
+fn refuters_and_the_judge_are_rows_with_their_own_runner() {
+    use agent_mux::app::flow_builder::Focus;
+    let (mut app, _temp) = app();
+    app.open_flow_builder_new();
+    add_step(&mut app, "check", 2); // each + check
+    add_step(&mut app, "best", 4); // best of N
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(st(&app).focus, Focus::List);
+    // settings, check, its refuters, best, its judge
+    assert_eq!(st(&app).rows().len(), 5);
+    press(&mut app, KeyCode::Home);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    assert_eq!((st(&app).selected, st(&app).sub), (1, Some(Role::Voters)));
+    let text = render(&app);
+    assert!(text.contains("check · its refuters"), "{text}");
+    // the refuters' own harness and model
+    press(&mut app, KeyCode::Right);
+    to_field(&mut app, Field::VotersHarness);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(
+        st(&app).draft.role_str(0, Role::Voters, "harness"),
+        "claude"
+    );
+    to_field(&mut app, Field::VotersModel);
+    press(&mut app, KeyCode::Enter);
+    ctrl(&mut app, 'u');
+    type_text(&mut app, "small");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(st(&app).draft.role_str(0, Role::Voters, "model"), "small");
+    let text = render(&app);
+    assert!(
+        text.lines()
+            .any(|l| l.contains("└ 3 votes") && l.contains("claude") && l.contains("small")),
+        "{text}"
+    );
+    // a step that names no harness shows the run's
+    assert!(
+        text.lines()
+            .any(|l| l.contains("1 check") && l.contains("the run's")),
+        "{text}"
+    );
+    // the judge's row
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    assert_eq!((st(&app).selected, st(&app).sub), (2, Some(Role::Judge)));
+    assert!(render(&app).contains("best · its judge"));
+    press(&mut app, KeyCode::Right);
+    to_field(&mut app, Field::JudgeHarness);
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(st(&app).draft.role_str(1, Role::Judge, "harness"), "codex");
+    assert!(
+        render(&app)
+            .lines()
+            .any(|l| l.contains("└ judge") && l.contains("codex"))
+    );
+    // the document says the same
+    let doc = st(&app).draft.parsed().unwrap();
+    let verify = doc.step("check").unwrap().verify.as_ref().unwrap();
+    assert_eq!(verify.runner.harness.as_deref(), Some("claude"));
+    assert_eq!(verify.runner.model.as_deref(), Some("small"));
+    assert_eq!(
+        doc.step("best").unwrap().judge_runner.harness.as_deref(),
+        Some("codex")
+    );
+    // d on such a row deletes nothing: it goes with the step's shape
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('d'));
+    assert!(st(&app).overlay.is_none());
+    assert_eq!(st(&app).draft.len(), 2);
+    // turning the shape back to once takes the row away, and the cursor
+    // returns to the step
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Right);
+    to_field(&mut app, Field::Runs);
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Left);
+    }
+    assert_eq!(st(&app).rows().len(), 4);
+    assert_eq!(st(&app).sub, None);
+}
+
+/// A row whose agent cannot run shows `!` and the reason.
+#[test]
+fn a_step_whose_agent_does_not_fit_is_marked_on_the_chain() {
+    let (mut app, _temp) = app();
+    app.open_flow_builder_new();
+    add_step(&mut app, "review", 0);
+    if let Mode::AgentEditor(ed) = &mut app.mode
+        && let Body::Flow(f) = &mut ed.body
+    {
+        f.draft.set_agent(0, Role::Step, Some("ghost"));
+    }
+    // any key re-runs the checks
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Up);
+    let text = render(&app);
+    assert!(
+        text.lines()
+            .any(|l| l.contains("1 review") && l.contains("ghost") && l.contains("! ")),
+        "{text}"
+    );
+    assert!(text.contains("not found"), "{text}");
 }

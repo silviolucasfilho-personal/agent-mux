@@ -71,6 +71,44 @@ impl SessionKey {
     pub fn journal_key(&self) -> String {
         self.label()
     }
+
+    /// The key a label of `step` was made from; the inverse of `label`,
+    /// for readers of stored rows and journals, which keep only the label.
+    pub fn parse(step: &str, label: &str) -> Option<SessionKey> {
+        let mut rest = label.strip_prefix(step)?;
+        let number = |t: &str| t.parse::<usize>().ok();
+        let key = |item, round, role| SessionKey {
+            step: step.to_string(),
+            item,
+            round,
+            role,
+        };
+        let mut round = 0;
+        if let Some(r) = rest.strip_prefix("/r") {
+            let digits = r.chars().take_while(char::is_ascii_digit).count();
+            round = number(&r[..digits]).filter(|n| *n > 0)?;
+            rest = &r[digits..];
+        }
+        if rest.is_empty() {
+            return Some(key(0, round, Role::Main));
+        }
+        if let Some(g) = rest.strip_prefix("/gen") {
+            let g = number(g)?.checked_sub(1)?;
+            return (round == 0).then(|| key(g, 0, Role::Generate(g)));
+        }
+        if let Some(j) = rest.strip_prefix("/judge") {
+            let (r, p) = j.split_once('.')?;
+            let (r, p) = (number(r)?.checked_sub(1)?, number(p)?.checked_sub(1)?);
+            return (r == round).then(|| key(p, r, Role::Judge { round: r, pair: p }));
+        }
+        let (item, tail) = rest.strip_prefix('[')?.split_once(']')?;
+        let item = number(item)?;
+        match tail.strip_prefix("/vote") {
+            Some(v) => Some(key(item, round, Role::Vote(number(v)?.checked_sub(1)?))),
+            None if tail.is_empty() && item > 0 => Some(key(item, round, Role::Main)),
+            None => None,
+        }
+    }
 }
 
 /// Per-step overrides the executor applies.
@@ -217,6 +255,18 @@ struct StepState {
     route_choice: Option<String>,
 }
 
+/// Where a step is, for readers of a run (`RunState::step_phase`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepPhase {
+    /// Not reached yet.
+    Pending,
+    /// Sessions running or still to start.
+    Active,
+    Done,
+    /// A route's branch not taken.
+    Skipped,
+}
+
 pub struct RunState {
     pub doc: Workflow,
     pub args: Value,
@@ -234,6 +284,8 @@ pub struct RunState {
     /// Journaled outcomes replayed instead of run.
     replay: BTreeMap<String, SessionDone>,
     pub replayed: usize,
+    /// The sessions answered from the journal, for readers of the run.
+    replayed_keys: BTreeSet<SessionKey>,
 }
 
 impl RunState {
@@ -263,6 +315,7 @@ impl RunState {
             failed: None,
             replay: BTreeMap::new(),
             replayed: 0,
+            replayed_keys: BTreeSet::new(),
         }
     }
 
@@ -368,6 +421,64 @@ impl RunState {
             .collect()
     }
 
+    // ---- reading a run ----------------------------------------------------
+
+    /// The phase of step `i` of the document.
+    pub fn step_phase(&self, i: usize) -> Option<StepPhase> {
+        self.steps.get(i).map(|st| match st.phase {
+            Phase::Pending => StepPhase::Pending,
+            Phase::Active => StepPhase::Active,
+            Phase::Done => StepPhase::Done,
+            Phase::Skipped => StepPhase::Skipped,
+        })
+    }
+
+    /// How many items step `i` works on, where only the run knows: the
+    /// items of a fan-out or pipeline, the items of an `until` round, the
+    /// candidates a tournament judges (those it started with, not those
+    /// left). `None` for a step that is not active, a single or a route,
+    /// and a tournament still generating.
+    pub fn step_items(&self, i: usize) -> Option<usize> {
+        let st = self.steps.get(i)?;
+        match st.work.as_ref()? {
+            Work::Single { .. } | Work::Route { .. } => None,
+            Work::Items { items, .. } => Some(items.len()),
+            Work::Until { current, .. } => Some(current.len()),
+            Work::Tournament {
+                generate,
+                candidates,
+                round,
+                ..
+            } => {
+                if generate.iter().any(|s| !s.finished()) {
+                    return None;
+                }
+                // every judge of a closed round sent one candidate home
+                let id = &self.doc.steps[i].id;
+                let eliminated = self
+                    .records
+                    .iter()
+                    .filter(|r| {
+                        &r.key.step == id
+                            && matches!(r.key.role, Role::Judge { round: jr, .. } if jr < *round)
+                    })
+                    .count();
+                Some(candidates.len() + eliminated)
+            }
+        }
+    }
+
+    /// The token ceiling the run is held to.
+    pub fn budget_tokens(&self) -> Option<u64> {
+        self.caps.budget_tokens
+    }
+
+    /// The session was answered from the journal of the run this one
+    /// resumed, not run again.
+    pub fn was_replayed(&self, key: &SessionKey) -> bool {
+        self.replayed_keys.contains(key)
+    }
+
     // ---- scheduling -------------------------------------------------------
 
     /// Ids of the steps a step reads.
@@ -471,6 +582,7 @@ impl RunState {
                     self.sessions_started += 1;
                     if let Some(done) = self.replay.remove(&key.journal_key()) {
                         self.replayed += 1;
+                        self.replayed_keys.insert(key.clone());
                         self.complete(&key, done);
                         replayed_any = true;
                     } else {
@@ -1542,6 +1654,80 @@ input = "confirmed"
         assert_eq!(st.tokens_spent, 120);
         assert_eq!(st.records.len(), 12);
         assert_eq!(st.records[0].phase, "Review");
+    }
+
+    #[test]
+    fn a_label_parses_back_into_its_key() {
+        let key = |item, round, role| SessionKey {
+            step: "s".into(),
+            item,
+            round,
+            role,
+        };
+        for k in [
+            key(0, 0, Role::Main),
+            key(2, 0, Role::Main),
+            key(0, 3, Role::Main),
+            key(1, 2, Role::Main),
+            key(0, 0, Role::Vote(0)),
+            key(4, 1, Role::Vote(2)),
+            key(1, 0, Role::Generate(1)),
+            key(0, 0, Role::Judge { round: 0, pair: 0 }),
+            key(1, 2, Role::Judge { round: 2, pair: 1 }),
+        ] {
+            assert_eq!(
+                SessionKey::parse("s", &k.label()),
+                Some(k.clone()),
+                "{}",
+                k.label()
+            );
+        }
+        for bad in [
+            "t", "s2[1]", "s[0]", "s[x]", "s/vote1", "s/gen0", "s/r0", "s/judge1",
+        ] {
+            assert_eq!(SessionKey::parse("s", bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_run_can_be_read_step_by_step() {
+        let doc = parse(REVIEW).unwrap();
+        let mut st = RunState::new(
+            doc,
+            serde_json::json!({}),
+            Caps {
+                max_sessions: 1000,
+                budget_tokens: Some(5000),
+            },
+        );
+        assert_eq!(st.step_phase(0), Some(StepPhase::Pending));
+        assert_eq!(st.step_phase(9), None);
+        assert_eq!(st.step_items(0), None);
+        assert_eq!(st.budget_tokens(), Some(5000));
+        let specs = st.next(4);
+        assert_eq!(st.step_phase(0), Some(StepPhase::Active));
+        assert_eq!(st.step_items(0), Some(2));
+        assert_eq!(st.step_phase(1), Some(StepPhase::Pending));
+        assert!(!st.was_replayed(&specs[0].key));
+        for spec in specs {
+            st.complete(
+                &spec.key,
+                SessionDone {
+                    outcome: obj(serde_json::json!({ "findings": [{ "file": "a.rs" }] })),
+                    tokens: 1,
+                    cost_usd: 0.0,
+                },
+            );
+        }
+        assert_eq!(st.step_phase(0), Some(StepPhase::Done));
+        assert_eq!(st.step_items(0), None, "a finished step keeps no work");
+        st.next(1);
+        assert_eq!(st.step_phase(1), Some(StepPhase::Active));
+        assert_eq!(
+            st.step_items(1),
+            Some(1),
+            "the two findings are one after dedupe"
+        );
     }
 
     #[test]

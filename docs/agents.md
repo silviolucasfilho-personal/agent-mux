@@ -173,7 +173,7 @@ Errors refuse the run before anything launches, and warnings become the run's no
 ## 5. Records and resume
 
 - The journal line of each session carries `agent` and `agent_hash` (the sha256 of the agent file), and every launch row carries `launches.metadata.workflow_agent`.
-- The Steps tab and `agent-mux workflow status <run> --steps` show `reviewer@codex` for a session that ran as an agent. `--json` adds `agent` per session.
+- The Run screen's tree shows `codex·reviewer` and `agent-mux workflow status <run> --steps` shows `reviewer@codex` for a session that ran as an agent. `--json` adds `agent` per session.
 - On `--resume`, if a session's agent changed since the journaled run (edited, swapped or removed), its step and every later step run again, because their inputs may change with it. The run's notes say so. Earlier steps replay.
 
 ## 6. The planner creates agents too

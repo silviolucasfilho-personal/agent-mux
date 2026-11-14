@@ -226,9 +226,13 @@ impl App {
                 Some(InboxItem::Plan { id, .. }) => {
                     self.open_workflows_view_on(RunRow::Planned(id))
                 }
-                Some(InboxItem::Run { run_id, .. }) => {
+                // a flow's run has a screen of its own
+                Some(InboxItem::Run { run_id, .. })
+                    if !self.open_run_screen(&run_id, super::run_screen::Origin::Agents) =>
+                {
                     self.open_workflows_view_on(RunRow::Stored(run_id))
                 }
+                Some(InboxItem::Run { .. }) => {}
                 None => {}
             },
             KeyCode::Char('T') => match selected.as_ref() {

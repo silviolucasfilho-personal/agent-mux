@@ -61,6 +61,29 @@ pub fn run_dir(runtime_dir: &Path, run_id: &str) -> PathBuf {
     runtime_dir.join("workflows").join(run_id)
 }
 
+/// Where a run keeps what session `label` printed, for the Run screen's
+/// Live tab once the session has ended.
+pub fn output_file(run_dir: &Path, label: &str) -> PathBuf {
+    let safe: String = label
+        .chars()
+        .map(|c| if c == '/' { '_' } else { c })
+        .collect();
+    run_dir.join("output").join(format!("{safe}.log"))
+}
+
+/// Where a resumed run records the labels of the journal entries it
+/// replayed (a JSON list), so a reader of the stored run need not guess.
+pub fn replayed_file(run_dir: &Path) -> PathBuf {
+    run_dir.join("replayed.json")
+}
+
+/// The labels a run recorded as replayed; `None` when it recorded none
+/// (it was not resumed, or it is from before the record).
+pub fn load_replayed(run_dir: &Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(replayed_file(run_dir)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// Writes `contexts/<n>.json` under the run directory, owner-only where
 /// the platform supports it.
 pub fn write(run_dir: &Path, n: usize, ctx: &Context) -> std::io::Result<PathBuf> {

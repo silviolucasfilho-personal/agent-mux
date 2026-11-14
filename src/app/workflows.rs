@@ -24,6 +24,142 @@ const PASS_EVERY: Duration = Duration::from_millis(500);
 /// Raw stdout kept per session; envelopes are small, tool output is not.
 const CAPTURE_CAP: usize = 4 * 1024 * 1024;
 
+/// Bounded stream storage. Appends touch only incoming/evicted bytes; the
+/// contiguous head + gap + tail view is built lazily when a reader needs it.
+#[derive(Debug, Default, Clone)]
+pub struct CapturedOutput {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    /// Every byte ever appended: a reader decodes again only when this
+    /// has moved.
+    total: u64,
+    truncated: bool,
+    tail_boundary: bool,
+    view: std::sync::OnceLock<Vec<u8>>,
+}
+
+impl CapturedOutput {
+    fn append(&mut self, mut bytes: &[u8]) {
+        use crate::workflows::live::CAPTURE_GAP;
+        const HEAD_CAP: usize = 8 * 1024;
+        self.view.take();
+        self.total += bytes.len() as u64;
+        if !self.truncated && self.tail.len().saturating_add(bytes.len()) <= CAPTURE_CAP {
+            self.tail.extend(bytes);
+            return;
+        }
+        if !self.truncated {
+            // This runs once, when the stream first exceeds the cap. The
+            // prefix can span the old buffer and a single large first chunk.
+            let mut prefix: Vec<u8> = self.tail.iter().take(HEAD_CAP).copied().collect();
+            prefix.extend_from_slice(&bytes[..bytes.len().min(HEAD_CAP - prefix.len())]);
+            let end = prefix
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            prefix.truncate(end);
+            self.head = prefix;
+            let old_prefix = end.min(self.tail.len());
+            self.tail.drain(..old_prefix);
+            bytes = &bytes[end - old_prefix..];
+            self.truncated = true;
+            self.tail_boundary = true;
+        }
+        let room = CAPTURE_CAP - self.head.len() - CAPTURE_GAP.len();
+        let dropped = self
+            .tail
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(room);
+        if dropped > 0 {
+            self.tail_boundary = if dropped <= self.tail.len() {
+                self.tail[dropped - 1] == b'\n'
+            } else {
+                bytes[dropped - self.tail.len() - 1] == b'\n'
+            };
+        }
+        if bytes.len() >= room {
+            self.tail.clear();
+            self.tail.extend(&bytes[bytes.len() - room..]);
+        } else {
+            self.tail.drain(..dropped);
+            self.tail.extend(bytes);
+        }
+    }
+
+    /// How many bytes were appended so far, kept or not.
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+
+    /// A read-only view compatible with the envelope and Live decoders.
+    /// Discard a leading tail fragment at read time, so both retained ranges
+    /// are exact source ranges beginning on line and UTF-8 boundaries.
+    pub fn snapshot(&self) -> &[u8] {
+        self.view.get_or_init(|| {
+            let mut out = Vec::with_capacity(CAPTURE_CAP.min(
+                self.head.len() + self.tail.len() + crate::workflows::live::CAPTURE_GAP.len(),
+            ));
+            if self.truncated {
+                out.extend_from_slice(&self.head);
+                out.extend_from_slice(crate::workflows::live::CAPTURE_GAP.as_bytes());
+            }
+            let skip = if self.truncated && !self.tail_boundary {
+                self.tail
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map(|i| i + 1)
+                    .unwrap_or(self.tail.len())
+            } else {
+                0
+            };
+            out.extend(self.tail.iter().skip(skip));
+            out
+        })
+    }
+}
+
+impl std::ops::Deref for CapturedOutput {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.snapshot()
+    }
+}
+
+/// Writes what a session printed into the run's directory, where the Run
+/// screen's Live tab reads it once the session has ended.
+fn keep_output(run_dir: &std::path::Path, s: &LiveWorkflowSession) {
+    let path = context::output_file(run_dir, &s.key.label());
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, s.stdout.snapshot());
+}
+
+/// Records which copied journal entries a resumed run has replayed so
+/// far, so the stored run is read exactly (`run_view::StoredRun.replayed`).
+fn record_replayed(run: &LiveWorkflowRun) {
+    if run.resumed_from.is_none() {
+        return;
+    }
+    let labels: Vec<String> = run
+        .state
+        .records
+        .iter()
+        .filter(|r| run.state.was_replayed(&r.key))
+        .map(|r| r.key.label())
+        .collect();
+    let _ = std::fs::write(
+        context::replayed_file(&run.run_dir),
+        serde_json::to_string(&labels).unwrap_or_default(),
+    );
+}
+
+fn append_capture(stdout: &mut CapturedOutput, bytes: &[u8]) {
+    stdout.append(bytes);
+}
+
 /// What starts a run.
 #[derive(Debug, Clone)]
 pub struct WorkflowRunRequest {
@@ -58,12 +194,23 @@ pub struct LiveWorkflowSession {
     pub timeout: Duration,
     pub exited_at: Option<Instant>,
     pub timed_out: bool,
-    pub stdout: Vec<u8>,
+    pub stdout: CapturedOutput,
     pub out_file: PathBuf,
     pub context_path: PathBuf,
     pub retried: bool,
     /// The worktree an isolated session runs in.
     pub worktree: Option<crate::loops::worktree::Worktree>,
+}
+
+/// A session of a live run that has answered: what the Run screen still
+/// shows of it (who ran it and when) once it has left `sessions`.
+#[derive(Debug, Clone)]
+pub struct EndedWorkflowSession {
+    pub spec: SessionSpec,
+    pub harness: Harness,
+    pub launch_id: Option<String>,
+    pub started_ns: i64,
+    pub ended_ns: i64,
 }
 
 /// A run with sessions in flight or about to start.
@@ -82,6 +229,8 @@ pub struct LiveWorkflowRun {
     pub started_ns: i64,
     pub run_dir: PathBuf,
     pub sessions: Vec<LiveWorkflowSession>,
+    /// The sessions that answered, in the order they did.
+    pub ended: Vec<EndedWorkflowSession>,
     pub session_count: usize,
     pub run_timeout: Duration,
     pub resumed_from: Option<String>,
@@ -475,6 +624,7 @@ impl App {
             started_ns,
             run_dir,
             sessions: Vec::new(),
+            ended: Vec::new(),
             session_count: 0,
             run_timeout: Duration::from_secs(self.workflows.run_timeout_s),
             resumed_from: req.resume_from.clone(),
@@ -936,7 +1086,7 @@ impl App {
                 timeout: Duration::from_secs(timeout_s),
                 exited_at: None,
                 timed_out: false,
-                stdout: Vec::new(),
+                stdout: CapturedOutput::default(),
                 out_file,
                 context_path,
                 retried: false,
@@ -991,10 +1141,7 @@ impl App {
     pub fn capture_workflow_output(&mut self, session_id: usize, bytes: &[u8]) {
         for run in &mut self.live_workflow_runs {
             if let Some(s) = run.sessions.iter_mut().find(|s| s.session_id == session_id) {
-                if s.stdout.len() < CAPTURE_CAP {
-                    let room = CAPTURE_CAP - s.stdout.len();
-                    s.stdout.extend_from_slice(&bytes[..bytes.len().min(room)]);
-                }
+                append_capture(&mut s.stdout, bytes);
                 return;
             }
         }
@@ -1024,7 +1171,7 @@ impl App {
                 s.spec.clone(),
                 s.harness,
                 s.launch_id.clone(),
-                s.stdout.clone(),
+                s.stdout.to_vec(),
                 s.out_file.clone(),
                 s.retried,
                 s.timed_out,
@@ -1175,7 +1322,15 @@ impl App {
         let _ = journal::append(&run.run_dir.join("journal.jsonl"), &entry);
         self.write_workflow_step_row(ri, si, Some((&outcome, tokens, cost)));
         let run = &mut self.live_workflow_runs[ri];
-        run.sessions.remove(si);
+        let s = run.sessions.remove(si);
+        keep_output(&run.run_dir, &s);
+        run.ended.push(EndedWorkflowSession {
+            spec: s.spec,
+            harness: s.harness,
+            launch_id: s.launch_id,
+            started_ns: s.started_ns,
+            ended_ns: crate::tracing::store::now_ns(),
+        });
         run.state.complete(&key, done);
         if let Outcome::Null(why) = &outcome {
             run.state
@@ -1185,6 +1340,7 @@ impl App {
         if let Some(n) = wt_note {
             run.state.notes.push(n);
         }
+        record_replayed(run);
     }
 
     /// Records a finished run and moves it to the recent list.
@@ -1199,6 +1355,11 @@ impl App {
         };
         let ended_ns = crate::tracing::store::now_ns();
         let live = &self.live_workflow_runs[ri];
+        // a session the run ended under never answered: its output stays
+        for s in &live.sessions {
+            keep_output(&live.run_dir, s);
+        }
+        record_replayed(live);
         self.write_workflow_run_row(live, status_label, Some(ended_ns));
         let (result, error) = match &status {
             RunStatus::Finished(v) | RunStatus::BudgetExhausted(v) => (v.clone(), None),
@@ -1332,7 +1493,7 @@ pub struct LivePlan {
     pub started: Instant,
     pub timeout: Duration,
     pub exited_at: Option<Instant>,
-    pub stdout: Vec<u8>,
+    pub stdout: CapturedOutput,
     pub out_file: PathBuf,
     pub launch_id: Option<String>,
     /// Start the run as soon as the document validates.
@@ -1499,7 +1660,7 @@ impl App {
             started: Instant::now(),
             timeout: Duration::from_secs(timeout_s),
             exited_at: None,
-            stdout: Vec::new(),
+            stdout: CapturedOutput::default(),
             out_file,
             launch_id,
             auto_run: req.auto_run,
@@ -1747,10 +1908,8 @@ impl App {
             .live_workflow_plans
             .iter_mut()
             .find(|p| p.session_id == session_id)
-            && p.stdout.len() < CAPTURE_CAP
         {
-            let room = CAPTURE_CAP - p.stdout.len();
-            p.stdout.extend_from_slice(&bytes[..bytes.len().min(room)]);
+            append_capture(&mut p.stdout, bytes);
         }
     }
 
@@ -1820,9 +1979,7 @@ pub(crate) fn short_task(task: &str) -> String {
 // ---- the section, the dialog and the view -------------------------------------
 
 use crate::app::dir_picker::PickerEvent;
-use crate::app::workflows_view::{
-    DialogField, DialogPurpose, RunRow, ViewFacts, WorkflowDialogState,
-};
+use crate::app::workflows_view::{DialogField, DialogPurpose, RunRow, WorkflowDialogState};
 use crate::app::{Action, Mode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -2058,8 +2215,20 @@ impl App {
                 ));
                 return;
             }
-            Some(WorkflowRow::Live(id)) => Some(RunRow::Live(id)),
-            Some(WorkflowRow::Recent(id)) => Some(RunRow::Stored(id)),
+            // a run opens on its own screen; a recent one the store no
+            // longer has falls back to the runs view
+            Some(WorkflowRow::Live(id)) => {
+                if self.open_run_screen(&id, super::run_screen::Origin::Agents) {
+                    return;
+                }
+                Some(RunRow::Live(id))
+            }
+            Some(WorkflowRow::Recent(id)) => {
+                if self.open_run_screen(&id, super::run_screen::Origin::Agents) {
+                    return;
+                }
+                Some(RunRow::Stored(id))
+            }
             Some(WorkflowRow::Planned(id)) => Some(RunRow::Planned(id)),
             Some(WorkflowRow::Doc(_)) => None,
         };
@@ -2466,23 +2635,16 @@ impl App {
                 match self.start_workflow_run(req) {
                     Ok(id) => {
                         self.mode = Mode::Main;
+                        // the new run is followed on its own screen
+                        self.open_run_screen(&id, super::run_screen::Origin::Agents);
                         self.notice = Some(Notice::info(format!(
-                            "workflow {name} started ({}); W follows it",
+                            "workflow {name} started ({})",
                             &id[..8]
                         )));
                     }
                     Err(e) => fail(self, e),
                 }
             }
-        }
-    }
-
-    pub fn view_facts(&self) -> ViewFacts<'_> {
-        ViewFacts {
-            live: &self.live_workflow_runs,
-            recent: &self.recent_workflow_runs,
-            planned: &self.planned_workflows,
-            plans_in_flight: self.live_workflow_plans.len(),
         }
     }
 
@@ -2537,6 +2699,88 @@ impl App {
 mod tests {
     use super::awaiting_verdict;
     use serde_json::json;
+
+    #[test]
+    fn bounded_capture_keeps_final_stream_results() {
+        use super::{CAPTURE_CAP, append_capture};
+        use crate::harness::Harness;
+        use crate::workflows::{harness::envelope, live};
+        for (h, result) in [
+            (
+                Harness::Claude,
+                r#"{"type":"result","result":"final answer","usage":{"input_tokens":12,"output_tokens":3},"total_cost_usd":0.25}"#,
+            ),
+            (
+                Harness::Antigravity,
+                r#"{"event":"result","result":{"response":"final answer","usage":{"input_tokens":12,"output_tokens":3},"cost_usd":0.25}}"#,
+            ),
+        ] {
+            let mut raw = b"{\"type\":\"system\",\"event\":\"init\"}\n".to_vec();
+            let filler = format!(
+                "{{\"type\":\"unknown\",\"data\":\"{}\"}}\n",
+                "x".repeat(999)
+            );
+            while raw.len() < CAPTURE_CAP * 2 {
+                raw.extend_from_slice(filler.as_bytes());
+            }
+            raw.extend_from_slice(result.as_bytes());
+            raw.push(b'\n');
+            for chunk_size in [raw.len(), 7777] {
+                let mut captured = super::CapturedOutput::default();
+                for chunk in raw.chunks(chunk_size) {
+                    append_capture(&mut captured, chunk);
+                }
+                assert!(captured.len() <= CAPTURE_CAP);
+                assert!(captured.starts_with(b"{\"type\":\"system\""));
+                let parsed = envelope(h, &captured, std::path::Path::new("/unused"));
+                assert_eq!(parsed.text.as_deref(), Some("final answer"));
+                assert_eq!(parsed.tokens, Some(15));
+                assert_eq!(parsed.cost_usd, Some(0.25));
+                assert_eq!(
+                    live::lines(h, &captured).last().unwrap().text,
+                    "final answer"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ring_capture_is_an_exact_bounded_prefix_and_suffix() {
+        use super::{CAPTURE_CAP, CapturedOutput};
+        use crate::workflows::live::CAPTURE_GAP;
+        let mut raw = "é🙂 streaming line\n".repeat(CAPTURE_CAP / 9).into_bytes();
+        raw.extend_from_slice(b"last complete line\nlast partial");
+        for chunk_size in [4096, 7777, raw.len()] {
+            let mut capture = CapturedOutput::default();
+            for chunk in raw.chunks(chunk_size) {
+                capture.append(chunk);
+                assert!(
+                    capture.head.len()
+                        + capture.tail.len()
+                        + if capture.truncated {
+                            CAPTURE_GAP.len()
+                        } else {
+                            0
+                        }
+                        <= CAPTURE_CAP
+                );
+            }
+            let snapshot = capture.snapshot();
+            assert!(std::str::from_utf8(snapshot).is_ok());
+            let gap = snapshot
+                .windows(CAPTURE_GAP.len())
+                .position(|w| w == CAPTURE_GAP.as_bytes())
+                .unwrap();
+            let head = &snapshot[..gap];
+            let tail = &snapshot[gap + CAPTURE_GAP.len()..];
+            assert!(raw.starts_with(head));
+            assert!(raw.ends_with(tail));
+            assert_eq!(head.last(), Some(&b'\n'));
+            let start = raw.len() - tail.len();
+            assert_eq!(raw[start - 1], b'\n');
+            assert!(tail.ends_with(b"last complete line\nlast partial"));
+        }
+    }
 
     #[test]
     fn a_verdict_waits_unless_accepted_and_uncontradicted() {

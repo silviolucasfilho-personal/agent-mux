@@ -44,6 +44,10 @@ impl App {
             _ => None,
         };
         let in_swarm = matches!(self.mode, Mode::Swarm(_));
+        let run_screen = match &self.mode {
+            Mode::Run(st) => Some(st),
+            _ => None,
+        };
         let supported = match id {
             Langfuse | OpenLangfuseWeb => {
                 if self.resolved_langfuse().is_some() {
@@ -89,6 +93,7 @@ impl App {
                 ) || config_item
                     || skills_package
                     || runs_item.is_some()
+                    || run_screen.is_some()
                     || matches!(self.mode, Mode::Markdown(_) | Mode::AgentEditor(_))
                     || workspace_node.is_some_and(|n| n.customization.primary_doc.is_some())
             }
@@ -128,6 +133,7 @@ impl App {
                         && !self.history_sessions.is_empty())
                     || matches!(self.mode, Mode::AgentEditor(_))
                     || runs_item.is_some()
+                    || run_screen.is_some_and(|s| s.data.stored.is_some())
                     || skills_package
                     || workspace_node.is_some()
                     || in_swarm
@@ -143,6 +149,7 @@ impl App {
                     || runs_item.is_some_and(|i| {
                         matches!(i.run, RunRef::LoopLive { .. } | RunRef::FlowLive(_))
                     })
+                    || run_screen.is_some_and(|s| s.data.live)
                     || in_swarm
             }
             Reload => matches!(
@@ -150,6 +157,7 @@ impl App {
                 Mode::ConfigView(_)
                     | Mode::SkillsView(_)
                     | Mode::RunsView(_)
+                    | Mode::Run(_)
                     | Mode::Markdown(_)
                     | Mode::Memory(_)
                     | Mode::Workspaces(_)
@@ -686,6 +694,7 @@ impl App {
             Mode::Main => "Session",
             Mode::AgentEditor(_) => "Editor",
             Mode::RunsView(_) => "Runs",
+            Mode::Run(_) => "Run",
             Mode::TraceBrowser(_) => "Traces",
             Mode::SkillsView(_) => "Skills",
             Mode::ConfigView(_) => "Configuration",
@@ -711,6 +720,14 @@ impl App {
             Mode::RunsView(st) => format!(
                 "Runs {} • Keyboard focus",
                 if st.detail_focused { "detail" } else { "list" }
+            ),
+            Mode::Run(st) => format!(
+                "Run {} • Keyboard focus",
+                if st.focus == super::run_screen::Focus::Pane {
+                    "pane"
+                } else {
+                    "tree"
+                }
             ),
             _ => format!("{} • Keyboard focus", self.keyboard_focus_short()),
         }
@@ -787,6 +804,7 @@ impl App {
             }
             Mode::Markdown(v) => v.confirm_close,
             Mode::RunsView(v) => v.confirm_discard,
+            Mode::Run(v) => v.confirm.is_some(),
             Mode::ConfigView(v) => {
                 matches!(v.pending, super::Pending::Reset | super::Pending::Push)
             }

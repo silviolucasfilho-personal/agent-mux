@@ -15,6 +15,17 @@
 //! final envelope with usage or cost (its session row in
 //! `~/.local/share/opencode/opencode.db` has them). It has no budget flag.
 
+//! Streaming re-probed 2026-11-13 with installed `--help` and real runs in
+//! a temporary folder: Claude `--version` reported 2.1.323 (the run's init
+//! reported 2.1.325). `--output-format stream-json --verbose` emits assistant
+//! messages and user tool results, then the same result envelope as `json`.
+//! Antigravity 1.5.8 accepts `--output-format stream-json`: `init`,
+//! `step_update` (text_delta and tool_info), then `result` nested under
+//! `result`, with response and usage. With `--mode accept-edits` its shell
+//! command was refused because headless mode cannot prompt for command
+//! permission, yet the final status was SUCCESS with an empty response.
+//! This permission behavior is recorded here, not changed.
+
 use crate::harness::Harness;
 use std::path::Path;
 
@@ -30,7 +41,8 @@ pub fn extra_args(
     match harness {
         Harness::Claude => {
             v.push("--output-format".into());
-            v.push("json".into());
+            v.push("stream-json".into());
+            v.push("--verbose".into());
             if let Some(cap) = usd_cap {
                 v.push("--max-budget-usd".into());
                 v.push(format!("{cap}"));
@@ -43,7 +55,7 @@ pub fn extra_args(
         }
         Harness::Antigravity => {
             v.push("--output-format".into());
-            v.push("json".into());
+            v.push("stream-json".into());
             v.push("--print-timeout".into());
             v.push(format!("{timeout_s}s"));
             v.push("--mode".into());
@@ -229,19 +241,36 @@ pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
         Harness::Grok | Harness::Pi => Envelope::default(),
         Harness::Claude | Harness::Antigravity => {
             let cleaned = clean_terminal(stdout);
-            let Some(v) = last_json_object(&cleaned) else {
+            let result = cleaned
+                .lines()
+                .rev()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+                .find(|v| {
+                    v.get("type").and_then(|x| x.as_str()) == Some("result")
+                        || v.get("event").and_then(|x| x.as_str()) == Some("result")
+                });
+            let Some(v) = result.or_else(|| last_json_object(&cleaned)) else {
                 return Envelope::default();
+            };
+            let v = if harness == Harness::Antigravity
+                && v.get("event").and_then(|x| x.as_str()) == Some("result")
+            {
+                &v["result"]
+            } else {
+                &v
             };
             let tokens = v
                 .get("usage")
                 .and_then(|u| {
                     let i = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
                     let o = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-                    (i + o > 0).then_some(i + o)
+                    (i + o > 0)
+                        .then_some(i + o)
+                        .or_else(|| u.get("total_tokens").and_then(|x| x.as_u64()))
                 })
                 .or_else(|| v.get("total_tokens").and_then(|x| x.as_u64()));
             Envelope {
-                text: text_of(&v),
+                text: text_of(v),
                 tokens,
                 cost_usd: v
                     .get("total_cost_usd")
@@ -255,6 +284,89 @@ pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_stream_result_and_legacy_agree() {
+        let old = br#"{"status":"SUCCESS","response":"probe done","usage":{"input_tokens":13,"output_tokens":2,"total_tokens":15}}"#;
+        let stream = format!(
+            "{{\"event\":\"init\"}}\n{{\"event\":\"result\",\"result\":{}}}\n",
+            String::from_utf8_lossy(old)
+        );
+        let expected = envelope(Harness::Antigravity, old, Path::new("/x"));
+        assert_eq!(expected.text.as_deref(), Some("probe done"));
+        assert_eq!(
+            envelope(Harness::Antigravity, stream.as_bytes(), Path::new("/x")),
+            expected
+        );
+    }
+
+    #[test]
+    fn final_result_survives_later_noise_and_partial_events() {
+        use crate::workflows::live::fixtures;
+        for (h, fixture) in [
+            (Harness::Claude, fixtures::CLAUDE),
+            (Harness::Antigravity, fixtures::AGY),
+        ] {
+            let noisy = format!("{fixture}{{\"event\":\"unknown\"}}\n{{\"partial\":");
+            assert_eq!(
+                envelope(h, noisy.as_bytes(), Path::new("/x")),
+                envelope(h, fixture.as_bytes(), Path::new("/x"))
+            );
+        }
+        let agy = br#"{"event":"result","result":{"response":"hi","usage":{"total_tokens":7},"cost_usd":0.1}}"#;
+        assert_eq!(
+            envelope(Harness::Antigravity, agy, Path::new("/x")),
+            Envelope {
+                text: Some("hi".into()),
+                tokens: Some(7),
+                cost_usd: Some(0.1)
+            }
+        );
+    }
+
+    #[test]
+    fn captured_results_preserve_accounting() {
+        use crate::workflows::live::fixtures;
+        for (h, stream, text, tokens, cost) in [
+            (
+                Harness::Claude,
+                fixtures::CLAUDE,
+                Some("probe done"),
+                160,
+                Some(0.2905132),
+            ),
+            (
+                Harness::Antigravity,
+                fixtures::AGY,
+                Some("probe done\n"),
+                12717,
+                None,
+            ),
+            (
+                Harness::Antigravity,
+                fixtures::AGY_DENIED,
+                None,
+                26797,
+                None,
+            ),
+        ] {
+            let got = envelope(h, stream.as_bytes(), Path::new("/x"));
+            assert_eq!(got.text.as_deref(), text);
+            assert_eq!(got.tokens, Some(tokens));
+            assert_eq!(got.cost_usd, cost);
+            let last: serde_json::Value =
+                serde_json::from_str(stream.lines().last().unwrap()).unwrap();
+            let old = if h == Harness::Antigravity {
+                &last["result"]
+            } else {
+                &last
+            };
+            assert_eq!(
+                envelope(h, old.to_string().as_bytes(), Path::new("/x")),
+                got
+            );
+        }
+    }
 
     #[test]
     fn effort_per_harness() {
@@ -287,7 +399,8 @@ mod tests {
                 "--model",
                 "m",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
                 "--max-budget-usd",
                 "1.5",
                 "-p",
@@ -321,7 +434,7 @@ mod tests {
             agy,
             vec![
                 "--output-format",
-                "json",
+                "stream-json",
                 "--print-timeout",
                 "60s",
                 "--mode",

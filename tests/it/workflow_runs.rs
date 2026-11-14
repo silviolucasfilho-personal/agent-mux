@@ -302,7 +302,10 @@ async fn the_builtin_review_runs_end_to_end_on_a_fake_claude() {
     let args = calls(&f.bin, Harness::Claude, "args");
     assert_eq!(args.len(), 9);
     for a in &args {
-        assert!(a.contains("--output-format\njson\n"), "{a}");
+        assert!(
+            a.contains("--output-format\nstream-json\n--verbose\n"),
+            "{a}"
+        );
         assert!(a.contains("--dangerously-skip-permissions"), "{a}");
         assert!(a.contains("\n-p\n"), "{a}");
     }
@@ -552,7 +555,7 @@ async fn one_run_can_mix_all_three_harnesses() {
     let agy_args = calls(&f.bin, Harness::Antigravity, "args");
     assert_eq!(agy_args.len(), 1);
     assert!(
-        agy_args[0].contains("--output-format\njson\n--print-timeout\n"),
+        agy_args[0].contains("--output-format\nstream-json\n--print-timeout\n"),
         "{}",
         agy_args[0]
     );
@@ -766,6 +769,30 @@ async fn a_resumed_run_replays_the_journal_without_launching() {
             .resumed_from
             .as_deref(),
         Some(first.as_str())
+    );
+    // the run recorded which journal entries it replayed, and the Run
+    // screen reads the stored run from that record
+    let recorded = std::fs::read_to_string(
+        f.home
+            .join("runtime/workflows")
+            .join(&second)
+            .join("replayed.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&recorded).unwrap(),
+        ["a", "b"]
+    );
+    assert!(
+        f.app
+            .open_run_screen(&second, agent_mux::app::run_screen::Origin::Agents)
+    );
+    let tree = &run_screen(&f.app).data.tree;
+    assert!(
+        tree.steps()
+            .all(|r| r.state == agent_mux::workflows::run_view::State::Replayed),
+        "{:?}",
+        tree.steps().map(|r| r.state).collect::<Vec<_>>()
     );
 
     // a missing journal is an error, not a silent fresh run
@@ -1343,4 +1370,505 @@ async fn steps_run_as_agents_on_every_harness() {
     assert_eq!(calls(&f.bin, Harness::Claude, "args").len(), 2);
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.contains("twice"), "the agy file follows the agent");
+}
+
+// ---- the Run screen ---------------------------------------------------------
+
+fn render(app: &App, width: u16, height: u16) -> String {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|f| agent_mux::ui::draw(f, app, Instant::now()))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let mut out = String::new();
+    for y in 0..height {
+        for x in 0..width {
+            out.push_str(buffer[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn press(app: &mut App, code: crossterm::event::KeyCode) {
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    app.handle_key(&KeyEvent::new(code, KeyModifiers::NONE), Instant::now());
+}
+
+fn run_screen(app: &App) -> &agent_mux::app::run_screen::RunScreen {
+    match &app.mode {
+        agent_mux::app::Mode::Run(st) => st,
+        other => panic!("not on the Run screen: {other:?}"),
+    }
+}
+
+/// Three steps, the second a fan-out over two items on Codex as an agent.
+const SCREENED: &str = r#"
+[workflow]
+name = "screened"
+description = "three steps, the second a fan-out"
+
+[[steps]]
+id = "first"
+prompt = "say one"
+
+[[steps]]
+id = "fan"
+kind = "fanout"
+over = ["a", "b"]
+harness = "codex"
+agent = "reviewer"
+prompt = "work on the item"
+
+[[steps]]
+id = "last"
+prompt = "sum up {fan}"
+"#;
+
+#[tokio::test]
+async fn the_run_screen_follows_a_live_run_and_keeps_it_once_it_is_stopped() {
+    use agent_mux::app::run_screen::Origin;
+    use agent_mux::workflows::run_view::{RowKind, State, Status};
+    use crossterm::event::KeyCode;
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fake_harness(&bin, Harness::Claude, &[("first", "one")], None, None);
+    fake_harness(&bin, Harness::Codex, &[], Some("fan"), None);
+    let mut f = fixture(&bin, temp);
+    let req = request(
+        "screened",
+        SCREENED,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    let run_id = f.app.start_workflow_run(req).unwrap();
+    assert!(f.app.open_run_screen(&run_id, Origin::Agents));
+    // the fan-out's two sessions are running, the first step has answered
+    let reached = pump_until(&mut f, Duration::from_secs(20), |a| {
+        a.live_workflow_runs
+            .first()
+            .is_some_and(|r| r.running_sessions() == 2 && r.state.records.len() == 1)
+    })
+    .await;
+    assert!(reached, "{:?}", f.app.notice);
+    // the screen re-reads the run on its own
+    let shown = pump_until(&mut f, Duration::from_secs(5), |a| {
+        let tree = &run_screen(a).data.tree;
+        tree.totals.steps_done == 1 && tree.totals.sessions_running == 2
+    })
+    .await;
+    assert!(shown);
+    let st = run_screen(&f.app);
+    let tree = &st.data.tree;
+    assert!(st.data.live);
+    assert_eq!(tree.status, Status::Running);
+    // every step is a row from the start, in the document's order
+    let steps: Vec<(&str, State)> = tree.steps().map(|r| (r.label.as_str(), r.state)).collect();
+    assert_eq!(
+        steps,
+        [
+            ("first", State::Done),
+            ("fan", State::Running),
+            ("last", State::Waiting)
+        ]
+    );
+    assert_eq!((tree.totals.steps_done, tree.totals.steps_total), (1, 3));
+    // a finished session keeps who ran it and when
+    let first = tree.steps().next().unwrap();
+    assert_eq!(first.who.harness, "claude");
+    assert!(first.started_ns.is_some() && first.ended_ns.is_some());
+    // the running step is open: its two sessions are rows, with who runs them
+    let fan: Vec<_> = tree.sessions_of("fan").collect();
+    assert_eq!(fan.len(), 2);
+    assert_eq!(fan[0].who.short(), "codex·reviewer");
+    assert_eq!(st.visible().len(), 1 + 3 + 2);
+
+    let screen = render(&f.app, 120, 30);
+    for expected in [
+        "screened · running",
+        "1 Board",
+        "2 Live",
+        "3 Timeline",
+        "4 Result",
+        "5 Document",
+        "first",
+        "fan",
+        "last",
+        "⇉ 2 in parallel",
+        "codex·reviewer",
+        "2 running",
+        "Run tree • Keyboard focus",
+        "x stop · e edit · Esc back",
+    ] {
+        assert!(
+            screen.contains(expected),
+            "missing {expected:?} in\n{screen}"
+        );
+    }
+
+    // a session's row has its own tabs
+    press(&mut f.app, KeyCode::Down);
+    press(&mut f.app, KeyCode::Down);
+    press(&mut f.app, KeyCode::Down);
+    let st = run_screen(&f.app);
+    assert_eq!(st.selected().kind, RowKind::Session);
+    assert_eq!(st.selected().label, "[0]");
+    let screen = render(&f.app, 120, 30);
+    for expected in [
+        "1 Step",
+        "2 Live",
+        "3 Trace",
+        "4 Changes",
+        "fan [0] · running",
+        "work on the item",
+        "received",
+    ] {
+        assert!(
+            screen.contains(expected),
+            "missing {expected:?} in\n{screen}"
+        );
+    }
+
+    // its Live tab is a tail of what it printed
+    press(&mut f.app, KeyCode::Char('2'));
+    assert!(render(&f.app, 120, 30).contains("Nothing printed yet."));
+    press(&mut f.app, KeyCode::Char('1'));
+    // the run's Live tab has a tile for every session running now
+    press(&mut f.app, KeyCode::Char('g'));
+    assert_eq!(run_screen(&f.app).selected().kind, RowKind::Run);
+    press(&mut f.app, KeyCode::Char('2'));
+    let screen = render(&f.app, 120, 30);
+    for expected in ["▶ fan · codex·reviewer", "▶ fan[1] · codex·reviewer"] {
+        assert!(
+            screen.contains(expected),
+            "missing {expected:?} in\n{screen}"
+        );
+    }
+    press(&mut f.app, KeyCode::Char('1'));
+    // x on the run row asks first; n leaves the run alone
+    press(&mut f.app, KeyCode::Char('x'));
+    assert!(render(&f.app, 120, 30).contains("Stop this run? [y/n]"));
+    press(&mut f.app, KeyCode::Char('n'));
+    assert!(run_screen(&f.app).confirm.is_none());
+    assert_eq!(f.app.live_workflow_runs.len(), 1);
+    press(&mut f.app, KeyCode::Char('x'));
+    press(&mut f.app, KeyCode::Char('y'));
+    let done = pump_until(&mut f, Duration::from_secs(20), |a| {
+        a.live_workflow_runs.is_empty()
+    })
+    .await;
+    assert!(done, "{:?}", f.app.notice);
+    // the run has left memory; the screen now reads it from the store
+    let read = pump_until(&mut f, Duration::from_secs(5), |a| !run_screen(a).data.live).await;
+    assert!(read);
+    let st = run_screen(&f.app);
+    assert_eq!(st.data.tree.status, Status::Cancelled);
+    assert_eq!(st.data.tree.steps().count(), 3);
+    assert!(render(&f.app, 120, 30).contains("screened · cancelled"));
+    // Esc returns to where it was opened from
+    press(&mut f.app, KeyCode::Esc);
+    assert!(matches!(f.app.mode, agent_mux::app::Mode::Main));
+}
+
+#[tokio::test]
+async fn x_on_a_session_row_stops_that_session_and_the_run_goes_on() {
+    use agent_mux::app::run_screen::{Confirm, Origin};
+    use agent_mux::workflows::run_view::State;
+    use crossterm::event::KeyCode;
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fake_harness(&bin, Harness::Claude, &[("first", "one")], None, None);
+    fake_harness(&bin, Harness::Codex, &[], Some("fan"), None);
+    let mut f = fixture(&bin, temp);
+    let req = request(
+        "screened",
+        SCREENED,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    let run_id = f.app.start_workflow_run(req).unwrap();
+    assert!(f.app.open_run_screen(&run_id, Origin::Agents));
+    let shown = pump_until(&mut f, Duration::from_secs(20), |a| {
+        let tree = &run_screen(a).data.tree;
+        tree.totals.steps_done == 1 && tree.totals.sessions_running == 2
+    })
+    .await;
+    assert!(shown, "{:?}", f.app.notice);
+    // run, first, fan, its first session
+    for _ in 0..3 {
+        press(&mut f.app, KeyCode::Down);
+    }
+    assert_eq!(run_screen(&f.app).selected().label, "[0]");
+    press(&mut f.app, KeyCode::Char('x'));
+    assert!(
+        matches!(
+            &run_screen(&f.app).confirm,
+            Some(Confirm::StopSession { label, .. }) if label == "fan [0]"
+        ),
+        "{:?}",
+        f.app.notice
+    );
+    press(&mut f.app, KeyCode::Char('y'));
+    // that session answers nothing; the other one is still running
+    let stopped = pump_until(&mut f, Duration::from_secs(20), |a| {
+        run_screen(a)
+            .data
+            .tree
+            .sessions_of("fan")
+            .any(|r| r.label == "[0]" && r.state == State::NullAnswer)
+    })
+    .await;
+    assert!(stopped, "{:?}", f.app.notice);
+    let st = run_screen(&f.app);
+    assert!(st.data.live, "the run goes on");
+    assert_eq!(st.data.tree.totals.sessions_running, 1);
+    let other = st
+        .data
+        .tree
+        .sessions_of("fan")
+        .find(|r| r.label == "[1]")
+        .unwrap();
+    assert_eq!(other.state, State::Running);
+    assert!(f.app.cancel_workflow_run(&run_id));
+    let done = pump_until(&mut f, Duration::from_secs(20), |a| {
+        a.live_workflow_runs.is_empty()
+    })
+    .await;
+    assert!(done);
+}
+
+#[tokio::test]
+async fn enter_on_a_flow_run_in_the_runs_view_opens_its_run_screen() {
+    use agent_mux::app::Mode;
+    use agent_mux::workflows::run_view::{State, Status};
+    use crossterm::event::KeyCode;
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fake_harness(
+        &bin,
+        Harness::Claude,
+        &[("first", "one"), ("last", "the sum")],
+        None,
+        None,
+    );
+    fake_harness(&bin, Harness::Codex, &[("fan", "an item done")], None, None);
+    let mut f = fixture(&bin, temp);
+    let req = request(
+        "screened",
+        SCREENED,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    let run_id = run_to_completion(&mut f, req).await;
+    f.app.open_runs_view_on(
+        &format!("flow:{run_id}"),
+        agent_mux::app::runs_view::RunTab::Report,
+    );
+    // the runs view keeps the run's line and points at its screen
+    let screen = render(&f.app, 120, 30);
+    assert!(screen.contains("↵ opens the run"), "{screen}");
+    assert!(!screen.contains("2 Steps"), "no flow tabs here:\n{screen}");
+    press(&mut f.app, KeyCode::Enter);
+    let st = run_screen(&f.app);
+    assert!(!st.data.live);
+    assert_eq!(st.data.tree.status, Status::Finished);
+    assert!(st.data.tree.steps().all(|r| r.state == State::Done));
+    // a finished step is folded: its sessions open with →
+    assert_eq!(st.visible().len(), 1 + 3);
+    let screen = render(&f.app, 120, 30);
+    for expected in [
+        "screened · finished",
+        "step 3/3",
+        "⇉ 2 in parallel",
+        "codex·reviewer",
+    ] {
+        assert!(
+            screen.contains(expected),
+            "missing {expected:?} in\n{screen}"
+        );
+    }
+    assert!(screen.contains("r resume · e edit · Esc back"), "{screen}");
+    // the Timeline tab has a lane per step
+    press(&mut f.app, KeyCode::Char('3'));
+    let screen = render(&f.app, 120, 30);
+    assert!(
+        screen.contains("3 last") && screen.contains('█'),
+        "{screen}"
+    );
+    // the Result tab has the run's answer
+    press(&mut f.app, KeyCode::Char('4'));
+    assert!(render(&f.app, 120, 30).contains("the sum"));
+    // the Document tab the TOML it started from
+    press(&mut f.app, KeyCode::Char('5'));
+    assert!(render(&f.app, 120, 30).contains("id = \"fan\""));
+    // the run's Live tab says where a finished run's output is
+    press(&mut f.app, KeyCode::Char('2'));
+    assert!(render(&f.app, 120, 30).contains("The run has ended"));
+    // a session's Live tab shows the output the run kept
+    press(&mut f.app, KeyCode::Down);
+    assert_eq!(run_screen(&f.app).selected().label, "first");
+    press(&mut f.app, KeyCode::Char('2'));
+    let screen = render(&f.app, 120, 30);
+    assert!(screen.contains("  one"), "the kept output:\n{screen}");
+    assert!(
+        f.home
+            .join("runtime/workflows")
+            .join(&run_id)
+            .join("output/first.log")
+            .exists()
+    );
+    // its Trace tab reads the trace store by its launch
+    press(&mut f.app, KeyCode::Char('3'));
+    let screen = render(&f.app, 120, 30);
+    assert!(
+        screen.contains("No turns recorded for this session yet."),
+        "{screen}"
+    );
+    press(&mut f.app, KeyCode::Char('1'));
+    // → opens the fan-out, then moves onto its first session
+    press(&mut f.app, KeyCode::Down);
+    press(&mut f.app, KeyCode::Right);
+    assert_eq!(run_screen(&f.app).visible().len(), 1 + 3 + 2);
+    press(&mut f.app, KeyCode::Right);
+    assert_eq!(run_screen(&f.app).selected().label, "[0]");
+    let screen = render(&f.app, 120, 30);
+    assert!(screen.contains("an item done"), "its answer:\n{screen}");
+    // a step on another harness does not show the run's profile
+    assert!(!screen.contains("profile"), "{screen}");
+    // ← goes back to the step, and folds it
+    press(&mut f.app, KeyCode::Left);
+    assert_eq!(run_screen(&f.app).selected().label, "fan");
+    press(&mut f.app, KeyCode::Left);
+    assert_eq!(run_screen(&f.app).visible().len(), 1 + 3);
+    // Esc returns to the runs view, on the same run
+    press(&mut f.app, KeyCode::Esc);
+    match &f.app.mode {
+        Mode::RunsView(v) => assert_eq!(
+            v.selected_item().map(|i| i.run.key()),
+            Some(format!("flow:{run_id}"))
+        ),
+        other => panic!("not the runs view: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn o_opens_the_run_picker_and_enter_moves_to_another_run() {
+    use agent_mux::app::run_screen::Origin;
+    use crossterm::event::KeyCode;
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fake_harness(&bin, Harness::Claude, &[("a", "A"), ("b", "B")], None, None);
+    let mut f = fixture(&bin, temp);
+    let req = request(
+        "two",
+        TWO,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    let first = run_to_completion(&mut f, req.clone()).await;
+    let second = run_to_completion(&mut f, req).await;
+    assert!(f.app.open_run_screen(&second, Origin::Agents));
+    press(&mut f.app, KeyCode::Char('o'));
+    let st = run_screen(&f.app);
+    let picker = st.picker.as_ref().expect("the picker is open");
+    let ids: Vec<&str> = picker.items.iter().map(|i| i.run_id.as_str()).collect();
+    assert_eq!(ids, [second.as_str(), first.as_str()], "newest first");
+    assert_eq!(picker.cursor, 0, "it opens on the run on screen");
+    let screen = render(&f.app, 120, 30);
+    assert!(screen.contains("Runs · ↑↓ · ↵ open · Esc"), "{screen}");
+    assert!(screen.contains("finished ·"), "{screen}");
+    // Esc closes it and leaves the run
+    press(&mut f.app, KeyCode::Esc);
+    assert!(run_screen(&f.app).picker.is_none());
+    assert_eq!(run_screen(&f.app).run_id, second);
+    // Enter on another run moves the screen to it
+    press(&mut f.app, KeyCode::Char('o'));
+    press(&mut f.app, KeyCode::Down);
+    press(&mut f.app, KeyCode::Enter);
+    let st = run_screen(&f.app);
+    assert_eq!(st.run_id, first);
+    assert!(st.picker.is_none());
+    assert_eq!(st.origin, Origin::Agents);
+}
+
+#[tokio::test]
+async fn the_live_tab_tails_a_session_while_it_runs() {
+    use agent_mux::app::run_screen::Origin;
+    use crossterm::event::KeyCode;
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // a claude that says something, runs a tool, and then takes its time
+    let script = bin.join("claude");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"working on it"}]}}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"make check"}}]}}'
+sleep 30
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut f = fixture(&bin, temp);
+    let doc = "[workflow]\nname = \"tail\"\ndescription = \"d\"\n[[steps]]\nid = \"only\"\nprompt = \"go\"\n";
+    let req = request(
+        "tail",
+        doc,
+        &f.ws.clone(),
+        Harness::Claude,
+        serde_json::Value::Null,
+    );
+    let run_id = f.app.start_workflow_run(req).unwrap();
+    assert!(f.app.open_run_screen(&run_id, Origin::Agents));
+    // the screen decodes what the session has printed as it re-reads the run
+    let tailed = pump_until(&mut f, Duration::from_secs(20), |a| {
+        run_screen(a)
+            .tails
+            .get("only")
+            .is_some_and(|t| t.running && t.lines.len() >= 2)
+    })
+    .await;
+    assert!(tailed, "{:?}", f.app.notice);
+    // every session running now, on the run's Live tab
+    press(&mut f.app, KeyCode::Char('2'));
+    let screen = render(&f.app, 120, 30);
+    for expected in ["▶ only · claude", "working on it", "▸ Bash", "make check"] {
+        assert!(
+            screen.contains(expected),
+            "missing {expected:?} in\n{screen}"
+        );
+    }
+    // and the session's own Live tab
+    press(&mut f.app, KeyCode::Down);
+    press(&mut f.app, KeyCode::Char('2'));
+    let screen = render(&f.app, 120, 30);
+    assert!(
+        screen.contains("working on it") && screen.contains("▸ Bash"),
+        "{screen}"
+    );
+    // nothing new was printed: the lines are not decoded again
+    let before = run_screen(&f.app).tails["only"].total;
+    pump_until(&mut f, Duration::from_millis(1500), |_| false).await;
+    assert_eq!(run_screen(&f.app).tails["only"].total, before);
+    assert!(f.app.cancel_workflow_run(&run_id));
+    let done = pump_until(&mut f, Duration::from_secs(20), |a| {
+        a.live_workflow_runs.is_empty()
+    })
+    .await;
+    assert!(done);
+    // the run ended under the session: what it printed was kept
+    let kept = pump_until(&mut f, Duration::from_secs(5), |a| {
+        run_screen(a).tails.get("only").is_some_and(|t| !t.running)
+    })
+    .await;
+    assert!(kept);
+    assert!(render(&f.app, 120, 30).contains("working on it"));
 }

@@ -206,7 +206,7 @@ The **Setup** tab (`3`) is everything about the loop that is not a run: what it 
 `I`, from anywhere, opens the inbox: everything waiting on a human, loops and workflows together. The status bar leads with the count (`● 3 need you [I]`) whenever it is not zero.
 
 - **Loops**: runs waiting on a decision across every loop, with the branch, the worktree path, the files, the verifier verdict and `git diff --stat`. For a run with a branch, `a` marks it **applied**: the worktree is removed, the branch stays for you to merge (`git merge loop/<run>`); agent-mux never merges. `x` marks it **rejected**: worktree and branch are removed. A run that asked for a decision without a branch reads `a` done and `x` dismiss; both record the decision. `Enter` opens its loop's History, `T` its traces.
-- **Workflows**: plans the planner wrote that wait for you (`Enter` opens one in the runs view, `d` discards it) and runs since startup that did not finish cleanly (`Enter` opens the run, `x` dismisses it from the inbox for this session).
+- **Workflows**: plans the planner wrote that wait for you (`Enter` opens one in the runs view, `d` discards it) and runs since startup that did not finish cleanly (`Enter` opens the run on its Run screen, `docs/workflows.md`, `x` dismisses it from the inbox for this session).
 
 ## 10. OpenCode, Antigravity, Grok, Pi, and DeepSeek
 

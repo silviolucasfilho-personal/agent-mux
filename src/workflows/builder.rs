@@ -707,14 +707,55 @@ impl Draft {
             .map(str::to_string)
     }
 
+    /// A role's own `harness`, `model` or `effort`; empty when it names
+    /// none (the refuters and the judge then take the step's).
+    pub fn role_str(&self, i: usize, role: Role, key: &str) -> String {
+        let st = self.step(i);
+        let t = match role {
+            Role::Step => Some(st),
+            Role::Voters => st.get("verify").and_then(Value::as_table),
+            Role::Judge => st.get("judge").and_then(Value::as_table),
+        };
+        t.and_then(|t| t.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// Sets a role's own `harness`, `model` or `effort`; empty removes it.
+    pub fn set_role_str(&mut self, i: usize, role: Role, key: &str, text: &str) {
+        let text = text.trim();
+        let Some(t) = self.role_table_mut(i, role) else {
+            return;
+        };
+        if text.is_empty() {
+            t.remove(key);
+        } else {
+            t.insert(key.into(), s(text));
+        }
+    }
+
     pub fn set_agent(&mut self, i: usize, role: Role, agent: Option<&str>) {
+        let Some(t) = self.role_table_mut(i, role) else {
+            return;
+        };
+        match agent {
+            Some(a) => {
+                t.insert("agent".into(), s(a));
+            }
+            None => {
+                t.remove("agent");
+            }
+        }
+    }
+
+    /// The table a role's keys live in: the step, its `verify` (none
+    /// without a check) or its `judge`, made a table to carry them.
+    fn role_table_mut(&mut self, i: usize, role: Role) -> Option<&mut Table> {
         let st = self.step_mut(i);
-        let t: &mut Table = match role {
+        Some(match role {
             Role::Step => st,
-            Role::Voters => match st.get_mut("verify").and_then(Value::as_table_mut) {
-                Some(t) => t,
-                None => return,
-            },
+            Role::Voters => st.get_mut("verify").and_then(Value::as_table_mut)?,
             Role::Judge => {
                 // `judge = "wf-judge"` becomes a table to carry an agent
                 if let Some(Value::String(name)) = st.get("judge").cloned() {
@@ -727,19 +768,9 @@ impl Draft {
                     t.insert("skill".into(), s("wf-judge"));
                     st.insert("judge".into(), Value::Table(t));
                 }
-                st.get_mut("judge")
-                    .and_then(Value::as_table_mut)
-                    .expect("judge table")
+                st.get_mut("judge").and_then(Value::as_table_mut)?
             }
-        };
-        match agent {
-            Some(a) => {
-                t.insert("agent".into(), s(a));
-            }
-            None => {
-                t.remove("agent");
-            }
-        }
+        })
     }
 
     /// `(votes, keep_below)` of a check: `refuted < keep_below` keeps.
