@@ -24,6 +24,104 @@ const PASS_EVERY: Duration = Duration::from_millis(500);
 /// Raw stdout kept per session; envelopes are small, tool output is not.
 const CAPTURE_CAP: usize = 4 * 1024 * 1024;
 
+/// Bounded stream storage. Appends touch only incoming/evicted bytes; the
+/// contiguous head + gap + tail view is built lazily when a reader needs it.
+#[derive(Debug, Default, Clone)]
+pub struct CapturedOutput {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    truncated: bool,
+    tail_boundary: bool,
+    view: std::sync::OnceLock<Vec<u8>>,
+}
+
+impl CapturedOutput {
+    fn append(&mut self, mut bytes: &[u8]) {
+        use crate::workflows::live::CAPTURE_GAP;
+        const HEAD_CAP: usize = 8 * 1024;
+        self.view.take();
+        if !self.truncated && self.tail.len().saturating_add(bytes.len()) <= CAPTURE_CAP {
+            self.tail.extend(bytes);
+            return;
+        }
+        if !self.truncated {
+            // This runs once, when the stream first exceeds the cap. The
+            // prefix can span the old buffer and a single large first chunk.
+            let mut prefix: Vec<u8> = self.tail.iter().take(HEAD_CAP).copied().collect();
+            prefix.extend_from_slice(&bytes[..bytes.len().min(HEAD_CAP - prefix.len())]);
+            let end = prefix
+                .iter()
+                .rposition(|b| *b == b'\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            prefix.truncate(end);
+            self.head = prefix;
+            let old_prefix = end.min(self.tail.len());
+            self.tail.drain(..old_prefix);
+            bytes = &bytes[end - old_prefix..];
+            self.truncated = true;
+            self.tail_boundary = true;
+        }
+        let room = CAPTURE_CAP - self.head.len() - CAPTURE_GAP.len();
+        let dropped = self
+            .tail
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(room);
+        if dropped > 0 {
+            self.tail_boundary = if dropped <= self.tail.len() {
+                self.tail[dropped - 1] == b'\n'
+            } else {
+                bytes[dropped - self.tail.len() - 1] == b'\n'
+            };
+        }
+        if bytes.len() >= room {
+            self.tail.clear();
+            self.tail.extend(&bytes[bytes.len() - room..]);
+        } else {
+            self.tail.drain(..dropped);
+            self.tail.extend(bytes);
+        }
+    }
+
+    /// A read-only view compatible with the envelope and Live decoders.
+    /// Discard a leading tail fragment at read time, so both retained ranges
+    /// are exact source ranges beginning on line and UTF-8 boundaries.
+    pub fn snapshot(&self) -> &[u8] {
+        self.view.get_or_init(|| {
+            let mut out = Vec::with_capacity(CAPTURE_CAP.min(
+                self.head.len() + self.tail.len() + crate::workflows::live::CAPTURE_GAP.len(),
+            ));
+            if self.truncated {
+                out.extend_from_slice(&self.head);
+                out.extend_from_slice(crate::workflows::live::CAPTURE_GAP.as_bytes());
+            }
+            let skip = if self.truncated && !self.tail_boundary {
+                self.tail
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map(|i| i + 1)
+                    .unwrap_or(self.tail.len())
+            } else {
+                0
+            };
+            out.extend(self.tail.iter().skip(skip));
+            out
+        })
+    }
+}
+
+impl std::ops::Deref for CapturedOutput {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.snapshot()
+    }
+}
+
+fn append_capture(stdout: &mut CapturedOutput, bytes: &[u8]) {
+    stdout.append(bytes);
+}
+
 /// What starts a run.
 #[derive(Debug, Clone)]
 pub struct WorkflowRunRequest {
@@ -58,7 +156,7 @@ pub struct LiveWorkflowSession {
     pub timeout: Duration,
     pub exited_at: Option<Instant>,
     pub timed_out: bool,
-    pub stdout: Vec<u8>,
+    pub stdout: CapturedOutput,
     pub out_file: PathBuf,
     pub context_path: PathBuf,
     pub retried: bool,
@@ -936,7 +1034,7 @@ impl App {
                 timeout: Duration::from_secs(timeout_s),
                 exited_at: None,
                 timed_out: false,
-                stdout: Vec::new(),
+                stdout: CapturedOutput::default(),
                 out_file,
                 context_path,
                 retried: false,
@@ -991,10 +1089,7 @@ impl App {
     pub fn capture_workflow_output(&mut self, session_id: usize, bytes: &[u8]) {
         for run in &mut self.live_workflow_runs {
             if let Some(s) = run.sessions.iter_mut().find(|s| s.session_id == session_id) {
-                if s.stdout.len() < CAPTURE_CAP {
-                    let room = CAPTURE_CAP - s.stdout.len();
-                    s.stdout.extend_from_slice(&bytes[..bytes.len().min(room)]);
-                }
+                append_capture(&mut s.stdout, bytes);
                 return;
             }
         }
@@ -1024,7 +1119,7 @@ impl App {
                 s.spec.clone(),
                 s.harness,
                 s.launch_id.clone(),
-                s.stdout.clone(),
+                s.stdout.to_vec(),
                 s.out_file.clone(),
                 s.retried,
                 s.timed_out,
@@ -1332,7 +1427,7 @@ pub struct LivePlan {
     pub started: Instant,
     pub timeout: Duration,
     pub exited_at: Option<Instant>,
-    pub stdout: Vec<u8>,
+    pub stdout: CapturedOutput,
     pub out_file: PathBuf,
     pub launch_id: Option<String>,
     /// Start the run as soon as the document validates.
@@ -1499,7 +1594,7 @@ impl App {
             started: Instant::now(),
             timeout: Duration::from_secs(timeout_s),
             exited_at: None,
-            stdout: Vec::new(),
+            stdout: CapturedOutput::default(),
             out_file,
             launch_id,
             auto_run: req.auto_run,
@@ -1747,10 +1842,8 @@ impl App {
             .live_workflow_plans
             .iter_mut()
             .find(|p| p.session_id == session_id)
-            && p.stdout.len() < CAPTURE_CAP
         {
-            let room = CAPTURE_CAP - p.stdout.len();
-            p.stdout.extend_from_slice(&bytes[..bytes.len().min(room)]);
+            append_capture(&mut p.stdout, bytes);
         }
     }
 
@@ -2537,6 +2630,88 @@ impl App {
 mod tests {
     use super::awaiting_verdict;
     use serde_json::json;
+
+    #[test]
+    fn bounded_capture_keeps_final_stream_results() {
+        use super::{CAPTURE_CAP, append_capture};
+        use crate::harness::Harness;
+        use crate::workflows::{harness::envelope, live};
+        for (h, result) in [
+            (
+                Harness::Claude,
+                r#"{"type":"result","result":"final answer","usage":{"input_tokens":12,"output_tokens":3},"total_cost_usd":0.25}"#,
+            ),
+            (
+                Harness::Antigravity,
+                r#"{"event":"result","result":{"response":"final answer","usage":{"input_tokens":12,"output_tokens":3},"cost_usd":0.25}}"#,
+            ),
+        ] {
+            let mut raw = b"{\"type\":\"system\",\"event\":\"init\"}\n".to_vec();
+            let filler = format!(
+                "{{\"type\":\"unknown\",\"data\":\"{}\"}}\n",
+                "x".repeat(999)
+            );
+            while raw.len() < CAPTURE_CAP * 2 {
+                raw.extend_from_slice(filler.as_bytes());
+            }
+            raw.extend_from_slice(result.as_bytes());
+            raw.push(b'\n');
+            for chunk_size in [raw.len(), 7777] {
+                let mut captured = super::CapturedOutput::default();
+                for chunk in raw.chunks(chunk_size) {
+                    append_capture(&mut captured, chunk);
+                }
+                assert!(captured.len() <= CAPTURE_CAP);
+                assert!(captured.starts_with(b"{\"type\":\"system\""));
+                let parsed = envelope(h, &captured, std::path::Path::new("/unused"));
+                assert_eq!(parsed.text.as_deref(), Some("final answer"));
+                assert_eq!(parsed.tokens, Some(15));
+                assert_eq!(parsed.cost_usd, Some(0.25));
+                assert_eq!(
+                    live::lines(h, &captured).last().unwrap().text,
+                    "final answer"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ring_capture_is_an_exact_bounded_prefix_and_suffix() {
+        use super::{CAPTURE_CAP, CapturedOutput};
+        use crate::workflows::live::CAPTURE_GAP;
+        let mut raw = "é🙂 streaming line\n".repeat(CAPTURE_CAP / 9).into_bytes();
+        raw.extend_from_slice(b"last complete line\nlast partial");
+        for chunk_size in [4096, 7777, raw.len()] {
+            let mut capture = CapturedOutput::default();
+            for chunk in raw.chunks(chunk_size) {
+                capture.append(chunk);
+                assert!(
+                    capture.head.len()
+                        + capture.tail.len()
+                        + if capture.truncated {
+                            CAPTURE_GAP.len()
+                        } else {
+                            0
+                        }
+                        <= CAPTURE_CAP
+                );
+            }
+            let snapshot = capture.snapshot();
+            assert!(std::str::from_utf8(snapshot).is_ok());
+            let gap = snapshot
+                .windows(CAPTURE_GAP.len())
+                .position(|w| w == CAPTURE_GAP.as_bytes())
+                .unwrap();
+            let head = &snapshot[..gap];
+            let tail = &snapshot[gap + CAPTURE_GAP.len()..];
+            assert!(raw.starts_with(head));
+            assert!(raw.ends_with(tail));
+            assert_eq!(head.last(), Some(&b'\n'));
+            let start = raw.len() - tail.len();
+            assert_eq!(raw[start - 1], b'\n');
+            assert!(tail.ends_with(b"last complete line\nlast partial"));
+        }
+    }
 
     #[test]
     fn a_verdict_waits_unless_accepted_and_uncontradicted() {
