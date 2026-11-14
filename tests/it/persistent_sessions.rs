@@ -94,6 +94,7 @@ async fn restoring_a_saved_antigravity_session_resumes_its_conversation() {
             profile: agy.clone(),
             dir: temp_dir.path().to_path_buf(),
             skill_id: None,
+            agent: None,
             conversation: Some("8fcec510-6f3b-44c9-aca5-830f7a9eeeb5".into()),
             continued_from: None,
         }],
@@ -184,6 +185,7 @@ async fn a_conversation_running_in_claudes_background_is_attached_not_resumed() 
         profile: claude.clone(),
         dir: temp_dir.path().to_path_buf(),
         skill_id: None,
+        agent: None,
         conversation: Some(conversation.into()),
         continued_from: None,
     };
@@ -243,6 +245,7 @@ async fn a_restored_session_that_exits_at_once_stays_saved() {
         },
         dir: temp_dir.path().to_path_buf(),
         skill_id: None,
+        agent: None,
         conversation: Some("c-1".into()),
         continued_from: None,
     };

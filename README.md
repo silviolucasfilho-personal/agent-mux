@@ -257,6 +257,7 @@ no_progress = 3
 hydrate = true      # write a briefing snapshot for agents that ask for one
 mcp = "auto"        # "auto" | "off": gate over every package's [agent] mcp
 show_swarm = false  # list swarm coordinators and workers in the Agents sidebar
+show_library = false  # list the sessions a skill or a persona launched there too
 ```
 
 ### Fields, defaults and precedence
@@ -282,7 +283,7 @@ show_swarm = false  # list swarm coordinators and workers in the Agents sidebar
 | `tracing.loops` | Warning thresholds (25 / 6 / 3); `0` disables one. |
 | `tracing.models` | Price rows: `id`, optional `provider`, `match` patterns, `input`, `output`, optional `cache_read`, `cache_write`, `cache_write_1h`, `reasoning` (USD per million tokens). Rows with an empty id or negative input/output are dropped silently. |
 | Per-profile `[profiles.tracing]` | `enabled`, `provider`, `content_mode`, `inject_session_id`, `hooks`, `backend`, `max_cost_usd`, `max_turns` override the global defaults for that profile. |
-| `[agents] hydrate`, `mcp`, `show_swarm` | `true`, `"auto"` and `false` by default (`config::resolve_agents`). `hydrate = false` writes no briefing snapshots; `mcp = "off"` never registers the MCP server for any session or harness; `show_swarm = true` lists a swarm's coordinator and workers in the Agents sidebar (otherwise they are seen on the Swarm screen only, `App::session_listed`). |
+| `[agents] hydrate`, `mcp`, `show_swarm`, `show_library` | `true`, `"auto"`, `false` and `false` by default (`config::resolve_agents`). `hydrate = false` writes no briefing snapshots; `mcp = "off"` never registers the MCP server for any session or harness; `show_swarm = true` lists a swarm's coordinator and workers in the Agents sidebar (otherwise they are seen on the Swarm screen only, `App::session_listed`); `show_library = true` does the same for the sessions a skill or a persona launched (otherwise they are rows of the Library, under their item). |
 | `[loops] enabled`, `max_concurrent`, `catch_up`, `run_timeout_s`, `worktrees_dir` | `true`, `1`, `"once"`, `900`, `".loop-worktrees"` (`config::resolve_loops`). `enabled = false` leaves manual runs only; `catch_up = "skip"` moves a slot missed while agent-mux was closed to the next one; the timeout floors at 30 s. |
 
 Langfuse credentials come from `[tracing.langfuse]` (`host`, `public_key`, `secret_key`, `flush_interval_ms` default 3,000) or from `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_HOST` then `LANGFUSE_BASE_URL` for the host (default `https://cloud.langfuse.com`). If the `[tracing.langfuse]` sub-table exists at all, the legacy `[tracing] host/public_key/secret_key` fields are ignored entirely; they are used only when the sub-table is absent, and trip a migration notice. Both keys must resolve or the remote backend is unavailable and launches fall back to local. A trailing `/` or `/api/public` is stripped from the host.

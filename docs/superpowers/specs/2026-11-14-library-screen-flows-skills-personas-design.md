@@ -310,6 +310,48 @@ Library exists.
    `Harness::ALL`. Adding it is its own integration, after which it
    appears in every matrix automatically.
 
+## 11. Revised the same day: the Swarm screen's conventions
+
+The first build was reviewed in use and found confusing; this
+supersedes §3.2, §3.5, §4 and the points of §10 it names.
+
+- **Launched sessions are rows of the Library, not of the Agents
+  list** (§4, reversed). A session a skill or a persona launched sits
+  under its item (`Row::Session`), and a flow's run in flight under
+  its flow (`Row::Run`), as a swarm's sessions sit on the Swarm
+  screen. `App::session_listed` leaves them out of the Agents list
+  unless `[agents] show_library = true`; the list says how many are
+  going (`● library: n session(s)  o`). `App::library_item_of` decides
+  the owner: a session with no group whose persona or listed skill is
+  in the Library.
+- **The main pane is the selected row**: a session's terminal through
+  `ui::draw_session_pane`, with `Enter` to type into it
+  (`LibraryState.pane_focused`) and the Focus Agents chord to return
+  to the tree; an item's card in the tab bar the Run and session
+  screens draw.
+- **The tree is drawn as the Agents and Swarm trees are**: the focus
+  border and `• Keyboard focus` title, the `>` marker and reversed
+  cursor row, capital dim headings with their count, a glyph per kind
+  (`⚙ ⚡ ◇ ⟳`), and a right-hand label (`●n` going, else `n/7`
+  coverage). Hints sit under the rows when there is room; nothing is
+  drawn over a row.
+- **The verbs go through the action registry** (`command_availability`):
+  the first build's `n`, `e`, `r` and `d` were answered "Unavailable"
+  before they reached the screen, and the filter lost those letters.
+- **Leaving and coming back**: a dialog or editor opened from the
+  Library returns to it when it closes (`App::library_return`,
+  `library_resume`), a session it starts is revealed on its row
+  (`App::reveal_session`), and `Esc`, `q` or `o` go to the Agents
+  list.
+- **Runs tabs embed** (§10 "Runs tabs direct", reversed): the Runs and
+  Executions tabs list the item's runs from the runs view's items and
+  the store's `skill_launches`.
+- **Verdicts are read once per item** while the screen is open
+  (`LibraryState.verdicts`; `Ctrl+R` reloads): the first build probed
+  the machine and the catalog for every row on every frame.
+- A restart keeps a persona's session under its persona
+  (`SavedSession.agent`).
+
 ## 10. As built (2026-11-14)
 
 Status: implemented the same day (packages A–E). Where the code

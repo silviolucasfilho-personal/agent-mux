@@ -88,15 +88,17 @@ fn flows_live_in_the_library_not_the_agents_sidebar() {
 
     app.open_library(agent_mux::app::library::Section::Flows);
     let text = render(&app, 120, 40);
-    assert!(text.contains("flows"), "{text}");
+    assert!(text.contains("FLOWS"), "{text}");
     assert!(text.contains("review-changes"), "{text}");
 
-    // the cursor starts on the flows heading; j walks the flows
-    let first = match &app.mode {
+    // the cursor starts on the first flow; k reaches the heading, which
+    // has no item, and j walks the flows
+    press(&mut app, KeyCode::Char('k'));
+    let heading = match &app.mode {
         Mode::Library(st) => app.library_item(st),
         _ => panic!("not in the library"),
     };
-    assert!(first.is_none(), "a heading has no item: {first:?}");
+    assert!(heading.is_none(), "a heading has no item: {heading:?}");
     press(&mut app, KeyCode::Char('j'));
     let first = match &app.mode {
         Mode::Library(st) => app.library_item(st),

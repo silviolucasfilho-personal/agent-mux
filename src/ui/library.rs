@@ -1,29 +1,34 @@
-//! The Library screen's drawing: the flows / skills / personas tree
-//! where the Agents list is (the Swarm screen's geometry), the selected
-//! row's card in the main pane, and the harness picker over it.
+//! Drawing the Library screen (`crate::app::library`) in the Agents
+//! layout, as the Swarm screen is drawn: the tree where the Agents list
+//! is (`draw_tree`: headings, items, and the sessions and runs an item
+//! launched), and the selected row in the main pane (`draw_pane`): a
+//! session's terminal through the Agents screen's own pane
+//! (`ui::draw_session_pane`), else the item's card in tabs. The harness
+//! picker is drawn over the pane. The global status bar is the only
+//! footer.
 
-use crate::app::library::{Item, LibraryState, Row, Section, Verdict, coverage};
+use super::flow::{dim, head};
+use crate::app::library::{
+    Drawn, Item, LibraryState, Picker, Row, Section, Verdict, coverage, tab_labels,
+};
 use crate::app::{App, Mode};
 use crate::harness::Harness;
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
 
-fn head() -> Style {
-    Style::default()
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD)
-}
-fn dim() -> Style {
-    Style::default().fg(Color::Gray)
-}
-fn sel() -> Style {
-    Style::default()
-        .bg(Color::White)
-        .fg(Color::Black)
-        .add_modifier(Modifier::BOLD)
+fn focus_border(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
 }
 
 fn verdict_style(v: &Verdict) -> Style {
@@ -35,189 +40,22 @@ fn verdict_style(v: &Verdict) -> Style {
     }
 }
 
-/// The tree rows as `(text, row)` — the drawing and the tests read this.
-pub fn tree_lines(app: &App, st: &LibraryState) -> Vec<(String, Row)> {
-    let rows = app.library_rows(st);
-    let mut out: Vec<(String, Row)> = Vec::new();
-    let mut counts: Vec<(Section, usize)> = Vec::new();
-    for r in &rows {
-        if !r.is_header() {
-            let s = r.section();
-            match counts.iter_mut().find(|(c, _)| *c == s) {
-                Some((_, n)) => *n += 1,
-                None => counts.push((s, 1)),
-            }
-        }
-    }
-    for r in rows {
-        let text = match &r {
-            Row::Header(s) => {
-                let n = counts
-                    .iter()
-                    .find(|(c, _)| c == s)
-                    .map(|(_, n)| *n)
-                    .unwrap_or(0);
-                let arrow = if st.folded.contains(s) { "▸" } else { "▾" };
-                format!("{arrow} {}  {n}", s.label())
-            }
-            Row::Flow(i) => {
-                let name = app
-                    .workflow_list
-                    .get(*i)
-                    .map(|e| e.name.clone())
-                    .unwrap_or_default();
-                let item = Item::Flow(*i);
-                let (ok, total) = coverage(&app.library_verdicts(&item));
-                let live = app.library_live_session(&item).is_some();
-                format!("  {name}  {ok}/{total}{}", if live { " ●" } else { "" })
-            }
-            Row::Skill(i) => {
-                let name = app
-                    .skills
-                    .get(*i)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
-                let item = Item::Skill(*i);
-                let (ok, total) = coverage(&app.library_verdicts(&item));
-                let live = app.library_live_session(&item).is_some();
-                format!("  {name}  {ok}/{total}{}", if live { " ●" } else { "" })
-            }
-            Row::Loop(i) => {
-                let (label, paused) = app
-                    .loop_registry
-                    .loops
-                    .get(*i)
-                    .map(|e| (format!("{} · {}", e.pattern, e.harness), e.paused()))
-                    .unwrap_or_default();
-                format!("  {label}{}", if paused { " ⏸" } else { "" })
-            }
-            Row::Persona(name) => {
-                let item = Item::Persona(name.clone());
-                let (ok, total) = coverage(&app.library_verdicts(&item));
-                let live = app.library_live_session(&item).is_some();
-                format!("  {name}  {ok}/{total}{}", if live { " ●" } else { "" })
-            }
-        };
-        out.push((text, r));
-    }
-    out
-}
-
-pub fn draw_tree(f: &mut Frame, area: Rect, app: &App, st: &LibraryState) {
-    let lines = tree_lines(app, st);
-    let mut title = " Library ".to_string();
-    if st.filtering || !st.filter.is_empty() {
-        title = format!(" Library · /{} ", st.filter);
-    }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(title, head()));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    let height = usize::from(inner.height);
-    let start = st
-        .cursor
-        .saturating_sub(height.saturating_sub(1).max(0))
-        .min(lines.len().saturating_sub(height.max(1)));
-    for (y, (i, (text, row))) in (inner.y..).zip(lines.iter().enumerate().skip(start).take(height))
-    {
-        let style = if i == st.cursor {
-            sel()
-        } else if row.is_header() {
-            head()
-        } else {
-            Style::default()
-        };
-        let rect = Rect::new(inner.x, y, inner.width, 1);
-        f.render_widget(Paragraph::new(Line::styled(text.clone(), style)), rect);
-    }
-    let hint = "o back · ↑↓ · Enter launch · e edit · n new · / filter";
-    let rect = Rect::new(
-        inner.x,
-        inner.y + inner.height.saturating_sub(1),
-        inner.width,
-        1,
-    );
-    f.render_widget(Paragraph::new(Line::styled(hint, dim())), rect);
-}
-
-/// The tab labels of the selected item's kind.
-pub fn tab_labels(item: &Item) -> Vec<&'static str> {
-    match item {
-        Item::Flow(_) => vec!["Overview", "Harnesses", "Runs", "Document"],
-        Item::Skill(_) => vec!["Details", "Harnesses", "Executions"],
-        Item::Persona(_) => vec!["Card", "Harnesses", "Runs"],
-        Item::Loop(_) => vec!["Card", "Runs"],
+fn verdict_glyph(v: &Verdict) -> &'static str {
+    match v {
+        Verdict::Ready => "✓",
+        Verdict::Degraded(_) => "~",
+        Verdict::Blocked(_) => "✗",
+        Verdict::NotInstalled => "·",
     }
 }
 
-/// The main pane's lines for the selected row (the picker excluded).
-pub fn pane_lines(app: &App, st: &LibraryState) -> Vec<Line<'static>> {
-    let rows = app.library_rows(st);
-    let Some(row) = rows.get(st.cursor) else {
-        return vec![Line::styled("nothing here", dim())];
-    };
-    match row {
-        Row::Header(section) => section_lines(app, *section),
-        item_row => {
-            let Some(item) = Option::<Item>::from(item_row) else {
-                return Vec::new();
-            };
-            item_lines(app, &item, st.tab)
-        }
-    }
-}
-
-fn section_lines(app: &App, section: Section) -> Vec<Line<'static>> {
-    let mut out = vec![
-        Line::styled(format!("{} ", section.label()), head()),
-        Line::raw(""),
-    ];
-    let items: Vec<Item> = match section {
-        Section::Flows => (0..app.workflow_list.len()).map(Item::Flow).collect(),
-        Section::Skills => (0..app.skills.len()).map(Item::Skill).collect(),
-        Section::Personas => crate::app::library::persona_names(app)
-            .into_iter()
-            .map(Item::Persona)
-            .collect(),
-        Section::Scheduled => (0..app.loop_registry.loops.len()).map(Item::Loop).collect(),
-    };
-    let mut full = 0;
-    let mut blocked: Vec<String> = Vec::new();
-    for item in &items {
-        let verdicts = app.library_verdicts(item);
-        let (ok, total) = coverage(&verdicts);
-        if ok == total {
-            full += 1;
-        }
-        for (h, v) in &verdicts {
-            if matches!(v, Verdict::Blocked(_)) {
-                blocked.push(format!(
-                    "{} on {}: {}",
-                    item_name(app, item),
-                    h.as_str(),
-                    v.notes().join("; ")
-                ));
-            }
-        }
-    }
-    out.push(Line::raw(format!(
-        "{} items · {full} on every harness",
-        items.len()
-    )));
-    if blocked.is_empty() {
-        out.push(Line::styled("no blocked harness", dim()));
-    } else {
-        out.push(Line::raw(""));
-        out.push(Line::styled("blocked:", head()));
-        for b in blocked {
-            out.push(Line::styled(
-                format!("  {b}"),
-                verdict_style(&Verdict::Blocked(b.clone())),
-            ));
-        }
-    }
-    out
+fn item_style(item: &Item) -> Style {
+    Style::default().fg(match item {
+        Item::Flow(_) => Color::Cyan,
+        Item::Skill(_) => Color::Yellow,
+        Item::Persona(_) => Color::Magenta,
+        Item::Loop(_) => Color::Cyan,
+    })
 }
 
 pub fn item_name(app: &App, item: &Item) -> String {
@@ -242,36 +80,371 @@ pub fn item_name(app: &App, item: &Item) -> String {
     }
 }
 
-fn item_lines(app: &App, item: &Item, tab: usize) -> Vec<Line<'static>> {
-    let tabs = tab_labels(item);
-    let tab = tab.min(tabs.len().saturating_sub(1));
-    let mut out: Vec<Line<'static>> = Vec::new();
-    let mut bar = String::new();
-    for (i, t) in tabs.iter().enumerate() {
-        bar.push_str(&format!(
-            " {} {}:{} ",
-            i + 1,
-            if i == tab { "▸" } else { " " },
-            t
-        ));
-    }
-    out.push(Line::styled(bar, head()));
-    out.push(Line::raw(""));
-    match (item, tabs[tab]) {
-        (_, "Harnesses") => {
-            for (h, v) in app.library_verdicts(item) {
-                out.push(Line::from(vec![
-                    Span::styled(format!("{:<10}", h.as_str()), head()),
-                    Span::styled(format!("{:<14}", v.label()), verdict_style(&v)),
-                    Span::raw(v.notes().join("; ")),
-                ]));
+/// One tree row, before it is fitted to the width: the text on the left
+/// in two styles (a glyph, then the name) and a label on the right.
+struct TreeRow {
+    lead: String,
+    lead_style: Style,
+    name: String,
+    name_style: Style,
+    right: String,
+    right_style: Style,
+}
+
+fn tree_row(app: &App, st: &LibraryState, rows: &[Row], at: usize, now: Instant) -> TreeRow {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    match &rows[at] {
+        Row::Header(section) => {
+            let count = rows[at + 1..]
+                .iter()
+                .take_while(|r| !r.is_header())
+                .filter(|r| !r.is_child())
+                .count();
+            let folded = st.folded.contains(section);
+            TreeRow {
+                lead: format!("{} ", if folded { "▸" } else { "▾" }),
+                lead_style: dim(),
+                name: section.label().to_uppercase(),
+                name_style: dim().add_modifier(Modifier::BOLD),
+                // a folded section's items are not in the rows to count
+                right: if folded {
+                    String::new()
+                } else {
+                    count.to_string()
+                },
+                right_style: dim(),
             }
         }
+        row @ (Row::Flow(_) | Row::Skill(_) | Row::Persona(_) | Row::Loop(_)) => {
+            let Some(item) = Option::<Item>::from(row) else {
+                unreachable!("an item row");
+            };
+            let live = app.library_live(&item);
+            let (right, right_style) = if live > 0 {
+                (format!("●{live}"), Style::default().fg(Color::Green))
+            } else if let Item::Loop(i) = &item {
+                match app.loop_registry.loops.get(*i) {
+                    Some(e) if e.paused() => ("⏸".to_string(), dim()),
+                    Some(e) => (e.harness.clone(), dim()),
+                    None => (String::new(), dim()),
+                }
+            } else {
+                // on how many harnesses it can start
+                let (ok, total) = coverage(&app.library_verdicts_in(st, &item));
+                (
+                    format!("{ok}/{total}"),
+                    if ok == 0 {
+                        Style::default().fg(Color::Red)
+                    } else {
+                        dim()
+                    },
+                )
+            };
+            let glyph = match &item {
+                Item::Skill(i) => app
+                    .skills
+                    .get(*i)
+                    .and_then(|s| s.icon.clone())
+                    .unwrap_or_else(|| item.glyph().to_string()),
+                _ => item.glyph().to_string(),
+            };
+            TreeRow {
+                lead: format!("  {glyph} "),
+                lead_style: item_style(&item),
+                name: item_name(app, &item),
+                name_style: bold,
+                right,
+                right_style,
+            }
+        }
+        row @ (Row::Session(_) | Row::Run(_)) => {
+            // the tree line stops at the item's last child
+            let last = rows.get(at + 1).is_none_or(|r| !r.is_child());
+            let lead = format!("    {} ", if last { "└" } else { "├" });
+            match row {
+                Row::Session(_) => {
+                    let s = app
+                        .library_session_index(row)
+                        .and_then(|i| app.sessions.get(i));
+                    let (name, (label, style)) = match s {
+                        Some(s) => (
+                            format!(
+                                "{} · {}",
+                                Harness::detect(&s.profile.command)
+                                    .map(|h| h.as_str().to_string())
+                                    .unwrap_or_else(|| s.profile.name.clone()),
+                                super::folder_name(&s.dir)
+                            ),
+                            super::status_label_style(s.status(now)),
+                        ),
+                        None => (String::new(), (String::new(), dim())),
+                    };
+                    TreeRow {
+                        lead,
+                        lead_style: dim(),
+                        name,
+                        name_style: Style::default(),
+                        right: label,
+                        right_style: style,
+                    }
+                }
+                Row::Run(id) => {
+                    let run = app.live_workflow_runs.iter().find(|r| &r.run_id == id);
+                    TreeRow {
+                        lead,
+                        lead_style: dim(),
+                        name: format!("run {}", id.chars().take(8).collect::<String>()),
+                        name_style: Style::default(),
+                        right: run
+                            .map(|r| format!("{}▶", r.running_sessions()))
+                            .unwrap_or_default(),
+                        right_style: Style::default().fg(Color::Green),
+                    }
+                }
+                _ => unreachable!("a session or a run"),
+            }
+        }
+    }
+}
+
+/// The tree rows as text, fitted to `width` columns: what the drawing
+/// shows, without the cursor marker (the tests read this).
+pub fn tree_lines(app: &App, st: &LibraryState, width: usize) -> Vec<(String, Row)> {
+    let rows = app.library_rows(st);
+    let now = Instant::now();
+    (0..rows.len())
+        .map(|at| {
+            let r = tree_row(app, st, &rows, at, now);
+            let room = width.saturating_sub(r.lead.width() + r.right.width() + 1);
+            let name = super::truncate_chars(&r.name, room);
+            let pad = room.saturating_sub(name.width());
+            (
+                format!("{}{name}{} {}", r.lead, " ".repeat(pad), r.right),
+                rows[at].clone(),
+            )
+        })
+        .collect()
+}
+
+/// The tree, where the Agents list is: every definition under its
+/// section, and under a definition the sessions and runs it launched.
+pub fn draw_tree(f: &mut Frame, area: Rect, app: &App, st: &LibraryState, now: Instant) {
+    let focused = !st.pane_focused;
+    let rows = app.library_rows(st);
+    let live = app.library_live_sessions() + app.live_workflow_runs.len();
+    // like the Agents list's: the name and where the keyboard is
+    let title = if st.filtering {
+        format!("Library · /{}▏", st.filter)
+    } else if !st.filter.is_empty() {
+        format!("Library · /{}", st.filter)
+    } else if focused {
+        "Library • Keyboard focus".to_string()
+    } else if live > 0 {
+        format!("Library · {live} live")
+    } else {
+        "Library".to_string()
+    };
+    let room = usize::from(area.width.saturating_sub(4));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border(focused))
+        .title(Span::styled(
+            format!(" {} ", super::truncate_chars(&title, room)),
+            if focused {
+                head()
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+    let inner_w = usize::from(area.width.saturating_sub(2));
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = super::sidebar_window(st.cursor, rows.len(), visible.saturating_sub(1).max(1));
+    st.drawn.set(Drawn {
+        tree: area,
+        tree_start: start,
+        ..st.drawn.get()
+    });
+    let mut items: Vec<ListItem> = Vec::new();
+    for at in (start..rows.len()).take(visible) {
+        let is_cursor = at == st.cursor;
+        let marker = if is_cursor { ">" } else { " " };
+        let r = tree_row(app, st, &rows, at, now);
+        let room = inner_w.saturating_sub(1 + r.lead.width() + r.right.width() + 1);
+        let name = super::truncate_chars(&r.name, room);
+        let pad = room.saturating_sub(name.width());
+        let item = ListItem::new(Line::from(vec![
+            Span::styled(marker, Style::default().fg(Color::Cyan)),
+            Span::styled(r.lead, r.lead_style),
+            Span::styled(name, r.name_style),
+            Span::raw(" ".repeat(pad + 1)),
+            Span::styled(r.right, r.right_style),
+        ]));
+        items.push(if is_cursor && focused {
+            item.style(Style::default().add_modifier(Modifier::REVERSED))
+        } else if is_cursor {
+            item.style(Style::default().fg(Color::Cyan))
+        } else {
+            item
+        });
+    }
+    // what the keys do, under the rows when there is room
+    let hints: &[&str] = if rows.is_empty() {
+        &[" nothing matches: Esc clears the filter"]
+    } else {
+        &["", " ↵ launch  / filter  o back"]
+    };
+    for h in hints {
+        if items.len() < visible {
+            items.push(ListItem::new(Line::styled(
+                super::truncate_chars(h, inner_w),
+                dim(),
+            )));
+        }
+    }
+    f.render_widget(List::new(items).block(block), area);
+}
+
+/// A card line: a yellow label, then its value.
+fn field(k: &str, v: impl Into<String>) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{k:<10} "), Style::default().fg(Color::Yellow)),
+        Span::raw(v.into()),
+    ])
+}
+
+fn title_line(text: impl Into<String>) -> Line<'static> {
+    Line::styled(text.into(), head())
+}
+
+fn note(text: impl Into<String>) -> Line<'static> {
+    Line::styled(text.into(), dim())
+}
+
+fn problem(text: &str) -> Line<'static> {
+    Line::styled(format!("✗ {text}"), Style::default().fg(Color::Red))
+}
+
+/// A heading's card: what the section holds and where it cannot run.
+fn section_lines(app: &App, st: &LibraryState, section: Section) -> Vec<Line<'static>> {
+    let items: Vec<Item> = match section {
+        Section::Flows => (0..app.workflow_list.len()).map(Item::Flow).collect(),
+        Section::Skills => (0..app.skills.len()).map(Item::Skill).collect(),
+        Section::Personas => crate::app::library::persona_names(app)
+            .into_iter()
+            .map(Item::Persona)
+            .collect(),
+        Section::Scheduled => (0..app.loop_registry.loops.len()).map(Item::Loop).collect(),
+    };
+    let mut out = vec![Line::raw(""), note(section.about()), Line::raw("")];
+    let live: usize = items.iter().map(|i| app.library_live(i)).sum();
+    out.push(field("items", items.len().to_string()));
+    out.push(field("running", live.to_string()));
+    if section == Section::Scheduled {
+        out.push(Line::raw(""));
+        out.push(note(
+            "r runs one now · p pauses it · e edits it · d removes it",
+        ));
+        return out;
+    }
+    let mut full = 0;
+    let mut blocked: Vec<String> = Vec::new();
+    for item in &items {
+        let verdicts = app.library_verdicts_in(st, item);
+        let (ok, total) = coverage(&verdicts);
+        if ok == total {
+            full += 1;
+        }
+        for (h, v) in &verdicts {
+            if matches!(v, Verdict::Blocked(_)) {
+                blocked.push(format!(
+                    "{} on {}: {}",
+                    item_name(app, item),
+                    h.as_str(),
+                    v.notes().join("; ")
+                ));
+            }
+        }
+    }
+    out.push(field(
+        "everywhere",
+        format!("{full} start on every harness"),
+    ));
+    out.push(Line::raw(""));
+    if blocked.is_empty() {
+        out.push(note("No harness is blocked for any of them."));
+    } else {
+        out.push(title_line("Blocked"));
+        out.extend(blocked.iter().map(|b| problem(b)));
+    }
+    out
+}
+
+fn harness_lines(app: &App, st: &LibraryState, item: &Item) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    for (h, v) in app.library_verdicts_in(st, item) {
+        out.push(Line::from(vec![
+            Span::styled(format!("{} ", verdict_glyph(&v)), verdict_style(&v)),
+            Span::styled(
+                format!("{:<12}", h.as_str()),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(v.label().to_string(), verdict_style(&v)),
+        ]));
+        // why, under the row it explains
+        for n in v.notes() {
+            out.push(Line::styled(format!("  {n}"), dim()));
+        }
+    }
+    out.push(Line::raw(""));
+    out.push(note(
+        "Enter picks one of these to launch on; Blocked and Not installed cannot start.",
+    ));
+    out
+}
+
+fn history_lines(st: &LibraryState, what: &str) -> Vec<Line<'static>> {
+    match &st.history {
+        None => vec![note("Reading…")],
+        Some((_, lines)) if lines.is_empty() => vec![
+            note(format!("No {what} recorded yet.")),
+            Line::raw(""),
+            note("Enter launches it; W opens the runs view."),
+        ],
+        Some((_, lines)) => lines
+            .iter()
+            .map(|l| Line::raw(l.clone()))
+            .chain([
+                Line::raw(""),
+                note("Newest first. W opens the runs view on every run."),
+            ])
+            .collect(),
+    }
+}
+
+/// What is going now, at the top of an item's first tab.
+fn running_line(app: &App, item: &Item) -> Option<Line<'static>> {
+    let live = app.library_live(item);
+    (live > 0).then(|| {
+        Line::from(vec![
+            Span::styled("running    ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("● {live}"), Style::default().fg(Color::Green)),
+            Span::styled("  → goes to its row, i to the first", dim()),
+        ])
+    })
+}
+
+/// The lines of an item's tab.
+fn item_lines(app: &App, st: &LibraryState, item: &Item, tab: &str) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    match (item, tab) {
+        (_, "Harnesses") => out = harness_lines(app, st, item),
         (Item::Flow(i), "Overview") => {
             if let Some(e) = app.workflow_list.get(*i) {
-                out.push(Line::styled(e.name.clone(), head()));
                 if let Some(doc) = &e.doc {
-                    out.push(Line::raw(doc.description.clone()));
+                    out.push(note(doc.description.clone()));
+                    out.push(Line::raw(""));
+                    out.extend(running_line(app, item));
+                    out.push(field("steps", doc.steps.len().to_string()));
                     out.push(Line::raw(""));
                     for s in &doc.steps {
                         let actor = match &s.actor {
@@ -281,202 +454,304 @@ fn item_lines(app: &App, item: &Item, tab: usize) -> Vec<Line<'static>> {
                             Some(crate::workflows::document::Actor::Prompt(_)) => "prompt".into(),
                             None => "—".into(),
                         };
-                        out.push(Line::raw(format!(
-                            "  {:<16} {:<22} agent {:<14} harness {}",
-                            s.id,
-                            actor,
-                            s.agent.as_deref().unwrap_or("—"),
-                            s.harness.as_deref().unwrap_or("(run profile)")
-                        )));
+                        out.push(Line::from(vec![
+                            Span::styled(
+                                format!("{:<18} ", s.id),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(format!("{actor:<24} ")),
+                            Span::styled(
+                                format!(
+                                    "{} · {}",
+                                    s.agent.as_deref().unwrap_or("no agent"),
+                                    s.harness.as_deref().unwrap_or("run's harness")
+                                ),
+                                dim(),
+                            ),
+                        ]));
                     }
                 }
-                for p in &e.problems {
-                    out.push(Line::styled(
-                        format!("✗ {p}"),
-                        verdict_style(&Verdict::Blocked(p.clone())),
-                    ));
-                }
+                out.extend(e.problems.iter().map(|p| problem(p)));
             }
         }
         (Item::Flow(i), "Document") => {
             if let Some(e) = app.workflow_list.get(*i) {
-                for l in e.text.lines() {
-                    out.push(Line::raw(l.to_string()));
-                }
+                out.extend(e.text.lines().map(|l| Line::raw(l.to_string())));
             }
         }
-        (Item::Flow(_), "Runs") => {
-            out.push(Line::raw(
-                "this flow's runs are in the runs view (W); Enter in the Agents list opens a run",
-            ));
-        }
+        (Item::Flow(_), "Runs") => out = history_lines(st, "runs"),
         (Item::Skill(i), "Details") => {
             if let Some(def) = app.skills.get(*i) {
-                out.push(Line::styled(def.name.clone(), head()));
-                out.push(Line::raw(def.description.clone()));
+                out.push(note(def.description.clone()));
                 out.push(Line::raw(""));
-                out.push(Line::raw(format!("id          {}", def.id)));
-                out.push(Line::raw(format!(
-                    "harnesses   {}",
-                    def.harnesses
-                        .iter()
-                        .map(|h| h.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-                out.push(Line::raw(format!(
-                    "default     {}",
-                    def.default_harness.as_str()
-                )));
-                out.push(Line::raw(format!(
-                    "source      {}",
+                out.extend(running_line(app, item));
+                out.push(field("id", def.id.clone()));
+                out.push(field(
+                    "invoke",
+                    crate::skill::render::invocation(&def.id, def.default_harness),
+                ));
+                out.push(field("default", def.default_harness.as_str()));
+                out.push(field(
+                    "source",
                     def.dir
                         .as_ref()
                         .map(|d| d.display().to_string())
-                        .unwrap_or_else(|| "built-in".into())
-                )));
-                for h in Harness::ALL {
-                    let status =
-                        crate::skill::install::status(def, h, &app.skill_home_for_library());
-                    out.push(Line::raw(format!(
-                        "  {:<10} {}",
-                        h.as_str(),
-                        status_label(status.current, status.installed)
-                    )));
+                        .unwrap_or_else(|| "built-in".into()),
+                ));
+                out.push(Line::raw(""));
+                out.push(title_line("Installed"));
+                let home = app.skill_home_for_library();
+                for h in &def.harnesses {
+                    let status = crate::skill::install::status(def, *h, &home);
+                    let (label, style) = if status.current {
+                        ("installed", Style::default().fg(Color::Green))
+                    } else if status.installed {
+                        (
+                            "stale: the next launch updates it",
+                            Style::default().fg(Color::Yellow),
+                        )
+                    } else {
+                        ("not yet: the first launch installs it", dim())
+                    };
+                    out.push(Line::from(vec![
+                        Span::raw(format!("{:<12} ", h.as_str())),
+                        Span::styled(label, style),
+                    ]));
                 }
                 for w in &def.warnings {
-                    out.push(Line::styled(format!("! {w}"), dim()));
+                    out.push(Line::styled(
+                        format!("! {w}"),
+                        Style::default().fg(Color::Yellow),
+                    ));
                 }
             }
         }
-        (Item::Skill(_), "Executions") => {
-            out.push(Line::raw(
-                "this skill's executions are in the Skills view (S), Executions tab",
-            ));
-        }
+        (Item::Skill(_), "Executions") => out = history_lines(st, "executions"),
         (Item::Persona(name), "Card") => {
             let catalog = app.library_catalog();
             match catalog.entry(name) {
                 Some(e) => {
-                    out.push(Line::styled(e.name.clone(), head()));
                     if let Some(spec) = &e.spec {
-                        out.push(Line::raw(spec.description.clone()));
+                        out.push(note(spec.description.clone()));
                         out.push(Line::raw(""));
-                        out.push(Line::raw(format!("tools   {}", spec.tools_label())));
+                        out.extend(running_line(app, item));
+                        out.push(field("tools", spec.tools_label()));
                         for (h, b) in &spec.backends {
-                            out.push(Line::raw(format!(
-                                "  {h:<10} model {} effort {}",
-                                b.model.as_deref().unwrap_or("—"),
-                                b.effort.as_deref().unwrap_or("—")
-                            )));
+                            out.push(field(
+                                h,
+                                format!(
+                                    "model {} · effort {}",
+                                    b.model.as_deref().unwrap_or("the harness's"),
+                                    b.effort.as_deref().unwrap_or("the harness's")
+                                ),
+                            ));
                         }
                         if let Some(t) = &spec.task {
-                            out.push(Line::raw(format!("task    {}", t.label())));
+                            out.push(field("task", t.label()));
                         }
                         if let Some(s) = &spec.schedule {
-                            out.push(Line::raw(format!(
-                                "when    every {} · {}",
-                                s.every,
-                                s.harness.as_deref().unwrap_or("(profile)")
-                            )));
+                            out.push(field(
+                                "when",
+                                format!(
+                                    "every {} · {}",
+                                    s.every,
+                                    s.harness.as_deref().unwrap_or("(profile)")
+                                ),
+                            ));
                         }
                         out.push(Line::raw(""));
-                        for l in spec.instructions.lines().take(20) {
-                            out.push(Line::styled(format!("  {l}"), dim()));
-                        }
+                        out.push(title_line("Instructions"));
+                        out.extend(
+                            spec.instructions
+                                .lines()
+                                .map(|l| Line::raw(format!("  {l}"))),
+                        );
                     }
-                    for p in &e.problems {
-                        out.push(Line::styled(
-                            format!("✗ {p}"),
-                            verdict_style(&Verdict::Blocked(p.clone())),
-                        ));
-                    }
+                    out.extend(e.problems.iter().map(|p| problem(p)));
                 }
-                None => out.push(Line::raw("the persona is not in the catalog")),
+                None => out.push(note("The persona is not in the catalog.")),
             }
         }
+        (Item::Persona(_), "Runs") => out = history_lines(st, "runs"),
         (Item::Loop(i), "Card") => {
             if let Some(e) = app.loop_registry.loops.get(*i) {
-                out.push(Line::styled(e.pattern.clone(), head()));
                 out.push(Line::raw(""));
-                out.push(Line::raw(format!("workspace  {}", e.workspace.display())));
-                out.push(Line::raw(format!(
-                    "runs on    {} · profile {}",
-                    e.harness,
-                    if e.profile.is_empty() {
-                        "(first)"
-                    } else {
-                        &e.profile
-                    }
-                )));
-                out.push(Line::raw(format!("every      {}s", e.interval_s)));
-                out.push(Line::raw(format!(
-                    "level      {} · {}",
-                    e.level.as_str(),
-                    if e.paused() { "paused" } else { "scheduled" }
-                )));
+                out.push(field("workspace", e.workspace.display().to_string()));
+                out.push(field(
+                    "runs on",
+                    format!(
+                        "{} · profile {}",
+                        e.harness,
+                        if e.profile.is_empty() {
+                            "(first)"
+                        } else {
+                            &e.profile
+                        }
+                    ),
+                ));
+                out.push(field("every", format!("{}s", e.interval_s)));
+                out.push(field("level", e.level.as_str()));
+                out.push(field(
+                    "state",
+                    if e.paused() { "paused" } else { "scheduled" },
+                ));
                 if let Some(next) = &e.next_run_at {
-                    out.push(Line::raw(format!("next       {next}")));
+                    out.push(field("next", next.to_string()));
                 }
                 if let Some(last) = &e.last_run_id {
-                    out.push(Line::raw(format!("last run   {last}")));
+                    out.push(field("last run", last.clone()));
                 }
                 out.push(Line::raw(""));
-                out.push(Line::styled(
-                    "r run now · p pause/resume · e edit · d remove".to_string(),
-                    dim(),
+                out.push(note(
+                    "r runs it now · p pauses or resumes · e edits · d removes",
                 ));
             }
         }
-        (Item::Loop(_), "Runs") => {
-            out.push(Line::raw(
-                "this loop's runs are in the runs view (W); its sessions sit in the Agents list",
-            ));
-        }
-        (Item::Persona(_), "Runs") => {
-            out.push(Line::raw(
-                "this persona's runs are in the runs view (W), under its name",
-            ));
-        }
+        (Item::Loop(_), "Runs") => out = history_lines(st, "runs"),
         _ => {}
     }
     out
 }
 
-fn status_label(current: bool, installed: bool) -> &'static str {
-    if current {
-        "installed ✓"
-    } else if installed {
-        "stale"
-    } else {
-        "not installed"
+/// The card's title, its tab labels (none for a heading) and its lines:
+/// what the pane shows for a row that is not a session.
+pub fn card(app: &App, st: &LibraryState) -> (String, Vec<&'static str>, Vec<Line<'static>>) {
+    match app.library_row(st) {
+        None => (
+            "Library".into(),
+            Vec::new(),
+            vec![Line::raw(""), note("Nothing matches the filter.")],
+        ),
+        Some(Row::Header(section)) => (
+            section.label().to_string(),
+            Vec::new(),
+            section_lines(app, st, section),
+        ),
+        Some(Row::Run(id)) => (
+            format!("run {id}"),
+            Vec::new(),
+            vec![
+                Line::raw(""),
+                note("A run of this flow is going."),
+                Line::raw(""),
+                note("Enter opens it on the Run screen: its steps, sessions and result."),
+            ],
+        ),
+        Some(Row::Session(_)) => (
+            "session".into(),
+            Vec::new(),
+            vec![Line::raw(""), note("The session is gone.")],
+        ),
+        Some(row) => {
+            let Some(item) = Option::<Item>::from(&row) else {
+                return (String::new(), Vec::new(), Vec::new());
+            };
+            let tabs = tab_labels(&item);
+            let tab = tabs[st.tab.min(tabs.len() - 1)];
+            (
+                format!("{} · {}", item_name(app, &item), item.word()),
+                tabs.to_vec(),
+                item_lines(app, st, &item, tab),
+            )
+        }
     }
 }
 
-pub fn draw_pane(f: &mut Frame, area: Rect, app: &App, st: &LibraryState) {
-    let item = app.library_item(st);
-    let title = match &item {
-        Some(it) => format!(" {} ", item_name(app, it)),
-        None => " Library ".to_string(),
-    };
+/// The card's text, for tests: its tab's lines without styles.
+pub fn pane_text(app: &App, st: &LibraryState) -> String {
+    card(app, st)
+        .2
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The main pane: the selected session's terminal, else the row's card,
+/// and the harness picker over either.
+pub fn draw_pane(f: &mut Frame, area: Rect, app: &App, st: &LibraryState, now: Instant) {
+    st.drawn.set(Drawn {
+        pane: area,
+        ..st.drawn.get()
+    });
+    let session = app
+        .library_row(st)
+        .and_then(|r| app.library_session_index(&r));
+    if let Some(idx) = session {
+        // the terminal itself, as the Agents list draws it
+        st.max_scroll.set(0);
+        super::draw_session_pane(f, area, app, idx, now);
+    } else {
+        draw_card(f, area, app, st);
+    }
+    if let Some(p) = &st.picker {
+        draw_picker(f, area, app, p);
+    }
+}
+
+fn draw_card(f: &mut Frame, area: Rect, app: &App, st: &LibraryState) {
+    let (title, tabs, lines) = card(app, st);
+    let room = usize::from(area.width.saturating_sub(4));
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(title, head()));
+        .border_style(focus_border(false))
+        .title(Span::styled(
+            format!(" {} ", super::truncate_chars(&title, room)),
+            Style::default().fg(Color::Gray),
+        ));
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let lines = pane_lines(app, st);
-    let height = usize::from(inner.height);
-    let start = st.scroll.min(lines.len().saturating_sub(height.max(1)));
-    let shown: Vec<Line> = lines.into_iter().skip(start).take(height).collect();
-    f.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), inner);
-    if let Some(p) = &st.picker {
-        draw_picker(f, area, p);
-    }
+    let body = if tabs.is_empty() {
+        inner
+    } else {
+        // the tab bar the Run and session screens draw
+        let [bar, body] =
+            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+        let current = st.tab.min(tabs.len() - 1);
+        let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+        for (n, t) in tabs.iter().enumerate() {
+            let label = format!(" {} {t} ", n + 1);
+            spans.push(if n == current {
+                Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(label, dim())
+            });
+            spans.push(Span::raw(" "));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), bar);
+        body
+    };
+    // a margin on both sides, so a wrapped line keeps its indent
+    let body = Rect::new(
+        body.x + 2.min(body.width),
+        body.y,
+        body.width.saturating_sub(3),
+        body.height,
+    );
+    let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let max = p
+        .line_count(body.width)
+        .saturating_sub(usize::from(body.height));
+    st.max_scroll.set(max);
+    let off = u16::try_from(st.scroll.min(max)).unwrap_or(u16::MAX);
+    f.render_widget(p.scroll((off, 0)), body);
 }
 
-fn draw_picker(f: &mut Frame, area: Rect, p: &crate::app::library::Picker) {
-    let w = area.width.min(64);
-    let h = (p.rows.len() as u16 + 4).min(area.height);
+/// The harness picker: every harness with its verdict, over the pane.
+fn draw_picker(f: &mut Frame, area: Rect, app: &App, p: &Picker) {
+    let w = area.width.min(72);
+    let h = (p.rows.len() as u16 + 5).min(area.height);
     let rect = Rect::new(
         area.x + area.width.saturating_sub(w) / 2,
         area.y + area.height.saturating_sub(h) / 2,
@@ -485,46 +760,70 @@ fn draw_picker(f: &mut Frame, area: Rect, p: &crate::app::library::Picker) {
     );
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" launch on ".to_string(), head()));
+        .border_style(focus_border(true))
+        .title(Span::styled(
+            format!(
+                " Launch {} on ",
+                super::truncate_chars(&item_name(app, &p.item), usize::from(w.saturating_sub(16)))
+            ),
+            head(),
+        ));
     let inner = block.inner(rect);
-    f.render_widget(ratatui::widgets::Clear, rect);
+    f.render_widget(Clear, rect);
     f.render_widget(block, rect);
-    for (y, (i, (h, v))) in (inner.y..).zip(p.rows.iter().enumerate()) {
-        if y >= inner.y + inner.height {
-            break;
-        }
-        let style = if i == p.cursor {
-            sel()
+    let width = usize::from(inner.width);
+    let mut items: Vec<ListItem> = Vec::new();
+    for (i, (h, v)) in p.rows.iter().enumerate() {
+        let on = i == p.cursor;
+        let left = format!(
+            "{} {} {:<12} {:<14}",
+            if on { ">" } else { " " },
+            verdict_glyph(v),
+            h.as_str(),
+            v.label()
+        );
+        let why = super::truncate_chars(
+            &v.notes().join("; "),
+            width.saturating_sub(left.width() + 1),
+        );
+        let item = ListItem::new(Line::from(vec![
+            Span::styled(
+                left,
+                if v.launchable() {
+                    verdict_style(v)
+                } else {
+                    dim()
+                },
+            ),
+            Span::raw(" "),
+            Span::styled(why, dim()),
+        ]));
+        items.push(if on {
+            item.style(Style::default().add_modifier(Modifier::REVERSED))
         } else {
-            Style::default()
-        };
-        let line = Line::from(vec![
-            Span::styled(format!(" {:<10} {:<14}", h.as_str(), v.label()), style),
-            Span::styled(v.notes().join("; "), verdict_style(v)),
-        ]);
-        f.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
+            item
+        });
     }
-    let hint = Rect::new(
-        inner.x,
-        inner.y + inner.height.saturating_sub(1),
-        inner.width,
-        1,
-    );
-    f.render_widget(
-        Paragraph::new(Line::styled("↑↓ pick · Enter launch · Esc back", dim())),
-        hint,
-    );
+    items.push(ListItem::new(Line::raw("")));
+    // why the row under the cursor cannot start, in full
+    let hint = match p.rows.get(p.cursor) {
+        Some((_, v)) if !v.launchable() => format!(" {}: pick another", v.label()),
+        _ => " ↑↓ pick · ↵ launch · Esc back".to_string(),
+    };
+    items.push(ListItem::new(Line::styled(
+        super::truncate_chars(&hint, width),
+        dim(),
+    )));
+    f.render_widget(List::new(items), inner);
 }
 
 /// Draws the whole screen body (tree + pane); the caller adds the
 /// status bar, as for the Swarm screen.
-pub fn draw_screen(f: &mut Frame, body: Rect, app: &App) {
+pub fn draw_screen(f: &mut Frame, body: Rect, app: &App, now: Instant) {
     let Mode::Library(st) = &app.mode else { return };
-    let [side, main] = ratatui::layout::Layout::horizontal([
-        ratatui::layout::Constraint::Length(crate::ui::SIDEBAR_WIDTH),
-        ratatui::layout::Constraint::Min(0),
-    ])
-    .areas(body);
-    draw_tree(f, side, app, st);
-    draw_pane(f, main, app, st);
+    let [side, main] =
+        Layout::horizontal([Constraint::Length(super::SIDEBAR_WIDTH), Constraint::Min(0)])
+            .areas(body);
+    draw_tree(f, side, app, st, now);
+    draw_pane(f, main, app, st, now);
 }

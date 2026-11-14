@@ -44,6 +44,19 @@ impl App {
             _ => None,
         };
         let in_swarm = matches!(self.mode, Mode::Swarm(_));
+        // the Library: the row under the cursor, and the item it is or
+        // was launched from
+        let library = match &self.mode {
+            Mode::Library(st) => Some((self.library_row(st), self.library_item(st))),
+            _ => None,
+        };
+        let library_item = library.as_ref().is_some_and(|(_, item)| item.is_some());
+        let library_session = library.as_ref().and_then(|(row, _)| {
+            row.as_ref()
+                .and_then(|r| self.library_session_index(r))
+                .and_then(|i| self.sessions.get(i))
+                .map(|s| matches!(s.status(Instant::now()), crate::status::Status::Exited(_)))
+        });
         let run_screen = match &self.mode {
             Mode::Run(st) => Some(st),
             _ => None,
@@ -81,6 +94,7 @@ impl App {
             }
             New => {
                 main_list
+                    || library.is_some()
                     || matches!(self.mode, Mode::ConfigView(_))
                     || editor_library
                     || workspace_node.is_some()
@@ -101,6 +115,7 @@ impl App {
                     || runs_item.is_some()
                     || run_screen.is_some()
                     || matches!(self.mode, Mode::Markdown(_) | Mode::AgentEditor(_))
+                    || library_item
                     || workspace_node.is_some_and(|n| n.customization.primary_doc.is_some())
             }
             Delete => {
@@ -123,6 +138,13 @@ impl App {
                     || matches!(self.mode, Mode::Inbox(_))
                     || editor_library
                     || in_swarm
+                    // a session's row (ended: removed; going: stopped
+                    // first) and a scheduled agent
+                    || library_session.is_some()
+                    || matches!(
+                        &library,
+                        Some((Some(super::library::Row::Loop(_)), _))
+                    )
             }
             Run => {
                 matches!(
@@ -147,6 +169,7 @@ impl App {
                         && self.sidebar_section == super::SidebarSection::Workflows
                         && self.selected_workflow_entry().is_some())
                     || matches!(self.mode, Mode::AgentEditor(_))
+                    || library_item
                     || runs_item.is_some()
                     || run_screen.is_some_and(|s| s.data.stored.is_some())
                     || skills_package
@@ -166,6 +189,7 @@ impl App {
                     })
                     || run_screen.is_some_and(|s| s.data.live)
                     || in_swarm
+                    || library_session == Some(false)
             }
             Reload => matches!(
                 self.mode,
@@ -178,6 +202,7 @@ impl App {
                     | Mode::Memory(_)
                     | Mode::Workspaces(_)
                     | Mode::Swarm(_)
+                    | Mode::Library(_)
                     | Mode::Langfuse(_)
             ),
             Restore => {
@@ -234,6 +259,13 @@ impl App {
                 // on the Swarm screen, the focus key takes the keyboard back
                 // from the pane to the swarm tree
                 if let Mode::Swarm(v) = &mut self.mode
+                    && v.pane_focused
+                {
+                    v.pane_focused = false;
+                    return;
+                }
+                // in the Library, from a session's terminal to the tree
+                if let Mode::Library(v) = &mut self.mode
                     && v.pane_focused
                 {
                     v.pane_focused = false;
@@ -674,6 +706,8 @@ impl App {
     }
     fn finish_navigation(&mut self, target: NavigationTarget, _now: Instant) {
         self.search = None;
+        // going somewhere by name: the Library does not come back after it
+        self.library_return = None;
         match target {
             NavigationTarget::Agents => {
                 self.mode = Mode::Main;
@@ -686,9 +720,9 @@ impl App {
                     .session_index(id)
                     .or_else(|| self.sessions.get(self.selected).map(|_| self.selected))
                 {
-                    self.mode = Mode::Main;
-                    self.selected = index;
-                    self.focus_pane();
+                    // where its row is: Agents, or the Library for a
+                    // session a skill or a persona launched
+                    self.reveal_session(index);
                 } else {
                     self.notice = Some(Notice::info("No session available"));
                 }
@@ -730,6 +764,7 @@ impl App {
             Mode::Memory(_) => "Memory",
             Mode::Workspaces(_) => "Workspaces",
             Mode::Swarm(_) => "Swarm",
+            Mode::Library(_) => "Library",
             Mode::Langfuse(_) => "Langfuse",
             _ => "Dialog",
         }
@@ -741,6 +776,11 @@ impl App {
                 .get(self.selected)
                 .map(|s| format!("Session • Keyboard goes to {}", s.profile.name))
                 .unwrap_or_else(|| "Session • No session available".into()),
+            Mode::Library(st) if st.pane_focused => self
+                .sessions
+                .get(self.selected)
+                .map(|s| format!("Library • Keyboard goes to {}", s.profile.name))
+                .unwrap_or_else(|| "Library • Keyboard focus".into()),
             Mode::AgentEditor(st) if st.editing => format!(
                 "Editing {} • Keyboard focus",
                 st.current().map(|f| f.label()).unwrap_or("field")
@@ -802,6 +842,7 @@ impl App {
             Mode::Workspaces(v) => v.filtering,
             Mode::Swarm(v) => v.text_entry_active(),
             Mode::SessionRun(v) => v.pane_focused,
+            Mode::Library(v) => v.text_entry_active(),
             Mode::Langfuse(v) => v.text_entry_active(),
             _ => false,
         }
@@ -810,6 +851,7 @@ impl App {
         match &self.mode {
             Mode::Memory(v) => v.pending.is_some(),
             Mode::Swarm(v) => v.confirmation_active(),
+            Mode::Library(v) => v.confirmation_active(),
             Mode::ConfirmKill
             | Mode::ConfirmCloseAll
             | Mode::ConfirmRestart

@@ -569,7 +569,9 @@ fn a_loop_is_named_by_its_workspace_and_its_hints_fit() {
     app.open_library(agent_mux::app::library::Section::Scheduled);
     let screen = render(&app, 100, 34);
     assert!(
-        screen.lines().any(|l| l.contains("daily-triage · claude")),
+        screen
+            .lines()
+            .any(|l| l.contains("⟳ daily-triage") && l.contains("claude")),
         "the scheduled row\n{screen}"
     );
 }
