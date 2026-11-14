@@ -79,6 +79,19 @@ pub fn valid(provider: Provider, raw: &[(String, i64)]) -> bool {
         {
             return false;
         }
+    } else if provider == Provider::Muse {
+        let cached = get(raw, "cache_read_tokens").or_else(|| get(raw, "cached_tokens"));
+        if let (Some(input), Some(cached)) = (get(raw, "input_tokens"), cached)
+            && cached > input
+        {
+            return false;
+        }
+        if let (Some(output), Some(reasoning)) =
+            (get(raw, "output_tokens"), get(raw, "reasoning_tokens"))
+            && reasoning > output
+        {
+            return false;
+        }
     }
     true
 }
@@ -141,6 +154,26 @@ pub fn normalize(provider: Provider, raw: &[(String, i64)]) -> NormalizedUsage {
             let reasoning = get(raw, "reasoning_tokens");
             let cache_read = get(raw, "cache_read_tokens");
             let cache_write = get(raw, "cache_write_tokens");
+            let total = sum_present([input, cache_read, cache_write, output]);
+            NormalizedUsage {
+                input,
+                output,
+                cache_read,
+                cache_write,
+                cache_write_1h: None,
+                reasoning,
+                total,
+            }
+        }
+        // Muse (`model_completed.usage`): `input_tokens` includes
+        // `cache_read_tokens` (`cached_tokens`) and `output_tokens` includes
+        // `reasoning_tokens`.
+        Provider::Muse => {
+            let cache_read = get(raw, "cache_read_tokens").or_else(|| get(raw, "cached_tokens"));
+            let input = get(raw, "input_tokens").map(|i| (i - cache_read.unwrap_or(0)).max(0));
+            let cache_write = get(raw, "cache_write_tokens");
+            let output = get(raw, "output_tokens");
+            let reasoning = get(raw, "reasoning_tokens");
             let total = sum_present([input, cache_read, cache_write, output]);
             NormalizedUsage {
                 input,
@@ -295,5 +328,32 @@ mod tests {
             &raw(&[("server_tool_use.web_search_requests", 2)]),
         );
         assert!(u.is_empty());
+    }
+
+    #[test]
+    fn muse_subtracts_cached_from_input_and_rejects_contradictions() {
+        let u = normalize(
+            Provider::Muse,
+            &raw(&[
+                ("input_tokens", 39_181),
+                ("cache_read_tokens", 38_385),
+                ("cached_tokens", 38_385),
+                ("cache_write_tokens", 0),
+                ("output_tokens", 228),
+                ("reasoning_tokens", 15),
+            ]),
+        );
+        assert_eq!(u.input, Some(39_181 - 38_385));
+        assert_eq!(u.cache_read, Some(38_385));
+        assert_eq!(u.cache_write, Some(0));
+        assert_eq!(u.output, Some(228));
+        assert_eq!(u.reasoning, Some(15));
+        assert_eq!(u.total, Some(39_181 + 228));
+
+        let bad = normalize(
+            Provider::Muse,
+            &raw(&[("input_tokens", 10), ("cache_read_tokens", 20)]),
+        );
+        assert!(bad.is_empty());
     }
 }

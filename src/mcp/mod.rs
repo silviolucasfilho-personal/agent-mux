@@ -29,11 +29,11 @@ pub const USAGE: &str = "agent-mux mcp <command>
                                 serve the ten read-only trace tools over stdio
   install agy|grok              register this binary with `agy|grok mcp add` (no per-launch flag exists)
   uninstall agy|grok            remove it with `agy|grok mcp remove`
-  status [claude|codex|agy|opencode|grok|pi]
+  status [claude|codex|agy|opencode|grok|pi|muse]
                                 how each harness reaches the server
 
-Claude Code, Codex, OpenCode and Pi are registered per launch by the Agents sidebar;
-nothing under ~/.claude, ~/.codex, ~/.config/opencode or ~/.pi is modified.";
+Claude Code, Codex, OpenCode, Pi and Muse are registered per launch by the Agents sidebar;
+nothing under ~/.claude, ~/.codex, ~/.config/opencode, ~/.pi or ~/.config/muse is modified.";
 
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {

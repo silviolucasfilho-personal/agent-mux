@@ -30,6 +30,7 @@ pub enum HookSource {
     CodexNotify,
     Antigravity,
     OpenCode,
+    Muse,
 }
 
 impl HookSource {
@@ -40,6 +41,7 @@ impl HookSource {
             "codex-notify" | "codex_notify" | "notify" => Some(HookSource::CodexNotify),
             "agy" | "antigravity" => Some(HookSource::Antigravity),
             "opencode" | "open-code" => Some(HookSource::OpenCode),
+            "muse" | "muse-code" => Some(HookSource::Muse),
             _ => None,
         }
     }
@@ -50,6 +52,7 @@ impl HookSource {
             HookSource::Codex | HookSource::CodexNotify => Provider::Codex,
             HookSource::Antigravity => Provider::Antigravity,
             HookSource::OpenCode => Provider::OpenCode,
+            HookSource::Muse => Provider::Muse,
         }
     }
 
@@ -60,6 +63,7 @@ impl HookSource {
             HookSource::CodexNotify => "codex-notify",
             HookSource::Antigravity => "agy",
             HookSource::OpenCode => "opencode",
+            HookSource::Muse => "muse",
         }
     }
 }
@@ -262,17 +266,29 @@ pub fn parse(
     launch_id: Option<String>,
 ) -> Option<HookEvent> {
     match source {
-        HookSource::Claude => parse_claude(Provider::Claude, payload, policy, ts_ns, launch_id),
-        HookSource::OpenCode => parse_claude(Provider::OpenCode, payload, policy, ts_ns, launch_id),
+        HookSource::Claude => {
+            parse_claude_like(Provider::Claude, false, payload, policy, ts_ns, launch_id)
+        }
+        HookSource::OpenCode => parse_claude_like(
+            Provider::OpenCode,
+            false,
+            payload,
+            policy,
+            ts_ns,
+            launch_id,
+        ),
         HookSource::Codex => parse_codex(payload, policy, ts_ns, launch_id),
         HookSource::CodexNotify => parse_codex_notify(payload, policy, ts_ns, launch_id),
         HookSource::Antigravity => parse_agy(event_override?, payload, policy, ts_ns, launch_id),
+        HookSource::Muse => parse_muse(payload, policy, ts_ns, launch_id),
     }
 }
 
-/// Claude's payloads, and the OpenCode plugin's, which copies their shape.
-fn parse_claude(
+/// Claude's payloads, and the OpenCode/Muse hooks, which follow the same
+/// schema (`Interrupt` is accepted for Muse).
+fn parse_claude_like(
     provider: Provider,
+    allow_interrupt: bool,
     v: &Value,
     policy: &ContentPolicy,
     ts_ns: i64,
@@ -331,7 +347,34 @@ fn parse_claude(
             ev.model = str_field(v, "new_model");
             put_structural(p, "old_model", v.get("old_model"));
         }
+        "Interrupt" if allow_interrupt => {}
         _ => return None,
+    }
+    Some(ev)
+}
+
+fn parse_muse(
+    v: &Value,
+    policy: &ContentPolicy,
+    ts_ns: i64,
+    launch_id: Option<String>,
+) -> Option<HookEvent> {
+    let mut ev = parse_claude_like(Provider::Muse, true, v, policy, ts_ns, launch_id)?;
+    if ev.model.is_none() {
+        ev.model = str_field(v, "model");
+    }
+    let subagent_type = str_field(v, "subagent_type");
+    if ev.agent_type.is_none() {
+        ev.agent_type = subagent_type.clone();
+    }
+    let reminder_kind = subagent_type
+        .as_deref()
+        .or(ev.agent_type.as_deref())
+        .or(ev.agent_id.as_deref());
+    if ev.agent_id.is_none()
+        && reminder_kind.is_some_and(|k| k.to_ascii_lowercase().contains("reminder"))
+    {
+        ev.agent_id = Some("skill-reminder".into());
     }
     Some(ev)
 }
@@ -900,6 +943,61 @@ mod tests {
             HookSource::parse("antigravity"),
             Some(HookSource::Antigravity)
         );
+        assert_eq!(HookSource::parse("muse"), Some(HookSource::Muse));
+        assert_eq!(HookSource::parse("Muse-Code"), Some(HookSource::Muse));
         assert_eq!(HookSource::parse("x"), None);
+    }
+
+    #[test]
+    fn muse_parses_interrupt_and_tags_reminder_subagents() {
+        let policy = ContentPolicy::full();
+        let interrupt = parse(
+            HookSource::Muse,
+            None,
+            &serde_json::json!({
+                "session_id": "m-1",
+                "hook_event_name": "Interrupt",
+                "cwd": "/repo"
+            }),
+            &policy,
+            42,
+            Some("L1".into()),
+        )
+        .unwrap();
+        assert_eq!(interrupt.provider, Provider::Muse);
+        assert_eq!(interrupt.event, "Interrupt");
+        assert_eq!(interrupt.agent_id, None);
+
+        let reminder = parse(
+            HookSource::Muse,
+            None,
+            &serde_json::json!({
+                "session_id": "m-child",
+                "hook_event_name": "SessionStart",
+                "subagent_type": "skill-reminder"
+            }),
+            &policy,
+            43,
+            Some("L1".into()),
+        )
+        .unwrap();
+        assert_eq!(reminder.agent_id.as_deref(), Some("skill-reminder"));
+        assert_eq!(reminder.agent_type.as_deref(), Some("skill-reminder"));
+
+        let explicit = parse(
+            HookSource::Muse,
+            None,
+            &serde_json::json!({
+                "session_id": "m-sub",
+                "hook_event_name": "SubagentStart",
+                "agent_id": "explicit-1",
+                "subagent_type": "skill-reminder"
+            }),
+            &policy,
+            44,
+            Some("L1".into()),
+        )
+        .unwrap();
+        assert_eq!(explicit.agent_id.as_deref(), Some("explicit-1"));
     }
 }

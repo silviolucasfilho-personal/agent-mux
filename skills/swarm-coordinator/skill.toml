@@ -5,7 +5,7 @@
 # (coordinator-first design §4.2).
 name = "Swarm Coordinator"
 icon = "◆"
-harnesses = ["claude", "codex", "agy", "opencode"]
+harnesses = ["claude", "codex", "agy", "opencode", "muse"]
 capabilities = ["trace.read"]
 # The coordinator reads, plans, launches and relays through the agent-mux
 # MCP tools; it never edits files. Approvals granted so it never stalls on a

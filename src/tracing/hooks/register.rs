@@ -151,13 +151,11 @@ pub const CLAUDE_EVENTS: &[(&str, bool, bool)] = &[
     ("SessionEnd", false, false),
 ];
 
-fn handler(reg: &Registration, event: &str, is_async: bool) -> Value {
-    let guarded = (reg.guard || reg.loop_guard) && event == "PreToolUse";
-    let is_async = is_async && !guarded;
+fn handler_args(reg: &Registration, source: &str, guarded: bool) -> Vec<String> {
     let mut args = vec![
         "trace".to_string(),
         "hook".to_string(),
-        "claude".to_string(),
+        source.to_string(),
         "--home".to_string(),
         reg.home.to_string_lossy().into_owned(),
         "--content-mode".to_string(),
@@ -169,6 +167,13 @@ fn handler(reg: &Registration, event: &str, is_async: bool) -> Value {
     if guarded && reg.loop_guard {
         args.push("--loop".to_string());
     }
+    args
+}
+
+fn handler(reg: &Registration, event: &str, is_async: bool) -> Value {
+    let guarded = (reg.guard || reg.loop_guard) && event == "PreToolUse";
+    let is_async = is_async && !guarded;
+    let args = handler_args(reg, "claude", guarded);
     let mut h = json!({
         "type": "command",
         "command": reg.exe.to_string_lossy(),
@@ -344,6 +349,60 @@ pub fn codex_notify_override(
     }
     let items: Vec<String> = argv.iter().map(|a| toml_string(a)).collect();
     format!("notify=[{}]", items.join(","))
+}
+
+/// Muse lifecycle events registered per launch via `-c hooks={…}`.
+/// Muse accepts no `"args"` array or `"matcher"` key in its hook objects,
+/// and requires `"async": true` on `StopFailure`, `SessionEnd` and
+/// `Interrupt`. Every event runs async except `PreToolUse` when a guard
+/// is active so Muse waits for the verdict.
+pub const MUSE_EVENTS: &[(&str, bool)] = &[
+    ("SessionStart", true),
+    ("UserPromptSubmit", true),
+    ("PreToolUse", true),
+    ("PostToolUse", true),
+    ("PostToolUseFailure", true),
+    ("SubagentStart", true),
+    ("SubagentStop", true),
+    ("Stop", true),
+    ("StopFailure", true),
+    ("SessionEnd", true),
+    ("Interrupt", true),
+];
+
+fn handler_command(reg: &Registration, source: &str, guarded: bool) -> String {
+    let mut parts = vec![super::install::sh_quote(&reg.exe.to_string_lossy())];
+    let mut args = handler_args(reg, source, guarded);
+    if let Some(i) = args.iter().position(|a| a == "--home")
+        && let Some(val) = args.get_mut(i + 1)
+    {
+        *val = super::install::sh_quote(val);
+    }
+    parts.extend(args);
+    parts.join(" ")
+}
+
+/// Inline `-c` override for `muse`: `hooks={<event>: [{"hooks": [...]}]}`.
+pub fn muse_cli_arg(reg: &Registration) -> String {
+    let mut hooks = Map::new();
+    for (event, is_async) in MUSE_EVENTS {
+        if !reg.profile.includes(event) {
+            continue;
+        }
+        let guarded = (reg.guard || reg.loop_guard) && *event == "PreToolUse";
+        let is_async = *is_async && !guarded;
+        let mut h = json!({
+            "type": "command",
+            "command": handler_command(reg, "muse", guarded),
+        });
+        if is_async {
+            h["async"] = Value::Bool(true);
+        }
+        let mut group = Map::new();
+        group.insert("hooks".into(), Value::Array(vec![h]));
+        hooks.insert((*event).to_string(), Value::Array(vec![Value::Object(group)]));
+    }
+    format!("hooks={}", Value::Object(hooks))
 }
 
 #[cfg(test)]
@@ -602,5 +661,43 @@ mod tests {
         let o = opencode_plugin_options(&r, "L1", Path::new("/ws"));
         assert_eq!(o.events, ["SessionStart"]);
         assert!(o.guard && o.loop_guard);
+    }
+
+    #[test]
+    fn muse_cli_arg_shapes_events_and_guards() {
+        let mut r = reg();
+        let arg = muse_cli_arg(&r);
+        let raw = arg.strip_prefix("hooks=").expect("hooks= prefix");
+        let hooks: Map<String, Value> = serde_json::from_str(raw).unwrap();
+        assert_eq!(hooks.len(), MUSE_EVENTS.len());
+        for (event, _) in MUSE_EVENTS {
+            let group = &hooks[*event][0];
+            assert!(group.get("matcher").is_none(), "{event}: {group}");
+            let h = &group["hooks"][0];
+            assert_eq!(h["type"], "command");
+            assert!(h.get("args").is_none(), "{event}: {h}");
+            assert_eq!(h["async"], Value::Bool(true), "{event}: {h}");
+            let cmd = h["command"].as_str().unwrap();
+            assert!(cmd.contains("'/opt/agent-mux' trace hook muse --home '/home/me' --content-mode full"));
+        }
+
+        r.loop_guard = true;
+        r.guard = true;
+        let raw = muse_cli_arg(&r);
+        let hooks: Map<String, Value> =
+            serde_json::from_str(raw.strip_prefix("hooks=").unwrap()).unwrap();
+        let pre = &hooks["PreToolUse"][0]["hooks"][0];
+        assert!(pre.get("async").is_none(), "guarded PreToolUse must wait");
+        let cmd = pre["command"].as_str().unwrap();
+        assert!(cmd.contains("--guard") && cmd.contains("--loop"), "{cmd}");
+        assert_eq!(hooks["SessionEnd"][0]["hooks"][0]["async"], Value::Bool(true));
+
+        r.profile = HooksProfile::Minimal;
+        let hooks: Map<String, Value> =
+            serde_json::from_str(muse_cli_arg(&r).strip_prefix("hooks=").unwrap()).unwrap();
+        assert!(hooks.contains_key("SessionStart"));
+        assert!(hooks.contains_key("StopFailure"));
+        assert!(hooks.contains_key("SessionEnd"));
+        assert!(!hooks.contains_key("PreToolUse"));
     }
 }

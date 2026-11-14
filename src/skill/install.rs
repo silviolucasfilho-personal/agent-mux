@@ -57,6 +57,7 @@ pub fn skills_root(harness: Harness, home: &Path) -> Option<PathBuf> {
         Harness::OpenCode => Some(opencode_config_dir(home).join("skill")),
         Harness::Grok => Some(grok_home(home).join("skills")),
         Harness::Pi => Some(pi_agent_dir(home).join("skills")),
+        Harness::Muse => Some(muse_config_dir(home).join("skills")),
     }
 }
 
@@ -98,6 +99,14 @@ pub fn pi_agent_dir(home: &Path) -> PathBuf {
     env_dir("PI_CODING_AGENT_DIR").unwrap_or_else(|| home.join(".pi").join("agent"))
 }
 
+/// Muse's configuration directory: `$XDG_CONFIG_HOME/muse`, else
+/// `~/.config/muse` (probed on muse 1.4.20).
+pub fn muse_config_dir(home: &Path) -> PathBuf {
+    env_dir("XDG_CONFIG_HOME")
+        .map(|d| d.join("muse"))
+        .unwrap_or_else(|| home.join(".config").join("muse"))
+}
+
 fn env_dir(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .filter(|v| !v.is_empty())
@@ -115,6 +124,7 @@ pub fn project_skills_root(harness: Harness, workspace: &Path) -> Option<PathBuf
         Harness::OpenCode => Some(workspace.join(".opencode").join("skill")),
         Harness::Grok => Some(workspace.join(".grok").join("skills")),
         Harness::Pi => Some(workspace.join(".pi").join("skills")),
+        Harness::Muse => Some(workspace.join(".agents").join("skills")),
     }
 }
 
@@ -375,5 +385,18 @@ mod tests {
         assert!(supports(Harness::Grok) && supports(Harness::Pi));
         assert!(supported_harnesses().contains(&Harness::Grok));
         assert!(supported_harnesses().contains(&Harness::Pi));
+
+        if std::env::var_os("XDG_CONFIG_HOME").is_none() {
+            let r = install(&d, Harness::Muse, &home, false).unwrap();
+            assert_eq!(r.dir, home.join(".config/muse/skills/loop-rules"));
+            let md = std::fs::read_to_string(r.dir.join("SKILL.md")).unwrap();
+            assert!(md.contains("Invoke with /loop-rules."), "{md}");
+            assert!(status(&d, Harness::Muse, &home).current);
+            assert!(uninstall("loop-rules", Harness::Muse, &home).unwrap());
+        }
+        let m = install_project(&d, Harness::Muse, &ws, false).unwrap();
+        assert_eq!(m.dir, ws.join(".agents/skills/loop-rules"));
+        assert!(supports(Harness::Muse));
+        assert!(supported_harnesses().contains(&Harness::Muse));
     }
 }

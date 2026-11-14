@@ -173,6 +173,117 @@ pub fn lines_for(harness: Harness, stdout: &[u8], session: Option<&str>) -> Vec<
                 "error" => emit(&mut out, LiveKind::Error, &display(&v["error"])),
                 _ => {}
             },
+            Harness::Muse => {
+                let payload = &v["payload"];
+                match string(&v, "payload_type") {
+                    "run.output.delta" => {
+                        let chunk = payload
+                            .get("text")
+                            .or_else(|| payload.get("delta"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("");
+                        pending_text.push_str(chunk);
+                        if let Some(end) = pending_text.rfind('\n') {
+                            emit(&mut out, LiveKind::Text, &pending_text[..=end]);
+                            pending_text.drain(..=end);
+                        }
+                    }
+                    "runtime.session" => {
+                        let ev = &payload["event"];
+                        match string(ev, "kind") {
+                            "assistant_tool_calls_committed" => {
+                                flush_text(&mut out, &mut pending_text);
+                                if let Some(calls) = ev["tool_calls"].as_array() {
+                                    for call in calls {
+                                        let name = call
+                                            .get("name")
+                                            .or_else(|| call.get("tool_name"))
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("tool");
+                                        let raw = call.get("args").or_else(|| call.get("arguments"));
+                                        let parsed = match raw {
+                                            Some(serde_json::Value::String(s)) => {
+                                                serde_json::from_str(s).unwrap_or_else(|_| {
+                                                    serde_json::Value::String(s.clone())
+                                                })
+                                            }
+                                            Some(other) => other.clone(),
+                                            None => serde_json::Value::Null,
+                                        };
+                                        tool(&mut out, name, &parsed);
+                                    }
+                                }
+                            }
+                            "tool_result_batch_committed" => {
+                                if let Some(results) = ev["results"].as_array() {
+                                    for res in results {
+                                        let content = res
+                                            .get("text")
+                                            .or_else(|| res.get("content"))
+                                            .unwrap_or(&serde_json::Value::Null);
+                                        let text_str = display(content);
+                                        let is_err = res["is_error"].as_bool() == Some(true)
+                                            || res
+                                                .get("text")
+                                                .and_then(|t| t.as_str())
+                                                .and_then(|s| {
+                                                    serde_json::from_str::<serde_json::Value>(s).ok()
+                                                })
+                                                .is_some_and(|j| {
+                                                    j.get("exit_code")
+                                                        .and_then(|c| c.as_i64())
+                                                        .is_some_and(|c| c != 0)
+                                                        || j.get("terminal_status")
+                                                            .and_then(|s| s.as_str())
+                                                            == Some("failed")
+                                                });
+                                        emit(
+                                            &mut out,
+                                            if is_err {
+                                                LiveKind::Error
+                                            } else {
+                                                LiveKind::Outcome
+                                            },
+                                            &text_str,
+                                        );
+                                    }
+                                }
+                            }
+                            "assistant_message_committed" => {
+                                if pending_text.is_empty()
+                                    && !out.iter().any(|l| l.kind == LiveKind::Text)
+                                {
+                                    if let Some(t) = ev.get("text").and_then(|s| s.as_str()) {
+                                        emit(&mut out, LiveKind::Text, t);
+                                    } else if !ev["content"].is_null() {
+                                        emit(&mut out, LiveKind::Text, &display(&ev["content"]));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    "run.terminal.completed" => {
+                        flush_text(&mut out, &mut pending_text);
+                        final_text(&mut out, string(payload, "text"));
+                    }
+                    "run.terminal.failed" => {
+                        flush_text(&mut out, &mut pending_text);
+                        let msg = payload
+                            .get("message")
+                            .or_else(|| payload.get("reason"))
+                            .or_else(|| payload.get("text"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("");
+                        if msg.is_empty() {
+                            emit(&mut out, LiveKind::Error, &display(payload));
+                        } else {
+                            emit(&mut out, LiveKind::Error, msg);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Harness::Codex | Harness::Grok | Harness::Pi => {}
         }
     }
@@ -628,9 +739,48 @@ mod tests {
 
     #[test]
     fn partial_json_and_unknown_events_are_ignored() {
-        for h in [Harness::Claude, Harness::Antigravity, Harness::OpenCode] {
+        for h in [
+            Harness::Claude,
+            Harness::Antigravity,
+            Harness::OpenCode,
+            Harness::Muse,
+        ] {
             assert!(lines(h, b"{\"unknown\":true}\n{\"type\":\"text\"").is_empty());
         }
+    }
+
+    #[test]
+    fn muse_exec_json_decodes_deltas_tools_and_terminal() {
+        let stream = concat!(
+            r#"{"payload_type":"run.output.delta","payload":{"text":"hello "}}"#,
+            "\n",
+            r#"{"payload_type":"run.output.delta","payload":{"text":"world\n"}}"#,
+            "\n",
+            r#"{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"name":"shell","args":"{\"command\":\"ls\"}"}]}}}"#,
+            "\n",
+            r#"{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"text":"{\"exit_code\":0}"}]}}}"#,
+            "\n",
+            r#"{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"text":"{\"exit_code\":1,\"terminal_status\":\"failed\"}"}]}}}"#,
+            "\n",
+            r#"{"payload_type":"run.terminal.completed","payload":{"text":"hello world"}}"#,
+            "\n",
+            r#"{"payload_type":"run.terminal.failed","payload":{"message":"timed out"}}"#,
+            "\n",
+        );
+        let decoded = lines(Harness::Muse, stream.as_bytes());
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|l| (l.kind, l.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (LiveKind::Text, "hello world"),
+                (LiveKind::Tool, r#"▸ shell {"command":"ls"}"#),
+                (LiveKind::Outcome, r#"{"exit_code":0}"#),
+                (LiveKind::Error, r#"{"exit_code":1,"terminal_status":"failed"}"#),
+                (LiveKind::Error, "timed out"),
+            ]
+        );
     }
     #[test]
     fn captured_codex_tool_and_agent_sections() {

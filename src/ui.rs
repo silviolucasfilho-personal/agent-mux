@@ -2979,6 +2979,7 @@ fn provider_badge(provider: &str) -> Span<'static> {
         "codex" => Span::styled("[X] ", Style::default().fg(Color::LightGreen)),
         "antigravity" => Span::styled("[A] ", Style::default().fg(Color::LightCyan)),
         "opencode" => Span::styled("[O] ", Style::default().fg(Color::LightYellow)),
+        "muse" => Span::styled("[M] ", Style::default().fg(Color::LightBlue)),
         _ => Span::raw("[?] "),
     }
 }

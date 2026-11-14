@@ -41,7 +41,7 @@ Patterns: daily-triage, pr-babysitter, ci-sweeper, post-merge-cleanup,
 dependency-sweeper, changelog-drafter, issue-triage, continuous-pr,
 harness-audit. The registry lives in
 ~/.agent-mux/loops.json (AGENT_MUX_LOOPS_FILE overrides). Loops run on Claude
-Code, Codex and OpenCode; Antigravity is not supported yet (docs/loops.md).";
+Code, Codex, OpenCode and Muse Code; Antigravity is not supported yet (docs/loops.md).";
 
 /// `--flag value` pairs, `--flag` switches and positionals.
 struct Args {
@@ -146,6 +146,8 @@ fn guard_available(harness: Harness, home: &Path) -> bool {
         }
         // agent-mux's plugin rides on every traced launch
         Harness::OpenCode => exe.is_some(),
+        // Muse hooks attach per launch via `-c hooks=...`
+        Harness::Muse => exe.is_some(),
         Harness::Antigravity | Harness::Grok | Harness::Pi => false,
     }
 }
@@ -172,7 +174,8 @@ fn parse_harness(s: &str) -> anyhow::Result<Harness> {
         "codex" => Ok(Harness::Codex),
         "agy" | "antigravity" => anyhow::bail!("Antigravity is not supported for loops"),
         "opencode" | "open-code" => Ok(Harness::OpenCode),
-        other => anyhow::bail!("unknown harness {other:?}: claude, codex or opencode"),
+        "muse" | "muse-code" => Ok(Harness::Muse),
+        other => anyhow::bail!("unknown harness {other:?}: claude, codex, opencode or muse"),
     }
 }
 

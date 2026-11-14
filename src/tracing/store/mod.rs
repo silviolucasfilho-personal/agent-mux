@@ -1556,6 +1556,57 @@ mod tests {
     }
 
     #[test]
+    fn v27_rebuilds_sessions_for_muse_and_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        {
+            let mut store = open_temp(dir.path());
+            store
+                .apply(&[
+                    StoreOp::Launch(launch("l1")),
+                    StoreOp::Trace(trace("t1", TraceStatus::Open, None)),
+                    StoreOp::Observation(observation("o1", None)),
+                ])
+                .unwrap();
+        }
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 26;").unwrap();
+        drop(conn);
+        let store = open_temp(dir.path());
+        let conn = store.conn();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM sessions"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM traces"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM launches"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM session_stats"), 1);
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_trace_changes_sessions_%'"
+            ),
+            3
+        );
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('sessions_last_seen', 'sessions_project')"
+            ),
+            2
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM pragma_foreign_key_check"), 0);
+        conn.execute(
+            "INSERT INTO sessions (key, provider, session_id, first_seen_ns, last_seen_ns) VALUES ('muse:ses_1', 'muse', 'ses_1', 1, 1)",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO sessions (key, provider, session_id, first_seen_ns, last_seen_ns) VALUES ('other:1', 'other', '1', 1, 1)",
+                [],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn v10_store_is_accepted_when_its_trace_schema_matches_v9() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.db");

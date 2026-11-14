@@ -152,10 +152,16 @@ pub fn install_agy(spec: &AgentSpec, home: &Path) -> Result<PathBuf, String> {
 /// What an agent's tool list becomes on `harness`, where it cannot be
 /// enforced exactly: advisory lines for `workflow check` and run notes.
 pub fn tool_notes(spec: &AgentSpec, harness: Harness) -> Vec<(Level, String)> {
-    let Some(tools) = &spec.tools else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
+    if harness == Harness::Muse && !spec.instructions.trim().is_empty() {
+        out.push((
+            Level::Warning,
+            "muse: primary session instructions are not applied via CLI flags (`--agents` defines subagents only)".to_string(),
+        ));
+    }
+    let Some(tools) = &spec.tools else {
+        return out;
+    };
     match harness {
         Harness::Claude => {}
         Harness::Codex => {
@@ -200,6 +206,28 @@ pub fn tool_notes(spec: &AgentSpec, harness: Harness) -> Vec<(Level, String)> {
                     out.push((
                         Level::Warning,
                         format!("opencode: mcp:{s} is not mapped; the session has the MCP servers opencode.json configures"),
+                    ));
+                }
+            }
+        }
+        Harness::Muse => {
+            if !tools.contains(&Tool::Read) {
+                out.push((
+                    Level::Warning,
+                    "muse always has read tools; without `read` the agent still has file read/search access".to_string(),
+                ));
+            }
+            if !tools.contains(&Tool::Web) {
+                out.push((
+                    Level::Warning,
+                    "muse: `web` is enforced in headless workflow runs (`--disable-web-tools`); interactive sessions use settings.json".to_string(),
+                ));
+            }
+            for t in tools {
+                if let Tool::Mcp(s) = t {
+                    out.push((
+                        Level::Warning,
+                        format!("muse: mcp:{s} must be configured in ~/.config/muse/settings.json"),
                     ));
                 }
             }
@@ -263,6 +291,14 @@ pub fn plan(spec: &AgentSpec, harness: Harness) -> LaunchPlan {
             out.args.push(agy_name(spec));
             out.env
                 .push(crate::opencode::config_env(&opencode_fragment(spec)));
+        }
+        Harness::Muse => {
+            if !spec.can(&Tool::Edit) {
+                out.args.push("--disable-write".into());
+            }
+            if !spec.can(&Tool::Shell) {
+                out.args.push("--disable-shell".into());
+            }
         }
         // TODO(agents): not applied yet (see `tool_notes`)
         Harness::Grok | Harness::Pi => {}
@@ -369,5 +405,20 @@ mod tests {
         assert!(tool_notes(&spec(""), Harness::Antigravity).is_empty());
         assert_eq!(tool_notes(&s, Harness::OpenCode).len(), 1);
         assert!(tool_notes(&spec("tools = [\"read\"]"), Harness::OpenCode).is_empty());
+        // Muse: always warns on non-empty instructions (even without `tools`), plus !read / !web / mcp
+        assert_eq!(tool_notes(&spec(""), Harness::Muse).len(), 1);
+        assert_eq!(tool_notes(&s, Harness::Muse).len(), 2);
+        assert_eq!(tool_notes(&spec("tools = [\"edit\"]"), Harness::Muse).len(), 3);
+    }
+
+    #[test]
+    fn muse_disables_edit_and_shell_only() {
+        let p = plan(&spec("tools = [\"read\"]"), Harness::Muse);
+        assert_eq!(p.args, ["--disable-write", "--disable-shell"]);
+        assert!(p.remove.is_empty());
+        let all = plan(&spec(""), Harness::Muse);
+        assert!(all.args.is_empty());
+        let editor = plan(&spec("tools = [\"read\", \"edit\", \"shell\"]"), Harness::Muse);
+        assert!(editor.args.is_empty());
     }
 }

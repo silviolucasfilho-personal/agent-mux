@@ -12,7 +12,7 @@ fn harness_args(args: &[String]) -> Result<Vec<Harness>, String> {
         if args[i] == "--harness" {
             let v = args
                 .get(i + 1)
-                .ok_or("--harness needs a value: claude, codex, agy, opencode, grok, pi or all")?;
+                .ok_or("--harness needs a value: claude, codex, agy, opencode, grok, pi, muse or all")?;
             if v == "all" {
                 out.extend(Harness::ALL);
             } else {
@@ -86,7 +86,7 @@ pub fn handle_skill_cli(args: &[String]) -> Result<(), String> {
         }
         "install" => {
             let id = args.get(1).ok_or(
-                "usage: agent-mux skill install <id> [--harness claude|codex|agy|opencode|grok|pi|all] [--force]",
+                "usage: agent-mux skill install <id> [--harness claude|codex|agy|opencode|grok|pi|muse|all] [--force]",
             )?;
             let def = find(id)?;
             let force = args.iter().any(|a| a == "--force");
@@ -128,7 +128,7 @@ pub fn handle_skill_cli(args: &[String]) -> Result<(), String> {
         "uninstall" => {
             let id = args
                 .get(1)
-                .ok_or("usage: agent-mux skill uninstall <id> [--harness claude|codex|agy|opencode|grok|pi|all]")?;
+                .ok_or("usage: agent-mux skill uninstall <id> [--harness claude|codex|agy|opencode|grok|pi|muse|all]")?;
             let mut targets = harness_args(&args[2..])?;
             if targets.is_empty() {
                 targets = Harness::ALL.to_vec();
@@ -208,7 +208,8 @@ commands:
   show <id> [--harness H]                the SKILL.md as it is written for that harness
   install <id> [--harness H|all] [--force]
                                          write the skill into the harness skill directories:
-                                         claude ~/.claude/skills, codex ~/.codex/skills, agy ~/.gemini/config/skills
+                                         claude ~/.claude/skills, codex ~/.codex/skills,
+                                         agy ~/.gemini/config/skills, muse ~/.config/muse/skills
   uninstall <id> [--harness H|all]       remove copies agent-mux installed
   status [id]                            installed / stale / not managed, per harness
   import <dir> [--force]                 copy a SKILL.md package written for one harness into

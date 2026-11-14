@@ -58,7 +58,7 @@ impl ReviewSettings {
                     ..Default::default()
                 }),
                 Err(_) => Err(format!(
-                    "review: `{s}` is not `auto`, `off` or a harness (claude, codex, agy, opencode)"
+                    "review: `{s}` is not `auto`, `off` or a harness (claude, codex, agy, opencode, muse)"
                 )),
             },
         }

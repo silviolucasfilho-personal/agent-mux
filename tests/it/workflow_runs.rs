@@ -72,6 +72,14 @@ fn fake_harness(
   printf '{"type":"text","sessionID":"ses_fake","part":{"type":"text","text":"%s"}}\n' "$esc"
 }"#
         }
+        Harness::Muse => {
+            // JSONL events as `muse exec --json`
+            r#"emit() {
+  esc=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{ORS="\\n"} {print}' | sed 's/\\n$//')
+  printf '{"payload_type":"run.usage","payload":{"kind":"run_usage","models":[{"input_tokens":10,"output_tokens":5}]}}\n'
+  printf '{"payload_type":"run.terminal.completed","payload":{"kind":"run_terminal","terminal":"completed","text":"%s"}}\n' "$esc"
+}"#
+        }
         Harness::Grok | Harness::Pi => unreachable!("not a workflow harness yet"),
     };
     let find_out = if harness == Harness::Codex {

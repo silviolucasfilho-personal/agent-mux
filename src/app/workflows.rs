@@ -984,6 +984,13 @@ impl App {
             .unwrap_or(self.workflows.session_timeout_s);
         let mut extra = wfh::extra_args(harness, run.usd_cap, timeout_s, &out_file);
         extra.extend(agent_plan.args.iter().cloned());
+        if harness == Harness::Muse
+            && agent
+                .as_ref()
+                .is_some_and(|a| !a.can(&crate::agents::Tool::Web))
+        {
+            extra.push("--disable-web-tools".into());
+        }
         // Reasoning effort, where the harness has one to set.
         if let Some(effort) = spec
             .overrides

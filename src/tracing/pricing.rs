@@ -59,6 +59,8 @@ fn guess_provider(id: &str) -> &'static str {
         "openai"
     } else if id.starts_with("gemini") {
         "google"
+    } else if id.starts_with("muse") || id.starts_with("assetgen") {
+        "meta"
     } else {
         "other"
     }
@@ -250,7 +252,7 @@ fn strip_date_suffix(s: &str) -> &str {
 /// suffixes stripped.
 pub fn normalize_model_name(name: &str) -> String {
     let mut s = name.trim().to_ascii_lowercase();
-    for prefix in ["anthropic/", "openai/", "google/", "models/"] {
+    for prefix in ["anthropic/", "openai/", "google/", "meta/", "models/"] {
         if let Some(rest) = s.strip_prefix(prefix) {
             s = rest.to_string();
         }
@@ -423,6 +425,14 @@ mod tests {
             "claude-fable-5-1"
         );
         assert_eq!(table.find("gpt-5.3-codex").unwrap().id, "gpt-5.3-codex");
+        assert_eq!(
+            table.find("muse-spark-1.3-contributor").unwrap().id,
+            "muse-spark-1.3-contributor"
+        );
+        assert_eq!(
+            table.find("meta/muse-wonder-1.0").unwrap().id,
+            "muse-wonder-1.0"
+        );
         assert!(table.find("<synthetic>").is_none());
         assert!(table.find("").is_none());
         assert!(table.find("totally-unknown-model").is_none());

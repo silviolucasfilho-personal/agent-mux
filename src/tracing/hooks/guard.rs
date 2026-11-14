@@ -88,7 +88,7 @@ pub fn check(db: &Path, launch_id: &str, budget: Duration) -> Verdict {
 /// Tools that only read: never refused by the fail-closed loop guard.
 /// OpenCode's are matched case-insensitively with Claude's (`read`,
 /// `grep`, `glob`, `webfetch`, `websearch`) plus its own below.
-const READ_TOOLS: [&str; 20] = [
+const READ_TOOLS: [&str; 24] = [
     "Read",
     "Grep",
     "Glob",
@@ -103,10 +103,14 @@ const READ_TOOLS: [&str; 20] = [
     "list_dir",
     "grep_files",
     "view_image",
+    "search",
     "web_search",
+    "web_fetch",
     "fetch",
     "list",
     "skill",
+    "read_skill",
+    "write_todos",
     "question",
     "subagent",
 ];

@@ -141,8 +141,29 @@ pub enum CorrelationSpec {
         cwd: PathBuf,
         t0_ms: i64,
     },
+    /// Muse with a known session id (`muse resume <id>`).
+    KnownMuse {
+        session_id: String,
+        data_dir: PathBuf,
+        resume: bool,
+    },
+    /// Muse session under `<data_dir>/sessions/YYYY/MM/DD/<id>/session.jsonl`.
+    WatchMuse {
+        data_dir: PathBuf,
+        cwd: PathBuf,
+        t0: SystemTime,
+    },
     /// Untraceable launch (e.g. bare `-r` / `--continue` with no id).
     None,
+}
+
+/// Muse's data directory: `$XDG_DATA_HOME/muse` else `<home>/.local/share/muse`.
+pub fn muse_data_dir(home: &Path) -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local").join("share"))
+        .join("muse")
 }
 
 #[derive(Debug, PartialEq)]
@@ -189,9 +210,52 @@ fn read_codex_session_meta(path: &Path, cap: usize) -> Option<TranscriptEvent> {
     None
 }
 
+/// Reads the first few lines of a Muse `session.jsonl` for session id,
+/// `workspace_root`, and any linked reminder child session ids.
+pub fn read_muse_session_meta(path: &Path, cap: usize) -> Option<(Option<String>, Option<String>)> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file.take(cap as u64));
+    let mut session_id = None;
+    let mut cwd = None;
+    for line in reader.lines().take(25) {
+        let Ok(line) = line else { break };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        for event in crate::transcript::parse_muse_line(line) {
+            if let TranscriptEvent::SessionMeta {
+                session_id: sid,
+                cwd: c,
+                ..
+            } = event
+            {
+                if session_id.is_none() {
+                    session_id = sid;
+                }
+                if cwd.is_none() {
+                    cwd = c;
+                }
+            }
+        }
+        if session_id.is_some() && cwd.is_some() {
+            break;
+        }
+    }
+    (session_id.is_some() || cwd.is_some()).then_some((session_id, cwd))
+}
+
+fn cwd_matches(meta_cwd: &str, cwd: &Path, want_canon: &Path) -> bool {
+    let meta_path = Path::new(meta_cwd);
+    let meta_canon = meta_path
+        .canonicalize()
+        .unwrap_or_else(|_| meta_path.to_path_buf());
+    meta_canon == want_canon || meta_path == cwd
+}
+
 /// Discovers all `sessions/YYYY/MM/DD` date directories in reverse
 /// chronological order (newest first).
-fn all_codex_date_dirs(sessions_dir: &Path) -> Vec<PathBuf> {
+pub fn all_date_dirs(sessions_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let Ok(years) = std::fs::read_dir(sessions_dir) else {
         return dirs;
@@ -459,7 +523,7 @@ pub fn poll_with(
         } => {
             let want_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
             let mut date_dirs = codex_date_dirs(sessions_dir, *t0);
-            for d in all_codex_date_dirs(sessions_dir) {
+            for d in all_date_dirs(sessions_dir) {
                 if !date_dirs.contains(&d) {
                     date_dirs.push(d);
                 }
@@ -486,15 +550,76 @@ pub fn poll_with(
                     else {
                         continue;
                     };
-                    let meta_cwd_path = Path::new(&meta_cwd);
-                    let meta_canon = meta_cwd_path
-                        .canonicalize()
-                        .unwrap_or_else(|_| meta_cwd_path.to_path_buf());
-                    if meta_canon != want_cwd && meta_cwd_path != cwd {
+                    if !cwd_matches(&meta_cwd, cwd, &want_cwd) {
                         continue;
                     }
                     if !try_claim(claims, Provider::Codex, &id) {
                         continue; // another session already owns it
+                    }
+                    return Some(Adopted {
+                        session_id: id,
+                        path,
+                        correlation: "watched",
+                        resume_prime: false,
+                    });
+                }
+            }
+            None
+        }
+        CorrelationSpec::KnownMuse {
+            session_id,
+            data_dir,
+            resume,
+        } => {
+            let path = muse_session_log_by_id(data_dir, session_id)?;
+            if !try_claim(claims, Provider::Muse, session_id) {
+                return None;
+            }
+            Some(Adopted {
+                session_id: session_id.clone(),
+                path,
+                correlation: "deterministic",
+                resume_prime: *resume,
+            })
+        }
+        CorrelationSpec::WatchMuse { data_dir, cwd, t0 } => {
+            let want_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+            let sessions_dir = data_dir.join("sessions");
+            let mut date_dirs = codex_date_dirs(&sessions_dir, *t0);
+            for d in all_date_dirs(&sessions_dir) {
+                if !date_dirs.contains(&d) {
+                    date_dirs.push(d);
+                }
+            }
+            for date_dir in date_dirs {
+                let Ok(entries) = std::fs::read_dir(&date_dir) else {
+                    continue;
+                };
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let dir_path = entry.path();
+                    if !dir_path.is_dir() {
+                        continue;
+                    }
+                    let path = dir_path.join("session.jsonl");
+                    if !path.is_file() || !mtime_in_window(&path, *t0) {
+                        continue;
+                    }
+                    let Some((meta_id, meta_cwd)) = read_muse_session_meta(&path, 256 * 1024) else {
+                        continue;
+                    };
+                    let Some(meta_cwd) = meta_cwd else {
+                        continue;
+                    };
+                    if !cwd_matches(&meta_cwd, cwd, &want_cwd) {
+                        continue;
+                    }
+                    let id = meta_id
+                        .unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned());
+                    if is_muse_reminder_child(&path)
+                        || foreign(&id)
+                        || !try_claim(claims, Provider::Muse, &id)
+                    {
+                        continue;
                     }
                     return Some(Adopted {
                         session_id: id,
@@ -694,6 +819,40 @@ pub fn codex_rollout_by_thread(sessions_dir: &Path, thread_id: &str) -> Option<P
     walk(sessions_dir, &format!("-{thread_id}.jsonl"), 0)
 }
 
+/// The `session.jsonl` file for a Muse session id under
+/// `<data_dir>/sessions/YYYY/MM/DD/<session-id>/session.jsonl`.
+pub fn muse_session_log_by_id(data_dir: &Path, session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() {
+        return None;
+    }
+    for date_dir in all_date_dirs(&data_dir.join("sessions")) {
+        let candidate = date_dir.join(session_id).join("session.jsonl");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+pub fn is_muse_reminder_child(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let reader = std::io::BufReader::new(file.take(64 * 1024));
+    for line in reader.lines().take(20) {
+        let Ok(line) = line else { break };
+        if line.contains("\"memory_reminder_child_session_linked\"")
+            && !line.contains("\"runtime.session.metadata\"")
+        {
+            continue;
+        }
+        if line.contains("\"reminder_child\"") && line.contains("\"owner_type\"") {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod thread_lookup_tests {
     use super::*;
@@ -716,5 +875,36 @@ mod thread_lookup_tests {
         );
         assert_eq!(codex_rollout_by_thread(dir.path(), "nope"), None);
         assert_eq!(codex_rollout_by_thread(dir.path(), ""), None);
+    }
+
+    #[test]
+    fn finds_and_watches_muse_session_by_id_and_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let sess_dir = dir
+            .path()
+            .join("sessions/2026/11/14/01a1-muse-1");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        let log = sess_dir.join("session.jsonl");
+        let meta = serde_json::json!({
+            "stream": {"kind": "session", "id": "01a1-muse-1"},
+            "recorded_at": 1794654214961524i64,
+            "payload_type": "runtime.session.metadata",
+            "payload": {"kind": "metadata", "record": {"workspace_root": ws}}
+        });
+        std::fs::write(&log, format!("{meta}\n")).unwrap();
+        assert_eq!(muse_session_log_by_id(dir.path(), "01a1-muse-1"), Some(log.clone()));
+
+        let claims = ClaimRegistry::default();
+        let mut spec = CorrelationSpec::WatchMuse {
+            data_dir: dir.path().to_path_buf(),
+            cwd: ws,
+            t0: SystemTime::UNIX_EPOCH,
+        };
+        let adopted = poll(&mut spec, Instant::now(), &claims).unwrap();
+        assert_eq!(adopted.session_id, "01a1-muse-1");
+        assert_eq!(adopted.path, log);
+        assert_eq!(adopted.correlation, "watched");
     }
 }

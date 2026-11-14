@@ -65,6 +65,9 @@ pub fn extra_args(
             v.push("--format".into());
             v.push("json".into());
         }
+        Harness::Muse => {
+            v.push("--json".into());
+        }
         // TODO(workflows): not a workflow harness yet (its step skills
         // cannot be installed, so a run stops before reaching here)
         Harness::Grok | Harness::Pi => {}
@@ -88,6 +91,11 @@ pub fn effort_args(harness: Harness, effort: &str) -> Option<Vec<String>> {
         Harness::Antigravity => ["low", "medium", "high", "max"]
             .contains(&effort)
             .then(|| vec!["--effort".into(), effort.to_string()]),
+        Harness::Muse => [
+            "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+        ]
+        .contains(&effort)
+        .then(|| vec!["--reasoning-effort".into(), effort.to_string()]),
         Harness::Claude | Harness::OpenCode | Harness::Grok | Harness::Pi => None,
     }
 }
@@ -99,7 +107,7 @@ pub fn insert_before_prompt(args: &mut Vec<String>, harness: Harness, extra: Vec
     let tail = match harness {
         // `--single <prompt>` on Grok, `--print <prompt>` on Pi
         Harness::Claude | Harness::Antigravity | Harness::Grok | Harness::Pi => 2,
-        Harness::Codex | Harness::OpenCode => 1,
+        Harness::Codex | Harness::OpenCode | Harness::Muse => 1,
     };
     let at = args.len().saturating_sub(tail);
     for (i, a) in extra.into_iter().enumerate() {
@@ -221,15 +229,61 @@ fn opencode_text(cleaned: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
+/// Reads a `muse exec --json` JSONL stream: sums `input_tokens + output_tokens`
+/// from the last `run.usage` snapshot and extracts `payload.text` when the
+/// terminal event is `run.terminal.completed`.
+fn muse_envelope(cleaned: &str) -> Envelope {
+    let mut text: Option<String> = None;
+    let mut tokens: Option<u64> = None;
+    for v in cleaned
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+    {
+        match v.get("payload_type").and_then(|t| t.as_str()) {
+            Some("run.usage") => {
+                if let Some(models) = v.pointer("/payload/models").and_then(|m| m.as_array()) {
+                    let sum: u64 = models
+                        .iter()
+                        .map(|m| {
+                            m.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
+                                + m.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
+                        })
+                        .sum();
+                    if sum > 0 {
+                        tokens = Some(sum);
+                    }
+                }
+            }
+            Some("run.terminal.completed") => {
+                text = v
+                    .pointer("/payload/text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            }
+            Some("run.terminal.failed") => {
+                text = None;
+            }
+            _ => {}
+        }
+    }
+    Envelope {
+        text,
+        tokens,
+        cost_usd: None,
+    }
+}
+
 /// Reads the envelope of a finished session: the JSON on stdout (Claude
-/// Code, Antigravity), the event stream on stdout (OpenCode) or the
-/// last-message file (Codex).
+/// Code, Antigravity, Muse), the event stream on stdout (OpenCode) or
+/// the last-message file (Codex).
 pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
     match harness {
         Harness::OpenCode => Envelope {
             text: opencode_text(&clean_terminal(stdout)),
             ..Default::default()
         },
+        Harness::Muse => muse_envelope(&clean_terminal(stdout)),
         Harness::Codex => Envelope {
             text: std::fs::read_to_string(out_file)
                 .ok()
@@ -505,5 +559,42 @@ mod tests {
             Some("codex answer")
         );
         assert_eq!(clean_terminal(b"a\x1b]0;title\x07b\x1b[1;31mc"), "abc");
+    }
+
+    #[test]
+    fn muse_exec_args_effort_and_envelope_work() {
+        let mut muse = vec!["exec".into(), "--yolo".into(), "hi".into()];
+        insert_before_prompt(
+            &mut muse,
+            Harness::Muse,
+            extra_args(Harness::Muse, None, 60, Path::new("/tmp/out")),
+        );
+        assert_eq!(muse, vec!["exec", "--yolo", "--json", "hi"]);
+        assert_eq!(
+            effort_args(Harness::Muse, "xhigh"),
+            Some(vec!["--reasoning-effort".into(), "xhigh".into()])
+        );
+        assert_eq!(effort_args(Harness::Muse, "invalid"), None);
+
+        let stream = concat!(
+            r#"{"payload_type":"run.usage","payload":{"models":[{"model":"muse-spark-1.3","input_tokens":120,"output_tokens":30},{"model":"sub","input_tokens":5,"output_tokens":2}]}}"#,
+            "\n",
+            r#"{"payload_type":"run.terminal.completed","payload":{"terminal":"completed","text":"done"}}"#,
+            "\n"
+        );
+        let ok = envelope(Harness::Muse, stream.as_bytes(), Path::new("/x"));
+        assert_eq!(ok.text.as_deref(), Some("done"));
+        assert_eq!(ok.tokens, Some(157));
+        assert_eq!(ok.cost_usd, None);
+
+        let failed = concat!(
+            r#"{"payload_type":"run.usage","payload":{"models":[{"input_tokens":10,"output_tokens":0}]}}"#,
+            "\n",
+            r#"{"payload_type":"run.terminal.failed","payload":{"terminal":"failed","message":"boom"}}"#,
+            "\n"
+        );
+        let err = envelope(Harness::Muse, failed.as_bytes(), Path::new("/x"));
+        assert_eq!(err.text, None);
+        assert_eq!(err.tokens, Some(10));
     }
 }

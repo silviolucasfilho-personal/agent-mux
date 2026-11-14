@@ -636,8 +636,8 @@ fn persona_fields(
                 }
                 out.push(Line::from(spans));
             }
-            AgentField::EffortCodex | AgentField::EffortAgy => {
-                let k = usize::from(af == AgentField::EffortAgy);
+            _ if crate::app::flow_builder::AgentForm::effort_index(af).is_some() => {
+                let k = crate::app::flow_builder::AgentForm::effort_index(af).unwrap();
                 let e = EFFORTS[form.efforts[k]];
                 out.push(row(
                     field.label(),
@@ -654,6 +654,7 @@ fn persona_fields(
                     AgentField::ModelClaude => &form.models[0],
                     AgentField::ModelCodex => &form.models[1],
                     AgentField::ModelOpenCode => &form.models[3],
+                    AgentField::ModelMuse => &form.models[4],
                     _ => &form.models[2],
                 };
                 let v = if typing {

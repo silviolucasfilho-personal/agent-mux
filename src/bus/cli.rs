@@ -677,7 +677,7 @@ A swarm is a conversation with a coordinator: it plans with you in its chat,
 starts the workers once you say go, and agent-mux supervises them.
 
 commands:
-  start [<goal...>] [--coordinator claude|codex|agy|opencode] [--gate chat|off] [--worker-harness H[,H...]] [--workers N] [--isolation shared|worktree] [--check CMD] [--workspace DIR]
+  start [<goal...>] [--coordinator claude|codex|agy|opencode|muse] [--gate chat|off] [--worker-harness H[,H...]] [--workers N] [--isolation shared|worktree] [--check CMD] [--workspace DIR]
                                 open a coordinator session in the running TUI and say the goal in its chat;
                                 with a goal (or --headless \"<goal>\") the coordinator plans it without asking
                                 --coordinator: its harness (default claude when installed); --gate chat (default: you confirm in the chat) or off;

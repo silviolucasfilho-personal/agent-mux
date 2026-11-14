@@ -227,7 +227,7 @@ pub struct AgentSpec {
     pub hash: String,
 }
 
-pub const HARNESSES: &[&str] = &["claude", "codex", "agy", "opencode"];
+pub const HARNESSES: &[&str] = &["claude", "codex", "agy", "opencode", "muse"];
 
 pub fn is_valid_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -289,10 +289,10 @@ impl AgentSpec {
                     problems.push("[schedule] workspace is empty: the folder it runs in".into());
                 }
                 if let Some(h) = &s.harness
-                    && !matches!(h.as_str(), "claude" | "codex" | "opencode")
+                    && !matches!(h.as_str(), "claude" | "codex" | "opencode" | "muse")
                 {
                     problems.push(format!(
-                        "[schedule] harness {h:?}: a scheduled agent runs on claude, codex or opencode"
+                        "[schedule] harness {h:?}: a scheduled agent runs on claude, codex, opencode or muse"
                     ));
                 }
                 interval.map(|interval_s| ScheduleSpec {
@@ -321,7 +321,7 @@ impl AgentSpec {
         for h in raw.backends.keys() {
             if !HARNESSES.contains(&h.as_str()) {
                 problems.push(format!(
-                    "[backends.{h}]: unknown harness; use claude, codex or agy"
+                    "[backends.{h}]: unknown harness; use claude, codex, agy, opencode or muse"
                 ));
             }
         }

@@ -23,6 +23,7 @@ pub enum Provider {
     /// database (`tracing::opencode_db`), one line here being one
     /// `session_message` row as `{"id", "type", "data"}`.
     OpenCode,
+    Muse,
 }
 
 impl Provider {
@@ -32,6 +33,7 @@ impl Provider {
             Provider::Codex => "codex",
             Provider::Antigravity => "antigravity",
             Provider::OpenCode => "opencode",
+            Provider::Muse => "muse",
         }
     }
 }
@@ -363,6 +365,11 @@ pub fn opencode_row_events(id: &str, kind: &str, data: &Value) -> Vec<Transcript
 pub fn detect_provider(first_line: &str) -> Provider {
     if first_line.contains("\"step_index\"") || first_line.contains("USER_EXPLICIT") {
         Provider::Antigravity
+    } else if first_line.contains("\"retained_frame\"")
+        || first_line.contains("\"outer_log_ordinal\"")
+        || (first_line.contains("\"payload_type\"") && first_line.contains("\"recorded_at\""))
+    {
+        Provider::Muse
     } else if first_line.contains("\"session_meta\"") {
         Provider::Codex
     } else {
@@ -376,6 +383,7 @@ pub fn parse_line(provider: Provider, line: &str) -> Vec<TranscriptEvent> {
         Provider::Codex => parse_codex_line(line),
         Provider::Antigravity => parse_antigravity_line(line),
         Provider::OpenCode => parse_opencode_line(line),
+        Provider::Muse => parse_muse_line(line),
     };
     let Some(v) = parse_json_line(line) else {
         return events;
@@ -1400,6 +1408,265 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
     events
 }
 
+/// Microseconds since the epoch (Muse's `recorded_at` field) as an
+/// RFC 3339 string.
+pub fn muse_ts(us: Option<i64>) -> Option<String> {
+    let us = us?;
+    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(us) * 1_000)
+        .ok()?
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
+}
+
+/// Parses one JSONL line from a Muse Code `session.jsonl` log.
+pub fn parse_muse_line(line: &str) -> Vec<TranscriptEvent> {
+    let mut events = Vec::new();
+    let Some(v) = parse_json_line(line) else {
+        return events;
+    };
+    if v.get("retained_frame").is_some() {
+        return events;
+    }
+    let Some(payload_type) = v.get("payload_type").and_then(Value::as_str) else {
+        return events;
+    };
+    let ts = muse_ts(v.get("recorded_at").and_then(Value::as_i64));
+    let session_id = v
+        .pointer("/stream/id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let Some(payload) = v.get("payload") else {
+        return events;
+    };
+    match payload_type {
+        "runtime.session.metadata" => {
+            if let Some(record) = payload.get("record") {
+                let cwd = record
+                    .get("workspace_root")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let mut extra = serde_json::Map::new();
+                if let Some(ver) = record.pointer("/build/semver").and_then(Value::as_str)
+                    && !ver.is_empty()
+                {
+                    extra.insert("cli_version".into(), Value::String(ver.to_owned()));
+                }
+                if let Some(prov) = record.get("provider_id").and_then(Value::as_str)
+                    && !prov.is_empty()
+                {
+                    extra.insert("provider".into(), Value::String(prov.to_owned()));
+                }
+                if let Some(model) = record.get("model_id").and_then(Value::as_str)
+                    && !model.is_empty()
+                {
+                    extra.insert("model".into(), Value::String(model.to_owned()));
+                }
+                events.push(TranscriptEvent::SessionMeta {
+                    session_id,
+                    cwd,
+                    extra: Value::Object(extra),
+                    ts,
+                });
+            }
+        }
+        "session.started" => {
+            events.push(TranscriptEvent::SessionMeta {
+                session_id,
+                cwd: None,
+                extra: Value::Object(serde_json::Map::new()),
+                ts,
+            });
+        }
+        "run.model.configured" => {
+            if let Some(model) = payload.pointer("/record/model_id").and_then(Value::as_str)
+                && !model.is_empty()
+            {
+                events.push(TranscriptEvent::SessionMeta {
+                    session_id,
+                    cwd: None,
+                    extra: serde_json::json!({"model": model}),
+                    ts,
+                });
+            }
+        }
+        "session.workspace_branch.observed" => {
+            if let Some(branch) = payload
+                .pointer("/record/branch")
+                .or_else(|| payload.get("branch"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                events.push(TranscriptEvent::SessionMeta {
+                    session_id,
+                    cwd: None,
+                    extra: serde_json::json!({"git_branch": branch}),
+                    ts,
+                });
+            }
+        }
+        "session.name.changed" => {
+            if let Some(title) = payload.get("new_name").and_then(Value::as_str)
+                && !title.is_empty()
+            {
+                events.push(TranscriptEvent::Record {
+                    kind: "ai-title".into(),
+                    payload: serde_json::json!({"title": title}),
+                    ts,
+                });
+            }
+        }
+        "runtime.session" if payload.get("kind").and_then(Value::as_str) == Some("run") => {
+            let Some(ev) = payload.get("event") else {
+                return events;
+            };
+            match ev.get("kind").and_then(Value::as_str) {
+                Some("started") => {
+                    let text = ev
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    events.push(TranscriptEvent::User {
+                        text,
+                        meta: false,
+                        ts,
+                    });
+                }
+                Some("reasoning_summary_committed" | "reasoning_committed") => {
+                    if let Some(text) = ev.get("text").and_then(Value::as_str)
+                        && !text.trim().is_empty()
+                    {
+                        events.push(TranscriptEvent::Thinking {
+                            text: text.to_string(),
+                            ts,
+                        });
+                    }
+                }
+                Some("assistant_message_committed") => {
+                    let text = ev
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let msg_id = ev
+                        .get("response_id")
+                        .or_else(|| ev.get("message_id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    events.push(TranscriptEvent::Assistant {
+                        text,
+                        model: None,
+                        thinking: None,
+                        usage: Vec::new(),
+                        msg_id,
+                        skill: None,
+                        step_index: None,
+                        ts,
+                    });
+                }
+                Some("assistant_tool_calls_committed") => {
+                    for tc in ev
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        let args = match tc.get("args") {
+                            Some(Value::String(s)) => serde_json::from_str(s)
+                                .unwrap_or_else(|_| Value::String(s.clone())),
+                            Some(other) => other.clone(),
+                            None => Value::Object(serde_json::Map::new()),
+                        };
+                        let id = tc
+                            .get("call_id")
+                            .or_else(|| tc.get("id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let name = tc
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("tool")
+                            .to_string();
+                        let skill = (name == "read_skill")
+                            .then(|| args.get("name").and_then(Value::as_str).map(str::to_owned))
+                            .flatten();
+                        events.push(TranscriptEvent::ToolUse {
+                            id,
+                            name,
+                            args,
+                            skill,
+                            ts: ts.clone(),
+                        });
+                    }
+                }
+                Some("tool_result_batch_committed") => {
+                    for r in ev
+                        .get("results")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        let id = r
+                            .get("tool_call_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let text = r.get("text").and_then(Value::as_str).unwrap_or_default();
+                        let is_error = serde_json::from_str::<Value>(text).ok().is_some_and(|v| {
+                            v.get("exit_code")
+                                .and_then(Value::as_i64)
+                                .is_some_and(|c| c != 0)
+                                || v.get("terminal_status").and_then(Value::as_str)
+                                    == Some("failed")
+                        });
+                        events.push(TranscriptEvent::ToolResult {
+                            id,
+                            content: Value::String(text.to_string()),
+                            is_error,
+                            structured: None,
+                            ts: ts.clone(),
+                        });
+                    }
+                }
+                Some("model_completed") => {
+                    let usage = integer_usage(ev.get("usage"));
+                    let model = ev
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                    events.push(TranscriptEvent::TokenCount {
+                        usage,
+                        msg_id: None,
+                        model,
+                        ts,
+                    });
+                }
+                Some("terminal") => {
+                    if let Some(duration_ms) = ev.get("turn_duration_ms").and_then(Value::as_i64) {
+                        events.push(TranscriptEvent::TurnDuration {
+                            duration_ms,
+                            message_count: None,
+                            ts: ts.clone(),
+                        });
+                    }
+                    let kind = if ev.get("terminal").and_then(Value::as_str) == Some("completed") {
+                        TurnBoundaryKind::Complete
+                    } else {
+                        TurnBoundaryKind::Aborted
+                    };
+                    events.push(TranscriptEvent::TurnBoundary { kind, ts });
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    events
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2101,5 +2368,71 @@ mod opencode_tests {
         let line = format!(r#"{{"id":"msg_u1","type":"user","data":{USER}}}"#);
         assert_eq!(parse_line(Provider::OpenCode, &line).len(), 1);
         assert!(parse_opencode_line("not json").is_empty());
+    }
+
+    #[test]
+    fn detects_and_parses_muse_events() {
+        let frame = r#"{"retained_frame":"session_permission_transaction","frame_schema_version":1,"outer_log_ordinal":1,"children":[]}"#;
+        assert_eq!(detect_provider(frame), Provider::Muse);
+        assert!(parse_line(Provider::Muse, frame).is_empty());
+
+        let meta = r#"{"stream":{"kind":"session","id":"sess-1"},"recorded_at":1794654214961524,"payload_type":"runtime.session.metadata","payload":{"kind":"metadata","record":{"workspace_root":"/tmp/proj","provider_id":"meta","model_id":"muse-spark-1.3","build":{"semver":"1.4.20"}}}}"#;
+        assert_eq!(detect_provider(meta), Provider::Muse);
+        let evs = parse_line(Provider::Muse, meta);
+        assert!(matches!(
+            &evs[0],
+            TranscriptEvent::SessionMeta { session_id: Some(id), cwd: Some(cwd), extra, ts: Some(_) }
+                if id == "sess-1" && cwd == "/tmp/proj" && extra["cli_version"] == "1.4.20"
+        ));
+
+        let title = r#"{"stream":{"id":"sess-1"},"recorded_at":1794654215000000,"payload_type":"session.name.changed","payload":{"new_name":"pebbled-crux"}}"#;
+        assert!(matches!(
+            &parse_line(Provider::Muse, title)[0],
+            TranscriptEvent::Record { kind, payload, .. }
+                if kind == "ai-title" && payload["title"] == "pebbled-crux"
+        ));
+
+        let started = r#"{"stream":{"id":"sess-1"},"recorded_at":1794654216000000,"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":"fix it"}}}"#;
+        assert!(matches!(
+            &parse_line(Provider::Muse, started)[0],
+            TranscriptEvent::User { text, meta: false, .. } if text == "fix it"
+        ));
+
+        let tools = r#"{"stream":{"id":"sess-1"},"recorded_at":1794654217000000,"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"id":"fc_1","call_id":"call_1","name":"read_skill","args":"{\"name\":\"plan\"}"}]}}}"#;
+        assert!(matches!(
+            &parse_line(Provider::Muse, tools)[0],
+            TranscriptEvent::ToolUse { id, name, skill: Some(skill), .. }
+                if id == "call_1" && name == "read_skill" && skill == "plan"
+        ));
+
+        let batch = r#"{"stream":{"id":"sess-1"},"recorded_at":1794654218000000,"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"tool_call_id":"call_1","text":"{\"exit_code\":1,\"terminal_status\":\"failed\"}"}]}}}"#;
+        assert!(matches!(
+            &parse_line(Provider::Muse, batch)[0],
+            TranscriptEvent::ToolResult { id, is_error: true, .. } if id == "call_1"
+        ));
+
+        let completed = r#"{"stream":{"id":"sess-1"},"recorded_at":1794654219000000,"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"model_completed","model":"muse-spark-1.3-contributor","usage":{"input_tokens":50,"output_tokens":10,"cache_read_tokens":40,"reasoning_tokens":3}}}}"#;
+        assert!(matches!(
+            &parse_line(Provider::Muse, completed)[0],
+            TranscriptEvent::TokenCount { model: Some(m), usage, .. }
+                if m == "muse-spark-1.3-contributor" && usage.iter().any(|(k, v)| k == "cache_read_tokens" && *v == 40)
+        ));
+
+        let terminal = r#"{"stream":{"id":"sess-1"},"recorded_at":1794654220000000,"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"terminal","terminal":"completed","turn_duration_ms":1234}}}"#;
+        let tevs = parse_line(Provider::Muse, terminal);
+        assert!(matches!(
+            &tevs[0],
+            TranscriptEvent::TurnDuration {
+                duration_ms: 1234,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &tevs[1],
+            TranscriptEvent::TurnBoundary {
+                kind: TurnBoundaryKind::Complete,
+                ..
+            }
+        ));
     }
 }

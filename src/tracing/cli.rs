@@ -28,7 +28,7 @@ commands:
                                log and timeline (the id, or the workspace's live swarm)
   search <fts5 query> [--limit N] [--json]
                                full-text search over content (full mode data)
-  import <path>... | --discover [--provider claude|codex|antigravity|opencode] [--content-mode full|metadata]
+  import <path>... | --discover [--provider claude|codex|antigravity|opencode|muse] [--content-mode full|metadata]
                                backfill transcripts and OpenCode's session db (idempotent)
   export [--session ID] [--since 30d] [--out FILE]
                                JSON Lines dump of every table
@@ -49,7 +49,7 @@ commands:
                                with no value: the scores on it
   experiments [name]           the experiment registry, or one experiment's variants
   (see also: agent-mux run --experiment <name> --variant <label> --prompt <text> …)
-  hook <claude|codex|codex-notify|agy|opencode> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
+  hook <claude|codex|codex-notify|agy|opencode|muse> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
                                hook entry point invoked by the CLIs (reads the payload from stdin or the last argument)
   hooks install|uninstall|status [codex|agy]
                                the opt-in hook installers (Claude and Codex notify need none: they register per launch)";
@@ -431,7 +431,7 @@ fn provider_key(h: crate::harness::Harness) -> &'static str {
     h.store_provider()
 }
 
-/// `--harness claude|codex|agy|opencode` narrows the inventory.
+/// `--harness claude|codex|agy|opencode|muse` narrows the inventory.
 fn harness_filter(args: &Args) -> anyhow::Result<Option<crate::harness::Harness>> {
     match args.value("harness") {
         None => Ok(None),
@@ -439,7 +439,7 @@ fn harness_filter(args: &Args) -> anyhow::Result<Option<crate::harness::Harness>
             .or_else(|| (h == "antigravity").then_some(crate::harness::Harness::Antigravity))
             .map(Some)
             .ok_or_else(|| {
-                anyhow::anyhow!("unknown harness {h:?}: claude, codex, agy or opencode")
+                anyhow::anyhow!("unknown harness {h:?}: claude, codex, agy, opencode or muse")
             }),
     }
 }
@@ -1459,11 +1459,25 @@ fn doctor() -> anyhow::Result<()> {
         opencode_db.as_deref().is_some_and(Path::is_file),
         &detail,
     );
+    check(
+        "muse on PATH",
+        on_path("muse").is_some(),
+        &on_path("muse")
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not found".into()),
+    );
+    let muse_sessions = resolved
+        .muse_dir
+        .clone()
+        .unwrap_or_else(|| super::correlate::muse_data_dir(&resolved.home))
+        .join("sessions");
+    let (ok, detail) = dir_status(Some(&muse_sessions));
+    check("muse sessions dir", ok, &detail);
 
     println!("\nhooks (mode: {}):", resolved.hooks.as_str());
     if resolved.hooks.registers() {
         println!(
-            "  claude: registered per launch through --settings; codex notify: per launch through -c;"
+            "  claude: registered per launch through --settings; codex notify: per launch through -c; muse: per launch through -c hooks;"
         );
         println!(
             "  opencode: agent-mux's plugin ({}) named per launch in OPENCODE_CONFIG_CONTENT",
@@ -2150,7 +2164,34 @@ pub fn discover_transcripts(resolved: &ResolvedTracing) -> Vec<(PathBuf, Provide
     {
         walk_rollouts(&dir, &mut out, 0);
     }
+    let muse_sessions = resolved
+        .muse_dir
+        .clone()
+        .unwrap_or_else(|| super::correlate::muse_data_dir(&resolved.home))
+        .join("sessions");
+    if muse_sessions.is_dir() {
+        walk_muse_sessions(&muse_sessions, &mut out, 0);
+    }
     out
+}
+
+fn walk_muse_sessions(dir: &Path, out: &mut Vec<(PathBuf, Provider)>, depth: usize) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_muse_sessions(&path, out, depth + 1);
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("session.jsonl")
+            && !super::correlate::is_muse_reminder_child(&path)
+        {
+            out.push((path, Provider::Muse));
+        }
+    }
 }
 
 fn walk_rollouts(dir: &Path, out: &mut Vec<(PathBuf, Provider)>, depth: usize) {
@@ -2212,6 +2253,12 @@ fn import_line_ns(line: &str) -> Option<i128> {
         .or_else(|| value.get("created_at"))
         .and_then(serde_json::Value::as_str)
         .and_then(transcript::parse_rfc3339_nanos)
+        .or_else(|| {
+            value
+                .get("recorded_at")
+                .and_then(serde_json::Value::as_i64)
+                .map(|us| i128::from(us) * 1_000)
+        })
 }
 
 fn clamp_import_ns(ns: i128) -> i64 {
@@ -2356,6 +2403,7 @@ fn import_rows(
             Provider::Codex => "Codex".into(),
             Provider::Antigravity => "Antigravity".into(),
             Provider::OpenCode => "OpenCode".into(),
+            Provider::Muse => "Muse Code".into(),
         },
         cwd: cwd.clone(),
         project_slug: crate::history::project_slug(Path::new(&cwd)),
@@ -2500,6 +2548,33 @@ fn identify_transcript(text: &str, path: &Path, provider: Provider) -> (String, 
         }
         // an export of `session_message` rows as lines: named by its file
         Provider::OpenCode => (stem(path), None),
+        Provider::Muse => {
+            let mut id = None;
+            let mut cwd = None;
+            for line in text.lines().take(25) {
+                for event in transcript::parse_muse_line(line) {
+                    if let transcript::TranscriptEvent::SessionMeta {
+                        session_id, cwd: c, ..
+                    } = event
+                    {
+                        id = id.or(session_id);
+                        cwd = cwd.or(c);
+                    }
+                }
+                if id.is_some() && cwd.is_some() {
+                    break;
+                }
+            }
+            let id = id.unwrap_or_else(|| {
+                path.parent()
+                    .and_then(|d| d.file_name())
+                    .and_then(|n| n.to_str())
+                    .filter(|n| uuid::Uuid::parse_str(n).is_ok())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| stem(path))
+            });
+            (id, cwd)
+        }
     }
 }
 
@@ -2516,6 +2591,7 @@ fn import(args: &Args) -> anyhow::Result<()> {
         Some("codex") => Some(Provider::Codex),
         Some("antigravity") | Some("agy") => Some(Provider::Antigravity),
         Some("opencode") => Some(Provider::OpenCode),
+        Some("muse") | Some("muse-code") => Some(Provider::Muse),
         Some(other) => anyhow::bail!("unknown provider {other:?}"),
         None => None,
     };
@@ -3423,5 +3499,77 @@ mod tests {
             truncate_path_display("/home/silvio/workspace/agent-mux", 20),
             "…workspace/agent-mux"
         );
+    }
+
+    #[test]
+    fn discovery_and_import_handle_muse_sessions_and_skip_reminder_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let muse_dir = temp.path().join("muse");
+        let real_id = "019a1da6-1000-7000-8000-000000000001";
+        let child_id = "019a1da6-1000-7000-8000-000000000002";
+        let real_dir = muse_dir.join("sessions/2026-11-14").join(real_id);
+        let child_dir = muse_dir.join("sessions/2026-11-14").join(child_id);
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        let real_log = real_dir.join("session.jsonl");
+        let meta = format!(
+            "{{\"stream\":{{\"kind\":\"session\",\"id\":\"{real_id}\"}},\"recorded_at\":1780531400000000,\"payload_type\":\"runtime.session.metadata\",\"payload\":{{\"kind\":\"metadata\",\"record\":{{\"workspace_root\":\"/tmp/ws\",\"provider_id\":\"meta\",\"model_id\":\"muse-spark-1.3\"}}}}}}\n\
+             {{\"stream\":{{\"id\":\"{real_id}\"}},\"recorded_at\":1780531401000000,\"payload_type\":\"runtime.session\",\"payload\":{{\"kind\":\"run\",\"event\":{{\"kind\":\"started\",\"prompt\":\"hi\"}}}}}}\n\
+             {{\"stream\":{{\"id\":\"{real_id}\"}},\"recorded_at\":1780531402000000,\"payload_type\":\"runtime.session\",\"payload\":{{\"kind\":\"run\",\"event\":{{\"kind\":\"assistant_message_committed\",\"text\":\"hello\"}}}}}}\n"
+        );
+        std::fs::write(&real_log, meta).unwrap();
+        std::fs::write(
+            child_dir.join("session.jsonl"),
+            "{\"owner_type\":\"reminder_child\",\"payload_type\":\"runtime.session.metadata\"}\n",
+        )
+        .unwrap();
+
+        let resolved = crate::config::ResolvedTracing {
+            db_path: temp.path().join("traces.db"),
+            content_mode: ContentMode::Full,
+            user_id: None,
+            release: None,
+            tags: Vec::new(),
+            environment: None,
+            content_max_bytes: 8192,
+            redact_literals: Vec::new(),
+            backfill_max_bytes: 0,
+            poll_interval_ms: 200,
+            flush_interval_ms: 500,
+            shutdown_flush_ms: 2000,
+            retention_days: 90,
+            claude_dir: Some(temp.path().join("no-claude")),
+            codex_dir: Some(temp.path().join("no-codex")),
+            antigravity_dir: Some(temp.path().join("no-agy")),
+            muse_dir: Some(muse_dir),
+            opencode_db: Some(temp.path().join("no-opencode.db")),
+            models: Vec::new(),
+            hooks: crate::config::HookMode::Auto,
+            loops: Default::default(),
+            home: temp.path().to_path_buf(),
+            backend: crate::config::Backend::Local,
+            langfuse: None,
+            legacy_langfuse_keys: false,
+        };
+        let found = discover_transcripts(&resolved);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].1, Provider::Muse);
+
+        let mut store = open_rw(&resolved).unwrap();
+        let summary = import_transcript(&mut store, &resolved, &found[0].0, None, ContentMode::Full)
+            .unwrap();
+        assert_eq!(summary.session_id, real_id);
+        assert!(!summary.empty);
+        let key = format!("muse:{real_id}");
+        let ts: i64 = store
+            .conn()
+            .query_row(
+                "SELECT first_seen_ns FROM sessions WHERE key = ?1",
+                [&key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ts, 1_780_531_400_000_000_i64 * 1_000);
     }
 }

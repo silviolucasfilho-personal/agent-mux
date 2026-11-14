@@ -302,16 +302,16 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         ("install", _) | ("uninstall", _) => anyhow::bail!(
-            "only agy and grok need an installed entry; Claude Code, Codex, OpenCode and Pi are registered per launch\n\n{}",
+            "only agy and grok need an installed entry; Claude Code, Codex, OpenCode, Pi and Muse are registered per launch\n\n{}",
             super::USAGE
         ),
         ("status", provider) => {
-            let all = ["claude", "codex", "agy", "opencode", "grok", "pi"];
+            let all = ["claude", "codex", "agy", "opencode", "grok", "pi", "muse"];
             let providers: Vec<&str> = match provider {
                 Some(p) if all.contains(&p) => vec![p],
                 Some(p) => {
                     anyhow::bail!(
-                        "unknown provider {p:?}: claude, codex, agy, opencode, grok or pi"
+                        "unknown provider {p:?}: claude, codex, agy, opencode, grok, pi or muse"
                     )
                 }
                 None => all.to_vec(),
@@ -332,6 +332,9 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
                         "pi: {per_launch} through agent-mux's extension (-e {}, {})",
                         crate::pi::extension_path(&home).display(),
                         crate::pi::MCP_ENV
+                    ),
+                    "muse" => println!(
+                        "muse: {per_launch} through -c mcpServers.agent-mux=... --trust-workspace"
                     ),
                     "grok" => {
                         let st = grok_status(&home, exe.as_deref());
