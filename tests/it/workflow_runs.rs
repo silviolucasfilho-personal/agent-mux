@@ -1872,3 +1872,54 @@ sleep 30
     assert!(kept);
     assert!(render(&f.app, 120, 30).contains("working on it"));
 }
+
+// ---- a persona's session ------------------------------------------------------
+
+/// A session started as a persona records it on its launch row, which is
+/// how the runs view finds a persona's past runs.
+#[tokio::test]
+async fn a_session_started_as_a_persona_records_it_on_its_launch() {
+    use agent_mux::app::Mode;
+    use crossterm::event::KeyCode;
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fake_harness(&bin, Harness::Claude, &[], None, None);
+    let mut f = fixture(&bin, temp);
+    f.app.open_agent_session("skeptic");
+    let ws = f.ws.clone();
+    match &mut f.app.mode {
+        Mode::NewSession(d) => {
+            assert_eq!(d.agent.as_deref(), Some("skeptic"));
+            d.dir = ws.display().to_string();
+            d.dir_edited = true;
+        }
+        other => panic!("not the New session dialog: {other:?}"),
+    }
+    press(&mut f.app, KeyCode::Enter);
+    assert_eq!(f.app.sessions.len(), 1, "{:?}", f.app.mode);
+    assert_eq!(f.app.sessions[0].agent.as_deref(), Some("skeptic"));
+    let db = f.db.clone();
+    let recorded = pump_until(&mut f, Duration::from_secs(20), |_| {
+        agent_mux::tracing::store::open_ro(&db)
+            .ok()
+            .and_then(|c| agent_mux::tracing::store::query::agent_launches(&c, 10).ok())
+            .is_some_and(|l| l.iter().any(|l| l.agent.as_deref() == Some("skeptic")))
+    })
+    .await;
+    assert!(recorded, "the launch row names the persona");
+    // i on the session's row opens its run screen, from the Agents list.
+    // The launch left the keyboard in the session's terminal, where i is
+    // the session's: the list takes it back first.
+    f.app
+        .execute_command(agent_mux::keymap::ActionId::FocusAgents, Instant::now());
+    f.app
+        .select_first_row_of(agent_mux::app::SidebarSection::Active);
+    press(&mut f.app, KeyCode::Char('i'));
+    match &f.app.mode {
+        Mode::SessionRun(st) => {
+            assert_eq!(st.card.name, "skeptic");
+            assert!(st.card.launch_id.is_some(), "it is traced");
+        }
+        other => panic!("i did not open the run screen: {other:?}"),
+    }
+}

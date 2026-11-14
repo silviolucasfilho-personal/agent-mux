@@ -1181,6 +1181,77 @@ pub fn skill_launches(
     rows.collect()
 }
 
+/// One launch as the session run screen's card reads it from the store:
+/// what it ran as and when.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaunchCard {
+    pub id: String,
+    pub provider: String,
+    pub profile: String,
+    pub cwd: String,
+    pub started_ns: i64,
+    pub ended_ns: Option<i64>,
+    pub exit_code: Option<i64>,
+    /// `metadata.skill_id`: the skill it was launched around.
+    pub skill_id: Option<String>,
+    /// `metadata.agent`: the persona it was started as.
+    pub agent: Option<String>,
+    /// The model of its newest generation, when one is recorded.
+    pub model: Option<String>,
+    /// The launch has not ended and its run is still heartbeating.
+    pub live: bool,
+}
+
+const LAUNCH_CARD: &str = "SELECT l.id, l.provider, l.profile, l.cwd, l.started_ns, l.ended_ns, l.exit_code,
+        json_extract(l.metadata, '$.skill_id'), json_extract(l.metadata, '$.agent'),
+        (SELECT o.model FROM observations o JOIN traces t ON t.id = o.trace_id
+          WHERE t.launch_id = l.id AND o.type = 'generation' AND o.model IS NOT NULL
+          ORDER BY o.start_ns DESC LIMIT 1),
+        (l.ended_ns IS NULL AND EXISTS (SELECT 1 FROM runs r WHERE r.id = l.run_id AND r.ended_ns IS NULL))
+ FROM launches l";
+
+fn launch_card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LaunchCard> {
+    Ok(LaunchCard {
+        id: r.get(0)?,
+        provider: r.get(1)?,
+        profile: r.get(2)?,
+        cwd: r.get(3)?,
+        started_ns: r.get(4)?,
+        ended_ns: r.get(5)?,
+        exit_code: r.get(6)?,
+        skill_id: r.get(7)?,
+        agent: r.get(8)?,
+        model: r.get(9)?,
+        live: r.get::<_, i64>(10)? != 0,
+    })
+}
+
+/// The card of launch `launch_id`, when the store has it.
+pub fn launch_card(conn: &Connection, launch_id: &str) -> rusqlite::Result<Option<LaunchCard>> {
+    conn.query_row(
+        &format!("{LAUNCH_CARD} WHERE l.id = ?1"),
+        params![launch_id],
+        launch_card_row,
+    )
+    .optional()
+}
+
+/// The launches started as a persona (`metadata.agent`), newest first. A
+/// swarm's workers and a flow's sessions run as agents too, but belong to
+/// their swarm and their run: they are left out. Launches from before the
+/// key was recorded are not found.
+pub fn agent_launches(conn: &Connection, limit: usize) -> rusqlite::Result<Vec<LaunchCard>> {
+    let mut stmt = conn.prepare(&format!(
+        "{LAUNCH_CARD}
+         WHERE json_extract(l.metadata, '$.agent') IS NOT NULL
+           AND json_extract(l.metadata, '$.swarm_id') IS NULL
+           AND json_extract(l.metadata, '$.workflow_run_id') IS NULL
+         ORDER BY l.started_ns DESC LIMIT ?1"
+    ))?;
+    let rows = stmt.query_map(params![limit.max(1) as i64], launch_card_row)?;
+    rows.collect()
+}
+
 /// A turn that loaded a skill, with whether any observation in it was
 /// attributed to that skill.
 #[derive(Debug, Clone, PartialEq)]

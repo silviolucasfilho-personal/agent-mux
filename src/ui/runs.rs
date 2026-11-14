@@ -153,7 +153,7 @@ fn draw_detail(f: &mut Frame, area: Rect, st: &RunsViewState, app: &App) {
     let mut spans = Vec::new();
     let flow = st.selected_item().is_some_and(|i| i.run.is_flow());
     // a flow's run has no tabs here: its screen has them
-    let tabbed = !st.selected_item().is_some_and(|i| i.run.is_flow_run());
+    let tabbed = !st.selected_item().is_some_and(|i| i.run.opens_screen());
     for (i, t) in RunTab::ALL.iter().enumerate().filter(|_| tabbed) {
         let text = format!(" {} {} ", i + 1, t.label(flow));
         spans.push(if *t == st.tab {
@@ -291,6 +291,7 @@ fn footer(st: &RunsViewState) -> Line<'static> {
             ("e", "edit the agent"),
         ],
         Some(RunRef::Next(_)) => vec![("r", "run now"), ("p", "pause"), ("e", "edit the agent")],
+        Some(RunRef::PersonaLive { .. } | RunRef::Persona(_)) => vec![("↩", "open the run")],
         None => vec![],
     };
     let mut v: Vec<(&str, &str)> = vec![("↑↓", "runs"), ("1-5", "tabs")];

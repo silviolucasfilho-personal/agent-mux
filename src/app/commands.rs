@@ -158,6 +158,7 @@ impl App {
                     | Mode::SkillsView(_)
                     | Mode::RunsView(_)
                     | Mode::Run(_)
+                    | Mode::SessionRun(_)
                     | Mode::Markdown(_)
                     | Mode::Memory(_)
                     | Mode::Workspaces(_)
@@ -218,6 +219,13 @@ impl App {
                 // on the Swarm screen, the focus key takes the keyboard back
                 // from the pane to the swarm tree
                 if let Mode::Swarm(v) = &mut self.mode
+                    && v.pane_focused
+                {
+                    v.pane_focused = false;
+                    return;
+                }
+                // and on a session's run screen, from its terminal to its tree
+                if let Mode::SessionRun(v) = &mut self.mode
                     && v.pane_focused
                 {
                     v.pane_focused = false;
@@ -695,6 +703,7 @@ impl App {
             Mode::AgentEditor(_) => "Editor",
             Mode::RunsView(_) => "Runs",
             Mode::Run(_) => "Run",
+            Mode::SessionRun(_) => "Session run",
             Mode::TraceBrowser(_) => "Traces",
             Mode::SkillsView(_) => "Skills",
             Mode::ConfigView(_) => "Configuration",
@@ -773,6 +782,7 @@ impl App {
             Mode::Memory(v) => v.input.is_some(),
             Mode::Workspaces(v) => v.filtering,
             Mode::Swarm(v) => v.text_entry_active(),
+            Mode::SessionRun(v) => v.pane_focused,
             Mode::Langfuse(v) => v.text_entry_active(),
             _ => false,
         }

@@ -8,6 +8,7 @@ pub mod markdown;
 pub mod memory;
 mod run_screen;
 mod runs;
+mod session_screen;
 pub mod step_row;
 pub mod swarm_board;
 pub mod workspaces;
@@ -326,6 +327,12 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
             Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
         swarm_board::draw_tree(f, side, view);
         swarm_board::draw_pane(f, main, view, app, now);
+    } else if let Mode::SessionRun(st) = &app.mode {
+        // one session, a skill's or a persona's, in the same layout
+        let [side, main] =
+            Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
+        session_screen::draw_tree(f, side, st);
+        session_screen::draw_pane(f, main, st, app, now);
     } else if let Mode::Run(st) = &app.mode {
         // the same layout for a flow run: its tree, then the selected row
         let [side, main] =
@@ -638,8 +645,17 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
                     "◇ ".into(),
                     Style::default().fg(Color::Magenta),
                     name.clone(),
-                    String::new(),
-                    dim,
+                    // the harness it is running on, as a skill's row says
+                    app.sessions
+                        .iter()
+                        .find(|s| {
+                            s.agent.as_deref() == Some(name.as_str())
+                                && !matches!(s.status(now), Status::Exited(_))
+                        })
+                        .and_then(|s| crate::harness::Harness::detect(&s.profile.command))
+                        .map(|h| h.as_str().to_string())
+                        .unwrap_or_default(),
+                    Style::default().fg(Color::Green),
                 ),
             };
         // an owner: its arrow when it has sessions to fold, then its glyph
@@ -816,7 +832,7 @@ fn folder_name(dir: &std::path::Path) -> String {
 
 /// The model a session was launched with: `--model` / `-m` on its command
 /// line, else its profile's.
-fn session_model(s: &crate::session::Session) -> Option<String> {
+pub(crate) fn session_model(s: &crate::session::Session) -> Option<String> {
     let args = &s.profile.args;
     for (i, a) in args.iter().enumerate() {
         if let Some(m) = a.strip_prefix("--model=") {
@@ -1080,6 +1096,7 @@ pub(crate) fn draw_session_pane(f: &mut Frame, area: Rect, app: &App, idx: usize
     };
     let focused = match &app.mode {
         Mode::Swarm(v) => v.pane_focused,
+        Mode::SessionRun(v) => v.pane_focused,
         _ => app.focus == crate::app::Focus::Pane,
     };
     let (label, _) = status_label_style(session.status(now));
@@ -1108,12 +1125,30 @@ pub(crate) fn draw_session_pane(f: &mut Frame, area: Rect, app: &App, idx: usize
     } else {
         trace_tag
     };
+    // what it runs as, before the profile: a persona, a skill
+    let owner = session
+        .agent
+        .clone()
+        .or_else(|| {
+            session.skill_id.as_ref().map(|id| {
+                app.skills
+                    .iter()
+                    .find(|k| k.id == *id)
+                    .map(|k| k.name.clone())
+                    .unwrap_or_else(|| id.clone())
+            })
+        })
+        // a skill's profile is already named after it
+        .filter(|o| !session.profile.name.contains(o.as_str()))
+        .map(|o| format!("{o} · "))
+        .unwrap_or_default();
     let title = format!(
-        " {} — {} [{label}] {continued}{trace_tag}{scroll_tag}",
+        " {owner}{} — {} [{label}] {continued}{trace_tag}{scroll_tag}",
         session.profile.name,
         session.dir.display()
     );
-    let title = if focused && matches!(app.mode, Mode::Main | Mode::Swarm(_)) {
+    let title = if focused && matches!(app.mode, Mode::Main | Mode::Swarm(_) | Mode::SessionRun(_))
+    {
         format!("{title} • Keyboard goes to {}", session.profile.name)
     } else {
         title

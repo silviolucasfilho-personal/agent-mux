@@ -32,6 +32,7 @@ pub mod new_agent;
 pub mod run_report;
 pub mod run_screen;
 pub mod runs_view;
+pub mod session_screen;
 pub mod shortcut_probe;
 pub use config_view::*;
 pub mod langfuse_view;
@@ -84,6 +85,9 @@ pub enum Mode {
     /// The Run screen: one flow run as a tree of its steps and sessions,
     /// in the Swarm screen's layout.
     Run(Box<run_screen::RunScreen>),
+    /// The session run screen: one interactive session (a skill's, a
+    /// persona's) as a card, its terminal, its trace and its changes.
+    SessionRun(Box<session_screen::SessionScreen>),
     /// `n` in the Agents list: how to start a new agent.
     NewAgent(Box<new_agent::NewAgentState>),
     /// The Markdown viewer and editor: a `.md` link clicked in the pane.
@@ -269,6 +273,8 @@ pub enum Action {
     ConfirmDeleteSwarm,
     RunsKey,
     RunScreenKey,
+    SessionScreenKey,
+    OpenSessionScreen,
     OpenInbox,
     InboxKey,
     WorkflowDialogKey,
@@ -636,6 +642,10 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 {
                     Action::RunAgent
                 }
+                // i: the session's run screen (who runs, how far it got)
+                KeyCode::Char('i') if in_list && ctx.agent_row == RowTag::Session => {
+                    Action::OpenSessionScreen
+                }
                 // f: continue this session in a new one
                 KeyCode::Char('f') if in_list && ctx.agent_row == RowTag::Session => {
                     Action::ForkSession
@@ -839,6 +849,12 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::AgentEditor(_) => Action::AgentEditorKey,
         Mode::RunsView(_) => Action::RunsKey,
         Mode::Run(_) => Action::RunScreenKey,
+        // its terminal has the keyboard: the session's, as on Agents
+        Mode::SessionRun(v) if v.pane_focused => match encode_key_with_mode(key, ctx.app_cursor) {
+            Some(bytes) => Action::ForwardBytes(bytes),
+            None => Action::None,
+        },
+        Mode::SessionRun(_) => Action::SessionScreenKey,
         Mode::NewAgent(_) => Action::NewAgentKey,
         Mode::Markdown(_) => Action::MarkdownKey,
         Mode::Memory(_) => Action::MemoryKey,
@@ -2617,6 +2633,10 @@ pub struct App {
     /// workflow run still finishes the normal way.
     pub closing_sessions: std::collections::HashSet<usize>,
     pub notice: Option<Notice>,
+    /// The persona the next launch is started as: set by the New session
+    /// dialog's launch, taken by the spawn, which records it on the
+    /// launch row (`metadata.agent`).
+    pub(crate) launch_agent: Option<String>,
     pub profiles: Vec<Profile>,
     pub pane_size: (u16, u16), // (rows, cols)
     pub selection: Option<ActiveSelection>,
@@ -2900,6 +2920,7 @@ impl App {
             restart_requested: false,
             closing_sessions: std::collections::HashSet::new(),
             notice: None,
+            launch_agent: None,
             profiles,
             pane_size: (24, 80),
             selection: None,
@@ -3229,6 +3250,16 @@ impl App {
             view.paste(text);
             return;
         }
+        if let Mode::SessionRun(view) = &self.mode {
+            // the terminal has the keyboard: the paste is the session's
+            if view.pane_focused
+                && let Some(s) = self.sessions.get_mut(self.selected)
+            {
+                let bytes = paste_bytes(text, s.parser.screen().bracketed_paste());
+                let _ = s.write_bytes(&bytes);
+            }
+            return;
+        }
         if let Mode::Swarm(view) = &mut self.mode {
             if !view.pane_focused {
                 view.paste(text);
@@ -3443,6 +3474,7 @@ impl App {
         self.workflow_plan_pass(now);
         self.refresh_runs_view(now);
         self.refresh_run_screen(now);
+        self.refresh_session_screen(now);
         self.swarm_engine_pass(now);
         self.flush_pending_bus_wakes(now);
     }
@@ -4105,6 +4137,11 @@ impl App {
             .tracing
             .as_ref()
             .and_then(|rt| rt.plan_launch(&profile, &dir));
+        // the persona this launch runs as, when the dialog set one
+        let launch_agent = self.launch_agent.take();
+        if let Some(p) = plan.as_mut() {
+            p.agent = launch_agent;
+        }
         if let (Some(p), Some(skill)) = (plan.as_mut(), skill_id) {
             let harness = crate::harness::Harness::detect(&profile.command)
                 .map(|h| h.as_str())
@@ -4383,7 +4420,8 @@ impl App {
 
     /// The session the pane's keyboard goes to, when the pane has it.
     pub fn pane_session(&self) -> Option<usize> {
-        let swarm_pane = matches!(&self.mode, Mode::Swarm(v) if v.pane_focused);
+        let swarm_pane = matches!(&self.mode, Mode::Swarm(v) if v.pane_focused)
+            || matches!(&self.mode, Mode::SessionRun(v) if v.pane_focused);
         ((matches!(self.mode, Mode::Main) && self.focus == Focus::Pane) || swarm_pane)
             .then_some(self.selected)
             .filter(|i| *i < self.sessions.len())
@@ -4595,6 +4633,7 @@ impl App {
             Mode::ConfigView(v) => v.pending == Pending::None,
             Mode::Swarm(v) => !v.text_entry_active() && !v.confirmation_active(),
             Mode::Run(v) => v.confirm.is_none(),
+            Mode::SessionRun(v) => !v.pane_focused,
             _ => false,
         }
     }
@@ -5856,6 +5895,16 @@ impl App {
             }
             return;
         }
+        if let Mode::SessionRun(ref mut view) = self.mode {
+            match ev.kind {
+                MouseEventKind::ScrollUp => view.scroll = view.scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown => {
+                    view.scroll = (view.scroll + 3).min(view.max_scroll.get())
+                }
+                _ => {}
+            }
+            return;
+        }
         if let Mode::Run(ref mut view) = self.mode {
             match ev.kind {
                 MouseEventKind::ScrollUp => view.scroll = view.scroll.saturating_sub(3),
@@ -6431,6 +6480,10 @@ impl App {
             }
             Action::RunsKey => self.handle_runs_view_key(key),
             Action::RunScreenKey => self.handle_run_screen_key(key),
+            Action::SessionScreenKey => self.handle_session_screen_key(key),
+            Action::OpenSessionScreen => {
+                self.open_session_screen();
+            }
             Action::OpenInbox => self.open_inbox(),
             Action::InboxKey => self.handle_inbox_key(key),
             Action::WorkflowDialogKey => self.handle_workflow_dialog_key(key),
@@ -6786,10 +6839,13 @@ impl App {
     /// Spawns what the New session dialog asked for.
     fn finish_dialog_launch(&mut self, l: DialogLaunch) -> Result<(), String> {
         let id = self.next_id;
+        self.launch_agent = l.agent.clone();
         let spawned = match &l.attach {
             Some(background) => self.spawn_attached(id, &l.profile, background, l.dir),
             None => self.spawn_traced_with_env(id, l.profile, l.dir, &l.env, None),
         };
+        // an attached session does not pass through the spawn that takes it
+        self.launch_agent = None;
         let mut session = spawned.map_err(|e| e.to_string())?;
         session.agent = l.agent;
         session.opening_args = l.opening_args;

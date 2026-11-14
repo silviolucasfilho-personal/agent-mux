@@ -75,6 +75,19 @@ The same preparation runs for sessions restored at startup and for respawns.
 
 A skill is a **singleton**: one live session per skill id. While it runs, the sidebar shows `<name> [<harness>]` and the Skills view shows `running [<harness>]`, Enter attaches to it, and asking for another harness attaches with a warning. Close the session to start it on another harness. Restored sessions count.
 
+### Following a skill's session
+
+`i` on a session's row in the Agents list opens its run screen, in the layout of a flow's Run screen (`docs/workflows.md`): the session where the list is, with its sub-agents as rows under it, and the selected row in the main pane.
+
+- **Card** says who is running and how far it got: the skill or persona and what it is for, the harness, profile and model, the tools (a persona's list; a skill takes the harness's own), the folder, what it was asked, and turns, tokens, cost and the tool running now.
+- **Live** is the session's own terminal. `Enter` gives it the keyboard; the Focus chord returns to the tree.
+- **Trace** has its turns and tools from the trace store; a sub-agent's row shows its own part of it.
+- **Changes** lists the files its tools wrote, then the folder's uncommitted changes (`git diff --stat`), which may include changes the session did not make.
+
+`1`–`4` pick a tab, `↑`/`↓` a row, `Ctrl+D`/`Ctrl+U` scroll, and `i` or `Esc` returns. Starting a skill or a persona still lands in its terminal; the screen is one key away. Any session opens it, also a plain harness session, whose card has no skill or persona line. A session that is not traced has a card and a terminal, and no trace or files.
+
+The session's pane title names the skill when its profile does not already.
+
 ## 5. The Skills workbench
 
 Press `S` for the workbench view of every skill under each harness it declares: agent-mux packages and the harness's own native skills, each with its install state (`installed ✓`, `stale`, `not managed`, `not installed`, or `running [harness]`). The Details tab shows the package, where it is installed for that harness and the store's statistics; the Executions tab lists the sessions launched with it and the turns that loaded it.

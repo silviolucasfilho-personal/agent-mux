@@ -58,6 +58,8 @@ The terminal may intercept a key or collapse its modifiers. Protocol support alo
 | Ctrl+D / Ctrl+U | Page down / up outside text fields. |
 | ? | Help outside text fields. |
 
+`i` on a session's row in the Agents list opens its run screen (`docs/agents.md`): who runs it, its terminal, its trace and its changes; `i` or `Esc` returns.
+
 On the Run screen (a flow's run, `docs/workflows.md`) and the Swarm screen, the tree takes `Left` / `Right` to fold and open a row and `o` to pick another run or swarm; on the Run screen `x` stops the run on its row and one session on a session's row, asking first.
 
 `q` remains a Back alias outside text fields and a legacy Quit alias in Main's list. Context-specific actions remain reachable through Commands; unavailable actions cannot run against a stale selection.

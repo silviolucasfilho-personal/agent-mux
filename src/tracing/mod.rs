@@ -135,6 +135,11 @@ pub struct LaunchPlan {
     /// as `metadata.skill_id` / `metadata.skill_harness` so a skill's
     /// executions are found by id rather than by session name.
     pub skill: Option<(String, String)>,
+    /// The persona (`src/agents`) an interactive session was started as,
+    /// set by the app for a launch from the New session dialog. Recorded
+    /// on the launch row as `metadata.agent`, so a persona's past runs
+    /// are found by name (the runs view).
+    pub agent: Option<String>,
     /// A loop run: the keys written to `launches.metadata.loop_*` and the
     /// policy the `PreToolUse` guard enforces. Set through `attach_loop`.
     pub loop_launch: Option<crate::loops::LoopLaunch>,
@@ -654,6 +659,7 @@ impl TraceRuntime {
             hooks_profile: hooks::register::HooksProfile::Off,
             profile_name: profile.name.clone(),
             skill: None,
+            agent: None,
             loop_launch: None,
             workflow: None,
             swarm: None,
@@ -967,6 +973,7 @@ impl TraceRuntime {
             hooks_profile,
             profile_name: profile.name.clone(),
             skill: None,
+            agent: None,
             loop_launch: None,
             workflow: None,
             swarm: None,
@@ -1070,6 +1077,9 @@ impl TraceRuntime {
             && let Ok(policy) = serde_json::to_value(p)
         {
             meta.insert("write_policy".into(), policy);
+        }
+        if let Some(agent) = &plan.agent {
+            meta.insert("agent".into(), serde_json::Value::from(agent.as_str()));
         }
         if let Some((skill_id, harness)) = &plan.skill {
             meta.insert(
