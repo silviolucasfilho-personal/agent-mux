@@ -57,6 +57,14 @@ pub enum Field {
     Model,
     Effort,
     Isolation,
+    /// The refuters' own runner, on their row of the chain.
+    VotersHarness,
+    VotersModel,
+    VotersEffort,
+    /// The judge's.
+    JudgeHarness,
+    JudgeModel,
+    JudgeEffort,
 }
 
 /// How a field is changed.
@@ -102,6 +110,9 @@ impl Field {
             Field::Model => "Model",
             Field::Effort => "Effort",
             Field::Isolation => "Isolation",
+            Field::VotersHarness | Field::JudgeHarness => "Harness",
+            Field::VotersModel | Field::JudgeModel => "Model",
+            Field::VotersEffort | Field::JudgeEffort => "Effort",
         }
     }
 
@@ -115,6 +126,10 @@ impl Field {
             | Field::Harness
             | Field::Effort
             | Field::Isolation
+            | Field::VotersHarness
+            | Field::VotersEffort
+            | Field::JudgeHarness
+            | Field::JudgeEffort
             | Field::FlowOutput => Edits::Cycle,
             Field::Items
             | Field::Does
@@ -435,6 +450,9 @@ pub struct FlowBuilderState {
     pub screen: Screen,
     /// 0 is the flow's own settings; step `i` is row `i + 1`.
     pub selected: usize,
+    /// The row under the selected step the cursor is on: its refuters or
+    /// its judge, who choose their own agent, harness and model.
+    pub sub: Option<Role>,
     pub focus: Focus,
     pub field: usize,
     pub edit: Option<InlineEdit>,
@@ -464,8 +482,125 @@ impl FlowBuilderState {
         self.selected.checked_sub(1)
     }
 
+    /// The rows under step `i`: its refuters when it is checked, its judge
+    /// when it keeps the best of several.
+    pub fn sub_rows(&self, i: usize) -> Vec<Role> {
+        let mut v = Vec::new();
+        if self.draft.check_votes(i).is_some() {
+            v.push(Role::Voters);
+        }
+        if self.draft.runs(i) == Runs::BestOf {
+            v.push(Role::Judge);
+        }
+        v
+    }
+
+    /// Why step `i`'s `role` will not run as it is written: the first
+    /// error the checks have about its agent (`agents::fit::check`).
+    pub fn role_problem(&self, i: usize, role: Role) -> Option<String> {
+        let what = match role {
+            Role::Step => "agent",
+            Role::Voters => "verify.agent",
+            Role::Judge => "judge.agent",
+        };
+        let prefix = format!("step {}: {what} ", self.draft.id(i));
+        self.checks
+            .iter()
+            .filter(|c| !c.ok && !c.warning)
+            .find_map(|c| c.text.strip_prefix(&prefix).map(str::to_string))
+    }
+
+    /// The steps that run a skill that edits files.
+    pub fn editing_steps(&self) -> Vec<String> {
+        (0..self.draft.len())
+            .filter(|i| {
+                self.skills
+                    .iter()
+                    .any(|(id, _, w)| *w && self.draft.does(*i) == Does::Skill(id.clone()))
+            })
+            .map(|i| self.draft.id(i))
+            .collect()
+    }
+
+    /// What the flow may change, in a sentence.
+    pub fn edits_summary(&self) -> String {
+        let editors = self.editing_steps();
+        let isolated = (0..self.draft.len())
+            .filter(|i| self.draft.step_str(*i, "isolation") == "worktree")
+            .count();
+        if editors.is_empty() {
+            "no step edits files: the flow reads and reports".into()
+        } else {
+            format!(
+                "{} edit files · {isolated} of {} step(s) in a worktree",
+                editors.join(", "),
+                self.draft.len()
+            )
+        }
+    }
+
+    /// Every row of the chain, top to bottom: `(selected, sub)`.
+    pub fn rows(&self) -> Vec<(usize, Option<Role>)> {
+        let mut v = vec![(0, None)];
+        for i in 0..self.draft.len() {
+            v.push((i + 1, None));
+            v.extend(self.sub_rows(i).into_iter().map(|r| (i + 1, Some(r))));
+        }
+        v
+    }
+
+    /// Moves the chain's cursor by `delta` rows.
+    fn move_row(&mut self, delta: isize) {
+        let rows = self.rows();
+        let at = rows
+            .iter()
+            .position(|r| *r == (self.selected, self.sub))
+            .unwrap_or(0);
+        let to = at
+            .saturating_add_signed(delta)
+            .min(rows.len().saturating_sub(1));
+        (self.selected, self.sub) = rows[to];
+        self.field = 0;
+    }
+
+    /// The role whose runner a field of a refuters' or judge's row edits,
+    /// and the key it writes.
+    fn role_key(f: Field) -> Option<(Role, &'static str)> {
+        Some(match f {
+            Field::VotersHarness => (Role::Voters, "harness"),
+            Field::VotersModel => (Role::Voters, "model"),
+            Field::VotersEffort => (Role::Voters, "effort"),
+            Field::JudgeHarness => (Role::Judge, "harness"),
+            Field::JudgeModel => (Role::Judge, "model"),
+            Field::JudgeEffort => (Role::Judge, "effort"),
+            _ => return None,
+        })
+    }
+
     /// The fields the right pane shows for the selected row.
     pub fn fields(&self) -> Vec<Field> {
+        match (self.step_index(), self.sub) {
+            (Some(_), Some(Role::Voters)) => {
+                return vec![
+                    Field::Votes,
+                    Field::KeepBelow,
+                    Field::VotersWho,
+                    Field::VotersHarness,
+                    Field::VotersModel,
+                    Field::VotersEffort,
+                ];
+            }
+            (Some(_), Some(Role::Judge)) => {
+                return vec![
+                    Field::Attempts,
+                    Field::JudgeWho,
+                    Field::JudgeHarness,
+                    Field::JudgeModel,
+                    Field::JudgeEffort,
+                ];
+            }
+            _ => {}
+        }
         let Some(i) = self.step_index() else {
             return vec![
                 Field::FlowName,
@@ -537,6 +672,15 @@ impl FlowBuilderState {
             };
         };
         let or_dash = |s: String| if s.is_empty() { dash() } else { s };
+        if let Some((role, key)) = Self::role_key(f) {
+            let v = d.role_str(i, role, key);
+            return match key {
+                _ if !v.is_empty() => v,
+                "harness" => "the step's".into(),
+                "model" => "the agent's, else the profile's".into(),
+                _ => dash(),
+            };
+        }
         match f {
             Field::Name => d.id(i),
             Field::Runs => d.runs(i).title().into(),
@@ -622,6 +766,8 @@ impl FlowBuilderState {
                 _ => String::new(),
             },
             (Field::Model, Some(i)) => d.step_str(i, "model"),
+            (Field::VotersModel, Some(i)) => d.role_str(i, Role::Voters, "model"),
+            (Field::JudgeModel, Some(i)) => d.role_str(i, Role::Judge, "model"),
             (Field::Paths, Some(i)) => d.branches_text(i),
             (Field::RepeatBy, Some(i)) => d.list_text(i, "dedupe_by"),
             (Field::Filter, Some(i)) => d.step_str(i, "keep"),
@@ -708,6 +854,15 @@ impl FlowBuilderState {
 
     fn clamp(&mut self) {
         self.selected = self.selected.min(self.draft.len());
+        // a row whose check or judge went away with a change of shape
+        if let (Some(i), Some(role)) = (self.step_index(), self.sub)
+            && !self.sub_rows(i).contains(&role)
+        {
+            self.sub = None;
+        }
+        if self.step_index().is_none() {
+            self.sub = None;
+        }
         let n = self.fields().len();
         self.field = self.field.min(n.saturating_sub(1));
     }
@@ -759,6 +914,7 @@ impl App {
             workspace,
             screen: Screen::Steps,
             selected: 0,
+            sub: None,
             focus: Focus::Fields,
             field: 0,
             edit: None,
@@ -927,6 +1083,8 @@ impl App {
                     st.selected = 1;
                 }
                 if screen != st.screen {
+                    // the other screens are about steps, not their rows
+                    st.sub = None;
                     st.ex_groups.clear();
                     st.ex_field = 0;
                     st.review_scroll = 0;
@@ -1112,25 +1270,27 @@ impl App {
         }
         match st.focus {
             Focus::List => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    st.selected = st.selected.saturating_sub(1);
-                    st.field = 0;
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    st.selected = (st.selected + 1).min(st.draft.len());
-                    st.field = 0;
-                }
+                KeyCode::Up | KeyCode::Char('k') => st.move_row(-1),
+                KeyCode::Down | KeyCode::Char('j') => st.move_row(1),
                 KeyCode::Char('K') => {
                     if let Some(i) = st.step_index() {
                         st.selected = st.draft.move_step(i, -1) + 1;
+                        st.sub = None;
                         st.touch();
                     }
                 }
                 KeyCode::Char('J') => {
                     if let Some(i) = st.step_index() {
                         st.selected = st.draft.move_step(i, 1) + 1;
+                        st.sub = None;
                         st.touch();
                     }
+                }
+                // the refuters and the judge go with the step's shape
+                KeyCode::Char('d') | KeyCode::Delete if st.sub.is_some() => {
+                    self.notice = Some(Notice::info(
+                        "this row goes with the step's shape: change Runs or Checked on the step",
+                    ));
                 }
                 KeyCode::Char('d') | KeyCode::Delete if st.step_index().is_some() => {
                     st.overlay = Some(Overlay::Confirm {
@@ -1138,8 +1298,14 @@ impl App {
                         action: ConfirmAction::DeleteStep,
                     });
                 }
-                KeyCode::Home | KeyCode::Char('g') => st.selected = 0,
-                KeyCode::End | KeyCode::Char('G') => st.selected = st.draft.len(),
+                KeyCode::Home | KeyCode::Char('g') => {
+                    st.selected = 0;
+                    st.sub = None;
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    st.selected = st.draft.len();
+                    st.sub = None;
+                }
                 KeyCode::Enter
                 | KeyCode::Right
                 | KeyCode::Char('l')
@@ -1207,6 +1373,22 @@ impl App {
         let Some(i) = st.selected.checked_sub(1) else {
             return;
         };
+        if let Some((role, key)) = FlowBuilderState::role_key(f) {
+            let all: &[&str] = if key == "harness" {
+                &HARNESSES
+            } else {
+                &EFFORTS
+            };
+            let cur = d.role_str(i, role, key);
+            let next = cycle(
+                all,
+                all.iter().find(|h| **h == cur).copied().unwrap_or(""),
+                delta,
+            );
+            d.set_role_str(i, role, key, next);
+            st.touch();
+            return;
+        }
         match f {
             Field::Runs => {
                 let next = cycle(&Runs::ALL, d.runs(i), delta);
@@ -1434,6 +1616,8 @@ impl App {
                 (Field::Name, Some(i)) => d.rename_step(i, &text)?,
                 (Field::Items, Some(i)) => d.set_items_list(i, &text),
                 (Field::Model, Some(i)) => d.set_step_str(i, "model", &text),
+                (Field::VotersModel, Some(i)) => d.set_role_str(i, Role::Voters, "model", &text),
+                (Field::JudgeModel, Some(i)) => d.set_role_str(i, Role::Judge, "model", &text),
                 (Field::Paths, Some(i)) => d.set_branches_text(i, &text)?,
                 (Field::RepeatBy, Some(i)) => d.set_list(i, "dedupe_by", &text),
                 (Field::Filter, Some(i)) => {
@@ -1499,6 +1683,7 @@ impl App {
                                 if let Some(i) = st.step_index() {
                                     st.draft.remove_step(i);
                                     st.selected = st.selected.min(st.draft.len());
+                                    st.sub = None;
                                     st.touch();
                                 }
                             }
@@ -1531,6 +1716,7 @@ impl App {
                     let i = st.draft.add_step(at, &id, runs);
                     st.overlay = None;
                     st.selected = i + 1;
+                    st.sub = None;
                     st.focus = Focus::Fields;
                     // straight to what the step does
                     st.field = st
@@ -2101,6 +2287,7 @@ impl App {
         }
         st.dirty = false;
         st.selected = st.selected.min(st.draft.len());
+        st.sub = None;
         self.reload_workflow_list();
         self.flow_refresh(st);
         self.notice = Some(Notice::info(format!("{name} is the built-in again")));

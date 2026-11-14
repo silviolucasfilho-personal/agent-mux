@@ -2,13 +2,19 @@
 //! What passes and Review screens and their overlays. The layout follows
 //! the design canvas "Agent Flow Builder": the flow as a chain on the
 //! left, the selected step's fields on the right, plain words over TOML.
+//! A row of the chain is drawn by `super::step_row`, as the Run screen's
+//! tree is: it names the step's harness, agent and model, and the
+//! refuters and the judge are rows of their own under their step.
 
+use super::step_row::{self, Columns, StepLine};
 use super::{centered, draw_confirm, pane_border, text_area_lines, truncate_chars};
 use crate::app::flow_builder::{
     AgentField, AgentForm, AgentPicker, EditTarget, Edits, ExPane, Field, FlowBuilderState, Focus,
     Overlay, Screen, TOOL_NAMES,
 };
 use crate::workflows::builder::{Does, FieldKind, Items, Role, Runs};
+use crate::workflows::document::StepKind;
+use crate::workflows::run_view::Shape;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -59,6 +65,80 @@ fn runs_short(st: &FlowBuilderState, i: usize) -> String {
         Runs::PickPath => "◆ pick a path".into(),
         Runs::BestOf => format!("★ best of {}", d.attempts(i)),
         Runs::UntilQuiet => "↺ until quiet".into(),
+    }
+}
+
+/// The harness the flow itself names, when it names exactly one.
+fn flow_harness(st: &FlowBuilderState) -> Option<String> {
+    Some(st.draft.flow_str("harness")).filter(|h| !h.is_empty())
+}
+
+/// Step `i` as the shared step line: its number, id, shape and who runs
+/// it, with `!` and the reason when its agent does not fit.
+fn chain_line(st: &FlowBuilderState, i: usize) -> StepLine {
+    let d = &st.draft;
+    let items = match d.items(i) {
+        Items::List(v) if !v.is_empty() => Some(v.len()),
+        _ => None,
+    };
+    let (kind, votes, attempts) = match d.runs(i) {
+        Runs::Once => (StepKind::Single, None, None),
+        Runs::Parallel => (StepKind::Fanout, None, None),
+        Runs::EachThenCheck => (
+            StepKind::Pipeline,
+            d.check_votes(i).map(|(v, _)| v.max(0) as usize),
+            None,
+        ),
+        Runs::PickPath => (StepKind::Route, None, None),
+        Runs::BestOf => (
+            StepKind::Tournament,
+            None,
+            Some(d.attempts(i).max(0) as usize),
+        ),
+        Runs::UntilQuiet => (StepKind::Until, None, None),
+    };
+    let shape = Shape::of(kind, items, votes, attempts);
+    let own = d.step_str(i, "harness");
+    StepLine {
+        number: Some(i + 1),
+        id: d.id(i),
+        shape: shape.words,
+        shape_short: shape.short,
+        inherited: own.is_empty(),
+        harness: if own.is_empty() {
+            flow_harness(st).unwrap_or_else(|| "the run's".into())
+        } else {
+            own
+        },
+        agent: d.agent(i, Role::Step),
+        model: Some(d.step_str(i, "model")).filter(|m| !m.is_empty()),
+        state: None,
+        counts: None,
+        problem: st.role_problem(i, Role::Step),
+    }
+}
+
+/// The refuters' or the judge's row under step `i`: they choose their
+/// own agent, harness and model, and take the step's harness otherwise.
+fn chain_sub_line(st: &FlowBuilderState, i: usize, role: Role) -> StepLine {
+    let d = &st.draft;
+    let own = d.role_str(i, role, "harness");
+    let step = chain_line(st, i);
+    StepLine {
+        number: None,
+        id: match role {
+            Role::Voters => format!(
+                "  └ {} votes",
+                d.check_votes(i).map(|(v, _)| v).unwrap_or(1)
+            ),
+            _ => "  └ judge".into(),
+        },
+        inherited: own.is_empty(),
+        harness: if own.is_empty() { step.harness } else { own },
+        agent: d.agent(i, role),
+        model: Some(d.role_str(i, role, "model")).filter(|m| !m.is_empty()),
+        problem: st.role_problem(i, role),
+        ..StepLine::default()
     }
 }
 
@@ -204,7 +284,7 @@ pub(super) fn footer(st: &FlowBuilderState) -> Line<'static> {
     }
     // the same on every screen
     let common: [(&str, &str); 4] = [
-        ("1-5", "tabs"),
+        ("1-3", "tabs"),
         (label(Verb::Save), "save"),
         (label(Verb::Run), "save and run"),
         ("Esc", "back"),
@@ -292,37 +372,57 @@ fn draw_chain(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
     if st.selected == 0 {
         selected_line = 0;
     }
+    // the settings row says what the whole flow runs with
+    let mut settings = " ⚙ flow settings".to_string();
+    if let Some(h) = flow_harness(st) {
+        settings.push_str(&format!(" · {h}"));
+    }
+    settings.push_str(&match st.draft.budget() {
+        Some(b) => format!(" · {}k tokens", b / 1000),
+        None => " · no budget".into(),
+    });
     lines.push(Line::styled(
-        truncate_chars(" ⚙ flow settings", width),
+        truncate_chars(&settings, width),
         row_style(st.selected == 0),
     ));
     lines.push(Line::raw(""));
     let output = st.draft.output();
-    for i in 0..st.draft.len() {
-        let on = st.selected == i + 1;
+    // every row names who runs it: the step, then its refuters and judge
+    let chain: Vec<(usize, Option<Role>, StepLine)> = (0..st.draft.len())
+        .flat_map(|i| {
+            let mut v = vec![(i, None, chain_line(st, i))];
+            v.extend(
+                st.sub_rows(i)
+                    .into_iter()
+                    .map(|r| (i, Some(r), chain_sub_line(st, i, r))),
+            );
+            v
+        })
+        .collect();
+    let cols = Columns::of(chain.iter().map(|(_, _, l)| l));
+    let row_line = |line: &StepLine, on: bool| -> Line<'static> {
+        // a row under a step has no number: it starts where the ids do
+        let lead = if line.number.is_some() { " " } else { "   " };
+        let spans = step_row::spans(line, cols, width.saturating_sub(lead.len()));
         if on {
-            selected_line = lines.len();
+            // one bar: the row's own colours would break it up
+            let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            Line::styled(format!("{lead}{text}"), row_style(true))
+        } else {
+            let mut all = vec![Span::raw(lead)];
+            all.extend(spans);
+            Line::from(all)
         }
+    };
+    for i in 0..st.draft.len() {
         let id = st.draft.id(i);
-        let who = st
-            .draft
-            .agent(i, Role::Step)
-            .or_else(|| st.draft.agent(i, Role::Voters))
-            .map(|a| format!("as {a}"))
-            .unwrap_or_default();
-        let runs = runs_short(st, i);
-        let text = format!(
-            " {:<2} {:<13} {:<18} ",
-            i + 1,
-            truncate_chars(&id, 13),
-            runs
-        );
-        let mut spans = vec![Span::styled(text, row_style(on))];
-        spans.push(Span::styled(
-            who,
-            if on && focused { sel() } else { agent_style() },
-        ));
-        lines.push(Line::from(spans));
+        for (_, sub, line) in chain.iter().filter(|(n, _, _)| *n == i) {
+            let on = st.selected == i + 1 && st.sub == *sub;
+            if on {
+                selected_line = lines.len();
+            }
+            lines.push(row_line(line, on));
+        }
         if st.draft.runs(i) == Runs::Parallel
             && let Items::List(v) = st.draft.items(i)
         {
@@ -397,9 +497,13 @@ fn draw_chain(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
 
 fn draw_fields(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
     let focused = st.focus == Focus::Fields;
-    let title = match st.step_index() {
-        Some(i) => format!(" Step {} · {} ", i + 1, st.draft.id(i)),
-        None => " The flow ".into(),
+    let title = match (st.step_index(), st.sub) {
+        (Some(i), Some(Role::Voters)) => {
+            format!(" Step {} · {} · its refuters ", i + 1, st.draft.id(i))
+        }
+        (Some(i), Some(_)) => format!(" Step {} · {} · its judge ", i + 1, st.draft.id(i)),
+        (Some(i), None) => format!(" Step {} · {} ", i + 1, st.draft.id(i)),
+        (None, _) => " The flow ".into(),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -491,6 +595,32 @@ fn draw_fields(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
                 truncate_chars(&format!("{}{d}", " ".repeat(LABEL)), width),
                 dim(),
             ));
+        }
+    }
+    // what the editor's When and Limits tabs used to say, where the
+    // budget is set
+    if st.step_index().is_none() {
+        let label = |k: &str| {
+            Span::styled(
+                format!(" {:<w$}", k, w = LABEL - 1),
+                Style::default().fg(Color::Yellow),
+            )
+        };
+        lines.push(Line::raw(""));
+        for (k, v) in [
+            (
+                "Runs",
+                format!(
+                    "when you start it: Enter on it in the Agents list, or agent-mux workflow run {}",
+                    st.draft.name()
+                ),
+            ),
+            ("Changes", st.edits_summary()),
+        ] {
+            lines.push(Line::from(vec![
+                label(k),
+                Span::styled(truncate_chars(&v, width.saturating_sub(LABEL + 1)), dim()),
+            ]));
         }
     }
     if st.step_index().is_none() && st.draft.is_empty() {
@@ -986,6 +1116,13 @@ fn draw_review(f: &mut Frame, area: Rect, st: &FlowBuilderState) {
                 .map(|b| format!("budget {}k tokens · stops early when spent", b / 1000))
                 .unwrap_or_else(|| "no budget: set one in the flow settings".into())
         ),
+        dim(),
+    ));
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(" Limits", Style::default().fg(Color::Yellow)));
+    lines.push(Line::raw(format!(" {}", st.edits_summary())));
+    lines.push(Line::styled(
+        " a step edits in a worktree when its Isolation says so · it runs when you start it",
         dim(),
     ));
     lines.push(Line::raw(""));

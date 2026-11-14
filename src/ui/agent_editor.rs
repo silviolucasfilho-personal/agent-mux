@@ -1,7 +1,7 @@
 //! Drawing the agent editor (`crate::app::agent_editor`): the header, the
 //! tabs Who · What · When · Limits · Review, the tab's fields on the left
-//! and what they mean on the right. A flow's Who, What and Review are the
-//! flow builder's own screens (`super::flow`).
+//! and what they mean on the right. A flow has three tabs instead, the
+//! flow builder's own screens Steps · What passes · Review (`super::flow`).
 
 use super::flow::{dim, head, hints, key_style, sel};
 use super::{
@@ -10,7 +10,7 @@ use super::{
 use crate::app::agent_editor::{
     AgentEditorState, Body, EdField, PersonaBody, Tab, TaskField, TaskKind,
 };
-use crate::app::flow_builder::{AgentField, EFFORTS, FlowBuilderState, TOOL_NAMES};
+use crate::app::flow_builder::{AgentField, EFFORTS, TOOL_NAMES};
 use crate::app::loops::{LoopDialogState, LoopField};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -33,18 +33,29 @@ pub fn draw(f: &mut Frame, st: &AgentEditorState) {
         Body::Flow(fl) => super::flow::draw_header(f, top, fl),
         _ => draw_header(f, top, st),
     }
-    f.render_widget(Paragraph::new(tab_bar(st.tab)), tabs);
-    match &st.body {
-        Body::Flow(fl) if !matches!(st.tab, Tab::When | Tab::Limits) => {
-            super::flow::draw_body(f, body, fl)
-        }
+    // a flow's tabs are its builder's three screens; the other agents
+    // keep Who · What · When · Limits · Review
+    let bar = match &st.body {
         Body::Flow(fl) => {
-            let [pane, foot] =
-                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body);
-            draw_flow_panel(f, pane, st.tab, fl);
-            f.render_widget(Paragraph::new(super::flow::footer(fl)), foot);
-            super::flow::draw_overlay(f, fl);
+            use crate::app::flow_builder::Screen;
+            let open = match fl.screen {
+                Screen::Steps => 0,
+                Screen::Exchange => 1,
+                Screen::Review => 2,
+            };
+            tab_bar(&FLOW_TABS, open)
         }
+        _ => {
+            let names: Vec<&str> = Tab::ALL.iter().map(|t| t.label()).collect();
+            tab_bar(
+                &names,
+                Tab::ALL.iter().position(|t| *t == st.tab).unwrap_or(0),
+            )
+        }
+    };
+    f.render_widget(Paragraph::new(bar), tabs);
+    match &st.body {
+        Body::Flow(fl) => super::flow::draw_body(f, body, fl),
         // a scheduled agent's What: the task library itself
         Body::Scheduled(_) if st.tab == Tab::What && st.tasks.is_some() => {
             if let Some(t) = &st.tasks {
@@ -75,11 +86,14 @@ pub fn draw(f: &mut Frame, st: &AgentEditorState) {
     }
 }
 
-fn tab_bar(tab: Tab) -> Line<'static> {
+/// A flow's tabs: the flow builder's screens.
+const FLOW_TABS: [&str; 3] = ["Steps", "What passes", "Review"];
+
+fn tab_bar(names: &[&str], open: usize) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
-    for (i, t) in Tab::ALL.iter().enumerate() {
-        let text = format!(" {} {} ", i + 1, t.label());
-        spans.push(if *t == tab {
+    for (i, name) in names.iter().enumerate() {
+        let text = format!(" {} {name} ", i + 1);
+        spans.push(if i == open {
             Span::styled(
                 text,
                 Style::default()
@@ -819,70 +833,6 @@ fn persona_facts(st: &AgentEditorState, p: &PersonaBody) -> (String, Vec<Line<'s
             ],
         ),
     }
-}
-
-fn draw_flow_panel(f: &mut Frame, area: Rect, tab: Tab, fl: &FlowBuilderState) {
-    let l = |s: String| Line::raw(format!(" {s}"));
-    let lines = match tab {
-        Tab::When => vec![
-            Line::raw(""),
-            l("It runs when you start it: Enter on it in the Agents list,".into()),
-            l(format!("or agent-mux workflow run {}.", fl.draft.name())),
-            Line::raw(""),
-            Line::styled(
-                " Only a one-task agent can run on a schedule for now.",
-                dim(),
-            ),
-        ],
-        _ => {
-            let budget = fl.draft.flow_str("budget");
-            let editors: Vec<String> = (0..fl.draft.len())
-                .filter(|i| {
-                    fl.skills.iter().any(|(id, _, w)| {
-                        *w && fl.draft.does(*i)
-                            == crate::workflows::builder::Does::Skill(id.clone())
-                    })
-                })
-                .map(|i| fl.draft.id(i))
-                .collect();
-            vec![
-                Line::raw(""),
-                l(format!(
-                    "Budget: {}",
-                    if budget.is_empty() {
-                        "none set (tab 1, Budget)".into()
-                    } else {
-                        budget
-                    }
-                )),
-                Line::raw(""),
-                l(if editors.is_empty() {
-                    "No step edits files: the flow reads and reports.".into()
-                } else {
-                    format!("Steps that edit files: {}.", editors.join(", "))
-                }),
-                l("A step that edits works in an isolated worktree when its".into()),
-                l("isolation says so (tab 2, the step's Isolation).".into()),
-            ]
-        }
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(pane_border(true))
-        .title(Span::styled(
-            if tab == Tab::When {
-                " When it runs "
-            } else {
-                " Limits "
-            },
-            key_style(),
-        ));
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(block),
-        area,
-    );
 }
 
 fn textwrap(text: &str, width: usize) -> Vec<String> {

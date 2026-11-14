@@ -5,7 +5,10 @@
 //! it may change, budgets) and **Review**. The body is the agent's own
 //! state: a scheduled agent is the loop dialog's values, a flow is the flow
 //! builder's draft, a persona is the agent form; each saves where it always
-//! did.
+//! did. A flow has one navigation instead of the five tabs: the flow
+//! builder's three screens Steps · What passes · Review (spec
+//! `docs/superpowers/specs/2026-11-13-run-screen-and-flow-editor-ux-design.md`,
+//! section 3), which take `1`-`3` themselves.
 
 use super::flow_builder::{After, AgentField, AgentForm, FlowBuilderState, Screen, text_key};
 use super::loops::{LoopDialogState, LoopField};
@@ -450,6 +453,7 @@ impl AgentEditorState {
                 Tab::Who => {
                     f.screen = Screen::Steps;
                     f.selected = 0;
+                    f.sub = None;
                     f.focus = super::flow_builder::Focus::Fields;
                     f.field = 0;
                 }
@@ -470,12 +474,10 @@ impl AgentEditorState {
         self.sync_loop_field();
     }
 
-    /// A flow's tab follows its builder's screen (When and Limits are the
-    /// editor's own panels).
+    /// A flow's tab follows its builder's screen: the flow's settings row
+    /// is its Who, a step its What.
     fn sync_flow_tab(&mut self) {
-        if let Body::Flow(f) = &self.body
-            && !matches!(self.tab, Tab::When | Tab::Limits)
-        {
+        if let Body::Flow(f) = &self.body {
             self.tab = match f.screen {
                 Screen::Review => Tab::Review,
                 Screen::Exchange => Tab::What,
@@ -840,26 +842,8 @@ impl App {
             return self.agent_editor_save(st, false);
         }
         if let Body::Flow(f) = &mut st.body {
-            let busy = f.overlay.is_some() || f.edit.is_some();
-            let tab = match key.code {
-                KeyCode::Char(c @ '1'..='5') if !busy && !ctrl => {
-                    Some(Tab::ALL[c as usize - '1' as usize])
-                }
-                _ => None,
-            };
-            if let Some(t) = tab {
-                st.set_tab(t);
-                return After::Stay;
-            }
-            // When and Limits are panels: save, run and leave still work
-            if matches!(st.tab, Tab::When | Tab::Limits) && !busy {
-                let passes = matches!(key.code, KeyCode::Char('s'))
-                    || (matches!(key.code, KeyCode::Char('r' | 'q') | KeyCode::Esc) && !ctrl);
-                if !passes {
-                    return After::Stay;
-                }
-                f.screen = Screen::Steps;
-            }
+            // a flow has one navigation: its builder's three screens,
+            // which take `1`-`3` themselves
             let after = self.flow_key(f, key);
             st.sync_flow_tab();
             return after;
