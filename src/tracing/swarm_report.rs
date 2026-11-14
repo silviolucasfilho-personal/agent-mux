@@ -205,7 +205,8 @@ fn turns(conn: &Connection, launch_id: &str) -> rusqlite::Result<Vec<TurnReport>
     rows.collect()
 }
 
-fn sub_agents(conn: &Connection, launch_id: &str) -> rusqlite::Result<Vec<AgentReport>> {
+/// The sub-agents of a launch, oldest first (at most 200).
+pub fn sub_agents(conn: &Connection, launch_id: &str) -> rusqlite::Result<Vec<AgentReport>> {
     let mut stmt = conn.prepare(
         "SELECT o.id, o.trace_id, o.name, o.start_ns, o.end_ns, o.total_tokens, o.total_cost_usd
          FROM observations o JOIN traces t ON t.id = o.trace_id

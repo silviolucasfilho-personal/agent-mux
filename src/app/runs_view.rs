@@ -59,6 +59,14 @@ pub enum RunRef {
     Flow(Box<WorkflowRun>),
     /// A scheduled agent's next run (its loop id).
     Next(String),
+    /// A persona's session in flight (the session's id, and its launch
+    /// when it is traced).
+    PersonaLive {
+        session_id: usize,
+        launch_id: Option<String>,
+    },
+    /// A persona's past run: its launch in the trace store.
+    Persona(Box<crate::tracing::store::query::LaunchCard>),
 }
 
 #[derive(Debug, Clone)]
@@ -122,7 +130,18 @@ impl RunRef {
             RunRef::Loop(r) => format!("loop:{}", r.id),
             RunRef::Flow(r) => format!("flow:{}", r.id),
             RunRef::Next(id) => format!("next:{id}"),
+            RunRef::PersonaLive {
+                launch_id: Some(l), ..
+            } => format!("persona:{l}"),
+            RunRef::PersonaLive { session_id, .. } => format!("persona-session:{session_id}"),
+            RunRef::Persona(l) => format!("persona:{}", l.id),
         }
+    }
+
+    /// The run has a screen of its own (`Enter`): a flow's run, a
+    /// persona's session. Its detail here only points there.
+    pub fn opens_screen(&self) -> bool {
+        self.is_flow_run() || matches!(self, RunRef::PersonaLive { .. } | RunRef::Persona(_))
     }
 
     /// A flow's run or plan, rather than a loop's run.
@@ -278,6 +297,32 @@ impl App {
                 at_ns: now,
             });
         }
+        // a persona's session: one interactive session, started as an agent
+        for s in self.sessions.iter().filter(|s| {
+            s.agent.is_some()
+                && s.swarm.is_none()
+                && s.group.is_none()
+                && !matches!(s.status(Instant::now()), crate::status::Status::Exited(_))
+        }) {
+            items.push(RunItem {
+                group: Group::Running,
+                agent: s.agent.clone().unwrap_or_default(),
+                when: s
+                    .dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                word: crate::harness::Harness::detect(&s.profile.command)
+                    .map(|h| h.as_str().to_string())
+                    .unwrap_or_default(),
+                glyph: "▶",
+                run: RunRef::PersonaLive {
+                    session_id: s.id,
+                    launch_id: s.trace.as_ref().map(|t| t.launch_id.clone()),
+                },
+                at_ns: now,
+            });
+        }
         let (inbox, mut error) = self.inbox_items();
         let mut waiting: Vec<String> = Vec::new();
         for item in inbox {
@@ -308,6 +353,7 @@ impl App {
             .filter_map(|i| match &i.run {
                 RunRef::LoopLive { run_id, .. } => Some(run_id.clone()),
                 RunRef::FlowLive(id) => Some(id.clone()),
+                RunRef::PersonaLive { launch_id, .. } => launch_id.clone(),
                 _ => None,
             })
             .collect();
@@ -388,6 +434,35 @@ impl App {
                 }
                 Err(e) => error = error.or(Some(e)),
             },
+        }
+        // a persona's past runs, by the persona recorded on their launch
+        if let Some(c) = self
+            .trace_db_path
+            .as_deref()
+            .and_then(|p| crate::tracing::store::open_ro(p).ok())
+        {
+            for l in crate::tracing::store::query::agent_launches(&c, EARLIER).unwrap_or_default() {
+                if live.contains(&l.id) {
+                    continue;
+                }
+                earlier.push(RunItem {
+                    group: Group::Earlier,
+                    agent: l.agent.clone().unwrap_or_default(),
+                    when: ago(l.started_ns, now),
+                    word: match (l.live, l.exit_code) {
+                        (true, _) => "running".into(),
+                        (false, Some(0)) | (false, None) => "ended".into(),
+                        (false, Some(code)) => format!("exit {code}"),
+                    },
+                    glyph: match (l.live, l.exit_code) {
+                        (true, _) => "▶",
+                        (false, Some(c)) if c != 0 => "✗",
+                        _ => "✓",
+                    },
+                    at_ns: l.started_ns,
+                    run: RunRef::Persona(Box::new(l)),
+                });
+            }
         }
         earlier.sort_by_key(|i| std::cmp::Reverse(i.at_ns));
         earlier.truncate(EARLIER);
@@ -516,8 +591,9 @@ impl App {
         if st.tab == RunTab::Change {
             return;
         }
-        // a flow's run is read on the Run screen: this pane only points there
-        if item.run.is_flow_run() {
+        // a flow's run and a persona's session are read on their own
+        // screens: this pane only points there
+        if item.run.opens_screen() {
             return;
         }
         if item.run.is_flow() {
@@ -751,6 +827,22 @@ impl App {
             RunRef::Next(_) => {
                 self.notice = Some(Notice::info("r runs it now; p pauses it; 5 its setup"));
                 true
+            }
+            // a persona's session has a screen of its own
+            RunRef::PersonaLive { session_id, .. } => {
+                match self.sessions.iter().position(|s| s.id == session_id) {
+                    Some(i) => {
+                        self.selected = i;
+                        !self.open_session_screen_from_runs()
+                    }
+                    None => {
+                        self.notice = Some(Notice::info("the session is gone"));
+                        true
+                    }
+                }
+            }
+            RunRef::Persona(l) => {
+                !self.open_session_screen_stored(&l.id, super::session_screen::Origin::Runs)
             }
         }
     }
@@ -1115,6 +1207,39 @@ pub fn tab_lines(app: &App, st: &RunsViewState) -> Vec<String> {
             v.push("↵ opens the run; d dismisses it.".into());
             v
         }
+        (RunRef::PersonaLive { session_id, .. }, _) => {
+            match app.sessions.iter().find(|s| s.id == *session_id) {
+                Some(s) => vec![
+                    format!(
+                        "{} is running in {}",
+                        s.agent.clone().unwrap_or_default(),
+                        s.dir.display()
+                    ),
+                    format!("on {}", s.profile.name),
+                    String::new(),
+                    "↵ opens its run: who runs, its terminal, its trace and its changes.".into(),
+                ],
+                None => vec!["finished: Ctrl+R reloads".into()],
+            }
+        }
+        (RunRef::Persona(l), _) => vec![
+            format!("{} ran in {}", l.agent.clone().unwrap_or_default(), l.cwd),
+            format!(
+                "on          {} ({}){}",
+                l.provider,
+                l.profile,
+                l.model
+                    .as_ref()
+                    .map(|m| format!(" · {m}"))
+                    .unwrap_or_default()
+            ),
+            format!(
+                "when        {}",
+                crate::workflows::report::format_range(l.started_ns, l.ended_ns)
+            ),
+            String::new(),
+            "↵ opens its run: who ran, its trace and its changes.".into(),
+        ],
         (RunRef::LoopLive { run_id, .. }, _) => {
             let live = app.live_loop_runs.iter().find(|r| &r.run_id == run_id);
             match live {

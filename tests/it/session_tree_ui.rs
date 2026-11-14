@@ -1084,3 +1084,163 @@ fn a_harness_row_shows_a_recap_of_each_session() {
 
     app.kill_all();
 }
+
+// ---- the session run screen ------------------------------------------------
+
+fn session_screen(app: &App) -> &agent_mux::app::session_screen::SessionScreen {
+    match &app.mode {
+        Mode::SessionRun(st) => st,
+        other => panic!("not on the session run screen: {other:?}"),
+    }
+}
+
+#[test]
+fn i_opens_a_personas_session_on_its_run_screen() {
+    use agent_mux::app::session_screen::{Kind, Source, Tab};
+    let (mut app, _t) = app_with_sessions(&[None]);
+    app.sessions[0].agent = Some("skeptic".into());
+    app.sessions[0].opening_args = vec!["Refute the finding in src/app/loops.rs".into()];
+    // what the rows read the harness from; the process is the shell's
+    app.sessions[0].profile.command = "claude".into();
+    // the Agents list names what the session runs as, and where
+    let list = render(&app, 140, 40);
+    assert!(
+        list.lines()
+            .any(|l| l.contains("◇ skeptic") && l.contains("claude")),
+        "the persona's row names the harness it runs on\n{list}"
+    );
+    assert!(list.contains("skeptic · p0 —"), "the pane's title\n{list}");
+
+    app.selected = 0;
+    assert!(app.open_session_screen());
+    let st = session_screen(&app);
+    assert_eq!(st.source, Source::Live(900));
+    assert_eq!(st.card.kind, Kind::Persona);
+    assert_eq!(st.card.name, "skeptic");
+    assert_eq!(st.card.tools.as_deref(), Some("read, shell"));
+    assert!(!st.card.description.is_empty());
+    assert!(!st.card.ended);
+    let screen = render(&app, 140, 40);
+    for expected in [
+        "◇ skeptic",
+        "1 Card",
+        "2 Live",
+        "3 Trace",
+        "4 Changes",
+        "persona",
+        "read, shell",
+        "Refute the finding in src/app/loops.rs",
+        "Not traced",
+        "i back to the session",
+        "Session run • Keyboard focus",
+    ] {
+        assert!(
+            screen.contains(expected),
+            "missing {expected:?} in\n{screen}"
+        );
+    }
+
+    // Live is the session's own terminal, over the whole pane
+    app.handle_key(&key(KeyCode::Char('2')), Instant::now());
+    assert_eq!(session_screen(&app).tab, Tab::Live);
+    let screen = render(&app, 140, 40);
+    assert!(screen.contains("skeptic · p0 —"), "{screen}");
+    // Enter gives it the keyboard: keys are the session's, not the screen's
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(session_screen(&app).pane_focused);
+    assert!(app.text_entry_active());
+    assert_eq!(app.pane_session(), Some(0));
+    app.handle_key(&key(KeyCode::Char('i')), Instant::now());
+    assert!(
+        matches!(app.mode, Mode::SessionRun(_)),
+        "i went to the terminal"
+    );
+    // the Focus chord returns to the tree
+    app.execute_command(agent_mux::keymap::ActionId::FocusAgents, Instant::now());
+    assert!(!session_screen(&app).pane_focused);
+    // the Changes tab reads without a trace
+    app.handle_key(&key(KeyCode::Char('4')), Instant::now());
+    let screen = render(&app, 140, 40);
+    assert!(screen.contains("Files its tools wrote (0)"), "{screen}");
+    // i returns to the session's row
+    app.handle_key(&key(KeyCode::Char('i')), Instant::now());
+    assert!(matches!(app.mode, Mode::Main), "{:?}", app.mode);
+}
+
+#[test]
+fn a_personas_past_run_is_listed_in_the_runs_view_and_opens_from_the_store() {
+    use agent_mux::app::session_screen::{Kind, Source};
+    let temp = tempfile::tempdir().unwrap();
+    // a persona's run, a swarm worker that ran as an agent, and a plain run
+    write_launches(
+        temp.path(),
+        &[
+            ("claude:pa", "l-persona", Some(r#"{"agent":"skeptic"}"#)),
+            (
+                "claude:sw",
+                "l-worker",
+                Some(r#"{"agent":"reviewer","swarm_id":"swarm-1","swarm_role":"worker"}"#),
+            ),
+            ("claude:pl", "l-plain", None),
+        ],
+        0,
+    );
+    let conn = open_ro(&temp.path().join("traces.db")).unwrap();
+    let found = agent_mux::tracing::store::query::agent_launches(&conn, 50).unwrap();
+    assert_eq!(
+        found.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
+        ["l-persona"],
+        "only what was started as a persona"
+    );
+    assert_eq!(found[0].agent.as_deref(), Some("skeptic"));
+    drop(conn);
+
+    let (tx, _rx) = mpsc::channel(32);
+    let mut app = App::new(vec![profile("Claude Code")], None, tx);
+    app.clipboard_enabled = false;
+    app.set_pane_size(30, 120);
+    app.library_root = Some(temp.path().join("library"));
+    app.loops_file = Some(temp.path().join("loops.json"));
+    app.runtime_dir = Some(temp.path().join("runtime"));
+    app.trace_db_path = Some(temp.path().join("traces.db"));
+    app.open_runs_view_on(
+        "persona:l-persona",
+        agent_mux::app::runs_view::RunTab::Report,
+    );
+    let Mode::RunsView(v) = &app.mode else {
+        panic!("the runs view is open")
+    };
+    assert_eq!(
+        v.selected_item().map(|i| (i.agent.as_str(), i.run.key())),
+        Some(("skeptic", "persona:l-persona".to_string()))
+    );
+    let screen = render(&app, 140, 40);
+    assert!(screen.contains("↵ opens its run"), "{screen}");
+
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    let st = session_screen(&app);
+    assert_eq!(st.source, Source::Stored("l-persona".into()));
+    assert_eq!(st.card.kind, Kind::Persona);
+    assert_eq!(st.card.name, "skeptic");
+    // the seeded launch has no end: the store reads it as running elsewhere
+    assert_eq!(st.card.state, "running elsewhere");
+    assert_eq!(st.card.turns, 1);
+    // the trace is the launch's turns
+    app.handle_key(&key(KeyCode::Char('3')), Instant::now());
+    let screen = render(&app, 140, 40);
+    assert!(screen.contains("turn pa"), "{screen}");
+    // a past run has no terminal
+    app.handle_key(&key(KeyCode::Char('2')), Instant::now());
+    assert!(render(&app, 140, 40).contains("not a session of this agent-mux"));
+    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    assert!(!session_screen(&app).pane_focused);
+    // Esc returns to the runs view, on the same run
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    match &app.mode {
+        Mode::RunsView(v) => assert_eq!(
+            v.selected_item().map(|i| i.run.key()),
+            Some("persona:l-persona".to_string())
+        ),
+        other => panic!("not the runs view: {other:?}"),
+    }
+}
