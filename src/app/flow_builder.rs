@@ -203,15 +203,19 @@ pub enum AgentField {
     ModelCodex,
     ModelAgy,
     ModelOpenCode,
+    ModelGrok,
+    ModelPi,
     ModelMuse,
     EffortCodex,
     EffortAgy,
+    EffortGrok,
+    EffortPi,
     EffortMuse,
     SaveTo,
 }
 
 impl AgentField {
-    pub const ALL: [AgentField; 14] = [
+    pub const ALL: [AgentField; 18] = [
         AgentField::Name,
         AgentField::Purpose,
         AgentField::Instructions,
@@ -221,9 +225,13 @@ impl AgentField {
         AgentField::ModelCodex,
         AgentField::ModelAgy,
         AgentField::ModelOpenCode,
+        AgentField::ModelGrok,
+        AgentField::ModelPi,
         AgentField::ModelMuse,
         AgentField::EffortCodex,
         AgentField::EffortAgy,
+        AgentField::EffortGrok,
+        AgentField::EffortPi,
         AgentField::EffortMuse,
         AgentField::SaveTo,
     ];
@@ -242,11 +250,26 @@ pub struct AgentForm {
     pub tool_cursor: usize,
     pub mcp: TextArea,
     /// One per `agents::HARNESSES`, in its order.
-    pub models: [TextArea; 5],
-    /// Codex's, Antigravity's, and Muse's effort, indexes into `EFFORTS`.
-    pub efforts: [usize; 3],
+    pub models: [TextArea; 7],
+    /// Codex's, Antigravity's, Grok's, Pi's and Muse's effort, indexes
+    /// into `EFFORTS`, in `effort_slot`'s order.
+    pub efforts: [usize; 5],
     pub to_workspace: bool,
     pub error: Option<String>,
+}
+
+/// The effort slot of a harness index in `agents::HARNESSES`, or
+/// `None` where the harness takes no effort (Claude, OpenCode). Slot
+/// order: codex, agy, grok, pi, muse.
+pub fn effort_slot(harness_idx: usize) -> Option<usize> {
+    match harness_idx {
+        1 => Some(0),
+        2 => Some(1),
+        4 => Some(2),
+        5 => Some(3),
+        6 => Some(4),
+        _ => None,
+    }
 }
 
 impl AgentForm {
@@ -260,7 +283,7 @@ impl AgentForm {
             tool_cursor: 0,
             mcp: TextArea::default(),
             models: Default::default(),
-            efforts: [0, 0, 0],
+            efforts: [0; 5],
             to_workspace: true,
             error: None,
         }
@@ -305,13 +328,9 @@ impl AgentForm {
                 .and_then(|b| b.model.clone())
                 .or_else(|| spec.model.clone());
             f.models[i].set(model.unwrap_or_default());
-            // efforts for codex, agy, and muse: claude and opencode have no effort flag
-            let slot_idx = match i {
-                1 => Some(0),
-                2 => Some(1),
-                4 => Some(2),
-                _ => None,
-            };
+            // efforts for codex, agy, grok, pi and muse: claude and
+            // opencode have no effort flag
+            let slot_idx = effort_slot(i);
             if let Some(slot) = slot_idx.and_then(|k| f.efforts.get_mut(k)) {
                 let effort = b
                     .and_then(|b| b.effort.clone())
@@ -336,7 +355,9 @@ impl AgentForm {
             AgentField::ModelCodex => Some(&mut self.models[1]),
             AgentField::ModelAgy => Some(&mut self.models[2]),
             AgentField::ModelOpenCode => Some(&mut self.models[3]),
-            AgentField::ModelMuse => Some(&mut self.models[4]),
+            AgentField::ModelGrok => Some(&mut self.models[4]),
+            AgentField::ModelPi => Some(&mut self.models[5]),
+            AgentField::ModelMuse => Some(&mut self.models[6]),
             _ => None,
         }
     }
@@ -375,11 +396,9 @@ impl AgentForm {
         );
         for (i, h) in agents::HARNESSES.iter().enumerate() {
             let model = self.models[i].text.trim();
-            let effort = match i {
-                1 => self.effort(0),
-                2 => self.effort(1),
-                4 => self.effort(2),
-                _ => "",
+            let effort = match effort_slot(i) {
+                Some(slot) => self.effort(slot),
+                None => "",
             };
             if model.is_empty() && effort.is_empty() {
                 continue;
@@ -2408,8 +2427,8 @@ mod opencode_form_tests {
         let spec = agents::AgentSpec::parse(text).expect("parses");
         let form = AgentForm::from_spec(&spec);
         assert_eq!(form.models[3].text, "opencode/big-pickle");
-        assert_eq!(form.models[4].text, "muse-spark-1.3");
-        assert_eq!(form.effort(2), "medium");
+        assert_eq!(form.models[6].text, "muse-spark-1.3");
+        assert_eq!(form.effort(4), "medium");
         let out = form.render();
         assert!(
             out.contains("[backends.opencode]\nmodel = \"opencode/big-pickle\"\n"),

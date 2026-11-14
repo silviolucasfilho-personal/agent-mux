@@ -1026,10 +1026,9 @@ fn with_several_swarms_that_need_you_the_newest_is_the_one_to_open() {
 }
 
 #[test]
-fn a_swarm_row_keeps_the_cursor_when_a_session_elsewhere_ends() {
+fn a_swarm_session_keeps_the_cursor_when_a_session_elsewhere_ends() {
     use agent_mux::app::agents_list::AgentKind;
     let mut f = fixture();
-    f.app.clean = false;
     f.app.agents.show_swarm = true;
     for _ in 0..2 {
         f.app.focus_list();
@@ -1046,6 +1045,7 @@ fn a_swarm_row_keeps_the_cursor_when_a_session_elsewhere_ends() {
         label: "w1".into(),
     });
     f.app.selected = 0;
+    // with show_swarm the worker gathers under its swarm's row
     let lines = f.app.agent_lines();
     let at = lines
         .iter()
@@ -1095,12 +1095,9 @@ fn swarm_sessions_stay_off_the_agents_list_unless_the_option_says_so() {
             .iter()
             .any(|l| matches!(&l.kind, AgentKind::Run(k) if k.starts_with("swarm:")))
     };
-    // the default: the worker is on the Swarm screen only, in either list
-    for clean in [true, false] {
-        f.app.clean = clean;
-        assert_eq!(listed(&f.app), vec![0], "clean = {clean}");
-        assert!(!swarm_row(&f.app), "clean = {clean}");
-    }
+    // the default: the worker is on the Swarm screen only
+    assert_eq!(listed(&f.app), vec![0]);
+    assert!(!swarm_row(&f.app));
     // a selected worker leaves the cursor on a listed session
     f.app.selected = 1;
     assert_eq!(f.app.agent_row(), Some(AgentKind::Session(0)));
@@ -1110,7 +1107,7 @@ fn swarm_sessions_stay_off_the_agents_list_unless_the_option_says_so() {
     f.app.focus_list();
     press(&mut f, KeyCode::Down);
     assert_eq!(f.app.selected, 0);
-    // `[agents] show_swarm = true` steps onto it and lists it under its swarm
+    // `[agents] show_swarm = true` steps onto it and lists it under its harness
     f.app.agents.show_swarm = true;
     press(&mut f, KeyCode::Down);
     assert_eq!(f.app.selected, 1);

@@ -1,12 +1,15 @@
-//! The Agents list: everything runnable in one sidebar section, each
-//! running session nested under the agent that started it (spec
-//! `docs/superpowers/specs/2026-09-26-agent-first-design.md`, section 4).
+//! The Agents list: launched work only — the harness profiles and,
+//! under each, its running sessions (spec
+//! `docs/superpowers/specs/2026-11-14-library-screen-flows-skills-personas-design.md`,
+//! section 4). Flows, skills and personas are definitions; they live
+//! in the Library (`crate::app::library`), and a session they launched
+//! sits under its harness here.
 //!
-//! The list is a projection over the existing runtimes. Moving the cursor
-//! onto a row selects the same thing the old sections selected (a
-//! session, a loop, a workflow row, a skill), so every action behind a key
-//! keeps working unchanged; only the rows without an older home (a
-//! harness, a persona agent) are remembered here.
+//! Moving the cursor onto a row selects the same thing the old
+//! sections selected (a session, a loop, a workflow row, a skill), so
+//! every action behind a key keeps working unchanged; only the rows
+//! without an older home (a harness, a persona agent) are remembered
+//! here.
 
 use super::workflows::WorkflowRow;
 use super::{App, SidebarSection};
@@ -165,47 +168,6 @@ impl App {
         }
     }
 
-    /// Which agent row a session belongs under.
-    pub(crate) fn owner_of(&self, idx: usize, workflow_rows: &[WorkflowRow]) -> AgentKind {
-        let s = &self.sessions[idx];
-        if let Some(g) = &s.group {
-            let known = match g.kind {
-                crate::tree::GroupKind::Loop => self
-                    .loop_registry
-                    .loops
-                    .iter()
-                    .position(|l| l.id == g.id)
-                    .map(AgentKind::Loop),
-                crate::tree::GroupKind::Workflow => workflow_rows
-                    .iter()
-                    .position(|r| {
-                        matches!(r, WorkflowRow::Live(id) | WorkflowRow::Recent(id) if *id == g.id)
-                    })
-                    .map(AgentKind::Flow),
-                crate::tree::GroupKind::Bus | crate::tree::GroupKind::Swarm => None,
-            };
-            // a run no row stands for still keeps its sessions together
-            return known.unwrap_or_else(|| AgentKind::Run(g.key()));
-        }
-        if let Some(agent) = &s.agent
-            && (self.task_agents.contains(agent) || self.personas.contains(agent))
-        {
-            return AgentKind::Persona(agent.clone());
-        }
-        if let Some(skill) = &s.skill_id
-            && let Some(i) = self.skills.iter().position(|k| k.id == *skill)
-        {
-            return AgentKind::Skill(i);
-        }
-        let by_name = self.profiles.iter().position(|p| p.name == s.profile.name);
-        let by_harness = Harness::detect(&s.profile.command).and_then(|h| {
-            self.profiles
-                .iter()
-                .position(|p| Harness::detect(&p.command) == Some(h))
-        });
-        AgentKind::Harness(by_name.or(by_harness).unwrap_or(0))
-    }
-
     /// Whether session `i` is listed in the Agents sidebar: a swarm's
     /// coordinator and workers are seen on the Swarm screen only, unless
     /// `[agents] show_swarm = true`.
@@ -218,9 +180,9 @@ impl App {
                 .is_some_and(|g| g.kind == crate::tree::GroupKind::Swarm)
     }
 
-    /// The harness row a session sits under in a clean list: by profile
-    /// name, else by harness, else the first.
-    fn harness_of(&self, idx: usize) -> AgentKind {
+    /// The harness row a session sits under in the Agents list: by
+    /// profile name, else by harness, else the first.
+    pub(crate) fn harness_of(&self, idx: usize) -> AgentKind {
         let s = &self.sessions[idx];
         let by_name = self.profiles.iter().position(|p| p.name == s.profile.name);
         let by_harness = Harness::detect(&s.profile.command).and_then(|h| {
@@ -231,22 +193,27 @@ impl App {
         AgentKind::Harness(by_name.or(by_harness).unwrap_or(0))
     }
 
-    /// Every row of the Agents list, in order: harnesses, scheduled
-    /// agents, flows, skills, personas; sessions under their owner. With
-    /// `App::clean` (how agent-mux starts; `m` toggles it), the
-    /// harnesses alone, every session under its harness.
+    /// Every row of the Agents list, in order: the harness profiles
+    /// and, under each, its launched sessions — launched work only.
+    /// Flows, skills and personas are definitions and live in the
+    /// Library (`Mode::Library`); a session they launched sits under
+    /// its harness here, badged with the item's name in the drawing.
     pub fn agent_lines(&self) -> Vec<AgentLine> {
-        let rows = self.workflow_rows();
         // `None`: a session the list leaves out (`session_listed`)
         let owners: Vec<Option<AgentKind>> = (0..self.sessions.len())
             .map(|i| {
                 if !self.session_listed(i) {
-                    None
-                } else if self.clean {
-                    Some(self.harness_of(i))
-                } else {
-                    Some(self.owner_of(i, &rows))
+                    return None;
                 }
+                let s = &self.sessions[i];
+                // a swarm's sessions gather under their swarm (they are
+                // launched work; the row carries the swarm verbs)
+                if let Some(g) = &s.group
+                    && g.kind == crate::tree::GroupKind::Swarm
+                {
+                    return Some(AgentKind::Run(g.key()));
+                }
+                Some(self.harness_of(i))
             })
             .collect();
         let mut out = Vec::new();
@@ -274,60 +241,17 @@ impl App {
                 }
             }
         };
-        // a heading with `count` agents under it, listed unless folded
-        let heading = |out: &mut Vec<AgentLine>, name: &'static str, count: usize| -> bool {
-            let kind = AgentKind::Header(name);
-            let folded = self.agent_is_folded(&kind);
-            out.push(AgentLine {
-                kind,
-                depth: 0,
-                children: count,
-            });
-            !folded
-        };
         for p in 0..self.profiles.len() {
             push(&mut out, AgentKind::Harness(p), 0);
         }
-        if self.clean {
-            return out;
-        }
-        if !self.loop_registry.loops.is_empty()
-            && heading(&mut out, "scheduled", self.loop_registry.loops.len())
-        {
-            for i in 0..self.loop_registry.loops.len() {
-                push(&mut out, AgentKind::Loop(i), 1);
-            }
-        }
-        let mut runs: Vec<AgentKind> = Vec::new();
+        let mut swarms: Vec<AgentKind> = Vec::new();
         for o in owners.iter().flatten() {
-            if matches!(o, AgentKind::Run(_)) && !runs.contains(o) {
-                runs.push(o.clone());
+            if matches!(o, AgentKind::Run(_)) && !swarms.contains(o) {
+                swarms.push(o.clone());
             }
         }
-        if (!rows.is_empty() || !runs.is_empty())
-            && heading(&mut out, "flows", rows.len() + runs.len())
-        {
-            for r in runs {
-                push(&mut out, r, 1);
-            }
-            for i in 0..rows.len() {
-                push(&mut out, AgentKind::Flow(i), 1);
-            }
-        }
-        if !self.skills.is_empty() && heading(&mut out, "skills", self.skills.len()) {
-            for i in 0..self.skills.len() {
-                push(&mut out, AgentKind::Skill(i), 1);
-            }
-        }
-        if !self.task_agents.is_empty() && heading(&mut out, "on demand", self.task_agents.len()) {
-            for name in &self.task_agents {
-                push(&mut out, AgentKind::Persona(name.clone()), 1);
-            }
-        }
-        if !self.personas.is_empty() && heading(&mut out, "personas", self.personas.len()) {
-            for name in &self.personas {
-                push(&mut out, AgentKind::Persona(name.clone()), 1);
-            }
+        for r in swarms {
+            push(&mut out, r, 0);
         }
         out
     }

@@ -274,9 +274,13 @@ impl EdField {
                 AgentField::ModelCodex => "Codex model",
                 AgentField::ModelAgy => "Antigravity model",
                 AgentField::ModelOpenCode => "OpenCode model",
+                AgentField::ModelGrok => "Grok model",
+                AgentField::ModelPi => "Pi model",
                 AgentField::ModelMuse => "Muse model",
                 AgentField::EffortCodex => "Codex effort",
                 AgentField::EffortAgy => "Antigravity effort",
+                AgentField::EffortGrok => "Grok effort",
+                AgentField::EffortPi => "Pi effort",
                 AgentField::EffortMuse => "Muse effort",
                 AgentField::SaveTo => "Saved in",
             },
@@ -314,6 +318,8 @@ impl EdField {
                     | AgentField::ModelCodex
                     | AgentField::ModelAgy
                     | AgentField::ModelOpenCode
+                    | AgentField::ModelGrok
+                    | AgentField::ModelPi
                     | AgentField::ModelMuse
             ),
             EdField::Task(f) => {
@@ -410,9 +416,13 @@ impl AgentEditorState {
                                 A::ModelCodex,
                                 A::ModelAgy,
                                 A::ModelOpenCode,
+                                A::ModelGrok,
+                                A::ModelPi,
                                 A::ModelMuse,
                                 A::EffortCodex,
                                 A::EffortAgy,
+                                A::EffortGrok,
+                                A::EffortPi,
                                 A::EffortMuse,
                             ])
                             .collect(),

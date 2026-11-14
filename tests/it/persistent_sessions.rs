@@ -407,7 +407,22 @@ async fn test_sidebar_split_navigation() {
         app.handle_key(&key(KeyCode::Down), Instant::now());
     }
     assert_eq!(app.sidebar_section, SidebarSection::History);
-    assert!(seen.contains(&SidebarSection::Workflows), "flows are rows");
+    // flows are not rows of this list any more: they are Library rows
+    assert!(
+        !seen.contains(&SidebarSection::Workflows),
+        "flows are not rows"
+    );
+    app.open_library(agent_mux::app::library::Section::Flows);
+    match &app.mode {
+        agent_mux::app::Mode::Library(st) => assert!(
+            app.library_rows(st)
+                .iter()
+                .any(|r| matches!(r, agent_mux::app::library::Row::Flow(_))),
+            "flows are rows of the Library"
+        ),
+        other => panic!("not in the library: {other:?}"),
+    }
+    app.mode = agent_mux::app::Mode::Main;
     assert_eq!(app.selected_history, 0);
 
     // Down in History navigates history items

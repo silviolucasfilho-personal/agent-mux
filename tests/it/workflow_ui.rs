@@ -73,11 +73,12 @@ fn to_workflows(app: &mut App) {
 }
 
 #[test]
-fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
-    // flows are rows of the Agents list, under their own heading
+fn flows_live_in_the_library_not_the_agents_sidebar() {
+    // the Agents list holds launched work only; the built-in flows are
+    // rows of the Library's flows section, with their coverage
     let (mut app, _temp) = app_with(vec![profile("Claude Code", "claude")]);
     let text = render(&app, 120, 40);
-    assert!(text.contains("FLOWS"), "{text}");
+    assert!(!text.contains("FLOWS"), "{text}");
     assert_eq!(app.sidebar_section, SidebarSection::Active);
     assert_eq!(
         app.workflow_list.len(),
@@ -85,54 +86,35 @@ fn the_sidebar_has_a_workflows_section_between_loops_and_history() {
         "the built-ins are listed from the start"
     );
 
-    to_workflows(&mut app);
+    app.open_library(agent_mux::app::library::Section::Flows);
     let text = render(&app, 120, 40);
+    assert!(text.contains("flows"), "{text}");
     assert!(text.contains("review-changes"), "{text}");
-    assert!(
-        text.contains("[c] compose"),
-        "the hint line names the keys\n{text}"
-    );
-    // the preview card describes the selected document
-    assert!(
-        text.contains("Choose the review lenses for the change"),
-        "{text}"
-    );
-    // steps in words, not document kinds
-    assert!(text.contains("one session for each item"), "{text}");
-    assert!(!text.contains("fanout"), "{text}");
-    assert!(text.contains("Typical"), "{text}");
 
-    // j/k walk the flows and continue into the rows around them
+    // the cursor starts on the flows heading; j walks the flows
+    let first = match &app.mode {
+        Mode::Library(st) => app.library_item(st),
+        _ => panic!("not in the library"),
+    };
+    assert!(first.is_none(), "a heading has no item: {first:?}");
     press(&mut app, KeyCode::Char('j'));
-    assert_eq!(app.selected_workflow, 1);
-    assert_eq!(app.selected_workflow_entry().unwrap().name, "understand");
-    for _ in 0..8 {
-        press(&mut app, KeyCode::Char('j'));
-    }
-    assert_ne!(
-        app.sidebar_section,
-        SidebarSection::Workflows,
-        "past the last flow: the skills below"
-    );
-    press(&mut app, KeyCode::Char('k'));
-    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
-    assert_eq!(app.selected_workflow, 8, "back on the last flow");
-    for _ in 0..9 {
-        press(&mut app, KeyCode::Char('k'));
-    }
-    assert_eq!(
-        app.agent_row(),
-        Some(agent_mux::app::agents_list::AgentKind::Header("flows")),
-        "the collapsible heading is a stop in the list"
-    );
-    press(&mut app, KeyCode::Char('k'));
-    assert!(
-        matches!(
-            app.agent_row(),
-            Some(agent_mux::app::agents_list::AgentKind::Harness(0))
-        ),
-        "k leaves upward, to the harness"
-    );
+    let first = match &app.mode {
+        Mode::Library(st) => app.library_item(st),
+        _ => panic!("not in the library"),
+    };
+    assert!(matches!(
+        first,
+        Some(agent_mux::app::library::Item::Flow(_))
+    ));
+    press(&mut app, KeyCode::Char('j'));
+    let second = match &app.mode {
+        Mode::Library(st) => app.library_item(st),
+        _ => panic!("not in the library"),
+    };
+    assert_ne!(first, second, "j moves to the next flow");
+    // Esc returns to the Agents list
+    press(&mut app, KeyCode::Esc);
+    assert!(matches!(app.mode, Mode::Main), "{:?}", app.mode);
 }
 
 #[test]
@@ -1032,22 +1014,21 @@ fn a_recent_run_is_listed_above_the_library_and_opens_on_its_run_screen() {
         WorkflowRow::Recent("run-00000009".into())
     );
 
+    // the Agents list holds launched work only: no FLOWS heading, no
+    // definition rows — the flow and its runs live in the Library
     let text = render(&app, 120, 40);
-    assert!(text.contains("FLOWS"), "{text}");
+    assert!(!text.contains("FLOWS"), "{text}");
+    app.open_library(agent_mux::app::library::Section::Flows);
+    let text = render(&app, 120, 40);
     assert!(
-        text.lines()
-            .any(|l| l.contains("✓ understand") && l.contains("done")),
-        "{text}"
+        text.contains("understand"),
+        "the Library lists the flow\n{text}"
     );
+    app.mode = Mode::Main;
 
-    // Enter on the run opens its Run screen, not the run dialog
-    app.select_workflow_row(0);
-    let text = render(&app, 120, 40);
-    assert!(
-        text.contains("FINISHED"),
-        "the preview is the run's\n{text}"
-    );
-    press(&mut app, KeyCode::Enter);
+    // the run opens on its Run screen (from the runs view, as the
+    // Library's Runs tab directs), not in a preview in the Agents list
+    assert!(app.open_run_screen("run-00000009", agent_mux::app::run_screen::Origin::Agents));
     let Mode::Run(v) = &app.mode else {
         panic!("not the Run screen: {:?}", app.mode)
     };

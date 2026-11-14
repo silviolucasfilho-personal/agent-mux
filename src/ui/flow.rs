@@ -1668,15 +1668,33 @@ fn draw_agent_form(f: &mut Frame, area: Rect, st: &FlowBuilderState, role: Role,
     );
     text_row(
         &mut lines,
+        "Model grok",
+        AgentField::ModelGrok,
+        &form.models[4],
+        1,
+        "the profile's",
+    );
+    text_row(
+        &mut lines,
+        "Model pi",
+        AgentField::ModelPi,
+        &form.models[5],
+        1,
+        "the profile's",
+    );
+    text_row(
+        &mut lines,
         "Model muse",
         AgentField::ModelMuse,
-        &form.models[4],
+        &form.models[6],
         1,
         "the profile's",
     );
     for (k, (name, field)) in [
         ("Effort codex", AgentField::EffortCodex),
         ("Effort agy", AgentField::EffortAgy),
+        ("Effort grok", AgentField::EffortGrok),
+        ("Effort pi", AgentField::EffortPi),
         ("Effort muse", AgentField::EffortMuse),
     ]
     .into_iter()

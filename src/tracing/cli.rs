@@ -3557,8 +3557,8 @@ mod tests {
         assert_eq!(found[0].1, Provider::Muse);
 
         let mut store = open_rw(&resolved).unwrap();
-        let summary = import_transcript(&mut store, &resolved, &found[0].0, None, ContentMode::Full)
-            .unwrap();
+        let summary =
+            import_transcript(&mut store, &resolved, &found[0].0, None, ContentMode::Full).unwrap();
         assert_eq!(summary.session_id, real_id);
         assert!(!summary.empty);
         let key = format!("muse:{real_id}");

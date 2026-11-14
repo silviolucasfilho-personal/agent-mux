@@ -10,6 +10,7 @@ mod config_library;
 mod config_ui;
 mod flow_builder_ui;
 mod heimdall_dossier;
+mod library_ui;
 mod live_snapshots;
 mod loop_builder_ui;
 mod loop_cli;

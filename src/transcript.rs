@@ -1573,8 +1573,9 @@ pub fn parse_muse_line(line: &str) -> Vec<TranscriptEvent> {
                         .flatten()
                     {
                         let args = match tc.get("args") {
-                            Some(Value::String(s)) => serde_json::from_str(s)
-                                .unwrap_or_else(|_| Value::String(s.clone())),
+                            Some(Value::String(s)) => {
+                                serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.clone()))
+                            }
                             Some(other) => other.clone(),
                             None => Value::Object(serde_json::Map::new()),
                         };

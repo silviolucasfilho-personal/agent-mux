@@ -90,34 +90,33 @@ fn app_with_sessions(groups: &[Option<GroupRef>]) -> (App, tempfile::TempDir) {
 }
 
 #[test]
-fn a_workflow_runs_steps_gather_under_one_header() {
+fn a_workflow_runs_steps_sit_under_their_harness() {
+    use agent_mux::app::agents_list::AgentKind;
     let (app, _t) = app_with_sessions(&[
         None,
         Some(wf("abcd1234ef", "read:src")),
         Some(wf("abcd1234ef", "read:tests")),
     ]);
     let out = render(&app, 120, 40);
-    assert!(out.contains("⚙"), "a workflow run carries its glyph");
-    assert!(out.contains("map-cod"), "the row names the workflow");
-    assert!(out.contains("├"), "its steps hang off it");
     assert!(
         out.contains("read:src"),
         "a step is named by its step, not its profile: {out}"
     );
-    // the steps sit right under their run in the Agents list
+    // launched work only: no run header, no definition rows; the steps
+    // sit under their harness like any other session
     let lines = app.agent_lines();
-    let run = lines
+    assert!(
+        !lines
+            .iter()
+            .any(|l| matches!(l.kind, AgentKind::Run(_) | AgentKind::Header(_))),
+        "{lines:?}"
+    );
+    let harness = lines
         .iter()
-        .position(|l| matches!(&l.kind, agent_mux::app::agents_list::AgentKind::Run(k) if k == "wf:abcd1234ef"))
-        .expect("a row for the run");
-    assert_eq!(
-        lines[run + 1].kind,
-        agent_mux::app::agents_list::AgentKind::Session(1)
-    );
-    assert_eq!(
-        lines[run + 2].kind,
-        agent_mux::app::agents_list::AgentKind::Session(2)
-    );
+        .position(|l| l.kind == AgentKind::Harness(0))
+        .expect("a harness row");
+    assert_eq!(lines[harness + 2].kind, AgentKind::Session(1));
+    assert_eq!(lines[harness + 3].kind, AgentKind::Session(2));
 }
 
 #[test]
@@ -151,62 +150,44 @@ fn space_folds_an_agent_without_losing_its_sessions() {
 }
 
 #[test]
-fn space_folds_a_section_and_keeps_its_heading_selected() {
+fn definitions_are_not_rows_in_the_agents_list() {
     use agent_mux::app::agents_list::AgentKind;
-    let (mut app, _t) = app_with_sessions(&[Some(wf("abcd1234ef", "read:src"))]);
+    let (app, _t) = app_with_sessions(&[Some(wf("abcd1234ef", "read:src"))]);
     let lines = app.agent_lines();
-    let flows = lines
-        .iter()
-        .position(|l| l.kind == AgentKind::Header("flows"))
-        .unwrap();
-    app.select_agent_line(&lines, flows);
-    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
-
-    assert_eq!(app.agent_row(), Some(AgentKind::Header("flows")));
     assert!(
-        app.agent_lines()
+        lines
             .iter()
-            .any(|l| l.kind == AgentKind::Header("flows"))
-    );
-    assert!(
-        !app.agent_lines()
-            .iter()
-            .any(|l| matches!(l.kind, AgentKind::Run(_)))
-    );
-
-    app.handle_key(&key(KeyCode::Char(' ')), Instant::now());
-    assert!(
-        app.agent_lines()
-            .iter()
-            .any(|l| matches!(l.kind, AgentKind::Run(_)))
+            .all(|l| matches!(l.kind, AgentKind::Harness(_) | AgentKind::Session(_))),
+        "the Agents list holds launched work only: {lines:?}"
     );
 }
 
 #[test]
-fn clicking_a_heading_folds_its_rows() {
+fn clicking_a_harness_folds_its_sessions() {
     use agent_mux::app::agents_list::AgentKind;
     let (mut app, _t) = app_with_sessions(&[Some(wf("abcd1234ef", "read:src"))]);
     let lines = app.agent_lines();
     let heights = agent_mux::ui::agent_row_heights(&lines);
-    let flows = lines
+    let harness = lines
         .iter()
-        .position(|l| l.kind == AgentKind::Header("flows"))
+        .position(|l| l.kind == AgentKind::Harness(0))
         .unwrap();
     let (agents, _) = agent_mux::ui::sidebar_areas(app.pane_size.0 + 3, 0);
     app.handle_mouse(
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 4,
-            row: agents.y + 1 + heights[..flows].iter().sum::<usize>() as u16,
+            // the harness's fold arrow column (`ui::agent_arrow_column`)
+            column: 3,
+            row: agents.y + 1 + heights[..harness].iter().sum::<usize>() as u16,
             modifiers: KeyModifiers::NONE,
         },
         Instant::now(),
     );
-    assert_eq!(app.agent_row(), Some(AgentKind::Header("flows")));
+    assert_eq!(app.agent_row(), Some(AgentKind::Harness(0)));
     assert!(
         !app.agent_lines()
             .iter()
-            .any(|l| matches!(l.kind, AgentKind::Run(_)))
+            .any(|l| matches!(l.kind, AgentKind::Session(_)))
     );
 }
 
@@ -414,11 +395,8 @@ fn the_trace_browser_draws_the_runs_as_a_tree() {
     assert!(out.contains("▸"), "the header closed: {out}");
 }
 
-/// A click lands on a drawn row, not on a session index: a header folds,
-/// a child selects. The Active pane starts at row 0, so its first list row
-/// is row 1.
 #[test]
-fn clicking_a_run_selects_it_and_clicking_a_step_selects_the_session() {
+fn clicking_a_step_selects_the_session() {
     use agent_mux::app::agents_list::AgentKind;
     let (mut app, _t) = app_with_sessions(&[
         None,
@@ -442,17 +420,8 @@ fn clicking_a_run_selects_it_and_clicking_a_step_selects_the_session() {
     };
     app.handle_mouse(click(at(&AgentKind::Session(1))), Instant::now());
     assert_eq!(app.selected, 1, "clicked the first step");
-    app.handle_mouse(
-        click(at(&AgentKind::Run("wf:abcd1234ef".into()))),
-        Instant::now(),
-    );
-    assert_eq!(
-        app.agent_row(),
-        Some(AgentKind::Run("wf:abcd1234ef".into()))
-    );
-    // a run row has no session keys: Enter does not attach
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
-    assert!(matches!(app.mode, Mode::Main));
+    app.handle_mouse(click(at(&AgentKind::Harness(0))), Instant::now());
+    assert_eq!(app.agent_row(), Some(AgentKind::Harness(0)));
 }
 
 /// A run that starts while the browser is open has to find its header:
@@ -496,8 +465,6 @@ fn the_live_refresh_groups_a_run_that_started_after_the_browser_opened() {
     );
 }
 
-/// The list is a tree: a fold arrow only where there is something to
-/// fold, headings in capitals with their count, `├`/`└` on sessions.
 #[test]
 fn the_tree_shows_arrows_only_where_something_folds() {
     use agent_mux::app::agents_list::AgentKind;
@@ -515,32 +482,18 @@ fn the_tree_shows_arrows_only_where_something_folds() {
         row("Codex").contains("  ❯ Codex") && !row("Codex").contains('▾'),
         "nothing to fold under an empty harness: {out}"
     );
-    assert!(row("FLOWS").contains("▾ FLOWS"), "{out}");
-    assert!(
-        row("map-cod").contains("▾ ⚙"),
-        "a run with sessions folds: {out}"
-    );
-    assert!(
-        row("understand").contains("  · understand") && !row("understand").contains('▾'),
-        "a library flow has nothing to fold: {out}"
-    );
     assert!(
         row("read:src").contains("└ 2 read:src"),
         "the only step is the last: {out}"
     );
-    // the heading counts what is under it, folded or not
-    let lines = app.agent_lines();
-    let flows = lines
-        .iter()
-        .find(|l| l.kind == AgentKind::Header("flows"))
-        .unwrap();
-    // the library's flows and the orphan run
-    assert_eq!(flows.children, app.workflow_rows().len() + 1);
-    let run = lines
-        .iter()
-        .find(|l| matches!(l.kind, AgentKind::Run(_)))
-        .unwrap();
-    assert_eq!((run.depth, run.children), (1, 1));
+    // definitions are not in this tree at all
+    assert!(
+        !app.agent_lines().iter().any(|l| matches!(
+            l.kind,
+            AgentKind::Header(_) | AgentKind::Flow(_) | AgentKind::Run(_)
+        )),
+        "{out}"
+    );
 }
 
 /// `←` folds the row, or climbs to the parent; `→` unfolds, or descends.
@@ -670,11 +623,9 @@ async fn a_new_session_starts_on_the_harness_under_the_cursor() {
     app.kill_all();
 }
 
-/// Harnesses only (`App::clean`, how agent-mux starts): the harness rows
-/// and their sessions, nothing else in the Agents list: no headings;
 /// History stays, and `n` is a new session.
 #[tokio::test]
-async fn clean_lists_only_the_harnesses_and_their_sessions() {
+async fn the_agents_list_holds_only_the_harnesses_and_their_sessions() {
     use agent_mux::app::agents_list::AgentKind;
     let (mut app, _temp) = app_with_sessions(&[None, Some(wf("run-1", "read"))]);
     app.history_sessions = vec![agent_mux::history::SessionSummary {
@@ -688,13 +639,6 @@ async fn clean_lists_only_the_harnesses_and_their_sessions() {
         provider: agent_mux::history::AgentProvider::Claude,
         cwd: Some(std::path::PathBuf::from("/tmp")),
     }];
-    // the full list has a flows heading for the workflow session, and
-    // the built-in skills
-    let full = app.agent_lines();
-    assert!(full.iter().any(|l| l.kind == AgentKind::Header("flows")));
-    assert!(full.iter().any(|l| l.kind == AgentKind::Header("skills")));
-
-    app.clean = true;
     let lines = app.agent_lines();
     assert!(
         lines
@@ -716,9 +660,9 @@ async fn clean_lists_only_the_harnesses_and_their_sessions() {
     assert_eq!(app.focus, agent_mux::app::Focus::Pane);
     app.execute_command(agent_mux::keymap::ActionId::FocusAgents, Instant::now());
     assert_eq!(app.focus, agent_mux::app::Focus::List);
-    // n is a new session, not the chooser
+    // n is the new-agent chooser; its blank path is a new session
     app.handle_key(&key(KeyCode::Char('n')), Instant::now());
-    assert!(matches!(app.mode, Mode::NewSession(_)), "{:?}", app.mode);
+    assert!(matches!(app.mode, Mode::NewAgent(_)), "{:?}", app.mode);
     app.mode = Mode::Main;
     let screen = render(&app, 120, 40);
     assert!(screen.contains("History"), "{screen}");
@@ -726,14 +670,12 @@ async fn clean_lists_only_the_harnesses_and_their_sessions() {
     app.kill_all();
 }
 
-/// `m` in the list shows the scheduled, flows, skills and personas
-/// sections and hides them again; a cursor on a row that goes away comes
-/// back to the sessions.
+/// `o` in the list opens the Library (flows, skills, personas); `m` is
+/// no longer a sections toggle and the list never gains definition rows.
 #[tokio::test]
-async fn m_shows_and_hides_the_sections_beyond_the_harnesses() {
+async fn o_opens_the_library_and_the_list_stays_launched_work_only() {
     use agent_mux::app::agents_list::AgentKind;
     let (mut app, _temp) = app_with_sessions(&[None, Some(wf("run-1", "read"))]);
-    app.clean = true;
     app.focus_list();
     let headed = |app: &agent_mux::app::App| {
         app.agent_lines()
@@ -742,34 +684,19 @@ async fn m_shows_and_hides_the_sections_beyond_the_harnesses() {
     };
     assert!(!headed(&app));
     let screen = render(&app, 120, 40);
-    assert!(screen.contains("⋯ more agents  m"), "{screen}");
+    assert!(screen.contains("⋯ flows, skills, personas o"), "{screen}");
     app.handle_key(&key(KeyCode::Char('m')), Instant::now());
-    assert!(!app.clean);
-    assert!(headed(&app));
-    assert!(
-        app.agent_lines()
-            .iter()
-            .any(|l| l.kind == AgentKind::Header("skills"))
-    );
-    // n is the agent chooser again with the sections shown
-    app.select_first_row_of(SidebarSection::Agents);
-    assert!(matches!(app.agent_row(), Some(AgentKind::Skill(_))));
-    app.handle_key(&key(KeyCode::Char('m')), Instant::now());
-    assert!(app.clean);
     assert!(!headed(&app));
-    assert_eq!(app.sidebar_section, SidebarSection::Active);
+    assert!(matches!(app.mode, Mode::Main), "{:?}", app.mode);
+    app.handle_key(&key(KeyCode::Char('o')), Instant::now());
     assert!(
-        matches!(
-            app.agent_row(),
-            Some(AgentKind::Harness(_) | AgentKind::Session(_))
-        ),
-        "{:?}",
-        app.agent_row()
+        matches!(app.mode, Mode::Library(_)),
+        "o opens the Library: {:?}",
+        app.mode
     );
-    // with the pane focused, m is typed into the harness
-    app.focus_pane();
-    app.handle_key(&key(KeyCode::Char('m')), Instant::now());
-    assert!(app.clean);
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    assert!(matches!(app.mode, Mode::Main), "{:?}", app.mode);
+    assert!(!headed(&app));
     app.kill_all();
 }
 
@@ -1105,9 +1032,8 @@ fn i_opens_a_personas_session_on_its_run_screen() {
     // the Agents list names what the session runs as, and where
     let list = render(&app, 140, 40);
     assert!(
-        list.lines()
-            .any(|l| l.contains("◇ skeptic") && l.contains("claude")),
-        "the persona's row names the harness it runs on\n{list}"
+        list.lines().any(|l| l.contains("◇skeptic")),
+        "the session row is badged with its persona (the harness is its parent row)\n{list}"
     );
     assert!(list.contains("skeptic · p0 —"), "the pane's title\n{list}");
 

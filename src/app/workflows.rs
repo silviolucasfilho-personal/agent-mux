@@ -2258,6 +2258,44 @@ impl App {
         self.mode = Mode::WorkflowDialog(Box::new(d));
     }
 
+    /// Puts the Workflows selection on the document at `idx` in
+    /// `workflow_list` (the Library's flows are indexed that way).
+    pub fn select_workflow_doc(&mut self, idx: usize) -> bool {
+        let rows = self.workflow_rows();
+        let Some(pos) = rows
+            .iter()
+            .position(|r| matches!(r, WorkflowRow::Doc(i) if *i == idx))
+        else {
+            return false;
+        };
+        self.selected_workflow = pos;
+        self.workflow_anchor = rows.get(pos).cloned();
+        self.sidebar_section = super::SidebarSection::Workflows;
+        true
+    }
+
+    /// The Library's flow launch: the run dialog for the document at
+    /// `idx`, preset to `harness`'s first profile when one is named.
+    pub fn open_workflow_run_on(&mut self, idx: usize, harness: Option<Harness>) {
+        if !self.select_workflow_doc(idx) {
+            self.notice = Some(Notice::info("that flow is not in the list"));
+            return;
+        }
+        self.open_workflow_run();
+        if let (Some(h), Mode::WorkflowDialog(d)) = (harness, &mut self.mode)
+            && let Some(pos) = d.profiles.iter().position(|(_, ph)| *ph == h)
+        {
+            d.profile_idx = pos;
+        }
+    }
+
+    /// The Library's flow edit: the flow builder on the document at `idx`.
+    pub fn open_workflow_run_editor(&mut self, idx: usize) {
+        if self.select_workflow_doc(idx) {
+            self.open_flow_builder_selected();
+        }
+    }
+
     /// `d` in the section: a plan opens in the runs view, where `d`
     /// discards it; a
     /// library document is removed from the Configuration view.

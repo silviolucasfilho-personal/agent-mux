@@ -667,12 +667,23 @@ fn commands_list_each_shortcut_beside_its_command() {
             .ends_with(&chord("⌘L", "Ctrl+Shift+L")),
         "{focus}"
     );
-    assert!(row("Open traces").contains("F3"));
     // an unavailable command still shows its key
     assert!(
         row("Return to session").contains(&chord("⌘Enter", "Ctrl+Shift+Enter")),
         "{text}"
     );
+    // the Screens theme grew (Open library): filter to the traces row
+    for c in "traces".chars() {
+        a.handle_key(&key(KeyCode::Char(c)), Instant::now());
+    }
+    let text = screen(&a, 100);
+    let row = |label: &str| {
+        text.lines()
+            .find(|l| l.contains(label))
+            .unwrap_or_else(|| panic!("no {label} row in\n{text}"))
+            .to_string()
+    };
+    assert!(row("Open traces").contains("F3"));
     // an observed shortcut replaces the candidate
     let observed = a.command_shortcut(ActionId::FocusAgents);
     assert_eq!(observed, Some((chord("⌘L", "Ctrl+Shift+L"), false)));

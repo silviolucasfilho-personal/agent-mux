@@ -3,6 +3,7 @@ mod agent_editor;
 mod commands;
 mod flow;
 pub mod langfuse;
+pub mod library;
 mod loop_builder;
 pub mod markdown;
 pub mod memory;
@@ -320,7 +321,11 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
     let [body, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
     // the Trace Browser takes the whole screen unless asked for the sidebar
     let browser_alone = matches!(&app.mode, Mode::TraceBrowser(b) if !b.with_sidebar);
-    if let Mode::Swarm(view) = &app.mode {
+    if let Mode::Library(_) = &app.mode {
+        // the Library: its tree where the Agents list is, the selected
+        // row's card in the main pane (`ui::library`)
+        library::draw_screen(f, body, app);
+    } else if let Mode::Swarm(view) = &app.mode {
         // the Agents layout: the swarm tree where the Agents list is, the
         // selected row in the main pane (`ui::swarm_board`)
         let [side, main] =
@@ -563,6 +568,21 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
                         _ if under_harness => folder_name(&s.dir),
                         _ => s.profile.name.clone(),
                     };
+                    // a session the Library launched keeps its item's
+                    // name as a badge (its definition lives there now)
+                    let name = match (&s.skill_id, &s.agent) {
+                        (Some(id), _) => {
+                            let label = app
+                                .skills
+                                .iter()
+                                .find(|k| &k.id == id)
+                                .map(|k| k.name.clone())
+                                .unwrap_or_else(|| id.clone());
+                            format!("{name} · ⚡{label}")
+                        }
+                        (None, Some(a)) => format!("{name} · ◇{a}"),
+                        (None, None) => name,
+                    };
                     let d = digits.get(i).filter(|d| **d <= 9);
                     let branch = if last_child[start + n] { "└" } else { "├" };
                     (
@@ -759,20 +779,11 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
     if lines.is_empty() {
         items.push(ListItem::new(Line::styled(" no agents: n makes one", dim)));
     } else if end == lines.len() && items.len() < visible {
-        let footer = if app.clean {
-            " + new session  n"
-        } else {
-            " + new agent  n"
-        };
-        items.push(ListItem::new(Line::styled(footer, dim)));
-        // the sections `m` brings back, named so they can be found
+        items.push(ListItem::new(Line::styled(" + new session  n", dim)));
+        // flows, skills and personas live in the Library now
         if items.len() < visible {
             items.push(ListItem::new(Line::styled(
-                if app.clean {
-                    " ⋯ more agents  m"
-                } else {
-                    " ⋯ harnesses only  m"
-                },
+                " ⋯ flows, skills, personas o",
                 dim,
             )));
         }
@@ -784,9 +795,8 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App, now: Instant) {
 fn harness_summary(app: &App, profile: usize, now: Instant) -> (String, Style) {
     use crate::app::agents_list::AgentKind;
     let (mut working, mut attention, mut idle, mut exited) = (0, 0, 0, 0);
-    let rows = app.workflow_rows();
     for (i, s) in app.sessions.iter().enumerate() {
-        if app.owner_of(i, &rows) != AgentKind::Harness(profile) {
+        if app.harness_of(i) != AgentKind::Harness(profile) {
             continue;
         }
         match s.status(now) {
@@ -1038,8 +1048,9 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         draw_trace_browser(f, area, browser);
         return;
     }
-    // a harness or persona row: its card
-    if !app.sidebar_hidden && app.list_focused() && app.sidebar_section != SidebarSection::History {
+    // a harness or persona row: its card (those rows live in the
+    // Active section; other sections draw their own previews below)
+    if !app.sidebar_hidden && app.list_focused() && app.sidebar_section == SidebarSection::Active {
         match app.agent_row() {
             Some(crate::app::agents_list::AgentKind::Harness(p)) => {
                 draw_harness_card(f, area, app, p, now);
@@ -1081,7 +1092,7 @@ fn draw_main(f: &mut Frame, area: Rect, app: &App, now: Instant) {
         return;
     }
     if app.sessions.get(app.selected).is_none() {
-        draw_welcome(f, area, app);
+        draw_welcome(f, area);
         return;
     }
     draw_session_pane(f, area, app, app.selected, now);
@@ -2167,7 +2178,7 @@ fn chord_row<'a>(c: crate::keymap::Chord) -> Line<'a> {
 }
 
 /// The pane with nothing to show: how to start, and the chord layer.
-fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
+fn draw_welcome(f: &mut Frame, area: Rect) {
     let key = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -2187,19 +2198,11 @@ fn draw_welcome(f: &mut Frame, area: Rect, app: &App) {
         Line::raw(""),
         line("Enter", "on a harness: a new session there"),
     ];
-    if app.clean {
-        lines.push(line("n", "a new session on the harness under the cursor"));
-        lines.push(line(
-            "m",
-            "show scheduled agents, flows, skills and personas",
-        ));
-    } else {
-        lines.push(line(
-            "n",
-            "a new agent: describe it, blank, or from a template",
-        ));
-        lines.push(line("Enter", "on a skill: launch it"));
-    }
+    lines.push(line("n", "a new session on the harness under the cursor"));
+    lines.push(line(
+        "o",
+        "the Library: flows, skills and personas, launched on any harness",
+    ));
     lines.extend([
         Line::raw(""),
         Line::styled(

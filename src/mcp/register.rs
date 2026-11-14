@@ -201,7 +201,10 @@ mod tests {
         assert_eq!(muse[2], "--trust-workspace");
         let spec_raw = muse[1].strip_prefix("mcpServers.agent-mux=").unwrap();
         let spec: serde_json::Value = serde_json::from_str(spec_raw).unwrap();
-        assert!(spec.get("type").is_none(), "muse rejects type field: {spec}");
+        assert!(
+            spec.get("type").is_none(),
+            "muse rejects type field: {spec}"
+        );
         assert_eq!(spec["command"], "/opt/agent mux/agent-mux");
         assert_eq!(spec["args"][6], "/tmp/a b");
     }

@@ -97,6 +97,29 @@ fn shape(app: &App) -> Vec<String> {
         .collect()
 }
 
+/// Opens the Library on the skill `id` and puts the cursor on its row.
+fn library_on_skill(app: &mut App, id: &str) {
+    use agent_mux::app::library::{Row, Section};
+    app.open_library(Section::Skills);
+    let at = match &app.mode {
+        Mode::Library(st) => app
+            .library_rows(st)
+            .iter()
+            .position(|r| matches!(r, Row::Skill(i) if app.skills[*i].id == id))
+            .expect("the skill is a Library row"),
+        _ => panic!("not in the library"),
+    };
+    if let Mode::Library(st) = &mut app.mode {
+        st.cursor = at;
+    }
+}
+
+/// Enter (picker), then Enter again (pick the row under the cursor).
+fn pick_harness(app: &mut App) {
+    app.handle_library_key(&key(KeyCode::Enter));
+    app.handle_library_key(&key(KeyCode::Enter));
+}
+
 fn selected(app: &App) -> Option<(String, Harness)> {
     let Mode::SkillsView(view) = &app.mode else {
         return None;
@@ -107,32 +130,32 @@ fn selected(app: &App) -> Option<(String, Harness)> {
 // ---------------------------------------------------------------- Agents
 
 #[tokio::test]
-async fn heimdall_is_listed_in_the_agents_section_and_the_picker_defaults_to_its_harness() {
+async fn heimdall_is_listed_in_the_library_and_the_picker_defaults_to_its_harness() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = app_in(temp.path(), vec![shell_profile("test")]);
-    let heimdall = app
-        .skills
-        .iter()
-        .position(|s| s.id == "heimdall")
-        .expect("compiled-in heimdall");
     assert_eq!(app.sidebar_section, SidebarSection::Active);
-    // skills are rows of the Agents list
-    app.select_first_row_of(SidebarSection::Agents);
-    assert_eq!(app.sidebar_section, SidebarSection::Agents);
-    app.selected_agent = heimdall;
+    library_on_skill(&mut app, "heimdall");
 
-    // the agent owns the main pane: its telemetry briefing, not a terminal
+    // the item owns the main pane: its card, and full coverage here
     let text = screen(&app);
-    assert!(text.contains(" Agents "), "sidebar section is named Agents");
     assert!(text.contains("Heimdall"));
-    assert!(
-        text.contains("Executive Briefing"),
-        "trace.read agents preview the briefing: {text}"
-    );
+    assert!(text.contains("7/7"), "every harness can launch it: {text}");
 
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    // Enter opens the Library's harness picker, on the package default
+    app.handle_library_key(&key(KeyCode::Enter));
+    match &app.mode {
+        Mode::Library(st) => {
+            let picker = st.picker.as_ref().expect("the picker is open");
+            assert_eq!(picker.rows.len(), Harness::ALL.len());
+            assert_eq!(picker.rows[picker.cursor].0, Harness::Antigravity);
+        }
+        other => panic!("Enter on a skill opens the picker: {other:?}"),
+    }
+
+    // picking opens the SkillLauncher preset to that harness
+    app.handle_library_key(&key(KeyCode::Enter));
     let Mode::SkillLauncher(ref state) = app.mode else {
-        panic!("Enter on an agent opens the harness picker");
+        panic!("picking a harness opens the skill launcher");
     };
     assert_eq!(state.skill_id, "heimdall");
     assert_eq!(state.selected_harness(), Harness::Antigravity);
@@ -149,10 +172,6 @@ async fn heimdall_is_listed_in_the_agents_section_and_the_picker_defaults_to_its
     }
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(matches!(app.mode, Mode::Main));
-
-    // h also opens it while Agents is focused
-    app.handle_key(&key(KeyCode::Char('h')), Instant::now());
-    assert!(matches!(app.mode, Mode::SkillLauncher(_)));
     app.kill_all();
 }
 
@@ -160,23 +179,23 @@ async fn heimdall_is_listed_in_the_agents_section_and_the_picker_defaults_to_its
 async fn a_running_agent_is_attached_to_instead_of_relaunched() {
     let temp = tempfile::tempdir().unwrap();
     let mut app = app_in(temp.path(), vec![shell_profile("test")]);
-    let heimdall = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
     let session_idx = push_skill_session(&mut app, "heimdall");
     app.sessions[session_idx].profile.command = "codex".to_string();
     assert_eq!(app.running_skill_session("heimdall"), Some(session_idx));
     assert_eq!(app.running_skill_harness("heimdall"), Some(Harness::Codex));
 
     app.mode = Mode::Main;
-    app.sidebar_section = SidebarSection::Agents;
-    app.selected_agent = heimdall;
     let text = screen(&app);
     assert!(
         text.lines()
-            .any(|l| l.contains("Heimdall") && l.contains("codex")),
-        "sidebar shows the running harness\n{text}"
+            .any(|l| l.contains("⚡") && l.contains("Heimdall")),
+        "the session row is badged with its skill\n{text}"
     );
 
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    // launching it again from the Library attaches to the same session
+    library_on_skill(&mut app, "heimdall");
+    pick_harness(&mut app);
+    assert!(matches!(app.mode, Mode::Main), "{:?}", app.mode);
     assert!(app.pane_session().is_some());
     assert_eq!(app.selected, session_idx);
 
@@ -191,9 +210,8 @@ async fn a_running_agent_is_attached_to_instead_of_relaunched() {
     app.sessions[session_idx].mark_exited();
     assert_eq!(app.running_skill_session("heimdall"), None);
     app.mode = Mode::Main;
-    app.focus_list();
-    app.sidebar_section = SidebarSection::Agents;
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    library_on_skill(&mut app, "heimdall");
+    pick_harness(&mut app);
     assert!(matches!(app.mode, Mode::SkillLauncher(_)));
     app.kill_all();
 }
@@ -213,9 +231,18 @@ async fn the_picker_installs_and_launches_on_the_chosen_harness() {
         bypass_approvals: None,
     };
     let mut app = app_in(temp.path(), vec![profile]);
-    app.sidebar_section = SidebarSection::Agents;
-    app.selected_agent = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    library_on_skill(&mut app, "heimdall");
+    app.handle_library_key(&key(KeyCode::Enter));
+    // the first harness row is Claude; the picker defaults to the
+    // package's own, so walk to the top first
+    for _ in 0..Harness::ALL.len() {
+        app.handle_library_key(&key(KeyCode::Char('k')));
+    }
+    app.handle_library_key(&key(KeyCode::Enter));
+    let Mode::SkillLauncher(ref state) = app.mode else {
+        panic!("picking opens the skill launcher");
+    };
+    assert_eq!(state.selected_harness(), Harness::Claude);
     app.handle_key(&key(KeyCode::Tab), Instant::now());
     app.handle_key(&key(KeyCode::Char('1')), Instant::now());
     app.handle_key(&key(KeyCode::Enter), Instant::now());
@@ -276,9 +303,8 @@ async fn the_skill_launcher_selects_a_workspace_before_launch() {
         bypass_approvals: None,
     };
     let mut app = app_in(temp.path(), vec![profile]);
-    app.sidebar_section = SidebarSection::Agents;
-    app.selected_agent = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    library_on_skill(&mut app, "heimdall");
+    pick_harness(&mut app);
 
     assert!(matches!(app.mode, Mode::SkillLauncher(_)));
     let text = screen(&app);
@@ -682,9 +708,8 @@ async fn the_workspace_field_accepts_the_harness_shortcut_letters() {
         bypass_approvals: None,
     };
     let mut app = app_in(temp.path(), vec![profile]);
-    app.sidebar_section = SidebarSection::Agents;
-    app.selected_agent = app.skills.iter().position(|s| s.id == "heimdall").unwrap();
-    app.handle_key(&key(KeyCode::Enter), Instant::now());
+    library_on_skill(&mut app, "heimdall");
+    pick_harness(&mut app);
 
     let before = match &app.mode {
         Mode::SkillLauncher(s) => s.workspace.clone(),

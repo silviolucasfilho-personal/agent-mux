@@ -1,6 +1,6 @@
 # Skills in agent-mux
 
-agent-mux ships **Heimdall**, a skill that briefs you on active sessions and evaluates skills and agents from the local SQLite trace store. Skills are the only kind of package agent-mux manages: one harness-neutral `SKILL.md`, installed into each harness's own skill directory in the syntax that harness reads, and launched from the Agents sidebar. The Skills view (`S`) is a read-only look at every skill, where it is installed and when it ran.
+agent-mux ships **Heimdall**, a skill that briefs you on active sessions and evaluates skills and agents from the local SQLite trace store. Skills are the only kind of package agent-mux manages: one harness-neutral `SKILL.md`, installed into each harness's own skill directory in the syntax that harness reads, and launched from the Library (`o` in the Agents list). The Skills view (`S`) is a read-only look at every skill, where it is installed and when it ran; the Library's skills section shows the same packages with their harness coverage.
 
 ---
 
@@ -32,7 +32,7 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 | `startup_prompt` | none | Appended to the invocation as the session's first message. |
 | `[agent] hydrate` | none | Snapshots Rust writes before launch; `["dossier"]` (schema 2 startup dossier) or `["briefing"]` (schema 1 legacy briefing). Needs `trace.read`. |
 | `[agent] mcp` | `auto` with `trace.read`, else `off` | Recorded on the package, but the server is attached to every session whatever a package says: the store is local, read-only and scoped to the launch's workspace. Claude Code and Codex take it on the command line, OpenCode in `OPENCODE_CONFIG_CONTENT`, Pi through agent-mux's MCP-client extension (`-e`); Antigravity and Grok read a global entry, which agent-mux writes before the first agy or grok session of a run (what `agent-mux mcp install agy|grok` does). `[agents] mcp = "off"` in profiles.toml is the one switch that turns it off, for every session and every harness. |
-| `hidden` | `false` | Not listed in the Agents sidebar or the Skills view; still installed and launched by workflows (the `wf-*` step skills, `workflow-author`). |
+| `hidden` | `false` | Not listed in the Library or the Skills view; still installed and launched by workflows (the `wf-*` step skills, `workflow-author`). |
 | `writes` | `false` | The skill edits files; a workflow step running it must be isolated in a worktree (`docs/workflows.md`). |
 | `auto_approve` | `false` | The session launches with every tool permission pre-granted, whichever harness runs it (`--dangerously-skip-permissions` on Claude Code and Antigravity, `--yolo` on Codex and Muse, `--auto` on OpenCode, `--always-approve` on Grok; Pi never asks). The package's own demand: it wins over a profile that leaves approvals on, never the other way round. |
 
@@ -62,9 +62,9 @@ DeepSeek has no harness in agent-mux yet (`dsh 0.2.2-rc.1` was probed but deferr
 
 The installed `SKILL.md` is the canonical file with one difference: the description ends with that harness's invocation (`Invoke with /<name>.`, `Invoke with $<name>.`, `Invoke with /skill:<name>.`, …). `reference/` files are copied unchanged. A `.agent-mux.json` manifest marks directories agent-mux wrote; a directory without it is never overwritten or removed unless `--force`.
 
-## 4. Launching from the Agents sidebar
+## 4. Launching from the Library
 
-Every package is listed in the Agents section of the sidebar; a `trace.read` package such as Heimdall previews its telemetry briefing in the main pane. Enter opens the harness picker. On confirm agent-mux:
+Every package is listed in the Library's skills section (`o` in the Agents list), with its harness coverage (`n/7` of the seven harnesses); Enter opens the harness picker, which lists every available harness as Ready, Degraded or Blocked with its reason — a package whose `skill.toml` restricts `harnesses` shows that restriction there instead of silently offering fewer harnesses. The Skills view (`S`) keeps the per-harness install state and executions. On confirm agent-mux:
 
 1. installs or refreshes the skill in that harness's directory (manifest hash check; unchanged packages are left alone),
 2. builds the harness command line: the model from your profile for that harness and the permission flags from your profile or the package's `auto_approve`, then the opening prompt `<invocation> <startup_prompt>` as the positional prompt (Claude Code, Codex, Grok, Pi, Muse), via `--prompt-interactive` (Antigravity) or via `--prompt` (OpenCode),

@@ -60,6 +60,8 @@ The terminal may intercept a key or collapse its modifiers. Protocol support alo
 
 `i` on a session's row in the Agents list opens its run screen (`docs/agents.md`): who runs it, its terminal, its trace and its changes; `i` or `Esc` returns.
 
+The Agents list holds launched work only: harness profiles and their sessions. Definitions live in the Library: `o` in the list (or F1 → Open library) opens it, with a flows / skills / personas / scheduled tree on the left and the selected item's card on the right. In the Library, `Enter` (or `r`) opens the harness picker — every available harness with its Ready / Degraded / Blocked verdict — `e` edits the item, `n` starts a new one, `/` filters, `1`–`4` switch the item's tabs, `i` jumps to a live session, and `Esc` returns to the Agents list. A scheduled row takes its loop verbs instead: `r` run now, `p` pause or resume, `e` edit, `d` remove.
+
 On the Run screen (a flow's run, `docs/workflows.md`) and the Swarm screen, the tree takes `Left` / `Right` to fold and open a row and `o` to pick another run or swarm; on the Run screen `x` stops the run on its row and one session on a session's row, asking first.
 
 `q` remains a Back alias outside text fields and a legacy Quit alias in Main's list. Context-specific actions remain reachable through Commands; unavailable actions cannot run against a stale selection.

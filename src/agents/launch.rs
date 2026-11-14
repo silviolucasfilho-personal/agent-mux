@@ -26,6 +26,19 @@
 //!   map and a `permission` map took the shell away from a probe agent;
 //!   the `tools` map is written. No file is written. The document counts
 //!   only with `--standalone`, which the spawn step adds.
+//! - Grok 1.0.77 (probed 2026-11-14, `grok --help` and a live
+//!   `grok -p … --rules …` run): `--rules <text>` appends rules to the
+//!   system prompt, which is how a persona's instructions are applied;
+//!   the probe answered with the persona name the rules gave it. Grok
+//!   has `--tools`/`--disallowed-tools` for built-in tools, but their
+//!   tool names were not probed, so a persona's tool list stays
+//!   advisory there (`tool_notes`).
+//! - Pi 1.5.2 (probed 2026-11-14, `pi --help`): `--append-system-prompt
+//!   <text>` appends to the system prompt, and `--tools <csv>` is an
+//!   allowlist of its built-in tools (`read`, `bash`, `edit`, `write`,
+//!   the names its own system prompt lists). A live persona probe was
+//!   not possible: this machine's default Pi model is rejected by its
+//!   provider, so the flags rest on `--help` alone.
 
 use super::{AgentSpec, Tool};
 use crate::harness::Harness;
@@ -232,16 +245,43 @@ pub fn tool_notes(spec: &AgentSpec, harness: Harness) -> Vec<(Level, String)> {
                 }
             }
         }
-        // TODO(agents): define agents on Grok (`--agents`/`--agent`) and Pi
-        Harness::Grok | Harness::Pi => out.push((
-            Level::Warning,
-            format!(
-                "{}: agents are not applied yet; the session runs with its default instructions and tools",
-                harness.as_str()
-            ),
-        )),
+        Harness::Grok => {
+            // the instructions are applied (`--rules`, see `plan`); the
+            // tool list is not: Grok's built-in tool names for
+            // `--tools`/`--disallowed-tools` were not probed
+            out.push((
+                Level::Warning,
+                "grok: the tool list is not enforced; the persona's instructions carry it"
+                    .to_string(),
+            ));
+        }
+        Harness::Pi => {
+            for t in tools {
+                match t {
+                    Tool::Web => out.push((
+                        Level::Warning,
+                        "pi: `web` is not mapped; pi has no built-in web tool".to_string(),
+                    )),
+                    Tool::Mcp(s) => out.push((
+                        Level::Warning,
+                        format!("pi: mcp:{s} is not mapped; the session has the MCP servers pi's settings configure"),
+                    )),
+                    _ => {}
+                }
+            }
+        }
     }
     out
+}
+
+/// Pi's built-in tool names for a canonical tool (`--tools` allowlist).
+pub fn pi_tools(tool: &Tool) -> Vec<&'static str> {
+    match tool {
+        Tool::Read => vec!["read"],
+        Tool::Edit => vec!["edit", "write"],
+        Tool::Shell => vec!["bash"],
+        Tool::Web | Tool::Mcp(_) => vec![],
+    }
 }
 
 /// The command-line changes that make a session `spec` on `harness`.
@@ -300,8 +340,25 @@ pub fn plan(spec: &AgentSpec, harness: Harness) -> LaunchPlan {
                 out.args.push("--disable-shell".into());
             }
         }
-        // TODO(agents): not applied yet (see `tool_notes`)
-        Harness::Grok | Harness::Pi => {}
+        Harness::Grok => {
+            if !spec.instructions.trim().is_empty() {
+                out.args.push("--rules".into());
+                out.args.push(spec.instructions.clone());
+            }
+        }
+        Harness::Pi => {
+            if !spec.instructions.trim().is_empty() {
+                out.args.push("--append-system-prompt".into());
+                out.args.push(spec.instructions.clone());
+            }
+            if let Some(tools) = &spec.tools {
+                let names: Vec<&str> = tools.iter().flat_map(pi_tools).collect();
+                if !names.is_empty() {
+                    out.args.push("--tools".into());
+                    out.args.push(names.join(","));
+                }
+            }
+        }
     }
     out
 }
@@ -396,6 +453,35 @@ mod tests {
     }
 
     #[test]
+    fn grok_gets_rules_and_pi_gets_a_system_prompt_and_tools() {
+        let s = spec("tools = [\"read\", \"edit\"]");
+        let g = plan(&s, Harness::Grok);
+        assert_eq!(g.args, ["--rules", "Say \"hi\".\nThen stop."]);
+        let p = plan(&s, Harness::Pi);
+        assert_eq!(
+            p.args,
+            [
+                "--append-system-prompt",
+                "Say \"hi\".\nThen stop.",
+                "--tools",
+                "read,edit,write"
+            ]
+        );
+        // no tool list: no allowlist, the harness's own tools
+        let all = plan(&spec(""), Harness::Pi);
+        assert_eq!(all.args.len(), 2);
+        // the notes no longer claim the persona is not applied
+        let grok_notes = tool_notes(&s, Harness::Grok);
+        assert_eq!(grok_notes.len(), 1);
+        assert!(grok_notes[0].1.contains("not enforced"));
+        assert!(tool_notes(&spec(""), Harness::Grok).is_empty());
+        assert!(tool_notes(&s, Harness::Pi).is_empty());
+        let web = tool_notes(&spec("tools = [\"web\"]"), Harness::Pi);
+        assert_eq!(web.len(), 1);
+        assert!(web[0].1.contains("`web` is not mapped"));
+    }
+
+    #[test]
     fn notes_say_what_is_not_enforced() {
         let s = spec("tools = [\"read\", \"web\", \"mcp:gh\"]");
         assert!(tool_notes(&s, Harness::Claude).is_empty());
@@ -408,7 +494,10 @@ mod tests {
         // Muse: always warns on non-empty instructions (even without `tools`), plus !read / !web / mcp
         assert_eq!(tool_notes(&spec(""), Harness::Muse).len(), 1);
         assert_eq!(tool_notes(&s, Harness::Muse).len(), 2);
-        assert_eq!(tool_notes(&spec("tools = [\"edit\"]"), Harness::Muse).len(), 3);
+        assert_eq!(
+            tool_notes(&spec("tools = [\"edit\"]"), Harness::Muse).len(),
+            3
+        );
     }
 
     #[test]
@@ -418,7 +507,10 @@ mod tests {
         assert!(p.remove.is_empty());
         let all = plan(&spec(""), Harness::Muse);
         assert!(all.args.is_empty());
-        let editor = plan(&spec("tools = [\"read\", \"edit\", \"shell\"]"), Harness::Muse);
+        let editor = plan(
+            &spec("tools = [\"read\", \"edit\", \"shell\"]"),
+            Harness::Muse,
+        );
         assert!(editor.args.is_empty());
     }
 }
