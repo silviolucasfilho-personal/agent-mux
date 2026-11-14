@@ -5584,7 +5584,7 @@ fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
         ));
         if dialog.field == WfField::Task {
             lines.push(Line::styled(
-                "            what the composed workflow should do; Enter new line, Ctrl+Enter submit, ⌃O editor",
+                "            what the composed workflow should do; Enter new line, Ctrl+S or Ctrl+Enter submit, ⌃O editor",
                 dim,
             ));
         }
@@ -5708,7 +5708,7 @@ fn draw_workflow_dialog(f: &mut Frame, dialog: &WorkflowDialogState) {
         ));
     }
     lines.push(Line::styled(
-        "  [Ctrl+Enter] start  [Tab] field  [Enter] line / submit  [⌃O] editor  [⌃V] paste  [Esc] cancel",
+        "  [Ctrl+S / Ctrl+Enter] start  [Tab] field  [Enter] line / submit  [⌃O] editor  [⌃V] paste  [Esc] cancel",
         dim,
     ));
     f.render_widget(Paragraph::new(lines).block(block), area);

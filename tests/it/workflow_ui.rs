@@ -410,7 +410,7 @@ fn the_task_field_takes_a_multi_line_prompt() {
     assert!(text.contains("Audit the parser for unchecked"), "{text}");
     assert!(text.contains("Report by file."), "{text}");
     assert!(
-        text.contains("[Ctrl+Enter] start") && text.contains("[Enter] line / submit"),
+        text.contains("[Ctrl+S / Ctrl+Enter] start") && text.contains("[Enter] line / submit"),
         "the keys are on screen\n{text}"
     );
 

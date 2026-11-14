@@ -68,6 +68,6 @@ On the Run screen (a flow's run, `docs/workflows.md`) and the Swarm screen, the 
 
 Letters remain literal while editing. Enter finishes a single-line field; in multiline instruction/task editors it inserts a newline. Ctrl+J remains a newline alias. Ctrl+S saves an enclosing editor, including an in-progress field. Esc ends or cancels field editing before leaving the editor; field hints show which applies. Existing cursor, word deletion, clipboard and external-editor controls remain available.
 
-Compose task and argument fields use Enter for a newline and Ctrl+Enter (or Submit dialog in Commands) to submit. Destructive confirmations require `y`; Enter does not approve them.
+Compose task and argument fields use Enter for a newline and Ctrl+S or Ctrl+Enter (or Submit dialog in Commands) to submit. Ctrl+Enter needs a terminal that reports modified keys (the kitty keyboard protocol); elsewhere it arrives as a plain Enter, so Ctrl+S is the one that always works. Destructive confirmations require `y`; Enter does not approve them.
 
 With session focus, ordinary characters, Ctrl letters, Alt, Esc, Tab and Enter go to the harness. Only recognized application chords and the explicit session scroll controls are intercepted. Host copy/paste shortcuts continue to use the terminal's clipboard path. Application editors never scroll a background session in response to their navigation keys.

@@ -1923,3 +1923,80 @@ async fn a_session_started_as_a_persona_records_it_on_its_launch() {
         other => panic!("i did not open the run screen: {other:?}"),
     }
 }
+
+/// A document with an argument: the dialog opens on it, a multiline field.
+const ASKED: &str = r#"
+[workflow]
+name = "asked"
+description = "one step with a question"
+output = "look"
+[args.question]
+description = "what to look at"
+required = true
+[[steps]]
+id = "look"
+prompt = "look at {{args.question}}"
+"#;
+
+#[tokio::test]
+async fn ctrl_enter_on_an_argument_starts_the_run_and_opens_its_screen() {
+    an_argument_field_submits(false).await;
+}
+
+#[tokio::test]
+async fn ctrl_s_on_an_argument_starts_the_run_and_opens_its_screen() {
+    an_argument_field_submits(true).await;
+}
+
+async fn an_argument_field_submits(ctrl_s: bool) {
+    use agent_mux::app::Mode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fake_harness(&bin, Harness::Claude, &[("look", "seen")], None, None);
+    let mut f = fixture(&bin, temp);
+    let lib = library::dir(&f.home.join(".agent-mux"));
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(lib.join("asked.toml"), ASKED).unwrap();
+    f.app.reload_workflow_list();
+    f.app.selected_workflow = f
+        .app
+        .workflow_list
+        .iter()
+        .position(|e| e.name == "asked")
+        .expect("the library document is listed");
+    f.app.open_workflow_run();
+    {
+        let Mode::WorkflowDialog(d) = &mut f.app.mode else {
+            panic!("not the dialog: {:?}", f.app.notice)
+        };
+        d.workspace = f.ws.to_string_lossy().into_owned();
+    }
+    for c in "the readme".chars() {
+        press(&mut f.app, KeyCode::Char(c));
+    }
+    // a terminal without modified keys sends Ctrl+Enter as Enter: a new
+    // line in the field, so Ctrl+S is the submit that always arrives
+    press(&mut f.app, KeyCode::Enter);
+    assert!(matches!(f.app.mode, Mode::WorkflowDialog(_)));
+    let chord = if ctrl_s {
+        KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)
+    } else {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+    };
+    f.app.handle_key(&chord, Instant::now());
+    assert!(
+        matches!(f.app.mode, Mode::Run(_)),
+        "the Run screen is open: {:?} {:?}",
+        f.app.mode,
+        f.app.notice
+    );
+    // and it stays open while the run goes on
+    f.app.on_tick(Instant::now());
+    assert!(matches!(f.app.mode, Mode::Run(_)), "{:?}", f.app.mode);
+    pump_until(&mut f, Duration::from_secs(90), |a| {
+        a.live_workflow_runs.is_empty()
+    })
+    .await;
+    assert!(matches!(f.app.mode, Mode::Run(_)), "{:?}", f.app.mode);
+}

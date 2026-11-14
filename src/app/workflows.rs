@@ -2377,6 +2377,13 @@ impl App {
                 let d = (**dialog).clone();
                 self.confirm_workflow_dialog(d);
             }
+            // Ctrl+S starts it too: a terminal that does not report
+            // modified keys sends Ctrl+Enter as a plain Enter, which is a
+            // new line in a multiline field
+            KeyCode::Char('s') if ctrl => {
+                let d = (**dialog).clone();
+                self.confirm_workflow_dialog(d);
+            }
             KeyCode::Tab => {
                 dialog.step_field(1);
                 dialog.dir_picker.leave();
