@@ -16,75 +16,39 @@ pub struct LiveLine {
     pub text: String,
 }
 
-/// Decode a full stdout snapshot. Text lines are bounded to 240 characters;
-/// unknown events and incomplete JSON records produce no display noise.
+/// Marks a bounded capture's missing middle; it is not a harness event.
+pub(crate) const CAPTURE_GAP: &str = "\n[workflow output omitted]\n";
+
+/// Decode the default session (for OpenCode, the first session id seen).
 pub fn lines(harness: Harness, stdout: &[u8]) -> Vec<LiveLine> {
+    lines_for(harness, stdout, None)
+}
+
+/// Decode a full stdout snapshot, optionally selecting an OpenCode session.
+/// Long display lines are abbreviated after 240 characters. Partial JSON
+/// records and capture gaps produce no display noise.
+pub fn lines_for(harness: Harness, stdout: &[u8], session: Option<&str>) -> Vec<LiveLine> {
     let cleaned = super::harness::clean_terminal(stdout);
+    if harness == Harness::Codex {
+        return codex_lines(&cleaned);
+    }
     let mut out = Vec::new();
-    let mut banner = false;
-    let mut separators = 0;
-    let mut codex_kind = LiveKind::Text;
+    let mut selected = session.map(str::to_owned);
+    let mut tools = std::collections::HashSet::new();
     for line in cleaned.lines() {
         let line = line.trim();
-        if harness == Harness::Codex {
-            if line.starts_with("Reading additional input from stdin") {
-                continue;
-            }
-            if line.starts_with("OpenAI Codex ") {
-                banner = true;
-                continue;
-            }
-            if banner {
-                if line.starts_with("--------") {
-                    separators += 1;
-                }
-                if separators == 2 {
-                    banner = false;
-                }
-                continue;
-            }
-            if line.starts_with("hook:") || line.starts_with("tokens used") {
-                continue;
-            }
-            match line {
-                "exec" => {
-                    codex_kind = LiveKind::Tool;
-                    continue;
-                }
-                "codex" | "thinking" | "user" => {
-                    codex_kind = LiveKind::Text;
-                    continue;
-                }
-                _ => {}
-            }
-            let kind = if line.contains("exited ") || line.contains("succeeded in ") {
-                if codex_kind == LiveKind::Tool {
-                    let command = line
-                        .split(" succeeded in ")
-                        .next()
-                        .unwrap_or(line)
-                        .split(" exited ")
-                        .next()
-                        .unwrap_or(line);
-                    emit(&mut out, LiveKind::Tool, &format!("▸ {command}"));
-                }
-                codex_kind = LiveKind::Outcome;
-                LiveKind::Outcome
-            } else if line.starts_with("ERROR") || line.starts_with("error:") {
-                LiveKind::Error
-            } else {
-                codex_kind
-            };
-            if kind == LiveKind::Tool {
-                emit(&mut out, kind, &format!("▸ {line}"));
-            } else {
-                emit(&mut out, kind, line);
-            }
-            continue;
-        }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        if harness == Harness::OpenCode {
+            let id = v.get("sessionID").and_then(|id| id.as_str());
+            if selected.is_none() {
+                selected = id.map(str::to_owned);
+            }
+            if selected.as_deref() != id {
+                continue;
+            }
+        }
         match harness {
             Harness::Claude => match string(&v, "type") {
                 "assistant" | "user" => {
@@ -150,14 +114,22 @@ pub fn lines(harness: Harness, stdout: &[u8]) -> Vec<LiveLine> {
                 "tool_use" => {
                     let part = &v["part"];
                     let state = &part["state"];
+                    // 2.0.32 emitted tool_use only on completion in the shell
+                    // probe. Show the invocation too, unless a prior event did.
+                    let id = part
+                        .get("id")
+                        .or_else(|| part.get("partID"))
+                        .and_then(|id| id.as_str())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("{}:{}", string(part, "tool"), state["input"]));
+                    if tools.insert(id) {
+                        tool(&mut out, string(part, "tool"), &state["input"]);
+                    }
                     match string(state, "status") {
                         "completed" => {
                             emit(&mut out, LiveKind::Outcome, &display(&state["output"]))
                         }
                         "error" => emit(&mut out, LiveKind::Error, &display(&state["error"])),
-                        "pending" | "running" | "" => {
-                            tool(&mut out, string(part, "tool"), &state["input"])
-                        }
                         _ => {}
                     }
                 }
@@ -165,6 +137,85 @@ pub fn lines(harness: Harness, stdout: &[u8]) -> Vec<LiveLine> {
                 _ => {}
             },
             Harness::Codex | Harness::Grok | Harness::Pi => {}
+        }
+    }
+    out
+}
+
+/// Codex's readable exec format has sections, not standalone status lines.
+fn codex_lines(cleaned: &str) -> Vec<LiveLine> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Section {
+        Text,
+        User,
+        Command,
+        Output,
+        Footer,
+    }
+    let mut section = Section::Text;
+    let mut banner = false;
+    let mut separators = 0;
+    let mut out = Vec::new();
+    for line in cleaned.lines().map(str::trim) {
+        if line == CAPTURE_GAP.trim() {
+            continue;
+        }
+        if line.starts_with("Reading additional input from stdin") || line.starts_with("hook:") {
+            continue;
+        }
+        if line.starts_with("OpenAI Codex ") {
+            banner = true;
+            separators = 0;
+            continue;
+        }
+        if banner {
+            if line.starts_with("--------") {
+                separators += 1;
+            }
+            if separators == 2 {
+                banner = false;
+            }
+            continue;
+        }
+        if section == Section::Footer {
+            continue;
+        }
+        match line {
+            "user" => {
+                section = Section::User;
+                continue;
+            }
+            "codex" | "thinking" => {
+                section = Section::Text;
+                continue;
+            }
+            "exec" => {
+                section = Section::Command;
+                continue;
+            }
+            "tokens used" => {
+                section = Section::Footer;
+                continue;
+            }
+            _ => {}
+        }
+        if section == Section::User {
+            continue;
+        }
+        if matches!(section, Section::Command | Section::Output)
+            && (line.starts_with("succeeded in ") || line.starts_with("exited "))
+        {
+            section = Section::Output;
+            emit(&mut out, LiveKind::Outcome, line);
+        } else if line.starts_with("ERROR") || line.starts_with("error:") {
+            emit(&mut out, LiveKind::Error, line);
+        } else {
+            match section {
+                Section::Command => emit(&mut out, LiveKind::Tool, &format!("▸ {line}")),
+                Section::Output => emit(&mut out, LiveKind::Outcome, line),
+                Section::Text => emit(&mut out, LiveKind::Text, line),
+                Section::User | Section::Footer => {}
+            }
         }
     }
     out
@@ -210,6 +261,64 @@ fn final_text(out: &mut Vec<LiveLine>, text: &str) {
 
 #[cfg(test)]
 pub(crate) mod fixtures {
+    // Real shell runs, 2026-11-13, Codex 0.167.0 and OpenCode 2.0.32.
+    pub const CODEX_TOOL: &str = r####"Reading additional input from stdin...
+OpenAI Codex v0.167.0
+--------
+workdir: /private/var/folders/tl/0nz3g9w50pz78dv7mrcwc7bc0000gn/T/flow-fix-probe-g8z6fbt4
+model: gpt-6.1-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: low
+reasoning summaries: none
+session id: 01a1d74f-da45-7761-8227-8a8eb4389191
+--------
+user
+Run printf stream-fix-probe in the shell, then reply exactly: The command succeeded in producing output.
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+codex
+I’ll run the command now.
+
+hook: PreToolUse
+hook: PreToolUse Completed
+exec
+/bin/zsh -lc 'printf stream-fix-probe' in /private/var/folders/tl/0nz3g9w50pz78dv7mrcwc7bc0000gn/T/flow-fix-probe-g8z6fbt4
+ succeeded in 0ms:
+stream-fix-probe
+hook: PostToolUse
+hook: PostToolUse Completed
+codex
+The command succeeded in producing output.
+hook: Stop
+hook: Stop Completed
+tokens used
+6,344
+The command succeeded in producing output.
+"####;
+    pub const OPENCODE: &str = r####"{"type":"step_start","timestamp":1794613708059,"sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","part":{"id":"prt_1d750051b001qoP6Jun1XyP0Wp","sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","messageID":"msg_1d74fffb0001qMcZapB3gEmkRN","type":"step-start","snapshot":"f498856f00a6f8351765b80a807e46f2e6f86d1d"}}
+{"type":"tool_use","timestamp":1794613709105,"sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","part":{"partID":"prt_1d75008980011dwov50J1TH13X","sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","messageID":"msg_1d74fffb0001qMcZapB3gEmkRN","type":"tool","id":"call_598319d05a684ea6b89d3809","tool":"shell","state":{"status":"completed","input":{"command":"printf stream-fix-probe"},"output":"stream-fix-probe","title":"shell","metadata":{"metadata":{"status":"completed","truncated":false,"exit":0},"content":[{"type":"text","text":"stream-fix-probe"}],"providerCall":{"executed":false},"providerResult":{"executed":false},"rawInput":"{\"command\":\"printf stream-fix-probe\"}"},"time":{"start":1794613708952,"end":1794613709105}}}}
+{"type":"step_finish","timestamp":1794613709131,"sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","part":{"id":"prt_1d750094b0010MzkUp9AWhiLu6","sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","messageID":"msg_1d74fffb0001qMcZapB3gEmkRN","type":"step-finish","reason":"tool-calls","snapshot":"f498856f00a6f8351765b80a807e46f2e6f86d1d","cost":0,"tokens":{"input":117,"output":43,"reasoning":137,"cache":{"read":32000,"write":0}}}}
+{"type":"step_start","timestamp":1794613710658,"sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","part":{"id":"prt_1d7500f42001cpEgDRB2EtYG3r","sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","messageID":"msg_1d7500954001cNTUdFCE41z7lI","type":"step-start","snapshot":"f498856f00a6f8351765b80a807e46f2e6f86d1d"}}
+{"type":"text","timestamp":1794613710682,"sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","part":{"id":"prt_1d7500f470010zLyxE1O99iM6g","sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","messageID":"msg_1d7500954001cNTUdFCE41z7lI","type":"text","text":"probe done.","time":{"start":1794613710663,"end":1794613710682}}}
+"####;
+    // Captured records replayed with the other session interleaved.
+    pub const OPENCODE_MIXED: &str = r####"{"type":"step_start","timestamp":1794613708059,"sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","part":{"id":"prt_1d750051b001qoP6Jun1XyP0Wp","sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","messageID":"msg_1d74fffb0001qMcZapB3gEmkRN","type":"step-start","snapshot":"f498856f00a6f8351765b80a807e46f2e6f86d1d"}}
+{"type":"text","timestamp":1794611474790,"sessionID":"ses_e28d2a8e6ffeyLar9G7hsraPxm","part":{"id":"prt_1d72dea04001bKahxfvEESROnh","sessionID":"ses_e28d2a8e6ffeyLar9G7hsraPxm","messageID":"msg_1d72dd3d9001nLhkyFCg5IBs8Z","type":"text","text":"Ran it. Results:\n\n**codex — exit 0**\n`codex-last.md` contains exactly:\n```\nprobe done\n```\nIts jsonl (571 B) shows the SessionStart/UserPromptSubmit/Stop hooks firing and `tokens used 6,291` — clean, streamed end to end.\n\n**opencode — exit 0, but the capture is not usable**\n`opencode.jsonl` (3.0 KB, 24 events) breaks down as:\n- 1 event for the probe's own session `ses_e28d27db…` — a lone `step_start`, no text, no `step_finish`\n- 23 events for `ses_e28d2a8e…`, which is *this* session (my `shell`/`read` calls, the `ls` of the probe dir, the failed read of a bad path)\n\nSo `/Users/sifilho/.opencode/bin/opencode run --format json` here is emitting the shared server's global event stream rather than just the probe session's, and it never printed an assistant text event for its own session. No `probe done` text is recoverable from that file.\n\nNet: codex probe passed; opencode probe needs a different isolation (e.g. `--session`, a separate `OPENCODE_CONFIG_DIR`/server, or `--standalone`) before its `--format json` output can be trusted as a per-run stream.","time":{"start":1794611472900,"end":1794611474790}}}
+{"type":"tool_use","timestamp":1794613709105,"sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","part":{"partID":"prt_1d75008980011dwov50J1TH13X","sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","messageID":"msg_1d74fffb0001qMcZapB3gEmkRN","type":"tool","id":"call_598319d05a684ea6b89d3809","tool":"shell","state":{"status":"completed","input":{"command":"printf stream-fix-probe"},"output":"stream-fix-probe","title":"shell","metadata":{"metadata":{"status":"completed","truncated":false,"exit":0},"content":[{"type":"text","text":"stream-fix-probe"}],"providerCall":{"executed":false},"providerResult":{"executed":false},"rawInput":"{\"command\":\"printf stream-fix-probe\"}"},"time":{"start":1794613708952,"end":1794613709105}}}}
+{"type":"step_finish","timestamp":1794613709131,"sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","part":{"id":"prt_1d750094b0010MzkUp9AWhiLu6","sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","messageID":"msg_1d74fffb0001qMcZapB3gEmkRN","type":"step-finish","reason":"tool-calls","snapshot":"f498856f00a6f8351765b80a807e46f2e6f86d1d","cost":0,"tokens":{"input":117,"output":43,"reasoning":137,"cache":{"read":32000,"write":0}}}}
+{"type":"step_start","timestamp":1794613710658,"sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","part":{"id":"prt_1d7500f42001cpEgDRB2EtYG3r","sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","messageID":"msg_1d7500954001cNTUdFCE41z7lI","type":"step-start","snapshot":"f498856f00a6f8351765b80a807e46f2e6f86d1d"}}
+{"type":"text","timestamp":1794613710682,"sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","part":{"id":"prt_1d7500f470010zLyxE1O99iM6g","sessionID":"ses_e28b000a2ffeX8Li6xYZ53eVQd","messageID":"msg_1d7500954001cNTUdFCE41z7lI","type":"text","text":"probe done.","time":{"start":1794613710663,"end":1794613710682}}}
+"####;
+    pub const OPENCODE_TWO_SESSIONS: &str = r####"{"type":"step_start","timestamp":1794611448402,"sessionID":"ses_e28d27db9ffeuatDpz8XRPMY1o","part":{"id":"prt_1d72d8a52001HP3ZDOVUGLdEtD","sessionID":"ses_e28d27db9ffeuatDpz8XRPMY1o","messageID":"msg_1d72d827e001w1X2XuidQSl04g","type":"step-start","snapshot":"795b152f2839ee9889305dc048ffbd03d7a29fb0"}}
+{"type":"text","timestamp":1794611474790,"sessionID":"ses_e28d2a8e6ffeyLar9G7hsraPxm","part":{"id":"prt_1d72dea04001bKahxfvEESROnh","sessionID":"ses_e28d2a8e6ffeyLar9G7hsraPxm","messageID":"msg_1d72dd3d9001nLhkyFCg5IBs8Z","type":"text","text":"Ran it. Results:\n\n**codex — exit 0**\n`codex-last.md` contains exactly:\n```\nprobe done\n```\nIts jsonl (571 B) shows the SessionStart/UserPromptSubmit/Stop hooks firing and `tokens used 6,291` — clean, streamed end to end.\n\n**opencode — exit 0, but the capture is not usable**\n`opencode.jsonl` (3.0 KB, 24 events) breaks down as:\n- 1 event for the probe's own session `ses_e28d27db…` — a lone `step_start`, no text, no `step_finish`\n- 23 events for `ses_e28d2a8e…`, which is *this* session (my `shell`/`read` calls, the `ls` of the probe dir, the failed read of a bad path)\n\nSo `/Users/sifilho/.opencode/bin/opencode run --format json` here is emitting the shared server's global event stream rather than just the probe session's, and it never printed an assistant text event for its own session. No `probe done` text is recoverable from that file.\n\nNet: codex probe passed; opencode probe needs a different isolation (e.g. `--session`, a separate `OPENCODE_CONFIG_DIR`/server, or `--standalone`) before its `--format json` output can be trusted as a per-run stream.","time":{"start":1794611472900,"end":1794611474790}}}
+"####;
+    pub const CODEX_COMMAND: &str = r####"▸ /bin/zsh -lc 'printf stream-fix-probe' in /private/var/folders/tl/0nz3g9w50pz78dv7mrcwc7bc0000gn/T/flow-fix-probe-g8z6fbt4"####;
+    pub const OPENCODE_SESSION: &str = r####"ses_e28b000a2ffeX8Li6xYZ53eVQd"####;
+    pub const OTHER_SESSION: &str = r####"ses_e28d2a8e6ffeyLar9G7hsraPxm"####;
     pub const CODEX: &str = r###"Reading additional input from stdin...
 OpenAI Codex v0.167.0
 --------
@@ -267,10 +376,13 @@ mod tests {
     #[test]
     fn captured_codex_plain_lines() {
         let decoded = lines(Harness::Codex, fixtures::CODEX.as_bytes());
-        assert!(decoded.iter().any(|l| l.text == "probe done"));
-        assert!(!decoded.iter().any(|l| l.text.contains("hook:")
-            || l.text.contains("workdir:")
-            || l.text.contains("OpenAI Codex")));
+        assert_eq!(
+            decoded,
+            vec![LiveLine {
+                kind: LiveKind::Text,
+                text: "probe done".into()
+            }]
+        );
     }
     #[test]
     fn captured_claude_and_agy_events() {
@@ -300,21 +412,35 @@ mod tests {
     }
     #[test]
     fn partial_capture_preserves_complete_events() {
-        let complete = br#"{"type":"text","part":{"text":"ready"}}
-"#;
+        let complete = fixtures::OPENCODE.as_bytes();
+        let event = fixtures::OPENCODE
+            .lines()
+            .find(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_owned))
+                    .as_deref()
+                    == Some("text")
+            })
+            .unwrap();
         let mut partial = complete.to_vec();
-        partial.extend_from_slice(b"{\"type\":\"text\",\"part\":{\"text\":\"later");
+        let split = event.len() / 2;
+        partial.extend_from_slice(&event.as_bytes()[..split]);
         assert_eq!(
             lines(Harness::OpenCode, &partial),
             lines(Harness::OpenCode, complete)
         );
-        partial.extend_from_slice(b"\"}}\n");
+        partial.extend_from_slice(&event.as_bytes()[split..]);
         assert_eq!(
             lines(Harness::OpenCode, &partial).last().unwrap().text,
-            "later"
+            "probe done."
         );
-        let command = lines(Harness::Codex, b"exec\nprintf hello");
-        assert_eq!(command[0].text, "▸ printf hello");
+        let command_capture = fixtures::CODEX_TOOL
+            .split("\n succeeded in ")
+            .next()
+            .unwrap();
+        let command = lines(Harness::Codex, command_capture.as_bytes());
+        assert_eq!(command.last().unwrap().text, fixtures::CODEX_COMMAND);
     }
 
     #[test]
@@ -324,33 +450,76 @@ mod tests {
         }
     }
     #[test]
-    fn codex_plain_output_and_pty_cleanup() {
-        let out = b"OpenAI Codex v0.167.0\r\n--------\nworkdir: /tmp\nmodel: gpt-5\n--------\nuser\nprompt\nhook: startup\nexec\nprintf hi succeeded in 10ms:\nhi\n\x1b[32mcodex\x1b[0m\nanswer";
-        let decoded = lines(Harness::Codex, out);
-        assert!(!decoded.iter().any(|l| l.text.contains("workdir")
-            || l.text.contains("hook:")
-            || l.text.contains("OpenAI")));
-        assert!(decoded.iter().any(|l| l.text == "answer"));
-        assert!(decoded.iter().any(|l| l.kind == LiveKind::Tool));
-    }
-    #[test]
-    fn opencode_events() {
-        let out = br#"{"type":"step_start","part":{"type":"step-start"}}
-{"type":"tool_use","part":{"tool":"bash","state":{"status":"running","input":{"command":"pwd"}}}}
-{"type":"tool_use","part":{"tool":"bash","state":{"status":"completed","output":"/tmp"}}}
-{"type":"text","part":{"text":"done"}}
-{"type":"error","error":{"message":"failed"}}
-"#;
-        let decoded = lines(Harness::OpenCode, out);
+    fn captured_codex_tool_and_agent_sections() {
+        let decoded = lines(Harness::Codex, fixtures::CODEX_TOOL.as_bytes());
         assert_eq!(
-            decoded.iter().map(|l| l.kind).collect::<Vec<_>>(),
+            decoded
+                .iter()
+                .map(|l| (l.kind, l.text.as_str()))
+                .collect::<Vec<_>>(),
             vec![
-                LiveKind::Tool,
-                LiveKind::Outcome,
-                LiveKind::Text,
-                LiveKind::Error
+                (LiveKind::Text, "I’ll run the command now."),
+                (LiveKind::Tool, fixtures::CODEX_COMMAND),
+                (LiveKind::Outcome, "succeeded in 0ms:"),
+                (LiveKind::Outcome, "stream-fix-probe"),
+                (LiveKind::Text, "The command succeeded in producing output."),
             ]
         );
-        assert_eq!(decoded[2].text, "done");
+        let gapped = fixtures::CODEX_TOOL
+            .replace("\nuser\n", &format!("\nuser\n{CAPTURE_GAP}"))
+            .replace("\ntokens used\n", &format!("\ntokens used\n{CAPTURE_GAP}"));
+        assert_eq!(lines(Harness::Codex, gapped.as_bytes()), decoded);
+        let pty = fixtures::CODEX_TOOL.replace("codex\n", "\x1b[32mcodex\x1b[0m\r\n");
+        assert_eq!(lines(Harness::Codex, pty.as_bytes()), decoded);
+    }
+    #[test]
+    fn captured_opencode_completion_and_session_filter() {
+        let expected = vec![
+            LiveLine {
+                kind: LiveKind::Tool,
+                text: "▸ shell {\"command\":\"printf stream-fix-probe\"}".into(),
+            },
+            LiveLine {
+                kind: LiveKind::Outcome,
+                text: "stream-fix-probe".into(),
+            },
+            LiveLine {
+                kind: LiveKind::Text,
+                text: "probe done.".into(),
+            },
+        ];
+        assert_eq!(
+            lines(Harness::OpenCode, fixtures::OPENCODE.as_bytes()),
+            expected
+        );
+        assert_eq!(
+            lines_for(
+                Harness::OpenCode,
+                fixtures::OPENCODE_MIXED.as_bytes(),
+                Some(fixtures::OPENCODE_SESSION)
+            ),
+            expected
+        );
+        assert_eq!(
+            lines(Harness::OpenCode, fixtures::OPENCODE_MIXED.as_bytes()),
+            expected
+        );
+        // The first event belongs to the probe; all subsequent events belong
+        // to a different real live session. Never display that other session.
+        assert!(
+            lines(
+                Harness::OpenCode,
+                fixtures::OPENCODE_TWO_SESSIONS.as_bytes()
+            )
+            .is_empty()
+        );
+        assert!(
+            !lines_for(
+                Harness::OpenCode,
+                fixtures::OPENCODE_TWO_SESSIONS.as_bytes(),
+                Some(fixtures::OTHER_SESSION)
+            )
+            .is_empty()
+        );
     }
 }

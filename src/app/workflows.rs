@@ -24,6 +24,69 @@ const PASS_EVERY: Duration = Duration::from_millis(500);
 /// Raw stdout kept per session; envelopes are small, tool output is not.
 const CAPTURE_CAP: usize = 4 * 1024 * 1024;
 
+/// Retain the first few complete lines (including a stream's session id)
+/// plus a recent tail. The explicit gap keeps unrelated line fragments apart.
+fn append_capture(stdout: &mut Vec<u8>, bytes: &[u8]) {
+    use crate::workflows::live::CAPTURE_GAP;
+    const HEAD_CAP: usize = 8 * 1024;
+    let gap = CAPTURE_GAP.as_bytes();
+    let gap_at = stdout[..stdout.len().min(HEAD_CAP + gap.len())]
+        .windows(gap.len())
+        .position(|window| window == gap);
+    if gap_at.is_none() && stdout.len().saturating_add(bytes.len()) <= CAPTURE_CAP {
+        stdout.extend_from_slice(bytes);
+        return;
+    }
+    let mut head = stdout[..stdout.len().min(HEAD_CAP)].to_vec();
+    if gap_at.is_none() && head.len() < HEAD_CAP {
+        head.extend_from_slice(&bytes[..bytes.len().min(HEAD_CAP - head.len())]);
+    }
+    let head_end = gap_at.unwrap_or_else(|| {
+        head.iter()
+            .rposition(|b| *b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    });
+    head.truncate(head_end);
+    let old_tail = &stdout[gap_at
+        .map(|i| i + gap.len())
+        .unwrap_or(head_end.min(stdout.len()))..];
+    let bytes = &bytes[head_end.saturating_sub(stdout.len())..];
+    let room = CAPTURE_CAP - head_end - gap.len();
+    let dropped = old_tail
+        .len()
+        .saturating_add(bytes.len())
+        .saturating_sub(room);
+    let at_boundary = dropped == 0
+        || if dropped <= old_tail.len() {
+            old_tail[dropped - 1] == b'\n'
+        } else {
+            bytes[dropped - old_tail.len() - 1] == b'\n'
+        };
+    let mut tail = Vec::with_capacity(room);
+    if bytes.len() >= room {
+        tail.extend_from_slice(&bytes[bytes.len() - room..]);
+    } else {
+        let keep = old_tail.len().min(room - bytes.len());
+        tail.extend_from_slice(&old_tail[old_tail.len() - keep..]);
+        tail.extend_from_slice(bytes);
+    }
+    let start = if !at_boundary {
+        // The suffix may start inside JSON or a UTF-8 character. Drop the
+        // fragment rather than join it to the preserved head or display it.
+        tail.iter()
+            .position(|b| *b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(tail.len())
+    } else {
+        0
+    };
+    stdout.clear();
+    stdout.extend_from_slice(&head);
+    stdout.extend_from_slice(gap);
+    stdout.extend_from_slice(&tail[start..]);
+}
+
 /// What starts a run.
 #[derive(Debug, Clone)]
 pub struct WorkflowRunRequest {
@@ -991,10 +1054,7 @@ impl App {
     pub fn capture_workflow_output(&mut self, session_id: usize, bytes: &[u8]) {
         for run in &mut self.live_workflow_runs {
             if let Some(s) = run.sessions.iter_mut().find(|s| s.session_id == session_id) {
-                if s.stdout.len() < CAPTURE_CAP {
-                    let room = CAPTURE_CAP - s.stdout.len();
-                    s.stdout.extend_from_slice(&bytes[..bytes.len().min(room)]);
-                }
+                append_capture(&mut s.stdout, bytes);
                 return;
             }
         }
@@ -1747,10 +1807,8 @@ impl App {
             .live_workflow_plans
             .iter_mut()
             .find(|p| p.session_id == session_id)
-            && p.stdout.len() < CAPTURE_CAP
         {
-            let room = CAPTURE_CAP - p.stdout.len();
-            p.stdout.extend_from_slice(&bytes[..bytes.len().min(room)]);
+            append_capture(&mut p.stdout, bytes);
         }
     }
 
@@ -2537,6 +2595,50 @@ impl App {
 mod tests {
     use super::awaiting_verdict;
     use serde_json::json;
+
+    #[test]
+    fn bounded_capture_keeps_final_stream_results() {
+        use super::{CAPTURE_CAP, append_capture};
+        use crate::harness::Harness;
+        use crate::workflows::{harness::envelope, live};
+        for (h, result) in [
+            (
+                Harness::Claude,
+                r#"{"type":"result","result":"final answer","usage":{"input_tokens":12,"output_tokens":3},"total_cost_usd":0.25}"#,
+            ),
+            (
+                Harness::Antigravity,
+                r#"{"event":"result","result":{"response":"final answer","usage":{"input_tokens":12,"output_tokens":3},"cost_usd":0.25}}"#,
+            ),
+        ] {
+            let mut raw = b"{\"type\":\"system\",\"event\":\"init\"}\n".to_vec();
+            let filler = format!(
+                "{{\"type\":\"unknown\",\"data\":\"{}\"}}\n",
+                "x".repeat(999)
+            );
+            while raw.len() < CAPTURE_CAP * 2 {
+                raw.extend_from_slice(filler.as_bytes());
+            }
+            raw.extend_from_slice(result.as_bytes());
+            raw.push(b'\n');
+            for chunk_size in [raw.len(), 7777] {
+                let mut captured = Vec::new();
+                for chunk in raw.chunks(chunk_size) {
+                    append_capture(&mut captured, chunk);
+                }
+                assert!(captured.len() <= CAPTURE_CAP);
+                assert!(captured.starts_with(b"{\"type\":\"system\""));
+                let parsed = envelope(h, &captured, std::path::Path::new("/unused"));
+                assert_eq!(parsed.text.as_deref(), Some("final answer"));
+                assert_eq!(parsed.tokens, Some(15));
+                assert_eq!(parsed.cost_usd, Some(0.25));
+                assert_eq!(
+                    live::lines(h, &captured).last().unwrap().text,
+                    "final answer"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_verdict_waits_unless_accepted_and_uncontradicted() {
