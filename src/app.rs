@@ -36,6 +36,7 @@ pub mod session_screen;
 pub mod shortcut_probe;
 pub use config_view::*;
 pub mod langfuse_view;
+pub mod library;
 pub mod loops;
 pub mod loops_view;
 pub mod markdown_view;
@@ -96,6 +97,9 @@ pub enum Mode {
     Memory(Box<memory_view::MemoryView>),
     /// The Workspaces Explorer screen: folders, sub-folders, stacks and agents.
     Workspaces(Box<workspaces_view::WorkspacesView>),
+    /// The Library screen: every flow, skill and persona in a left
+    /// tree, launched through one harness picker.
+    Library(Box<library::LibraryState>),
     /// The Swarm screen: one workspace's swarm as its plan's task board.
     Swarm(Box<swarm_board::SwarmBoard>),
     /// The Langfuse screen: remote traces, observation trees, and web links.
@@ -193,6 +197,10 @@ pub enum Action {
     CycleTraceStrip,
     OpenHelp,
     OpenSkillsView,
+    /// `o` in the Agents list, or F1 → Open library.
+    OpenLibrary,
+    /// Library mode: App routes the key to the Library state it owns.
+    LibraryKey,
     OpenSkillLauncher,
     KillSelected,
     EnterConfirmKill,
@@ -201,9 +209,6 @@ pub enum Action {
     Restart,
     RemoveSelected,
     RemoveExited,
-    /// `m` in the list: the scheduled, flows, skills, on demand and
-    /// personas sections, shown or hidden.
-    ToggleAgentSections,
     RespawnSelected,
     ToggleTracing,
     ToggleSidebar,
@@ -506,8 +511,6 @@ pub struct DispatchCtx {
     pub app_cursor: bool,
     pub sidebar_section: SidebarSection,
     pub sidebar_hidden: bool,
-    /// Only the harnesses and their sessions are listed (`App::clean`).
-    pub clean: bool,
 }
 
 /// The trace strip under the selected session: `T` cycles it, and from
@@ -625,10 +628,15 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
             let in_list = !ctx.sidebar_hidden && ctx.sidebar_section != SidebarSection::History;
             match key.code {
                 // n makes a new agent; the chooser starts on the kind of
+                // row the cursor is on (its blank path is a plain session)
+                KeyCode::Char('n') if in_list => Action::OpenNewAgent,
+                // n makes a new agent; the chooser starts on the kind of
                 // row the cursor is on (a session, a scheduled agent, a flow)
-                KeyCode::Char('n') if in_list && !ctx.clean => Action::OpenNewAgent,
-                KeyCode::Char('m') if !ctx.sidebar_hidden => Action::ToggleAgentSections,
-                KeyCode::Enter if in_list && ctx.agent_row == RowTag::Harness => {
+                KeyCode::Enter
+                    if in_list
+                        && ctx.sidebar_section == SidebarSection::Active
+                        && ctx.agent_row == RowTag::Harness =>
+                {
                     Action::NewSessionFromHarness
                 }
                 KeyCode::Enter | KeyCode::Char('e')
@@ -682,6 +690,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 }
                 KeyCode::Char('x' | 'd' | 'r' | 't' | 'h' | ' ')
                     if in_list
+                        && ctx.sidebar_section == SidebarSection::Active
                         && matches!(
                             ctx.agent_row,
                             RowTag::Harness | RowTag::Persona | RowTag::Task
@@ -792,6 +801,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
                 }
                 KeyCode::Char('T') => Action::CycleTraceStrip,
                 KeyCode::Char('S') => Action::OpenSkillsView,
+                KeyCode::Char('o') if in_list => Action::OpenLibrary,
                 KeyCode::Char('C') => Action::OpenConfigView,
                 KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
                 KeyCode::Char('x')
@@ -833,6 +843,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::SessionHistory(_) => Action::HistoryKey,
         Mode::TraceBrowser(_) => Action::BrowserKey,
         Mode::SkillsView(_) => Action::SkillsKey,
+        Mode::Library(_) => Action::LibraryKey,
         Mode::SkillLauncher(_) => Action::SkillLauncherKey,
         Mode::About(_) => match key.code {
             KeyCode::Char('?') | KeyCode::F(1) => Action::OpenHelp,
@@ -2710,11 +2721,6 @@ pub struct App {
     pub antigravity_dir: Option<std::path::PathBuf>,
     /// Whether the sidebar is currently hidden (full-screen harness).
     pub sidebar_hidden: bool,
-    /// The Agents list holds only the harnesses and their sessions (no
-    /// scheduled agents, flows, skills or personas; History stays), `n` is
-    /// a new session, and the hints say no more than that. agent-mux starts
-    /// this way; `m` in the list toggles it (`toggle_agent_sections`).
-    pub clean: bool,
     /// Loop and workflow headers folded away in the Active sidebar, by
     /// `tree::GroupRef::key`. Keyed by the parent rather than by a session
     /// index, so a fold survives sessions coming and going.
@@ -2956,7 +2962,6 @@ impl App {
             claude_dir: None,
             antigravity_dir: None,
             sidebar_hidden: false,
-            clean: false,
             collapsed_groups: std::collections::HashSet::new(),
             collapsed_agents: std::collections::HashSet::new(),
             terminal_size: (27, 112),
@@ -3062,6 +3067,26 @@ impl App {
         self.skills.get(self.selected_agent)
     }
 
+    /// The Library's skill launch: the SkillLauncher dialog (workspace
+    /// choice, as before) for the skill at `idx`, preset to `harness`.
+    /// A running skill attaches instead, as `OpenSkillLauncher` does.
+    pub fn open_skill_launcher_on(&mut self, idx: usize, harness: crate::harness::Harness) {
+        let Some(skill) = self.skills.get(idx).cloned() else {
+            return;
+        };
+        self.selected_agent = idx;
+        if let Some(session) = self.running_skill_session(&skill.id) {
+            self.attach_to_session(session);
+            return;
+        }
+        let mut state =
+            SkillLauncherState::for_skill_in_workspace(&skill, self.skill_launcher_workspace());
+        if let Some(pos) = state.harnesses.iter().position(|h| *h == harness) {
+            state.selected = pos;
+        }
+        self.mode = Mode::SkillLauncher(state);
+    }
+
     fn skill_launcher_workspace(&self) -> String {
         if let Some(s) = self.sessions.get(self.selected) {
             return s.dir.to_string_lossy().into_owned();
@@ -3119,6 +3144,11 @@ impl App {
             Ok(()) => vec![(feed::ENV_OWNER.into(), feed::OWNER.into())],
             Err(_) => Vec::new(),
         }
+    }
+
+    /// `skill_home` for the Library screen's install-state column.
+    pub fn skill_home_for_library(&self) -> std::path::PathBuf {
+        self.skill_home()
     }
 
     /// The home whose harness skill directories receive installs.
@@ -4614,7 +4644,6 @@ impl App {
             app_cursor,
             sidebar_section: self.sidebar_section,
             sidebar_hidden: self.sidebar_hidden,
-            clean: self.clean,
         };
         // g/G and Ctrl+D/Ctrl+U in the list views, where nothing is typed
         let aliased;
@@ -4635,6 +4664,7 @@ impl App {
             Mode::Main => self.focus == Focus::List,
             Mode::TraceBrowser(b) => b.search_input.is_none(),
             Mode::SessionHistory(_) | Mode::SkillsView(_) | Mode::Inbox(_) => true,
+            Mode::Library(v) => !v.text_entry_active() && !v.confirmation_active(),
             Mode::ConfigView(v) => v.pending == Pending::None,
             Mode::Swarm(v) => !v.text_entry_active() && !v.confirmation_active(),
             Mode::Run(v) => v.confirm.is_none(),
@@ -5858,6 +5888,17 @@ impl App {
                 return;
             }
         }
+        if matches!(self.mode, Mode::Library(_)) {
+            // the wheel scrolls the card; clicks are the keyboard's for now
+            if let Mode::Library(st) = &mut self.mode {
+                match ev.kind {
+                    MouseEventKind::ScrollDown => st.scroll = st.scroll.saturating_add(3),
+                    MouseEventKind::ScrollUp => st.scroll = st.scroll.saturating_sub(3),
+                    _ => {}
+                }
+            }
+            return;
+        }
         if matches!(self.mode, Mode::Swarm(_)) {
             self.swarm_mouse(ev);
             return;
@@ -6318,6 +6359,23 @@ impl App {
                         self.selected_history =
                             (self.selected_history + 1).min(self.history_sessions.len() - 1);
                     }
+                } else if self.sidebar_section == SidebarSection::Workflows {
+                    // the section's own selection (its rows live in the Library now)
+                    let rows = self.workflow_rows();
+                    if !rows.is_empty() {
+                        self.selected_workflow = (self.selected_workflow + 1).min(rows.len() - 1);
+                        self.workflow_anchor = rows.get(self.selected_workflow).cloned();
+                    }
+                } else if self.sidebar_section == SidebarSection::Loops {
+                    let n = self.loop_registry.loops.len();
+                    if n > 0 {
+                        self.selected_loop = (self.selected_loop + 1).min(n - 1);
+                    }
+                } else if self.sidebar_section == SidebarSection::Agents {
+                    let n = self.skills.len();
+                    if n > 0 {
+                        self.selected_agent = (self.selected_agent + 1).min(n - 1);
+                    }
                 } else if !self.move_agent_cursor(1) && !self.history_sessions.is_empty() {
                     // past the last agent: into History
                     self.sidebar_section = SidebarSection::History;
@@ -6340,6 +6398,14 @@ impl App {
                             self.select_agent_line(&lines, last);
                         }
                     }
+                } else if self.sidebar_section == SidebarSection::Workflows {
+                    self.selected_workflow = self.selected_workflow.saturating_sub(1);
+                    self.workflow_anchor =
+                        self.workflow_rows().get(self.selected_workflow).cloned();
+                } else if self.sidebar_section == SidebarSection::Loops {
+                    self.selected_loop = self.selected_loop.saturating_sub(1);
+                } else if self.sidebar_section == SidebarSection::Agents {
+                    self.selected_agent = self.selected_agent.saturating_sub(1);
                 } else {
                     self.move_agent_cursor(-1);
                 }
@@ -6440,6 +6506,8 @@ impl App {
             }
             Action::ToggleKillSwitch => self.toggle_kill_switch(),
             Action::OpenSkillsView => self.open_skills_view(),
+            Action::OpenLibrary => self.open_library(library::Section::Flows),
+            Action::LibraryKey => self.handle_library_key(key),
             Action::SkillsKey => self.handle_skills_key(key),
             Action::OpenConfigView => self.open_config_view(),
             Action::ConfigKey => self.handle_config_key(key),
@@ -6510,6 +6578,8 @@ impl App {
                 }
             }
             Action::SkillLauncherKey => self.handle_skill_launcher_key(key),
+            // (the Library's picker opens the launcher through
+            // `open_skill_launcher_on`, below)
             Action::RestartHistorySession => {
                 if let Some(summary) = self.history_sessions.get(self.selected_history).cloned() {
                     self.resume_history_session(&summary);
@@ -6603,7 +6673,6 @@ impl App {
                     let _ = self.save_active_sessions();
                 }
             }
-            Action::ToggleAgentSections => self.toggle_agent_sections(),
             Action::RemoveExited => {
                 let before = self.sessions.len();
                 let now = Instant::now();
@@ -7043,32 +7112,6 @@ impl App {
             Ok(()) => self.request_editor(path, "trace:reader".into()),
             Err(e) => self.notice = Some(Notice::error(format!("editor: {e}"))),
         }
-    }
-
-    /// `m`: shows or hides the sections beyond the harnesses (scheduled,
-    /// flows, skills, on demand, personas). A cursor left on a hidden row
-    /// goes back to the session it had, or the first harness.
-    pub fn toggle_agent_sections(&mut self) {
-        self.clean = !self.clean;
-        if self.clean
-            && matches!(
-                self.sidebar_section,
-                SidebarSection::Loops | SidebarSection::Workflows | SidebarSection::Agents
-            )
-        {
-            self.sidebar_section = SidebarSection::Active;
-        }
-        if self.clean
-            && let Some(kind) = self.agent_focus().cloned()
-            && !self.agent_lines().iter().any(|l| l.kind == kind)
-        {
-            self.agent_focus = None;
-        }
-        self.notice = Some(Notice::info(if self.clean {
-            "harnesses only · m shows scheduled, flows, skills and personas"
-        } else {
-            "scheduled, flows, skills and personas shown · m hides them"
-        }));
     }
 
     /// The quit chord: quits at once with nothing running, and asks first
@@ -9000,7 +9043,6 @@ mod dispatch_tests {
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
             sidebar_hidden: false,
-            clean: false,
         }
     }
 
@@ -9289,7 +9331,6 @@ mod confirm_modes {
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
             sidebar_hidden: false,
-            clean: false,
         }
     }
 
@@ -9886,7 +9927,6 @@ mod history_tests {
             app_cursor: false,
             sidebar_section: SidebarSection::Active,
             sidebar_hidden: false,
-            clean: false,
         }
     }
 

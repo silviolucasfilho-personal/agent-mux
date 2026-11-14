@@ -4,7 +4,7 @@
 
 use agent_mux::app::agent_editor::Body;
 use agent_mux::app::flow_builder::{Field, FlowBuilderState, Overlay, Screen};
-use agent_mux::app::{App, Mode, SidebarSection};
+use agent_mux::app::{App, Mode};
 use agent_mux::config::Profile;
 use agent_mux::workflows::builder::{FieldKind, Role};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -140,12 +140,6 @@ fn open_agents(app: &mut App) {
     );
 }
 
-fn to_workflows(app: &mut App) {
-    // the Agents list: the first row of that kind takes the section's keys
-    app.select_first_row_of(SidebarSection::Workflows);
-    assert_eq!(app.sidebar_section, SidebarSection::Workflows);
-}
-
 /// Adds a step running as the `n`th shape, named `name`.
 fn add_step(app: &mut App, name: &str, shape: usize) {
     press(app, KeyCode::Char('n'));
@@ -163,9 +157,7 @@ fn add_step(app: &mut App, name: &str, shape: usize) {
 fn a_flow_is_built_step_by_step_and_saved() {
     let (mut app, temp) = app();
     let ws = temp.path().join("ws");
-    to_workflows(&mut app);
-    press(&mut app, KeyCode::Char('n'));
-    press(&mut app, KeyCode::Enter); // the chooser starts on it
+    app.open_flow_builder_new();
     assert!(matches!(app.mode, Mode::AgentEditor(_)));
     let text = render(&app);
     assert!(text.contains("New flow"), "{text}");
@@ -401,9 +393,7 @@ fn a_flow_is_built_step_by_step_and_saved() {
 #[test]
 fn leaving_with_changes_asks_first_and_a_document_opens_in_the_builder() {
     let (mut app, _temp) = app();
-    to_workflows(&mut app);
-    press(&mut app, KeyCode::Char('n'));
-    press(&mut app, KeyCode::Enter); // the chooser starts on it
+    app.open_flow_builder_new();
     add_step(&mut app, "only", 0);
     press(&mut app, KeyCode::Esc); // fields → list
     press(&mut app, KeyCode::Esc); // list → close?
@@ -420,16 +410,7 @@ fn leaving_with_changes_asks_first_and_a_document_opens_in_the_builder() {
         .iter()
         .position(|e| e.name == "review-changes")
         .unwrap();
-    for _ in 0..40 {
-        if matches!(
-            app.selected_workflow_row(),
-            Some(agent_mux::app::workflows::WorkflowRow::Doc(i)) if i == pos
-        ) {
-            break;
-        }
-        press(&mut app, KeyCode::Down);
-    }
-    press(&mut app, KeyCode::Char('e'));
+    app.open_workflow_run_editor(pos);
     let s = st(&app);
     assert_eq!(s.draft.name(), "review-changes");
     assert_eq!(
@@ -448,9 +429,7 @@ fn leaving_with_changes_asks_first_and_a_document_opens_in_the_builder() {
 #[test]
 fn a_built_in_agent_is_edited_as_a_library_copy() {
     let (mut app, temp) = app();
-    to_workflows(&mut app);
-    press(&mut app, KeyCode::Char('n'));
-    press(&mut app, KeyCode::Enter); // the chooser starts on it
+    app.open_flow_builder_new();
     add_step(&mut app, "look", 0);
     open_agents(&mut app);
     let Some(Overlay::Agent(p)) = &st(&app).overlay else {
@@ -503,22 +482,13 @@ fn a_built_in_agent_is_edited_as_a_library_copy() {
 #[test]
 fn a_built_in_workflow_is_edited_as_a_copy_and_restored() {
     let (mut app, temp) = app();
-    to_workflows(&mut app);
     let pos = app
         .workflow_entries()
         .iter()
         .position(|e| e.name == "santa-review")
         .unwrap();
-    for _ in 0..40 {
-        if matches!(
-            app.selected_workflow_row(),
-            Some(agent_mux::app::workflows::WorkflowRow::Doc(i)) if i == pos
-        ) {
-            break;
-        }
-        press(&mut app, KeyCode::Down);
-    }
-    press(&mut app, KeyCode::Char('e'));
+    // the Library's `e` on the flow: the builder, on the document
+    app.open_workflow_run_editor(pos);
     assert!(render(&app).contains("Built-in flow"));
     // change what it says it does, then save: the library copy wins
     press(&mut app, KeyCode::Up); // flow settings

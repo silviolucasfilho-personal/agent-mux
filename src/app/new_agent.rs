@@ -225,6 +225,13 @@ impl App {
     /// with the agent attached. The first profile on a harness the agent
     /// names a model for is preselected.
     pub fn open_agent_session(&mut self, name: &str) {
+        self.open_agent_session_on(name, None);
+    }
+
+    /// `open_agent_session` with the harness chosen first (the Library's
+    /// harness picker): the dialog opens on the first profile running
+    /// `harness`, with the agent attached.
+    pub fn open_agent_session_on(&mut self, name: &str, harness: Option<crate::harness::Harness>) {
         let catalog = crate::agents::Catalog::load(&self.library_root(), None);
         let Some(spec) = catalog.entry(name).and_then(|e| e.spec.clone()) else {
             self.notice = Some(Notice::error(format!("agent {name} does not load")));
@@ -238,12 +245,18 @@ impl App {
             )));
             return;
         }
-        let preferred = spec.backends.keys().next().cloned();
-        let profile = preferred.and_then(|h| {
-            self.profiles.iter().position(|p| {
-                crate::harness::Harness::detect(&p.command).map(|x| x.as_str()) == Some(h.as_str())
-            })
-        });
+        let profile = match harness {
+            Some(h) => self
+                .profiles
+                .iter()
+                .position(|p| crate::harness::Harness::detect(&p.command) == Some(h)),
+            None => spec.backends.keys().next().and_then(|h| {
+                self.profiles.iter().position(|p| {
+                    crate::harness::Harness::detect(&p.command).map(|x| x.as_str())
+                        == Some(h.as_str())
+                })
+            }),
+        };
         self.open_new_session_dialog(profile);
         if let Mode::NewSession(d) = &mut self.mode {
             d.agent = Some(name.to_string());
@@ -330,7 +343,8 @@ impl App {
     ) -> Result<crate::handoff::Continue, String> {
         use crate::handoff::{self, Continue, Source};
         use crate::harness::Harness;
-        let harness = harness.ok_or("continue on a Claude Code, Codex, Antigravity or Muse profile")?;
+        let harness =
+            harness.ok_or("continue on a Claude Code, Codex, Antigravity or Muse profile")?;
         let s = self
             .sessions
             .iter()

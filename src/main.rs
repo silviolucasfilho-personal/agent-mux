@@ -296,8 +296,6 @@ async fn main() -> Result<()> {
     if hide_sidebar {
         app.sidebar_hidden = true;
     }
-    // the list starts with the harnesses alone; `m` shows the rest
-    app.clean = true;
     if let Some(first) = startup_notices.into_iter().next() {
         app.notice = Some(agent_mux::app::Notice::warn(first));
     }

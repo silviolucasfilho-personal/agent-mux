@@ -1648,10 +1648,9 @@ impl Pipeline {
         for ev in &events {
             if self.ctx.provider == Provider::Muse
                 && ev.agent_id.is_some()
-                && self
-                    .adopted
-                    .as_ref()
-                    .is_some_and(|a| !ev.session_id.trim().is_empty() && a.session_id != ev.session_id)
+                && self.adopted.as_ref().is_some_and(|a| {
+                    !ev.session_id.trim().is_empty() && a.session_id != ev.session_id
+                })
             {
                 // Internal Muse reminder child sessions must not hijack the
                 // parent pipeline or overwrite parent launch metadata.

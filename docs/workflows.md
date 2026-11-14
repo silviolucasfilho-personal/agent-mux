@@ -319,14 +319,16 @@ Every session is a print-mode run with the harness's own approval prompts bypass
 
 agent-mux validates it against the schema and retries the session once with the errors when it does not match; a second failure makes the item `null`, which the view and the notes report.
 
-| | Claude Code | Codex CLI | Antigravity | OpenCode | Muse |
-| --- | --- | --- | --- | --- | --- |
-| Command | `claude -p … --output-format json` | `codex exec … -o <file> --skip-git-repo-check` | `agy -p … --output-format json --print-timeout <s> --mode accept-edits` | `opencode run … --format json --standalone`, the MCP server and any agent in `OPENCODE_CONFIG_CONTENT` | `muse exec … --json --yolo --trust-workspace` with MCP and hook `-c` overrides |
-| Final text | the JSON envelope, then the transcript, then the screen | the last-message file, then the transcript, then the screen | the JSON envelope, then the transcript, then the screen | the `text` events of its JSON stream (one event per line; no usage or cost in it), then the screen | the `run.terminal.completed` (or decoded stream) event of its JSONL output (and usage from `run.usage`), then the transcript, then the screen |
-| Path guard | per launch | per launch (after `trace hooks install codex`) | none: rely on isolation and budgets | none: rely on isolation and budgets | per launch |
-| Worktree isolation | yes | yes | not applied | yes | yes |
+| | Claude Code | Codex CLI | Antigravity | OpenCode | Grok | Pi | Muse |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Command | `claude -p … --output-format json` | `codex exec … -o <file> --skip-git-repo-check` | `agy -p … --output-format json --print-timeout <s> --mode accept-edits` | `opencode run … --format json --standalone`, the MCP server and any agent in `OPENCODE_CONFIG_CONTENT` | `grok --single … --output-format json` | `pi --print … --mode json` | `muse exec … --json --yolo --trust-workspace` with MCP and hook `-c` overrides |
+| Final text | the JSON envelope, then the transcript, then the screen | the last-message file, then the transcript, then the screen | the JSON envelope, then the transcript, then the screen | the `text` events of its JSON stream (one event per line; no usage or cost in it), then the screen | the `text` of its one JSON object (with `usage` and `total_cost_usd`), then the screen | the last assistant `message_end` of its JSON event stream (with its `usage`), then the screen | the `run.terminal.completed` (or decoded stream) event of its JSONL output (and usage from `run.usage`), then the transcript, then the screen |
+| Path guard | per launch | per launch (after `trace hooks install codex`) | none: rely on isolation and budgets | none: rely on isolation and budgets | none: rely on isolation and budgets | none: rely on isolation and budgets | per launch |
+| Worktree isolation | yes | yes | not applied | yes | yes | yes | yes |
 
-Grok, Pi, and DeepSeek do not run workflow steps yet (`src/agents/fit.rs` and `src/workflows/harness.rs` treat Grok and Pi as unsupported for workflows; DeepSeek is deferred).
+Every harness runs workflow steps (Grok 1.0.77 and Pi 1.5.2 probed 2026-11-14; `src/workflows/harness.rs` records the probes). DeepSeek is deferred: it has no `Harness` variant yet. A document's own `harness = [...]` still narrows where its steps may run, and the Library's Harnesses tab shows that as the document's restriction.
+
+Flows live in the Library (`o` in the Agents list, or F1 → Open library): its flows section lists every document with its harness coverage (`n/7`), and Enter launches it through the harness picker into the same run dialog. The Agents list itself holds only launched work.
 
 Step skills are agent-mux packages (`wf-review-dimensions`, `wf-review-find`, `wf-refute`, `wf-synthesize`, `wf-read-map`, `wf-search`, `wf-deep-read`, `wf-critic`, `wf-find`, `wf-attempt`, `wf-judge`, `wf-discover-sites`, `wf-transform`, `wf-verify-site`, `wf-classify`, `wf-triage-bug`, `wf-triage-feature`, `wf-grimoire-brief`, `wf-grimoire-lens`, `wf-grimoire-verdict`) with `hidden = true` in their `skill.toml`, so they stay out of the Agents sidebar. They are installed user-level for the run's harness before the first session. `writes = true` marks a skill that edits files; a step running it must have `isolation = "worktree"`, which the validator enforces.
 

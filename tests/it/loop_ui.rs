@@ -79,9 +79,10 @@ fn render(app: &App, width: u16, height: u16) -> String {
 }
 
 /// The sidebar is the Agents list and History: History keeps a few rows
-/// (never more than a third), and a scheduled agent is a row of the list.
+/// (never more than a third). A scheduled agent is not a row of that
+/// list any more: it lives in the Library's scheduled section.
 #[test]
-fn the_sidebar_is_agents_and_history_and_a_loop_is_an_agent() {
+fn the_sidebar_is_agents_and_history_and_a_loop_lives_in_the_library() {
     let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
     let (agents, history) = agent_mux::ui::sidebar_areas(33, 5);
     assert_eq!([agents.height, history.height], [26, 6]);
@@ -95,14 +96,44 @@ fn the_sidebar_is_agents_and_history_and_a_loop_is_an_agent() {
     );
 
     app.loop_registry.add(entry(&temp, "daily-triage"));
-    app.select_first_row_of(SidebarSection::Loops);
-    assert_eq!(app.sidebar_section, SidebarSection::Loops);
     let screen = render(&app, 120, 34);
-    assert!(screen.contains("SCHEDULED"), "{screen}");
+    assert!(!screen.contains("SCHEDULED"), "{screen}");
+    assert!(!screen.contains("daily-triage"), "{screen}");
+
+    app.open_library(agent_mux::app::library::Section::Scheduled);
+    let screen = render(&app, 120, 34);
+    assert!(screen.contains("scheduled"), "{screen}");
     assert!(screen.contains("daily-triage"), "{screen}");
-    // Tab targets the pane; it keeps the selected agent row.
-    app.handle_key(&key(KeyCode::Tab), Instant::now());
-    assert_eq!(app.sidebar_section, SidebarSection::Loops);
+    // its verbs work from the Library: p pauses the loop
+    let id = app.loop_registry.loops[0].id.clone();
+    match &app.mode {
+        Mode::Library(st) => {
+            assert!(
+                matches!(
+                    app.library_item(st),
+                    Some(agent_mux::app::library::Item::Loop(0))
+                ) || app
+                    .library_rows(st)
+                    .iter()
+                    .any(|r| matches!(r, agent_mux::app::library::Row::Loop(0)))
+            );
+        }
+        other => panic!("not in the library: {other:?}"),
+    }
+    // move onto the loop row and pause it
+    let at = match &app.mode {
+        Mode::Library(st) => app
+            .library_rows(st)
+            .iter()
+            .position(|r| matches!(r, agent_mux::app::library::Row::Loop(0)))
+            .unwrap(),
+        other => panic!("not in the library: {other:?}"),
+    };
+    if let Mode::Library(st) = &mut app.mode {
+        st.cursor = at;
+    }
+    app.handle_library_key(&key(KeyCode::Char('p')));
+    assert!(app.loop_registry.find(&id).unwrap().paused());
 }
 
 #[test]
@@ -497,24 +528,16 @@ fn the_runs_timeline_folds_quiet_runs_and_opens_the_selected_one() {
     );
 }
 
-/// The sidebar row and the preview name the workspace, not a cut-off path,
-/// and no hint line wraps or loses its last hint.
+/// The preview names the workspace, not a cut-off path, and no hint
+/// line wraps or loses its last hint. (The loop's row is in the
+/// Library's scheduled section; the preview card is the Loops
+/// section's, in the main pane.)
 #[test]
 fn a_loop_is_named_by_its_workspace_and_its_hints_fit() {
     let (mut app, temp) = app_with(vec![profile("Claude Code", "claude")]);
     app.loop_registry.add(entry(&temp, "daily-triage"));
     app.sidebar_section = SidebarSection::Loops;
     let screen = render(&app, 100, 34);
-    let rows: Vec<&str> = screen.lines().collect();
-    let at = rows
-        .iter()
-        .position(|l| l.contains("daily-triage") && l.starts_with('│'))
-        .unwrap();
-    assert!(
-        rows[at + 1].contains("proj · reports only"),
-        "the line under the row names the workspace: {}",
-        rows[at + 1]
-    );
     let title = screen.lines().next().unwrap();
     assert!(
         title.contains("daily-triage · proj · Claude Code"),
@@ -541,6 +564,14 @@ fn a_loop_is_named_by_its_workspace_and_its_hints_fit() {
     );
     let last = screen.lines().last().unwrap().trim_end();
     assert!(last.contains("[F1 Commands]"), "{last}");
+
+    // and its Library row names the pattern and its harness
+    app.open_library(agent_mux::app::library::Section::Scheduled);
+    let screen = render(&app, 100, 34);
+    assert!(
+        screen.lines().any(|l| l.contains("daily-triage · claude")),
+        "the scheduled row\n{screen}"
+    );
 }
 
 /// The preview leads with what the loop found, then what it may do and

@@ -957,13 +957,13 @@ async fn wheel_over_an_overflowing_agents_list_scrolls_the_list() {
     assert!(!out.contains("harness-00"), "scrolled past the top:\n{out}");
     assert!(out.contains("harness-03"), "{out}");
 
-    // it reaches the end of the list (the personas, below the harnesses)
-    // and stops there
+    // it reaches the end of the list (the last harness: the list holds
+    // launched work only now) and stops there
     for _ in 0..60 {
         wheel_at(&mut app, MouseEventKind::ScrollDown);
     }
     let out = render(&app);
-    assert!(out.contains("PERSONAS"), "the end is in view:\n{out}");
+    assert!(out.contains("harness-29"), "the end is in view:\n{out}");
     let at_end = app.agents_scroll.unwrap().start;
     wheel_at(&mut app, MouseEventKind::ScrollUp);
     assert_eq!(app.agents_scroll.unwrap().start, at_end - 3, "no backlog");
@@ -975,7 +975,7 @@ async fn wheel_over_an_overflowing_agents_list_scrolls_the_list() {
     );
     let out = render(&app);
     assert!(out.contains("harness-01"), "{out}");
-    assert!(!out.contains("PERSONAS"), "back at the cursor:\n{out}");
+    assert!(!out.contains("harness-29"), "back at the cursor:\n{out}");
     wheel_at(&mut app, MouseEventKind::ScrollDown);
 
     // and back to the top

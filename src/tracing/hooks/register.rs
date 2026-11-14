@@ -400,7 +400,10 @@ pub fn muse_cli_arg(reg: &Registration) -> String {
         }
         let mut group = Map::new();
         group.insert("hooks".into(), Value::Array(vec![h]));
-        hooks.insert((*event).to_string(), Value::Array(vec![Value::Object(group)]));
+        hooks.insert(
+            (*event).to_string(),
+            Value::Array(vec![Value::Object(group)]),
+        );
     }
     format!("hooks={}", Value::Object(hooks))
 }
@@ -678,7 +681,9 @@ mod tests {
             assert!(h.get("args").is_none(), "{event}: {h}");
             assert_eq!(h["async"], Value::Bool(true), "{event}: {h}");
             let cmd = h["command"].as_str().unwrap();
-            assert!(cmd.contains("'/opt/agent-mux' trace hook muse --home '/home/me' --content-mode full"));
+            assert!(cmd.contains(
+                "'/opt/agent-mux' trace hook muse --home '/home/me' --content-mode full"
+            ));
         }
 
         r.loop_guard = true;
@@ -690,7 +695,10 @@ mod tests {
         assert!(pre.get("async").is_none(), "guarded PreToolUse must wait");
         let cmd = pre["command"].as_str().unwrap();
         assert!(cmd.contains("--guard") && cmd.contains("--loop"), "{cmd}");
-        assert_eq!(hooks["SessionEnd"][0]["hooks"][0]["async"], Value::Bool(true));
+        assert_eq!(
+            hooks["SessionEnd"][0]["hooks"][0]["async"],
+            Value::Bool(true)
+        );
 
         r.profile = HooksProfile::Minimal;
         let hooks: Map<String, Value> =

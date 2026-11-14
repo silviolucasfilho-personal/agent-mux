@@ -32,14 +32,39 @@ fn candidates(named: Option<&str>, filter: &HarnessFilter) -> Vec<Harness> {
         Some(h) => vec![h],
         None => Harness::ALL
             .into_iter()
-            // TODO(workflows): Grok and Pi do not run workflow steps yet
-            .filter(|h| !matches!(h, Harness::Grok | Harness::Pi))
             .filter(|h| filter.allows(h.as_str()))
             .collect(),
     }
 }
 
+/// The fit diagnostics for one harness alone: what `check` would say
+/// about the steps that may run on `h`, plus an error when the document
+/// itself does not allow `h`. The Library's coverage matrix reads this.
+pub fn check_on(
+    doc: &Workflow,
+    catalog: &Catalog,
+    skills: &[SkillInfo],
+    h: Harness,
+) -> Vec<Diagnostic> {
+    if !doc.harness.allows(h.as_str()) {
+        return vec![Diagnostic::error(format!(
+            "harness {:?} is not allowed by workflow.harness",
+            h.as_str()
+        ))];
+    }
+    check_candidates(doc, catalog, skills, &[h])
+}
+
 pub fn check(doc: &Workflow, catalog: &Catalog, skills: &[SkillInfo]) -> Vec<Diagnostic> {
+    check_candidates(doc, catalog, skills, &Harness::ALL)
+}
+
+fn check_candidates(
+    doc: &Workflow,
+    catalog: &Catalog,
+    skills: &[SkillInfo],
+    only: &[Harness],
+) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = Vec::new();
     for s in &doc.steps {
         let mut roles: Vec<(&str, &str, Option<&str>, Option<&Actor>)> = Vec::new();
@@ -102,7 +127,10 @@ pub fn check(doc: &Workflow, catalog: &Catalog, skills: &[SkillInfo]) -> Vec<Dia
                     )));
                 }
             }
-            for h in candidates(harness, &doc.harness) {
+            for h in candidates(harness, &doc.harness)
+                .into_iter()
+                .filter(|h| only.contains(h))
+            {
                 for (level, note) in tool_notes(spec, h) {
                     let d = Diagnostic {
                         level,

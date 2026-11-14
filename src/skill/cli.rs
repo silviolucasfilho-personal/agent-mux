@@ -10,9 +10,9 @@ fn harness_args(args: &[String]) -> Result<Vec<Harness>, String> {
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--harness" {
-            let v = args
-                .get(i + 1)
-                .ok_or("--harness needs a value: claude, codex, agy, opencode, grok, pi, muse or all")?;
+            let v = args.get(i + 1).ok_or(
+                "--harness needs a value: claude, codex, agy, opencode, grok, pi, muse or all",
+            )?;
             if v == "all" {
                 out.extend(Harness::ALL);
             } else {

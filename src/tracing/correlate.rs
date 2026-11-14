@@ -604,7 +604,8 @@ pub fn poll_with(
                     if !path.is_file() || !mtime_in_window(&path, *t0) {
                         continue;
                     }
-                    let Some((meta_id, meta_cwd)) = read_muse_session_meta(&path, 256 * 1024) else {
+                    let Some((meta_id, meta_cwd)) = read_muse_session_meta(&path, 256 * 1024)
+                    else {
                         continue;
                     };
                     let Some(meta_cwd) = meta_cwd else {
@@ -613,8 +614,8 @@ pub fn poll_with(
                     if !cwd_matches(&meta_cwd, cwd, &want_cwd) {
                         continue;
                     }
-                    let id = meta_id
-                        .unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned());
+                    let id =
+                        meta_id.unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned());
                     if is_muse_reminder_child(&path)
                         || foreign(&id)
                         || !try_claim(claims, Provider::Muse, &id)
@@ -882,9 +883,7 @@ mod thread_lookup_tests {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let sess_dir = dir
-            .path()
-            .join("sessions/2026/11/14/01a1-muse-1");
+        let sess_dir = dir.path().join("sessions/2026/11/14/01a1-muse-1");
         std::fs::create_dir_all(&sess_dir).unwrap();
         let log = sess_dir.join("session.jsonl");
         let meta = serde_json::json!({
@@ -894,7 +893,10 @@ mod thread_lookup_tests {
             "payload": {"kind": "metadata", "record": {"workspace_root": ws}}
         });
         std::fs::write(&log, format!("{meta}\n")).unwrap();
-        assert_eq!(muse_session_log_by_id(dir.path(), "01a1-muse-1"), Some(log.clone()));
+        assert_eq!(
+            muse_session_log_by_id(dir.path(), "01a1-muse-1"),
+            Some(log.clone())
+        );
 
         let claims = ClaimRegistry::default();
         let mut spec = CorrelationSpec::WatchMuse {

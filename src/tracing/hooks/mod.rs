@@ -269,14 +269,9 @@ pub fn parse(
         HookSource::Claude => {
             parse_claude_like(Provider::Claude, false, payload, policy, ts_ns, launch_id)
         }
-        HookSource::OpenCode => parse_claude_like(
-            Provider::OpenCode,
-            false,
-            payload,
-            policy,
-            ts_ns,
-            launch_id,
-        ),
+        HookSource::OpenCode => {
+            parse_claude_like(Provider::OpenCode, false, payload, policy, ts_ns, launch_id)
+        }
         HookSource::Codex => parse_codex(payload, policy, ts_ns, launch_id),
         HookSource::CodexNotify => parse_codex_notify(payload, policy, ts_ns, launch_id),
         HookSource::Antigravity => parse_agy(event_override?, payload, policy, ts_ns, launch_id),

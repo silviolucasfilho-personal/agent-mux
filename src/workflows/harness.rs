@@ -15,6 +15,17 @@
 //! final envelope with usage or cost (its session row in
 //! `~/.local/share/opencode/opencode.db` has them). It has no budget flag.
 
+//! Grok 1.0.77 and Pi 1.5.2 re-probed 2026-11-14 (`--help` and live
+//! runs in a temporary folder): Grok's one-shot is `-p/--single` (from
+//! `LaunchOptions::render`) with `--output-format json`, one pretty
+//! JSON object (`text`, `usage.input_tokens`/`output_tokens`,
+//! `total_cost_usd`); a live probe answered the prompt exactly. Pi's
+//! one-shot is `--print` with `--mode json`, one JSON event per line;
+//! the answer is the last assistant `message_end`'s text parts, its
+//! `usage` carries `totalTokens` and `cost.total`. Pi's live probe
+//! reached its provider (which rejected this machine's default model),
+//! so its text rests on the observed event shapes.
+//!
 //! Streaming re-probed 2026-11-13 with installed `--help` and real runs in
 //! a temporary folder: Claude `--version` reported 2.1.323 (the run's init
 //! reported 2.1.325). `--output-format stream-json --verbose` emits assistant
@@ -68,9 +79,14 @@ pub fn extra_args(
         Harness::Muse => {
             v.push("--json".into());
         }
-        // TODO(workflows): not a workflow harness yet (its step skills
-        // cannot be installed, so a run stops before reaching here)
-        Harness::Grok | Harness::Pi => {}
+        Harness::Grok => {
+            v.push("--output-format".into());
+            v.push("json".into());
+        }
+        Harness::Pi => {
+            v.push("--mode".into());
+            v.push("json".into());
+        }
     }
     v
 }
@@ -96,7 +112,14 @@ pub fn effort_args(harness: Harness, effort: &str) -> Option<Vec<String>> {
         ]
         .contains(&effort)
         .then(|| vec!["--reasoning-effort".into(), effort.to_string()]),
-        Harness::Claude | Harness::OpenCode | Harness::Grok | Harness::Pi => None,
+        // grok 1.0.77 `--reasoning-effort`, pi 1.5.2 `--thinking`
+        Harness::Grok => ["low", "medium", "high"]
+            .contains(&effort)
+            .then(|| vec!["--reasoning-effort".into(), effort.to_string()]),
+        Harness::Pi => ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+            .contains(&effort)
+            .then(|| vec!["--thinking".into(), effort.to_string()]),
+        Harness::Claude | Harness::OpenCode => None,
     }
 }
 
@@ -274,9 +297,60 @@ fn muse_envelope(cleaned: &str) -> Envelope {
     }
 }
 
+/// Reads a Pi `--mode json` stream: the last assistant `message_end`'s
+/// text parts, and its usage (`totalTokens`, else input + output;
+/// `cost.total`).
+fn pi_envelope(cleaned: &str) -> Envelope {
+    let mut out = Envelope::default();
+    for v in cleaned
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+    {
+        if v.get("type").and_then(|t| t.as_str()) != Some("message_end") {
+            continue;
+        }
+        let m = &v["message"];
+        if m.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        if m.get("stopReason").and_then(|s| s.as_str()) == Some("error") {
+            out = Envelope::default();
+            continue;
+        }
+        let parts: Vec<String> = m
+            .get("content")
+            .and_then(|c| c.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let usage = &m["usage"];
+        out = Envelope {
+            text: (!parts.is_empty()).then(|| parts.join("\n")),
+            tokens: usage
+                .get("totalTokens")
+                .and_then(|x| x.as_u64())
+                .filter(|t| *t > 0)
+                .or_else(|| {
+                    let i = usage.get("input").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let o = usage.get("output").and_then(|x| x.as_u64()).unwrap_or(0);
+                    (i + o > 0).then_some(i + o)
+                }),
+            cost_usd: usage
+                .pointer("/cost/total")
+                .and_then(|x| x.as_f64())
+                .filter(|c| *c > 0.0),
+        };
+    }
+    out
+}
+
 /// Reads the envelope of a finished session: the JSON on stdout (Claude
-/// Code, Antigravity, Muse), the event stream on stdout (OpenCode) or
-/// the last-message file (Codex).
+/// Code, Antigravity, Muse, Grok), the event stream on stdout (OpenCode,
+/// Pi) or the last-message file (Codex).
 pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
     match harness {
         Harness::OpenCode => Envelope {
@@ -284,6 +358,7 @@ pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
             ..Default::default()
         },
         Harness::Muse => muse_envelope(&clean_terminal(stdout)),
+        Harness::Pi => pi_envelope(&clean_terminal(stdout)),
         Harness::Codex => Envelope {
             text: std::fs::read_to_string(out_file)
                 .ok()
@@ -291,9 +366,7 @@ pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
                 .filter(|s| !s.is_empty()),
             ..Default::default()
         },
-        // TODO(workflows): not a workflow harness yet
-        Harness::Grok | Harness::Pi => Envelope::default(),
-        Harness::Claude | Harness::Antigravity => {
+        Harness::Claude | Harness::Antigravity | Harness::Grok => {
             let cleaned = clean_terminal(stdout);
             let result = cleaned
                 .lines()
@@ -423,6 +496,45 @@ mod tests {
     }
 
     #[test]
+    fn grok_and_pi_envelopes() {
+        // the shapes probed live on 2026-11-14 (module docs)
+        let grok = "{\n  \"text\": \"PROBE-OK\",\n  \"stopReason\": \"end_turn\",\n  \"usage\": {\n    \"input_tokens\": 9998,\n    \"output_tokens\": 623,\n    \"total_tokens\": 19197\n  },\n  \"total_cost_usd\": 0.028022\n}\n";
+        assert_eq!(
+            envelope(Harness::Grok, grok.as_bytes(), Path::new("/x")),
+            Envelope {
+                text: Some("PROBE-OK".into()),
+                tokens: Some(9998 + 623),
+                cost_usd: Some(0.028022)
+            }
+        );
+        let pi = concat!(
+            "{\"type\":\"session\",\"version\":3}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n",
+            "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"PROBE-\"},{\"type\":\"text\",\"text\":\"OK\"}],\"usage\":{\"input\":10,\"output\":5,\"totalTokens\":15,\"cost\":{\"total\":0.01}},\"stopReason\":\"stop\"}}\n"
+        );
+        assert_eq!(
+            envelope(Harness::Pi, pi.as_bytes(), Path::new("/x")),
+            Envelope {
+                text: Some("PROBE-\nOK".into()),
+                tokens: Some(15),
+                cost_usd: Some(0.01)
+            }
+        );
+        // an errored assistant message is no answer
+        let pi_err = "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[],\"usage\":{\"totalTokens\":0},\"stopReason\":\"error\"}}\n";
+        assert_eq!(
+            envelope(Harness::Pi, pi_err.as_bytes(), Path::new("/x")),
+            Envelope::default()
+        );
+        let out = Path::new("/tmp/last.md");
+        assert_eq!(
+            extra_args(Harness::Grok, None, 60, out),
+            ["--output-format", "json"]
+        );
+        assert_eq!(extra_args(Harness::Pi, None, 60, out), ["--mode", "json"]);
+    }
+
+    #[test]
     fn effort_per_harness() {
         assert_eq!(
             effort_args(Harness::Codex, "low").unwrap(),
@@ -436,6 +548,16 @@ mod tests {
         assert_eq!(effort_args(Harness::Antigravity, "minimal"), None);
         assert_eq!(effort_args(Harness::Claude, "high"), None);
         assert_eq!(effort_args(Harness::OpenCode, "high"), None);
+        assert_eq!(
+            effort_args(Harness::Grok, "high").unwrap(),
+            vec!["--reasoning-effort", "high"]
+        );
+        assert_eq!(effort_args(Harness::Grok, "max"), None);
+        assert_eq!(
+            effort_args(Harness::Pi, "xhigh").unwrap(),
+            vec!["--thinking", "xhigh"]
+        );
+        assert_eq!(effort_args(Harness::Pi, "ultra"), None);
     }
 
     #[test]

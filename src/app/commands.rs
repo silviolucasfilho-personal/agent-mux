@@ -61,7 +61,7 @@ impl App {
                     || matches!(&self.mode, Mode::Swarm(v) if v.modal.is_some())
             }
             Commands | Help | FocusAgents | TestShortcuts | Quit | Runs | Skills
-            | Configuration | Memory | Workspaces | Swarm | Inbox | History => true,
+            | Configuration | Memory | Workspaces | Library | Swarm | Inbox | History => true,
             ReturnToSession => self.return_session_id().is_some(),
             PrevSession | NextSession => session.is_some(),
             CloseAllSessions => !self.sessions.is_empty(),
@@ -90,7 +90,13 @@ impl App {
                 matches!(
                     row,
                     Some(AgentKind::Persona(_) | AgentKind::Loop(_) | AgentKind::Flow(_))
-                ) || config_item
+                ) || (main_list
+                    && self.sidebar_section == super::SidebarSection::Loops
+                    && self.selected_loop().is_some())
+                    || (main_list
+                        && self.sidebar_section == super::SidebarSection::Workflows
+                        && self.selected_workflow_entry().is_some())
+                    || config_item
                     || skills_package
                     || runs_item.is_some()
                     || run_screen.is_some()
@@ -99,6 +105,9 @@ impl App {
             }
             Delete => {
                 matches!(row, Some(AgentKind::Loop(_)))
+                    || (main_list
+                        && self.sidebar_section == super::SidebarSection::Loops
+                        && self.selected_loop().is_some())
                     || matches!(&row, Some(AgentKind::Run(k)) if k.starts_with("swarm:"))
                     || (main_list
                         && self.sidebar_section == super::SidebarSection::Workflows
@@ -131,6 +140,12 @@ impl App {
                     || (main_list
                         && self.sidebar_section == super::SidebarSection::History
                         && !self.history_sessions.is_empty())
+                    || (main_list
+                        && self.sidebar_section == super::SidebarSection::Loops
+                        && self.selected_loop().is_some())
+                    || (main_list
+                        && self.sidebar_section == super::SidebarSection::Workflows
+                        && self.selected_workflow_entry().is_some())
                     || matches!(self.mode, Mode::AgentEditor(_))
                     || runs_item.is_some()
                     || run_screen.is_some_and(|s| s.data.stored.is_some())
@@ -259,6 +274,7 @@ impl App {
             Configuration => self.request_navigation(NavigationTarget::Configuration, now),
             Memory => self.request_navigation(NavigationTarget::Memory, now),
             Workspaces => self.request_navigation(NavigationTarget::Workspaces, now),
+            Library => self.request_navigation(NavigationTarget::Library, now),
             Swarm => self.request_navigation(NavigationTarget::Swarm, now),
             Inbox => self.request_navigation(NavigationTarget::Inbox, now),
             History => self.request_navigation(NavigationTarget::History, now),
@@ -367,6 +383,7 @@ pub enum NavigationTarget {
     Configuration,
     Memory,
     Workspaces,
+    Library,
     Swarm,
     Inbox,
     History,
@@ -683,6 +700,7 @@ impl App {
             NavigationTarget::Configuration => self.open_config_view(),
             NavigationTarget::Memory => self.open_memory_view(),
             NavigationTarget::Workspaces => self.open_workspaces_view(),
+            NavigationTarget::Library => self.open_library(super::library::Section::Flows),
             NavigationTarget::Swarm => self.open_swarm_view(),
             NavigationTarget::Inbox => self.open_inbox(),
             NavigationTarget::Langfuse => self.open_langfuse_view(),

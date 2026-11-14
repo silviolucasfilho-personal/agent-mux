@@ -200,7 +200,8 @@ pub fn lines_for(harness: Harness, stdout: &[u8], session: Option<&str>) -> Vec<
                                             .or_else(|| call.get("tool_name"))
                                             .and_then(|s| s.as_str())
                                             .unwrap_or("tool");
-                                        let raw = call.get("args").or_else(|| call.get("arguments"));
+                                        let raw =
+                                            call.get("args").or_else(|| call.get("arguments"));
                                         let parsed = match raw {
                                             Some(serde_json::Value::String(s)) => {
                                                 serde_json::from_str(s).unwrap_or_else(|_| {
@@ -227,7 +228,8 @@ pub fn lines_for(harness: Harness, stdout: &[u8], session: Option<&str>) -> Vec<
                                                 .get("text")
                                                 .and_then(|t| t.as_str())
                                                 .and_then(|s| {
-                                                    serde_json::from_str::<serde_json::Value>(s).ok()
+                                                    serde_json::from_str::<serde_json::Value>(s)
+                                                        .ok()
                                                 })
                                                 .is_some_and(|j| {
                                                     j.get("exit_code")
@@ -249,15 +251,14 @@ pub fn lines_for(harness: Harness, stdout: &[u8], session: Option<&str>) -> Vec<
                                     }
                                 }
                             }
-                            "assistant_message_committed" => {
+                            "assistant_message_committed"
                                 if pending_text.is_empty()
-                                    && !out.iter().any(|l| l.kind == LiveKind::Text)
-                                {
-                                    if let Some(t) = ev.get("text").and_then(|s| s.as_str()) {
-                                        emit(&mut out, LiveKind::Text, t);
-                                    } else if !ev["content"].is_null() {
-                                        emit(&mut out, LiveKind::Text, &display(&ev["content"]));
-                                    }
+                                    && !out.iter().any(|l| l.kind == LiveKind::Text) =>
+                            {
+                                if let Some(t) = ev.get("text").and_then(|s| s.as_str()) {
+                                    emit(&mut out, LiveKind::Text, t);
+                                } else if !ev["content"].is_null() {
+                                    emit(&mut out, LiveKind::Text, &display(&ev["content"]));
                                 }
                             }
                             _ => {}
@@ -284,7 +285,27 @@ pub fn lines_for(harness: Harness, stdout: &[u8], session: Option<&str>) -> Vec<
                     _ => {}
                 }
             }
-            Harness::Codex | Harness::Grok | Harness::Pi => {}
+            // Pi's `--mode json` events (probed 2026-11-14): the
+            // assistant's committed message carries its text parts
+            Harness::Pi => {
+                if string(&v, "type") == "message_end" {
+                    let m = &v["message"];
+                    if string(m, "role") == "assistant" {
+                        if string(m, "stopReason") == "error" {
+                            emit(&mut out, LiveKind::Error, string(m, "errorMessage"));
+                        } else if let Some(parts) = m["content"].as_array() {
+                            for p in parts {
+                                if string(p, "type") == "text" {
+                                    emit(&mut out, LiveKind::Text, string(p, "text"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Grok's `--output-format json` is one object at the end:
+            // no stream to decode, the envelope carries the answer
+            Harness::Codex | Harness::Grok => {}
         }
     }
     flush_text(&mut out, &mut pending_text);
@@ -777,7 +798,10 @@ mod tests {
                 (LiveKind::Text, "hello world"),
                 (LiveKind::Tool, r#"▸ shell {"command":"ls"}"#),
                 (LiveKind::Outcome, r#"{"exit_code":0}"#),
-                (LiveKind::Error, r#"{"exit_code":1,"terminal_status":"failed"}"#),
+                (
+                    LiveKind::Error,
+                    r#"{"exit_code":1,"terminal_status":"failed"}"#
+                ),
                 (LiveKind::Error, "timed out"),
             ]
         );

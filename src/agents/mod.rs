@@ -227,7 +227,7 @@ pub struct AgentSpec {
     pub hash: String,
 }
 
-pub const HARNESSES: &[&str] = &["claude", "codex", "agy", "opencode", "muse"];
+pub const HARNESSES: &[&str] = &["claude", "codex", "agy", "opencode", "grok", "pi", "muse"];
 
 pub fn is_valid_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -321,7 +321,7 @@ impl AgentSpec {
         for h in raw.backends.keys() {
             if !HARNESSES.contains(&h.as_str()) {
                 problems.push(format!(
-                    "[backends.{h}]: unknown harness; use claude, codex, agy, opencode or muse"
+                    "[backends.{h}]: unknown harness; use claude, codex, agy, opencode, grok, pi or muse"
                 ));
             }
         }
