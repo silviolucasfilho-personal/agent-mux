@@ -395,6 +395,39 @@ impl SkillsViewState {
         }
     }
 
+    /// What the native Markdown viewer should open for the selected row:
+    /// a package's `SKILL.md` (or its body staged as Markdown), or a
+    /// native skill's file when it is Markdown on disk.
+    pub fn markdown_target(&self) -> Option<crate::app::ViewerTarget> {
+        if let Some((def, _)) = self.selected_package() {
+            if let Some(dir) = &def.dir {
+                let path = dir.join("SKILL.md");
+                if path.is_file() {
+                    return Some(crate::app::ViewerTarget::File(path));
+                }
+            }
+            if def.body.trim().is_empty() {
+                return None;
+            }
+            return Some(crate::app::ViewerTarget::Text {
+                stem: format!("skill-{}", def.id),
+                text: format!("# {}\n\n{}", def.name, def.body),
+            });
+        }
+        if let Some(native) = self.selected_native() {
+            if crate::markdown::is_markdown_path(&native.path) && native.path.is_file() {
+                return Some(crate::app::ViewerTarget::File(native.path.clone()));
+            }
+            if !native.description.trim().is_empty() {
+                return Some(crate::app::ViewerTarget::Text {
+                    stem: format!("native-{}", native.name),
+                    text: format!("# {}\n\n{}", native.name, native.description),
+                });
+            }
+        }
+        None
+    }
+
     /// `j`/`k` (and the wheel): `|delta|` selectable rows in that
     /// direction; headers are skipped, the ends clamp.
     pub fn step(&mut self, delta: isize) {

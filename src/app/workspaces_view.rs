@@ -368,6 +368,14 @@ impl WorkspacesView {
             _ => {}
         }
 
+        if let KeyCode::Char('m') = key.code
+            && key.modifiers.is_empty()
+            && let Some(node) = self.selected_node()
+            && let Some(doc) = &node.customization.primary_doc
+        {
+            return Outcome::OpenMarkdown(doc.clone());
+        }
+
         if let Some(verb) = keymap::verb(key) {
             match verb {
                 Verb::Back => {
@@ -757,6 +765,12 @@ mod tests {
         // `e` opens AGENTS.md in Markdown viewer
         assert_eq!(
             view.handle_key(&key(KeyCode::Char('e'))),
+            Outcome::OpenMarkdown(api_canon.join("AGENTS.md"))
+        );
+
+        // `m` is the same viewer shortcut on every screen showing Markdown
+        assert_eq!(
+            view.handle_key(&key(KeyCode::Char('m'))),
             Outcome::OpenMarkdown(api_canon.join("AGENTS.md"))
         );
 

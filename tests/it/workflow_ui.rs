@@ -608,6 +608,26 @@ fn a_long_result_wraps_and_scrolls_in_the_result_tab() {
         press_mod(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
     }
     assert_eq!(render(&app, 110, 30), top);
+
+    // `m` stages the same result in the native Markdown viewer, verbatim:
+    // the answer renders instead of the tab's indented lines
+    press(&mut app, KeyCode::Char('m'));
+    let Mode::Markdown(view) = &app.mode else {
+        panic!("m opens the viewer: {:?}", app.mode);
+    };
+    assert!(view.text.text.contains("FIRSTMARK"), "the answer is staged");
+    assert!(
+        view.text.text.starts_with("# map-codebase — finished"),
+        "the headline names the run"
+    );
+    let seen = render(&app, 110, 30);
+    assert!(seen.contains("FIRSTMARK"), "{seen}");
+    // Esc comes back to the Run screen, not the Agents list
+    press(&mut app, KeyCode::Esc);
+    let Mode::Run(v) = &app.mode else {
+        panic!("Esc returns to the run: {:?}", app.mode);
+    };
+    assert_eq!(v.run_id, "run-00000001");
 }
 
 /// A finished review run: two findings found, one of them refuted by two of

@@ -751,6 +751,11 @@ impl App {
             KeyCode::Char('x') if !ctrl => self.runs_view_stop(&mut st),
             KeyCode::Char('e') if !ctrl => stay = !self.runs_view_edit(&st),
             KeyCode::Char('T') if !ctrl => self.runs_view_traces(&st),
+            KeyCode::Char('m') if !ctrl => {
+                self.mode = Mode::RunsView(st);
+                self.open_runs_result_in_markdown();
+                return;
+            }
             _ => match verb(&crate::keymap::list_alias(key)) {
                 Some(Verb::Back) if st.detail_focused => st.detail_focused = false,
                 Some(Verb::Back) => stay = false,
@@ -1368,10 +1373,39 @@ fn loop_tab(r: &LoopRun, tab: RunTab) -> Vec<String> {
             r.pattern
         )],
         RunTab::Result => match r.detail_str("final_message") {
-            Some(m) => m.lines().map(str::to_string).collect(),
+            Some(m) => m
+                .lines()
+                .map(str::to_string)
+                .chain([
+                    String::new(),
+                    "m opens this message in the Markdown viewer.".into(),
+                ])
+                .collect(),
             None => vec!["The run left no final message.".into()],
         },
     }
+}
+
+/// What the native Markdown viewer (`m`) should open for the selected run:
+/// a loop run's Result tab is its final message, already Markdown. Flow
+/// runs open on the Run screen, whose own `m` shows their result.
+pub(crate) fn result_target_for(run: &RunRef, tab: RunTab) -> Option<super::ViewerTarget> {
+    if tab != RunTab::Result {
+        return None;
+    }
+    let r = match run {
+        RunRef::Loop(r) => r.as_ref(),
+        RunRef::Inbox(InboxItem::Loop(r)) => r.as_ref(),
+        _ => return None,
+    };
+    let message = r.detail_str("final_message")?;
+    if message.trim().is_empty() {
+        return None;
+    }
+    Some(super::ViewerTarget::Text {
+        stem: format!("loop-run-{}", r.id),
+        text: message.to_string(),
+    })
 }
 
 /// A stored flow run in a few lines; the Run screen has the rest.
@@ -1395,4 +1429,65 @@ fn flow_summary(r: &WorkflowRun) -> Vec<String> {
     v.push(String::new());
     v.push("↵ opens the run; r resumes it; s saves its document.".into());
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RunRef, RunTab, result_target_for};
+    use crate::app::inbox::InboxItem;
+    use crate::loops::Level;
+    use crate::loops::store::LoopRun;
+
+    fn loop_run(message: Option<&str>) -> LoopRun {
+        let mut r = LoopRun::new(
+            "2026-09-17T17:36:53Z",
+            "loop-1",
+            "/work/proj",
+            "pr-babysitter",
+            "claude",
+            Level::L1,
+            1,
+        );
+        if let Some(m) = message {
+            r.set_detail("final_message", serde_json::Value::String(m.into()));
+        }
+        r
+    }
+
+    #[test]
+    fn m_stages_a_loop_result_verbatim_and_nothing_else() {
+        let body = "# Review\n\nPR 12 waits.\n\n- [ ] re-check tests\n";
+        let run = RunRef::Loop(Box::new(loop_run(Some(body))));
+        let target = result_target_for(&run, RunTab::Result).expect("a target");
+        match target {
+            crate::app::ViewerTarget::Text { stem, text } => {
+                assert!(stem.contains("2026-09-17"), "{stem:?}");
+                assert_eq!(text, body);
+            }
+            other => panic!("{other:?}"),
+        }
+        // an inbox loop run resolves the same way
+        let inbox = RunRef::Inbox(InboxItem::Loop(Box::new(loop_run(Some(body)))));
+        assert!(matches!(
+            result_target_for(&inbox, RunTab::Result),
+            Some(crate::app::ViewerTarget::Text { .. })
+        ));
+    }
+
+    #[test]
+    fn m_needs_a_result_tab_with_a_message() {
+        let run = RunRef::Loop(Box::new(loop_run(Some("hi"))));
+        assert_eq!(result_target_for(&run, RunTab::Report), None);
+        let silent = RunRef::Loop(Box::new(loop_run(None)));
+        assert_eq!(result_target_for(&silent, RunTab::Result), None);
+        let blank = RunRef::Loop(Box::new(loop_run(Some("  \n"))));
+        assert_eq!(result_target_for(&blank, RunTab::Result), None);
+        // flow runs live on the Run screen, whose own `m` shows them
+        let live = RunRef::LoopLive {
+            run_id: "r".into(),
+            loop_id: "l".into(),
+            session_id: 0,
+        };
+        assert_eq!(result_target_for(&live, RunTab::Result), None);
+    }
 }

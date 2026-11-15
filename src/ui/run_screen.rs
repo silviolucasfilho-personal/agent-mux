@@ -174,7 +174,10 @@ pub fn draw_tree(f: &mut Frame, area: Rect, st: &RunScreen) {
             dim(),
         )));
         if rows + 2 < visible {
-            items.push(ListItem::new(Line::styled("o other runs", dim())));
+            items.push(ListItem::new(Line::styled(
+                "o other runs · m Markdown",
+                dim(),
+            )));
         }
     }
     f.render_widget(List::new(items).block(block), area);

@@ -845,6 +845,19 @@ fn the_runs_view_lists_every_run_and_decides_the_ones_that_need_you() {
     let out = render(&app, 120, 34);
     assert!(out.contains("PR 12 and PR 14 wait on review"), "{out}");
 
+    // `m` stages the final message in the native Markdown viewer; Esc
+    // comes back to the runs view, not the Agents list
+    app.handle_key(&key(KeyCode::Char('m')), Instant::now());
+    let Mode::Markdown(view) = &app.mode else {
+        panic!("m opens the viewer: {:?}", app.mode);
+    };
+    assert_eq!(view.text.text, "PR 12 and PR 14 wait on review");
+    app.handle_key(&key(KeyCode::Esc), Instant::now());
+    let Mode::RunsView(st) = &app.mode else {
+        panic!("Esc returns to the runs: {:?}", app.mode);
+    };
+    assert_eq!(st.tab, agent_mux::app::runs_view::RunTab::Result);
+
     // d dismisses it: it moves to Earlier with the decision
     app.handle_key(&key(KeyCode::Char('d')), Instant::now());
     let Mode::RunsView(st) = &app.mode else {

@@ -4397,7 +4397,7 @@ fn draw_skills_view(f: &mut Frame, view: &SkillsViewState, app: &App) {
     }
 
     let footer_text = Line::styled(
-        " [e] edit  [v] check  [r] run  [⌃R] rescan  [Tab] details/runs  [↑/↓] select  [1-3] harness  [T] trace  [Esc] close",
+        " [e] edit  [m] Markdown  [v] check  [r] run  [⌃R] rescan  [Tab] details/runs  [↑/↓] select  [1-3] harness  [T] trace  [Esc] close",
         Style::default().fg(Color::Black).bg(Color::Cyan),
     );
     f.render_widget(Paragraph::new(footer_text), footer);
