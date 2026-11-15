@@ -139,6 +139,13 @@ pub struct SessionInfo {
     pub parent_id: Option<String>,
     /// Milliseconds since the epoch.
     pub time_created: i64,
+    /// Milliseconds since the epoch of the last write.
+    pub time_updated: i64,
+    /// The session's title as OpenCode keeps it (a placeholder until it
+    /// has named the conversation).
+    pub title: Option<String>,
+    /// How many `session_message` rows the session has.
+    pub messages: i64,
 }
 
 /// Every session in the database that has at least one message, oldest
@@ -148,7 +155,9 @@ pub fn list_sessions(db: &Path) -> Vec<SessionInfo> {
         return Vec::new();
     };
     let Ok(mut stmt) = conn.prepare(
-        "SELECT s.id, s.directory, s.parent_id, s.time_created FROM session_v2 s
+        "SELECT s.id, s.directory, s.parent_id, s.time_created, s.time_updated, s.title,
+                (SELECT COUNT(*) FROM session_message c WHERE c.session_id = s.id)
+         FROM session_v2 s
          WHERE EXISTS (SELECT 1 FROM session_message m WHERE m.session_id = s.id)
          ORDER BY s.time_created, s.id",
     ) else {
@@ -160,6 +169,9 @@ pub fn list_sessions(db: &Path) -> Vec<SessionInfo> {
             directory: r.get(1)?,
             parent_id: r.get(2)?,
             time_created: r.get(3)?,
+            time_updated: r.get(4)?,
+            title: r.get(5)?,
+            messages: r.get(6)?,
         })
     })
     .map(|rows| rows.flatten().collect())

@@ -11,7 +11,7 @@ use super::{
     WorkspaceNode,
 };
 use crate::harness::Harness;
-use crate::history::{self, AgentProvider, SessionSummary};
+use crate::history::{self, SessionSummary};
 use crate::loops::registry::LoopEntry;
 use crate::tracing::store::query::{self, SessionFilter, SessionStat};
 use rusqlite::{Connection, params};
@@ -83,10 +83,7 @@ impl ActivitySource {
         let loops_path = loops_file.unwrap_or(&default_loops);
         let (reg, _) = crate::agents::schedule::load_registry(loops_path, library_root);
 
-        let claude_dir = history::default_claude_dir();
-        let agy_dir = history::default_antigravity_dir();
-        let history_sessions =
-            history::discover_sessions(claude_dir.as_deref(), agy_dir.as_deref(), None, true);
+        let history_sessions = history::discover_all(&history::HistoryDirs::from_env(), None, true);
 
         ActivitySource {
             live,
@@ -260,10 +257,7 @@ impl ActivitySource {
                 continue;
             }
             seen_ids.insert(h.session_id.clone());
-            let provider = match h.provider {
-                AgentProvider::Claude => "claude".to_string(),
-                AgentProvider::Antigravity => "antigravity".to_string(),
-            };
+            let provider = h.provider.as_str().to_string();
             items.push(RecentSessionItem {
                 session_id: h.session_id.clone(),
                 provider,

@@ -12,6 +12,79 @@ use std::time::SystemTime;
 pub enum AgentProvider {
     Claude,
     Antigravity,
+    Codex,
+    OpenCode,
+    Grok,
+    Pi,
+    Muse,
+}
+
+impl AgentProvider {
+    /// The harness whose sessions this provider's transcripts are.
+    pub fn harness(self) -> crate::harness::Harness {
+        use crate::harness::Harness;
+        match self {
+            AgentProvider::Claude => Harness::Claude,
+            AgentProvider::Antigravity => Harness::Antigravity,
+            AgentProvider::Codex => Harness::Codex,
+            AgentProvider::OpenCode => Harness::OpenCode,
+            AgentProvider::Grok => Harness::Grok,
+            AgentProvider::Pi => Harness::Pi,
+            AgentProvider::Muse => Harness::Muse,
+        }
+    }
+
+    /// Lower-case name used by the trace store and the workspace report.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentProvider::Claude => "claude",
+            AgentProvider::Antigravity => "antigravity",
+            AgentProvider::Codex => "codex",
+            AgentProvider::OpenCode => "opencode",
+            AgentProvider::Grok => "grok",
+            AgentProvider::Pi => "pi",
+            AgentProvider::Muse => "muse",
+        }
+    }
+
+    /// Display name for the log header and the preview.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentProvider::Claude => "Claude Code",
+            AgentProvider::Antigravity => "Google Antigravity",
+            AgentProvider::Codex => "Codex CLI",
+            AgentProvider::OpenCode => "OpenCode",
+            AgentProvider::Grok => "Grok",
+            AgentProvider::Pi => "Pi",
+            AgentProvider::Muse => "Muse Code",
+        }
+    }
+
+    /// One-letter badge for the compact sidebar list.
+    pub fn badge(self) -> &'static str {
+        match self {
+            AgentProvider::Claude => "C",
+            AgentProvider::Antigravity => "A",
+            AgentProvider::Codex => "X",
+            AgentProvider::OpenCode => "O",
+            AgentProvider::Grok => "G",
+            AgentProvider::Pi => "P",
+            AgentProvider::Muse => "M",
+        }
+    }
+
+    /// Terminal colour shared by every place that tags a provider.
+    pub fn color(self) -> Color {
+        match self {
+            AgentProvider::Claude => Color::Magenta,
+            AgentProvider::Antigravity => Color::Blue,
+            AgentProvider::Codex => Color::Green,
+            AgentProvider::OpenCode => Color::Yellow,
+            AgentProvider::Grok => Color::Red,
+            AgentProvider::Pi => Color::LightBlue,
+            AgentProvider::Muse => Color::LightYellow,
+        }
+    }
 }
 
 /// Converts a directory path into Claude Code's project folder slug format.
@@ -111,6 +184,9 @@ pub fn default_antigravity_dir() -> Option<PathBuf> {
         .map(|root| root.join("brain"))
         .filter(|p| p.is_dir())
 }
+
+/// Every harness's session storage, so the History tab can list them all.
+pub use crate::history_ext::{HistoryDirs, discover_all, load_log};
 
 /// Scans both Claude and Antigravity storage for past session files.
 pub fn discover_sessions(
@@ -543,7 +619,7 @@ pub fn load_session_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> {
 
 /// Flattens Claude structured tool input to the viewer's display string:
 /// prefer `command`, then `file_path`, else pretty-printed JSON.
-fn format_claude_tool_args(args: &Value) -> String {
+pub(crate) fn format_claude_tool_args(args: &Value) -> String {
     if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
         cmd.to_string()
     } else if let Some(file_path) = args.get("file_path").and_then(|c| c.as_str()) {
@@ -717,6 +793,18 @@ pub fn load_antigravity_log(file_path: &Path) -> std::io::Result<Vec<LogEntry>> 
     Ok(entries)
 }
 
+fn provider_heading(provider: AgentProvider) -> &'static str {
+    match provider {
+        AgentProvider::Codex => "🤖 CODEX",
+        AgentProvider::OpenCode => "🤖 OPENCODE",
+        AgentProvider::Grok => "🤖 GROK",
+        AgentProvider::Pi => "🤖 PI",
+        AgentProvider::Muse => "🤖 MUSE",
+        AgentProvider::Claude => "🤖 CLAUDE",
+        AgentProvider::Antigravity => "✨ ANTIGRAVITY",
+    }
+}
+
 /// Renders structured log entries into styled Ratatui Lines for display.
 pub fn render_log_lines(entries: &[LogEntry]) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -775,6 +863,12 @@ pub fn render_log_lines(entries: &[LogEntry]) -> Vec<Line<'static>> {
                         "✨ ANTIGRAVITY",
                         Style::default()
                             .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    other => (
+                        provider_heading(*other),
+                        Style::default()
+                            .fg(other.color())
                             .add_modifier(Modifier::BOLD),
                     ),
                 };
@@ -872,7 +966,7 @@ pub fn render_log_lines(entries: &[LogEntry]) -> Vec<Line<'static>> {
     lines
 }
 
-fn format_iso_time(iso: &str) -> Option<String> {
+pub(crate) fn format_iso_time(iso: &str) -> Option<String> {
     // Expects e.g. "2026-08-30T19:28:18.806Z" -> "2026-08-30 19:28"
     if iso.len() >= 16 {
         let date = &iso[0..10];
@@ -883,7 +977,7 @@ fn format_iso_time(iso: &str) -> Option<String> {
     }
 }
 
-fn format_system_time(time: SystemTime) -> String {
+pub(crate) fn format_system_time(time: SystemTime) -> String {
     let dur = time
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();

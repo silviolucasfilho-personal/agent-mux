@@ -2147,6 +2147,9 @@ pub fn discover_transcripts(resolved: &ResolvedTracing) -> Vec<(PathBuf, Provide
         let provider = match summary.provider {
             crate::history::AgentProvider::Claude => Provider::Claude,
             crate::history::AgentProvider::Antigravity => Provider::Antigravity,
+            // `discover_sessions` lists only those two; the others are
+            // walked below.
+            _ => continue,
         };
         out.push((summary.file_path, provider));
     }
