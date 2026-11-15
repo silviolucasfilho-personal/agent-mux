@@ -291,7 +291,7 @@ pub fn draw_tree(f: &mut Frame, area: Rect, app: &App, st: &LibraryState, now: I
     let hints: &[&str] = if rows.is_empty() {
         &[" nothing matches: Esc clears the filter"]
     } else {
-        &["", " ↵ launch  / filter  o back"]
+        &["", " ↵ launch  m Markdown  / filter  o back"]
     };
     for h in hints {
         if items.len() < visible {

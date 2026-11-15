@@ -456,7 +456,7 @@ fn draw_footer_bar(f: &mut Frame, area: Rect, v: &WorkspacesView) {
         &[
             ("Enter/r", "open/resume"),
             ("n", "new session"),
-            ("e", "edit/docs"),
+            ("e/m", "edit/docs"),
             ("Tab", "folders"),
             ("s", "LLM summary"),
             ("Ctrl+R", "rescan"),
@@ -468,7 +468,7 @@ fn draw_footer_bar(f: &mut Frame, area: Rect, v: &WorkspacesView) {
             ("r", "resume latest"),
             ("n", "new session"),
             ("Tab", "focus agents"),
-            ("e", "open docs"),
+            ("e/m", "open docs"),
             ("s", "LLM summary"),
             ("/", "filter"),
             ("Ctrl+R", "rescan"),

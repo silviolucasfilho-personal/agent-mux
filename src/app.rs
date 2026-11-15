@@ -118,6 +118,14 @@ pub struct EditorRequest {
     pub command: Vec<String>,
 }
 
+/// Where the native Markdown viewer should read from: a file on disk,
+/// or staged text written to a temporary `.md` file first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewerTarget {
+    File(std::path::PathBuf),
+    Text { stem: String, text: String },
+}
+
 #[derive(Debug, Clone)]
 struct SkillWorkbenchBookmark {
     id: String,
@@ -2660,6 +2668,9 @@ pub struct App {
     /// The Library screen as it was when it opened a dialog or an editor:
     /// it comes back when that closes (`App::library_resume`).
     pub(crate) library_return: Option<Box<library::LibraryState>>,
+    /// The screen the Markdown viewer opened from: closing it (`q`/`Esc`)
+    /// comes back here instead of the Agents list.
+    pub(crate) markdown_return: Option<Box<Mode>>,
     pub profiles: Vec<Profile>,
     pub pane_size: (u16, u16), // (rows, cols)
     pub selection: Option<ActiveSelection>,
@@ -2941,6 +2952,7 @@ impl App {
             notice: None,
             launch_agent: None,
             library_return: None,
+            markdown_return: None,
             profiles,
             pane_size: (24, 80),
             selection: None,
@@ -5888,18 +5900,145 @@ impl App {
         })
     }
 
-    /// Opens a Markdown file in the viewer, over the main screen.
+    /// Opens a Markdown file in the viewer, over the current screen.
+    /// Closing the viewer comes back to that screen.
     pub fn open_markdown(&mut self, path: &std::path::Path) {
         match markdown_view::MarkdownView::open(path) {
-            Ok(view) => self.mode = Mode::Markdown(Box::new(view)),
+            Ok(view) => {
+                let prev = std::mem::replace(&mut self.mode, Mode::Markdown(Box::new(view)));
+                // A second open from inside the viewer keeps the original
+                // return; only a first open stores where to come back to.
+                if !matches!(prev, Mode::Markdown(_)) {
+                    self.markdown_return = Some(Box::new(prev));
+                }
+            }
             Err(e) => self.notice = Some(Notice::error(e)),
+        }
+    }
+
+    /// Opens rendered `text` in the viewer via a temporary `.md` file, over
+    /// the current screen. Used for content that has no file of its own
+    /// (a persona's instructions, a config asset, a workflow document).
+    pub fn open_markdown_text(&mut self, stem: &str, text: &str) {
+        let mut dir = self.workflows_runtime_dir();
+        dir.push("markdown-view");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.notice = Some(Notice::error(format!("could not stage markdown view: {e}")));
+            return;
+        }
+        let safe: String = stem
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let safe = if safe.is_empty() {
+            "view".to_string()
+        } else {
+            safe
+        };
+        let path = dir.join(format!("{safe}.md"));
+        if let Err(e) = std::fs::write(&path, text) {
+            self.notice = Some(Notice::error(format!("could not stage markdown view: {e}")));
+            return;
+        }
+        self.open_markdown(&path);
+    }
+
+    /// Whether `text` already reads as Markdown (else callers fence it as
+    /// code so the viewer still renders it usefully).
+    pub(crate) fn looks_like_markdown(text: &str) -> bool {
+        let t = text.trim_start();
+        t.starts_with('#')
+            || t.starts_with('-')
+            || t.starts_with('*')
+            || t.starts_with('>')
+            || t.starts_with("```")
+            || t.starts_with("---")
+            || t.contains("\n# ")
+            || t.contains("\n## ")
+    }
+
+    /// The selected config asset as Markdown: the file itself when it is a
+    /// Markdown file on disk, else the effective text (fenced when it is
+    /// TOML or another non-Markdown format).
+    pub(crate) fn config_viewer_target(asset: &crate::assets::Asset) -> Option<ViewerTarget> {
+        if crate::markdown::is_markdown_path(&asset.path) && asset.path.is_file() {
+            return Some(ViewerTarget::File(asset.path.clone()));
+        }
+        let text = asset.effective();
+        if text.trim().is_empty() {
+            return None;
+        }
+        let body =
+            if crate::markdown::is_markdown_path(&asset.path) || Self::looks_like_markdown(&text) {
+                text
+            } else {
+                format!("```toml\n{text}\n```\n")
+            };
+        Some(ViewerTarget::Text {
+            stem: format!("config-{}", asset.id.replace('/', "-")),
+            text: body,
+        })
+    }
+
+    /// Opens the selected config asset in the native Markdown viewer.
+    pub(crate) fn open_config_in_markdown(&mut self) {
+        let target = match &self.mode {
+            Mode::ConfigView(view) => view.selected_asset().map(Self::config_viewer_target),
+            _ => None,
+        };
+        match target {
+            Some(Some(ViewerTarget::File(path))) => self.open_markdown(&path),
+            Some(Some(ViewerTarget::Text { stem, text })) => self.open_markdown_text(&stem, &text),
+            _ => {
+                self.notice = Some(Notice::info("nothing viewable: select a config item first"));
+            }
+        }
+    }
+
+    /// Opens the selected skill (package or native) in the viewer.
+    pub(crate) fn open_skills_in_markdown(&mut self) {
+        let target = match &self.mode {
+            Mode::SkillsView(view) => view.markdown_target(),
+            _ => None,
+        };
+        match target {
+            Some(ViewerTarget::File(path)) => self.open_markdown(&path),
+            Some(ViewerTarget::Text { stem, text }) => self.open_markdown_text(&stem, &text),
+            None => {
+                self.notice = Some(Notice::info("nothing viewable: select a skill first"));
+            }
+        }
+    }
+
+    /// Opens the Library item under the cursor in the viewer: a skill's
+    /// `SKILL.md`, a persona's file or instructions, or a flow's document.
+    pub(crate) fn open_library_in_markdown(&mut self) {
+        let target = self.library_viewer_target();
+        match target {
+            Some(ViewerTarget::File(path)) => self.open_markdown(&path),
+            Some(ViewerTarget::Text { stem, text }) => self.open_markdown_text(&stem, &text),
+            None => {
+                self.notice = Some(Notice::info("no Markdown file for this row"));
+            }
         }
     }
 
     fn markdown_outcome(&mut self, outcome: markdown_view::Outcome) {
         match outcome {
             markdown_view::Outcome::None => {}
-            markdown_view::Outcome::Close => self.mode = Mode::Main,
+            markdown_view::Outcome::Close => {
+                self.mode = self
+                    .markdown_return
+                    .take()
+                    .map(|m| *m)
+                    .unwrap_or(Mode::Main)
+            }
             markdown_view::Outcome::OpenUrl(url) => self.open_url(&url),
             markdown_view::Outcome::OpenEditor(path) => {
                 self.request_editor(path, "markdown:view".into())
@@ -7782,6 +7921,9 @@ impl App {
                     view.pending = Pending::Push;
                 }
             }
+            KeyCode::Char('m') => {
+                self.open_config_in_markdown();
+            }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 view.reload(&self.loop_registry);
                 self.notice = Some(Notice::info("configuration rescanned"));
@@ -7828,6 +7970,10 @@ impl App {
         match key.code {
             KeyCode::Char('e') => {
                 self.edit_selected_skill();
+                return;
+            }
+            KeyCode::Char('m') => {
+                self.open_skills_in_markdown();
                 return;
             }
             KeyCode::Char('v') => {
@@ -10358,5 +10504,67 @@ mod history_tests {
         browser.refresh_if_live(t2 + Duration::from_millis(1200));
         assert_eq!(browser.sessions.len(), 4);
         assert_eq!(browser.sessions[0].key, "claude:s4");
+    }
+}
+
+#[cfg(test)]
+mod markdown_viewer_tests {
+    use super::*;
+    use crate::assets::{Asset, Kind, Source};
+
+    fn asset(path: &std::path::Path, builtin: &'static str) -> Asset {
+        Asset {
+            kind: Kind::Workflow,
+            id: "workflows/demo".into(),
+            path: path.to_path_buf(),
+            builtin: Some(builtin),
+            repo_path: None,
+            source: Source::Builtin,
+            name: "demo".into(),
+            problems: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn looks_like_markdown_spots_headings_and_fences() {
+        assert!(App::looks_like_markdown("# Title\n\ntext"));
+        assert!(App::looks_like_markdown("```toml\nx = 1\n```"));
+        assert!(App::looks_like_markdown("text\n\n## Section\n"));
+        assert!(!App::looks_like_markdown("x = 1\ny = 2"));
+        assert!(!App::looks_like_markdown("   "));
+    }
+
+    #[test]
+    fn config_viewer_prefers_the_file_for_markdown_and_fences_toml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let md = dir.path().join("notes.md");
+        std::fs::write(&md, "# Hi\n").unwrap();
+        let target = App::config_viewer_target(&asset(&md, "# Hi\n"));
+        assert_eq!(target, Some(ViewerTarget::File(md)));
+
+        // A TOML asset stages its effective text fenced, so the viewer
+        // renders it instead of showing raw lines.
+        let toml = dir.path().join("agent.toml");
+        let target = App::config_viewer_target(&asset(&toml, "x = 1\n"));
+        match target {
+            Some(ViewerTarget::Text { stem, text }) => {
+                assert!(stem.contains("demo"));
+                assert!(text.starts_with("```toml"), "{text:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Markdown text stages as-is even when the path is not Markdown.
+        let target = App::config_viewer_target(&asset(&toml, "# Title\n\nbody\n"));
+        match target {
+            Some(ViewerTarget::Text { text, .. }) => {
+                assert!(text.starts_with("# Title"), "{text:?}")
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Empty text has nothing to show.
+        let target = App::config_viewer_target(&asset(&toml, "  \n"));
+        assert_eq!(target, None);
     }
 }

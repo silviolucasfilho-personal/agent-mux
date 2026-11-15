@@ -187,7 +187,7 @@ pub fn draw(f: &mut Frame, area: Rect, v: &MemoryView) {
         _ if v.input.is_some() => vec![("Enter", "search"), ("Esc", "cancel")],
         None if v.hits.is_some() => vec![
             ("↑/↓", "select"),
-            ("Enter", "open page"),
+            ("Enter/m", "open page"),
             ("/", "search again"),
             ("a", "ask"),
             ("Esc", "back"),

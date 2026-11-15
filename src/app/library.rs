@@ -691,6 +691,62 @@ impl App {
             .collect()
     }
 
+    /// What the native Markdown viewer should open for the Library item
+    /// under the cursor: a skill's `SKILL.md`, a persona's file (or its
+    /// instructions staged as Markdown), or a flow's document staged as
+    /// Markdown. Sessions, runs and headings have no document.
+    pub fn library_viewer_target(&self) -> Option<super::ViewerTarget> {
+        let Mode::Library(st) = &self.mode else {
+            return None;
+        };
+        let item = self.library_item(st)?;
+        match item {
+            Item::Skill(i) => {
+                let def = self.skills.get(i)?;
+                if let Some(dir) = &def.dir {
+                    let path = dir.join("SKILL.md");
+                    if path.is_file() {
+                        return Some(super::ViewerTarget::File(path));
+                    }
+                }
+                if def.body.trim().is_empty() {
+                    return None;
+                }
+                Some(super::ViewerTarget::Text {
+                    stem: format!("skill-{}", def.id),
+                    text: format!("# {}\n\n{}", def.name, def.body),
+                })
+            }
+            Item::Persona(name) => {
+                let catalog = self.library_catalog();
+                let entry = catalog.entry(&name)?;
+                let path = entry.source.path().to_path_buf();
+                if crate::markdown::is_markdown_path(&path) && path.is_file() {
+                    return Some(super::ViewerTarget::File(path));
+                }
+                let spec = entry.spec.as_ref()?;
+                if spec.instructions.trim().is_empty() {
+                    return None;
+                }
+                Some(super::ViewerTarget::Text {
+                    stem: format!("persona-{name}"),
+                    text: format!("# {name}\n\n{}", spec.instructions),
+                })
+            }
+            Item::Flow(i) => {
+                let entry = self.workflow_list.get(i)?;
+                if entry.text.trim().is_empty() {
+                    return None;
+                }
+                Some(super::ViewerTarget::Text {
+                    stem: format!("flow-{}", entry.name),
+                    text: format!("# {}\n\n```toml\n{}\n```\n", entry.name, entry.text),
+                })
+            }
+            Item::Loop(_) => None,
+        }
+    }
+
     /// Opens the Library on `section`: on its first item, else its heading.
     pub fn open_library(&mut self, section: Section) {
         self.reload_skills();
@@ -1234,6 +1290,9 @@ impl App {
                 if let Some(item) = item {
                     self.library_edit(item);
                 }
+            }
+            KeyCode::Char('m') if !ctrl => {
+                self.open_library_in_markdown();
             }
             KeyCode::Char('n') if !ctrl => match section_at(&rows, at) {
                 Some(Section::Flows) => self.open_workflow_plan(),

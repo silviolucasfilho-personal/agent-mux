@@ -7,8 +7,8 @@
 //!   ai-memory's wiring and stops its server (`p` also deletes the
 //!   memory), `Ctrl+R` reads the state again. Steps run on a thread; their output is the log below the
 //!   state, and the state is read again when they finish.
-//! - `/` searches the project's memory (`memory::query::search`); `Enter`
-//!   on a result opens the page in the Markdown viewer.
+//! - `/` searches the project's memory (`memory::query::search`);
+//!   `Enter` or `m` on a result opens the page in the Markdown viewer.
 //! - `a` asks a question: a new session on a wired harness, its opening
 //!   message the question (`memory::query::ask_prompt`); `Tab` picks the
 //!   harness.
@@ -165,7 +165,7 @@ impl MemoryView {
                     self.selected = (self.selected + 1).min(n.saturating_sub(1));
                     return Outcome::None;
                 }
-                KeyCode::Enter => return self.open_selected(),
+                KeyCode::Enter | KeyCode::Char('m') => return self.open_selected(),
                 _ => {}
             }
         }
@@ -527,6 +527,27 @@ mod tests {
                 .unwrap()
                 .starts_with("nothing to install")
         );
+    }
+
+    #[test]
+    fn m_opens_a_hit_like_enter_does() {
+        use crate::memory::query::Hit;
+        let mut v = MemoryView::with_state(wired(true, true));
+        v.hits = Some((
+            "docs".into(),
+            vec![Hit {
+                path: "missing.md".into(),
+                title: None,
+                snippet: "s".into(),
+            }],
+        ));
+        // The binary path does not exist here, so both keys fail the same
+        // way — the point is `m` reaches the same opener as `Enter`.
+        let enter = v.handle_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let m = v.handle_key(&key('m'));
+        assert_eq!(format!("{enter:?}"), format!("{m:?}"));
+        assert!(matches!(enter, Outcome::None));
+        assert!(v.error.as_deref().unwrap().contains("missing.md"));
     }
 
     #[test]
