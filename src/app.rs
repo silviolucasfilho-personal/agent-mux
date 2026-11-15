@@ -1513,7 +1513,7 @@ pub struct HistoryState {
 impl HistoryState {
     pub fn new(current_dir: Option<&std::path::Path>) -> Self {
         let base_dir = current_dir.map(|p| p.to_path_buf());
-        let sessions = history::discover_sessions(None, None, current_dir, false);
+        let sessions = history::discover_all(&history::HistoryDirs::from_env(), current_dir, false);
         let mut state = HistoryState {
             sessions,
             selected_session_idx: 0,
@@ -1539,7 +1539,7 @@ impl HistoryState {
 
     pub fn load_selected_log(&mut self) {
         if let Some(summary) = self.sessions.get(self.selected_session_idx) {
-            match history::load_session_log(&summary.file_path) {
+            match history::load_log(summary) {
                 Ok(entries) => {
                     self.log_lines = history::render_log_lines(&entries);
                     self.error = None;
@@ -1558,7 +1558,11 @@ impl HistoryState {
 
     pub fn reload_sessions(&mut self) {
         let cur_ref = self.base_dir.as_deref();
-        self.sessions = history::discover_sessions(None, None, cur_ref, self.all_projects);
+        self.sessions = history::discover_all(
+            &history::HistoryDirs::from_env(),
+            cur_ref,
+            self.all_projects,
+        );
         self.selected_session_idx = 0;
         self.load_selected_log();
     }
@@ -2912,9 +2916,10 @@ impl App {
         let trace_db_path = tracing.as_ref().map(|rt| rt.db_path().to_path_buf());
         let cur_dir = std::env::current_dir().ok();
         let mut history_sessions =
-            history::discover_sessions(None, None, cur_dir.as_deref(), false);
+            history::discover_all(&history::HistoryDirs::from_env(), cur_dir.as_deref(), false);
         if history_sessions.is_empty() {
-            history_sessions = history::discover_sessions(None, None, cur_dir.as_deref(), true);
+            history_sessions =
+                history::discover_all(&history::HistoryDirs::from_env(), cur_dir.as_deref(), true);
         }
         let (skills, _) = crate::skill::load_skills(None);
         let (hidden_skills, skills): (Vec<_>, Vec<_>) = skills.into_iter().partition(|s| s.hidden);
@@ -3719,9 +3724,9 @@ impl App {
         cur_dir: Option<&std::path::Path>,
         all: bool,
     ) -> Vec<history::SessionSummary> {
-        let mut sessions = history::discover_sessions(None, None, cur_dir, all);
+        let mut sessions = history::discover_all(&history::HistoryDirs::from_env(), cur_dir, all);
         if sessions.is_empty() && !all {
-            sessions = history::discover_sessions(None, None, cur_dir, true);
+            sessions = history::discover_all(&history::HistoryDirs::from_env(), cur_dir, true);
         }
         sessions
     }
@@ -8155,10 +8160,7 @@ impl App {
     }
 
     pub fn resume_history_session(&mut self, summary: &SessionSummary) {
-        let harness = match summary.provider {
-            crate::history::AgentProvider::Claude => crate::harness::Harness::Claude,
-            crate::history::AgentProvider::Antigravity => crate::harness::Harness::Antigravity,
-        };
+        let harness = summary.provider.harness();
         self.resume_conversation(harness, &summary.session_id, summary.cwd.clone());
     }
 

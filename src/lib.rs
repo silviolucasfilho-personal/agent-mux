@@ -9,6 +9,7 @@ pub mod events;
 pub mod handoff;
 pub mod harness;
 pub mod history;
+pub mod history_ext;
 pub mod keymap;
 pub mod keys;
 pub mod keys_cli;

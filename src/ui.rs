@@ -1019,12 +1019,8 @@ fn draw_history_sidebar(f: &mut Frame, area: Rect, app: &App) {
             let i = start + offset;
             let is_selected = i == app.selected_history;
             let marker = if is_selected { "> " } else { "  " };
-            let (provider_badge, provider_style) = match s.provider {
-                crate::history::AgentProvider::Claude => ("C", Style::default().fg(Color::Magenta)),
-                crate::history::AgentProvider::Antigravity => {
-                    ("A", Style::default().fg(Color::Blue))
-                }
-            };
+            let (provider_badge, provider_style) =
+                (s.provider.badge(), Style::default().fg(s.provider.color()));
             let max_title_len = (area.width as usize).saturating_sub(8).max(5);
             let title = if s.title.chars().count() > max_title_len {
                 let mut truncated: String = s
@@ -1410,10 +1406,7 @@ fn draw_history_preview(
     summary: &crate::history::SessionSummary,
     has_active: bool,
 ) {
-    let provider_name = match summary.provider {
-        crate::history::AgentProvider::Claude => "Claude Code",
-        crate::history::AgentProvider::Antigravity => "Google Antigravity",
-    };
+    let provider_name = summary.provider.label();
     let title = format!(" History Session: {} ", summary.title);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1432,13 +1425,7 @@ fn draw_history_preview(
         ]),
         Line::from(vec![
             Span::styled("Provider:     ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                provider_name,
-                match summary.provider {
-                    crate::history::AgentProvider::Claude => Style::default().fg(Color::Magenta),
-                    crate::history::AgentProvider::Antigravity => Style::default().fg(Color::Blue),
-                },
-            ),
+            Span::styled(provider_name, Style::default().fg(summary.provider.color())),
         ]),
         Line::from(vec![
             Span::styled("Session ID:   ", Style::default().fg(Color::DarkGray)),
@@ -2839,6 +2826,10 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
                     crate::history::AgentProvider::Antigravity => {
                         Span::styled("[AGY]    ", Style::default().fg(Color::LightCyan))
                     }
+                    other => Span::styled(
+                        format!("{:<9}", format!("[{}]", history_tag(other))),
+                        Style::default().fg(other.color()),
+                    ),
                 };
                 let title_str = truncate_chars(&s.title, 18);
                 let line = Line::from(vec![
@@ -2883,6 +2874,7 @@ fn draw_session_history(f: &mut Frame, history: &HistoryState, _app: &App) {
         let provider_tag = match s.provider {
             crate::history::AgentProvider::Claude => "Claude",
             crate::history::AgentProvider::Antigravity => "Antigravity",
+            other => other.label(),
         };
         format!(
             " Log [{provider_tag}]: {} ({id_short}){scroll_tag} ",
@@ -6271,6 +6263,20 @@ fn draw_new_agent(f: &mut Frame, st: &crate::app::new_agent::NewAgentState) {
         Span::styled(" cancel", dim),
     ]));
     f.render_widget(Paragraph::new(body), inner);
+}
+
+/// The short tag the History list shows for a harness without a bespoke one.
+fn history_tag(provider: crate::history::AgentProvider) -> &'static str {
+    use crate::history::AgentProvider;
+    match provider {
+        AgentProvider::Codex => "Codex",
+        AgentProvider::OpenCode => "OC",
+        AgentProvider::Grok => "Grok",
+        AgentProvider::Pi => "Pi",
+        AgentProvider::Muse => "Muse",
+        AgentProvider::Claude => "Claude",
+        AgentProvider::Antigravity => "AGY",
+    }
 }
 
 #[cfg(test)]
