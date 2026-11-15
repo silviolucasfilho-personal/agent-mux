@@ -8,7 +8,7 @@ agent-mux md notes.md --edit        # open the source; a new file starts empty
 agent-mux md SKILL.md --print       # the rendering on stdout, plain text (--width N)
 ```
 
-Inside agent-mux, a click on a Markdown file in a session's pane opens it in the same viewer: an OSC 8 `file://` link (Claude Code, agy) or a path printed as plain text (`docs/plan.md`, `README.md:12`), resolved against the session's directory and opened only when the file exists. `q` returns to the pane. Every other screen that shows a Markdown file offers the same viewer with `m`: the Library (a skill's `SKILL.md`, a persona's instructions, a flow's document), the Skills view (`S`), the Configuration view (`C`), a Memory search hit (`Enter` also works), and the Workspaces Explorer (`e` also works). `q`/`Esc` closes the viewer back to the screen it opened from.
+Inside agent-mux, a click on a Markdown file in a session's pane opens it in the same viewer: an OSC 8 `file://` link (Claude Code, agy) or a path printed as plain text (`docs/plan.md`, `README.md:12`), resolved against the session's directory and opened only when the file exists. `q` returns to the pane. Every other screen that shows a Markdown file offers the same viewer with `m`: the Library (a skill's `SKILL.md`, a persona's instructions, a flow's document), the Skills view (`S`), the Configuration view (`C`), a Memory search hit (`Enter` also works), and the Workspaces Explorer (`e` also works). A run's result opens the same way: `m` on the Run screen stages the Result tab from the run's own answer, and `m` on a loop run's Result tab in the runs view (`E` / `W`) stages its final message. `q`/`Esc` closes the viewer back to the screen it opened from.
 
 ## Reading
 

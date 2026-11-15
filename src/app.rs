@@ -6016,6 +6016,43 @@ impl App {
         }
     }
 
+    /// Opens the selected runs-view row in the viewer: a loop run's Result
+    /// tab is its final message, already Markdown. Anything else says what
+    /// `m` needs.
+    pub(crate) fn open_runs_result_in_markdown(&mut self) {
+        let target = match &self.mode {
+            Mode::RunsView(st) => st
+                .selected_item()
+                .and_then(|i| runs_view::result_target_for(&i.run, st.tab)),
+            _ => None,
+        };
+        match target {
+            Some(ViewerTarget::File(path)) => self.open_markdown(&path),
+            Some(ViewerTarget::Text { stem, text }) => self.open_markdown_text(&stem, &text),
+            None => {
+                self.notice = Some(Notice::info(
+                    "m shows a loop run's Result tab: select one first",
+                ));
+            }
+        }
+    }
+
+    /// Opens the run on the Run screen in the viewer: its Result tab as
+    /// Markdown, staged from the run's own answer.
+    pub(crate) fn open_run_result_in_markdown(&mut self) {
+        let target = match &self.mode {
+            Mode::Run(st) => Some(self.result_viewer_target(st)),
+            _ => None,
+        };
+        match target {
+            Some(ViewerTarget::File(path)) => self.open_markdown(&path),
+            Some(ViewerTarget::Text { stem, text }) => self.open_markdown_text(&stem, &text),
+            None => {
+                self.notice = Some(Notice::info("nothing viewable: open a run first"));
+            }
+        }
+    }
+
     /// Opens the Library item under the cursor in the viewer: a skill's
     /// `SKILL.md`, a persona's file or instructions, or a flow's document.
     pub(crate) fn open_library_in_markdown(&mut self) {

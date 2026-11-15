@@ -169,7 +169,9 @@ What the run said
   the status fragment, then the `Human decision:` and `Loop action:` lines.
 - **Since last run** is the difference against the previous run's report:
   items that are new, gone, moved bucket or changed status.
-- **What the run said** is the run's final message.
+- **What the run said** is the run's final message. The **Result** tab
+  (`4`) shows that message in full; `m` there opens it in the Markdown
+  viewer.
 
 `↑` `↓` step back through the runs; the report follows the selection, so an
 older run shows the report *it* wrote. agent-mux keeps one copy of the state

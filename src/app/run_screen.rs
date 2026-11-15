@@ -187,6 +187,9 @@ pub struct RunData {
     pub run_dir: std::path::PathBuf,
     /// The Result tab, built with the run in hand.
     pub result: Vec<Line<'static>>,
+    /// The Result tab as Markdown for the native viewer (`m`): the same
+    /// headline, with the run's answer verbatim.
+    pub result_markdown: String,
     /// The stored run, which `r` resumes.
     pub stored: Option<WorkflowRun>,
     pub now_ns: i64,
@@ -531,6 +534,35 @@ fn block(lines: &mut Vec<Line<'static>>, heading: &str, text: &str) {
     }
 }
 
+/// The Result tab as a Markdown document for the native viewer (`m`): the
+/// same headline the tab shows, then the run's answer verbatim. The answer
+/// is Markdown already, so the viewer renders it; it is staged raw rather
+/// than converted from the tab's indented lines, so nested lists and fenced
+/// code blocks survive unchanged.
+pub(crate) fn result_viewer_text(
+    title: &str,
+    verdict: &str,
+    meta: &str,
+    answer: &str,
+    error: Option<&str>,
+    notes: &[String],
+) -> String {
+    let mut out = format!("# {title}\n\n{verdict}\n\n{meta}\n");
+    if let Some(e) = error {
+        out.push_str(&format!("\nError: {e}\n"));
+    }
+    if !answer.trim().is_empty() {
+        out.push_str(&format!("\n{answer}\n"));
+    }
+    if !notes.is_empty() {
+        out.push_str("\n---\n\n");
+        for n in notes {
+            out.push_str(&format!("- {n}\n"));
+        }
+    }
+    out
+}
+
 /// What a session of `step` was asked: the step's own skill or prompt,
 /// the refuters' or the judge's.
 fn asked(step: &Step, role: &Role) -> Option<String> {
@@ -842,26 +874,50 @@ impl App {
             });
             let mut result = headline_lines(&rep);
             result.push(rule());
+            let viewer_title = format!("{} — {word}", r.name);
+            let viewer_meta = rep.headline.one_line();
+            let mut viewer_answer = String::new();
+            let mut viewer_error: Option<String> = None;
             match &status {
                 RunStatus::Running => {
                     result.push(Line::styled(
                         "  still running · the steps that have finished so far",
                         dim(),
                     ));
+                    let mut parts = vec![String::from("_Still running — steps finished so far._")];
                     for (step, state) in r.state.step_states() {
                         if state != "done" {
                             continue;
                         }
-                        block(&mut result, &step, &pretty(&r.state.step_result(&step)));
+                        let text = pretty(&r.state.step_result(&step));
+                        block(&mut result, &step, &text);
+                        parts.push(format!("## {step}\n\n{text}"));
                     }
+                    viewer_answer = parts.join("\n\n");
                 }
                 RunStatus::Finished(v) | RunStatus::BudgetExhausted(v) => {
-                    result.extend(value_lines(&pretty(v)))
+                    let text = pretty(v);
+                    result.extend(value_lines(&text));
+                    viewer_answer = text;
                 }
-                RunStatus::Failed(e) => result.push(Line::styled(format!("  failed · {e}"), red)),
-                RunStatus::Cancelled => result.push(Line::styled("  cancelled", dim())),
+                RunStatus::Failed(e) => {
+                    result.push(Line::styled(format!("  failed · {e}"), red));
+                    viewer_error = Some(e.clone());
+                }
+                RunStatus::Cancelled => {
+                    result.push(Line::styled("  cancelled", dim()));
+                    viewer_answer = String::from("_Cancelled._");
+                }
             }
             notes_lines(&mut result, &r.state.notes);
+            let result_markdown = result_viewer_text(
+                &viewer_title,
+                &rep.headline.verdict,
+                &viewer_meta,
+                &viewer_answer,
+                viewer_error.as_deref(),
+                &r.state.notes,
+            );
             return Ok(RunData {
                 tree,
                 live: true,
@@ -883,6 +939,7 @@ impl App {
                     .collect(),
                 run_dir: r.run_dir.clone(),
                 result,
+                result_markdown,
                 stored: None,
                 now_ns,
             });
@@ -947,25 +1004,35 @@ impl App {
             doc: doc.as_ref(),
             steps: &rows,
         });
+        let viewer_meta = format!(
+            "{} · {} · {}",
+            report::format_range(run.started_ns, run.ended_ns),
+            run.harness,
+            run.workspace
+        );
         let mut result = headline_lines(&rep);
-        result.push(Line::styled(
-            format!(
-                "  {} · {} · {}",
-                report::format_range(run.started_ns, run.ended_ns),
-                run.harness,
-                run.workspace
-            ),
-            dim(),
-        ));
+        result.push(Line::styled(format!("  {viewer_meta}"), dim()));
         if let Some(e) = &run.error {
             result.push(Line::styled(format!("  Error     {e}"), red));
         }
         result.push(rule());
         result.extend(report_lines(&rep));
-        if !run.result.is_null() {
+        let viewer_answer = if run.result.is_null() {
+            String::new()
+        } else {
             // the report above is an outline; this is every word of it
-            block(&mut result, "The answer in full", &pretty(&run.result));
-        }
+            let text = pretty(&run.result);
+            block(&mut result, "The answer in full", &text);
+            text
+        };
+        let result_markdown = result_viewer_text(
+            &format!("{} — {}", run.workflow, run.status),
+            &rep.headline.verdict,
+            &viewer_meta,
+            &viewer_answer,
+            run.error.as_deref(),
+            &notes,
+        );
         Ok(RunData {
             tree,
             live: false,
@@ -979,9 +1046,19 @@ impl App {
             running: Vec::new(),
             run_dir: dir,
             result,
+            result_markdown,
             stored: Some(run),
             now_ns,
         })
+    }
+
+    /// What the native Markdown viewer should open for the run on screen:
+    /// its Result tab as Markdown, staged from the run's own answer.
+    pub fn result_viewer_target(&self, st: &RunScreen) -> super::ViewerTarget {
+        super::ViewerTarget::Text {
+            stem: format!("run-{}", st.run_id),
+            text: st.data.result_markdown.clone(),
+        }
     }
 
     /// Opens the Run screen on run `run_id`; `false`, with the reason as
@@ -1228,6 +1305,11 @@ impl App {
             KeyCode::Char('x') if !ctrl => self.run_screen_stop(&mut st),
             KeyCode::Char('r') if !ctrl => stay = !self.run_screen_resume(&st),
             KeyCode::Char('e') if !ctrl => stay = !self.run_screen_edit(&st),
+            KeyCode::Char('m') if !ctrl => {
+                self.mode = Mode::Run(st);
+                self.open_run_result_in_markdown();
+                return;
+            }
             _ => match verb(&crate::keymap::list_alias(key)) {
                 Some(Verb::Back) if pane => st.focus = Focus::Tree,
                 Some(Verb::Back) => {
@@ -1363,5 +1445,46 @@ impl App {
             ws,
         );
         matches!(self.mode, Mode::AgentEditor(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::result_viewer_text;
+
+    #[test]
+    fn result_markdown_keeps_the_answer_verbatim() {
+        let answer =
+            "# Verdict\n\nShip it.\n\n- item one\n  - nested item\n\n```rust\nlet x = 1;\n```\n";
+        let md = result_viewer_text(
+            "triage-route — finished",
+            "done",
+            "12:00 · claude · ws",
+            answer,
+            None,
+            &[],
+        );
+        assert!(md.starts_with("# triage-route — finished\n"), "{md:?}");
+        assert!(md.contains("done\n"), "{md:?}");
+        // nested lists and fences survive: the answer is staged raw, not
+        // re-indented the way the tab's lines are
+        assert!(md.contains("  - nested item\n"), "{md:?}");
+        assert!(md.contains("```rust\nlet x = 1;\n```\n"), "{md:?}");
+    }
+
+    #[test]
+    fn result_markdown_reports_errors_and_notes_without_an_answer() {
+        let md = result_viewer_text(
+            "triage-route — failed",
+            "failed",
+            "12:00 · claude · ws",
+            "",
+            Some("boom"),
+            &[String::from("retried once")],
+        );
+        assert!(md.contains("Error: boom"), "{md:?}");
+        assert!(md.contains("- retried once"), "{md:?}");
+        // no answer, no answer section
+        assert!(!md.contains("answer"), "{md:?}");
     }
 }
