@@ -225,7 +225,7 @@ pub fn item_for(
         ));
     }
     body.push_str(
-        "\nMake the checks pass with new commits on this branch. Do not rewrite its history, and do not weaken or delete a check to make it pass.\n",
+        "\nMake the checks pass with new commits on this branch. Do not rewrite its history, and do not weaken or delete a check to make it pass.\n\nNo station pushes: agent-mux pushes the fix once the review approves it, and the checks run on GitHub only after that. So every acceptance criterion must be one that can be verified in the worktree before the push, by running what the failing check runs. \"The check is green on the pull request\" is not an acceptance criterion.\n",
     );
     it.body = body;
     it.attended = false;
