@@ -245,6 +245,31 @@ pub fn title_of(text: &str, max: usize) -> String {
     out
 }
 
+/// A title for a typed item from triage's one-sentence summary: the
+/// sentence without its full stop, cut at a word when it is long. A
+/// request is typed as a paragraph; its first 72 characters are not a title.
+pub fn title_from_summary(summary: &str, max: usize) -> Option<String> {
+    let s = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    let s = s.trim_end_matches(['.', ' ']);
+    if s.is_empty() {
+        return None;
+    }
+    if s.chars().count() <= max {
+        return Some(s.to_string());
+    }
+    let mut out = String::new();
+    for word in s.split(' ') {
+        if out.chars().count() + word.chars().count() + 1 > max {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// What a finished run made of its item.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settlement {
@@ -255,6 +280,8 @@ pub struct Settlement {
     pub kind: Option<String>,
     pub priority: Option<String>,
     pub complexity: Option<String>,
+    /// Triage's one-sentence restatement of the item.
+    pub summary: Option<String>,
     pub cycles: i64,
     pub error: Option<String>,
     /// Triage's questions, for `needs-answer`.
@@ -304,6 +331,7 @@ pub fn settle(
         kind: text_field(classify, "kind"),
         priority: text_field(classify, "priority"),
         complexity: text_field(classify, "complexity"),
+        summary: text_field(classify, "summary"),
         cycles: build.get("cycles").and_then(Value::as_i64).unwrap_or(0),
         error: None,
         questions: Vec::new(),
@@ -537,5 +565,14 @@ mod tests {
         assert!(text.contains("Title: Reset mail twice"));
         assert_eq!(it.handle(), "#12");
         assert_eq!(title_of("\n  fix the thing  \nmore", 7), "fix the…");
+        assert_eq!(
+            title_from_summary("Add a  Reporting bugs section to the README.", 72).as_deref(),
+            Some("Add a Reporting bugs section to the README")
+        );
+        assert_eq!(
+            title_from_summary("Add a Reporting bugs section to the README.", 20).as_deref(),
+            Some("Add a Reporting bugs")
+        );
+        assert_eq!(title_from_summary(" . ", 20), None);
     }
 }

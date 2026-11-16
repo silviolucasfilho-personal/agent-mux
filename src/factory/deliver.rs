@@ -74,20 +74,25 @@ pub fn fetch(workspace: &Path, branch: &str) -> Result<(), String> {
     git(workspace, &["fetch", "--no-tags", "origin", branch]).map(|_| ())
 }
 
-/// Lowercase words of `text` joined by `-`, at most `max` characters.
+/// Lowercase words of `text` joined by `-`, at most `max` characters,
+/// ending on a whole word (a single word longer than `max` is cut).
 pub fn slug(text: &str, max: usize) -> String {
     let mut out = String::new();
-    for c in text.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-        } else if !out.is_empty() && !out.ends_with('-') {
+    let words = text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty());
+    for word in words {
+        let word = word.to_ascii_lowercase();
+        if out.is_empty() {
+            out = word.chars().take(max).collect();
+        } else if out.len() + 1 + word.len() <= max {
             out.push('-');
-        }
-        if out.len() >= max {
+            out.push_str(&word);
+        } else {
             break;
         }
     }
-    out.trim_matches('-').to_string()
+    out
 }
 
 /// `<prefix><kind>-<slug of the title>`: `factory/bug-reset-email-twice`.
@@ -515,6 +520,16 @@ mod tests {
             "factory/bug-reset-e-mail-arrives-twice"
         );
         assert_eq!(branch_name("factory/", None, "…"), "factory/change");
+        // a long title ends on a whole word, not in the middle of one
+        assert_eq!(
+            branch_name(
+                "factory/",
+                Some("chore"),
+                "Add a Reporting bugs section to the README that asks for the version"
+            ),
+            "factory/chore-add-a-reporting-bugs-section-to-the"
+        );
+        assert_eq!(slug("supercalifragilistic", 5), "super");
         assert!(branch_name("f/", Some("bug"), &"word ".repeat(40)).len() <= 2 + 3 + 1 + 40);
         assert_eq!(pr_number("https://github.com/o/r/pull/221\n"), Some(221));
         assert_eq!(pr_number("nope"), None);

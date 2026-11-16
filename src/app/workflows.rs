@@ -681,7 +681,36 @@ impl App {
             state = state.with_replay(journal::to_replay(&entries));
         }
         state.notes.extend(resume_note);
-        for d in &diagnostics {
+        // The run's notes say what its own harnesses cannot enforce, not
+        // what every installed CLI would do: the run's harness, those the
+        // document names, and, for a reviewer on "another" harness, those
+        // the user has a profile for.
+        let mut reach: Vec<Harness> = vec![req.harness];
+        for h in state.doc.harnesses_used() {
+            if let Some(h) = Harness::detect(&h)
+                && !reach.contains(&h)
+            {
+                reach.push(h);
+            }
+        }
+        let any_other = state.doc.steps.iter().any(|s| {
+            s.review.as_ref().is_some_and(|r| {
+                r.runner.harness.as_deref() == Some(crate::workflows::document::OTHER_HARNESS)
+            })
+        });
+        if any_other {
+            for p in &self.profiles {
+                if let Some(h) = Harness::detect(&p.command)
+                    && !reach.contains(&h)
+                    && crate::session::command_available(&p.command)
+                {
+                    reach.push(h);
+                }
+            }
+        }
+        for d in
+            crate::agents::fit::check_for(&state.doc, &catalog, &self.all_skill_infos(), &reach)
+        {
             state.notes.push(d.message.clone());
         }
         let profile = self.workflow_profile(req.profile.as_deref(), req.harness);

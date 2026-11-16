@@ -59,6 +59,17 @@ pub fn check(doc: &Workflow, catalog: &Catalog, skills: &[SkillInfo]) -> Vec<Dia
     check_candidates(doc, catalog, skills, &Harness::ALL)
 }
 
+/// `check`, for the harnesses of `only` alone: what a run that can reach
+/// just those has to know.
+pub fn check_for(
+    doc: &Workflow,
+    catalog: &Catalog,
+    skills: &[SkillInfo],
+    only: &[Harness],
+) -> Vec<Diagnostic> {
+    check_candidates(doc, catalog, skills, only)
+}
+
 fn check_candidates(
     doc: &Workflow,
     catalog: &Catalog,

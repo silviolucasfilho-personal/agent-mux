@@ -6,7 +6,9 @@
 //! journal, and delivers an approved branch itself.
 
 use super::deliver::{self, Tools};
-use super::{FLOW, Item, Settlement, Source, State, brain, settle, store, title_of};
+use super::{
+    FLOW, Item, Settlement, Source, State, brain, settle, store, title_from_summary, title_of,
+};
 use crate::app::workflows::WorkflowRunRequest;
 use crate::config::FactorySettings;
 use crate::harness::Harness;
@@ -390,6 +392,12 @@ fn apply(
     analysis: &Value,
     build: &Value,
 ) {
+    // a typed request is a paragraph: triage's summary names it better
+    if item.source == Source::Manual
+        && let Some(title) = s.summary.as_deref().and_then(|t| title_from_summary(t, 72))
+    {
+        item.title = title;
+    }
     item.kind = s.kind.clone().or(item.kind.take());
     item.priority = s.priority.clone().or(item.priority.take());
     item.complexity = s.complexity.clone().or(item.complexity.take());
