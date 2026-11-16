@@ -773,7 +773,7 @@ impl App {
     /// With `[factory] intake = "label"`, polls the launch directory's
     /// repository every `poll_interval_s`, in a process of its own.
     fn factory_poll_tick(&mut self, now: Instant) {
-        if !self.factory.intake_label {
+        if !self.factory.intake_label && !self.factory.ci_fix {
             return;
         }
         let every = Duration::from_secs(self.factory.poll_interval_s);
@@ -795,6 +795,7 @@ impl App {
         };
         let args = vec![
             "poll".to_string(),
+            "--auto".to_string(),
             "--workspace".to_string(),
             ws.to_string_lossy().into_owned(),
         ];
@@ -896,8 +897,9 @@ pub fn badge(it: &Item, process: Option<bool>) -> String {
 /// The item's name in the tree: `#12 title` for an issue, the title otherwise.
 pub fn row_name(it: &Item) -> String {
     match it.source {
-        Source::Manual => it.title.clone(),
-        _ => format!("#{} {}", it.source_ref, it.title),
+        Source::Issue => format!("#{} {}", it.source_ref, it.title),
+        // a `ci` item's title names its pull request
+        Source::Manual | Source::Ci => it.title.clone(),
     }
 }
 

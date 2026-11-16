@@ -180,7 +180,7 @@ fn item_lines(it: &Item, v: &FactoryView) -> Vec<Line<'static>> {
         if it.attended {
             "by the operator"
         } else {
-            "by the label poll (unattended)"
+            "by the poll (unattended)"
         },
     ));
     let facts: Vec<String> = [&it.kind, &it.priority, &it.complexity]

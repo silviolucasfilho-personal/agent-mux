@@ -297,7 +297,7 @@ fn the_label_poll_starts_on_the_tick_only_when_intake_is_on() {
     let ws = f.ws.to_string_lossy().into_owned();
     assert_eq!(
         started(&f, 1),
-        vec![format!("factory poll --workspace {ws}")]
+        vec![format!("factory poll --auto --workspace {ws}")]
     );
     f.app.on_tick(t0 + Duration::from_secs(301));
     assert_eq!(started(&f, 2).len(), 2, "one poll per interval");

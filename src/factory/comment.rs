@@ -168,8 +168,12 @@ fn signature(item: &Item) -> String {
 
 /// The progress comment: what the line has done so far.
 pub fn progress(item: &Item, lines: &[String]) -> String {
-    let mut out =
-        String::from("The software factory picked this up. Stations report here as they finish.\n");
+    let mut out = String::from(match item.source {
+        super::Source::Ci => {
+            "The software factory is fixing the failing checks. Stations report here as they finish.\n"
+        }
+        _ => "The software factory picked this up. Stations report here as they finish.\n",
+    });
     if !lines.is_empty() {
         out.push('\n');
         out.push_str(&lines.join("\n"));
@@ -195,18 +199,30 @@ pub fn outcome(item: &Item, s: &Settlement, build: &Value) -> Option<String> {
             b
         }
         State::Answered => s.answer.clone()?,
+        State::Delivered if item.source == super::Source::Ci => {
+            let mut b = String::from(
+                "A fix for the failing checks was pushed to this branch, after an independent review.\n",
+            );
+            let summary = text(&review, "summary");
+            if !summary.is_empty() {
+                b.push_str(&format!("\n{summary}\n"));
+            }
+            b
+        }
         State::Delivered => format!(
             "A draft pull request is open: {}\n\nIt was reviewed independently before it was opened. A person marks it ready and merges it.",
             item.pr_url.as_deref().unwrap_or("(no URL recorded)")
         ),
         State::Unresolved | State::Rejected => {
+            let nothing = match item.source {
+                super::Source::Ci => "Nothing was pushed.",
+                _ => "No pull request was opened.",
+            };
             let mut b = if item.state == State::Rejected {
-                String::from(
-                    "The independent review rejected the approach. No pull request was opened.\n",
-                )
+                format!("The independent review rejected the approach. {nothing}\n")
             } else {
                 format!(
-                    "The independent review still did not pass after {} revision(s). No pull request was opened.\n",
+                    "The independent review still did not pass after {} revision(s). {nothing}\n",
                     item.cycles
                 )
             };
@@ -243,6 +259,8 @@ pub fn outcome(item: &Item, s: &Settlement, build: &Value) -> Option<String> {
 pub struct Progress<'a> {
     tools: &'a Tools,
     item: Item,
+    /// The issue or pull request commented on.
+    number: String,
     id: Option<String>,
     sent: usize,
     journal_len: u64,
@@ -253,10 +271,11 @@ pub struct Progress<'a> {
 }
 
 impl<'a> Progress<'a> {
-    pub fn new(tools: &'a Tools, item: &Item) -> Progress<'a> {
+    pub fn new(tools: &'a Tools, item: &Item, number: &str) -> Progress<'a> {
         Progress {
             tools,
             item: item.clone(),
+            number: number.to_string(),
             id: None,
             sent: 0,
             journal_len: 0,
@@ -284,7 +303,7 @@ impl<'a> Progress<'a> {
         let workspace = Path::new(&self.item.workspace).to_path_buf();
         let done = match &self.id {
             Some(id) => edit(self.tools, &workspace, &self.item.repo, id, &body),
-            None => post(self.tools, &workspace, &self.item.source_ref, &body).map(|url| {
+            None => post(self.tools, &workspace, &self.number, &body).map(|url| {
                 self.id = comment_id(&url);
                 self.url = Some(url);
             }),

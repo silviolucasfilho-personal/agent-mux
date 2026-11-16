@@ -279,6 +279,11 @@ pub struct FactoryConfig {
     pub poll_interval_s: Option<u64>,
     /// Whether agent-mux comments on an issue item's issue (default true).
     pub comments: Option<bool>,
+    /// Whether red checks on a factory pull request become a `ci` item
+    /// (default false).
+    pub ci_fix: Option<bool>,
+    /// How many `ci` items one pull request may get (default 2).
+    pub ci_fix_max: Option<usize>,
 }
 
 /// `[factory]` resolved.
@@ -293,6 +298,8 @@ pub struct FactorySettings {
     pub label: String,
     pub poll_interval_s: u64,
     pub comments: bool,
+    pub ci_fix: bool,
+    pub ci_fix_max: usize,
 }
 
 impl Default for FactorySettings {
@@ -306,6 +313,8 @@ impl Default for FactorySettings {
             label: "factory".into(),
             poll_interval_s: 300,
             comments: true,
+            ci_fix: false,
+            ci_fix_max: 2,
         }
     }
 }
@@ -341,6 +350,12 @@ pub fn resolve_factory(cfg: Option<&FactoryConfig>) -> FactorySettings {
     }
     if let Some(b) = c.comments {
         s.comments = b;
+    }
+    if let Some(b) = c.ci_fix {
+        s.ci_fix = b;
+    }
+    if let Some(n) = c.ci_fix_max {
+        s.ci_fix_max = n.clamp(1, 5);
     }
     s
 }
