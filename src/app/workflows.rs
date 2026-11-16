@@ -681,10 +681,10 @@ impl App {
             state = state.with_replay(journal::to_replay(&entries));
         }
         state.notes.extend(resume_note);
-        // The run's notes say what its own harnesses cannot enforce, not
-        // what every installed CLI would do: the run's harness, those the
-        // document names, and, for a reviewer on "another" harness, those
-        // the user has a profile for.
+        // The run's notes say what the harnesses it will use cannot enforce,
+        // not what every installed CLI would do. Its own sessions run on
+        // the run's harness or one the document names; a reviewer asked
+        // for on "another" harness runs on the one `other_harness` picks.
         let mut reach: Vec<Harness> = vec![req.harness];
         for h in state.doc.harnesses_used() {
             if let Some(h) = Harness::detect(&h)
@@ -698,20 +698,31 @@ impl App {
                 r.runner.harness.as_deref() == Some(crate::workflows::document::OTHER_HARNESS)
             })
         });
-        if any_other {
-            for p in &self.profiles {
-                if let Some(h) = Harness::detect(&p.command)
-                    && !reach.contains(&h)
-                    && crate::session::command_available(&p.command)
-                {
-                    reach.push(h);
-                }
+        let skill_infos = self.all_skill_infos();
+        let of_review = |d: &crate::agents::fit::Diagnostic| d.message.contains(": review.agent ");
+        for d in crate::agents::fit::check_for(&state.doc, &catalog, &skill_infos, &reach) {
+            if !(any_other && of_review(&d)) {
+                state.notes.push(d.message.clone());
             }
         }
-        for d in
-            crate::agents::fit::check_for(&state.doc, &catalog, &self.all_skill_infos(), &reach)
-        {
-            state.notes.push(d.message.clone());
+        if any_other {
+            let mut pool: Vec<Harness> = Vec::new();
+            for p in &self.profiles {
+                if let Some(h) = Harness::detect(&p.command)
+                    && !pool.contains(&h)
+                    && state.doc.harness.allows(h.as_str())
+                    && crate::session::command_available(&p.command)
+                {
+                    pool.push(h);
+                }
+            }
+            let reviewer = pick_other(req.harness, &pool).unwrap_or(req.harness);
+            for d in crate::agents::fit::check_for(&state.doc, &catalog, &skill_infos, &[reviewer])
+            {
+                if of_review(&d) {
+                    state.notes.push(d.message.clone());
+                }
+            }
         }
         let profile = self.workflow_profile(req.profile.as_deref(), req.harness);
         let started_at = crate::loops::now();

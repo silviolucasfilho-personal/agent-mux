@@ -393,7 +393,12 @@ fn apply(
     build: &Value,
 ) {
     // a typed request is a paragraph: triage's summary names it better
+    // (not while triage is still asking: its summary then describes the gap)
     if item.source == Source::Manual
+        && !matches!(
+            s.state,
+            State::NeedsAnswer | State::Failed | State::Cancelled
+        )
         && let Some(title) = s.summary.as_deref().and_then(|t| title_from_summary(t, 72))
     {
         item.title = title;
@@ -654,12 +659,24 @@ async fn start(args: &Args) -> anyhow::Result<()> {
     {
         let conn = open(&env)?;
         if let store::Inserted::Claimed(existing) = store::insert(&conn, &item)? {
+            let next = if existing.state.may_retry() {
+                format!(
+                    "run it again with `agent-mux factory retry {}`",
+                    existing.id
+                )
+            } else if existing.state == State::NeedsAnswer {
+                format!(
+                    "answer it with `agent-mux factory answer {} \"<answer>\"`",
+                    existing.id
+                )
+            } else {
+                "an issue becomes an item once".to_string()
+            };
             anyhow::bail!(
-                "issue #{} is already work item {} ({}); see `agent-mux factory show {}`, or run it again with `agent-mux factory retry {}`",
+                "issue #{} is already work item {} ({}); see `agent-mux factory show {}`; {next}",
                 existing.source_ref,
                 existing.id,
                 existing.state.as_str(),
-                existing.id,
                 existing.id
             );
         }
