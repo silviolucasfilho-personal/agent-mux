@@ -2,7 +2,7 @@
 
 The factory takes one **work item**, a GitHub issue or text you type, through a fixed line of stations and ends with a **draft pull request**. Each station is a headless session of one of your harnesses with one job. agent-mux, not a session, pushes the branch and opens the pull request. Marking it ready and merging stay with you.
 
-This is phase 1: the line, the delivery, the brain and the `agent-mux factory` commands. The Factory screen, label intake and issue comments are phase 2 (design: `docs/superpowers/specs/2026-11-15-software-factory-design.md`).
+Phases 1 and 2 are built: the line, the delivery, the brain, the `agent-mux factory` commands, the Factory screen, intake by issue label, comments on the issue and brain notes in the inbox. Design: `docs/superpowers/specs/2026-11-15-software-factory-design.md`.
 
 ## 1. The line
 
@@ -63,7 +63,7 @@ agent-mux factory cancel <item> [--force]
 
 An item is named by its id (`wi_…`), a unique prefix of it, or `#<issue>`. An issue becomes an item once: a second `run --issue 214` says which item it already is.
 
-`retry` starts a fresh run. After a failed **delivery** (the review had approved) it only delivers again. A run is stopped with Ctrl-C in its terminal; if that process is gone and the item still reads `running`, `retry --force` or `cancel --force` takes it over.
+`retry` starts a fresh run. After a failed **delivery** (the review had approved) it only delivers again. `cancel` marks the item cancelled and tells the process that runs it to stop (each running item records its process under `<runtime>/factory/<item>.pid`). If that process is gone and the item still reads `running`, `retry --force` takes it over.
 
 ## 3. Delivery
 
@@ -81,7 +81,7 @@ One short Markdown file per repository with the durable facts earlier runs learn
 
 - It lives in the library, `~/.agent-mux/factory/<key>/brain.md`, keyed by the `origin` remote (the SSH and HTTPS forms of one remote are one brain), not in the repository.
 - agent-mux reads it when a run starts and puts it in every station's context. No station opens the file, so it works the same on every harness and needs no memory tool.
-- Only you write it. The implementer and the reviewer may **suggest** a note; a run prints the suggestions and adds nothing.
+- Only you write it. The implementer and the reviewer may **suggest** a note. A suggestion waits in the inbox (`I`) under **Factory**: `Enter` adds it under today's date, `e` adds it and opens the brain to reword it, `d` discards it. A note you decided once is not suggested again for that item.
 - It is bounded (40,000 characters by default). An addition past the bound is refused: edit the page down.
 
 ```sh
@@ -99,19 +99,71 @@ branch_prefix = "factory/"   # every pushed branch starts with it
 budget_tokens = 0            # a token ceiling per item; 0 = none
 brain_max_chars = 40000
 setup_command = ""           # the implementer runs it once in its worktree, e.g. "pnpm install"
+intake = "off"               # "label": open issues with the label become items (section 6)
+label = "factory"
+poll_interval_s = 300        # how often the running TUI polls; at least 60
+comments = true              # agent-mux comments on an issue item's issue (section 7)
 ```
 
 How often work may be sent back is the flow's own `max_cycles` (2) on its `build` step. Each station's harness and model are the flow's and the agents': set them there, or for one run with `--step`.
 
-## 6. What is recorded
+## 6. The Factory screen
+
+`F1` → **Open factory** shows the items of one repository: the selected session's folder, else the folder agent-mux was started in.
+
+```
+┌ factory · api · 2 need you ─────┐┌ #214 Reset email arrives twice · running ──────────────┐
+│ ▸ running (1)                   ││ [1 Item]  2 Line   3 Thread   4 Result                 │
+│> #214 Reset email      running  ││                                                        │
+│ ▸ needs you (2)                 ││  ✓ triage           bug · high · small          8k     │
+│  #209 Export CSV             ?  ││  ✓ analysis         5 acceptance criteria, 4 steps     │
+│  #201 Flaky login          ✗ 2  ││  ✓ implementation   3 file(s) changed, 2 check(s) run  │
+│ ▸ delivered (1)                 ││  ◷ the next station is working                         │
+│  #198 Typo in docs     PR #221  ││                                                        │
+│  ▸ brain                  3.1k  ││                                                        │
+└─────────────────────────────────┘└────────────────────────────────────────────────────────┘
+```
+
+- **Tree:** items under `running`, `needs you` (needs an answer, review open, rejected, failed), `queued`, `delivered` and `closed`, then the brain. Delivered and closed items older than 14 days are hidden; what needs you never is.
+- **Tabs** (`1`–`4`, `Tab`): **Item** (source, requester, triage, branch, pull request, the request's text), **Line** (one row per session that finished, from the run's journal), **Thread** (the item's history), **Result** (the review per criterion, or triage's questions).
+- **Keys:** `n` new (type what is wanted, or `#<issue>`), `a` answer triage's questions, `r` retry, `x` stop and cancel (asks first), `Enter` the item's run on the Run screen (`Esc` there comes back), `o` the pull request in the browser, `/` filter, `Ctrl+R` reload, `Esc` close. On the brain row, `e` or `Enter` opens the brain in the Markdown editor.
+
+The screen runs nothing itself. `n`, `a` and `r` start `agent-mux factory …` as a process of its own, which outlives the screen; its output is in `<runtime>/factory/<name>.log`. An item started from a shell looks the same. A `running` item whose process is gone reads `lost`, and `r` takes it over.
+
+Items that need you also count in the status bar and are listed in the inbox (`I`), where `Enter` opens the screen on the item.
+
+## 7. Intake by label, and comments
+
+**The poll.** With `intake = "label"`, open issues that carry `label` become items without anyone at the keyboard:
+
+```sh
+agent-mux factory poll [--dry-run] [--no-run] [--workspace DIR]
+```
+
+For each labeled issue with no item, agent-mux reads who added the label (the issue's events) and that login's role on the repository. `triage` or above: the item is queued. Otherwise nothing is recorded. A `gh` call that fails inserts nothing for that issue. Then the queued unattended items of the repository run one after another in that process. `--dry-run` only says what it would do; `--no-run` queues without running.
+
+While the TUI is open it starts this command every `poll_interval_s` for the folder it was started in. Without the TUI, run it from cron or launchd. One poll per repository runs at a time.
+
+An unattended item differs in two ways: it runs only on Claude Code, Codex or Muse (where the guard refuses a push), and its questions are answered with `agent-mux factory answer` or `a` on the screen.
+
+**Comments.** For an item that came from an issue, by `run --issue` or by the poll, agent-mux writes on the issue. No station does: the text is rendered from the stations' typed answers.
+
+- One progress comment per run, edited in place as stations finish, so the issue gets one notification, not one per station.
+- One new comment at the end: triage's questions, the draft pull request's link, the findings a review left open, the answer to a question, or why the run failed.
+
+`comments = false` turns them off. A comment that cannot be sent never stops a run; the item's thread records `comment.failed`.
+
+## 8. What is recorded
 
 - `work_items` and `work_item_events` in the trace store (schema v28): the item, its state, its latest run, its branch and pull request, and its history. GitHub stays the system of record for issues and pull requests.
 - The run itself is a workflow run: `agent-mux workflow status <run>`, the Run screen, `<runtime>/workflows/<run>/` with the journal, each session's output, `artifacts/` (longer documents a station left for later ones) and `worktrees.json` (the build step's worktree).
 
-## 7. Limits of phase 1
+## 9. Limits
 
-- No Factory screen, no label intake, no comments on the issue: start items from the command line.
-- One item per `factory run` process; it does not queue.
+- One item runs per process: `factory run` works one, and the poll works its queue one after another. There is no parallel dispatch.
+- The TUI polls only the folder it was started in.
+- An answer is given with `factory answer` or on the screen, not read from an issue comment.
+- Red checks on a factory pull request do not yet become an item, and there are no evals (phase 3).
 - A reviewer on Antigravity cannot run commands (it runs custom agents read-only), so it judges from the files alone; the choice of reviewer avoids it when another harness is there.
 - The no-push rule is enforced by the guard only on harnesses where agent-mux's hooks run for the session; elsewhere it rests on the station's instructions and on delivery being the only code that pushes.
 - A station's artifact rules (one file, never overwritten, 256 KiB) are instructions, not enforced.

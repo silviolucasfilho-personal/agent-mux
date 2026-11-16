@@ -271,6 +271,14 @@ pub struct FactoryConfig {
     pub brain_max_chars: Option<usize>,
     /// A command the implementer runs once in its worktree before it starts.
     pub setup_command: Option<String>,
+    /// `off` (default) or `label`: open issues with `label` become items.
+    pub intake: Option<String>,
+    /// The issue label the poll reads (default `factory`).
+    pub label: Option<String>,
+    /// How often the running TUI polls, in seconds (default 300, at least 60).
+    pub poll_interval_s: Option<u64>,
+    /// Whether agent-mux comments on an issue item's issue (default true).
+    pub comments: Option<bool>,
 }
 
 /// `[factory]` resolved.
@@ -280,6 +288,11 @@ pub struct FactorySettings {
     pub budget_tokens: u64,
     pub brain_max_chars: usize,
     pub setup_command: String,
+    /// The label poll is on.
+    pub intake_label: bool,
+    pub label: String,
+    pub poll_interval_s: u64,
+    pub comments: bool,
 }
 
 impl Default for FactorySettings {
@@ -289,6 +302,10 @@ impl Default for FactorySettings {
             budget_tokens: 0,
             brain_max_chars: crate::factory::brain::MAX_CHARS,
             setup_command: String::new(),
+            intake_label: false,
+            label: "factory".into(),
+            poll_interval_s: 300,
+            comments: true,
         }
     }
 }
@@ -312,6 +329,18 @@ pub fn resolve_factory(cfg: Option<&FactoryConfig>) -> FactorySettings {
     }
     if let Some(c) = c.setup_command.as_deref().map(str::trim) {
         s.setup_command = c.to_string();
+    }
+    s.intake_label = c.intake.as_deref().map(str::trim) == Some("label");
+    if let Some(l) = c.label.as_deref().map(str::trim)
+        && !l.is_empty()
+    {
+        s.label = l.to_string();
+    }
+    if let Some(n) = c.poll_interval_s {
+        s.poll_interval_s = n.max(60);
+    }
+    if let Some(b) = c.comments {
+        s.comments = b;
     }
     s
 }

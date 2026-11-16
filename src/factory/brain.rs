@@ -108,6 +108,13 @@ pub fn read(library_root: &Path, workspace: &Path) -> String {
     std::fs::read_to_string(path(library_root, workspace)).unwrap_or_default()
 }
 
+/// What a new brain file starts with.
+pub fn heading(name: &str) -> String {
+    format!(
+        "# Factory brain: {name}\n\nDurable facts about this repository that every factory run starts from. Keep it short and current: it is read whole by every station.\n\n"
+    )
+}
+
 /// Appends `note` under `date` (`2026-11-16`), creating the file with its
 /// heading when it is new. Refuses a note that would take the brain past
 /// `max_chars`: the page is to be edited down, not truncated.
@@ -126,9 +133,7 @@ pub fn append(
     let name = repo_name(workspace);
     let mut text = std::fs::read_to_string(&file).unwrap_or_default();
     if text.trim().is_empty() {
-        text = format!(
-            "# Factory brain: {name}\n\nDurable facts about this repository that every factory run starts from. Keep it short and current: it is read whole by every station.\n\n"
-        );
+        text = heading(&name);
     }
     if !text.ends_with('\n') {
         text.push('\n');

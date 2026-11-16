@@ -44,6 +44,12 @@ impl App {
             _ => None,
         };
         let in_swarm = matches!(self.mode, Mode::Swarm(_));
+        // the Factory: the item under the cursor, or the brain row
+        let factory = match &self.mode {
+            Mode::Factory(v) => Some(v),
+            _ => None,
+        };
+        let factory_item = factory.and_then(|v| v.selected_item());
         // the Library: the row under the cursor, and the item it is or
         // was launched from
         let library = match &self.mode {
@@ -74,7 +80,9 @@ impl App {
                     || matches!(&self.mode, Mode::Swarm(v) if v.modal.is_some())
             }
             Commands | Help | FocusAgents | TestShortcuts | Quit | Runs | Skills
-            | Configuration | Memory | Workspaces | Library | Swarm | Inbox | History => true,
+            | Configuration | Memory | Workspaces | Library | Factory | Swarm | Inbox | History => {
+                true
+            }
             ReturnToSession => self.return_session_id().is_some(),
             PrevSession | NextSession => session.is_some(),
             CloseAllSessions => !self.sessions.is_empty(),
@@ -99,6 +107,7 @@ impl App {
                     || editor_library
                     || workspace_node.is_some()
                     || in_swarm
+                    || factory.is_some()
             }
             Edit => {
                 matches!(
@@ -117,6 +126,9 @@ impl App {
                     || matches!(self.mode, Mode::Markdown(_) | Mode::AgentEditor(_))
                     || library_item
                     || workspace_node.is_some_and(|n| n.customization.primary_doc.is_some())
+                    || factory.is_some_and(|v| {
+                        matches!(v.selected_row(), Some(super::factory::Row::Brain))
+                    })
             }
             Delete => {
                 matches!(row, Some(AgentKind::Loop(_)))
@@ -175,6 +187,9 @@ impl App {
                     || skills_package
                     || workspace_node.is_some()
                     || in_swarm
+                    || factory_item.is_some_and(|it| {
+                        it.state.may_retry() || it.state == crate::factory::State::Running
+                    })
                     || matches!(&self.mode, Mode::TraceBrowser(b) if !b.sessions.is_empty())
                     || matches!(&self.mode, Mode::SessionHistory(h) if !h.sessions.is_empty())
             }
@@ -190,6 +205,14 @@ impl App {
                     || run_screen.is_some_and(|s| s.data.live)
                     || in_swarm
                     || library_session == Some(false)
+                    || factory_item.is_some_and(|it| {
+                        !matches!(
+                            it.state,
+                            crate::factory::State::Delivered
+                                | crate::factory::State::Answered
+                                | crate::factory::State::Cancelled
+                        )
+                    })
             }
             Reload => matches!(
                 self.mode,
@@ -201,6 +224,7 @@ impl App {
                     | Mode::Markdown(_)
                     | Mode::Memory(_)
                     | Mode::Workspaces(_)
+                    | Mode::Factory(_)
                     | Mode::Swarm(_)
                     | Mode::Library(_)
                     | Mode::Langfuse(_)
@@ -307,6 +331,7 @@ impl App {
             Memory => self.request_navigation(NavigationTarget::Memory, now),
             Workspaces => self.request_navigation(NavigationTarget::Workspaces, now),
             Library => self.request_navigation(NavigationTarget::Library, now),
+            Factory => self.request_navigation(NavigationTarget::Factory, now),
             Swarm => self.request_navigation(NavigationTarget::Swarm, now),
             Inbox => self.request_navigation(NavigationTarget::Inbox, now),
             History => self.request_navigation(NavigationTarget::History, now),
@@ -416,6 +441,7 @@ pub enum NavigationTarget {
     Memory,
     Workspaces,
     Library,
+    Factory,
     Swarm,
     Inbox,
     History,
@@ -735,6 +761,7 @@ impl App {
             NavigationTarget::Memory => self.open_memory_view(),
             NavigationTarget::Workspaces => self.open_workspaces_view(),
             NavigationTarget::Library => self.open_library(super::library::Section::Flows),
+            NavigationTarget::Factory => self.open_factory(),
             NavigationTarget::Swarm => self.open_swarm_view(),
             NavigationTarget::Inbox => self.open_inbox(),
             NavigationTarget::Langfuse => self.open_langfuse_view(),
@@ -765,6 +792,7 @@ impl App {
             Mode::Workspaces(_) => "Workspaces",
             Mode::Swarm(_) => "Swarm",
             Mode::Library(_) => "Library",
+            Mode::Factory(_) => "Factory",
             Mode::Langfuse(_) => "Langfuse",
             _ => "Dialog",
         }
@@ -840,6 +868,7 @@ impl App {
             Mode::RunsView(v) => v.save_name.is_some(),
             Mode::Memory(v) => v.input.is_some(),
             Mode::Workspaces(v) => v.filtering,
+            Mode::Factory(v) => v.text_entry_active(),
             Mode::Swarm(v) => v.text_entry_active(),
             Mode::SessionRun(v) => v.pane_focused,
             Mode::Library(v) => v.text_entry_active(),
@@ -852,6 +881,7 @@ impl App {
             Mode::Memory(v) => v.pending.is_some(),
             Mode::Swarm(v) => v.confirmation_active(),
             Mode::Library(v) => v.confirmation_active(),
+            Mode::Factory(v) => v.confirmation_active(),
             Mode::ConfirmKill
             | Mode::ConfirmCloseAll
             | Mode::ConfirmRestart

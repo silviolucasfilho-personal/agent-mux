@@ -305,6 +305,7 @@ async fn main() -> Result<()> {
     app.restore_saved_sessions();
     app.loops = config::resolve_loops(cfg.loops.as_ref());
     app.workflows = config::resolve_workflows(cfg.workflows.as_ref());
+    app.factory = config::resolve_factory(cfg.factory.as_ref());
     app.load_loop_registry();
     app.keys_enhanced = KEYBOARD_ENHANCED.load(std::sync::atomic::Ordering::SeqCst);
     // no attached mode: the keyboard starts in the pane when there is a
