@@ -34,6 +34,11 @@ pub enum InboxItem {
         notes: Vec<String>,
         verdict: Option<String>,
     },
+    /// A factory work item that waits on the operator: triage's
+    /// questions, a review that did not pass, a failure.
+    Work(Box<crate::factory::Item>),
+    /// A fact a station suggests for a repository's brain.
+    BrainNote(crate::factory::store::PendingNote),
 }
 
 impl InboxItem {
@@ -42,6 +47,7 @@ impl InboxItem {
         match self {
             InboxItem::Loop(_) => "Loops",
             InboxItem::Plan { .. } | InboxItem::Run { .. } => "Workflows",
+            InboxItem::Work(_) | InboxItem::BrainNote(_) => "Factory",
         }
     }
 
@@ -56,6 +62,13 @@ impl InboxItem {
                 verdict: Some(_), ..
             } => "verdict to read",
             InboxItem::Run { .. } => "did not finish",
+            InboxItem::Work(it) => match it.state {
+                crate::factory::State::NeedsAnswer => "needs an answer",
+                crate::factory::State::Unresolved => "review open",
+                crate::factory::State::Rejected => "rejected",
+                _ => "failed",
+            },
+            InboxItem::BrainNote(_) => "brain note",
         }
     }
 
@@ -72,6 +85,12 @@ impl InboxItem {
             InboxItem::Run { .. } => {
                 " [↑/↓] select  [Enter] open the run  [d] dismiss  [Esc] close"
             }
+            InboxItem::Work(_) => {
+                " [↑/↓] select  [Enter] open it in the factory  [d] dismiss  [Esc] close"
+            }
+            InboxItem::BrainNote(_) => {
+                " [↑/↓] select  [Enter] add to the brain  [e] add, then edit  [d] discard  [Esc] close"
+            }
         }
     }
 
@@ -80,6 +99,9 @@ impl InboxItem {
             InboxItem::Loop(r) => format!("loop:{}", r.id),
             InboxItem::Plan { id, .. } => format!("plan:{id}"),
             InboxItem::Run { run_id, .. } => format!("run:{run_id}"),
+            // by state: an item that needs you again after a retry is listed again
+            InboxItem::Work(it) => format!("work:{}:{}", it.id, it.state.as_str()),
+            InboxItem::BrainNote(n) => format!("brain:{}:{}", n.item, n.note),
         }
     }
 }
@@ -162,11 +184,18 @@ impl App {
             .filter(|r| r.needs_human())
             .filter(|r| !self.inbox_dismissed.contains(&format!("run:{}", r.run_id)))
             .count();
-        loops + plans + runs
+        loops + plans + runs + self.factory_needs
+    }
+
+    /// The inbox's rows: what the runs view also lists, then the factory's.
+    fn inbox_rows(&self) -> (Vec<InboxItem>, Option<String>) {
+        let (mut items, error) = self.inbox_items();
+        items.extend(self.factory_inbox_items());
+        (items, error)
     }
 
     pub fn open_inbox(&mut self) {
-        let (items, error) = self.inbox_items();
+        let (items, error) = self.inbox_rows();
         self.mode = Mode::Inbox(Box::new(InboxState {
             items,
             selected: 0,
@@ -176,7 +205,7 @@ impl App {
 
     /// Re-reads the items, keeping the selection's place.
     fn reload_inbox(&mut self) {
-        let (items, error) = self.inbox_items();
+        let (items, error) = self.inbox_rows();
         if let Mode::Inbox(state) = &mut self.mode {
             state.items = items;
             state.error = error;
@@ -216,8 +245,33 @@ impl App {
                     self.notice = Some(Notice::info("dismissed; the run stays in the runs view"));
                     self.reload_inbox();
                 }
+                Some(item @ InboxItem::Work(_)) if c == 'd' => {
+                    self.inbox_dismissed.insert(item.key());
+                    self.last_factory_needs = None;
+                    self.notice = Some(Notice::info("dismissed; the item stays in the factory"));
+                    self.reload_inbox();
+                }
+                Some(InboxItem::BrainNote(note)) if c == 'd' => {
+                    self.notice = Some(match self.decide_brain_note(&note, false) {
+                        Ok(()) => Notice::info("suggestion discarded; the brain is unchanged"),
+                        Err(e) => Notice::error(format!("inbox: {e}")),
+                    });
+                    self.reload_inbox();
+                }
                 _ => {}
             },
+            // add the note, then open the brain to reword it
+            KeyCode::Char('e') => {
+                if let Some(InboxItem::BrainNote(note)) = selected {
+                    match self.decide_brain_note(&note, true) {
+                        Ok(()) => {
+                            self.reload_inbox();
+                            self.edit_factory_brain(std::path::Path::new(&note.workspace));
+                        }
+                        Err(e) => self.notice = Some(Notice::error(format!("inbox: {e}"))),
+                    }
+                }
+            }
             // the runs view holds everything about a run
             KeyCode::Enter => match selected {
                 Some(InboxItem::Loop(r)) => {
@@ -233,6 +287,17 @@ impl App {
                     self.open_workflows_view_on(RunRow::Stored(run_id))
                 }
                 Some(InboxItem::Run { .. }) => {}
+                Some(InboxItem::Work(it)) => self.open_factory_on(&it.id, &it.workspace),
+                Some(InboxItem::BrainNote(note)) => {
+                    self.notice = Some(match self.decide_brain_note(&note, true) {
+                        Ok(()) => Notice::info(format!(
+                            "added to the brain of {}",
+                            crate::factory::brain::repo_name(std::path::Path::new(&note.workspace))
+                        )),
+                        Err(e) => Notice::error(format!("inbox: {e}")),
+                    });
+                    self.reload_inbox();
+                }
                 None => {}
             },
             KeyCode::Char('T') => match selected.as_ref() {

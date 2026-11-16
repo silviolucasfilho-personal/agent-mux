@@ -264,6 +264,7 @@ fn footer(st: &RunsViewState) -> Line<'static> {
             ("s", "save"),
             ("d", "discard"),
         ],
+        Some(RunRef::Inbox(InboxItem::Work(_) | InboxItem::BrainNote(_))) => vec![],
         Some(RunRef::Inbox(InboxItem::Run { .. })) => vec![
             ("↩", "open the run"),
             ("r", "resume"),

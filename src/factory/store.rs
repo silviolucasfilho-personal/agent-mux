@@ -227,6 +227,62 @@ pub fn events_of(conn: &Connection, item: &str) -> rusqlite::Result<Vec<Event>> 
     Ok(rows)
 }
 
+/// A fact a station suggested for the brain, waiting on the operator.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingNote {
+    pub item: String,
+    pub workspace: String,
+    pub title: String,
+    pub note: String,
+}
+
+/// Suggested brain notes nobody has added or discarded yet, oldest
+/// first. The same note suggested twice for an item is one row, and a
+/// note decided once is not asked again.
+pub fn pending_brain_notes(conn: &Connection) -> rusqlite::Result<Vec<PendingNote>> {
+    let mut stmt = conn.prepare(
+        "SELECT e.item, w.workspace, w.title, e.detail
+         FROM work_item_events e JOIN work_items w ON w.id = e.item
+         WHERE e.kind = 'brain.note'
+           AND NOT EXISTS (
+             SELECT 1 FROM work_item_events r
+             WHERE r.item = e.item AND r.detail = e.detail
+               AND r.kind IN ('brain.note.added', 'brain.note.discarded'))
+         GROUP BY e.item, e.detail
+         ORDER BY MIN(e.rid)",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            let detail: String = row.get(3)?;
+            Ok(PendingNote {
+                item: row.get(0)?,
+                workspace: row.get(1)?,
+                title: row.get(2)?,
+                note: serde_json::from_str::<Value>(&detail)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default(),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows.into_iter().filter(|n| !n.note.is_empty()).collect())
+}
+
+/// Records what the operator decided about a suggested brain note.
+pub fn resolve_brain_note(
+    conn: &Connection,
+    item: &str,
+    note: &str,
+    added: bool,
+) -> rusqlite::Result<()> {
+    let kind = if added {
+        "brain.note.added"
+    } else {
+        "brain.note.discarded"
+    };
+    add_event(conn, item, kind, serde_json::json!(note))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +367,33 @@ mod tests {
         let ev = events_of(&conn, &it.id).unwrap();
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].detail["pr"], 21);
+    }
+
+    #[test]
+    fn a_suggested_note_waits_until_it_is_added_or_discarded() {
+        let (_dir, conn) = store();
+        let it = Item::new(Path::new("/w"), "o/r", Source::Manual, "", "Fix");
+        insert(&conn, &it).unwrap();
+        for note in ["no test suite", "no test suite", "run make lint"] {
+            add_event(&conn, &it.id, "brain.note", serde_json::json!(note)).unwrap();
+        }
+        let pending = pending_brain_notes(&conn).unwrap();
+        assert_eq!(
+            pending.iter().map(|n| n.note.as_str()).collect::<Vec<_>>(),
+            vec!["no test suite", "run make lint"]
+        );
+        assert_eq!(pending[0].workspace, "/w");
+        resolve_brain_note(&conn, &it.id, "no test suite", true).unwrap();
+        resolve_brain_note(&conn, &it.id, "run make lint", false).unwrap();
+        assert!(pending_brain_notes(&conn).unwrap().is_empty());
+        // decided once: the same suggestion from a later run is not asked again
+        add_event(
+            &conn,
+            &it.id,
+            "brain.note",
+            serde_json::json!("run make lint"),
+        )
+        .unwrap();
+        assert!(pending_brain_notes(&conn).unwrap().is_empty());
     }
 }

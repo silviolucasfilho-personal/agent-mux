@@ -40,6 +40,8 @@ const REFRESH_STORED: Duration = Duration::from_millis(2000);
 pub enum Origin {
     Agents,
     Runs,
+    /// A work item's run: back goes to the Factory screen.
+    Factory,
 }
 
 /// The run row's tabs.
@@ -1321,6 +1323,8 @@ impl App {
                             &format!("flow:{}", st.run_id),
                             super::runs_view::RunTab::Report,
                         );
+                    } else if st.origin == Origin::Factory {
+                        self.return_to_factory();
                     }
                 }
                 Some(Verb::Top) if pane => {

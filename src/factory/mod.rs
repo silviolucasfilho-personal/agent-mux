@@ -7,6 +7,8 @@
 //! - `brain`: one Markdown file per repository, read into every station's
 //!   context and written only by agent-mux.
 //! - `deliver`: the push of exactly one branch and the draft pull request.
+//! - `intake`: the label poll, and which process works which item.
+//! - `comment`: what agent-mux says on an issue item's issue.
 //! - `cli`: `agent-mux factory …`.
 //!
 //! The line itself is a workflow (`workflows/factory.toml`), so the order
@@ -18,7 +20,9 @@
 
 pub mod brain;
 pub mod cli;
+pub mod comment;
 pub mod deliver;
+pub mod intake;
 pub mod store;
 
 use serde_json::Value;

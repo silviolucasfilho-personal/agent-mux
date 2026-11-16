@@ -127,6 +127,8 @@ impl RunRef {
             RunRef::Inbox(InboxItem::Loop(r)) => format!("loop:{}", r.id),
             RunRef::Inbox(InboxItem::Plan { id, .. }) => format!("plan:{id}"),
             RunRef::Inbox(InboxItem::Run { run_id, .. }) => format!("flow:{run_id}"),
+            // the factory's rows are listed in the inbox, not here
+            RunRef::Inbox(item @ (InboxItem::Work(_) | InboxItem::BrainNote(_))) => item.key(),
             RunRef::Loop(r) => format!("loop:{}", r.id),
             RunRef::Flow(r) => format!("flow:{}", r.id),
             RunRef::Next(id) => format!("next:{id}"),
@@ -332,6 +334,8 @@ impl App {
                 InboxItem::Run { name, run_id, .. } => {
                     (name.clone(), "since startup".into(), run_id.clone())
                 }
+                // `inbox_items` holds no factory row; the inbox adds them
+                InboxItem::Work(_) | InboxItem::BrainNote(_) => continue,
             };
             waiting.push(id);
             let at_ns = match &item {
@@ -821,6 +825,7 @@ impl App {
                 self.notice = Some(Notice::info("d dismisses it; e edits the agent; T traces"));
                 true
             }
+            RunRef::Inbox(InboxItem::Work(_) | InboxItem::BrainNote(_)) => true,
             RunRef::Loop(_) => {
                 self.notice = Some(Notice::info("r runs it again; T its traces; 2 its history"));
                 true
@@ -946,6 +951,7 @@ impl App {
             return;
         };
         match item {
+            InboxItem::Work(_) | InboxItem::BrainNote(_) => {}
             InboxItem::Loop(r) => {
                 if let Err(e) = self.decide_loop_run(&r.id, false) {
                     self.notice = Some(Notice::error(format!("reject: {e}")));
@@ -1272,6 +1278,7 @@ pub fn tab_lines(app: &App, st: &RunsViewState) -> Vec<String> {
                 "↵ opens the run; x stops it.".into(),
             ]
         }
+        (RunRef::Inbox(InboxItem::Work(_) | InboxItem::BrainNote(_)), _) => Vec::new(),
     }
 }
 

@@ -7,7 +7,8 @@
 
 use super::deliver::{self, Tools};
 use super::{
-    FLOW, Item, Settlement, Source, State, brain, settle, store, title_from_summary, title_of,
+    FLOW, Item, Settlement, Source, State, brain, comment, intake, settle, store,
+    title_from_summary, title_of,
 };
 use crate::app::workflows::WorkflowRunRequest;
 use crate::config::FactorySettings;
@@ -28,7 +29,9 @@ const USAGE: &str = "agent-mux factory — one work item through the line, to a 
   agent-mux factory show <item> [--json]
   agent-mux factory answer <item> \"<answer>\"     answer triage's questions and run again
   agent-mux factory retry <item> [--force]       run again, or deliver again after a failed delivery
-  agent-mux factory cancel <item> [--force]
+  agent-mux factory cancel <item> [--force]        stops the process that runs it, too
+  agent-mux factory poll [--dry-run] [--no-run] [--workspace DIR]
+        issues labeled for the factory become items, then run one by one
   agent-mux factory brain show|path|edit [--workspace DIR]
   agent-mux factory brain add \"<note>\" [--workspace DIR]
 
@@ -168,6 +171,7 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         Some("answer") => answer(&a).await,
         Some("retry") => retry(&a).await,
         Some("cancel") => cancel(&a),
+        Some("poll") => poll(&a).await,
         Some("brain") => brain_cmd(&a),
         Some("help") | Some("--help") | Some("-h") | None => {
             println!("{USAGE}");
@@ -460,6 +464,15 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
         Some(h) => Harness::detect(h).ok_or_else(|| anyhow::anyhow!("unknown harness {h:?}"))?,
         None => Harness::Claude,
     };
+    // nobody watches an unattended item: its writing stations run only
+    // where agent-mux's guard reaches the session
+    if !item.attended && !matches!(harness, Harness::Claude | Harness::Codex | Harness::Muse) {
+        anyhow::bail!(
+            "{} came from the label poll and runs unattended: its harness must be claude, codex or muse, where the guard refuses a push; {} is not",
+            item.handle(),
+            harness.as_str()
+        );
+    }
     // the work forks from the remote's default branch, not from whatever
     // the workspace happens to have checked out
     let worktree_base = if deliver::has_origin(&workspace) {
@@ -509,6 +522,10 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
         step_overrides,
     };
     let quiet = args.flag("--json");
+    let factory_runtime = crate::tracing::analysis::default_snapshot_dir();
+    let Some(_held) = intake::hold(&factory_runtime, &item.id) else {
+        anyhow::bail!("{} is being worked by another process", item.id);
+    };
     let mut h = crate::workflows::cli::headless()?;
     let run_id = h
         .app
@@ -526,7 +543,13 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
     }
     let timeout = Duration::from_secs(h.app.workflows.run_timeout_s + 60);
     let mut seen = 0;
+    let comments = commented(env, item);
+    let mut progress = comments.then(|| comment::Progress::new(&env.tools, item));
+    let journal_file = context::run_dir(&runtime, &run_id).join("journal.jsonl");
     let finished = crate::workflows::cli::pump(&mut h, timeout, |a| {
+        if let Some(p) = progress.as_mut() {
+            p.tick(&journal_file);
+        }
         if !quiet && let Some(r) = a.live_workflow_runs.first() {
             for n in &r.state.notes[seen..] {
                 eprintln!("  {n}");
@@ -557,8 +580,41 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
         &answer_of(&entries, "answer"),
     );
     apply(&conn, env, item, &s, wt.as_ref(), &analysis, &recent.result);
+    if let Some(mut p) = progress {
+        p.tick(&journal_file);
+        if let Some(url) = &p.url {
+            let _ = store::add_event(&conn, &item.id, "comment.progress", serde_json::json!(url));
+        }
+        let sent = match (p.failed.take(), comment::outcome(item, &s, &recent.result)) {
+            (Some(e), _) => Err(e),
+            (None, Some(body)) => {
+                comment::post(&env.tools, &workspace, &item.source_ref, &body).map(Some)
+            }
+            (None, None) => Ok(None),
+        };
+        match sent {
+            Ok(Some(url)) => {
+                let _ = store::add_event(&conn, &item.id, "comment", serde_json::json!(url));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = store::add_event(&conn, &item.id, "comment.failed", serde_json::json!(e));
+                if !quiet {
+                    eprintln!("  the issue was not commented: {e}");
+                }
+            }
+        }
+    }
     report(item, &s, &recent.result, quiet);
     Ok(())
+}
+
+/// Whether agent-mux comments on this item's issue.
+fn commented(env: &Env, item: &Item) -> bool {
+    env.settings.comments
+        && item.source == Source::Issue
+        && !item.source_ref.is_empty()
+        && !item.repo.is_empty()
 }
 
 /// What the operator reads when a run ends.
@@ -788,18 +844,115 @@ fn cancel(args: &Args) -> anyhow::Result<()> {
     let env = env()?;
     let conn = open(&env)?;
     let mut item = find(&conn, args)?;
-    match item.state {
-        State::Running if !args.flag("--force") => anyhow::bail!(
-            "{} is running in the process that started it: stop that `agent-mux factory run` (Ctrl-C). If it is gone, `cancel --force` marks the item cancelled",
-            item.id
-        ),
-        State::Delivered | State::Answered | State::Cancelled => {
-            anyhow::bail!("{} is {} already", item.id, item.state.as_str())
-        }
-        _ => {}
+    if matches!(
+        item.state,
+        State::Delivered | State::Answered | State::Cancelled
+    ) {
+        anyhow::bail!("{} is {} already", item.id, item.state.as_str());
     }
-    set_state(&conn, &mut item, State::Cancelled, Value::Null);
-    println!("{} cancelled", item.id);
+    // the process that runs it, when there is one, is told to stop first
+    let runtime = crate::tracing::analysis::default_snapshot_dir();
+    let stopped = intake::cancel(&conn, &runtime, &mut item);
+    println!(
+        "{} cancelled{}",
+        item.id,
+        if stopped {
+            "; its process was told to stop"
+        } else {
+            ""
+        }
+    );
+    Ok(())
+}
+
+// ---- unattended intake ------------------------------------------------------
+
+/// Reads the labeled issues into items, then works the queued unattended
+/// ones of this workspace one after another.
+async fn poll(args: &Args) -> anyhow::Result<()> {
+    let env = env()?;
+    let workspace = workspace_of(args)?;
+    let repo = brain::github_repo(&workspace);
+    if repo.is_empty() {
+        anyhow::bail!(
+            "the poll needs a GitHub origin remote in {}",
+            workspace.display()
+        );
+    }
+    let dry = args.flag("--dry-run");
+    let runtime = crate::tracing::analysis::default_snapshot_dir();
+    let lock = format!("poll-{}", brain::key(&repo));
+    // one poll per repository at a time: a second one would start the
+    // same queued item
+    let held = if dry {
+        None
+    } else {
+        match intake::hold(&runtime, &lock) {
+            Some(h) => Some(h),
+            None => {
+                println!("another poll of {repo} is running");
+                return Ok(());
+            }
+        }
+    };
+    let label = &env.settings.label;
+    let seen = {
+        let conn = open(&env)?;
+        intake::poll(&conn, &env.tools, &workspace, &repo, label, dry)
+            .map_err(|e| anyhow::anyhow!(e))?
+    };
+    if seen.is_empty() {
+        println!("no open issue of {repo} carries the label {label:?}");
+    }
+    for s in &seen {
+        match s {
+            intake::Seen::New(it) => println!(
+                "#{} {} {}",
+                it.source_ref,
+                if dry {
+                    "would become an item:"
+                } else {
+                    "queued:"
+                },
+                title_of(&it.title, 70)
+            ),
+            intake::Seen::Known { number, item } => println!("#{number} is already {item}"),
+            intake::Seen::Refused {
+                number,
+                login,
+                role,
+            } => println!(
+                "#{number} ignored: labeled by {} ({role}), who may not triage {repo}",
+                login.as_deref().unwrap_or("nobody the events name")
+            ),
+            intake::Seen::Error { number, why } => println!("#{number} skipped: {why}"),
+        }
+    }
+    if dry || args.flag("--no-run") {
+        return Ok(());
+    }
+    let ws = workspace.to_string_lossy().into_owned();
+    loop {
+        let next = {
+            let conn = open(&env)?;
+            store::list(&conn, Some(State::Queued), Some(&ws), 200)?
+                .into_iter()
+                .filter(|it| !it.attended)
+                .min_by_key(|it| it.created_ns)
+        };
+        let Some(mut item) = next else { break };
+        if let Err(e) = work(&env, &mut item, &RunOpts { args }).await {
+            eprintln!("{}: {e}", item.handle());
+            // an item that could not start must not be picked again
+            if item.state == State::Queued {
+                let conn = open(&env)?;
+                item.error = Some(e.to_string());
+                let why = serde_json::json!(item.error);
+                set_state(&conn, &mut item, State::Failed, why);
+            }
+        }
+    }
+    drop(held);
     Ok(())
 }
 

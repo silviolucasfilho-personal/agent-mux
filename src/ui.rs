@@ -1,6 +1,7 @@
 use crate::app::about::{AboutRow, AboutState};
 mod agent_editor;
 mod commands;
+pub mod factory;
 mod flow;
 pub mod langfuse;
 pub mod library;
@@ -389,6 +390,11 @@ pub fn draw(f: &mut Frame, app: &App, now: Instant) {
             let full = f.area();
             let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
             workspaces::draw(f, area, view);
+        }
+        Mode::Factory(view) => {
+            let full = f.area();
+            let area = Rect::new(full.x, full.y, full.width, full.height.saturating_sub(1));
+            factory::draw(f, area, view);
         }
         Mode::Langfuse(view) => {
             let full = f.area();
@@ -5778,6 +5784,8 @@ fn draw_inbox(f: &mut Frame, state: &crate::app::inbox::InboxState) {
             ),
             InboxItem::Plan { name, .. } => name.clone(),
             InboxItem::Run { name, .. } => name.clone(),
+            InboxItem::Work(it) => crate::app::factory::row_name(it),
+            InboxItem::BrainNote(n) => n.note.clone(),
         };
         let sel = i == state.selected;
         if sel {
@@ -5911,6 +5919,50 @@ fn draw_inbox(f: &mut Frame, state: &crate::app::inbox::InboxState) {
             detail.push(Line::raw(""));
             detail.push(Line::styled(
                 "  [Enter] its report and steps   [x] dismiss from the inbox",
+                dim,
+            ));
+        }
+        Some(InboxItem::Work(it)) => {
+            detail.push(Line::styled(
+                format!(
+                    "  {} · {}",
+                    it.state.as_str().to_uppercase(),
+                    crate::app::factory::row_name(it)
+                ),
+                head,
+            ));
+            detail.push(row("workspace", it.workspace.clone()));
+            detail.push(row("item", it.id.clone()));
+            if let Some(e) = &it.error {
+                detail.push(Line::styled(
+                    format!("  {e}"),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+            detail.push(Line::raw(""));
+            detail.push(Line::styled(
+                match it.state {
+                    crate::factory::State::NeedsAnswer => {
+                        "  [Enter] open it in the factory: its questions are on the Result tab, [a] answers"
+                    }
+                    _ => "  [Enter] open it in the factory: [r] runs it again   [d] dismiss from the inbox",
+                },
+                dim,
+            ));
+        }
+        Some(InboxItem::BrainNote(n)) => {
+            detail.push(Line::styled("  BRAIN NOTE · suggested by a station", head));
+            detail.push(row("repository", n.workspace.clone()));
+            detail.push(row("from", format!("{} ({})", n.title, n.item)));
+            detail.push(Line::raw(""));
+            detail.push(Line::raw(format!("  {}", n.note)));
+            detail.push(Line::raw(""));
+            detail.push(Line::styled(
+                "  [Enter] add it to the brain   [e] add it, then edit the brain   [d] discard",
+                dim,
+            ));
+            detail.push(Line::styled(
+                "  Every station of this repository's runs reads the brain; nothing is added without you.",
                 dim,
             ));
         }

@@ -24,6 +24,7 @@ pub mod agents_list;
 pub mod commands;
 mod config_view;
 pub mod dir_picker;
+pub mod factory;
 pub mod flow_builder;
 pub mod harness_recap;
 pub mod inbox;
@@ -97,6 +98,8 @@ pub enum Mode {
     Memory(Box<memory_view::MemoryView>),
     /// The Workspaces Explorer screen: folders, sub-folders, stacks and agents.
     Workspaces(Box<workspaces_view::WorkspacesView>),
+    /// The Factory screen: one repository's work items and its brain.
+    Factory(Box<factory::FactoryView>),
     /// The Library screen: every flow, skill and persona in a left
     /// tree, launched through one harness picker.
     Library(Box<library::LibraryState>),
@@ -254,6 +257,8 @@ pub enum Action {
     MarkdownKey,
     MemoryKey,
     WorkspacesKey,
+    /// Factory mode: App routes the key to the view it owns.
+    FactoryKey,
     SwarmKey,
     LangfuseKey,
     /// LoopsView mode: App routes the key to the LoopsViewState it owns.
@@ -883,6 +888,7 @@ pub fn dispatch(mode: &Mode, key: &KeyEvent, ctx: &DispatchCtx) -> Action {
         Mode::Markdown(_) => Action::MarkdownKey,
         Mode::Memory(_) => Action::MemoryKey,
         Mode::Workspaces(_) => Action::WorkspacesKey,
+        Mode::Factory(_) => Action::FactoryKey,
         // the swarm's pane has the keyboard: the session's, as on Agents
         Mode::Swarm(v) if v.pane_focused => match encode_key_with_mode(key, ctx.app_cursor) {
             Some(bytes) => Action::ForwardBytes(bytes),
@@ -2856,6 +2862,20 @@ pub struct App {
     pub workflow_anchor: Option<workflows::WorkflowRow>,
     /// Inbox items the user dismissed this session (`run:<id>`).
     pub inbox_dismissed: std::collections::HashSet<String>,
+    /// `[factory]` resolved.
+    pub factory: crate::config::FactorySettings,
+    /// The binary factory processes start from; `None` is this one.
+    /// Tests point it at a script.
+    pub factory_exe: Option<std::path::PathBuf>,
+    /// The repository the Factory screen and the label poll use in place
+    /// of the selected session's folder and the launch directory.
+    pub factory_workspace_override: Option<std::path::PathBuf>,
+    pub last_factory_poll: Option<Instant>,
+    /// The Factory screen as it was when it opened an item's run.
+    pub(crate) factory_return: Option<Box<factory::FactoryView>>,
+    pub last_factory_needs: Option<Instant>,
+    /// Work items and brain notes waiting on the operator, as last counted.
+    pub factory_needs: usize,
     /// Unix domain socket path for inter-agent bus control (`WakeSession`, `SpawnWorker`).
     pub bus_control_sock: Option<std::path::PathBuf>,
     bus_control_guard: Option<crate::bus::control::ControlListenerGuard>,
@@ -3042,6 +3062,13 @@ impl App {
             selected_workflow: 0,
             workflow_anchor: None,
             inbox_dismissed: Default::default(),
+            factory: Default::default(),
+            factory_exe: None,
+            factory_workspace_override: None,
+            last_factory_poll: None,
+            factory_return: None,
+            last_factory_needs: None,
+            factory_needs: 0,
             bus_control_sock: None,
             bus_control_guard: None,
             pending_bus_wakes: Vec::new(),
@@ -3530,6 +3557,7 @@ impl App {
         if let Mode::Workspaces(view) = &mut self.mode {
             view.poll();
         }
+        self.factory_tick(now);
         if let Mode::Langfuse(view) = &mut self.mode {
             view.poll();
         }
@@ -6638,6 +6666,7 @@ impl App {
                     self.memory_outcome(outcome);
                 }
             }
+            Action::FactoryKey => self.handle_factory_key(key),
             Action::WorkspacesKey => {
                 if let Mode::Workspaces(view) = &mut self.mode {
                     let outcome = view.handle_key(key);

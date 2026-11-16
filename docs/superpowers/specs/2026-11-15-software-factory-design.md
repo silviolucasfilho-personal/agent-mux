@@ -1,7 +1,7 @@
 # Software factory: one work item, one line of stations — design
 
-Status: phase 1 implemented, 2026-11-16 (branch `feat/software-factory`);
-phases 2 and 3 proposed. Section 14 lists where the code differs from this text.
+Status: phases 1 and 2 implemented, 2026-11-16; phase 3 proposed.
+Sections 14 and 15 list where the code differs from this text.
 
 Modelled on the software factory template of eve (`vercel/eve`,
 `apps/templates/eve-software-factory-template`, read 2026-11-15). eve hosts
@@ -429,3 +429,24 @@ Where the code differs from the sections above.
 | 15 | §9 | `[factory]` has `branch_prefix`, `budget_tokens`, `brain_max_chars`, `setup_command`. `max_cycles` is the flow's own; the intake keys come with phase 2. `setup_command` is handed to the implementer (`args.setup`), which runs it | — |
 | 16 | §6 | `factory run` works one item in its own process; there is no dispatcher or queue yet. A running item is stopped with Ctrl-C; `--force` on `retry` and `cancel` takes over an item whose process is gone |
 | 17 | §13 | Covered: `revise` in the interpreter (seven tests), the line end to end with fake harnesses and a bare remote (`tests/it/factory_line.rs`), delivery, the claim, the brain, `settle`. Not covered: `factory run` as a process (it needs real harnesses), and the poll (phase 2) |
+
+## 15. Phase 2 as built
+
+Built 2026-11-16 on branch `feat/factory-phase-2`: the Factory screen, the
+label poll, issue comments and brain notes in the inbox. Where the code
+differs from §6 to §9.
+
+| # | Section | As built | Why |
+| --- | --- | --- | --- |
+| 1 | §6 | The poll is `agent-mux factory poll`, a process: it inserts the items and then works the queued unattended ones one after another. The running TUI starts it every `poll_interval_s` for its launch directory (`App::factory_tick`); without the TUI it runs from cron or launchd | A run is headless in its own process (§14, 16); the TUI stays a reader |
+| 2 | §6 | There is no `max_concurrent`: one item at a time per process, and one poll per repository (`intake::hold` on `poll-<key>`) | A dispatcher with parallel items is not built |
+| 3 | §6 | The role is `role_name` of `…/collaborators/<login>/permission` (`permission` when absent); a label no `labeled` event explains is refused | `permission` alone folds triage into read |
+| 4 | §6 | Comments: one progress comment per run, edited in place as stations finish, and one new comment for the outcome. Texts are rendered in Rust (`factory::comment`), not `prompts.toml` templates | A comment per station is a notification per station; lists do not fit the placeholder templates (§14, 11) |
+| 5 | §6 | An unattended item whose run harness is not Claude Code, Codex or Muse is refused before it starts | The check is on the run's harness; a `--step` override of the build step is not inspected |
+| 6 | §7 | A suggested note is a `brain.note` event; the inbox lists those with no `brain.note.added` or `brain.note.discarded` event of the same text for the item. `e` adds the note and opens the brain in the Markdown editor, rather than editing before adding | No schema change; one editor for the brain |
+| 7 | §8 | The screen starts nothing in-process: `n`, `a`, `r` spawn `agent-mux factory …` (`intake::spawn_cli`), with output in `<runtime>/factory/<name>.log`. Each working process records its pid (`<runtime>/factory/<item>.pid`); `x` and `cancel` stop it, and a `running` item without a live process reads `lost` | One code path for the shell and the screen |
+| 8 | §8 | The Line tab is drawn from the run's journal (one row per finished session), not from `workflows::run_view`; `Enter` opens the full Run screen, and back returns to the Factory screen (`Origin::Factory`) | The run lives in another process, so there is no live tree to read here |
+| 9 | §8 | Groups also include `closed` (cancelled). `o` opens the pull request. The local verbs are the screen's own keys; the registry knows the screen for New, Edit, Run, Stop and Reload | — |
+| 10 | §8 | Items that need the operator are inbox rows (`InboxItem::Work`), dismissed per state, beside brain notes (`InboxItem::BrainNote`); both count in the status bar through `App.factory_needs`, re-read every 5 s | The status bar is drawn every frame |
+| 11 | §9 | `[factory]` gains `intake`, `label`, `poll_interval_s`, `comments`. `max_concurrent` and `max_cycles` are not keys | Rows 2 and §14, 15 |
+| 12 | §13 | Covered: the poll and the progress comment against a stubbed `gh` (`tests/it/factory_intake.rs`), the screen, the inbox rows and the poll tick (`tests/it/factory_ui.rs`). Run for real: `factory poll --dry-run` against a labeled issue. Not run for real: an unattended item end to end, and the comments | — |
