@@ -59,6 +59,17 @@ pub fn check(doc: &Workflow, catalog: &Catalog, skills: &[SkillInfo]) -> Vec<Dia
     check_candidates(doc, catalog, skills, &Harness::ALL)
 }
 
+/// `check`, for the harnesses of `only` alone: what a run that can reach
+/// just those has to know.
+pub fn check_for(
+    doc: &Workflow,
+    catalog: &Catalog,
+    skills: &[SkillInfo],
+    only: &[Harness],
+) -> Vec<Diagnostic> {
+    check_candidates(doc, catalog, skills, only)
+}
+
 fn check_candidates(
     doc: &Workflow,
     catalog: &Catalog,
@@ -79,6 +90,20 @@ fn check_candidates(
                 a,
                 v.runner.harness.as_deref().or(s.harness.as_deref()),
                 Some(&v.actor),
+            ));
+        }
+        if let Some(r) = &s.review
+            && let Some(a) = &r.runner.agent
+        {
+            roles.push((
+                "review.agent",
+                a,
+                r.runner
+                    .harness
+                    .as_deref()
+                    .filter(|h| *h != crate::workflows::document::OTHER_HARNESS)
+                    .or(s.harness.as_deref()),
+                Some(&r.actor),
             ));
         }
         if let Some(a) = &s.judge_runner.agent {

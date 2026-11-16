@@ -174,6 +174,9 @@ pub struct WorkflowRunRequest {
     pub usd_cap: Option<f64>,
     pub isolation: Option<Isolation>,
     pub resume_from: Option<String>,
+    /// The ref a `revise` step's worktree forks from, instead of the
+    /// branch the workspace is on (the factory: the remote's default branch).
+    pub worktree_base: Option<String>,
     /// One-off per-step overrides for this run, `(step id, key, value)` with
     /// `key` one of `harness`, `profile`, `model`, `effort`, `agent`. What a document
     /// states permanently, these state for one run.
@@ -200,6 +203,9 @@ pub struct LiveWorkflowSession {
     pub retried: bool,
     /// The worktree an isolated session runs in.
     pub worktree: Option<crate::loops::worktree::Worktree>,
+    /// The worktree belongs to the step (a `revise` step's work and its
+    /// reviews share one), so the session's end does not remove it.
+    pub shared_worktree: bool,
 }
 
 /// A session of a live run that has answered: what the Run screen still
@@ -236,6 +242,63 @@ pub struct LiveWorkflowRun {
     pub resumed_from: Option<String>,
     /// The agents the document names, as loaded when the run started.
     pub agents: std::collections::BTreeMap<String, crate::agents::AgentSpec>,
+    /// The worktree of each `revise` step, by step id: its work sessions
+    /// and their reviews run in the same one, cycle after cycle. Kept in
+    /// `<run>/worktrees.json` so a resumed run finds the work again.
+    pub step_worktrees: std::collections::BTreeMap<String, crate::loops::worktree::Worktree>,
+    /// The ref a `revise` step's worktree forks from, when not the
+    /// workspace's branch.
+    pub worktree_base: Option<String>,
+}
+
+/// `<run>/worktrees.json`: the worktrees a run's `revise` steps work in.
+pub fn step_worktrees_file(run_dir: &std::path::Path) -> PathBuf {
+    run_dir.join("worktrees.json")
+}
+
+/// The `revise` steps' worktrees a run recorded, by step id. A worktree
+/// whose folder is gone is left out.
+pub fn load_step_worktrees(
+    run_dir: &std::path::Path,
+) -> std::collections::BTreeMap<String, crate::loops::worktree::Worktree> {
+    let Ok(text) = std::fs::read_to_string(step_worktrees_file(run_dir)) else {
+        return Default::default();
+    };
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) else {
+        return Default::default();
+    };
+    map.into_iter()
+        .filter_map(|(step, v)| {
+            let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+            let wt = crate::loops::worktree::Worktree {
+                path: PathBuf::from(s("path")?),
+                branch: s("branch")?,
+                base: s("base")?,
+            };
+            wt.path.is_dir().then_some((step, wt))
+        })
+        .collect()
+}
+
+fn save_step_worktrees(run: &LiveWorkflowRun) {
+    let map: serde_json::Map<String, Value> = run
+        .step_worktrees
+        .iter()
+        .map(|(step, wt)| {
+            (
+                step.clone(),
+                serde_json::json!({
+                    "path": wt.path.to_string_lossy(),
+                    "branch": wt.branch,
+                    "base": wt.base,
+                }),
+            )
+        })
+        .collect();
+    let _ = std::fs::write(
+        step_worktrees_file(&run.run_dir),
+        serde_json::to_string_pretty(&Value::Object(map)).unwrap_or_default(),
+    );
 }
 
 impl LiveWorkflowRun {
@@ -339,6 +402,17 @@ fn awaiting_verdict(accept: &[String], status: &str, result: &Value) -> Option<S
         && v.blocking.unwrap_or(0) == 0
         && !v.human_required;
     (!accepted).then_some(v.value)
+}
+
+/// A harness of `pool` other than `worker`, Antigravity last: it runs a
+/// reviewing agent without a shell.
+fn pick_other(worker: Harness, pool: &[Harness]) -> Option<Harness> {
+    let other = |h: &&Harness| **h != worker;
+    pool.iter()
+        .filter(other)
+        .find(|h| **h != Harness::Antigravity)
+        .or_else(|| pool.iter().find(other))
+        .copied()
 }
 
 fn hash_text(text: &str) -> String {
@@ -568,6 +642,7 @@ impl App {
         let runtime = self.workflows_runtime_dir();
         let run_dir = context::run_dir(&runtime, &run_id);
         std::fs::create_dir_all(&run_dir).map_err(|e| format!("{}: {e}", run_dir.display()))?;
+        let _ = std::fs::create_dir_all(context::artifacts_dir(&run_dir));
         let _ = std::fs::write(run_dir.join("workflow.toml"), &req.document);
         let _ = std::fs::write(
             run_dir.join("args.json"),
@@ -583,7 +658,10 @@ impl App {
         };
         let mut state = RunState::new(doc, args.clone(), caps);
         let mut resume_note: Option<String> = None;
+        let mut step_worktrees = std::collections::BTreeMap::new();
         if let Some(prev) = &req.resume_from {
+            // the work a `revise` step already committed is in its worktree
+            step_worktrees = load_step_worktrees(&context::run_dir(&runtime, prev));
             let prev_journal = context::run_dir(&runtime, prev).join("journal.jsonl");
             let entries = journal::load(&prev_journal);
             if entries.is_empty() {
@@ -603,8 +681,48 @@ impl App {
             state = state.with_replay(journal::to_replay(&entries));
         }
         state.notes.extend(resume_note);
-        for d in &diagnostics {
-            state.notes.push(d.message.clone());
+        // The run's notes say what the harnesses it will use cannot enforce,
+        // not what every installed CLI would do. Its own sessions run on
+        // the run's harness or one the document names; a reviewer asked
+        // for on "another" harness runs on the one `other_harness` picks.
+        let mut reach: Vec<Harness> = vec![req.harness];
+        for h in state.doc.harnesses_used() {
+            if let Some(h) = Harness::detect(&h)
+                && !reach.contains(&h)
+            {
+                reach.push(h);
+            }
+        }
+        let any_other = state.doc.steps.iter().any(|s| {
+            s.review.as_ref().is_some_and(|r| {
+                r.runner.harness.as_deref() == Some(crate::workflows::document::OTHER_HARNESS)
+            })
+        });
+        let skill_infos = self.all_skill_infos();
+        let of_review = |d: &crate::agents::fit::Diagnostic| d.message.contains(": review.agent ");
+        for d in crate::agents::fit::check_for(&state.doc, &catalog, &skill_infos, &reach) {
+            if !(any_other && of_review(&d)) {
+                state.notes.push(d.message.clone());
+            }
+        }
+        if any_other {
+            let mut pool: Vec<Harness> = Vec::new();
+            for p in &self.profiles {
+                if let Some(h) = Harness::detect(&p.command)
+                    && !pool.contains(&h)
+                    && state.doc.harness.allows(h.as_str())
+                    && crate::session::command_available(&p.command)
+                {
+                    pool.push(h);
+                }
+            }
+            let reviewer = pick_other(req.harness, &pool).unwrap_or(req.harness);
+            for d in crate::agents::fit::check_for(&state.doc, &catalog, &skill_infos, &[reviewer])
+            {
+                if of_review(&d) {
+                    state.notes.push(d.message.clone());
+                }
+            }
         }
         let profile = self.workflow_profile(req.profile.as_deref(), req.harness);
         let started_at = crate::loops::now();
@@ -629,7 +747,10 @@ impl App {
             run_timeout: Duration::from_secs(self.workflows.run_timeout_s),
             resumed_from: req.resume_from.clone(),
             agents,
+            step_worktrees,
+            worktree_base: req.worktree_base.clone(),
         };
+        save_step_worktrees(&live);
         self.write_workflow_run_row(&live, "running", None);
         self.live_workflow_runs.push(live);
         self.pump_workflows();
@@ -793,6 +914,53 @@ impl App {
         }
     }
 
+    /// The harness of a reviewer asked for as `harness = "other"`: one the
+    /// user has a profile for and that is installed, allowed by the
+    /// document, and not the one that did the step's work (Antigravity
+    /// last, as swarm reviews choose). With no such harness, the work's
+    /// own, and a note saying the review is not independent.
+    fn other_harness(&self, ri: usize, spec: &SessionSpec) -> (Harness, Option<String>) {
+        let run = &self.live_workflow_runs[ri];
+        let worker = run
+            .ended
+            .iter()
+            .rev()
+            .find(|e| {
+                e.spec.key.step == spec.key.step
+                    && matches!(e.spec.key.role, crate::workflows::interp::Role::Main)
+            })
+            .map(|e| e.harness)
+            .or_else(|| {
+                run.state
+                    .doc
+                    .step(&spec.key.step)
+                    .and_then(|s| s.harness.as_deref())
+                    .and_then(Harness::detect)
+            })
+            .unwrap_or(run.harness);
+        let mut pool: Vec<Harness> = Vec::new();
+        for p in &self.profiles {
+            if let Some(h) = Harness::detect(&p.command)
+                && !pool.contains(&h)
+                && run.state.doc.harness.allows(h.as_str())
+                && crate::session::command_available(&p.command)
+            {
+                pool.push(h);
+            }
+        }
+        match pick_other(worker, &pool) {
+            Some(h) => (h, None),
+            None => (
+                worker,
+                Some(format!(
+                    "{}: no other harness to review on; the review runs on {} too",
+                    spec.label(),
+                    worker.as_str()
+                )),
+            ),
+        }
+    }
+
     /// One session: context file, prompt, command line, spawn.
     fn spawn_workflow_session(
         &mut self,
@@ -800,13 +968,25 @@ impl App {
         spec: SessionSpec,
         retry_hint: Option<String>,
     ) -> Result<(), String> {
+        let other =
+            spec.overrides.harness.as_deref() == Some(crate::workflows::document::OTHER_HARNESS);
+        let harness = if other {
+            let (h, note) = self.other_harness(ri, &spec);
+            if let Some(n) = note {
+                self.live_workflow_runs[ri].state.notes.push(n);
+            }
+            // its skills were not installed with the document's harnesses
+            let doc = self.live_workflow_runs[ri].state.doc.clone();
+            self.install_workflow_skills(&doc, h)?;
+            h
+        } else {
+            spec.overrides
+                .harness
+                .as_deref()
+                .and_then(Harness::detect)
+                .unwrap_or(self.live_workflow_runs[ri].harness)
+        };
         let run = &mut self.live_workflow_runs[ri];
-        let harness = spec
-            .overrides
-            .harness
-            .as_deref()
-            .and_then(Harness::detect)
-            .unwrap_or(run.harness);
         let mut profile = match &spec.overrides.profile {
             Some(name) => self.workflow_profile(Some(name), harness),
             None if harness == run.harness => run.profile.clone(),
@@ -826,7 +1006,44 @@ impl App {
         // isolation: a worktree per session, on a git workspace, never on
         // Antigravity (no path guard, no per-launch registration)
         let mut worktree: Option<crate::loops::worktree::Worktree> = None;
-        if spec.overrides.isolation == Some(Isolation::Worktree)
+        // a `revise` step has one worktree: the work is committed there and
+        // each review reads it, cycle after cycle
+        let shared_worktree = run
+            .state
+            .doc
+            .step(&spec.key.step)
+            .is_some_and(|s| s.kind == crate::workflows::document::StepKind::Revise);
+        if shared_worktree {
+            if !crate::loops::worktree::is_git_repo(&run.workspace) {
+                return Err("a revise step needs a git repository".into());
+            }
+            if harness == Harness::Antigravity
+                && matches!(spec.key.role, crate::workflows::interp::Role::Main)
+            {
+                return Err("the work of a revise step cannot run on Antigravity".into());
+            }
+            worktree = run.step_worktrees.get(&spec.key.step).cloned();
+            if worktree.is_none() {
+                let wt_id = format!("wf-{}-{}", &run.run_id[..8], spec.key.step);
+                let worktrees_dir = self.loops.worktrees_dir.clone();
+                let run = &mut self.live_workflow_runs[ri];
+                let wt = crate::loops::worktree::create_from(
+                    &run.workspace,
+                    &worktrees_dir,
+                    &wt_id,
+                    &run.name,
+                    &crate::loops::format_timestamp(crate::loops::now()),
+                    run.worktree_base.as_deref(),
+                )
+                .map_err(|e| format!("worktree: {e}"))?;
+                run.step_worktrees.insert(spec.key.step.clone(), wt.clone());
+                save_step_worktrees(run);
+                worktree = Some(wt);
+            }
+        }
+        let run = &mut self.live_workflow_runs[ri];
+        if !shared_worktree
+            && spec.overrides.isolation == Some(Isolation::Worktree)
             && harness != Harness::Antigravity
             && crate::loops::worktree::is_git_repo(&run.workspace)
         {
@@ -893,6 +1110,7 @@ impl App {
                     crate::workflows::interp::Role::Vote(_) => "vote".into(),
                     crate::workflows::interp::Role::Generate(_) => "generate".into(),
                     crate::workflows::interp::Role::Judge { .. } => "judge".into(),
+                    crate::workflows::interp::Role::Review => "review".into(),
                 },
                 index: spec.index,
                 of,
@@ -909,6 +1127,10 @@ impl App {
             worktree: worktree
                 .as_ref()
                 .map(|w| w.path.to_string_lossy().into_owned()),
+            worktree_base: worktree.as_ref().map(|w| w.base.clone()),
+            artifacts: context::artifacts_dir(&run.run_dir)
+                .to_string_lossy()
+                .into_owned(),
             gate: crate::loops::gate::load(&run.workspace.join(crate::loops::GATE_YAML))
                 .ok()
                 .map(|g| serde_json::json!({ "denylist": g.denylist, "max_files": g.max_files })),
@@ -1049,6 +1271,12 @@ impl App {
                 self.live_workflow_runs[ri].name.clone(),
             ),
             ("AGENT_MUX_WORKFLOW_STEP".into(), label.clone()),
+            (
+                "AGENT_MUX_WORKFLOW_ARTIFACTS".into(),
+                context::artifacts_dir(&self.live_workflow_runs[ri].run_dir)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             ("AGENT_MUX_MCP".into(), registration.env_value().to_string()),
             (
                 "AGENT_MUX_WORKSPACE".into(),
@@ -1061,6 +1289,7 @@ impl App {
             step: label.clone(),
             phase: phase.clone(),
             agent: agent.as_ref().map(|a| a.name.clone()),
+            no_push: shared_worktree,
         };
         let id = self.next_id;
         let session = self
@@ -1098,6 +1327,7 @@ impl App {
                 context_path,
                 retried: false,
                 worktree,
+                shared_worktree,
             });
         let si = self.live_workflow_runs[ri].sessions.len() - 1;
         self.write_workflow_step_row(ri, si, None);
@@ -1227,6 +1457,25 @@ impl App {
         } else {
             result::interpret(final_text.as_deref(), schema, &doc.schemas)
         };
+        // the work of a `revise` step is what its commits say: a reviewer
+        // reads the branch, so nothing may be left uncommitted
+        let uncommitted = {
+            let s = &self.live_workflow_runs[ri].sessions[si];
+            match (&interpreted, &s.worktree) {
+                (Ok(_), Some(wt))
+                    if s.shared_worktree
+                        && matches!(key.role, crate::workflows::interp::Role::Main) =>
+                {
+                    crate::loops::worktree::committed_and_clean(wt).err()
+                }
+                _ => None,
+            }
+        };
+        let not_committed = uncommitted.is_some();
+        let interpreted = match uncommitted {
+            Some(why) => Err(why),
+            None => interpreted,
+        };
         let tokens = facts
             .as_ref()
             .and_then(|f| f.tokens)
@@ -1240,14 +1489,20 @@ impl App {
             .unwrap_or(0.0);
         let outcome = match interpreted {
             Ok(o) => o,
-            Err(e) if schema.is_some() && !retried && !timed_out => {
+            Err(e) if (schema.is_some() || not_committed) && !retried && !timed_out => {
                 // retry once with the validation errors
                 self.live_workflow_runs[ri].state.tokens_spent += tokens;
                 self.live_workflow_runs[ri].state.cost_spent += cost;
                 self.live_workflow_runs[ri].sessions.remove(si);
-                let hint = format!(
-                    "Your previous answer did not match the expected result: {e}. Answer again, ending with exactly one fenced workflow-result block that matches result_schema in the context file, and nothing after it."
-                );
+                let hint = if not_committed {
+                    format!(
+                        "Your work is not ready to be reviewed: {e}. You are in the same worktree, with your changes as you left them. Commit everything that belongs to the change, leave nothing uncommitted, and answer again, ending with exactly one fenced workflow-result block that matches result_schema in the context file, and nothing after it."
+                    )
+                } else {
+                    format!(
+                        "Your previous answer did not match the expected result: {e}. Answer again, ending with exactly one fenced workflow-result block that matches result_schema in the context file, and nothing after it."
+                    )
+                };
                 match self.spawn_workflow_session(ri, spec.clone(), Some(hint)) {
                     Ok(()) => {
                         let run = &mut self.live_workflow_runs[ri];
@@ -1255,8 +1510,13 @@ impl App {
                             s.retried = true;
                         }
                         run.state.notes.push(format!(
-                            "{}: retrying after a schema mismatch",
-                            spec.label()
+                            "{}: retrying after {}",
+                            spec.label(),
+                            if not_committed {
+                                "uncommitted work"
+                            } else {
+                                "a schema mismatch"
+                            }
                         ));
                         return;
                     }
@@ -1283,6 +1543,8 @@ impl App {
             let run = &self.live_workflow_runs[ri];
             let s = &run.sessions[si];
             match &s.worktree {
+                // a step's worktree outlives its sessions (`finish_workflow_run`)
+                Some(_) if s.shared_worktree => None,
                 Some(wt) if crate::loops::worktree::has_changes(wt) => Some(format!(
                     "{}: kept worktree {} on branch {} ({})",
                     key.label(),
@@ -1361,6 +1623,35 @@ impl App {
             RunStatus::Running => "running",
         };
         let ended_ns = crate::tracing::store::now_ns();
+        // the `revise` steps' worktrees: kept with the work, removed without
+        let mut wt_notes: Vec<String> = Vec::new();
+        {
+            let live = &self.live_workflow_runs[ri];
+            for (step, wt) in &live.step_worktrees {
+                if crate::loops::worktree::has_changes(wt) {
+                    wt_notes.push(format!(
+                        "{step}: kept worktree {} on branch {} ({})",
+                        wt.path.display(),
+                        wt.branch,
+                        crate::loops::worktree::diff_stat(wt)
+                            .lines()
+                            .last()
+                            .unwrap_or("changes")
+                            .trim()
+                    ));
+                } else {
+                    let _ = crate::loops::worktree::remove(
+                        &live.workspace,
+                        &self.loops.worktrees_dir,
+                        wt,
+                        true,
+                        Some("clean"),
+                        &format!("wf-{}-{step}", &live.run_id[..8]),
+                    );
+                }
+            }
+        }
+        self.live_workflow_runs[ri].state.notes.extend(wt_notes);
         let live = &self.live_workflow_runs[ri];
         // a session the run ended under never answered: its output stays
         for s in &live.sessions {
@@ -1638,6 +1929,7 @@ impl App {
             step: "plan".into(),
             phase: "Plan".into(),
             agent: None,
+            no_push: false,
         };
         let sid = self.next_id;
         let session = self
@@ -1857,6 +2149,7 @@ impl App {
             usd_cap: None,
             isolation: None,
             resume_from: Some(r.id.clone()),
+            worktree_base: None,
             step_overrides: Vec::new(),
         };
         self.start_workflow_run(req)
@@ -1890,6 +2183,7 @@ impl App {
             usd_cap: None,
             isolation: None,
             resume_from: None,
+            worktree_base: None,
             step_overrides: Vec::new(),
         };
         let run_id = self.start_workflow_run(req)?;
@@ -2682,6 +2976,7 @@ impl App {
                     usd_cap,
                     isolation: Some(d.isolation),
                     resume_from: None,
+                    worktree_base: None,
                     step_overrides: d.step_overrides(),
                 };
                 match self.start_workflow_run(req) {

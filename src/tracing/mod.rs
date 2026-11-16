@@ -1206,6 +1206,9 @@ impl TraceRuntime {
             if let Some(a) = &w.agent {
                 meta.insert("workflow_agent".into(), serde_json::Value::from(a.as_str()));
             }
+            if w.no_push {
+                meta.insert("workflow_no_push".into(), serde_json::Value::Bool(true));
+            }
         }
         if let Some(sw) = &plan.swarm {
             sw.metadata(&mut meta);

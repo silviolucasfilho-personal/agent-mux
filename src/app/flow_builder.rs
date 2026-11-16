@@ -678,7 +678,7 @@ impl FlowBuilderState {
             Runs::BestOf => v.extend([Field::Attempts, Field::JudgeWho]),
             Runs::PickPath => v.push(Field::Paths),
             Runs::UntilQuiet => v.extend([Field::RepeatBy, Field::Filter]),
-            Runs::Once => {}
+            Runs::Once | Runs::WorkAndReview => {}
         }
         v.extend([
             Field::Harness,

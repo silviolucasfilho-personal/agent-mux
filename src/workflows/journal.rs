@@ -136,6 +136,8 @@ fn agent_of<'a>(doc: &'a crate::workflows::Workflow, step: &str, key: &str) -> O
         s.verify.as_ref().and_then(|v| v.runner.agent.as_ref())
     } else if key.contains("/judge") {
         s.judge_runner.agent.as_ref()
+    } else if key.ends_with("/review") {
+        s.review.as_ref().and_then(|r| r.runner.agent.as_ref())
     } else {
         s.agent.as_ref()
     }

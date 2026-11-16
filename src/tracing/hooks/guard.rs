@@ -177,6 +177,36 @@ pub fn is_human_gate_command(command: &str) -> bool {
     false
 }
 
+/// A command that takes a branch out of the machine or into another one:
+/// the human gates, plus opening a pull request or marking one ready.
+/// Refused in a session whose branch agent-mux delivers itself.
+pub fn is_delivery_command(command: &str) -> bool {
+    if is_human_gate_command(command) {
+        return true;
+    }
+    let words: Vec<&str> = command.split_whitespace().collect();
+    words.iter().enumerate().any(|(i, w)| {
+        w.rsplit('/').next().unwrap_or(w) == "gh"
+            && words.get(i + 1) == Some(&"pr")
+            && matches!(words.get(i + 2), Some(&"create") | Some(&"ready"))
+    })
+}
+
+/// The rule of a workflow session marked `workflow_no_push`: its work is
+/// committed, and agent-mux pushes it and opens the pull request.
+pub fn no_push_verdict(tool_name: &str, tool_input: Option<&Value>) -> Verdict {
+    if is_shell_tool(tool_name)
+        && let Some(cmd) = tool_input.and_then(shell_command)
+        && is_delivery_command(&cmd)
+    {
+        return Verdict::Block(
+            "agent-mux workflow: commit your work and stop there; agent-mux pushes this branch and opens its pull request"
+                .into(),
+        );
+    }
+    Verdict::Permit
+}
+
 /// A path relative to the run's worktree (or as given when it is not
 /// under it), with `./` stripped, for policy checks.
 fn relative_path(path: &str, policy: &LoopPolicy) -> String {
@@ -424,6 +454,12 @@ pub fn check_tool(
     let Some(meta) = meta else {
         return closed("no launch row");
     };
+    if meta.get("workflow_no_push").and_then(Value::as_bool) == Some(true)
+        && let Some(tool) = tool_name
+        && let Verdict::Block(reason) = no_push_verdict(tool, tool_input)
+    {
+        return Verdict::Block(reason);
+    }
     if let Some(policy) = meta
         .get("loop_policy")
         .cloned()
@@ -629,6 +665,35 @@ mod tests {
                 "Bash",
                 Some(&json!({ "command": "git push origin main" }))
             ),
+            Verdict::Permit
+        );
+    }
+
+    #[test]
+    fn a_no_push_session_may_commit_but_not_deliver() {
+        let bash = |cmd: &str| no_push_verdict("Bash", Some(&json!({ "command": cmd })));
+        for cmd in [
+            "git push origin HEAD",
+            "git -C . push --force",
+            "gh pr create --draft --title x",
+            "/opt/homebrew/bin/gh pr ready 12",
+            "gh pr merge 12 --squash",
+            "git add -A && git commit -m x && git push",
+        ] {
+            assert!(matches!(bash(cmd), Verdict::Block(_)), "{cmd}");
+        }
+        for cmd in [
+            "git add -A && git commit -m 'fix'",
+            "git diff origin/main...HEAD",
+            "gh pr view 12",
+            "gh issue view 12",
+            "cargo test",
+        ] {
+            assert_eq!(bash(cmd), Verdict::Permit, "{cmd}");
+        }
+        // only shell commands deliver
+        assert_eq!(
+            no_push_verdict("Write", Some(&json!({ "file_path": "push.sh" }))),
             Verdict::Permit
         );
     }

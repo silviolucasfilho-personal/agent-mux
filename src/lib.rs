@@ -6,6 +6,7 @@ pub mod bus;
 pub mod config;
 pub mod config_cli;
 pub mod events;
+pub mod factory;
 pub mod handoff;
 pub mod harness;
 pub mod history;

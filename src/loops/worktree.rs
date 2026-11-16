@@ -142,12 +142,28 @@ pub fn create(
     pattern: &str,
     now: &str,
 ) -> Result<Worktree, String> {
+    create_from(workspace, worktrees_dir, run_id, pattern, now, None)
+}
+
+/// `create`, forking from `base` (a branch or any ref, such as
+/// `origin/main`) instead of the branch the workspace is on.
+pub fn create_from(
+    workspace: &Path,
+    worktrees_dir: &str,
+    run_id: &str,
+    pattern: &str,
+    now: &str,
+    base: Option<&str>,
+) -> Result<Worktree, String> {
     let root = workspace.join(worktrees_dir);
     std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     let safe = run_id.replace(':', "-");
     let path = root.join(&safe);
     let branch = format!("loop/{safe}");
-    let base = base_branch(workspace);
+    let base = match base {
+        Some(b) => b.to_string(),
+        None => base_branch(workspace),
+    };
     if path.exists() {
         return Err(format!("{} already exists", path.display()));
     }
@@ -281,6 +297,37 @@ pub fn has_changes(wt: &Worktree) -> bool {
     .and_then(|s| s.trim().parse::<u64>().ok())
     .is_some_and(|n| n > 0);
     dirty || ahead
+}
+
+/// Whether the work in a worktree is ready to be read by someone else:
+/// at least one commit past its base and nothing left uncommitted. The
+/// reason when it is not, in words a session can act on.
+pub fn committed_and_clean(wt: &Worktree) -> Result<(), String> {
+    let dirty = dirty_paths(wt);
+    if !dirty.is_empty() {
+        let shown: Vec<&str> = dirty.iter().take(5).map(String::as_str).collect();
+        return Err(format!(
+            "{} uncommitted path(s) in the worktree ({}{})",
+            dirty.len(),
+            shown.join(", "),
+            if dirty.len() > shown.len() {
+                ", …"
+            } else {
+                ""
+            }
+        ));
+    }
+    let ahead = git(
+        &wt.path,
+        &["rev-list", "--count", &format!("{}..HEAD", wt.base)],
+    )
+    .ok()
+    .and_then(|s| s.trim().parse::<u64>().ok())
+    .unwrap_or(0);
+    if ahead == 0 {
+        return Err(format!("no commit on {} past {}", wt.branch, wt.base));
+    }
+    Ok(())
 }
 
 /// `git diff --stat` of everything the run changed (working tree and

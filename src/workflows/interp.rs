@@ -35,7 +35,12 @@ pub enum Role {
     Main,
     Vote(usize),
     Generate(usize),
-    Judge { round: usize, pair: usize },
+    Judge {
+        round: usize,
+        pair: usize,
+    },
+    /// The reviewer of a `revise` step's work; the cycle is the key's round.
+    Review,
 }
 
 /// Identifies one session of a run; stable across resumes.
@@ -48,7 +53,8 @@ pub struct SessionKey {
 }
 
 impl SessionKey {
-    /// `find[2]`, `confirmed[0]/vote1`, `best/r1/judge2.1`, `audit/r2`.
+    /// `find[2]`, `confirmed[0]/vote1`, `best/r1/judge2.1`, `audit/r2`,
+    /// `build/review`, `build/r1/review`.
     pub fn label(&self) -> String {
         let mut s = self.step.clone();
         if self.round > 0 {
@@ -63,6 +69,7 @@ impl SessionKey {
             Role::Vote(i) => s.push_str(&format!("[{}]/vote{}", self.item, i + 1)),
             Role::Generate(i) => s.push_str(&format!("/gen{}", i + 1)),
             Role::Judge { round, pair } => s.push_str(&format!("/judge{}.{}", round + 1, pair + 1)),
+            Role::Review => s.push_str("/review"),
         }
         s
     }
@@ -84,13 +91,19 @@ impl SessionKey {
             role,
         };
         let mut round = 0;
-        if let Some(r) = rest.strip_prefix("/r") {
+        // `/review` also starts with `/r`: a round is `/r` and digits
+        if let Some(r) = rest.strip_prefix("/r")
+            && r.starts_with(|c: char| c.is_ascii_digit())
+        {
             let digits = r.chars().take_while(char::is_ascii_digit).count();
             round = number(&r[..digits]).filter(|n| *n > 0)?;
             rest = &r[digits..];
         }
         if rest.is_empty() {
             return Some(key(0, round, Role::Main));
+        }
+        if rest == "/review" {
+            return Some(key(0, round, Role::Review));
         }
         if let Some(g) = rest.strip_prefix("/gen") {
             let g = number(g)?.checked_sub(1)?;
@@ -235,6 +248,15 @@ enum Work {
         keys: BTreeSet<String>,
         /// This round's sessions.
         current: Vec<ItemWork>,
+    },
+    Revise {
+        /// Revisions done so far; the sessions' round.
+        cycle: usize,
+        work: Slot,
+        review: Slot,
+        /// The latest work and review answers.
+        work_result: Value,
+        review_result: Value,
     },
 }
 
@@ -441,7 +463,7 @@ impl RunState {
     pub fn step_items(&self, i: usize) -> Option<usize> {
         let st = self.steps.get(i)?;
         match st.work.as_ref()? {
-            Work::Single { .. } | Work::Route { .. } => None,
+            Work::Single { .. } | Work::Route { .. } | Work::Revise { .. } => None,
             Work::Items { items, .. } => Some(items.len()),
             Work::Until { current, .. } => Some(current.len()),
             Work::Tournament {
@@ -738,6 +760,13 @@ impl RunState {
                 keys: BTreeSet::new(),
                 current: Vec::new(),
             },
+            StepKind::Revise => Work::Revise {
+                cycle: 0,
+                work: Slot::new(),
+                review: Slot::new(),
+                work_result: Value::Null,
+                review_result: Value::Null,
+            },
         };
         self.steps[i].work = Some(work);
         self.steps[i].phase = Phase::Active;
@@ -765,7 +794,7 @@ impl RunState {
         let mut runner = role.over(&crate::workflows::document::Workflow::runner_of(step));
         // The step's agent does the step's work; a refuter or a judge is
         // another role and runs as its own agent, or as none.
-        if matches!(key.role, Role::Vote(_) | Role::Judge { .. }) {
+        if matches!(key.role, Role::Vote(_) | Role::Judge { .. } | Role::Review) {
             runner.agent = role.agent.clone();
         }
         let results = self.step_results();
@@ -961,6 +990,84 @@ impl RunState {
                     current[idx] = it;
                 }
             }
+            Work::Revise {
+                cycle,
+                mut work,
+                mut review,
+                work_result,
+                review_result,
+            } => {
+                let input = self.main_inputs(&step);
+                let spec = if !work.issued {
+                    work.issued = true;
+                    let key = SessionKey {
+                        step: sid.clone(),
+                        item: 0,
+                        round: cycle,
+                        role: Role::Main,
+                    };
+                    let actor = step.actor.clone().expect("validated");
+                    // every cycle reads the same shape, so the skill has one
+                    // contract: the step's input, then what came before
+                    let inputs = serde_json::json!({
+                        "input": input,
+                        "cycle": cycle,
+                        "max_cycles": step.max_cycles,
+                        "previous": work_result,
+                        "review": review_result,
+                    });
+                    Some(self.spec_for(
+                        i,
+                        key,
+                        &actor,
+                        &Value::Null,
+                        0,
+                        inputs,
+                        step.result.clone(),
+                        None,
+                        &crate::workflows::document::Runner::default(),
+                    ))
+                } else if work.finished() && !work_result.is_null() && !review.issued {
+                    review.issued = true;
+                    let r = step.review.clone().expect("validated");
+                    let key = SessionKey {
+                        step: sid.clone(),
+                        item: 0,
+                        round: cycle,
+                        role: Role::Review,
+                    };
+                    let inputs = serde_json::json!({
+                        "input": input,
+                        "cycle": cycle,
+                        "work": work_result,
+                    });
+                    Some(self.spec_for(
+                        i,
+                        key,
+                        &r.actor,
+                        &Value::Null,
+                        0,
+                        inputs,
+                        r.result.clone(),
+                        None,
+                        &r.runner,
+                    ))
+                } else {
+                    None
+                };
+                if let Some(spec) = spec {
+                    issued = Some((
+                        spec,
+                        Work::Revise {
+                            cycle,
+                            work,
+                            review,
+                            work_result,
+                            review_result,
+                        },
+                    ));
+                }
+            }
         }
         match issued {
             Some((spec, work)) => {
@@ -1103,6 +1210,23 @@ impl RunState {
                     Self::record_on_item(&step, it, key, &done.outcome);
                 }
             }
+            Work::Revise {
+                work,
+                review,
+                work_result,
+                review_result,
+                ..
+            } => match &key.role {
+                Role::Main => {
+                    work.done = Some(done.outcome.clone());
+                    *work_result = done.outcome.value();
+                }
+                Role::Review => {
+                    review.done = Some(done.outcome.clone());
+                    *review_result = done.outcome.value();
+                }
+                _ => {}
+            },
         }
         self.steps[i].work = Some(work);
         self.advance(i);
@@ -1397,6 +1521,52 @@ impl RunState {
                     }
                 }
             }
+            Work::Revise {
+                cycle,
+                work,
+                review,
+                work_result,
+                review_result,
+            } => {
+                let close = |outcome: &str, work: &Value, review: &Value, cycles: usize| {
+                    serde_json::json!({
+                        "outcome": outcome,
+                        "cycles": cycles,
+                        "work": work,
+                        "review": review,
+                    })
+                };
+                if work.finished() && work_result.is_null() {
+                    self.notes
+                        .push(format!("{}: the work gave no answer", step.id));
+                    finished = Some(close("failed", work_result, review_result, *cycle));
+                } else if review.finished() {
+                    let r = step.review.as_ref().expect("validated");
+                    if review_result.is_null() {
+                        self.notes
+                            .push(format!("{}: the review gave no answer", step.id));
+                        finished = Some(close("failed", work_result, review_result, *cycle));
+                    } else if r.pass.eval(review_result) {
+                        finished = Some(close("approved", work_result, review_result, *cycle));
+                    } else if r.stop.as_ref().is_some_and(|p| p.eval(review_result)) {
+                        self.notes
+                            .push(format!("{}: the review stopped the step", step.id));
+                        finished = Some(close("rejected", work_result, review_result, *cycle));
+                    } else if *cycle >= step.max_cycles {
+                        self.notes.push(format!(
+                            "{}: still not passing after {} revision(s)",
+                            step.id, *cycle
+                        ));
+                        finished = Some(close("unresolved", work_result, review_result, *cycle));
+                    } else {
+                        *cycle += 1;
+                        *work = Slot::new();
+                        *review = Slot::new();
+                        self.notes
+                            .push(format!("{}: sent back, revision {}", step.id, *cycle));
+                    }
+                }
+            }
         }
         match finished {
             Some(v) => {
@@ -1565,6 +1735,193 @@ mod tests {
 
     fn obj(v: Value) -> Outcome {
         Outcome::Object(v)
+    }
+
+    const REVISE: &str = r#"
+[workflow]
+name = "line"
+description = "d"
+output = "build"
+default_isolation = "worktree"
+[schemas.work]
+fields.summary = { type = "string", required = true }
+[schemas.review]
+fields.verdict = { type = "string", required = true }
+
+[[steps]]
+id = "plan"
+prompt = "plan it"
+
+[[steps]]
+id = "build"
+kind = "revise"
+skill = "wf-work"
+agent = "implementer"
+input = "plan"
+result = "work"
+review = { skill = "wf-check", agent = "reviewer", harness = "other", result = "review", pass = "verdict == \"approve\"", stop = "verdict == \"reject\"" }
+max_cycles = 2
+"#;
+
+    /// Drives REVISE with the reviewer's verdicts in order.
+    fn revise(verdicts: &[&str]) -> (RunState, Vec<String>) {
+        let mut reviews = verdicts.iter();
+        drive(REVISE, Value::Null, Caps::default(), |spec| {
+            match spec.key.role {
+                Role::Review => obj(serde_json::json!({ "verdict": reviews.next().unwrap() })),
+                _ if spec.key.step == "plan" => Outcome::Text("the plan".into()),
+                _ => obj(serde_json::json!({ "summary": format!("cycle {}", spec.key.round) })),
+            }
+        })
+    }
+
+    #[test]
+    fn revise_approved_at_once_runs_one_work_and_one_review() {
+        let (st, labels) = revise(&["approve"]);
+        assert_eq!(labels, vec!["plan", "build", "build/review"]);
+        let r = st.step_result("build");
+        assert_eq!(r["outcome"], "approved");
+        assert_eq!(r["cycles"], 0);
+        assert_eq!(r["work"]["summary"], "cycle 0");
+        assert_eq!(r["review"]["verdict"], "approve");
+        assert!(matches!(st.status(), RunStatus::Finished(_)));
+    }
+
+    #[test]
+    fn revise_sends_the_work_back_with_the_review() {
+        let doc = parse(REVISE).unwrap();
+        let mut st = RunState::new(doc, Value::Null, Caps::default());
+        let done = |o| SessionDone {
+            outcome: o,
+            tokens: 1,
+            cost_usd: 0.0,
+        };
+        let plan = st.next(4).remove(0);
+        st.complete(&plan.key, done(Outcome::Text("the plan".into())));
+        let work = st.next(4).remove(0);
+        assert_eq!(work.inputs["input"], "the plan");
+        assert_eq!(work.inputs["cycle"], 0);
+        assert!(work.inputs["previous"].is_null());
+        assert_eq!(work.overrides.agent.as_deref(), Some("implementer"));
+        st.complete(
+            &work.key,
+            done(obj(serde_json::json!({ "summary": "first" }))),
+        );
+        let review = st.next(4).remove(0);
+        assert_eq!(review.label(), "build/review");
+        assert_eq!(review.inputs["work"]["summary"], "first");
+        assert_eq!(review.result_schema.as_deref(), Some("review"));
+        // the reviewer is its own role: its agent and harness, not the step's
+        assert_eq!(review.overrides.agent.as_deref(), Some("reviewer"));
+        assert_eq!(review.overrides.harness.as_deref(), Some("other"));
+        st.complete(
+            &review.key,
+            done(obj(serde_json::json!({ "verdict": "request_changes" }))),
+        );
+        let again = st.next(4).remove(0);
+        assert_eq!(again.label(), "build/r1");
+        assert_eq!(again.inputs["cycle"], 1);
+        assert_eq!(again.inputs["previous"]["summary"], "first");
+        assert_eq!(again.inputs["review"]["verdict"], "request_changes");
+    }
+
+    #[test]
+    fn revise_stops_after_max_cycles_as_unresolved() {
+        let (st, labels) = revise(&["request_changes", "request_changes", "request_changes"]);
+        assert_eq!(
+            labels,
+            vec![
+                "plan",
+                "build",
+                "build/review",
+                "build/r1",
+                "build/r1/review",
+                "build/r2",
+                "build/r2/review"
+            ]
+        );
+        let r = st.step_result("build");
+        assert_eq!(r["outcome"], "unresolved");
+        assert_eq!(r["cycles"], 2);
+        assert_eq!(r["work"]["summary"], "cycle 2");
+    }
+
+    #[test]
+    fn revise_ends_on_a_stop_verdict_without_another_cycle() {
+        let (st, labels) = revise(&["reject"]);
+        assert_eq!(labels.len(), 3);
+        assert_eq!(st.step_result("build")["outcome"], "rejected");
+    }
+
+    #[test]
+    fn revise_without_a_work_answer_fails_and_is_not_reviewed() {
+        let (st, labels) = drive(REVISE, Value::Null, Caps::default(), |spec| {
+            if spec.key.step == "plan" {
+                Outcome::Text("p".into())
+            } else {
+                Outcome::Null("no answer".into())
+            }
+        });
+        assert_eq!(labels, vec!["plan", "build"]);
+        assert_eq!(st.step_result("build")["outcome"], "failed");
+    }
+
+    #[test]
+    fn revise_resumes_from_its_journal_mid_cycle() {
+        let doc = parse(REVISE).unwrap();
+        let done = |o| SessionDone {
+            outcome: o,
+            tokens: 1,
+            cost_usd: 0.0,
+        };
+        let replay: BTreeMap<String, SessionDone> = [
+            ("plan", Outcome::Text("the plan".into())),
+            ("build", obj(serde_json::json!({ "summary": "first" }))),
+            (
+                "build/review",
+                obj(serde_json::json!({ "verdict": "request_changes" })),
+            ),
+        ]
+        .into_iter()
+        .map(|(k, o)| (k.to_string(), done(o)))
+        .collect();
+        let mut st = RunState::new(doc, Value::Null, Caps::default()).with_replay(replay);
+        let specs = st.next(4);
+        assert_eq!(st.replayed, 3);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].label(), "build/r1");
+        assert_eq!(specs[0].inputs["previous"]["summary"], "first");
+    }
+
+    #[test]
+    fn review_labels_parse_back_to_their_keys() {
+        for (label, round) in [("build/review", 0), ("build/r2/review", 2)] {
+            let key = SessionKey::parse("build", label).unwrap();
+            assert_eq!(key.role, Role::Review);
+            assert_eq!(key.round, round);
+            assert_eq!(key.label(), label);
+        }
+    }
+
+    #[test]
+    fn a_revise_step_is_checked_when_the_document_loads() {
+        use crate::workflows::document::validate;
+        let problems = |text: &str| validate(&parse(text).unwrap(), None);
+        assert!(problems(REVISE).is_empty(), "{:?}", problems(REVISE));
+        let no_review = REVISE.replace("review = {", "# review = {");
+        assert!(
+            problems(&no_review)
+                .iter()
+                .any(|p| p.contains("needs review"))
+        );
+        let in_place = REVISE.replace("default_isolation = \"worktree\"", "");
+        assert!(problems(&in_place).iter().any(|p| p.contains("worktree")));
+        let elsewhere = REVISE.replace("kind = \"revise\"", "kind = \"single\"");
+        assert!(
+            problems(&elsewhere)
+                .iter()
+                .any(|p| p.contains("review belongs to a revise step"))
+        );
     }
 
     const REVIEW: &str = r#"

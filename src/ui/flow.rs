@@ -65,6 +65,7 @@ fn runs_short(st: &FlowBuilderState, i: usize) -> String {
         Runs::PickPath => "◆ pick a path".into(),
         Runs::BestOf => format!("★ best of {}", d.attempts(i)),
         Runs::UntilQuiet => "↺ until quiet".into(),
+        Runs::WorkAndReview => "⇄ work and review".into(),
     }
 }
 
@@ -96,6 +97,7 @@ fn chain_line(st: &FlowBuilderState, i: usize) -> StepLine {
             Some(d.attempts(i).max(0) as usize),
         ),
         Runs::UntilQuiet => (StepKind::Until, None, None),
+        Runs::WorkAndReview => (StepKind::Revise, None, None),
     };
     let shape = Shape::of(kind, items, votes, attempts);
     let own = d.step_str(i, "harness");
@@ -649,6 +651,7 @@ fn chip(r: Runs) -> &'static str {
         Runs::PickPath => "pick a path",
         Runs::BestOf => "best of N",
         Runs::UntilQuiet => "until quiet",
+        Runs::WorkAndReview => "work + review",
     }
 }
 

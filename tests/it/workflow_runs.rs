@@ -238,6 +238,7 @@ fn request(
         usd_cap: None,
         isolation: None,
         resume_from: None,
+        worktree_base: None,
         step_overrides: Vec::new(),
     }
 }
@@ -806,6 +807,7 @@ async fn a_resumed_run_replays_the_journal_without_launching() {
     // a missing journal is an error, not a silent fresh run
     let mut bad = WorkflowRunRequest {
         resume_from: Some("nope".into()),
+        worktree_base: None,
         step_overrides: Vec::new(),
         ..request(
             "two",

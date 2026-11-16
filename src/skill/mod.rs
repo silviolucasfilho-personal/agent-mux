@@ -140,6 +140,11 @@ pub fn builtin_packages() -> Vec<BuiltinPackage> {
         wf_skill!("wf-grimoire-brief"),
         wf_skill!("wf-grimoire-lens"),
         wf_skill!("wf-grimoire-verdict"),
+        wf_skill!("wf-factory-classify"),
+        wf_skill!("wf-factory-research"),
+        wf_skill!("wf-factory-analyze"),
+        wf_skill!("wf-factory-implement"),
+        wf_skill!("wf-factory-review"),
     ]
 }
 

@@ -35,6 +35,9 @@ pub enum StepKind {
     Route,
     Tournament,
     Until,
+    /// Work, then an independent review of it in the same worktree; the
+    /// work runs again with the review's findings until it passes.
+    Revise,
 }
 
 impl StepKind {
@@ -46,6 +49,7 @@ impl StepKind {
             StepKind::Route => "route",
             StepKind::Tournament => "tournament",
             StepKind::Until => "until",
+            StepKind::Revise => "revise",
         }
     }
 
@@ -179,6 +183,27 @@ pub struct Verify {
     pub runner: Runner,
 }
 
+/// The harness name a `review` table gives to mean "a harness other than
+/// the one that did the work"; the executor resolves it at launch.
+pub const OTHER_HARNESS: &str = "other";
+
+/// A `review = { … }` table of a `revise` step: who reviews the work and
+/// which answers end the step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Review {
+    pub actor: Actor,
+    pub result: Option<String>,
+    /// The review passes: the step is done, outcome `approved`.
+    pub pass: Predicate,
+    pub pass_text: String,
+    /// The review ends the step without another cycle, outcome `rejected`.
+    pub stop: Option<Predicate>,
+    pub stop_text: Option<String>,
+    /// The reviewer's own harness and model. `harness = "other"` asks for
+    /// a harness that did not do the work.
+    pub runner: Runner,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Over {
     Inline(Vec<Value>),
@@ -205,6 +230,9 @@ pub struct Step {
     pub n: Option<usize>,
     pub rounds_without_new: usize,
     pub max_rounds: usize,
+    /// `revise`: the reviewer, and how many times the work may be sent back.
+    pub review: Option<Review>,
+    pub max_cycles: usize,
     pub harness: Option<String>,
     pub profile: Option<String>,
     pub model: Option<String>,
@@ -276,6 +304,11 @@ impl Workflow {
             if let Some(v) = &s.verify {
                 push(&v.runner.harness);
             }
+            if let Some(r) = &s.review
+                && r.runner.harness.as_deref() != Some(OTHER_HARNESS)
+            {
+                push(&r.runner.harness);
+            }
         }
         out
     }
@@ -296,6 +329,9 @@ impl Workflow {
             if let Some(v) = &s.verify {
                 push(&Some(v.actor.clone()));
             }
+            if let Some(r) = &s.review {
+                push(&Some(r.actor.clone()));
+            }
         }
         out
     }
@@ -308,6 +344,7 @@ impl Workflow {
                 &s.agent,
                 &s.judge_runner.agent,
                 &s.verify.as_ref().and_then(|v| v.runner.agent.clone()),
+                &s.review.as_ref().and_then(|r| r.runner.agent.clone()),
             ] {
                 if let Some(a) = a
                     && !out.contains(a)
@@ -415,6 +452,21 @@ fn one() -> usize {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawReview {
+    skill: Option<String>,
+    prompt: Option<String>,
+    result: Option<String>,
+    pass: Option<String>,
+    stop: Option<String>,
+    harness: Option<String>,
+    profile: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    agent: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawStep {
     id: String,
     #[serde(default = "single")]
@@ -438,6 +490,8 @@ struct RawStep {
     n: Option<usize>,
     rounds_without_new: Option<usize>,
     max_rounds: Option<usize>,
+    review: Option<RawReview>,
+    max_cycles: Option<usize>,
     harness: Option<String>,
     profile: Option<String>,
     model: Option<String>,
@@ -590,6 +644,63 @@ pub fn parse(text: &str) -> Result<Workflow, Vec<String>> {
                 })
             }
         };
+        let review = match r.review {
+            None => None,
+            Some(v) => {
+                let actor = match (v.skill, v.prompt) {
+                    (Some(s), None) => Some(Actor::Skill(s)),
+                    (None, Some(p)) => Some(Actor::Prompt(p)),
+                    _ => {
+                        problems.push(format!(
+                            "{ctx}: review needs exactly one of skill or prompt"
+                        ));
+                        None
+                    }
+                };
+                let pass = match &v.pass {
+                    None => {
+                        problems.push(format!("{ctx}: review needs pass"));
+                        None
+                    }
+                    Some(s) => match Predicate::parse(s) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            problems.push(format!("{ctx}: review.pass: {e}"));
+                            None
+                        }
+                    },
+                };
+                let stop = match &v.stop {
+                    None => None,
+                    Some(s) => match Predicate::parse(s) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            problems.push(format!("{ctx}: review.stop: {e}"));
+                            None
+                        }
+                    },
+                };
+                let runner = Runner {
+                    harness: v.harness,
+                    profile: v.profile,
+                    model: v.model,
+                    effort: v.effort,
+                    agent: v.agent,
+                };
+                match (actor, pass) {
+                    (Some(actor), Some(pass)) => Some(Review {
+                        actor,
+                        result: v.result,
+                        pass,
+                        pass_text: v.pass.unwrap_or_default(),
+                        stop,
+                        stop_text: v.stop,
+                        runner,
+                    }),
+                    _ => None,
+                }
+            }
+        };
         let mut judge_runner = Runner::default();
         let judge_from_table = match r.judge {
             Some(RawJudge::Name(name)) => Some(Actor::Skill(name)),
@@ -664,6 +775,8 @@ pub fn parse(text: &str) -> Result<Workflow, Vec<String>> {
             n: r.n,
             rounds_without_new: r.rounds_without_new.unwrap_or(2),
             max_rounds: r.max_rounds.unwrap_or(10),
+            review,
+            max_cycles: r.max_cycles.unwrap_or(2),
             harness: r.harness,
             profile: r.profile,
             model: r.model,
@@ -756,7 +869,11 @@ pub fn validate(doc: &Workflow, skills: Option<&[SkillInfo]>) -> Vec<String> {
         let earlier: Vec<&str> = ids[..i].to_vec();
         // actor requirements
         let needs_actor = match s.kind {
-            StepKind::Single | StepKind::Fanout | StepKind::Route | StepKind::Until => true,
+            StepKind::Single
+            | StepKind::Fanout
+            | StepKind::Route
+            | StepKind::Until
+            | StepKind::Revise => true,
             StepKind::Pipeline => false,
             StepKind::Tournament => s.over.is_none(),
         };
@@ -816,7 +933,48 @@ pub fn validate(doc: &Workflow, skills: Option<&[SkillInfo]>) -> Vec<String> {
                     }
                 }
             }
+            StepKind::Revise => {
+                match &s.review {
+                    None => problems.push(format!("{ctx}: a revise step needs review")),
+                    Some(r) => {
+                        if r.result.is_none() {
+                            problems.push(format!(
+                                "{ctx}: review needs result, the schema pass and stop read"
+                            ));
+                        }
+                    }
+                }
+                let iso = s.isolation.or(doc.default_isolation).unwrap_or_default();
+                if iso != Isolation::Worktree {
+                    problems.push(format!(
+                        "{ctx}: a revise step must run with isolation = \"worktree\""
+                    ));
+                }
+                if s.verify.is_some() {
+                    problems.push(format!("{ctx}: a revise step takes review, not verify"));
+                }
+            }
             _ => {}
+        }
+        if s.kind != StepKind::Revise && s.review.is_some() {
+            problems.push(format!("{ctx}: review belongs to a revise step"));
+        }
+        if let Some(r) = &s.review {
+            if let Some(name) = &r.result
+                && !doc.schemas.contains_key(name)
+            {
+                problems.push(format!(
+                    "{ctx}: review.result names unknown schema {name:?}"
+                ));
+            }
+            if let Some(h) = &r.runner.harness
+                && h != OTHER_HARNESS
+                && !doc.harness.allows(h)
+            {
+                problems.push(format!(
+                    "{ctx}: review.harness {h:?} is not allowed by workflow.harness"
+                ));
+            }
         }
         if s.kind != StepKind::Route && !s.branches.is_empty() {
             problems.push(format!("{ctx}: branches belong to a route step"));
@@ -890,6 +1048,10 @@ pub fn validate(doc: &Workflow, skills: Option<&[SkillInfo]>) -> Vec<String> {
                 &s.verify.as_ref().and_then(|v| v.runner.agent.clone()),
             ),
             ("judge.agent", &s.judge_runner.agent),
+            (
+                "review.agent",
+                &s.review.as_ref().and_then(|r| r.runner.agent.clone()),
+            ),
         ] {
             if let Some(a) = agent
                 && !is_valid_id(a)
@@ -920,6 +1082,9 @@ pub fn validate(doc: &Workflow, skills: Option<&[SkillInfo]>) -> Vec<String> {
             }
             if let Some(j) = &s.judge {
                 actors.push((j, "judge"));
+            }
+            if let Some(r) = &s.review {
+                actors.push((&r.actor, "review.skill"));
             }
             for (a, what) in actors {
                 if let Actor::Skill(name) = a {

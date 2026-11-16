@@ -50,10 +50,21 @@ pub struct Context {
     pub budget: Budget,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// The branch the worktree forked from: what its work is diffed against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_base: Option<String>,
+    /// A folder of the run where a session may leave one longer document
+    /// for later steps (also `$AGENT_MUX_WORKFLOW_ARTIFACTS`).
+    pub artifacts: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_seen: Option<Value>,
+}
+
+/// `<run>/artifacts`: the longer documents a run's sessions hand on.
+pub fn artifacts_dir(run_dir: &Path) -> PathBuf {
+    run_dir.join("artifacts")
 }
 
 /// `<runtime>/workflows/<run_id>`.

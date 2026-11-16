@@ -32,4 +32,8 @@ pub struct WorkflowLaunch {
     pub phase: String,
     /// The agent the session runs as (`launches.metadata.workflow_agent`).
     pub agent: Option<String>,
+    /// The session works on a branch agent-mux delivers itself (a
+    /// `revise` step): the guard refuses pushing, merging and opening a
+    /// pull request from it (`launches.metadata.workflow_no_push`).
+    pub no_push: bool,
 }

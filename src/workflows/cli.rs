@@ -30,7 +30,7 @@ pub const USAGE: &str = "agent-mux workflow <command>
 
 Documents live in ~/.agent-mux/workflows (AGENT_MUX_LIBRARY_DIR overrides); the
 built-in ones are review-changes, understand, research, audit-until-dry,
-judge-panel, migrate, triage-route, santa-review and grimoire-review.
+judge-panel, migrate, triage-route, santa-review, grimoire-review and factory.
 docs/workflows.md explains the format.";
 
 struct Args {
@@ -123,7 +123,7 @@ fn all_skills() -> Vec<crate::skill::SkillDefinition> {
     crate::skill::load_skills(None).0
 }
 
-fn entries() -> Vec<library::Entry> {
+pub(crate) fn entries() -> Vec<library::Entry> {
     library::load(&crate::assets::root(), &all_skills())
 }
 
@@ -324,12 +324,12 @@ fn skills() -> anyhow::Result<()> {
 }
 
 /// A private App with the trace runtime, for headless runs.
-struct Headless {
-    app: crate::app::App,
-    rx: tokio::sync::mpsc::Receiver<crate::events::AppEvent>,
+pub(crate) struct Headless {
+    pub(crate) app: crate::app::App,
+    pub(crate) rx: tokio::sync::mpsc::Receiver<crate::events::AppEvent>,
 }
 
-fn headless() -> anyhow::Result<Headless> {
+pub(crate) fn headless() -> anyhow::Result<Headless> {
     let cfg = crate::config::load()?;
     let resolved = crate::config::resolve_tracing(cfg.tracing.as_ref(), &|k| std::env::var(k).ok())
         .ok_or_else(|| anyhow::anyhow!("tracing is disabled; a workflow run needs the store"))?;
@@ -346,7 +346,7 @@ fn headless() -> anyhow::Result<Headless> {
     Ok(Headless { app, rx })
 }
 
-async fn pump(
+pub(crate) async fn pump(
     h: &mut Headless,
     deadline: Duration,
     mut done: impl FnMut(&crate::app::App) -> bool,
@@ -374,7 +374,7 @@ async fn pump(
     done(&h.app)
 }
 
-async fn shutdown(mut h: Headless) {
+pub(crate) async fn shutdown(mut h: Headless) {
     h.app.kill_all();
     if let Some(rt) = h.app.take_tracing() {
         rt.shutdown(Duration::from_secs(5)).await;
@@ -454,6 +454,7 @@ async fn run_workflow(args: &Args) -> anyhow::Result<()> {
             None => None,
         },
         resume_from: args.value("--resume").map(str::to_string),
+        worktree_base: None,
         step_overrides: parse_step_flags(args)?,
     };
     let mut h = headless()?;
