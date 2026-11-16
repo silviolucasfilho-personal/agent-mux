@@ -1,7 +1,7 @@
 # Software factory: one work item, one line of stations — design
 
-Status: phases 1 and 2 implemented, 2026-11-16; phase 3 proposed.
-Sections 14 and 15 list where the code differs from this text.
+Status: all three phases implemented, 2026-11-16.
+Sections 14 to 16 list where the code differs from this text.
 
 Modelled on the software factory template of eve (`vercel/eve`,
 `apps/templates/eve-software-factory-template`, read 2026-11-15). eve hosts
@@ -450,3 +450,33 @@ differs from §6 to §9.
 | 10 | §8 | Items that need the operator are inbox rows (`InboxItem::Work`), dismissed per state, beside brain notes (`InboxItem::BrainNote`); both count in the status bar through `App.factory_needs`, re-read every 5 s | The status bar is drawn every frame |
 | 11 | §9 | `[factory]` gains `intake`, `label`, `poll_interval_s`, `comments`. `max_concurrent` and `max_cycles` are not keys | Rows 2 and §14, 15 |
 | 12 | §13 | Covered: the poll and the progress comment against a stubbed `gh` (`tests/it/factory_intake.rs`), the screen, the inbox rows and the poll tick (`tests/it/factory_ui.rs`). Run for real: `factory poll --dry-run` against a labeled issue. Not run for real: an unattended item end to end, and the comments | — |
+
+## 16. Phase 3 as built
+
+Built 2026-11-16 on branch `feat/factory-phase-3`: `ci` items for red
+checks and the line's evals. §10 gave phase 3 one row; this is its design
+as built.
+
+**Failing checks (`factory::ci`).**
+
+| # | Decision | Why |
+| --- | --- | --- |
+| 1 | Found by the poll, for open pull requests of `delivered` items of the repository, with `[factory] ci_fix = true` or `factory poll --ci`. Off by default | It starts sessions nobody asked for |
+| 2 | Red is a failed check with none pending (`gh pr checks --json name,bucket,link`) | A run in flight may still change the picture |
+| 3 | The item is claimed by `<pr>@<12 of the head sha>`, and a pull request gets at most `ci_fix_max` (2, up to 5) | One item per failing commit; a check the line cannot fix must not run it forever |
+| 4 | The item's text is the checks' names and links and the last 150 lines of `gh run view <run> --log-failed` | The log is what a person would read; it is quoted as data |
+| 5 | The line is a second built-in flow, `factory-ci`: `analyze` then the same `build` step. `ci::CLASSIFICATION` stands in for triage's answer | "Starts at the analyst" without a conditional entry in the interpreter |
+| 6 | The work forks from `origin/<the pull request's branch>`; delivery is the same `deliver::push` to that branch, and no pull request is opened because the item is created with its `pr_url` | Same push rules; new commits, never a rewrite |
+| 7 | Comments go to the pull request | That is where its reader is |
+
+**Evals (`factory::eval`, `agent-mux factory eval`).** The user chose the
+factory's own cases over a general `agent-mux eval` (2026-11-16).
+
+| # | Decision | Why |
+| --- | --- | --- |
+| 8 | Real harnesses, the user's profiles and the effective flow, skills and agents | The cases measure the line as it would run, including a model's judgment |
+| 9 | Each run is `factory run` as a child process with `AGENT_MUX_TRACE_DB`, `AGENT_MUX_RUNTIME_DIR` and `PATH` pointed into a sandbox | Nothing of the user's is written; the same code path as a real item |
+| 10 | The remote is a local bare repository and `gh` is a recording stub that tells agent-mux from a session by `GH_PROMPT_DISABLED` | A push and a pull request are observable without GitHub |
+| 11 | `unresolved` is forced by a workspace agent named `reviewer` that never passes | The property is what agent-mux does with such a review, not whether a model produces one |
+| 12 | `order` and `no-push` read one run; four runs in parallel | Cost |
+| 13 | Not covered by a case: the label poll's permission check and the `ci` line (both tested with a stubbed `gh`) | They need GitHub |

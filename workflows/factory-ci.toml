@@ -1,0 +1,86 @@
+# The software factory's short line for a pull request whose checks are
+# red: analysis of the failure, a fix on the pull request's own branch and
+# an independent review. agent-mux, not a session, pushes the fix to that
+# branch (`agent-mux factory`, docs/factory.md).
+[workflow]
+name = "factory-ci"
+description = "Fix the failing checks of a factory pull request: analysis, a fix on its branch and an independent review."
+when_to_use = "Started by `agent-mux factory poll` for a delivered item whose pull request has failing checks. The run forks from the pull request's branch."
+output = "build"
+default_isolation = "worktree"
+
+[args.item]
+description = "The failing checks: the pull request, the checks and the end of their logs."
+required = true
+[args.classification]
+description = "What kind of work this is, as triage would have said."
+default = ""
+[args.brain]
+description = "What the factory already knows about this repository."
+default = ""
+[args.setup]
+description = "A command the implementer runs once in its worktree before it starts."
+default = ""
+
+[schemas.analysis]
+fields.problem_statement = { type = "string", required = true }
+fields.approach = { type = "string", required = true }
+fields.plan = { type = "array", items = "string", required = true }
+fields.affected_surface = { type = "array", items = "string", required = true }
+fields.risks = { type = "array", items = "string", required = true }
+fields.acceptance_criteria = { type = "array", items = "string", required = true }
+fields.test_strategy = { type = "string", required = true }
+fields.assumptions = { type = "array", items = "string", required = true }
+fields.open_questions = { type = "array", items = "string", required = true }
+fields.artifact = { type = "string" }
+
+[schemas.file_change]
+fields.path = { type = "string", required = true }
+fields.change = { type = "string", required = true }
+[schemas.check]
+fields.command = { type = "string", required = true }
+fields.result = { type = "string", required = true }
+[schemas.implementation]
+fields.base = { type = "string", required = true }
+fields.change_summary = { type = "array", items = "file_change", required = true }
+fields.verification = { type = "array", items = "check", required = true }
+fields.deviations = { type = "array", items = "string", required = true }
+fields.known_limitations = { type = "array", items = "string", required = true }
+fields.brain_note = { type = "string" }
+
+[schemas.criterion]
+fields.criterion = { type = "string", required = true }
+fields.pass = { type = "boolean", required = true }
+fields.evidence = { type = "string", required = true }
+[schemas.review]
+fields.verdict = { type = "string", enum = ["approve", "request_changes", "reject"], required = true }
+fields.criteria_results = { type = "array", items = "criterion", required = true }
+fields.blocking_findings = { type = "array", items = "string", required = true }
+fields.suggestions = { type = "array", items = "string", required = true }
+fields.summary = { type = "string", required = true }
+fields.brain_note = { type = "string" }
+
+# No triage: failing checks are work by definition.
+[[steps]]
+id = "analyze"
+phase = "Analyze"
+agent = "analyst"
+skill = "wf-factory-analyze"
+isolation = "none"
+args = { item = "{args.item}", classification = "{args.classification}", brain = "{args.brain}" }
+result = "analysis"
+
+# The implementer works in a worktree and commits; the reviewer reads the
+# branch there, on another harness when there is one. Sent back at most
+# max_cycles times.
+[[steps]]
+id = "build"
+kind = "revise"
+phase = "Build"
+agent = "implementer"
+skill = "wf-factory-implement"
+input = "analyze"
+args = { item = "{args.item}", brain = "{args.brain}", setup = "{args.setup}" }
+result = "implementation"
+review = { agent = "reviewer", skill = "wf-factory-review", harness = "other", result = "review", pass = "verdict == \"approve\"", stop = "verdict == \"reject\"" }
+max_cycles = 2

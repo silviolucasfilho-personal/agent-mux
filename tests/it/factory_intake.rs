@@ -7,7 +7,7 @@
 
 use agent_mux::factory::deliver::Tools;
 use agent_mux::factory::intake::{self, Seen};
-use agent_mux::factory::{Item, Source, State, comment, store};
+use agent_mux::factory::{Item, Source, State, ci, comment, store};
 use agent_mux::workflows::journal;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -148,7 +148,7 @@ fn the_progress_comment_is_posted_once_then_edited() {
         agent: None,
         agent_hash: None,
     };
-    let mut p = comment::Progress::new(&tools, &item);
+    let mut p = comment::Progress::new(&tools, &item, "1");
     // no journal yet: nothing is sent
     p.tick(&file);
     assert!(calls(tmp.path()).is_empty());
@@ -191,4 +191,119 @@ fn the_progress_comment_is_posted_once_then_edited() {
         c[1]
     );
     assert!(p.failed.is_none());
+}
+
+/// A `gh` for the checks of pull requests 6 (red), 7 (still running) and
+/// 8 (closed), with the failed log of run 77.
+fn fake_gh_checks(dir: &Path) -> Tools {
+    use std::os::unix::fs::PermissionsExt;
+    let script = format!(
+        r#"#!/bin/sh
+DIR="{dir}"
+printf '%s\n' "$(echo "$*" | tr '\n' ' ')" >> "$DIR/calls"
+case "$*" in
+  "pr view 6 "*) echo '{{"state":"OPEN","headRefOid":"'"$(cat "$DIR/head6")"'","headRefName":"factory/feature-add-export"}}' ;;
+  "pr view 7 "*) echo '{{"state":"OPEN","headRefOid":"7777777777777777","headRefName":"factory/chore-docs"}}' ;;
+  "pr view 8 "*) echo '{{"state":"MERGED","headRefOid":"8888888888888888","headRefName":"factory/bug-old"}}' ;;
+  "pr checks 6 "*) echo '[{{"name":"test","bucket":"fail","link":"https://github.com/o/r/actions/runs/77/job/1"}},{{"name":"lint","bucket":"pass","link":"https://github.com/o/r/actions/runs/77/job/2"}}]'; exit 1 ;;
+  "pr checks 7 "*) echo '[{{"name":"test","bucket":"pending","link":""}}]'; exit 8 ;;
+  "run view 77 --log-failed"*) printf 'test\tRun tests\tFAIL: expected 3, got 4\n' ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"#,
+        dir = dir.display()
+    );
+    let path = dir.join("gh");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    Tools {
+        gh: path.to_string_lossy().into_owned(),
+    }
+}
+
+#[test]
+fn red_checks_on_a_factory_pull_request_become_one_item_per_failing_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = fake_gh_checks(tmp.path());
+    let conn = open_store(tmp.path());
+    let ws = tmp.path();
+    std::fs::write(ws.join("head6"), "aaaaaaaaaaaaaaaaaaaa").unwrap();
+    let delivered = |issue: &str, pr: i64, branch: &str| {
+        let mut it = Item::new(ws, "o/r", Source::Issue, issue, "Add export");
+        it.state = State::Delivered;
+        it.branch = Some(branch.into());
+        it.pr_number = Some(pr);
+        it.pr_url = Some(format!("https://github.com/o/r/pull/{pr}"));
+        store::insert(&conn, &it).unwrap();
+        store::update(&conn, &mut it).unwrap();
+        it
+    };
+    let parent = delivered("5", 6, "factory/feature-add-export");
+    delivered("9", 7, "factory/chore-docs");
+    delivered("10", 8, "factory/bug-old");
+
+    // a dry run writes nothing and reads no log
+    let seen = ci::poll(&conn, &tools, ws, 2, true).unwrap();
+    assert!(matches!(&seen[0], ci::Seen::New(_)), "{seen:?}");
+    assert_eq!(store::list(&conn, None, None, 10).unwrap().len(), 3);
+    assert!(!calls(tmp.path()).iter().any(|c| c.starts_with("run view")));
+
+    let seen = ci::poll(&conn, &tools, ws, 2, false).unwrap();
+    assert_eq!(
+        seen.len(),
+        2,
+        "a merged pull request is not looked at: {seen:?}"
+    );
+    let ci::Seen::New(item) = &seen[0] else {
+        panic!("pull request 6 is red: {:?}", seen[0]);
+    };
+    assert_eq!(item.source, Source::Ci);
+    assert_eq!(item.source_ref, "6@aaaaaaaaaaaa");
+    assert_eq!(item.title, "Fix failing checks on #6: test");
+    assert_eq!(item.branch.as_deref(), Some("factory/feature-add-export"));
+    assert_eq!(item.pr_number, Some(6));
+    assert_eq!(item.state, State::Queued);
+    assert!(!item.attended);
+    assert!(
+        item.body.contains("FAIL: expected 3, got 4"),
+        "{}",
+        item.body
+    );
+    assert_eq!(
+        seen[1],
+        ci::Seen::Skipped {
+            pr: 7,
+            why: "checks are still running".into()
+        }
+    );
+    let events = store::events_of(&conn, &item.id).unwrap();
+    assert_eq!(events[0].detail["for"], parent.id.as_str());
+    assert_eq!(events[0].detail["checks"][0], "test");
+
+    // the same failing commit again: the claim
+    let seen = ci::poll(&conn, &tools, ws, 2, false).unwrap();
+    assert_eq!(
+        seen[0],
+        ci::Seen::Known {
+            pr: 6,
+            item: item.id.clone()
+        }
+    );
+    // the fix was pushed and fails again: a second item, and then no third
+    std::fs::write(ws.join("head6"), "bbbbbbbbbbbbbbbbbbbb").unwrap();
+    let seen = ci::poll(&conn, &tools, ws, 2, false).unwrap();
+    assert!(matches!(&seen[0], ci::Seen::New(it) if it.source_ref == "6@bbbbbbbbbbbb"));
+    std::fs::write(ws.join("head6"), "cccccccccccccccccccc").unwrap();
+    let seen = ci::poll(&conn, &tools, ws, 2, false).unwrap();
+    assert!(
+        matches!(&seen[0], ci::Seen::Skipped { pr: 6, why } if why.contains("waits for a person")),
+        "{:?}",
+        seen[0]
+    );
+    let fixes = store::list(&conn, None, None, 20)
+        .unwrap()
+        .into_iter()
+        .filter(|it| it.source == Source::Ci)
+        .count();
+    assert_eq!(fixes, 2);
 }

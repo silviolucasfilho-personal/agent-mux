@@ -8,7 +8,9 @@
 //!   context and written only by agent-mux.
 //! - `deliver`: the push of exactly one branch and the draft pull request.
 //! - `intake`: the label poll, and which process works which item.
+//! - `ci`: red checks on a factory pull request as a `ci` item.
 //! - `comment`: what agent-mux says on an issue item's issue.
+//! - `eval`: the line's five checks on a throwaway repository.
 //! - `cli`: `agent-mux factory …`.
 //!
 //! The line itself is a workflow (`workflows/factory.toml`), so the order
@@ -19,9 +21,11 @@
 //! docs/superpowers/specs/2026-11-15-software-factory-design.md.
 
 pub mod brain;
+pub mod ci;
 pub mod cli;
 pub mod comment;
 pub mod deliver;
+pub mod eval;
 pub mod intake;
 pub mod store;
 
@@ -199,7 +203,7 @@ impl Item {
     /// `#12` for an issue, the id otherwise.
     pub fn handle(&self) -> String {
         match self.source {
-            Source::Issue | Source::Ci if !self.source_ref.is_empty() => {
+            Source::Issue if !self.source_ref.is_empty() => {
                 format!("#{}", self.source_ref)
             }
             _ => self.id.clone(),
@@ -224,7 +228,11 @@ impl Item {
                     .map(|r| format!(", opened by @{r}"))
                     .unwrap_or_default()
             ),
-            Source::Ci => format!("failing checks on pull request #{}", self.source_ref),
+            Source::Ci => format!(
+                "failing checks on pull request #{} of {}, read by agent-mux",
+                self.pr_number.unwrap_or_default(),
+                self.repo
+            ),
             Source::Manual => "typed by the operator".to_string(),
         };
         format!(

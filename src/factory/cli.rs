@@ -7,7 +7,7 @@
 
 use super::deliver::{self, Tools};
 use super::{
-    FLOW, Item, Settlement, Source, State, brain, comment, intake, settle, store,
+    FLOW, Item, Settlement, Source, State, brain, ci, comment, intake, settle, store,
     title_from_summary, title_of,
 };
 use crate::app::workflows::WorkflowRunRequest;
@@ -30,8 +30,11 @@ const USAGE: &str = "agent-mux factory — one work item through the line, to a 
   agent-mux factory answer <item> \"<answer>\"     answer triage's questions and run again
   agent-mux factory retry <item> [--force]       run again, or deliver again after a failed delivery
   agent-mux factory cancel <item> [--force]        stops the process that runs it, too
-  agent-mux factory poll [--dry-run] [--no-run] [--workspace DIR]
-        issues labeled for the factory become items, then run one by one
+  agent-mux factory poll [--dry-run] [--no-run] [--ci] [--workspace DIR]
+        issues labeled for the factory become items, then run one by one;
+        with [factory] ci_fix or --ci, so do red checks on its pull requests
+  agent-mux factory eval [--case NAME]… [--harness H] [--keep] [--json]
+        the line's five checks with real harnesses on a throwaway repository
   agent-mux factory brain show|path|edit [--workspace DIR]
   agent-mux factory brain add \"<note>\" [--workspace DIR]
 
@@ -49,6 +52,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--issue",
     "--state",
     "--step",
+    "--case",
 ];
 
 struct Args {
@@ -172,6 +176,7 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
         Some("retry") => retry(&a).await,
         Some("cancel") => cancel(&a),
         Some("poll") => poll(&a).await,
+        Some("eval") => eval_cmd(&a),
         Some("brain") => brain_cmd(&a),
         Some("help") | Some("--help") | Some("-h") | None => {
             println!("{USAGE}");
@@ -455,10 +460,13 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
     let args = opts.args;
     let workspace = PathBuf::from(&item.workspace);
     let entries = crate::workflows::cli::entries();
-    let entry = library::find(&entries, FLOW)
-        .ok_or_else(|| anyhow::anyhow!("the {FLOW} workflow is missing from the library"))?;
+    // failing checks run the short line, on the pull request's branch
+    let is_ci = item.source == Source::Ci;
+    let flow = if is_ci { ci::FLOW } else { FLOW };
+    let entry = library::find(&entries, flow)
+        .ok_or_else(|| anyhow::anyhow!("the {flow} workflow is missing from the library"))?;
     if !entry.valid() {
-        anyhow::bail!("{FLOW}: {}", entry.problems.join("; "));
+        anyhow::bail!("{flow}: {}", entry.problems.join("; "));
     }
     let harness = match args.value("--harness") {
         Some(h) => Harness::detect(h).ok_or_else(|| anyhow::anyhow!("unknown harness {h:?}"))?,
@@ -468,14 +476,21 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
     // where agent-mux's guard reaches the session
     if !item.attended && !matches!(harness, Harness::Claude | Harness::Codex | Harness::Muse) {
         anyhow::bail!(
-            "{} came from the label poll and runs unattended: its harness must be claude, codex or muse, where the guard refuses a push; {} is not",
+            "{} was started by the poll and runs unattended: its harness must be claude, codex or muse, where the guard refuses a push; {} is not",
             item.handle(),
             harness.as_str()
         );
     }
     // the work forks from the remote's default branch, not from whatever
     // the workspace happens to have checked out
-    let worktree_base = if deliver::has_origin(&workspace) {
+    let worktree_base = if is_ci {
+        let branch = item
+            .branch
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("{} has no branch to fix", item.id))?;
+        deliver::fetch(&workspace, &branch).map_err(|e| anyhow::anyhow!(e))?;
+        Some(format!("origin/{branch}"))
+    } else if deliver::has_origin(&workspace) {
         let default = deliver::default_branch(&workspace).map_err(|e| anyhow::anyhow!(e))?;
         deliver::fetch(&workspace, &default).map_err(|e| anyhow::anyhow!(e))?;
         Some(format!("origin/{default}"))
@@ -509,11 +524,17 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
         workspace: workspace.clone(),
         profile: args.value("--profile").map(str::to_string),
         harness,
-        args: serde_json::json!({
-            "item": item.text(),
-            "brain": brain::read(&crate::assets::root(), &workspace),
-            "setup": env.settings.setup_command,
-        }),
+        args: {
+            let mut a = serde_json::json!({
+                "item": item.text(),
+                "brain": brain::read(&crate::assets::root(), &workspace),
+                "setup": env.settings.setup_command,
+            });
+            if is_ci {
+                a["classification"] = serde_json::json!(ci::CLASSIFICATION);
+            }
+            a
+        },
         budget_tokens: budget,
         usd_cap: None,
         isolation: None,
@@ -543,8 +564,10 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
     }
     let timeout = Duration::from_secs(h.app.workflows.run_timeout_s + 60);
     let mut seen = 0;
-    let comments = commented(env, item);
-    let mut progress = comments.then(|| comment::Progress::new(&env.tools, item));
+    let target = comment_target(env, item);
+    let mut progress = target
+        .as_deref()
+        .map(|n| comment::Progress::new(&env.tools, item, n));
     let journal_file = context::run_dir(&runtime, &run_id).join("journal.jsonl");
     let finished = crate::workflows::cli::pump(&mut h, timeout, |a| {
         if let Some(p) = progress.as_mut() {
@@ -575,7 +598,7 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
     let s = settle(
         &recent.status,
         recent.error.as_deref(),
-        &answer_of(&entries, "classify"),
+        &classification_of(item, &entries),
         &recent.result,
         &answer_of(&entries, "answer"),
     );
@@ -587,9 +610,13 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
         }
         let sent = match (p.failed.take(), comment::outcome(item, &s, &recent.result)) {
             (Some(e), _) => Err(e),
-            (None, Some(body)) => {
-                comment::post(&env.tools, &workspace, &item.source_ref, &body).map(Some)
-            }
+            (None, Some(body)) => comment::post(
+                &env.tools,
+                &workspace,
+                target.as_deref().unwrap_or_default(),
+                &body,
+            )
+            .map(Some),
             (None, None) => Ok(None),
         };
         match sent {
@@ -609,12 +636,26 @@ async fn work(env: &Env, item: &mut Item, opts: &RunOpts<'_>) -> anyhow::Result<
     Ok(())
 }
 
-/// Whether agent-mux comments on this item's issue.
-fn commented(env: &Env, item: &Item) -> bool {
-    env.settings.comments
-        && item.source == Source::Issue
-        && !item.source_ref.is_empty()
-        && !item.repo.is_empty()
+/// The issue or pull request agent-mux comments on for this item: an
+/// issue item's issue, a `ci` item's pull request.
+fn comment_target(env: &Env, item: &Item) -> Option<String> {
+    if !env.settings.comments || item.repo.is_empty() {
+        return None;
+    }
+    match item.source {
+        Source::Issue if !item.source_ref.is_empty() => Some(item.source_ref.clone()),
+        Source::Ci => item.pr_number.map(|n| n.to_string()),
+        _ => None,
+    }
+}
+
+/// Triage's answer for the item's run. A `ci` item has no triage: failing
+/// checks are work to build.
+fn classification_of(item: &Item, entries: &[journal::Entry]) -> Value {
+    if item.source == Source::Ci {
+        return serde_json::from_str(ci::CLASSIFICATION).unwrap_or(Value::Null);
+    }
+    answer_of(entries, "classify")
 }
 
 /// What the operator reads when a run ends.
@@ -653,6 +694,9 @@ fn report(item: &Item, s: &Settlement, build: &Value, json: bool) {
                 }
             }
             println!("\nNo pull request was opened. The work is in the worktree above.");
+        }
+        State::Delivered if item.source == Source::Ci => {
+            println!("\nThe reviewed fix was pushed to the pull request's branch.");
         }
         State::Delivered => {
             println!("\nA draft pull request is open. Marking it ready and merging are yours.");
@@ -818,7 +862,7 @@ async fn retry(args: &Args) -> anyhow::Result<()> {
             let s = settle(
                 "finished",
                 None,
-                &answer_of(&entries, "classify"),
+                &classification_of(&item, &entries),
                 &build,
                 &Value::Null,
             );
@@ -829,10 +873,13 @@ async fn retry(args: &Args) -> anyhow::Result<()> {
             }
         }
     }
-    // a fresh run: a branch and a pull request of an earlier one stay as they are
-    item.branch = None;
-    item.pr_number = None;
-    item.pr_url = None;
+    // a fresh run: a branch and a pull request of an earlier one stay as
+    // they are. A `ci` item keeps its own: they are what it fixes.
+    if item.source != Source::Ci {
+        item.branch = None;
+        item.pr_number = None;
+        item.pr_url = None;
+    }
     item.worktree = None;
     let _ = store::add_event(&conn, &item.id, "retry", Value::Null);
     drop(conn);
@@ -895,37 +942,68 @@ async fn poll(args: &Args) -> anyhow::Result<()> {
             }
         }
     };
+    // by hand the labels are always read; started by the TUI (`--auto`),
+    // only what the settings turn on
+    let auto = args.flag("--auto");
+    let labels = !auto || env.settings.intake_label;
+    let checks = env.settings.ci_fix || args.flag("--ci");
     let label = &env.settings.label;
-    let seen = {
-        let conn = open(&env)?;
-        intake::poll(&conn, &env.tools, &workspace, &repo, label, dry)
-            .map_err(|e| anyhow::anyhow!(e))?
-    };
-    if seen.is_empty() {
-        println!("no open issue of {repo} carries the label {label:?}");
+    if labels {
+        let seen = {
+            let conn = open(&env)?;
+            intake::poll(&conn, &env.tools, &workspace, &repo, label, dry)
+                .map_err(|e| anyhow::anyhow!(e))?
+        };
+        if seen.is_empty() {
+            println!("no open issue of {repo} carries the label {label:?}");
+        }
+        for s in &seen {
+            match s {
+                intake::Seen::New(it) => println!(
+                    "#{} {} {}",
+                    it.source_ref,
+                    if dry {
+                        "would become an item:"
+                    } else {
+                        "queued:"
+                    },
+                    title_of(&it.title, 70)
+                ),
+                intake::Seen::Known { number, item } => println!("#{number} is already {item}"),
+                intake::Seen::Refused {
+                    number,
+                    login,
+                    role,
+                } => println!(
+                    "#{number} ignored: labeled by {} ({role}), who may not triage {repo}",
+                    login.as_deref().unwrap_or("nobody the events name")
+                ),
+                intake::Seen::Error { number, why } => println!("#{number} skipped: {why}"),
+            }
+        }
     }
-    for s in &seen {
-        match s {
-            intake::Seen::New(it) => println!(
-                "#{} {} {}",
-                it.source_ref,
-                if dry {
-                    "would become an item:"
-                } else {
-                    "queued:"
-                },
-                title_of(&it.title, 70)
-            ),
-            intake::Seen::Known { number, item } => println!("#{number} is already {item}"),
-            intake::Seen::Refused {
-                number,
-                login,
-                role,
-            } => println!(
-                "#{number} ignored: labeled by {} ({role}), who may not triage {repo}",
-                login.as_deref().unwrap_or("nobody the events name")
-            ),
-            intake::Seen::Error { number, why } => println!("#{number} skipped: {why}"),
+    if checks {
+        let seen = {
+            let conn = open(&env)?;
+            ci::poll(&conn, &env.tools, &workspace, env.settings.ci_fix_max, dry)
+                .map_err(|e| anyhow::anyhow!(e))?
+        };
+        if seen.is_empty() {
+            println!("no open factory pull request of {repo} has failing checks");
+        }
+        for s in &seen {
+            match s {
+                ci::Seen::New(it) => println!(
+                    "{} {}",
+                    if dry { "would be queued:" } else { "queued:" },
+                    title_of(&it.title, 90)
+                ),
+                ci::Seen::Known { pr, item } => {
+                    println!("pull request #{pr}: this failure is already {item}")
+                }
+                ci::Seen::Skipped { pr, why } => println!("pull request #{pr}: {why}"),
+                ci::Seen::Error { pr, why } => println!("pull request #{pr} skipped: {why}"),
+            }
         }
     }
     if dry || args.flag("--no-run") {
@@ -953,6 +1031,75 @@ async fn poll(args: &Args) -> anyhow::Result<()> {
         }
     }
     drop(held);
+    Ok(())
+}
+
+// ---- evals ----------------------------------------------------------------
+
+/// Runs the line's checks with real harnesses on a throwaway repository.
+fn eval_cmd(args: &Args) -> anyhow::Result<()> {
+    use super::eval::{self, Case};
+    let mut cases = Vec::new();
+    for name in args.all("--case") {
+        cases.push(Case::parse(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown case {name:?}: {}",
+                Case::ALL.map(Case::name).join(", ")
+            )
+        })?);
+    }
+    if cases.is_empty() {
+        cases = Case::ALL.to_vec();
+    }
+    let json = args.flag("--json");
+    let exe = std::env::current_exe()?;
+    let temp = tempfile::Builder::new()
+        .prefix("agent-mux-factory-eval-")
+        .tempdir()?;
+    // macOS: the temp dir is a symlink; git reports the real path
+    let root = temp.path().canonicalize()?;
+    let mut runs: Vec<_> = cases.iter().map(|c| c.run()).collect();
+    runs.sort();
+    runs.dedup();
+    if !json {
+        eprintln!(
+            "{} case(s) over {} run(s) of the line with real harnesses, in parallel, in {}. This takes a few minutes and costs what {} small item(s) cost.",
+            cases.len(),
+            runs.len(),
+            root.display(),
+            runs.len()
+        );
+    }
+    let verdicts = eval::run_cases(&exe, &root, &cases, args.value("--harness"));
+    let failed = verdicts.iter().filter(|v| !v.pass).count();
+    if json {
+        let rows: Vec<Value> = verdicts
+            .iter()
+            .map(|v| {
+                serde_json::json!({ "case": v.case.name(), "checks": v.case.what(),
+                    "pass": v.pass, "detail": v.detail })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else {
+        for v in &verdicts {
+            println!(
+                "{} {:<11} {}",
+                if v.pass { "PASS" } else { "FAIL" },
+                v.case.name(),
+                v.case.what()
+            );
+            println!("     {}", v.detail);
+        }
+        println!("\n{} of {} passed", verdicts.len() - failed, verdicts.len());
+    }
+    if args.flag("--keep") {
+        let kept = temp.keep();
+        eprintln!("kept: {}", kept.display());
+    }
+    if failed > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
