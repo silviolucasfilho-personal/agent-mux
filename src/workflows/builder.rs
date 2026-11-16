@@ -18,6 +18,11 @@ pub enum Runs {
     PickPath,
     BestOf,
     UntilQuiet,
+    /// A `revise` step: work, an independent review, sent back until it
+    /// passes. Shown for a step that is one; not offered in `ALL`, since
+    /// the builder has no fields for the `review` table (edit it with
+    /// `Ctrl+O`).
+    WorkAndReview,
 }
 
 impl Runs {
@@ -38,6 +43,7 @@ impl Runs {
             Runs::PickPath => "route",
             Runs::BestOf => "tournament",
             Runs::UntilQuiet => "until",
+            Runs::WorkAndReview => "revise",
         }
     }
 
@@ -48,6 +54,7 @@ impl Runs {
             "route" => Runs::PickPath,
             "tournament" => Runs::BestOf,
             "until" => Runs::UntilQuiet,
+            "revise" => Runs::WorkAndReview,
             _ => Runs::Once,
         }
     }
@@ -60,6 +67,7 @@ impl Runs {
             Runs::PickPath => "Pick a path",
             Runs::BestOf => "Best of N",
             Runs::UntilQuiet => "Until nothing new",
+            Runs::WorkAndReview => "Work, then review",
         }
     }
 
@@ -79,6 +87,9 @@ impl Runs {
             Runs::UntilQuiet => {
                 "Repeat rounds, dropping repeats, until two rounds find nothing new."
             }
+            Runs::WorkAndReview => {
+                "One session works and commits; another reviews it and sends it back until it passes."
+            }
         }
     }
 
@@ -91,6 +102,7 @@ impl Runs {
             Runs::PickPath => &["──◆─ a", "   └─ b"],
             Runs::BestOf => &["●┐", "●┴◆┐", "●┐ ├★", "●┴◆┘"],
             Runs::UntilQuiet => &["●→●→●", " ↺ quiet"],
+            Runs::WorkAndReview => &["●⇄✓", " ↺ changes"],
         }
     }
 
@@ -573,12 +585,28 @@ impl Draft {
                 ],
                 Runs::BestOf => &["verify", "rounds_without_new", "max_rounds", "dedupe_by"],
                 Runs::UntilQuiet => &["verify", "judge", "judge_prompt", "n"],
+                Runs::WorkAndReview => &[
+                    "over",
+                    "verify",
+                    "judge",
+                    "judge_prompt",
+                    "n",
+                    "rounds_without_new",
+                    "max_rounds",
+                    "dedupe_by",
+                    "take",
+                    "keep",
+                ],
             };
             for k in drop {
                 st.remove(*k);
             }
             if runs != Runs::PickPath {
                 st.remove("branches");
+            }
+            if runs != Runs::WorkAndReview {
+                st.remove("review");
+                st.remove("max_cycles");
             }
             match runs {
                 Runs::Parallel if !st.contains_key("over") => {
@@ -1255,6 +1283,9 @@ impl Draft {
                 };
                 match self.runs(i) {
                     Runs::Once => format!("{id}: {who}{what} once{reads}."),
+                    Runs::WorkAndReview => format!(
+                        "{id}: {who}{what}{reads}, then an independent review; the work is sent back until the review passes."
+                    ),
                     Runs::Parallel => {
                         format!("{id}: {who}{what} for each of {items}, all at once{reads}.")
                     }

@@ -81,6 +81,20 @@ fn check_candidates(
                 Some(&v.actor),
             ));
         }
+        if let Some(r) = &s.review
+            && let Some(a) = &r.runner.agent
+        {
+            roles.push((
+                "review.agent",
+                a,
+                r.runner
+                    .harness
+                    .as_deref()
+                    .filter(|h| *h != crate::workflows::document::OTHER_HARNESS)
+                    .or(s.harness.as_deref()),
+                Some(&r.actor),
+            ));
+        }
         if let Some(a) = &s.judge_runner.agent {
             roles.push((
                 "judge.agent",

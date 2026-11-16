@@ -130,6 +130,7 @@ impl Shape {
                 None => ("★ best of".into(), "★".into()),
             },
             StepKind::Until => ("↺ until quiet".into(), "↺".into()),
+            StepKind::Revise => ("⇄ work and review".into(), "⇄".into()),
         };
         Shape { words, short }
     }
@@ -469,6 +470,7 @@ fn runner_for(step: &Step, role: &Role) -> Runner {
     let own = match role {
         Role::Vote(_) => step.verify.as_ref().map(|v| &v.runner),
         Role::Judge { .. } => Some(&step.judge_runner),
+        Role::Review => step.review.as_ref().map(|r| &r.runner),
         Role::Main | Role::Generate(_) => None,
     };
     match own {
@@ -494,6 +496,8 @@ fn short_label(key: &SessionKey) -> String {
         Role::Vote(v) => format!("{round}[{}]/vote{}", key.item, v + 1),
         Role::Generate(g) => format!("gen{}", g + 1),
         Role::Judge { round, pair } => format!("judge{}.{}", round + 1, pair + 1),
+        Role::Review if key.round > 0 => format!("{round}/review"),
+        Role::Review => "review".into(),
     }
 }
 
@@ -504,6 +508,8 @@ fn order(key: &SessionKey) -> (u8, usize, usize, usize) {
         Role::Generate(g) => (0, key.round, *g, 0),
         Role::Vote(v) => (0, key.round, key.item, v + 1),
         Role::Judge { round, pair } => (1, *round, *pair, 0),
+        // a cycle's review right after its work
+        Role::Review => (0, key.round, key.item, 1),
     }
 }
 
@@ -570,6 +576,11 @@ fn planned(step: Option<&Step>, sessions: &[Sess], items: Option<usize>) -> usiz
             };
             let rounds = sessions.iter().map(|s| s.key.round + 1).max().unwrap_or(1);
             per_round.max(1) * rounds
+        }
+        // each cycle seen so far is a work session and its review
+        StepKind::Revise => {
+            let cycles = sessions.iter().map(|s| s.key.round + 1).max().unwrap_or(1);
+            cycles * 2
         }
     };
     n.max(seen)

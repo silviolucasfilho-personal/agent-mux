@@ -8,7 +8,7 @@ Design: `docs/superpowers/specs/2026-09-17-workflows-design.md`. The idea follow
 
 ## 1. First run
 
-1. In the **Agents** list, the flows are the rows under the `flows` heading. The nine built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`, `santa-review`, `grimoire-review`. The main pane describes the selected one in words: each step, what it starts sessions for and what it filters or checks (the skill and any CLI it names in grey under it), the arguments it needs or takes, about how many sessions a run starts, and the last run.
+1. In the **Agents** list, the flows are the rows under the `flows` heading. The ten built-in workflows are listed: `review-changes`, `understand`, `research`, `audit-until-dry`, `judge-panel`, `migrate`, `triage-route`, `santa-review`, `grimoire-review`, `factory` (the software factory's line, `docs/factory.md`). The main pane describes the selected one in words: each step, what it starts sessions for and what it filters or checks (the skill and any CLI it names in grey under it), the arguments it needs or takes, about how many sessions a run starts, and the last run.
 
    Above the library the section lists what is going on, each group under its heading: **Running** (`▶ name 3/7`), **Plans to review** (`⏸`, the planner's documents waiting for you), and **Recent** (`✓ name done`, the last three runs finished since agent-mux started). `Enter` on a run opens its Run screen (below), on a plan the runs view; `Enter` on a library document opens the run dialog. The selection stays on its row when a run starts or ends.
 2. `Enter` opens the run dialog on what the run is for: one field per declared arg first, then the workspace (one line; the shared directory picker opens while the field has focus), the profile (one per harness the document allows) and **More ▸**, whose summary says what it hides (`no token budget · no cost cap · in place`). `Space` or `→` on **More** shows a token budget, a USD cap, the isolation default and one **Steps** row per step: the CLI that step runs on for this run (`←`/`→` or `Space`; it starts on the step's default, shown as `codex · set by the document` or `claude · the run's profile`, and offers only harnesses you have a profile for). Under the form, about how many sessions the run starts. `Enter` starts the run from any field and opens the Run screen on it.
@@ -197,7 +197,7 @@ args = { subject = "confirmed review findings", shape = "a report grouped by sev
 | Field | Meaning |
 | --- | --- |
 | `id` | Unique, `^[a-z][a-z0-9_-]*$` |
-| `kind` | `single` (default), `fanout`, `pipeline`, `route`, `tournament`, `until` |
+| `kind` | `single` (default), `fanout`, `pipeline`, `route`, `tournament`, `until`, `revise` |
 | `skill` or `prompt` | A step skill (an agent-mux package named `wf-…`) or inline text; `{…}` interpolates |
 | `args` | Values the session reads from its context; `{item}`, `{item.field}`, `{index}`, `{args.name}`, `{step}` interpolate |
 | `over` | Items for `fanout`, `pipeline`, `tournament`, `until`: an array, `args.name`, or a path into an earlier step's result |
@@ -209,6 +209,7 @@ args = { subject = "confirmed review findings", shape = "a report grouped by sev
 | `branches` | `route`: `{ label = ["step", …] }`; the classifier's result carries `label`; other branches are skipped |
 | `judge` / `judge_prompt`, `n` | `tournament`: the pairwise judge and how many candidates to generate. `judge` is a skill name or a table (`{ skill \| prompt, harness, profile, model, effort }`) when the judge should run on its own model |
 | `rounds_without_new`, `max_rounds` | `until`: stop after this many quiet rounds (2) or rounds (10); needs `dedupe_by` |
+| `review`, `max_cycles` | `revise`: `review = { skill \| prompt, result, pass, stop, harness, profile, model, effort, agent }` is the session that judges the step's work; `pass` and `stop` are predicates on its answer. The work is sent back at most `max_cycles` times (2). See **Work, review, send back** |
 | `agent` | Who runs the step's sessions: an agent from `~/.agent-mux/agents/` or the workspace's `.agent-mux/agents/` (`docs/agents.md`). Its instructions become the system prompt; its tools limit the session where the harness can. `verify` and `judge` tables take their own `agent` and do not inherit the step's |
 | `harness`, `profile`, `model`, `effort`, `isolation`, `cwd`, `timeout_s`, `concurrency`, `phase` | Per-step overrides. `harness` and `profile` pick the CLI and its configuration, `model` becomes `--model`, and `effort` becomes Codex's `model_reasoning_effort`, Antigravity's `--effort` (`low`, `medium`, `high` or `max`), or Muse's `--reasoning-effort` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `ultra`; Claude Code and OpenCode take none, and the run notes an effort it ignored). The step skills are installed for every harness the document names, so a step may switch CLI safely. |
 
@@ -281,8 +282,35 @@ agent-mux passes `--model` through and does not keep a list of model names.
 | Choose the lenses first | a `single` step answers an array, the `fanout` runs `over = "<step>.<field>[*]"`; `review-changes` picks its review dimensions per change this way |
 | Tournament | `tournament` with `judge`; the bracket runs in Rust, byes advance |
 | Loop until done | `until` with `dedupe_by` and `rounds_without_new` |
+| Work, review, send back | `revise` with `review = { …, pass, stop }` and `max_cycles` |
 
 Per-item chains (the main session, then its votes) run independently; a step waits only for the steps it references. Concurrency is `[workflows] max_concurrent` across runs, shared with loop runs.
+
+### Work, review, send back
+
+A `revise` step runs its session, then an independent reviewer of what it did, and sends the work back with the reviewer's answer until the review passes:
+
+```toml
+[[steps]]
+id = "build"
+kind = "revise"
+skill = "wf-factory-implement"      # the work: it edits files and commits
+agent = "implementer"
+input = "analyze"
+result = "implementation"
+review = { skill = "wf-factory-review", agent = "reviewer", harness = "other", result = "review", pass = "verdict == \"approve\"", stop = "verdict == \"reject\"" }
+max_cycles = 2
+```
+
+- **One worktree for the step.** The step must run with `isolation = "worktree"`. The work and every review run in the same worktree, cycle after cycle, on a branch forked from the workspace's branch.
+- **Work is what was committed.** A review starts only when the worktree has a commit past its base and nothing uncommitted; otherwise the work session is asked again, once.
+- **The reviewer is its own role.** It takes its own `agent`, `harness` and `model`, not the step's. `harness = "other"` asks for a harness you have a profile for other than the one that did the work (Antigravity last); with a single harness the review runs on the same one and the run notes it.
+- **What each session reads.** The work session's `inputs` are `{ input, cycle, max_cycles, previous, review }`: the step's `input`, then its own previous answer and the reviewer's (null on the first cycle). The reviewer's are `{ input, cycle, work }`. Both get `worktree` and `worktree_base` in the context.
+- **The result** is `{ outcome, cycles, work, review }` with `outcome` one of `approved` (`pass` held), `rejected` (`stop` held), `unresolved` (still not passing after `max_cycles` revisions) or `failed` (a session gave no answer).
+- **Labels**: `build`, `build/review`, `build/r1`, `build/r1/review`. A resume replays the cycles the journal holds and finds the worktree again (`<run>/worktrees.json`).
+- Where agent-mux's `PreToolUse` guard runs, a session of a `revise` step is refused `git push`, `git merge`, `git rebase` and `gh pr create|ready|merge`: the branch is for whoever started the run to deliver.
+
+The built-in `factory` flow is this shape with triage, research and analysis before it (`docs/factory.md`).
 
 ### Built-in reviews
 
@@ -309,7 +337,7 @@ The run's headline is the verdict line (any text answer whose header has a `<NAM
 
 ## 3. Sessions and harnesses
 
-Every session is a print-mode run with the harness's own approval prompts bypassed (nobody is there to answer), reading its facts from `$AGENT_MUX_WORKFLOW_CONTEXT`: the run, the step, `args`, `item`, `inputs`, `result_schema`, the budget, the worktree, the gate. A structured answer is a fenced block at the end of the final message:
+Every session is a print-mode run with the harness's own approval prompts bypassed (nobody is there to answer), reading its facts from `$AGENT_MUX_WORKFLOW_CONTEXT`: the run, the step, `args`, `item`, `inputs`, `result_schema`, the budget, the worktree and the branch it forked from (`worktree_base`), the gate, and `artifacts`, a folder of the run (`$AGENT_MUX_WORKFLOW_ARTIFACTS`) where a session may leave one longer document for later steps. A structured answer is a fenced block at the end of the final message:
 
 ````text
 ```workflow-result
@@ -330,7 +358,7 @@ Every harness runs workflow steps (Grok 1.0.77 and Pi 1.5.2 probed 2026-11-14; `
 
 Flows live in the Library (`o` in the Agents list, or F1 → Open library): its flows section lists every document with its harness coverage (`n/7`), and Enter launches it through the harness picker into the same run dialog. The Agents list itself holds only launched work.
 
-Step skills are agent-mux packages (`wf-review-dimensions`, `wf-review-find`, `wf-refute`, `wf-synthesize`, `wf-read-map`, `wf-search`, `wf-deep-read`, `wf-critic`, `wf-find`, `wf-attempt`, `wf-judge`, `wf-discover-sites`, `wf-transform`, `wf-verify-site`, `wf-classify`, `wf-triage-bug`, `wf-triage-feature`, `wf-grimoire-brief`, `wf-grimoire-lens`, `wf-grimoire-verdict`) with `hidden = true` in their `skill.toml`, so they stay out of the Agents sidebar. They are installed user-level for the run's harness before the first session. `writes = true` marks a skill that edits files; a step running it must have `isolation = "worktree"`, which the validator enforces.
+Step skills are agent-mux packages (`wf-review-dimensions`, `wf-review-find`, `wf-refute`, `wf-synthesize`, `wf-read-map`, `wf-search`, `wf-deep-read`, `wf-critic`, `wf-find`, `wf-attempt`, `wf-judge`, `wf-discover-sites`, `wf-transform`, `wf-verify-site`, `wf-classify`, `wf-triage-bug`, `wf-triage-feature`, `wf-grimoire-brief`, `wf-grimoire-lens`, `wf-grimoire-verdict`, and the factory's `wf-factory-classify`, `wf-factory-research`, `wf-factory-analyze`, `wf-factory-implement`, `wf-factory-review`) with `hidden = true` in their `skill.toml`, so they stay out of the Agents sidebar. They are installed user-level for the run's harness before the first session. `writes = true` marks a skill that edits files; a step running it must have `isolation = "worktree"`, which the validator enforces.
 
 Mixed harnesses: a step's `harness = "codex"` runs it on Codex whatever the run's harness; `profile` picks a named profile. For one run, the run dialog's Steps rows and `--step <id>.harness=<h>` do the same without editing the document. Such a choice must be one `workflow.harness` allows, or the run is refused before it launches, and a `profile` the document named for another CLI is dropped, so the step launches with the chosen harness's own profile. Refuters and judges keep their own `harness` and are not changed by the step's row.
 

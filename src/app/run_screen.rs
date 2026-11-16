@@ -570,6 +570,7 @@ fn asked(step: &Step, role: &Role) -> Option<String> {
         Role::Main | Role::Generate(_) => step.actor.as_ref(),
         Role::Vote(_) => step.verify.as_ref().map(|v| &v.actor),
         Role::Judge { .. } => step.judge.as_ref(),
+        Role::Review => step.review.as_ref().map(|r| &r.actor),
     }?;
     Some(match actor {
         Actor::Skill(s) => format!("skill {s}"),
@@ -641,6 +642,7 @@ pub fn step_lines(data: &RunData, row: &Row) -> Vec<Line<'static>> {
                 ("asked", Role::Main),
                 ("refuters", Role::Vote(0)),
                 ("judge", Role::Judge { round: 0, pair: 0 }),
+                ("reviewer", Role::Review),
             ] {
                 if let Some(a) = asked(step, &role) {
                     block(&mut lines, name, &a);

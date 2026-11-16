@@ -436,6 +436,10 @@ pub fn describe_step(s: &crate::workflows::document::Step) -> String {
             "repeats until {} rounds find nothing new (at most {})",
             s.rounds_without_new, s.max_rounds
         ),
+        StepKind::Revise => format!(
+            "one session does the work, another reviews it; sent back at most {} time(s)",
+            s.max_cycles
+        ),
     };
     if !s.dedupe_by.is_empty() {
         text.push_str("; drops duplicates");
@@ -479,6 +483,8 @@ pub fn estimate_text(doc: &crate::workflows::document::Workflow) -> String {
                 fixed += n + n.saturating_sub(1);
             }
             StepKind::Until => rounds = true,
+            // the work and its review, when the first review passes
+            StepKind::Revise => fixed += 2,
         }
     }
     let mut text = format!("about {fixed} session(s)");

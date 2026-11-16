@@ -1787,6 +1787,7 @@ It builds a temporary project and home with `alpha`/`beta` skills and a `verifie
 - [docs/loops.md](docs/loops.md): Loop Engineering operator guide (week one, files, levels, inbox, Antigravity status).
 - [docs/configuration.md](docs/configuration.md): the configuration library, the Configuration view and `agent-mux config`.
 - [docs/workflows.md](docs/workflows.md): workflows, the document format, step skills, the planner and `agent-mux workflow`.
+- [docs/factory.md](docs/factory.md): the software factory: one work item through triage, analysis, implementation and an independent review to a draft pull request, with `agent-mux factory`.
 - [docs/superpowers/specs/](docs/superpowers/specs/), [docs/superpowers/plans/](docs/superpowers/plans/): historical designs.
 
 The implementation is best-effort capture with provider-dependent evidence, heuristic attribution and loop warnings, an in-process analysis service, and optional remote export. It does not infer task success from process exit, recreate lost hook events from terminal output, manage packages other than skills, provide a full database restore through `trace import`, or expose a network analysis server (the MCP server is local stdio only). Known limitations at the time of writing: analysis cursors are keyed per process (section 10.1), CLI writers ignore `retention_days`, read commands other than `doctor` migrate an old store in place, and the Skills view accepts mouse wheel input but not clicks.

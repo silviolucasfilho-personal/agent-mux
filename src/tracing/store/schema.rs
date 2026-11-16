@@ -1,11 +1,11 @@
 //! Schema DDL, versioned through `PRAGMA user_version`. Migrations are
 //! append-only: never edit a shipped entry, add a new one.
 
-pub const SCHEMA_VERSION: i32 = 27;
+pub const SCHEMA_VERSION: i32 = 28;
 
 pub const MIGRATIONS: &[&str] = &[
     V1, V2, V3, V4, V5, V6, V7, V8, V9, V10, V11, V12, V13, V14, V15, V16, V17, V18, V19, V20, V21,
-    V22, V23, V24, V25, V26, V27,
+    V22, V23, V24, V25, V26, V27, V28,
 ];
 
 // Preserve historical IDs and score targets; rebuilding a legacy session
@@ -1456,4 +1456,46 @@ BEGIN
   INSERT INTO trace_changes(entity_kind, entity_id, session_key, launch_id, operation)
   VALUES ('session', OLD.key, OLD.key, NULL, 'delete');
 END;
+"#;
+
+// v28: the software factory's work items (`factory::store`). One row per
+// request against a repository; the partial unique index is the intake
+// claim, so an issue becomes an item at most once. `run_id` names the
+// item's latest workflow run. Replay-safe (`IF NOT EXISTS` throughout).
+const V28: &str = r#"
+CREATE TABLE IF NOT EXISTS work_items (
+  id          TEXT PRIMARY KEY,
+  workspace   TEXT NOT NULL,
+  repo        TEXT NOT NULL DEFAULT '',
+  source      TEXT NOT NULL CHECK (source IN ('issue','manual','ci')),
+  source_ref  TEXT NOT NULL DEFAULT '',
+  title       TEXT NOT NULL,
+  body        TEXT NOT NULL DEFAULT '',
+  requester   TEXT,
+  attended    INTEGER NOT NULL DEFAULT 1,
+  state       TEXT NOT NULL,
+  kind        TEXT,
+  priority    TEXT,
+  complexity  TEXT,
+  run_id      TEXT,
+  cycles      INTEGER NOT NULL DEFAULT 0,
+  worktree    TEXT,
+  branch      TEXT,
+  pr_number   INTEGER,
+  pr_url      TEXT,
+  error       TEXT,
+  created_ns  INTEGER NOT NULL,
+  updated_ns  INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS work_items_claim
+  ON work_items (repo, source, source_ref) WHERE source <> 'manual';
+CREATE INDEX IF NOT EXISTS work_items_recent ON work_items (updated_ns DESC);
+CREATE TABLE IF NOT EXISTS work_item_events (
+  rid    INTEGER PRIMARY KEY AUTOINCREMENT,
+  item   TEXT NOT NULL,
+  ts_ns  INTEGER NOT NULL,
+  kind   TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT 'null'
+);
+CREATE INDEX IF NOT EXISTS work_item_events_item ON work_item_events (item, rid);
 "#;

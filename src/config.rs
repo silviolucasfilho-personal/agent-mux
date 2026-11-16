@@ -260,6 +260,62 @@ pub fn resolve_workflows(cfg: Option<&WorkflowsConfig>) -> WorkflowSettings {
     s
 }
 
+/// `[factory]` in the settings file: the software factory.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct FactoryConfig {
+    /// The prefix of every branch the factory pushes (default `factory/`).
+    pub branch_prefix: Option<String>,
+    /// A token ceiling per work item; 0 or unset is none.
+    pub budget_tokens: Option<u64>,
+    /// The bound of a repository's brain, in characters (default 40000).
+    pub brain_max_chars: Option<usize>,
+    /// A command the implementer runs once in its worktree before it starts.
+    pub setup_command: Option<String>,
+}
+
+/// `[factory]` resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactorySettings {
+    pub branch_prefix: String,
+    pub budget_tokens: u64,
+    pub brain_max_chars: usize,
+    pub setup_command: String,
+}
+
+impl Default for FactorySettings {
+    fn default() -> Self {
+        FactorySettings {
+            branch_prefix: "factory/".into(),
+            budget_tokens: 0,
+            brain_max_chars: crate::factory::brain::MAX_CHARS,
+            setup_command: String::new(),
+        }
+    }
+}
+
+pub fn resolve_factory(cfg: Option<&FactoryConfig>) -> FactorySettings {
+    let mut s = FactorySettings::default();
+    let Some(c) = cfg else {
+        return s;
+    };
+    // an empty prefix would let a push reach any branch: keep the default
+    if let Some(p) = c.branch_prefix.as_deref().map(str::trim)
+        && !p.is_empty()
+    {
+        s.branch_prefix = p.to_string();
+    }
+    if let Some(b) = c.budget_tokens {
+        s.budget_tokens = b;
+    }
+    if let Some(n) = c.brain_max_chars {
+        s.brain_max_chars = n.max(1_000);
+    }
+    if let Some(c) = c.setup_command.as_deref().map(str::trim) {
+        s.setup_command = c.to_string();
+    }
+    s
+}
+
 /// `[loops]` resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopRunnerSettings {
@@ -366,6 +422,9 @@ pub struct Config {
     /// The workflow runtime (`[workflows]`).
     #[serde(default)]
     pub workflows: Option<WorkflowsConfig>,
+    /// The software factory (`[factory]`).
+    #[serde(default)]
+    pub factory: Option<FactoryConfig>,
     /// Whether the sidebar starts hidden (full-screen harness).
     #[serde(default)]
     pub hide_sidebar: bool,
@@ -809,6 +868,7 @@ pub fn load() -> anyhow::Result<Config> {
         agents: None,
         loops: None,
         workflows: None,
+        factory: None,
         hide_sidebar: false,
         clean: false,
         bypass_approvals: None,
@@ -838,6 +898,7 @@ pub fn load_from_home(home: &Path) -> anyhow::Result<Config> {
         agents: None,
         loops: None,
         workflows: None,
+        factory: None,
         hide_sidebar: false,
         clean: false,
         bypass_approvals: None,

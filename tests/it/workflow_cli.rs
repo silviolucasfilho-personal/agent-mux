@@ -110,6 +110,7 @@ fn ls_check_show_and_skills_describe_the_builtin_set() {
         "triage-route",
         "santa-review",
         "grimoire-review",
+        "factory",
     ] {
         assert!(out.contains(name), "{name} in {out}");
     }
@@ -117,7 +118,7 @@ fn ls_check_show_and_skills_describe_the_builtin_set() {
     let (code, out, _) = run(&f, &["ls", "--json"]);
     assert_eq!(code, 0);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v.as_array().unwrap().len(), 9);
+    assert_eq!(v.as_array().unwrap().len(), 10);
     assert!(v[0]["problems"].as_array().unwrap().is_empty());
 
     let (code, out, _) = run(&f, &["check"]);
