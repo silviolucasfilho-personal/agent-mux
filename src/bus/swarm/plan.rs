@@ -118,7 +118,7 @@ pub fn parse(text: &str) -> Result<Plan, String> {
 /// What [`check`] needs to know about the machine and the workspace.
 #[derive(Debug, Clone, Default)]
 pub struct CheckEnv {
-    /// Harnesses installed here (`claude`, `codex`, `agy`, `opencode`, `muse`).
+    /// Harnesses installed here (`claude`, `codex`, `agy`, `opencode`, `muse`, `cursor`).
     pub harnesses: Vec<String>,
     /// Agent names the catalog knows.
     pub agents: Vec<String>,
@@ -162,7 +162,7 @@ impl CheckEnv {
         let catalog = crate::agents::Catalog::load(&crate::assets::root(), Some(workspace));
         CheckEnv {
             harnesses: swarm_harnesses()
-                .filter(|h| crate::session::command_available(h.as_str()))
+                .filter(|h| crate::session::command_available(h.command()))
                 .map(|h| h.as_str().to_string())
                 .collect(),
             agents: catalog.entries.iter().map(|e| e.name.clone()).collect(),

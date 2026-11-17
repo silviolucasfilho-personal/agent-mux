@@ -374,6 +374,7 @@ pub fn project_skills_dir(harness: Harness, workspace: &Path) -> Option<PathBuf>
         // OpenCode 2.0.32 scans `{skill,skills}/` under `.opencode/`
         Harness::OpenCode => Some(workspace.join(".opencode").join("skills")),
         Harness::Muse => Some(workspace.join(".agents").join("skills")),
+        Harness::Cursor => Some(workspace.join(".cursor").join("skills")),
         Harness::Antigravity | Harness::Grok | Harness::Pi => None,
     }
 }
@@ -402,6 +403,14 @@ pub fn verifier_path(harness: Harness, workspace: &Path) -> Option<PathBuf> {
         Harness::Muse => Some(
             workspace
                 .join(".muse")
+                .join("agents")
+                .join("loop-verifier.md"),
+        ),
+        // the Cursor CLI reads sub-agents from the project's
+        // `.cursor/agents/*.md` (frontmatter `name`, `description`)
+        Harness::Cursor => Some(
+            workspace
+                .join(".cursor")
                 .join("agents")
                 .join("loop-verifier.md"),
         ),
@@ -438,6 +447,12 @@ pub fn agent_path(harness: Harness, workspace: &Path, name: &str) -> Option<Path
         Harness::Muse => Some(
             workspace
                 .join(".muse")
+                .join("agents")
+                .join(format!("{name}.md")),
+        ),
+        Harness::Cursor => Some(
+            workspace
+                .join(".cursor")
                 .join("agents")
                 .join(format!("{name}.md")),
         ),

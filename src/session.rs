@@ -168,6 +168,9 @@ pub fn install_fallback(command: &str, home: &Path) -> Option<PathBuf> {
             home.join(".bun").join("bin").join("pi"),
         ],
         "muse" => vec![home.join(".local").join("bin").join("muse")],
+        // Cursor's installer (`curl https://cursor.com/install | bash`)
+        // links `cursor-agent` and `agent` into `~/.local/bin`
+        "cursor-agent" => vec![home.join(".local").join("bin").join("cursor-agent")],
         _ => return None,
     };
     candidates.into_iter().find(|c| is_runnable(c))

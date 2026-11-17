@@ -24,6 +24,10 @@ pub enum Provider {
     /// `session_message` row as `{"id", "type", "data"}`.
     OpenCode,
     Muse,
+    /// Cursor CLI: `agent-transcripts/<id>/<id>.jsonl` under its project
+    /// folder. The lines carry no timestamps, tool ids, tool results or
+    /// usage; the hooks supply the usage (`tracing::hooks`).
+    Cursor,
 }
 
 impl Provider {
@@ -34,6 +38,7 @@ impl Provider {
             Provider::Antigravity => "antigravity",
             Provider::OpenCode => "opencode",
             Provider::Muse => "muse",
+            Provider::Cursor => "cursor",
         }
     }
 }
@@ -370,6 +375,8 @@ pub fn detect_provider(first_line: &str) -> Provider {
         || (first_line.contains("\"payload_type\"") && first_line.contains("\"recorded_at\""))
     {
         Provider::Muse
+    } else if first_line.trim_start().starts_with("{\"role\":") {
+        Provider::Cursor
     } else if first_line.contains("\"session_meta\"") {
         Provider::Codex
     } else {
@@ -384,6 +391,7 @@ pub fn parse_line(provider: Provider, line: &str) -> Vec<TranscriptEvent> {
         Provider::Antigravity => parse_antigravity_line(line),
         Provider::OpenCode => parse_opencode_line(line),
         Provider::Muse => parse_muse_line(line),
+        Provider::Cursor => parse_cursor_line(line),
     };
     let Some(v) = parse_json_line(line) else {
         return events;
@@ -1410,6 +1418,102 @@ pub fn parse_codex_line(line: &str) -> Vec<TranscriptEvent> {
 
 /// Microseconds since the epoch (Muse's `recorded_at` field) as an
 /// RFC 3339 string.
+/// The request inside a Cursor user message: the text of its
+/// `<user_query>` element, else the whole text.
+fn cursor_user_query(text: &str) -> String {
+    tag_inner(text, "user_query")
+        .unwrap_or(text)
+        .trim()
+        .to_string()
+}
+
+/// Parses one line of a Cursor CLI transcript
+/// (`~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`, read
+/// on 2026.11.13): `{"role": "user"|"assistant", "message": {"content":
+/// [{"type": "text", "text"} | {"type": "tool_use", "name", "input"}]}}`
+/// and `{"type": "turn_ended", "status"}`. A user message wraps the
+/// request in `<user_query>` after a `<timestamp>` of minute precision,
+/// which is not used. There are no ids, results or usage.
+pub fn parse_cursor_line(line: &str) -> Vec<TranscriptEvent> {
+    let mut events = Vec::new();
+    let Some(v) = parse_json_line(line) else {
+        return events;
+    };
+    if v.get("type").and_then(Value::as_str) == Some("turn_ended") {
+        let kind = match v.get("status").and_then(Value::as_str) {
+            Some("success") | None => TurnBoundaryKind::Complete,
+            Some(_) => TurnBoundaryKind::Aborted,
+        };
+        events.push(TranscriptEvent::TurnBoundary { kind, ts: None });
+        return events;
+    }
+    let Some(role) = v.get("role").and_then(Value::as_str) else {
+        return events;
+    };
+    let parts = v
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let text_of = |parts: &[Value]| -> String {
+        parts
+            .iter()
+            .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    match role {
+        "user" => {
+            let raw = text_of(&parts);
+            if raw.trim().is_empty() {
+                return events;
+            }
+            // a user line without a query is the harness talking
+            let meta = !raw.contains("<user_query>") && raw.trim_start().starts_with('<');
+            events.push(TranscriptEvent::User {
+                text: cursor_user_query(&raw),
+                meta,
+                ts: None,
+            });
+        }
+        "assistant" => {
+            let text = text_of(&parts);
+            let tools: Vec<&Value> = parts
+                .iter()
+                .filter(|p| p.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .collect();
+            if !text.trim().is_empty() || !tools.is_empty() {
+                events.push(TranscriptEvent::Assistant {
+                    text,
+                    model: None,
+                    thinking: None,
+                    usage: Vec::new(),
+                    msg_id: None,
+                    skill: None,
+                    step_index: None,
+                    ts: None,
+                });
+            }
+            for tool in tools {
+                events.push(TranscriptEvent::ToolUse {
+                    id: String::new(),
+                    name: tool
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool")
+                        .to_string(),
+                    args: tool.get("input").cloned().unwrap_or(Value::Null),
+                    skill: None,
+                    ts: None,
+                });
+            }
+        }
+        _ => {}
+    }
+    events
+}
+
 pub fn muse_ts(us: Option<i64>) -> Option<String> {
     let us = us?;
     time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(us) * 1_000)

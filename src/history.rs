@@ -17,6 +17,7 @@ pub enum AgentProvider {
     Grok,
     Pi,
     Muse,
+    Cursor,
 }
 
 impl AgentProvider {
@@ -31,6 +32,7 @@ impl AgentProvider {
             AgentProvider::Grok => Harness::Grok,
             AgentProvider::Pi => Harness::Pi,
             AgentProvider::Muse => Harness::Muse,
+            AgentProvider::Cursor => Harness::Cursor,
         }
     }
 
@@ -44,6 +46,7 @@ impl AgentProvider {
             AgentProvider::Grok => "grok",
             AgentProvider::Pi => "pi",
             AgentProvider::Muse => "muse",
+            AgentProvider::Cursor => "cursor",
         }
     }
 
@@ -57,6 +60,7 @@ impl AgentProvider {
             AgentProvider::Grok => "Grok",
             AgentProvider::Pi => "Pi",
             AgentProvider::Muse => "Muse Code",
+            AgentProvider::Cursor => "Cursor",
         }
     }
 
@@ -70,6 +74,7 @@ impl AgentProvider {
             AgentProvider::Grok => "G",
             AgentProvider::Pi => "P",
             AgentProvider::Muse => "M",
+            AgentProvider::Cursor => "U",
         }
     }
 
@@ -83,6 +88,7 @@ impl AgentProvider {
             AgentProvider::Grok => Color::Red,
             AgentProvider::Pi => Color::LightBlue,
             AgentProvider::Muse => Color::LightYellow,
+            AgentProvider::Cursor => Color::White,
         }
     }
 }
@@ -800,6 +806,7 @@ fn provider_heading(provider: AgentProvider) -> &'static str {
         AgentProvider::Grok => "🤖 GROK",
         AgentProvider::Pi => "🤖 PI",
         AgentProvider::Muse => "🤖 MUSE",
+        AgentProvider::Cursor => "🤖 CURSOR",
         AgentProvider::Claude => "🤖 CLAUDE",
         AgentProvider::Antigravity => "✨ ANTIGRAVITY",
     }

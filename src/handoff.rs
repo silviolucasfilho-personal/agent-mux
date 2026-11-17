@@ -52,6 +52,7 @@ pub fn provider_of(name: &str) -> Option<Provider> {
         "antigravity" | "agy" => Some(Provider::Antigravity),
         "opencode" => Some(Provider::OpenCode),
         "muse" => Some(Provider::Muse),
+        "cursor" => Some(Provider::Cursor),
         _ => None,
     }
 }
@@ -63,6 +64,7 @@ fn provider_label(p: Provider) -> &'static str {
         Provider::Antigravity => "Antigravity",
         Provider::OpenCode => "OpenCode",
         Provider::Muse => "Muse Code",
+        Provider::Cursor => "Cursor",
     }
 }
 
@@ -372,6 +374,10 @@ pub fn transcript_by_id(provider: Provider, id: &str) -> Option<PathBuf> {
             &crate::tracing::correlate::muse_data_dir(&crate::skill::install::home_dir()),
             id,
         ),
+        Provider::Cursor => crate::tracing::correlate::cursor_transcript_by_id(
+            &crate::tracing::correlate::cursor_dir(&crate::skill::install::home_dir()),
+            id,
+        ),
     }
 }
 
@@ -392,6 +398,9 @@ pub fn find_on_disk(
             muse: Some(crate::tracing::correlate::muse_data_dir(
                 &crate::skill::install::home_dir(),
             )),
+            cursor: Some(crate::tracing::correlate::cursor_dir(
+                &crate::skill::install::home_dir(),
+            )),
         },
         provider,
         dir,
@@ -410,6 +419,8 @@ pub struct Roots {
     pub codex: Option<PathBuf>,
     /// Muse's data dir (`~/.local/share/muse`).
     pub muse: Option<PathBuf>,
+    /// Cursor's folder (`~/.cursor`).
+    pub cursor: Option<PathBuf>,
 }
 
 /// `find_on_disk` over explicit folders.
@@ -481,6 +492,23 @@ pub fn find_in(
                                 id.unwrap_or_else(|| e.file_name().to_string_lossy().into_owned()),
                                 log,
                             )
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Provider::Cursor => roots
+            .cursor
+            .as_deref()
+            .map(|r| {
+                let want = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+                crate::tracing::correlate::cursor_transcripts(r)
+                    .into_iter()
+                    .filter(|(_, p)| recent(p))
+                    .filter(|(id, _)| {
+                        crate::tracing::correlate::cursor_chat_cwd(r, id).is_some_and(|cwd| {
+                            let cwd = Path::new(&cwd);
+                            cwd == dir || cwd.canonicalize().is_ok_and(|c| c == want)
                         })
                     })
                     .collect()
@@ -652,6 +680,7 @@ mod tests {
             antigravity: Some(t.path().join("brain")),
             codex: Some(t.path().join("codex")),
             muse: Some(t.path().join("muse")),
+            cursor: Some(t.path().join(".cursor")),
         };
         // nothing yet: it has not had a turn
         let e = find_in(&roots, Provider::Claude, &ws, before).unwrap_err();

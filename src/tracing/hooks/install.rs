@@ -1,6 +1,7 @@
-//! The opt-in installers: Codex tool-level hooks in `~/.codex/hooks.json`
-//! and the Antigravity plugin under `~/.gemini/config/plugins/agent-mux/`.
-//! Both are explicit (`agent-mux trace hooks install <provider>`),
+//! The opt-in installers: Codex tool-level hooks in `~/.codex/hooks.json`,
+//! the Antigravity plugin under `~/.gemini/config/plugins/agent-mux/` and
+//! Cursor's user hooks in `~/.cursor/hooks.json`.
+//! All are explicit (`agent-mux trace hooks install <provider>`),
 //! idempotent, and reversible; per-launch channels never touch these
 //! files.
 
@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
 /// The marker every handler we write carries in its command line.
 const CODEX_MARK: &str = "trace hook codex";
 const AGY_MARK: &str = "trace hook agy";
+const CURSOR_MARK: &str = "trace hook cursor";
 pub const PLUGIN_NAME: &str = "agent-mux";
 
 /// Codex events registered by the installer. `Interrupt` and `SessionEnd`
@@ -365,6 +367,186 @@ pub fn codex_status(home: &Path, current_exe: Option<&Path>) -> Status {
     };
     Status {
         provider: "codex",
+        installed,
+        path,
+        exe,
+        stale,
+        note,
+    }
+}
+
+// ---------------------------------------------------------------- cursor
+//
+// Cursor CLI 2026.11.13 reads hooks from `<project>/.cursor/hooks.json`
+// and `~/.cursor/hooks.json` (`{"version": 1, "hooks": {"<event>":
+// [{"command", "timeout", "matcher", "failClosed"}]}}`); there is no
+// per-launch flag. A hook inherits the session's environment, so the
+// handler finds its launch in `AGENT_MUX_SESSION_ID` and does nothing in
+// a Cursor session agent-mux did not start. `failClosed` is not set: with
+// it, a moved binary would refuse every tool call of every Cursor
+// session. The handler itself fails closed in a loop run.
+
+pub fn cursor_hooks_path(home: &Path) -> PathBuf {
+    home.join(".cursor").join("hooks.json")
+}
+
+fn cursor_handler(exe: &Path, home: &Path, event: &str) -> Value {
+    let extra: &[&str] = if event == "preToolUse" {
+        &["--guard"]
+    } else {
+        &[]
+    };
+    json!({
+        "command": command_line(exe, home, "cursor", None, extra, sh_quote),
+        "timeout": 5,
+    })
+}
+
+fn cursor_is_ours(h: &Value) -> bool {
+    handler_is_ours(h, CURSOR_MARK)
+}
+
+/// `hooks.json` after installing (or refreshing) our entries.
+pub fn cursor_merge(existing: Option<Value>, exe: &Path, home: &Path) -> Value {
+    let mut root = match existing {
+        Some(Value::Object(m)) => m,
+        _ => Map::new(),
+    };
+    root.entry("version").or_insert(Value::from(1));
+    let mut hooks = match root.remove("hooks") {
+        Some(Value::Object(m)) => m,
+        _ => Map::new(),
+    };
+    for (event, _) in super::CURSOR_EVENTS {
+        let mut list = match hooks.remove(*event) {
+            Some(Value::Array(a)) => a,
+            _ => Vec::new(),
+        };
+        list.retain(|h| !cursor_is_ours(h));
+        list.push(cursor_handler(exe, home, event));
+        hooks.insert(event.to_string(), Value::Array(list));
+    }
+    root.insert("hooks".into(), Value::Object(hooks));
+    Value::Object(root)
+}
+
+/// `hooks.json` with our entries removed; `None` when no hook is left.
+pub fn cursor_strip(existing: Value) -> Option<Value> {
+    let Value::Object(mut root) = existing else {
+        return Some(existing);
+    };
+    let mut left = Map::new();
+    if let Some(Value::Object(hooks)) = root.remove("hooks") {
+        for (event, list) in hooks {
+            match list {
+                Value::Array(mut list) => {
+                    list.retain(|h| !cursor_is_ours(h));
+                    if !list.is_empty() {
+                        left.insert(event, Value::Array(list));
+                    }
+                }
+                other => {
+                    left.insert(event, other);
+                }
+            }
+        }
+    }
+    let only_version = root.keys().all(|k| k == "version");
+    if left.is_empty() && only_version {
+        return None;
+    }
+    root.insert("hooks".into(), Value::Object(left));
+    Some(Value::Object(root))
+}
+
+pub fn install_cursor(exe: &Path, home: &Path) -> Result<Report, String> {
+    let path = cursor_hooks_path(home);
+    let existing = read_json(&path)?;
+    let merged = cursor_merge(existing.clone(), exe, home);
+    let changed = existing.as_ref() != Some(&merged);
+    if changed {
+        write_json(&path, &merged)?;
+    }
+    Ok(Report {
+        path,
+        changed,
+        note: "Cursor reloads hooks.json when it changes. The handlers record only sessions \
+               agent-mux starts; in any other Cursor session they do nothing."
+            .into(),
+    })
+}
+
+pub fn uninstall_cursor(home: &Path) -> Result<Report, String> {
+    let path = cursor_hooks_path(home);
+    let Some(existing) = read_json(&path)? else {
+        return Ok(Report {
+            path,
+            changed: false,
+            note: "nothing installed".into(),
+        });
+    };
+    match cursor_strip(existing.clone()) {
+        Some(rest) if rest == existing => Ok(Report {
+            path,
+            changed: false,
+            note: "no agent-mux entries found".into(),
+        }),
+        Some(rest) => {
+            write_json(&path, &rest)?;
+            Ok(Report {
+                path,
+                changed: true,
+                note: "agent-mux entries removed; other hooks kept".into(),
+            })
+        }
+        None => {
+            std::fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))?;
+            Ok(Report {
+                path,
+                changed: true,
+                note: "file removed (it held only agent-mux entries)".into(),
+            })
+        }
+    }
+}
+
+pub fn cursor_status(home: &Path, current_exe: Option<&Path>) -> Status {
+    let path = cursor_hooks_path(home);
+    let mut exe = None;
+    let mut events = 0usize;
+    if let Ok(Some(root)) = read_json(&path)
+        && let Some(Value::Object(hooks)) = root.get("hooks")
+    {
+        for list in hooks.values() {
+            for h in list.as_array().into_iter().flatten() {
+                if cursor_is_ours(h) {
+                    events += 1;
+                    if exe.is_none() {
+                        exe = h
+                            .get("command")
+                            .and_then(|c| c.as_str())
+                            .and_then(command_exe);
+                    }
+                }
+            }
+        }
+    }
+    let installed = events > 0;
+    let stale = installed && current_exe.is_some() && exe.as_deref() != current_exe;
+    let note = if !installed {
+        "not installed — `agent-mux trace hooks install cursor`".into()
+    } else if stale {
+        format!(
+            "{events} handlers point at {}, not this binary — rerun `agent-mux trace hooks install cursor`",
+            exe.as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        )
+    } else {
+        format!("{events} handlers")
+    };
+    Status {
+        provider: "cursor",
         installed,
         path,
         exe,

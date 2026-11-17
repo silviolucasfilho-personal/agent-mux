@@ -1,6 +1,6 @@
 # agent-mux
 
-A terminal multiplexer for AI coding harnesses, with local trace capture, a SQLite analysis store, and portable skills. Run Claude Code (`claude`), Codex CLI (`codex`), Google Antigravity (`agy`), OpenCode (`opencode`), Grok (`grok`), and Pi (`pi`) in separate pseudo-terminals, switch between them, resume provider sessions, inspect turns and tool calls, and compare recorded work. (DeepSeek `dsh` is not yet supported).
+A terminal multiplexer for AI coding harnesses, with local trace capture, a SQLite analysis store, and portable skills. Run Claude Code (`claude`), Codex CLI (`codex`), Google Antigravity (`agy`), OpenCode (`opencode`), Grok (`grok`), Pi (`pi`), Muse Code (`muse`) and the Cursor CLI (`cursor-agent`, `docs/cursor.md`) in separate pseudo-terminals, switch between them, resume provider sessions, inspect turns and tool calls, and compare recorded work. (DeepSeek `dsh` is not yet supported).
 
 This README is the developer onboarding guide to the **implemented code in this checkout**. Every screen, panel, query, capture step, hook and SQL statement below was read from the source at the time of writing; file paths are given so you can verify and extend. Design documents under `docs/superpowers/` record development history and are not a guarantee that a proposed feature shipped.
 
@@ -992,6 +992,7 @@ The same per-launch pattern serves the read-only MCP server (`src/mcp/`). Every 
 | OpenCode | Per launch: `OPENCODE_CONFIG_CONTENT` carries `mcp.servers.agent-mux` with `--standalone`. | `opencode` 2.0.32 |
 | Grok | Installed once, like Antigravity: `grok mcp add --scope user agent-mux -- <binary> mcp serve --stdio --workspace-from-env` writes `[mcp_servers.agent-mux]` in `~/.grok/config.toml`; agent-mux runs it before the first grok session of a run when the entry is missing, stale or disabled (`agent-mux mcp install\|uninstall grok` by hand). Grok has no per-launch route for the TUI: the `GROK_CONFIG` overlay drops `mcp_servers`, and `--plugin-dir` exists only on `grok agent stdio`. | `grok --help` 1.0.70 |
 | Pi | Per launch: `-e ~/.agent-mux/pi-extension/agent-mux-mcp.js` and `AGENT_MUX_PI_MCP='{"name","command","args"}'`. Pi has no MCP client; agent-mux's extension (`src/pi_mcp_extension.js`) is one, registering the server's tools as Pi tools. Nothing under `~/.pi` is written. | `pi --help` 0.73.1 |
+| Cursor | Installed once: agent-mux merges `mcpServers.agent-mux` (`<binary> mcp serve --stdio --workspace-from-env`) into `~/.cursor/mcp.json` before the first Cursor session of a run (`agent-mux mcp install cursor` by hand), and every launch adds `--approve-mcps --trust`. Cursor has no per-launch MCP flag and no `mcp add`. | `cursor-agent --help` 2026.11.13 |
 
 DeepSeek (`dsh` 0.2.2-rc.1) is deferred and not yet supported; no MCP registration is implemented.
 
@@ -1640,6 +1641,7 @@ A skill package is:
 | OpenCode | `~/.config/opencode/skill/<id>/` (`$OPENCODE_CONFIG_DIR/skill/`) | `load skill <id>` | `opencode [--auto] --prompt "<invocation> <startup_prompt>"` |
 | Grok | `~/.grok/skills/<id>/` (`$GROK_HOME/skills/`) | `/<id>` | `grok [--model M] [--always-approve] "<invocation> <startup_prompt>"` |
 | Pi | `~/.pi/agent/skills/<id>/` (`$PI_CODING_AGENT_DIR/skills/`) | `/skill:<id>` | `pi [--model M] "<invocation> <startup_prompt>"` |
+| Cursor | `~/.cursor/skills/<id>/` | `/<id>` | `cursor-agent [--model M] [--force] --trust "<invocation> <startup_prompt>"` |
 
 DeepSeek has no harness variant in agent-mux yet (`dsh 0.2.2-rc.1` is deferred per operator decision), so it has no skill directory or launch command. Note also what is not yet supported for Grok and Pi: while both launch interactively and can run skills with MCP tools, neither has a tracing pipeline (no turns or tool events in `traces.db`), loop guard, workflow runner, or swarm worker participation.
 

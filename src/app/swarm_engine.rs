@@ -66,7 +66,7 @@ impl App {
                 self.profiles.iter().any(|p| {
                     Harness::detect(&p.command) == Some(*h)
                         && crate::session::command_available(&p.command)
-                }) || crate::session::command_available(h.as_str())
+                }) || crate::session::command_available(h.command())
             })
             .collect()
     }
@@ -338,7 +338,7 @@ impl App {
             .cloned()
             .unwrap_or_else(|| crate::config::Profile {
                 name: harness.as_str().to_string(),
-                command: harness.as_str().to_string(),
+                command: harness.command().to_string(),
                 args: Vec::new(),
                 default_dir: None,
                 tracing: None,
@@ -489,7 +489,7 @@ impl App {
             .cloned()
             .unwrap_or_else(|| crate::config::Profile {
                 name: harness.as_str().to_string(),
-                command: harness.as_str().to_string(),
+                command: harness.command().to_string(),
                 args: Vec::new(),
                 default_dir: None,
                 tracing: None,
@@ -646,7 +646,7 @@ impl App {
             .cloned()
             .unwrap_or_else(|| crate::config::Profile {
                 name: harness.as_str().to_string(),
-                command: harness.as_str().to_string(),
+                command: harness.command().to_string(),
                 args: Vec::new(),
                 default_dir: None,
                 tracing: None,

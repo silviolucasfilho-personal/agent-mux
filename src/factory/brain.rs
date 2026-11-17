@@ -3,7 +3,7 @@
 //! obvious, a convention a station missed).
 //!
 //! agent-mux reads it when a run starts and hands it to every station in
-//! its context, so it reaches all seven harnesses alike and no station
+//! its context, so it reaches all eight harnesses alike and no station
 //! needs a memory tool. Only agent-mux writes it: a station can at most
 //! suggest a note, and the operator decides. It lives in the library
 //! (`<library>/factory/<key>/brain.md`), not in the repository, where

@@ -9,6 +9,9 @@
 //! That optional flag is not enabled by flow launches.
 //! OpenCode 2.0.32 run --format json emitted a complete part.text in the
 //! multi-paragraph probe, rather than word deltas.
+//! Cursor CLI 2026.11.13 (probed 2026-11-17) emits complete assistant
+//! messages, `thinking` deltas (not shown) and `tool_call` events whose
+//! `subtype` is `started` or `completed`.
 use crate::harness::Harness;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,6 +306,58 @@ pub fn lines_for(harness: Harness, stdout: &[u8], session: Option<&str>) -> Vec<
                     }
                 }
             }
+            Harness::Cursor => match string(&v, "type") {
+                "assistant" => {
+                    if let Some(parts) = v["message"]["content"].as_array() {
+                        for part in parts {
+                            if string(part, "type") == "text" {
+                                emit(&mut out, LiveKind::Text, string(part, "text"));
+                            }
+                        }
+                    }
+                }
+                "tool_call" => {
+                    // `{"shellToolCall": {"args": …, "result": …}}`
+                    let Some((kind, call)) =
+                        v["tool_call"].as_object().and_then(|o| o.iter().next())
+                    else {
+                        continue;
+                    };
+                    let name = kind.strip_suffix("ToolCall").unwrap_or(kind);
+                    match string(&v, "subtype") {
+                        "started" => {
+                            let args = &call["args"];
+                            let shown = ["command", "path", "pattern", "toolName", "query"]
+                                .iter()
+                                .find_map(|k| args.get(*k).filter(|a| a.is_string()))
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            tool(&mut out, name, &shown);
+                        }
+                        "completed" => {
+                            let result = &call["result"];
+                            match result.get("success") {
+                                Some(ok) => {
+                                    let text = ["interleavedOutput", "stdout", "content"]
+                                        .iter()
+                                        .find_map(|k| ok.get(*k).and_then(|t| t.as_str()))
+                                        .unwrap_or("");
+                                    emit(&mut out, LiveKind::Outcome, text);
+                                }
+                                None if !result.is_null() => {
+                                    emit(&mut out, LiveKind::Error, &display(result));
+                                }
+                                None => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                "result" if v["is_error"].as_bool() == Some(true) => {
+                    emit(&mut out, LiveKind::Error, string(&v, "result"));
+                }
+                _ => {}
+            },
             // Grok's `--output-format json` is one object at the end:
             // no stream to decode, the envelope carries the answer
             Harness::Codex | Harness::Grok => {}
@@ -436,6 +491,19 @@ fn final_text(out: &mut Vec<LiveLine>, text: &str) {
 
 #[cfg(test)]
 pub(crate) mod fixtures {
+    // A real run, 2026-11-17, Cursor CLI 2026.11.13 (`--print
+    // --output-format stream-json`), with the bulky fields of the tool
+    // call and the thinking deltas cut.
+    pub const CURSOR: &str = r####"{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/tmp/probe1","session_id":"a5cdd247-d8e9-46e6-89de-a00ceb9d2b3c","model":"Auto","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Run the shell command 'cat a.txt' and then reply with exactly: PROBE_OK"}]},"session_id":"a5cdd247-d8e9-46e6-89de-a00ceb9d2b3c"}
+{"type":"thinking","subtype":"delta","text":"The","session_id":"a5cdd247-d8e9-46e6-89de-a00ceb9d2b3c","timestamp_ms":1794933847493}
+{"type":"thinking","subtype":"completed","session_id":"a5cdd247-d8e9-46e6-89de-a00ceb9d2b3c","timestamp_ms":1794933847775}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll run `cat a.txt`, then reply with exactly `PROBE_OK`."}]},"session_id":"a5cdd247-d8e9-46e6-89de-a00ceb9d2b3c","model_call_id":"be7cfc21-0-ise7","timestamp_ms":1794933848091}
+{"type":"tool_call","subtype":"started","call_id":"call-7f92","tool_call":{"shellToolCall":{"args":{"command":"cat a.txt","workingDirectory":"","timeout":30000,"simpleCommands":["cat"]}}},"session_id":"a5cdd247-d8e9-46e6-89de-a00ceb9d2b3c","timestamp_ms":1794933848100}
+{"type":"tool_call","subtype":"completed","call_id":"call-7f92","tool_call":{"shellToolCall":{"args":{"command":"cat a.txt","workingDirectory":"","timeout":30000},"result":{"success":{"command":"cat a.txt","exitCode":0,"signal":"","stdout":"hello\n","stderr":"","executionTime":442,"interleavedOutput":"hello\n"},"isBackground":false}}},"session_id":"a5cdd247-d8e9-46e6-89de-a00ceb9d2b3c","timestamp_ms":1794933848630}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"PROBE_OK"}]},"session_id":"a5cdd247-d8e9-46e6-89de-a00ceb9d2b3c"}
+{"type":"result","subtype":"success","duration_ms":5375,"duration_api_ms":5375,"is_error":false,"result":"I'll run `cat a.txt`, then reply with exactly `PROBE_OK`.PROBE_OK","session_id":"a5cdd247-d8e9-46e6-89de-a00ceb9d2b3c","request_id":"be7cfc21","usage":{"inputTokens":9682,"outputTokens":85,"cacheReadTokens":17408,"cacheWriteTokens":0,"reasoningTokens":47}}
+"####;
     // Real shell runs, 2026-11-13, Codex 0.167.0 and OpenCode 2.0.32.
     pub const CODEX_TOOL: &str = r####"Reading additional input from stdin...
 OpenAI Codex v0.167.0
@@ -877,6 +945,29 @@ mod tests {
                 Some(fixtures::OTHER_SESSION)
             )
             .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_stream_shows_messages_the_tool_call_and_its_output() {
+        let got = lines(Harness::Cursor, fixtures::CURSOR.as_bytes());
+        let shown: Vec<(LiveKind, &str)> = got.iter().map(|l| (l.kind, l.text.as_str())).collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    LiveKind::Text,
+                    "I'll run `cat a.txt`, then reply with exactly `PROBE_OK`."
+                ),
+                (LiveKind::Tool, "▸ shell cat a.txt"),
+                (LiveKind::Outcome, "hello"),
+                (LiveKind::Text, "PROBE_OK"),
+            ]
         );
     }
 }

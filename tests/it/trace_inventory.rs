@@ -274,6 +274,9 @@ fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
             "swarm-coordinator@muse",
             "native deploy",
             "native silent",
+            "# cursor",
+            "heimdall@cursor",
+            "swarm-coordinator@cursor",
         ]
     );
     assert_eq!(view.selected, 1, "the first selectable row, never a header");
@@ -338,12 +341,12 @@ fn the_skills_view_lists_native_skills_with_their_turns_and_statistics() {
         Some(("heimdall", Harness::Codex))
     );
     assert!(view.clear_filter());
-    assert_eq!(view.rows.len(), 25);
+    assert_eq!(view.rows.len(), 28);
     assert!(!view.clear_filter());
 
     // without a store the view still lists what is on disk
     let bare = SkillsViewState::new(None, &cwd, &home, &home, Some(&skills_dir));
-    assert_eq!(bare.rows.len(), 25);
+    assert_eq!(bare.rows.len(), 28);
     assert!(bare.turns.is_empty());
     assert!(bare.error.as_deref().unwrap().contains("tracing is off"));
 }

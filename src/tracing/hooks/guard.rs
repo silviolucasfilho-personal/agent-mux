@@ -532,6 +532,25 @@ pub fn deny_json(reason: &str) -> String {
     .to_string()
 }
 
+/// Cursor's `preToolUse` reply that refuses the call (probed on the Cursor
+/// CLI 2026.11.13: the call failed with `permission_denied` and the model
+/// reported the block).
+pub fn cursor_deny_json(reason: &str) -> String {
+    json!({
+        "permission": "deny",
+        "user_message": reason,
+        "agent_message": reason,
+    })
+    .to_string()
+}
+
+/// Cursor's `postToolUse` reply that adds context for the model. Its
+/// `preToolUse` has no such field, so urgent bus messages reach a Cursor
+/// session after a tool call, not before one.
+pub fn cursor_context_json(context: &str) -> String {
+    json!({ "additional_context": context }).to_string()
+}
+
 /// The `PreToolUse` reply that permits the call while injecting urgent
 /// inter-agent bus messages into the model's context.
 pub fn allow_with_context_json(context: &str) -> String {

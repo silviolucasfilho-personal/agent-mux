@@ -80,6 +80,14 @@ fn fake_harness(
   printf '{"payload_type":"run.terminal.completed","payload":{"kind":"run_terminal","terminal":"completed","text":"%s"}}\n' "$esc"
 }"#
         }
+        Harness::Cursor => {
+            // stream-json as `cursor-agent --print --output-format stream-json`
+            r#"emit() {
+  esc=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN{ORS="\\n"} {print}' | sed 's/\\n$//')
+  printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]}}\n' "$esc"
+  printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","usage":{"inputTokens":10,"outputTokens":5}}\n' "$esc"
+}"#
+        }
         Harness::Grok | Harness::Pi => unreachable!("not a workflow harness yet"),
     };
     let find_out = if harness == Harness::Codex {

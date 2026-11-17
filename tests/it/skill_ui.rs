@@ -139,7 +139,7 @@ async fn heimdall_is_listed_in_the_library_and_the_picker_defaults_to_its_harnes
     // the item owns the main pane: its card, and full coverage here
     let text = screen(&app);
     assert!(text.contains("Heimdall"));
-    assert!(text.contains("7/7"), "every harness can launch it: {text}");
+    assert!(text.contains("8/8"), "every harness can launch it: {text}");
 
     // Enter opens the Library's harness picker, on the package default
     app.handle_library_key(&key(KeyCode::Enter));
@@ -348,8 +348,8 @@ async fn the_picker_installs_and_launches_on_the_chosen_harness() {
     assert!(text.contains("running [claude]"), "{text}");
     assert_eq!(
         text.matches("not installed").count(),
-        11,
-        "codex, agy, opencode, grok, pi, muse plus swarm-coordinator@claude: {text}"
+        13,
+        "codex, agy, opencode, grok, pi, muse, cursor plus swarm-coordinator@claude: {text}"
     );
     app.kill_all();
 }
@@ -606,6 +606,9 @@ async fn s_opens_the_workbench_grouped_by_harness() {
             "# muse",
             "heimdall@muse",
             "swarm-coordinator@muse",
+            "# cursor",
+            "heimdall@cursor",
+            "swarm-coordinator@cursor",
         ]
     );
     assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
@@ -624,7 +627,7 @@ async fn s_opens_the_workbench_grouped_by_harness() {
     assert_eq!(selected(&app), Some(("heimdall".into(), Harness::Claude)));
 
     let text = screen(&app);
-    assert!(text.contains("Skills (12) [harness: all]"), "{text}");
+    assert!(text.contains("Skills (14) [harness: all]"), "{text}");
     assert!(
         text.contains("Claude Code") && text.contains("Codex CLI"),
         "{text}"
@@ -659,7 +662,7 @@ async fn s_opens_the_workbench_grouped_by_harness() {
     );
     assert!(screen(&app).contains("[harness: codex]"));
     app.execute_command(agent_mux::keymap::ActionId::FilterCodex, Instant::now());
-    assert_eq!(shape(&app).len(), 19);
+    assert_eq!(shape(&app).len(), 22);
     app.execute_command(
         agent_mux::keymap::ActionId::FilterAntigravity,
         Instant::now(),
@@ -669,7 +672,7 @@ async fn s_opens_the_workbench_grouped_by_harness() {
         matches!(app.mode, Mode::SkillsView(_)),
         "Esc cleared the filter first"
     );
-    assert_eq!(shape(&app).len(), 19);
+    assert_eq!(shape(&app).len(), 22);
     app.handle_key(&key(KeyCode::Esc), Instant::now());
     assert!(matches!(app.mode, Mode::Main));
     app.kill_all();

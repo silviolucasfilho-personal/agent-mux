@@ -472,7 +472,7 @@ pub fn profile_for(spec: &RunSpec, profiles: &[Profile]) -> Profile {
         .cloned()
         .unwrap_or_else(|| Profile {
             name: spec.harness.as_str().to_string(),
-            command: spec.harness.as_str().to_string(),
+            command: spec.harness.command().to_string(),
             args: vec![],
             default_dir: None,
             tracing: None,

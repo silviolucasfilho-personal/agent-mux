@@ -143,7 +143,7 @@ impl Field {
     }
 }
 
-const HARNESSES: [&str; 6] = ["", "claude", "codex", "agy", "opencode", "muse"];
+const HARNESSES: [&str; 7] = ["", "claude", "codex", "agy", "opencode", "muse", "cursor"];
 pub(crate) const EFFORTS: [&str; 5] = ["", "low", "medium", "high", "max"];
 
 /// What an inline text edit writes back to.
@@ -206,6 +206,8 @@ pub enum AgentField {
     ModelGrok,
     ModelPi,
     ModelMuse,
+    /// Cursor has no effort field: its effort is part of the model id.
+    ModelCursor,
     EffortCodex,
     EffortAgy,
     EffortGrok,
@@ -215,7 +217,7 @@ pub enum AgentField {
 }
 
 impl AgentField {
-    pub const ALL: [AgentField; 18] = [
+    pub const ALL: [AgentField; 19] = [
         AgentField::Name,
         AgentField::Purpose,
         AgentField::Instructions,
@@ -228,6 +230,7 @@ impl AgentField {
         AgentField::ModelGrok,
         AgentField::ModelPi,
         AgentField::ModelMuse,
+        AgentField::ModelCursor,
         AgentField::EffortCodex,
         AgentField::EffortAgy,
         AgentField::EffortGrok,
@@ -250,7 +253,7 @@ pub struct AgentForm {
     pub tool_cursor: usize,
     pub mcp: TextArea,
     /// One per `agents::HARNESSES`, in its order.
-    pub models: [TextArea; 7],
+    pub models: [TextArea; 8],
     /// Codex's, Antigravity's, Grok's, Pi's and Muse's effort, indexes
     /// into `EFFORTS`, in `effort_slot`'s order.
     pub efforts: [usize; 5],
@@ -259,7 +262,7 @@ pub struct AgentForm {
 }
 
 /// The effort slot of a harness index in `agents::HARNESSES`, or
-/// `None` where the harness takes no effort (Claude, OpenCode). Slot
+/// `None` where the harness takes no effort (Claude, OpenCode, Cursor). Slot
 /// order: codex, agy, grok, pi, muse.
 pub fn effort_slot(harness_idx: usize) -> Option<usize> {
     match harness_idx {
@@ -358,6 +361,7 @@ impl AgentForm {
             AgentField::ModelGrok => Some(&mut self.models[4]),
             AgentField::ModelPi => Some(&mut self.models[5]),
             AgentField::ModelMuse => Some(&mut self.models[6]),
+            AgentField::ModelCursor => Some(&mut self.models[7]),
             _ => None,
         }
     }

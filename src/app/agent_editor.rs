@@ -277,6 +277,7 @@ impl EdField {
                 AgentField::ModelGrok => "Grok model",
                 AgentField::ModelPi => "Pi model",
                 AgentField::ModelMuse => "Muse model",
+                AgentField::ModelCursor => "Cursor model",
                 AgentField::EffortCodex => "Codex effort",
                 AgentField::EffortAgy => "Antigravity effort",
                 AgentField::EffortGrok => "Grok effort",
@@ -321,6 +322,7 @@ impl EdField {
                     | AgentField::ModelGrok
                     | AgentField::ModelPi
                     | AgentField::ModelMuse
+                    | AgentField::ModelCursor
             ),
             EdField::Task(f) => {
                 matches!(f, TaskField::Text | TaskField::Every | TaskField::Workspace)
@@ -419,6 +421,7 @@ impl AgentEditorState {
                                 A::ModelGrok,
                                 A::ModelPi,
                                 A::ModelMuse,
+                                A::ModelCursor,
                                 A::EffortCodex,
                                 A::EffortAgy,
                                 A::EffortGrok,

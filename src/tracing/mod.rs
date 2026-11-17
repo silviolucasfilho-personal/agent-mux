@@ -541,6 +541,13 @@ impl TraceRuntime {
             .or_else(|| home_dir().map(|h| opencode_db::default_db_path(&h)))
     }
 
+    fn cursor_dir(&self) -> PathBuf {
+        self.settings
+            .cursor_dir
+            .clone()
+            .unwrap_or_else(|| correlate::cursor_dir(&self.settings.home))
+    }
+
     fn muse_dir(&self) -> Option<PathBuf> {
         self.settings
             .muse_dir
@@ -565,6 +572,7 @@ impl TraceRuntime {
             Some("antigravity") => Provider::Antigravity,
             Some("opencode") => Provider::OpenCode,
             Some("muse") => Provider::Muse,
+            Some("cursor") => Provider::Cursor,
             Some("none") => return None,
             Some(_) => return None,
             None => match basename(&profile.command) {
@@ -573,6 +581,7 @@ impl TraceRuntime {
                 "agy" => Provider::Antigravity,
                 "opencode" => Provider::OpenCode,
                 "muse" => Provider::Muse,
+                "cursor-agent" | "cursor" => Provider::Cursor,
                 _ => return None,
             },
         };
@@ -700,6 +709,30 @@ impl TraceRuntime {
                     )
                 }
             }
+            Provider::Cursor => {
+                let cursor_dir = self.cursor_dir();
+                // bare `--resume` is a picker: only a value names a chat
+                if let Some(id) = arg_value(&profile.args, "--resume") {
+                    known_session_id = Some(id.to_string());
+                    (
+                        CorrelationSpec::KnownCursor {
+                            session_id: id.to_string(),
+                            cursor_dir,
+                            resume: true,
+                        },
+                        "deterministic",
+                    )
+                } else {
+                    (
+                        CorrelationSpec::WatchCursor {
+                            cursor_dir,
+                            cwd: dir.to_path_buf(),
+                            t0,
+                        },
+                        "watched",
+                    )
+                }
+            }
         };
 
         let (backend, backend_requested) = self.resolve_backend(profile);
@@ -746,6 +779,7 @@ impl TraceRuntime {
             Some("antigravity") => Provider::Antigravity,
             Some("opencode") => Provider::OpenCode,
             Some("muse") => Provider::Muse,
+            Some("cursor") => Provider::Cursor,
             Some("none") => return None,
             Some(_) => return None, // unknown override: fail safe, untraced
             None => match basename(&profile.command) {
@@ -754,6 +788,7 @@ impl TraceRuntime {
                 "agy" => Provider::Antigravity,
                 "opencode" => Provider::OpenCode,
                 "muse" => Provider::Muse,
+                "cursor-agent" | "cursor" => Provider::Cursor,
                 _ => return None,
             },
         };
@@ -932,6 +967,30 @@ impl TraceRuntime {
                     )
                 }
             }
+            Provider::Cursor => {
+                let cursor_dir = self.cursor_dir();
+                // bare `--resume` is a picker: only a value names a chat
+                if let Some(id) = arg_value(&profile.args, "--resume") {
+                    known_session_id = Some(id.to_string());
+                    (
+                        CorrelationSpec::KnownCursor {
+                            session_id: id.to_string(),
+                            cursor_dir,
+                            resume: true,
+                        },
+                        "deterministic",
+                    )
+                } else {
+                    (
+                        CorrelationSpec::WatchCursor {
+                            cursor_dir,
+                            cwd: dir.to_path_buf(),
+                            t0: SystemTime::now(),
+                        },
+                        "watched",
+                    )
+                }
+            }
         };
 
         // Per-launch hook registrations: nothing is written anywhere, and a
@@ -974,6 +1033,12 @@ impl TraceRuntime {
                 Provider::OpenCode => Some("hooks are off for this launch"),
                 Provider::Muse if hooks_wanted => None,
                 Provider::Muse => Some("hooks are off for this launch"),
+                Provider::Cursor
+                    if hooks::install::cursor_status(&self.settings.home, None).installed =>
+                {
+                    None
+                }
+                Provider::Cursor => Some("Cursor needs `agent-mux trace hooks install cursor`"),
             };
             if let Some(why) = why {
                 let _ = self.status_tx.try_send(AppEvent::TraceStatus(format!(
@@ -1044,6 +1109,13 @@ impl TraceRuntime {
                     extra_args.push("-c".into());
                     extra_args.push(hooks::register::muse_cli_arg(&reg));
                     hooks_registered = true;
+                }
+                // Cursor reads hooks only from `hooks.json` files: see
+                // `trace hooks install cursor`. The installed handler finds
+                // this launch through `AGENT_MUX_SESSION_ID`.
+                Provider::Cursor => {
+                    hooks_registered =
+                        hooks::install::cursor_status(&self.settings.home, None).installed;
                 }
             }
         }
@@ -1250,6 +1322,7 @@ impl TraceRuntime {
                 | CorrelationSpec::KnownAntigravity { .. }
                 | CorrelationSpec::KnownOpenCode { resume: true, .. }
                 | CorrelationSpec::KnownMuse { resume: true, .. }
+                | CorrelationSpec::KnownCursor { resume: true, .. }
         );
         let codex_sessions_dir = match &plan.correlation {
             CorrelationSpec::WatchCodex { sessions_dir, .. } => Some(sessions_dir.clone()),
@@ -1260,11 +1333,17 @@ impl TraceRuntime {
             | CorrelationSpec::WatchMuse { data_dir, .. } => Some(data_dir.clone()),
             _ => None,
         };
+        let cursor_dir = match &plan.correlation {
+            CorrelationSpec::KnownCursor { cursor_dir, .. }
+            | CorrelationSpec::WatchCursor { cursor_dir, .. } => Some(cursor_dir.clone()),
+            _ => None,
+        };
         let ctx = PipelineCtx {
             db_path: self.settings.db_path.clone(),
             known_resume,
             codex_sessions_dir,
             muse_data_dir,
+            cursor_dir,
             claims: Arc::clone(&self.claims),
             op_tx: self.writer.tx.clone(),
             dropped: Arc::clone(&self.writer.dropped),
@@ -1349,6 +1428,8 @@ struct PipelineCtx {
     codex_sessions_dir: Option<PathBuf>,
     /// Muse: where to look a hook-announced session id up.
     muse_data_dir: Option<PathBuf>,
+    /// Cursor: where to look a hook-announced chat id up.
+    cursor_dir: Option<PathBuf>,
     claims: Arc<ClaimRegistry>,
     op_tx: std::sync::mpsc::SyncSender<StoreOp>,
     dropped: Arc<AtomicU64>,
@@ -1438,6 +1519,12 @@ struct Pipeline {
     /// Sessions this launch has already followed into, so a chain that
     /// loops back cannot make the pipeline ping-pong between two files.
     followed: HashSet<String>,
+    /// Cursor: a transcript `turn_ended` held back until the `Stop` hook
+    /// brings the turn's usage (only while hooks are arriving).
+    cursor_turn_end: Option<crate::transcript::TranscriptEvent>,
+    /// Cursor: a `Stop` hook that arrived before the transcript lines of
+    /// its turn, and the ticks it has waited for them.
+    cursor_pending_stop: Option<(hooks::HookEvent, u8)>,
 }
 
 impl Pipeline {
@@ -1490,10 +1577,70 @@ impl Pipeline {
         let recv = now_nanos();
         let mut ops = Vec::new();
         for event in events {
+            // Cursor's transcript has no usage: with hooks arriving, the
+            // turn stays open until its `Stop` hook has brought it
+            if self.ctx.provider == Provider::Cursor
+                && self.hook_events > 0
+                && matches!(
+                    event,
+                    crate::transcript::TranscriptEvent::TurnBoundary { .. }
+                )
+            {
+                self.cursor_turn_end = Some(event);
+                continue;
+            }
             ops.extend(self.assembler.feed(event, recv));
         }
         self.send_ops(ops);
         self.flush_warnings();
+    }
+
+    /// How many ticks a Cursor `Stop` waits for its turn's transcript
+    /// lines before its usage is given up.
+    const CURSOR_STOP_TICKS: u8 = 40;
+
+    /// A Cursor `Stop` that came ahead of its turn: applied once the
+    /// transcript has opened the turn.
+    fn retry_cursor_stop(&mut self) {
+        let Some((ev, waited)) = self.cursor_pending_stop.take() else {
+            return;
+        };
+        if self.adopted.is_some() && self.assembler.has_open_turn() {
+            let ops = self.cursor_stop(&ev);
+            self.send_ops(ops);
+            self.flush_warnings();
+        } else if waited < Self::CURSOR_STOP_TICKS {
+            self.cursor_pending_stop = Some((ev, waited + 1));
+        }
+    }
+
+    /// Cursor `Stop` hook: the turn's usage (the transcript has none),
+    /// then the turn's end.
+    fn cursor_stop(&mut self, ev: &hooks::HookEvent) -> Vec<StoreOp> {
+        use crate::transcript::{TranscriptEvent, TurnBoundaryKind};
+        let recv = now_nanos();
+        let mut ops = Vec::new();
+        let usage = hooks::cursor_usage(&ev.payload);
+        if !usage.is_empty() {
+            ops.extend(self.assembler.feed(
+                TranscriptEvent::TokenCount {
+                    usage,
+                    msg_id: ev.turn_key.clone(),
+                    model: ev.model.clone().filter(|m| m != "default"),
+                    ts: None,
+                },
+                recv,
+            ));
+        }
+        let end = self
+            .cursor_turn_end
+            .take()
+            .unwrap_or(TranscriptEvent::TurnBoundary {
+                kind: TurnBoundaryKind::Complete,
+                ts: None,
+            });
+        ops.extend(self.assembler.feed(end, recv));
+        ops
     }
 
     /// Prime (no emission) an existing transcript for Known resumes; always
@@ -1623,6 +1770,11 @@ impl Pipeline {
                 self.ctx.muse_data_dir.as_deref()?,
                 &ann.session_id,
             )?,
+            // Cursor's first hooks carry no transcript path
+            None if self.ctx.provider == Provider::Cursor => correlate::cursor_transcript_by_id(
+                self.ctx.cursor_dir.as_deref()?,
+                &ann.session_id,
+            )?,
             None => return None,
         };
         if !path.is_file() {
@@ -1693,6 +1845,19 @@ impl Pipeline {
                         meta,
                     )));
                 }
+                "Stop" if self.ctx.provider == Provider::Cursor => {
+                    ops.extend(self.assembler.attach_hook_event(ev));
+                    // the transcript lines of this turn are read first
+                    self.send_ops(std::mem::take(&mut ops));
+                    self.tick_tail();
+                    if self.adopted.is_some() && self.assembler.has_open_turn() {
+                        ops.extend(self.cursor_stop(ev));
+                    } else {
+                        // usage with no turn to charge would open an
+                        // empty one: wait for the transcript
+                        self.cursor_pending_stop = Some((ev.clone(), 0));
+                    }
+                }
                 _ => ops.extend(self.assembler.attach_hook_event(ev)),
             }
         }
@@ -1720,6 +1885,7 @@ impl Pipeline {
         self.poll_opencode();
         self.follow_continuation();
         self.poll_agy_usage();
+        self.retry_cursor_stop();
         self.poll_hooks();
         let children = self.assembler.poll_children();
         self.send_ops(children);
@@ -1776,6 +1942,15 @@ impl Pipeline {
                 return;
             };
             let Some(p) = correlate::muse_session_log_by_id(dir, &pending.session_id) else {
+                return; // wait for file to appear
+            };
+            p
+        } else if self.ctx.provider == Provider::Cursor {
+            let Some(dir) = self.ctx.cursor_dir.as_deref() else {
+                self.pending_continuation = None;
+                return;
+            };
+            let Some(p) = correlate::cursor_transcript_by_id(dir, &pending.session_id) else {
                 return; // wait for file to appear
             };
             p
@@ -2034,6 +2209,8 @@ async fn run_pipeline(
         adopted: None,
         claim_guard: None,
         agy_usage: None,
+        cursor_turn_end: None,
+        cursor_pending_stop: None,
         opencode: None,
         hook_feed,
         hook_events: 0,

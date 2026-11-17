@@ -153,8 +153,91 @@ pub enum CorrelationSpec {
         cwd: PathBuf,
         t0: SystemTime,
     },
+    /// Cursor with a known chat id (`--resume <id>`).
+    KnownCursor {
+        session_id: String,
+        /// `~/.cursor`
+        cursor_dir: PathBuf,
+        resume: bool,
+    },
+    /// Cursor chat under
+    /// `<cursor_dir>/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`,
+    /// its folder read from `<cursor_dir>/chats/<hash>/<id>/meta.json`.
+    WatchCursor {
+        cursor_dir: PathBuf,
+        cwd: PathBuf,
+        t0: SystemTime,
+    },
     /// Untraceable launch (e.g. bare `-r` / `--continue` with no id).
     None,
+}
+
+/// Cursor's directory: `<home>/.cursor` (probed on the Cursor CLI
+/// 2026.11.13, which has no variable to move it).
+pub fn cursor_dir(home: &Path) -> PathBuf {
+    home.join(".cursor")
+}
+
+/// The transcript of a Cursor chat:
+/// `<cursor_dir>/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`. The
+/// project slug is not computed (its rule was not probed); every project
+/// folder is looked in.
+pub fn cursor_transcript_by_id(cursor_dir: &Path, session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() || session_id.contains(['/', '\\']) {
+        return None;
+    }
+    let projects = std::fs::read_dir(cursor_dir.join("projects")).ok()?;
+    for project in projects.filter_map(|e| e.ok()) {
+        let candidate = project
+            .path()
+            .join("agent-transcripts")
+            .join(session_id)
+            .join(format!("{session_id}.jsonl"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// The folder a Cursor chat was started in, from its
+/// `chats/<hash>/<id>/meta.json` (`{"cwd": …}`).
+pub fn cursor_chat_cwd(cursor_dir: &Path, session_id: &str) -> Option<String> {
+    let hashes = std::fs::read_dir(cursor_dir.join("chats")).ok()?;
+    for hash in hashes.filter_map(|e| e.ok()) {
+        let meta = hash.path().join(session_id).join("meta.json");
+        let Ok(text) = std::fs::read_to_string(&meta) else {
+            continue;
+        };
+        let cwd = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("cwd").and_then(|c| c.as_str()).map(str::to_owned));
+        if cwd.is_some() {
+            return cwd;
+        }
+    }
+    None
+}
+
+/// Every Cursor transcript on disk, as `(chat id, path)`.
+pub fn cursor_transcripts(cursor_dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(projects) = std::fs::read_dir(cursor_dir.join("projects")) else {
+        return out;
+    };
+    for project in projects.filter_map(|e| e.ok()) {
+        let Ok(chats) = std::fs::read_dir(project.path().join("agent-transcripts")) else {
+            continue;
+        };
+        for chat in chats.filter_map(|e| e.ok()) {
+            let id = chat.file_name().to_string_lossy().into_owned();
+            let path = chat.path().join(format!("{id}.jsonl"));
+            if path.is_file() {
+                out.push((id, path));
+            }
+        }
+    }
+    out
 }
 
 /// Muse's data directory: `$XDG_DATA_HOME/muse` else `<home>/.local/share/muse`.
@@ -632,6 +715,57 @@ pub fn poll_with(
             }
             None
         }
+        CorrelationSpec::KnownCursor {
+            session_id,
+            cursor_dir,
+            resume,
+        } => {
+            let path = cursor_transcript_by_id(cursor_dir, session_id)?;
+            if !try_claim(claims, Provider::Cursor, session_id) {
+                return None;
+            }
+            Some(Adopted {
+                session_id: session_id.clone(),
+                path,
+                correlation: "deterministic",
+                resume_prime: *resume,
+            })
+        }
+        CorrelationSpec::WatchCursor {
+            cursor_dir,
+            cwd,
+            t0,
+        } => {
+            let want_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+            let mut candidates: Vec<(SystemTime, String, PathBuf)> = cursor_transcripts(cursor_dir)
+                .into_iter()
+                .filter(|(_, path)| mtime_in_window(path, *t0))
+                .filter_map(|(id, path)| {
+                    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+                    Some((mtime, id, path))
+                })
+                .collect();
+            // newest first: the chat this launch just started
+            candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
+            for (_, id, path) in candidates {
+                let Some(meta_cwd) = cursor_chat_cwd(cursor_dir, &id) else {
+                    continue;
+                };
+                if !cwd_matches(&meta_cwd, cwd, &want_cwd) {
+                    continue;
+                }
+                if foreign(&id) || !try_claim(claims, Provider::Cursor, &id) {
+                    continue;
+                }
+                return Some(Adopted {
+                    session_id: id,
+                    path,
+                    correlation: "watched",
+                    resume_prime: false,
+                });
+            }
+            None
+        }
         CorrelationSpec::WatchAntigravity {
             root,
             cwd,
@@ -876,6 +1010,64 @@ mod thread_lookup_tests {
         );
         assert_eq!(codex_rollout_by_thread(dir.path(), "nope"), None);
         assert_eq!(codex_rollout_by_thread(dir.path(), ""), None);
+    }
+
+    #[test]
+    fn finds_and_watches_a_cursor_chat_by_id_and_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let cursor = dir.path().join(".cursor");
+        let write = |id: &str, slug: &str, cwd: &Path| -> PathBuf {
+            let t = cursor
+                .join("projects")
+                .join(slug)
+                .join("agent-transcripts")
+                .join(id);
+            std::fs::create_dir_all(&t).unwrap();
+            let path = t.join(format!("{id}.jsonl"));
+            std::fs::write(&path, "{\"role\":\"user\"}\n").unwrap();
+            let chat = cursor.join("chats").join(format!("hash-{slug}")).join(id);
+            std::fs::create_dir_all(&chat).unwrap();
+            std::fs::write(
+                chat.join("meta.json"),
+                serde_json::json!({ "cwd": cwd }).to_string(),
+            )
+            .unwrap();
+            path
+        };
+        let mine = write("chat-1", "ws", &ws);
+        write("chat-2", "other", &other);
+        assert_eq!(
+            cursor_transcript_by_id(&cursor, "chat-1"),
+            Some(mine.clone())
+        );
+        assert_eq!(cursor_transcript_by_id(&cursor, "nope"), None);
+        assert_eq!(cursor_transcript_by_id(&cursor, "../x"), None);
+        assert_eq!(
+            cursor_chat_cwd(&cursor, "chat-2").as_deref(),
+            Some(other.to_string_lossy().as_ref())
+        );
+
+        let claims = ClaimRegistry::default();
+        let mut spec = CorrelationSpec::WatchCursor {
+            cursor_dir: cursor.clone(),
+            cwd: ws,
+            t0: SystemTime::UNIX_EPOCH,
+        };
+        let adopted = poll(&mut spec, Instant::now(), &claims).unwrap();
+        assert_eq!(adopted.session_id, "chat-1");
+        assert_eq!(adopted.path, mine);
+        assert_eq!(adopted.correlation, "watched");
+        // a chat another pipeline holds is not taken twice
+        let mut again = CorrelationSpec::KnownCursor {
+            session_id: "chat-1".into(),
+            cursor_dir: cursor,
+            resume: true,
+        };
+        assert!(poll(&mut again, Instant::now(), &claims).is_none());
     }
 
     #[test]

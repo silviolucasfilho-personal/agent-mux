@@ -867,6 +867,15 @@ impl App {
             Harness::OpenCode => crate::tracing::hooks::register::current_exe().is_some(),
             // Muse hooks attach per launch via `-c hooks=...`
             Harness::Muse => crate::tracing::hooks::register::current_exe().is_some(),
+            // Cursor reads hooks from `~/.cursor/hooks.json` only
+            Harness::Cursor => {
+                let exe = crate::tracing::hooks::register::current_exe();
+                let st = crate::tracing::hooks::install::cursor_status(
+                    &self.skill_home(),
+                    exe.as_deref(),
+                );
+                st.installed && !st.stale
+            }
             Harness::Antigravity | Harness::Grok | Harness::Pi => false,
         }
     }
@@ -1456,13 +1465,20 @@ impl App {
                     args.insert(at + 1, json);
                 }
             }
+            // print mode cannot answer the workspace trust prompt; there
+            // is no per-run budget flag: the loop's own caps and the guard
+            // (the installed hooks, told by `AGENT_MUX_LOOP_ID`) apply
+            Harness::Cursor => {
+                let at = args.len().saturating_sub(2);
+                args.insert(at, "--trust".into());
+            }
             Harness::Antigravity => return Err("Antigravity is not supported for loops".into()),
             Harness::Grok | Harness::Pi => {
                 return Err(format!("{} is not supported for loops", harness.as_str()));
             }
         }
         if Harness::detect(&profile.command) != Some(harness) {
-            profile.command = harness.as_str().to_string();
+            profile.command = harness.command().to_string();
         }
         profile.args = args;
         profile.name = format!("{} ↻ {}", entry.pattern, entry.workspace_name());

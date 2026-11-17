@@ -2999,6 +2999,7 @@ fn provider_badge(provider: &str) -> Span<'static> {
         "antigravity" => Span::styled("[A] ", Style::default().fg(Color::LightCyan)),
         "opencode" => Span::styled("[O] ", Style::default().fg(Color::LightYellow)),
         "muse" => Span::styled("[M] ", Style::default().fg(Color::LightBlue)),
+        "cursor" => Span::styled("[U] ", Style::default().fg(Color::White)),
         _ => Span::raw("[?] "),
     }
 }
@@ -6326,6 +6327,7 @@ fn history_tag(provider: crate::history::AgentProvider) -> &'static str {
         AgentProvider::Grok => "Grok",
         AgentProvider::Pi => "Pi",
         AgentProvider::Muse => "Muse",
+        AgentProvider::Cursor => "Cursor",
         AgentProvider::Claude => "Claude",
         AgentProvider::Antigravity => "AGY",
     }

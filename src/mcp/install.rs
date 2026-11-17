@@ -19,6 +19,17 @@
 //! with `grok mcp doctor`: a variable set on `grok` reached the server), so
 //! `AGENT_MUX_WORKSPACE` scopes it, as for agy. A `GROK_HOME` other than
 //! `~/.grok` is not followed by the status reader.
+//!
+//! Cursor CLI 2026.11.13 (probed 2026-11-17) has no per-launch MCP flag
+//! either: it reads `.cursor/mcp.json` in the project and
+//! `~/.cursor/mcp.json` (`{"mcpServers": {"<name>": {"command", "args",
+//! "env"}}}`), and `cursor-agent mcp` has `list`, `enable` and `disable`
+//! but no `add`. agent-mux therefore writes its entry into
+//! `~/.cursor/mcp.json` itself, keeping every other key, and each launch
+//! passes `--approve-mcps` (without it `cursor-agent mcp list` says "not
+//! loaded (needs approval)"). A probe with a project file and
+//! `--approve-mcps` called `agent_mux_get_health`. The server inherits
+//! the launch's environment, so `AGENT_MUX_WORKSPACE` scopes it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -68,7 +79,7 @@ pub fn grok_config_path(home: &Path) -> PathBuf {
     home.join(".grok").join("config.toml")
 }
 
-/// An installed entry's state, for agy or Grok.
+/// An installed entry's state, for agy, Grok or Cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpEntryStatus {
     /// The harness command (`agy`, `grok`), for the advice in `note`.
@@ -114,7 +125,8 @@ impl McpEntryStatus {
         }
         let mut parts = Vec::new();
         if self.disabled {
-            parts.push(format!("disabled ({h} mcp enable agent-mux)"));
+            let bin = if h == "cursor" { "cursor-agent" } else { h };
+            parts.push(format!("disabled ({bin} mcp enable agent-mux)"));
         }
         if !self.current {
             parts.push(format!(
@@ -130,9 +142,93 @@ impl McpEntryStatus {
     }
 }
 
+pub fn cursor_config_path(home: &Path) -> PathBuf {
+    home.join(".cursor").join("mcp.json")
+}
+
+/// The `mcpServers.agent-mux` entry of `~/.cursor/mcp.json`.
+pub fn cursor_status(home: &Path, exe: Option<&Path>) -> McpEntryStatus {
+    json_entry_status("cursor", cursor_config_path(home), exe)
+}
+
+/// Writes the entry into `~/.cursor/mcp.json`, keeping everything else
+/// in the file. A file that is not a JSON object is left alone.
+pub fn install_cursor(exe: &Path, home: &Path) -> Result<String, String> {
+    let path = cursor_config_path(home);
+    let mut doc = match std::fs::read_to_string(&path) {
+        Ok(text) if text.trim().is_empty() => serde_json::Map::new(),
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(serde_json::Value::Object(m)) => m,
+            Ok(_) => return Err(format!("{} is not a JSON object", path.display())),
+            Err(e) => return Err(format!("{} is not valid JSON: {e}", path.display())),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    let servers = doc
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(servers) = servers.as_object_mut() else {
+        return Err(format!("{}: mcpServers is not an object", path.display()));
+    };
+    servers.insert(
+        super::SERVER_NAME.into(),
+        serde_json::json!({
+            "command": exe.to_string_lossy(),
+            "args": installed_argv(),
+        }),
+    );
+    write_json_object(&path, doc)?;
+    Ok(format!("wrote the agent-mux entry to {}", path.display()))
+}
+
+/// Removes the entry from `~/.cursor/mcp.json`; the file stays.
+pub fn uninstall_cursor(home: &Path) -> Result<String, String> {
+    let path = cursor_config_path(home);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok("nothing installed".into());
+    };
+    let Ok(serde_json::Value::Object(mut doc)) = serde_json::from_str(&text) else {
+        return Err(format!("{} is not a JSON object", path.display()));
+    };
+    let removed = doc
+        .get_mut("mcpServers")
+        .and_then(|s| s.as_object_mut())
+        .and_then(|s| s.remove(super::SERVER_NAME))
+        .is_some();
+    if !removed {
+        return Ok("no agent-mux entry found".into());
+    }
+    write_json_object(&path, doc)?;
+    Ok(format!(
+        "removed the agent-mux entry from {}",
+        path.display()
+    ))
+}
+
+fn write_json_object(
+    path: &Path,
+    doc: serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(doc))
+        .map_err(|e| e.to_string())?
+        + "\n";
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename to {}: {e}", path.display()))
+}
+
 pub fn agy_status(home: &Path, exe: Option<&Path>) -> AgyMcpStatus {
-    let path = agy_config_path(home);
-    let mut status = McpEntryStatus::empty("agy", path.clone());
+    json_entry_status("agy", agy_config_path(home), exe)
+}
+
+/// An `mcpServers.agent-mux` entry of a JSON file (agy and Cursor share
+/// the shape).
+fn json_entry_status(harness: &'static str, path: PathBuf, exe: Option<&Path>) -> McpEntryStatus {
+    let mut status = McpEntryStatus::empty(harness, path.clone());
     let Ok(text) = std::fs::read_to_string(&path) else {
         return status;
     };
@@ -261,7 +357,7 @@ pub fn uninstall_grok(home: &Path) -> Result<String, String> {
     run_tool(&grok_bin(home), &["mcp", "remove", super::SERVER_NAME])
 }
 
-/// `agent-mux mcp install|uninstall|status [claude|codex|agy|opencode|grok|pi]`.
+/// `agent-mux mcp install|uninstall|status [claude|codex|agy|opencode|grok|pi|muse|cursor]`.
 pub fn cli(args: &[String]) -> anyhow::Result<()> {
     let action = args.first().map(String::as_str).unwrap_or("status");
     let provider = args.get(1).map(String::as_str).map(|p| match p {
@@ -301,17 +397,33 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
             println!("{message}");
             Ok(())
         }
+        ("install", Some("cursor")) => {
+            let exe = exe.ok_or_else(|| anyhow::anyhow!("cannot locate this binary"))?;
+            let message = install_cursor(&exe, &home).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{message}");
+            println!(
+                "agent-mux starts Cursor with --approve-mcps, so the server loads unprompted."
+            );
+            Ok(())
+        }
+        ("uninstall", Some("cursor")) => {
+            let message = uninstall_cursor(&home).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{message}");
+            Ok(())
+        }
         ("install", _) | ("uninstall", _) => anyhow::bail!(
-            "only agy and grok need an installed entry; Claude Code, Codex, OpenCode, Pi and Muse are registered per launch\n\n{}",
+            "only agy, grok and cursor need an installed entry; Claude Code, Codex, OpenCode, Pi and Muse are registered per launch\n\n{}",
             super::USAGE
         ),
         ("status", provider) => {
-            let all = ["claude", "codex", "agy", "opencode", "grok", "pi", "muse"];
+            let all = [
+                "claude", "codex", "agy", "opencode", "grok", "pi", "muse", "cursor",
+            ];
             let providers: Vec<&str> = match provider {
                 Some(p) if all.contains(&p) => vec![p],
                 Some(p) => {
                     anyhow::bail!(
-                        "unknown provider {p:?}: claude, codex, agy, opencode, grok, pi or muse"
+                        "unknown provider {p:?}: claude, codex, agy, opencode, grok, pi, muse or cursor"
                     )
                 }
                 None => all.to_vec(),
@@ -340,6 +452,10 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
                         let st = grok_status(&home, exe.as_deref());
                         println!("grok: {}", st.note());
                     }
+                    "cursor" => {
+                        let st = cursor_status(&home, exe.as_deref());
+                        println!("cursor: {}", st.note());
+                    }
                     _ => {
                         let st = agy_status(&home, exe.as_deref());
                         println!("agy: {}", st.note());
@@ -355,6 +471,43 @@ pub fn cli(args: &[String]) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_entry_is_merged_into_the_users_file_and_removed_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let exe = Path::new("/x/agent-mux");
+        assert!(!cursor_status(home, Some(exe)).installed);
+        let path = cursor_config_path(home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"mine":{"url":"https://example.com/mcp"}},"other":1}"#,
+        )
+        .unwrap();
+        install_cursor(exe, home).unwrap();
+        let st = cursor_status(home, Some(exe));
+        assert!(st.installed && st.current && st.usable(), "{st:?}");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["mcpServers"]["mine"]["url"], "https://example.com/mcp");
+        assert_eq!(doc["other"], 1);
+        assert_eq!(
+            doc["mcpServers"]["agent-mux"]["args"][3],
+            "--workspace-from-env"
+        );
+        // another binary's entry is stale
+        assert!(!cursor_status(home, Some(Path::new("/y/agent-mux"))).current);
+        uninstall_cursor(home).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(doc["mcpServers"].get("agent-mux").is_none());
+        assert_eq!(doc["mcpServers"]["mine"]["url"], "https://example.com/mcp");
+        // a file that is not an object is not overwritten
+        std::fs::write(&path, "[]").unwrap();
+        assert!(install_cursor(exe, home).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+    }
 
     #[test]
     fn status_reads_the_agy_file_shape() {

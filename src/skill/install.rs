@@ -58,6 +58,11 @@ pub fn skills_root(harness: Harness, home: &Path) -> Option<PathBuf> {
         Harness::Grok => Some(grok_home(home).join("skills")),
         Harness::Pi => Some(pi_agent_dir(home).join("skills")),
         Harness::Muse => Some(muse_config_dir(home).join("skills")),
+        // Cursor CLI 2026.11.13 (probed 2026-11-17): a skill written to
+        // `~/.cursor/skills/<name>/SKILL.md` answered `/<name>` in print
+        // mode. `~/.cursor/skills-cursor/` is Cursor's own and is not
+        // touched.
+        Harness::Cursor => Some(home.join(".cursor").join("skills")),
     }
 }
 
@@ -125,6 +130,7 @@ pub fn project_skills_root(harness: Harness, workspace: &Path) -> Option<PathBuf
         Harness::Grok => Some(workspace.join(".grok").join("skills")),
         Harness::Pi => Some(workspace.join(".pi").join("skills")),
         Harness::Muse => Some(workspace.join(".agents").join("skills")),
+        Harness::Cursor => Some(workspace.join(".cursor").join("skills")),
     }
 }
 

@@ -26,7 +26,7 @@ agent-mux ships **Heimdall**, a skill that briefs you on active sessions and eva
 | :--- | :--- | :--- |
 | `name` | id capitalized | Display name in the sidebar and the session name `<name> (<harness>)`. |
 | `icon` | `⚡` | Sidebar icon. |
-| `harnesses` | all | Harnesses offered in the picker: `claude`, `codex`, `agy`, `opencode`, `grok`, `pi`, `muse` (default: every harness agent-mux installs skills for). |
+| `harnesses` | all | Harnesses offered in the picker: `claude`, `codex`, `agy`, `opencode`, `grok`, `pi`, `muse`, `cursor` (default: every harness agent-mux installs skills for). |
 | `default_harness` | first | Preselected in the picker; must be in `harnesses`. |
 | `capabilities` | none | `trace.read` switches the preview pane to the telemetry dashboard. |
 | `startup_prompt` | none | Appended to the invocation as the session's first message. |
@@ -57,6 +57,7 @@ Verified against the installed CLIs (Claude Code 2.1.x, Codex CLI 0.154.x, Antig
 | Grok | `~/.grok/skills/<name>/SKILL.md` (`$GROK_HOME/skills/`; project level `.grok/skills/`, read only in a folder the user trusted) | `/<name>` slash command, including as the positional opening prompt. Grok also reads `.agents/skills/`, `.claude/skills/` and `.cursor/skills/`, deduplicated by name. |
 | Pi | `~/.pi/agent/skills/<name>/SKILL.md` (`$PI_CODING_AGENT_DIR/skills/`; project level `.pi/skills/`) | `/skill:<name>`, which pi expands into the skill's body, including in the positional opening prompt. Pi also reads `~/.agents/skills/` and `.agents/skills/`. |
 | Muse | `~/.config/muse/skills/<name>/SKILL.md` (`$XDG_CONFIG_HOME/muse/skills/`; project level `.agents/skills/` and `.claude/skills/`) | `/<name>` slash command, including as the positional opening prompt. |
+| Cursor | `~/.cursor/skills/<name>/SKILL.md` (project level `.cursor/skills/`; `~/.cursor/skills-cursor/` is Cursor's own and is left alone) | `/<name>` slash command, including as the positional opening prompt (`docs/cursor.md`). |
 
 DeepSeek has no harness in agent-mux yet (`dsh 0.2.2-rc.1` was probed but deferred), so it has no skill directory or invocation. Note also what is not yet supported for Grok and Pi: while both support skill installation and MCP registration, sessions running on Grok or Pi do not have tracing pipelines yet, so turn-level telemetry and tool events will not appear in the Skills view Executions tab.
 
@@ -64,7 +65,7 @@ The installed `SKILL.md` is the canonical file with one difference: the descript
 
 ## 4. Launching from the Library
 
-Every package is listed in the Library's skills section (`o` in the Agents list), with its harness coverage (`n/7` of the seven harnesses); Enter opens the harness picker, which lists every available harness as Ready, Degraded or Blocked with its reason — a package whose `skill.toml` restricts `harnesses` shows that restriction there instead of silently offering fewer harnesses. The Skills view (`S`) keeps the per-harness install state and executions. The session a launch starts is a row under its skill in the Library, with its terminal in the main pane (`Enter` types into it); it is not listed in the Agents sidebar unless `[agents] show_library = true`. On confirm agent-mux:
+Every package is listed in the Library's skills section (`o` in the Agents list), with its harness coverage (`n/8` of the eight harnesses); Enter opens the harness picker, which lists every available harness as Ready, Degraded or Blocked with its reason — a package whose `skill.toml` restricts `harnesses` shows that restriction there instead of silently offering fewer harnesses. The Skills view (`S`) keeps the per-harness install state and executions. The session a launch starts is a row under its skill in the Library, with its terminal in the main pane (`Enter` types into it); it is not listed in the Agents sidebar unless `[agents] show_library = true`. On confirm agent-mux:
 
 1. installs or refreshes the skill in that harness's directory (manifest hash check; unchanged packages are left alone),
 2. builds the harness command line: the model from your profile for that harness and the permission flags from your profile or the package's `auto_approve`, then the opening prompt `<invocation> <startup_prompt>` as the positional prompt (Claude Code, Codex, Grok, Pi, Muse), via `--prompt-interactive` (Antigravity) or via `--prompt` (OpenCode),
@@ -102,7 +103,7 @@ For an agent-mux package, `e` opens its `SKILL.md` in the configured external ed
 ```sh
 agent-mux skill list                          # compiled-in and ~/.agent-mux/skills packages
 agent-mux skill show heimdall --harness codex # SKILL.md as written for that harness
-agent-mux skill install heimdall [--harness claude|codex|agy|opencode|grok|pi|muse|all] [--force]
+agent-mux skill install heimdall [--harness claude|codex|agy|opencode|grok|pi|muse|cursor|all] [--force]
 agent-mux skill uninstall heimdall [--harness …]
 agent-mux skill status [heimdall]             # installed / stale / not managed, per harness
 agent-mux skill import <dir> [--force]        # bring a package written for one harness into ~/.agent-mux/skills

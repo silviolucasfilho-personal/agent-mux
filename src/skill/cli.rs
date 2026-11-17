@@ -11,7 +11,7 @@ fn harness_args(args: &[String]) -> Result<Vec<Harness>, String> {
     while i < args.len() {
         if args[i] == "--harness" {
             let v = args.get(i + 1).ok_or(
-                "--harness needs a value: claude, codex, agy, opencode, grok, pi, muse or all",
+                "--harness needs a value: claude, codex, agy, opencode, grok, pi, muse, cursor or all",
             )?;
             if v == "all" {
                 out.extend(Harness::ALL);
@@ -86,7 +86,7 @@ pub fn handle_skill_cli(args: &[String]) -> Result<(), String> {
         }
         "install" => {
             let id = args.get(1).ok_or(
-                "usage: agent-mux skill install <id> [--harness claude|codex|agy|opencode|grok|pi|muse|all] [--force]",
+                "usage: agent-mux skill install <id> [--harness claude|codex|agy|opencode|grok|pi|muse|cursor|all] [--force]",
             )?;
             let def = find(id)?;
             let force = args.iter().any(|a| a == "--force");
@@ -128,7 +128,7 @@ pub fn handle_skill_cli(args: &[String]) -> Result<(), String> {
         "uninstall" => {
             let id = args
                 .get(1)
-                .ok_or("usage: agent-mux skill uninstall <id> [--harness claude|codex|agy|opencode|grok|pi|muse|all]")?;
+                .ok_or("usage: agent-mux skill uninstall <id> [--harness claude|codex|agy|opencode|grok|pi|muse|cursor|all]")?;
             let mut targets = harness_args(&args[2..])?;
             if targets.is_empty() {
                 targets = Harness::ALL.to_vec();

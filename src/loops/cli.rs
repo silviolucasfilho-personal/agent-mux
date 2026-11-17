@@ -148,6 +148,11 @@ fn guard_available(harness: Harness, home: &Path) -> bool {
         Harness::OpenCode => exe.is_some(),
         // Muse hooks attach per launch via `-c hooks=...`
         Harness::Muse => exe.is_some(),
+        // Cursor reads hooks from `~/.cursor/hooks.json` only
+        Harness::Cursor => {
+            let st = crate::tracing::hooks::install::cursor_status(home, exe.as_deref());
+            st.installed && !st.stale
+        }
         Harness::Antigravity | Harness::Grok | Harness::Pi => false,
     }
 }
@@ -175,7 +180,10 @@ fn parse_harness(s: &str) -> anyhow::Result<Harness> {
         "agy" | "antigravity" => anyhow::bail!("Antigravity is not supported for loops"),
         "opencode" | "open-code" => Ok(Harness::OpenCode),
         "muse" | "muse-code" => Ok(Harness::Muse),
-        other => anyhow::bail!("unknown harness {other:?}: claude, codex, opencode or muse"),
+        "cursor" | "cursor-agent" => Ok(Harness::Cursor),
+        other => {
+            anyhow::bail!("unknown harness {other:?}: claude, codex, opencode, muse or cursor")
+        }
     }
 }
 

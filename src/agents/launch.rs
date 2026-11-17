@@ -39,6 +39,14 @@
 //!   the names its own system prompt lists). A live persona probe was
 //!   not possible: this machine's default Pi model is rejected by its
 //!   provider, so the flags rest on `--help` alone.
+//! - Cursor CLI 2026.11.13 (probed 2026-11-17, `cursor-agent --help` and
+//!   live print-mode runs): there is no flag for instructions, and the CLI
+//!   reads custom agents only as sub-agents from the project's
+//!   `.cursor/agents/`. The instructions therefore open the session's
+//!   first message (`LaunchPlan::preamble`). `--mode ask` is read-only: a
+//!   probe read a file, and was refused a write and a `touch` ("Ask mode
+//!   blocks writes and non-readonly shell"). An agent without `edit` gets
+//!   it in place of `--force`; the rest of the tool list is advisory.
 
 use super::{AgentSpec, Tool};
 use crate::harness::Harness;
@@ -63,6 +71,20 @@ pub struct LaunchPlan {
     /// The agent's model and effort on this harness; a step's own win.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// Text put ahead of the session's first message, on a harness with
+    /// no flag for instructions (Cursor).
+    pub preamble: Option<String>,
+}
+
+impl LaunchPlan {
+    /// `message` with the preamble ahead of it.
+    pub fn with_preamble(&self, message: &str) -> String {
+        match self.preamble.as_deref() {
+            Some(p) if message.trim().is_empty() => p.to_string(),
+            Some(p) => format!("{p}\n\n{message}"),
+            None => message.to_string(),
+        }
+    }
 }
 
 /// Claude Code's tool names for a canonical tool.
@@ -255,6 +277,28 @@ pub fn tool_notes(spec: &AgentSpec, harness: Harness) -> Vec<(Level, String)> {
                     .to_string(),
             ));
         }
+        Harness::Cursor => {
+            if tools.contains(&Tool::Edit) {
+                out.push((
+                    Level::Warning,
+                    "cursor: the tool list is not enforced; the agent's instructions carry it"
+                        .to_string(),
+                ));
+            } else {
+                out.push((
+                    Level::Warning,
+                    "cursor: without `edit` the session runs in ask mode (no writes, no shell command that changes anything); the rest of the tool list is not enforced".to_string(),
+                ));
+            }
+            for t in tools {
+                if let Tool::Mcp(s) = t {
+                    out.push((
+                        Level::Warning,
+                        format!("cursor: mcp:{s} must be configured in ~/.cursor/mcp.json or .cursor/mcp.json"),
+                    ));
+                }
+            }
+        }
         Harness::Pi => {
             for t in tools {
                 match t {
@@ -346,6 +390,21 @@ pub fn plan(spec: &AgentSpec, harness: Harness) -> LaunchPlan {
                 out.args.push(spec.instructions.clone());
             }
         }
+        Harness::Cursor => {
+            if !spec.instructions.trim().is_empty() {
+                out.preamble = Some(format!(
+                    "You are the agent \"{}\". Follow these instructions for the whole session:\n\n{}",
+                    spec.name,
+                    spec.instructions.trim()
+                ));
+            }
+            if !spec.can(&Tool::Edit) {
+                out.args.push("--mode".into());
+                out.args.push("ask".into());
+                out.remove.push("--force".into());
+                out.remove.push("--yolo".into());
+            }
+        }
         Harness::Pi => {
             if !spec.instructions.trim().is_empty() {
                 out.args.push("--append-system-prompt".into());
@@ -366,6 +425,27 @@ pub fn plan(spec: &AgentSpec, harness: Harness) -> LaunchPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_opens_with_the_instructions_and_reads_only_without_edit() {
+        let p = plan(&spec("tools = [\"read\", \"shell\"]"), Harness::Cursor);
+        assert_eq!(p.args, ["--mode", "ask"]);
+        assert!(p.remove.contains(&"--force".to_string()));
+        let opening = p.with_preamble("Review the diff.");
+        assert!(opening.starts_with("You are the agent \"reviewer\"."));
+        assert!(opening.contains("Say \"hi\".\nThen stop."));
+        assert!(opening.ends_with("\n\nReview the diff."));
+        // an editing agent keeps the harness's own mode
+        let p = plan(&spec("tools = [\"read\", \"edit\"]"), Harness::Cursor);
+        assert!(p.args.is_empty() && p.remove.is_empty());
+        assert!(
+            tool_notes(&spec("tools = [\"read\", \"edit\"]"), Harness::Cursor)
+                .iter()
+                .any(|(_, n)| n.contains("not enforced"))
+        );
+        // no preamble elsewhere: the message is untouched
+        assert_eq!(plan(&spec(""), Harness::Claude).with_preamble("x"), "x");
+    }
 
     fn spec(tools: &str) -> AgentSpec {
         AgentSpec::parse(&format!(

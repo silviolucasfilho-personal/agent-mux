@@ -18,7 +18,7 @@
 //!   back here (`App::library_return`, `App::library_resume`).
 //!
 //! The coverage reader in this module is the one source of truth for
-//! "can this item run on this harness": the tree's `n/7`, the Harnesses
+//! "can this item run on this harness": the tree's `n/8`, the Harnesses
 //! tab and the picker all read it.
 
 use super::{App, Mode, Notice};
@@ -73,7 +73,7 @@ impl Verdict {
 /// Whether `h`'s binary resolves here (`PATH` or its installer's
 /// fallback path, the rule `session::command_available` already uses).
 pub fn available(h: Harness) -> bool {
-    crate::session::command_available(h.as_str())
+    crate::session::command_available(h.command())
 }
 
 /// Every harness, in `Harness::ALL` order, with its availability.
@@ -567,7 +567,7 @@ impl App {
         }
     }
 
-    /// The verdicts behind an item's `n/7`, its Harnesses tab and its
+    /// The verdicts behind an item's `n/8`, its Harnesses tab and its
     /// picker — one reader, so the three never disagree.
     pub fn library_verdicts(&self, item: &Item) -> Vec<(Harness, Verdict)> {
         match item {
@@ -1490,7 +1490,7 @@ mod tests {
             (Harness::Grok, Verdict::Blocked("no".into())),
             (Harness::Pi, Verdict::NotInstalled),
         ];
-        assert_eq!(coverage(&vs), (2, 7));
+        assert_eq!(coverage(&vs), (2, 8));
         assert!(Verdict::Degraded(vec![]).launchable());
         assert!(!Verdict::Blocked("x".into()).launchable());
         assert_eq!(Verdict::NotInstalled.label(), "Not installed");

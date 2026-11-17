@@ -186,7 +186,9 @@ pub fn normalize(provider: Provider, raw: &[(String, i64)]) -> NormalizedUsage {
             }
         }
         // Anthropic semantics; Antigravity `-p` shapes are not modeled.
-        Provider::Claude | Provider::Antigravity => {
+        // Cursor's `stop` hook counts arrive under these names
+        // (`hooks::cursor_usage`).
+        Provider::Claude | Provider::Antigravity | Provider::Cursor => {
             let input = get(raw, "input_tokens");
             let cache_read = get(raw, "cache_read_input_tokens");
             let w5 = get(raw, "cache_creation.ephemeral_5m_input_tokens");

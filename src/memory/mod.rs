@@ -43,11 +43,12 @@ pub const LAUNCHD_LABEL: &str = "com.github.akitaonrails.ai-memory";
 /// The name of ai-memory's MCP entry in each harness.
 pub const MCP_NAME: &str = "ai-memory";
 /// The harnesses agent-mux wires, in order.
-pub const HARNESSES: [Harness; 4] = [
+pub const HARNESSES: [Harness; 5] = [
     Harness::Claude,
     Harness::Codex,
     Harness::Antigravity,
     Harness::OpenCode,
+    Harness::Cursor,
 ];
 
 /// ai-memory's name for a harness (`--agent` / `--client`).
@@ -63,6 +64,9 @@ pub fn agent_name(h: Harness) -> &'static str {
         Harness::Grok => "grok",
         Harness::Pi => "pi",
         Harness::Muse => "muse",
+        // ai-memory 2.6.7 (`install-hooks --help`, read 2026-11-17): hooks
+        // in `~/.cursor/hooks.json`, the file the Cursor CLI reads too
+        Harness::Cursor => "cursor",
     }
 }
 
@@ -76,6 +80,7 @@ pub fn label(h: Harness) -> &'static str {
         Harness::Grok => "Grok",
         Harness::Pi => "Pi",
         Harness::Muse => "Muse Code",
+        Harness::Cursor => "Cursor",
     }
 }
 
@@ -275,6 +280,10 @@ pub fn config_files(home: &Path, h: Harness) -> (PathBuf, PathBuf) {
                 dir.join("opencode.json"),
                 dir.join("plugins").join("ai-memory-opencode2.ts"),
             )
+        }
+        Harness::Cursor => {
+            let dir = home.join(".cursor");
+            (dir.join("mcp.json"), dir.join("hooks.json"))
         }
         // not wired (not in `HARNESSES`): no files, so nothing reads as set up
         Harness::Grok | Harness::Pi | Harness::Muse => (PathBuf::new(), PathBuf::new()),
