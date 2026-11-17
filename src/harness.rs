@@ -60,6 +60,24 @@
 //! `--yolo` (skips approvals + sandbox + trusts workspace for the run), and
 //! `--trust-workspace` (trusts workspace for skills/rules/MCPs for this run).
 //!
+//! Cursor CLI 2026.11.13-eacade1 (`cursor-agent`, also installed as
+//! `agent`, both symlinks in `~/.local/bin`; probed 2026-11-17 with
+//! `--help`, the help of its subcommands and live runs in a temporary
+//! folder): `cursor-agent [options] [prompt…]`, the positional being the
+//! opening message. `--continue` continues the previous session,
+//! `--resume [chatId]` resumes one (bare: a picker); there is no fork.
+//! `cursor-agent create-chat` prints the id of a new empty chat, which
+//! `--resume <id>` then uses: the only way to name a new conversation.
+//! `--model <id>` (ids from `cursor-agent models`; effort is part of the
+//! id or a bracket parameter, there is no effort flag), `-f`/`--force`
+//! (alias `--yolo`: run every command unless denied), `--trust` (trust the
+//! workspace without the prompt), `--approve-mcps`, `--mode plan|ask`
+//! (read-only), `-p`/`--print` one-shot with `--output-format
+//! text|json|stream-json` (the prompt stays positional). The harness is
+//! named `cursor` and its program is `cursor-agent` (`Harness::command`),
+//! the one harness whose two differ; `agent` is too general a name to
+//! claim.
+//!
 //! Not yet supported: DeepSeek Harness (`dsh` 0.2.2-rc.1, Homebrew cask
 //! `deepseek-harness`, launcher at `/Applications/DeepSeek
 //! Harness.app/Contents/Resources/runtime/cli/bin/dsh`; probed 2026-11-10
@@ -84,6 +102,7 @@ pub enum Harness {
     Grok,
     Pi,
     Muse,
+    Cursor,
 }
 
 impl Harness {
@@ -104,11 +123,22 @@ impl Harness {
             "grok" => Some(Harness::Grok),
             "pi" => Some(Harness::Pi),
             s if s == "muse" || s.starts_with("muse-bin") => Some(Harness::Muse),
+            // its program, and its name in documents and `--harness`
+            "cursor-agent" | "cursor" => Some(Harness::Cursor),
             _ => None,
         }
     }
 
-    pub const ALL: [Harness; 7] = [
+    /// The program a launch runs: the name, except on Cursor, whose CLI
+    /// is `cursor-agent` (`cursor` is the editor's launcher).
+    pub fn command(&self) -> &'static str {
+        match self {
+            Harness::Cursor => "cursor-agent",
+            other => other.as_str(),
+        }
+    }
+
+    pub const ALL: [Harness; 8] = [
         Harness::Claude,
         Harness::Codex,
         Harness::Antigravity,
@@ -116,6 +146,7 @@ impl Harness {
         Harness::Grok,
         Harness::Pi,
         Harness::Muse,
+        Harness::Cursor,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -127,6 +158,7 @@ impl Harness {
             Harness::Grok => "grok",
             Harness::Pi => "pi",
             Harness::Muse => "muse",
+            Harness::Cursor => "cursor",
         }
     }
 
@@ -147,6 +179,7 @@ impl Harness {
             Harness::Grok => "Grok (grok)",
             Harness::Pi => "Pi (pi)",
             Harness::Muse => "Muse Code (muse)",
+            Harness::Cursor => "Cursor CLI (cursor-agent)",
         }
     }
 
@@ -156,7 +189,12 @@ impl Harness {
     /// directory). A one-shot prompt is `LaunchOptions::one_shot`.
     pub fn opening_args(self, message: String) -> Vec<String> {
         match self {
-            Harness::Claude | Harness::Codex | Harness::Grok | Harness::Pi | Harness::Muse => {
+            Harness::Claude
+            | Harness::Codex
+            | Harness::Grok
+            | Harness::Pi
+            | Harness::Muse
+            | Harness::Cursor => {
                 vec![message]
             }
             Harness::Antigravity => vec!["--prompt-interactive".into(), message],
@@ -187,6 +225,7 @@ impl std::str::FromStr for Harness {
             "grok" => Ok(Harness::Grok),
             "pi" | "pi-coding-agent" => Ok(Harness::Pi),
             "muse" | "muse-code" => Ok(Harness::Muse),
+            "cursor" | "cursor-agent" | "cursor-cli" => Ok(Harness::Cursor),
             other => Err(format!("unknown harness '{other}'")),
         }
     }
@@ -465,6 +504,30 @@ impl LaunchOptions {
                     out.trailing.push(prompt.to_string());
                 }
             }
+            Harness::Cursor => {
+                match &self.resume {
+                    // no fork: `handoff` hands the transcript over instead
+                    Resume::Off | Resume::Fork(_) => {}
+                    // bare `--resume` opens a picker
+                    Resume::Last => out.trailing.push("--continue".into()),
+                    Resume::Id(id) => {
+                        out.trailing.push("--resume".into());
+                        out.trailing.push(id.clone());
+                    }
+                }
+                if let Some(model) = self.model() {
+                    out.trailing.push("--model".into());
+                    out.trailing.push(model.to_string());
+                }
+                if self.bypass_approvals {
+                    out.trailing.push("--force".into());
+                }
+                if let Some(prompt) = prompt {
+                    // `--print` is a switch; the prompt is positional
+                    out.trailing.push("--print".into());
+                    out.trailing.push(prompt.to_string());
+                }
+            }
         }
         out
     }
@@ -527,6 +590,8 @@ fn without_resume(harness: Harness, args: &[String]) -> Vec<String> {
     }
     let valued: &[&str] = match harness {
         Harness::Claude | Harness::Grok => &["--resume", "-r"],
+        // bare `--resume` is a picker, dropped with or without a value
+        Harness::Cursor => &["--resume"],
         Harness::OpenCode => &["--session", "-s"],
         // pi's `--resume`/`-r` is a bare picker, dropped as a switch
         Harness::Pi => &["--session", "--fork"],
@@ -1115,6 +1180,69 @@ mod tests {
         assert_eq!(
             compose(&profile_args, &o.render(Harness::Claude)),
             vec!["--search", "--dangerously-skip-permissions", "-p", "go"]
+        );
+    }
+
+    #[test]
+    fn cursor_spells_resume_approvals_and_one_shot() {
+        assert_eq!(Harness::detect("cursor-agent"), Some(Harness::Cursor));
+        assert_eq!(
+            Harness::detect("/Users/me/.local/bin/cursor-agent"),
+            Some(Harness::Cursor)
+        );
+        // `agent` is the CLI's other name, and too general to claim
+        assert_eq!(Harness::detect("agent"), None);
+        // the name parses too, and the program is never the editor's
+        assert_eq!(Harness::detect("cursor"), Some(Harness::Cursor));
+        assert_eq!(Harness::Cursor.command(), "cursor-agent");
+        assert_eq!(Harness::Claude.command(), "claude");
+        assert_eq!(Harness::Cursor.as_str(), "cursor");
+        assert_eq!(Harness::Cursor.store_provider(), "cursor");
+        assert_eq!("cursor".parse::<Harness>(), Ok(Harness::Cursor));
+        assert_eq!("cursor-agent".parse::<Harness>(), Ok(Harness::Cursor));
+        assert!(Harness::ALL.contains(&Harness::Cursor));
+        assert_eq!(Harness::Cursor.opening_args("hi".into()), ["hi"]);
+        assert!(!can_fork(Harness::Cursor));
+
+        let o = LaunchOptions {
+            model: Some("composer-2.5".into()),
+            bypass_approvals: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            rendered(&o, Harness::Cursor),
+            ["--model", "composer-2.5", "--force"]
+        );
+        let last = LaunchOptions {
+            resume: Resume::Last,
+            ..Default::default()
+        };
+        assert_eq!(rendered(&last, Harness::Cursor), ["--continue"]);
+        assert_eq!(resume_args(Harness::Cursor, "abc"), ["--resume", "abc"]);
+        let fork = LaunchOptions {
+            resume: Resume::Fork("abc".into()),
+            ..Default::default()
+        };
+        assert_eq!(fork.render(Harness::Cursor), Rendered::default());
+        let one_shot = LaunchOptions {
+            one_shot: Some("fix tests".into()),
+            ..o
+        };
+        assert_eq!(
+            rendered(&one_shot, Harness::Cursor),
+            ["--model", "composer-2.5", "--force", "--print", "fix tests"]
+        );
+        assert_eq!(
+            restore_args(
+                Harness::Cursor,
+                &args(&["--continue", "--force", "--resume", "old"]),
+                "new"
+            ),
+            ["--force", "--resume", "new"]
+        );
+        assert_eq!(
+            fresh_args(Harness::Cursor, &args(&["--resume", "--force"])),
+            ["--force"]
         );
     }
 

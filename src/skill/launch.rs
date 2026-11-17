@@ -394,6 +394,16 @@ pub fn build_skill_launch_full(
                 args.push("--trust-workspace".into());
             }
             args.push(prompt);
+        } // cursor-agent 2026.11.13: `--force` runs every command unless
+        // denied; `--trust` skips the workspace trust prompt, which would
+        // otherwise sit in front of the opening message. The opening
+        // message is positional, and `/<skill>` in it loads the skill.
+        Harness::Cursor => {
+            if bypass {
+                args.push("--force".into());
+            }
+            args.push("--trust".into());
+            args.push(prompt);
         }
     }
     let mut profile = base.clone();
@@ -402,7 +412,7 @@ pub fn build_skill_launch_full(
     // (a wrapper path such as `~/bin/claude`) is kept; otherwise the bare
     // executable name is looked up on PATH.
     if Harness::detect(&base.command) != Some(harness) {
-        profile.command = harness.as_str().to_string();
+        profile.command = harness.command().to_string();
     }
     profile.args = args;
 

@@ -36,6 +36,20 @@
 //! command was refused because headless mode cannot prompt for command
 //! permission, yet the final status was SUCCESS with an empty response.
 //! This permission behavior is recorded here, not changed.
+//!
+//! Cursor CLI 2026.11.13 (probed 2026-11-17 with `--help` and live runs
+//! in a temporary folder): `cursor-agent --print --output-format
+//! stream-json <prompt>` prints one JSON object per line: `system` (init,
+//! with `session_id` and `model`), `user`, `thinking` deltas, `assistant`
+//! (`message.content` text parts), `tool_call` (`subtype` started or
+//! completed, the call under a `<kind>ToolCall` key with `args` and
+//! `result`) and a final `result` with `usage` (`inputTokens`,
+//! `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`; no cost). The
+//! `result` text is every assistant message glued together with no
+//! separator, so the answer is read from the `assistant` messages
+//! instead. `--trust` is passed: print mode cannot answer the workspace
+//! trust prompt. It has no budget, timeout or effort flag (effort is
+//! part of the model id).
 
 use crate::harness::Harness;
 use std::path::Path;
@@ -87,6 +101,11 @@ pub fn extra_args(
             v.push("--mode".into());
             v.push("json".into());
         }
+        Harness::Cursor => {
+            v.push("--output-format".into());
+            v.push("stream-json".into());
+            v.push("--trust".into());
+        }
     }
     v
 }
@@ -119,7 +138,8 @@ pub fn effort_args(harness: Harness, effort: &str) -> Option<Vec<String>> {
         Harness::Pi => ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
             .contains(&effort)
             .then(|| vec!["--thinking".into(), effort.to_string()]),
-        Harness::Claude | Harness::OpenCode => None,
+        // Cursor's effort is part of the model id (`gpt-5.3-codex-high`)
+        Harness::Claude | Harness::OpenCode | Harness::Cursor => None,
     }
 }
 
@@ -129,7 +149,8 @@ pub fn effort_args(harness: Harness, effort: &str) -> Option<Vec<String>> {
 pub fn insert_before_prompt(args: &mut Vec<String>, harness: Harness, extra: Vec<String>) {
     let tail = match harness {
         // `--single <prompt>` on Grok, `--print <prompt>` on Pi
-        Harness::Claude | Harness::Antigravity | Harness::Grok | Harness::Pi => 2,
+        // and `--print <prompt>` on Cursor
+        Harness::Claude | Harness::Antigravity | Harness::Grok | Harness::Pi | Harness::Cursor => 2,
         Harness::Codex | Harness::OpenCode | Harness::Muse => 1,
     };
     let at = args.len().saturating_sub(tail);
@@ -255,6 +276,52 @@ fn opencode_text(cleaned: &str) -> Option<String> {
 /// Reads a `muse exec --json` JSONL stream: sums `input_tokens + output_tokens`
 /// from the last `run.usage` snapshot and extracts `payload.text` when the
 /// terminal event is `run.terminal.completed`.
+/// Reads a `cursor-agent --print --output-format stream-json` stream: the
+/// answer is the `assistant` messages, one per line (the `result` event
+/// glues them together), the tokens the `result` event's input and output.
+fn cursor_envelope(cleaned: &str) -> Envelope {
+    let mut texts: Vec<String> = Vec::new();
+    let mut out = Envelope::default();
+    for v in cleaned
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+    {
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("assistant") => {
+                let text: String = v
+                    .pointer("/message/content")
+                    .and_then(|c| c.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                    .collect();
+                if !text.trim().is_empty() {
+                    texts.push(text);
+                }
+            }
+            Some("result") => {
+                let n = |k: &str| {
+                    v.pointer(&format!("/usage/{k}"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0)
+                };
+                let tokens = n("inputTokens") + n("outputTokens");
+                out.tokens = (tokens > 0).then_some(tokens);
+                if texts.is_empty()
+                    && let Some(r) = v.get("result").and_then(|r| r.as_str())
+                    && !r.trim().is_empty()
+                {
+                    texts.push(r.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    out.text = (!texts.is_empty()).then(|| texts.join("\n"));
+    out
+}
+
 fn muse_envelope(cleaned: &str) -> Envelope {
     let mut text: Option<String> = None;
     let mut tokens: Option<u64> = None;
@@ -358,6 +425,7 @@ pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
             ..Default::default()
         },
         Harness::Muse => muse_envelope(&clean_terminal(stdout)),
+        Harness::Cursor => cursor_envelope(&clean_terminal(stdout)),
         Harness::Pi => pi_envelope(&clean_terminal(stdout)),
         Harness::Codex => Envelope {
             text: std::fs::read_to_string(out_file)
@@ -411,6 +479,39 @@ pub fn envelope(harness: Harness, stdout: &[u8], out_file: &Path) -> Envelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_reads_the_answer_from_its_messages_and_the_tokens_from_the_result() {
+        use crate::workflows::live::fixtures;
+        let e = envelope(
+            Harness::Cursor,
+            fixtures::CURSOR.as_bytes(),
+            Path::new("/x"),
+        );
+        // the result event glues the two messages; the envelope does not
+        assert_eq!(
+            e.text.as_deref(),
+            Some("I'll run `cat a.txt`, then reply with exactly `PROBE_OK`.\nPROBE_OK")
+        );
+        assert_eq!(e.tokens, Some(9682 + 85));
+        assert_eq!(e.cost_usd, None);
+        let args = extra_args(Harness::Cursor, Some(1.0), 60, Path::new("/x"));
+        assert_eq!(args, ["--output-format", "stream-json", "--trust"]);
+        let mut line: Vec<String> = ["--force", "--print", "go"].map(String::from).to_vec();
+        insert_before_prompt(&mut line, Harness::Cursor, args);
+        assert_eq!(
+            line,
+            [
+                "--force",
+                "--output-format",
+                "stream-json",
+                "--trust",
+                "--print",
+                "go"
+            ]
+        );
+        assert_eq!(effort_args(Harness::Cursor, "high"), None);
+    }
 
     #[test]
     fn nested_stream_result_and_legacy_agree() {

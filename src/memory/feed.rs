@@ -117,7 +117,11 @@ pub fn should_own(home: &Path, harness: Harness, complete: bool) -> bool {
         && complete
         && !matches!(
             harness,
-            Harness::Antigravity | Harness::OpenCode | Harness::Grok | Harness::Pi
+            Harness::Antigravity
+                | Harness::OpenCode
+                | Harness::Grok
+                | Harness::Pi
+                | Harness::Cursor
         )
         && super::find_binary(home).is_some()
         && super::wiring(home, harness, true).hooks

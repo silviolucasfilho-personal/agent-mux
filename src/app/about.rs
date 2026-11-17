@@ -194,6 +194,7 @@ pub fn rows(facts: &AboutFacts<'_>) -> Vec<AboutRow> {
         ("agy", "agy"),
         ("opencode", "opencode"),
         ("muse", "muse"),
+        ("cursor", "cursor-agent"),
         ("git", "git"),
         ("gh", "gh"),
     ] {

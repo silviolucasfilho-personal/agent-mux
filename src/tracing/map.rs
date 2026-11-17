@@ -415,6 +415,11 @@ impl TurnAssembler {
     /// Prime mode: state updates only, nothing emitted (resumed transcripts
     /// must never re-export history). Turning emitting back on marks any
     /// still-open primed turn stale so its eventual close stays silent.
+    /// A turn is open and still taking events.
+    pub fn has_open_turn(&self) -> bool {
+        self.turn.as_ref().is_some_and(|t| !t.stale)
+    }
+
     pub fn set_emitting(&mut self, emitting: bool) {
         if emitting
             && !self.emitting
@@ -3329,6 +3334,7 @@ fn extract_skill_info(raw_tool_name: &str, args: &Value) -> Option<(String, Stri
         || path_lower.contains(".gemini/skills")
         || path_lower.contains(".agent/skills")
         || path_lower.contains(".muse/skills")
+        || path_lower.contains(".cursor/skills")
     {
         let p = std::path::Path::new(&path);
         let skill_name = if p

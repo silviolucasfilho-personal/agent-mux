@@ -9,6 +9,7 @@ implementations:
 | Codex | `codex` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
 | Antigravity | `agy` | `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript_full.jsonl` (falling back to `transcript.jsonl`) |
 | OpenCode | `opencode` | `~/.local/share/opencode/opencode.db` (`[tracing] opencode_db`): the session's rows in `session_message`, read in place |
+| Cursor | `cursor-agent` | `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl` (`[tracing] cursor_dir`), the chat's folder from `~/.cursor/chats/<hash>/<id>/meta.json`. The transcript has no times, tool results or usage: `agent-mux trace hooks install cursor` adds them (`docs/cursor.md`) |
 
 Grok (`grok`), Pi (`pi`), and DeepSeek (`dsh`) are not supported for tracing yet. Grok and Pi launch interactively in the TUI, support skill installation, and connect to the agent-mux MCP server, but write no parsed transcripts or events into `traces.db` and have no hook pipeline. DeepSeek integration is deferred.
 

@@ -31,6 +31,7 @@ pub enum HookSource {
     Antigravity,
     OpenCode,
     Muse,
+    Cursor,
 }
 
 impl HookSource {
@@ -42,6 +43,7 @@ impl HookSource {
             "agy" | "antigravity" => Some(HookSource::Antigravity),
             "opencode" | "open-code" => Some(HookSource::OpenCode),
             "muse" | "muse-code" => Some(HookSource::Muse),
+            "cursor" | "cursor-agent" => Some(HookSource::Cursor),
             _ => None,
         }
     }
@@ -53,6 +55,7 @@ impl HookSource {
             HookSource::Antigravity => Provider::Antigravity,
             HookSource::OpenCode => Provider::OpenCode,
             HookSource::Muse => Provider::Muse,
+            HookSource::Cursor => Provider::Cursor,
         }
     }
 
@@ -64,6 +67,7 @@ impl HookSource {
             HookSource::Antigravity => "agy",
             HookSource::OpenCode => "opencode",
             HookSource::Muse => "muse",
+            HookSource::Cursor => "cursor",
         }
     }
 }
@@ -276,6 +280,7 @@ pub fn parse(
         HookSource::CodexNotify => parse_codex_notify(payload, policy, ts_ns, launch_id),
         HookSource::Antigravity => parse_agy(event_override?, payload, policy, ts_ns, launch_id),
         HookSource::Muse => parse_muse(payload, policy, ts_ns, launch_id),
+        HookSource::Cursor => parse_cursor(payload, policy, ts_ns, launch_id),
     }
 }
 
@@ -370,6 +375,111 @@ fn parse_muse(
         && reminder_kind.is_some_and(|k| k.to_ascii_lowercase().contains("reminder"))
     {
         ev.agent_id = Some("skill-reminder".into());
+    }
+    Some(ev)
+}
+
+/// Cursor's hook event names and the normalized ones they are stored
+/// under. Cursor has more events (`beforeShellExecution`, `afterFileEdit`,
+/// `afterAgentResponse`…); they repeat what these carry and are not
+/// installed.
+pub const CURSOR_EVENTS: &[(&str, &str)] = &[
+    ("sessionStart", "SessionStart"),
+    ("beforeSubmitPrompt", "UserPromptSubmit"),
+    ("preToolUse", "PreToolUse"),
+    ("postToolUse", "PostToolUse"),
+    ("postToolUseFailure", "PostToolUseFailure"),
+    ("subagentStart", "SubagentStart"),
+    ("subagentStop", "SubagentStop"),
+    ("stop", "Stop"),
+    ("sessionEnd", "SessionEnd"),
+];
+
+/// The token counts of a Cursor `stop` payload, under the names the usage
+/// normalizer reads. Cursor counts cached input apart from `input_tokens`
+/// (a print-mode run reported 9,682 input and 17,408 cache-read tokens).
+pub fn cursor_usage(payload: &Map<String, Value>) -> Vec<(String, i64)> {
+    [
+        ("input_tokens", "input_tokens"),
+        ("output_tokens", "output_tokens"),
+        ("cache_read_tokens", "cache_read_input_tokens"),
+        ("cache_write_tokens", "cache_creation_input_tokens"),
+    ]
+    .iter()
+    .filter_map(|(from, to)| Some((to.to_string(), payload.get(*from)?.as_i64()?)))
+    .collect()
+}
+
+/// Cursor CLI hooks (probed on 2026.11.13 with a project `hooks.json` in
+/// print mode and in an interactive session). The payload is close to
+/// Claude's: `session_id`, `hook_event_name` (camelCase), `tool_name`,
+/// `tool_input`, `tool_use_id`, `transcript_path`, plus `conversation_id`,
+/// `generation_id`, `model`, `workspace_roots`, `cursor_version` and
+/// `user_email` (never stored). `cwd` is an empty string, so the folder
+/// is the first workspace root. `postToolUse` carries `tool_output` and
+/// `duration`; `postToolUseFailure` `error_message` and `failure_type`;
+/// `stop` the turn's `input_tokens`, `output_tokens`,
+/// `cache_read_tokens`, `cache_write_tokens` and `status`.
+fn parse_cursor(
+    v: &Value,
+    policy: &ContentPolicy,
+    ts_ns: i64,
+    launch_id: Option<String>,
+) -> Option<HookEvent> {
+    let native = str_field(v, "hook_event_name")?;
+    let event = CURSOR_EVENTS
+        .iter()
+        .find(|(from, _)| *from == native)
+        .map(|(_, to)| *to)?;
+    let mut norm = v.as_object()?.clone();
+    norm.insert("hook_event_name".into(), Value::from(event));
+    if let Some(out) = norm.remove("tool_output") {
+        norm.insert("tool_response".into(), out);
+    }
+    if let Some(err) = norm.remove("error_message") {
+        norm.insert("tool_error".into(), err);
+    }
+    let mut ev = parse_claude_like(
+        Provider::Cursor,
+        false,
+        &Value::Object(norm),
+        policy,
+        ts_ns,
+        launch_id,
+    )?;
+    if ev.cwd.is_none() {
+        ev.cwd = v
+            .pointer("/workspace_roots/0")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
+    ev.model = str_field(v, "model");
+    // a prompt and its stop share a generation id; elsewhere it repeats
+    // the chat id and names no turn
+    ev.turn_key = str_field(v, "generation_id").filter(|g| *g != ev.session_id);
+    if ev.agent_type.is_none() {
+        ev.agent_type = str_field(v, "subagent_type");
+    }
+    let p = &mut ev.payload;
+    match event {
+        "Stop" => {
+            for key in [
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "status",
+                "loop_count",
+            ] {
+                put_structural(p, key, v.get(key));
+            }
+            ev.is_error = v.get("status").and_then(Value::as_str) == Some("error");
+        }
+        "PostToolUse" => put_structural(p, "duration_ms", v.get("duration")),
+        "PostToolUseFailure" => put_structural(p, "failure_type", v.get("failure_type")),
+        "SessionEnd" => put_structural(p, "final_status", v.get("final_status")),
+        _ => {}
     }
     Some(ev)
 }
@@ -941,6 +1051,114 @@ mod tests {
         assert_eq!(HookSource::parse("muse"), Some(HookSource::Muse));
         assert_eq!(HookSource::parse("Muse-Code"), Some(HookSource::Muse));
         assert_eq!(HookSource::parse("x"), None);
+    }
+
+    #[test]
+    fn cursor_events_are_renamed_and_carry_usage_and_the_folder() {
+        let policy = ContentPolicy::full();
+        assert_eq!(HookSource::parse("cursor"), Some(HookSource::Cursor));
+        // the payload shapes the CLI sent on 2026.11.13
+        let post = parse(
+            HookSource::Cursor,
+            None,
+            &serde_json::json!({
+                "conversation_id": "c-1", "generation_id": "c-1", "model": "default",
+                "tool_name": "Shell",
+                "tool_input": {"command": "cat a.txt", "cwd": "", "timeout": 30000},
+                "tool_output": "{\"output\":\"hello\\n\",\"exitCode\":0}",
+                "duration": 218.905, "tool_use_id": "t-1", "cwd": "",
+                "session_id": "c-1", "hook_event_name": "postToolUse",
+                "workspace_roots": ["/repo"], "user_email": "someone@example.com",
+                "transcript_path": "/home/me/.cursor/projects/repo/agent-transcripts/c-1/c-1.jsonl"
+            }),
+            &policy,
+            7,
+            Some("L1".into()),
+        )
+        .unwrap();
+        assert_eq!(post.provider, Provider::Cursor);
+        assert_eq!(post.event, "PostToolUse");
+        assert_eq!(post.cwd.as_deref(), Some("/repo"));
+        assert_eq!(post.tool_use_id.as_deref(), Some("t-1"));
+        assert_eq!(post.tool_name.as_deref(), Some("Shell"));
+        assert_eq!(post.turn_key, None, "the chat id names no turn");
+        assert!(
+            post.payload["tool_result"]
+                .as_str()
+                .unwrap()
+                .contains("hello")
+        );
+        assert!(!post.payload_json().contains("someone@example.com"));
+
+        let failure = parse(
+            HookSource::Cursor,
+            None,
+            &serde_json::json!({
+                "session_id": "c-1", "hook_event_name": "postToolUseFailure",
+                "tool_name": "Shell", "tool_use_id": "t-2",
+                "error_message": "blocked", "failure_type": "permission_denied"
+            }),
+            &policy,
+            8,
+            None,
+        )
+        .unwrap();
+        assert!(failure.is_error);
+        assert_eq!(failure.payload["tool_error"], "blocked");
+
+        let prompt = parse(
+            HookSource::Cursor,
+            None,
+            &serde_json::json!({
+                "session_id": "c-1", "generation_id": "g-1",
+                "hook_event_name": "beforeSubmitPrompt", "prompt": "fix it"
+            }),
+            &policy,
+            9,
+            None,
+        )
+        .unwrap();
+        assert_eq!(prompt.event, "UserPromptSubmit");
+        assert_eq!(prompt.turn_key.as_deref(), Some("g-1"));
+        assert_eq!(prompt.payload["prompt"], "fix it");
+
+        let stop = parse(
+            HookSource::Cursor,
+            None,
+            &serde_json::json!({
+                "session_id": "c-1", "generation_id": "g-1", "model": "composer-2.5",
+                "hook_event_name": "stop", "status": "completed", "loop_count": 0,
+                "input_tokens": 27165, "output_tokens": 66,
+                "cache_read_tokens": 25600, "cache_write_tokens": 0
+            }),
+            &ContentPolicy::metadata(),
+            10,
+            None,
+        )
+        .unwrap();
+        assert_eq!(stop.event, "Stop");
+        assert_eq!(stop.model.as_deref(), Some("composer-2.5"));
+        assert_eq!(
+            cursor_usage(&stop.payload),
+            vec![
+                ("input_tokens".to_string(), 27165),
+                ("output_tokens".to_string(), 66),
+                ("cache_read_input_tokens".to_string(), 25600),
+                ("cache_creation_input_tokens".to_string(), 0),
+            ]
+        );
+        // events that repeat these are not stored
+        assert!(
+            parse(
+                HookSource::Cursor,
+                None,
+                &serde_json::json!({"session_id": "c-1", "hook_event_name": "afterShellExecution"}),
+                &policy,
+                11,
+                None,
+            )
+            .is_none()
+        );
     }
 
     #[test]

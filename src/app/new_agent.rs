@@ -302,9 +302,13 @@ impl App {
                 return Err(format!("{name} runs the {p} loop on its schedule"));
             }
         };
-        let opening = match text {
-            None => Vec::new(),
-            Some(t) => harness.opening_args(t),
+        // a harness with no flag for instructions (Cursor) opens with them
+        let opening = match (text, plan.preamble.as_deref()) {
+            (None, None) => Vec::new(),
+            (None, Some(_)) => harness.opening_args(
+                plan.with_preamble("Say in one line that you are ready, then wait for the task."),
+            ),
+            (Some(t), _) => harness.opening_args(plan.with_preamble(&t)),
         };
         Ok((plan, opening))
     }

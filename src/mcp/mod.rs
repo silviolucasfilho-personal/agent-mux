@@ -27,9 +27,10 @@ pub const USAGE: &str = "agent-mux mcp <command>
 
   serve --stdio [--db PATH] [--workspace DIR | --all-workspaces | --workspace-from-env]
                                 serve the ten read-only trace tools over stdio
-  install agy|grok              register this binary with `agy|grok mcp add` (no per-launch flag exists)
-  uninstall agy|grok            remove it with `agy|grok mcp remove`
-  status [claude|codex|agy|opencode|grok|pi|muse]
+  install agy|grok|cursor       register this binary with `agy|grok mcp add`, or in ~/.cursor/mcp.json
+                                (no per-launch flag exists)
+  uninstall agy|grok|cursor     remove it again
+  status [claude|codex|agy|opencode|grok|pi|muse|cursor]
                                 how each harness reaches the server
 
 Claude Code, Codex, OpenCode, Pi and Muse are registered per launch by the Agents sidebar;

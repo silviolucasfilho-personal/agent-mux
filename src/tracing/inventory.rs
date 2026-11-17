@@ -385,6 +385,35 @@ fn roots(harness: Harness, cwd: &Path, home: &Path) -> Vec<Root> {
         }
         // not inventoried yet (out of scope for the harness itself)
         Harness::Grok | Harness::Pi => {}
+        // Cursor CLI 2026.11.13: skills in `.cursor/skills` and
+        // `~/.cursor/skills`, sub-agents in the project's
+        // `.cursor/agents` (the CLI does not read `~/.cursor/agents`)
+        Harness::Cursor => {
+            r.push(Root {
+                dir: cwd.join("AGENTS.md"),
+                kind: Kind::Instructions,
+                layout: Layout::File,
+                scope: Scope::Project,
+            });
+            r.push(Root {
+                dir: cwd.join(".cursor").join("skills"),
+                kind: Kind::Skill,
+                layout: Layout::SkillDirs,
+                scope: Scope::Project,
+            });
+            r.push(Root {
+                dir: cwd.join(".cursor").join("agents"),
+                kind: Kind::Agent,
+                layout: Layout::MdFiles,
+                scope: Scope::Project,
+            });
+            r.push(Root {
+                dir: home.join(".cursor").join("skills"),
+                kind: Kind::Skill,
+                layout: Layout::SkillDirs,
+                scope: Scope::Home,
+            });
+        }
         Harness::Muse => {
             r.push(Root {
                 dir: cwd.join("AGENTS.md"),
@@ -696,7 +725,8 @@ pub fn known_tools(harness: Harness, seen: impl IntoIterator<Item = String>) -> 
         | Harness::OpenCode
         | Harness::Grok
         | Harness::Pi
-        | Harness::Muse => HashSet::new(),
+        | Harness::Muse
+        | Harness::Cursor => HashSet::new(),
     };
     set.extend(seen);
     set

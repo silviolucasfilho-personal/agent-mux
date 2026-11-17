@@ -103,6 +103,9 @@ impl Registration {
     }
 }
 
+/// Cursor CLI: "Automatically approve all MCP servers".
+pub const CURSOR_APPROVE_FLAG: &str = "--approve-mcps";
+
 /// Decides the registration for one launch.
 pub fn plan(
     harness: Option<Harness>,
@@ -171,6 +174,22 @@ pub fn plan(
             args: muse_overrides(exe, &argv),
             env: Vec::new(),
         },
+        // the entry is in `~/.cursor/mcp.json`; the flags are what load
+        // it with no prompt: one approves the server, the other trusts
+        // the workspace (a worker in a new worktree would otherwise stop
+        // at "trust this folder?" before its opening message)
+        Some(Harness::Cursor) => {
+            if super::install::cursor_status(home, Some(exe)).usable() {
+                Registration::PerLaunch {
+                    args: vec![CURSOR_APPROVE_FLAG.into(), "--trust".into()],
+                    env: Vec::new(),
+                }
+            } else {
+                Registration::Unavailable(
+                    "cursor has no per-launch MCP flag: run `agent-mux mcp install cursor`".into(),
+                )
+            }
+        }
         None => Registration::Unavailable("the command is not a known harness".into()),
     }
 }

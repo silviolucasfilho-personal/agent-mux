@@ -2793,6 +2793,7 @@ pub struct App {
     agy_mcp_checked: bool,
     /// The Grok counterpart of `agy_mcp_checked`.
     grok_mcp_checked: bool,
+    cursor_mcp_checked: bool,
     /// Whether a launch bypasses the harness's approval prompts when the
     /// profile does not say. From `bypass_approvals` in profiles.toml.
     pub bypass_approvals_default: bool,
@@ -3026,6 +3027,7 @@ impl App {
             agents: crate::config::AgentsSettings::default(),
             agy_mcp_checked: false,
             grok_mcp_checked: false,
+            cursor_mcp_checked: false,
             bypass_approvals_default: DEFAULT_BYPASS_APPROVALS,
             runtime_dir: None,
             cached_briefing: None,
@@ -3179,11 +3181,14 @@ impl App {
                     plan.full_content()
                         && crate::tracing::hooks::install::codex_status(&home, None).installed
                 }
+                // Cursor: ai-memory's own hooks in `~/.cursor/hooks.json`
+                // capture the session; nothing is relayed
                 Harness::Antigravity
                 | Harness::OpenCode
                 | Harness::Grok
                 | Harness::Pi
-                | Harness::Muse => false,
+                | Harness::Muse
+                | Harness::Cursor => false,
             };
         if !feed::should_own(&home, harness, complete) {
             return Vec::new();
@@ -3871,7 +3876,8 @@ impl App {
                 crate::harness::Harness::Codex
                 | crate::harness::Harness::Grok
                 | crate::harness::Harness::Pi
-                | crate::harness::Harness::Muse,
+                | crate::harness::Harness::Muse
+                | crate::harness::Harness::Cursor,
             )
             | None => None,
         };
@@ -4435,6 +4441,23 @@ impl App {
                 self.notice = Some(match crate::mcp::install::install_grok(exe, &home) {
                     Ok(_) => Notice::info("registered the agent-mux MCP server with Grok"),
                     Err(e) => Notice::warn(format!("Grok gets no MCP tools: {e}")),
+                });
+            }
+        }
+        // Cursor reads `~/.cursor/mcp.json` and has no per-launch flag
+        // (`mcp::install`): the same once-per-run user-level entry.
+        if harness == Some(crate::harness::Harness::Cursor)
+            && !self.cursor_mcp_checked
+            && self.trace_db_path.is_some()
+            && self.may_install_globally()
+            && let Some(exe) = exe.as_deref().filter(|e| e.is_absolute())
+        {
+            self.cursor_mcp_checked = true;
+            let st = crate::mcp::install::cursor_status(&home, Some(exe));
+            if !st.installed || !st.current || st.disabled {
+                self.notice = Some(match crate::mcp::install::install_cursor(exe, &home) {
+                    Ok(_) => Notice::info("registered the agent-mux MCP server with Cursor"),
+                    Err(e) => Notice::warn(format!("Cursor gets no MCP tools: {e}")),
                 });
             }
         }
@@ -5150,6 +5173,7 @@ impl App {
                     "antigravity" | "agy" => crate::harness::Harness::Antigravity,
                     "opencode" => crate::harness::Harness::OpenCode,
                     "muse" | "muse-code" => crate::harness::Harness::Muse,
+                    "cursor" | "cursor-agent" => crate::harness::Harness::Cursor,
                     other => {
                         self.notice = Some(Notice::warn(format!(
                             "resume is not supported for {other} sessions"
@@ -7387,6 +7411,7 @@ impl App {
             "antigravity" => crate::harness::Harness::Antigravity,
             "opencode" => crate::harness::Harness::OpenCode,
             "muse" => crate::harness::Harness::Muse,
+            "cursor" => crate::harness::Harness::Cursor,
             other => {
                 self.notice = Some(Notice::warn(format!(
                     "resume is not supported for {other} sessions"
@@ -8331,7 +8356,7 @@ impl App {
             .cloned()
             .unwrap_or_else(|| Profile {
                 name: String::new(),
-                command: harness.as_str().to_string(),
+                command: harness.command().to_string(),
                 args: vec![],
                 default_dir: None,
                 tracing: None,
@@ -8386,7 +8411,7 @@ impl App {
         session_id: &str,
         cwd: Option<std::path::PathBuf>,
     ) {
-        let command = harness.as_str();
+        let command = harness.command();
         let label = match harness {
             crate::harness::Harness::Claude => "claude",
             crate::harness::Harness::Codex => "codex",
@@ -8395,6 +8420,7 @@ impl App {
             crate::harness::Harness::Grok => "grok",
             crate::harness::Harness::Pi => "pi",
             crate::harness::Harness::Muse => "muse",
+            crate::harness::Harness::Cursor => "cursor",
         };
         let mut profile = self
             .profiles
@@ -9037,7 +9063,7 @@ impl App {
                     .cloned()
                     .unwrap_or_else(|| Profile {
                         name: target_harness.as_str().to_string(),
-                        command: target_harness.as_str().to_string(),
+                        command: target_harness.command().to_string(),
                         args: Vec::new(),
                         default_dir: None,
                         tracing: None,

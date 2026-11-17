@@ -28,7 +28,7 @@ commands:
                                log and timeline (the id, or the workspace's live swarm)
   search <fts5 query> [--limit N] [--json]
                                full-text search over content (full mode data)
-  import <path>... | --discover [--provider claude|codex|antigravity|opencode|muse] [--content-mode full|metadata]
+  import <path>... | --discover [--provider claude|codex|antigravity|opencode|muse|cursor] [--content-mode full|metadata]
                                backfill transcripts and OpenCode's session db (idempotent)
   export [--session ID] [--since 30d] [--out FILE]
                                JSON Lines dump of every table
@@ -49,7 +49,7 @@ commands:
                                with no value: the scores on it
   experiments [name]           the experiment registry, or one experiment's variants
   (see also: agent-mux run --experiment <name> --variant <label> --prompt <text> …)
-  hook <claude|codex|codex-notify|agy|opencode|muse> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
+  hook <claude|codex|codex-notify|agy|opencode|muse|cursor> [--event E] [--home DIR] [--launch ID] [--content-mode M] [--db PATH] [payload]
                                hook entry point invoked by the CLIs (reads the payload from stdin or the last argument)
   hooks install|uninstall|status [codex|agy]
                                the opt-in hook installers (Claude and Codex notify need none: they register per launch)";
@@ -431,7 +431,7 @@ fn provider_key(h: crate::harness::Harness) -> &'static str {
     h.store_provider()
 }
 
-/// `--harness claude|codex|agy|opencode|muse` narrows the inventory.
+/// `--harness claude|codex|agy|opencode|muse|cursor` narrows the inventory.
 fn harness_filter(args: &Args) -> anyhow::Result<Option<crate::harness::Harness>> {
     match args.value("harness") {
         None => Ok(None),
@@ -439,7 +439,9 @@ fn harness_filter(args: &Args) -> anyhow::Result<Option<crate::harness::Harness>
             .or_else(|| (h == "antigravity").then_some(crate::harness::Harness::Antigravity))
             .map(Some)
             .ok_or_else(|| {
-                anyhow::anyhow!("unknown harness {h:?}: claude, codex, agy, opencode or muse")
+                anyhow::anyhow!(
+                    "unknown harness {h:?}: claude, codex, agy, opencode, muse or cursor"
+                )
             }),
     }
 }
@@ -1011,11 +1013,14 @@ fn hooks_cmd(args: &Args) -> anyhow::Result<()> {
     let home = resolved.home.clone();
     let exe = super::hooks::register::current_exe();
     let providers: Vec<&str> = match provider {
-        Some(p @ ("codex" | "agy")) => vec![p],
+        Some(p @ ("codex" | "agy" | "cursor")) => vec![p],
         Some("antigravity") => vec!["agy"],
-        Some(other) => anyhow::bail!("unknown provider {other:?}: expected codex or agy"),
-        None if action == "status" => vec!["codex", "agy"],
-        None => anyhow::bail!("usage: agent-mux trace hooks {action} <codex|agy>"),
+        Some("cursor-agent") => vec!["cursor"],
+        Some(other) => {
+            anyhow::bail!("unknown provider {other:?}: expected codex, agy or cursor")
+        }
+        None if action == "status" => vec!["codex", "agy", "cursor"],
+        None => anyhow::bail!("usage: agent-mux trace hooks {action} <codex|agy|cursor>"),
     };
     for p in providers {
         match action {
@@ -1025,6 +1030,7 @@ fn hooks_cmd(args: &Args) -> anyhow::Result<()> {
                 };
                 let report = match p {
                     "codex" => install::install_codex(exe, &home),
+                    "cursor" => install::install_cursor(exe, &home),
                     _ => install::install_agy(exe, &home),
                 }
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -1042,6 +1048,7 @@ fn hooks_cmd(args: &Args) -> anyhow::Result<()> {
             "uninstall" => {
                 let report = match p {
                     "codex" => install::uninstall_codex(&home),
+                    "cursor" => install::uninstall_cursor(&home),
                     _ => install::uninstall_agy(&home),
                 }
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -1065,6 +1072,7 @@ fn hooks_cmd(args: &Args) -> anyhow::Result<()> {
 fn hook_status(provider: &str, home: &Path, exe: Option<&Path>) -> super::hooks::install::Status {
     match provider {
         "codex" => super::hooks::install::codex_status(home, exe),
+        "cursor" => super::hooks::install::cursor_status(home, exe),
         _ => super::hooks::install::agy_status(home, exe),
     }
 }
@@ -1473,6 +1481,22 @@ fn doctor() -> anyhow::Result<()> {
         .join("sessions");
     let (ok, detail) = dir_status(Some(&muse_sessions));
     check("muse sessions dir", ok, &detail);
+    let cursor_bin = on_path("cursor-agent")
+        .or_else(|| crate::session::install_fallback("cursor-agent", &resolved.home));
+    check(
+        "cursor-agent on PATH",
+        cursor_bin.is_some(),
+        &cursor_bin
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not found".into()),
+    );
+    let cursor_projects = resolved
+        .cursor_dir
+        .clone()
+        .unwrap_or_else(|| super::correlate::cursor_dir(&resolved.home))
+        .join("projects");
+    let (ok, detail) = dir_status(Some(&cursor_projects));
+    check("cursor projects dir", ok, &detail);
 
     println!("\nhooks (mode: {}):", resolved.hooks.as_str());
     if resolved.hooks.registers() {
@@ -1487,7 +1511,7 @@ fn doctor() -> anyhow::Result<()> {
         println!("  per-launch registrations are off; installed hooks still write rows");
     }
     let exe = super::hooks::register::current_exe();
-    for p in ["codex", "agy"] {
+    for p in ["codex", "agy", "cursor"] {
         print_hook_status(&hook_status(p, &resolved.home, exe.as_deref()));
     }
     if let Ok(conn) = store::open_ro(&resolved.db_path) {
@@ -2175,6 +2199,13 @@ pub fn discover_transcripts(resolved: &ResolvedTracing) -> Vec<(PathBuf, Provide
     if muse_sessions.is_dir() {
         walk_muse_sessions(&muse_sessions, &mut out, 0);
     }
+    let cursor_dir = resolved
+        .cursor_dir
+        .clone()
+        .unwrap_or_else(|| super::correlate::cursor_dir(&resolved.home));
+    for (_, path) in super::correlate::cursor_transcripts(&cursor_dir) {
+        out.push((path, Provider::Cursor));
+    }
     out
 }
 
@@ -2407,6 +2438,7 @@ fn import_rows(
             Provider::Antigravity => "Antigravity".into(),
             Provider::OpenCode => "OpenCode".into(),
             Provider::Muse => "Muse Code".into(),
+            Provider::Cursor => "Cursor".into(),
         },
         cwd: cwd.clone(),
         project_slug: crate::history::project_slug(Path::new(&cwd)),
@@ -2578,6 +2610,16 @@ fn identify_transcript(text: &str, path: &Path, provider: Provider) -> (String, 
             });
             (id, cwd)
         }
+        // `~/.cursor/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`;
+        // the folder is in `~/.cursor/chats/<hash>/<id>/meta.json`
+        Provider::Cursor => {
+            let id = stem(path);
+            let cwd = path
+                .ancestors()
+                .nth(5)
+                .and_then(|cursor| super::correlate::cursor_chat_cwd(cursor, &id));
+            (id, cwd)
+        }
     }
 }
 
@@ -2595,6 +2637,7 @@ fn import(args: &Args) -> anyhow::Result<()> {
         Some("antigravity") | Some("agy") => Some(Provider::Antigravity),
         Some("opencode") => Some(Provider::OpenCode),
         Some("muse") | Some("muse-code") => Some(Provider::Muse),
+        Some("cursor") | Some("cursor-agent") => Some(Provider::Cursor),
         Some(other) => anyhow::bail!("unknown provider {other:?}"),
         None => None,
     };
@@ -2955,6 +2998,26 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
         .map(str::to_string)
         .or_else(|| std::env::var("AGENT_MUX_SESSION_ID").ok())
         .filter(|s| !s.is_empty());
+    let cursor = source == HookSource::Cursor;
+    if cursor {
+        // Cursor reads a JSON object from every hook
+        outcome.response = Some("{}".into());
+        // installed for every Cursor session of this user: only the ones
+        // agent-mux started are recorded
+        if launch_id.is_none() {
+            return outcome;
+        }
+    }
+    // an installed handler cannot carry `--loop`: the loop run says so in
+    // the environment the hook inherits
+    let loop_mode = args.has("loop") || (cursor && std::env::var_os("AGENT_MUX_LOOP_ID").is_some());
+    let deny = |reason: &str| {
+        if cursor {
+            hooks::guard::cursor_deny_json(reason)
+        } else {
+            hooks::guard::deny_json(reason)
+        }
+    };
     let Some(mut ev) = hooks::parse(
         source,
         event.as_deref(),
@@ -2969,7 +3032,7 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
     // the budget guard: only on a PreToolUse registered with --guard, and
     // only ever a refusal past the launch's own limits (fail-open)
     // `--loop` adds the loop policy rules and fails closed for write tools
-    if (args.has("guard") || args.has("loop"))
+    if (args.has("guard") || loop_mode)
         && ev.event == "PreToolUse"
         && let Some(id) = ev.launch_id.clone()
         && let hooks::guard::Verdict::Block(reason) = hooks::guard::check_tool(
@@ -2978,14 +3041,14 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
             HOOK_BUSY_CAP,
             payload.get("tool_name").and_then(|v| v.as_str()),
             payload.get("tool_input"),
-            args.has("loop"),
+            loop_mode,
         )
     {
         ev.payload.insert(
             "agent_mux_guard".into(),
             serde_json::json!({ "blocked": true, "reason": reason }),
         );
-        outcome.response = Some(hooks::guard::deny_json(&reason));
+        outcome.response = Some(deny(&reason));
         outcome.blocked = Some(reason);
     }
     match store::open_hook_sink(&resolved.db_path, HOOK_BUSY_CAP) {
@@ -2996,7 +3059,7 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
                 && let Some(id) = ev.launch_id.clone()
             {
                 if !args.has("guard")
-                    && !args.has("loop")
+                    && !loop_mode
                     && let Some(tool) = payload.get("tool_name").and_then(|v| v.as_str())
                     && let Some(cwd) = ev.cwd.as_deref().filter(|s| !s.is_empty())
                     && let hooks::guard::Verdict::Block(reason) = hooks::guard::bus_lease_verdict(
@@ -3011,15 +3074,25 @@ pub fn hook_run(raw: &[String], stdin_override: Option<&str>) -> HookOutcome {
                         "agent_mux_guard".into(),
                         serde_json::json!({ "blocked": true, "reason": reason }),
                     );
-                    outcome.response = Some(hooks::guard::deny_json(&reason));
+                    outcome.response = Some(deny(&reason));
                     outcome.blocked = Some(reason);
                 }
+                // Cursor's preToolUse cannot add context: see PostToolUse
                 if outcome.blocked.is_none()
+                    && !cursor
                     && let Some(ctx) =
                         crate::bus::store::drain_urgent_for_hook(&conn, &id, store::now_ns())
                 {
                     outcome.response = Some(hooks::guard::allow_with_context_json(&ctx));
                 }
+            }
+            if cursor
+                && ev.event == "PostToolUse"
+                && let Some(id) = ev.launch_id.clone()
+                && let Some(ctx) =
+                    crate::bus::store::drain_urgent_for_hook(&conn, &id, store::now_ns())
+            {
+                outcome.response = Some(hooks::guard::cursor_context_json(&ctx));
             }
             match store::insert_hook_event(&conn, &ev) {
                 Ok(inserted) => {
@@ -3546,6 +3619,7 @@ mod tests {
             codex_dir: Some(temp.path().join("no-codex")),
             antigravity_dir: Some(temp.path().join("no-agy")),
             muse_dir: Some(muse_dir),
+            cursor_dir: Some(temp.path().join("no-cursor")),
             opencode_db: Some(temp.path().join("no-opencode.db")),
             models: Vec::new(),
             hooks: crate::config::HookMode::Auto,

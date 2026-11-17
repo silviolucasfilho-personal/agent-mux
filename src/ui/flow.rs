@@ -1693,6 +1693,14 @@ fn draw_agent_form(f: &mut Frame, area: Rect, st: &FlowBuilderState, role: Role,
         1,
         "the profile's",
     );
+    text_row(
+        &mut lines,
+        "Model cursor",
+        AgentField::ModelCursor,
+        &form.models[7],
+        1,
+        "the profile's",
+    );
     for (k, (name, field)) in [
         ("Effort codex", AgentField::EffortCodex),
         ("Effort agy", AgentField::EffortAgy),

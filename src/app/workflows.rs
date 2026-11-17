@@ -459,7 +459,7 @@ impl App {
         }
         Profile {
             name: harness.display_name().to_string(),
-            command: harness.as_str().to_string(),
+            command: harness.command().to_string(),
             args: Vec::new(),
             default_dir: None,
             tracing: None,
@@ -1196,7 +1196,8 @@ impl App {
                 .or_else(|| profile.model.clone()),
             bypass_approvals: true,
             resume: Resume::Off,
-            one_shot: Some(prompt),
+            // a harness with no flag for instructions opens with them
+            one_shot: Some(agent_plan.with_preamble(&prompt)),
         };
         let mut args = compose(&profile.args, &options.render(harness));
         args.retain(|a| !agent_plan.remove.contains(a));
@@ -1233,7 +1234,7 @@ impl App {
         }
         wfh::insert_before_prompt(&mut args, harness, extra);
         if Harness::detect(&profile.command) != Some(harness) {
-            profile.command = harness.as_str().to_string();
+            profile.command = harness.command().to_string();
         }
         profile.args = args;
         profile.name = format!("{} ▸ {label}", run.name);
@@ -1908,7 +1909,7 @@ impl App {
             wfh::extra_args(req.harness, None, timeout_s, &out_file),
         );
         if Harness::detect(&profile.command) != Some(req.harness) {
-            profile.command = req.harness.as_str().to_string();
+            profile.command = req.harness.command().to_string();
         }
         profile.args = args;
         profile.name = format!("workflow plan ▸ {}", short_task(&req.task));

@@ -657,6 +657,7 @@ fn persona_fields(
                     AgentField::ModelGrok => &form.models[4],
                     AgentField::ModelPi => &form.models[5],
                     AgentField::ModelMuse => &form.models[6],
+                    AgentField::ModelCursor => &form.models[7],
                     _ => &form.models[2],
                 };
                 let v = if typing {

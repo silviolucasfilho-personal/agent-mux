@@ -131,7 +131,7 @@ verifier_model = "claude-sonnet-5"     # optional; the loop-verifier's model
 every = "1d"                           # <n>m, <n>h or <n>d, at least 5m
 workspace = "~/code/api"
 profile = "Codex"                      # the harness profile the runs launch with
-harness = "codex"                      # claude, codex, opencode or muse
+harness = "codex"                      # claude, codex, opencode, muse or cursor
 
 [limits]                               # optional; absent values take the pattern's
 runs_per_day = 2
@@ -163,6 +163,7 @@ An agent answer is a draft (`PlannedWorkflow.agent`): it is listed under **Needs
 | Muse | `[--disable-write] [--disable-shell]` plus `[--disable-web-tools]` on `muse exec` (MCP and hooks passed via `-c` overrides with `--trust-workspace`) | none (workflow/persona instructions are not passed on the primary CLI; loop subagents are written under `.muse/agents/<name>.md` and passed via `--agents`) |
 | Grok | `--rules "<instructions>"` appends the persona's instructions to the system prompt | none (the tool list is advisory: Grok's built-in tool names for `--tools` were not probed) |
 | Pi | `--append-system-prompt "<instructions>"`, plus `--tools <csv>` (its `read`, `bash`, `edit`, `write`) when the agent names tools | none |
+| Cursor | none for the instructions: they open the session's first message. `--mode ask` in place of `--force` when the agent has no `edit` (read-only: writes and changing shell commands are refused) | none (the rest of the tool list is advisory; `docs/cursor.md`) |
 
 These were checked against the installed CLIs on 2026-09-25. On Claude Code 2.1.282, the agent's prompt, tools and model all applied in print mode, and a `/skill` in the prompt still loaded when the tool list was restricted. On Codex 0.155.1, a probe was answered from the developer instructions. The Antigravity file shape was probed on agy 1.2.2. OpenCode 2.0.32 was probed on 2026-10-31: an inline agent answered from its prompt both through `run --agent` and through `default_agent`, and one without `shell` had no shell tool. Two things were not re-probed: the file shape on the installed agy 1.2.10, and a Codex `-s read-only` session that has to run tools. `src/agents/launch.rs` records these checks. Grok and Pi were probed on 2026-11-14 (Grok 1.0.77 `--rules` answered with the persona name a live probe gave it; Pi 1.5.2's flags rest on `pi --help`, since this machine's default Pi model is rejected by its provider). DeepSeek is deferred.
 

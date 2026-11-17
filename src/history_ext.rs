@@ -1,7 +1,7 @@
 //! History for every harness: where each one keeps its past sessions, how
 //! a session is summarised for the list, and how its log is read for the
 //! viewer. Claude Code and Antigravity live in `history.rs`; this module
-//! adds Codex, Muse, OpenCode, Grok and Pi.
+//! adds Codex, Muse, OpenCode, Grok, Pi and Cursor.
 //!
 //! Storage (probed on the installed CLIs):
 //! - Codex: `<codex>/sessions/YYYY/MM/DD/rollout-*.jsonl` (`$CODEX_HOME`,
@@ -15,6 +15,9 @@
 //! - Pi: `<pi>/sessions/<slug>/<timestamp>_<id>.jsonl`
 //!   (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`), a `session` header line
 //!   then `message` lines.
+//! - Cursor: `<cursor>/projects/<slug>/agent-transcripts/<id>/<id>.jsonl`
+//!   (`~/.cursor`), `transcript::parse_cursor_line`; the folder a chat ran
+//!   in is in `<cursor>/chats/<hash>/<id>/meta.json`.
 
 use crate::history::{
     AgentProvider, LogEntry, SessionSummary, discover_antigravity_sessions,
@@ -44,6 +47,8 @@ pub struct HistoryDirs {
     pub grok: Option<PathBuf>,
     /// Pi's agent directory (the folder holding `sessions/`).
     pub pi: Option<PathBuf>,
+    /// Cursor's directory (the folder holding `projects/` and `chats/`).
+    pub cursor: Option<PathBuf>,
 }
 
 impl HistoryDirs {
@@ -79,6 +84,7 @@ impl HistoryDirs {
                 .map(|h| crate::tracing::opencode_db::default_db_path(h)),
             grok: env_dir("GROK_HOME").or_else(|| under(&[".grok"])),
             pi: env_dir("PI_CODING_AGENT_DIR").or_else(|| under(&[".pi", "agent"])),
+            cursor: under(&[".cursor"]),
         }
     }
 }
@@ -123,6 +129,9 @@ pub fn discover_all(
     if let Some(dir) = &dirs.pi {
         out.extend(discover_pi(dir, &want));
     }
+    if let Some(dir) = &dirs.cursor {
+        out.extend(discover_cursor(dir, &want));
+    }
     out.sort_by_key(|a| std::cmp::Reverse(a.modified));
     out
 }
@@ -146,6 +155,11 @@ pub fn load_log(summary: &SessionSummary) -> std::io::Result<Vec<LogEntry>> {
         AgentProvider::OpenCode => Ok(load_opencode(&summary.file_path, &summary.session_id)),
         AgentProvider::Grok => load_grok(&summary.file_path),
         AgentProvider::Pi => load_pi(&summary.file_path),
+        AgentProvider::Cursor => load_jsonl_events(
+            &summary.file_path,
+            AgentProvider::Cursor,
+            crate::transcript::parse_cursor_line,
+        ),
     }
 }
 
@@ -229,7 +243,7 @@ fn discover_codex(codex_home: &Path, want: &Want) -> Vec<SessionSummary> {
     });
     files
         .iter()
-        .filter_map(|f| summarize_events(f, AgentProvider::Codex, None, want))
+        .filter_map(|f| summarize_events(f, AgentProvider::Codex, None, None, want))
         .collect()
 }
 
@@ -249,7 +263,20 @@ fn discover_muse(data_dir: &Path, want: &Want) -> Vec<SessionSummary> {
                 .parent()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().into_owned());
-            summarize_events(f, AgentProvider::Muse, id, want)
+            summarize_events(f, AgentProvider::Muse, id, None, want)
+        })
+        .collect()
+}
+
+/// Cursor's chats: the transcript names the chat, `meta.json` its folder
+/// (the transcript lines carry neither).
+fn discover_cursor(cursor_dir: &Path, want: &Want) -> Vec<SessionSummary> {
+    crate::tracing::correlate::cursor_transcripts(cursor_dir)
+        .into_iter()
+        .filter_map(|(id, path)| {
+            let cwd =
+                crate::tracing::correlate::cursor_chat_cwd(cursor_dir, &id).map(PathBuf::from);
+            summarize_events(&path, AgentProvider::Cursor, Some(id), cwd, want)
         })
         .collect()
 }
@@ -274,6 +301,7 @@ fn walk_files(dir: &Path, depth: usize, max: usize, visit: &mut dyn FnMut(&Path)
 fn parser_for(provider: AgentProvider) -> fn(&str) -> Vec<TranscriptEvent> {
     match provider {
         AgentProvider::Muse => crate::transcript::parse_muse_line,
+        AgentProvider::Cursor => crate::transcript::parse_cursor_line,
         _ => crate::transcript::parse_codex_line,
     }
 }
@@ -282,12 +310,13 @@ fn summarize_events(
     path: &Path,
     provider: AgentProvider,
     id_hint: Option<String>,
+    cwd_hint: Option<PathBuf>,
     want: &Want,
 ) -> Option<SessionSummary> {
     let parse = parser_for(provider);
     let reader = BufReader::new(File::open(path).ok()?);
     let mut session_id = id_hint;
-    let mut cwd: Option<PathBuf> = None;
+    let mut cwd: Option<PathBuf> = cwd_hint;
     let mut first_prompt: Option<String> = None;
     let mut first_ts: Option<String> = None;
     let mut turns = 0usize;
@@ -926,6 +955,64 @@ mod tests {
             Some("/Users/me/app")
         );
         assert_eq!(percent_decode("plain").as_deref(), Some("plain"));
+    }
+
+    #[test]
+    fn cursor_chats_are_listed_by_folder_and_read() {
+        let home = tempfile::tempdir().unwrap();
+        let proj = home.path().join("work");
+        let other = home.path().join("other");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let cursor = home.path().join(".cursor");
+        let chat = |id: &str, cwd: &Path, prompt: &str| {
+            write(
+                &cursor.join(format!("projects/p-{id}/agent-transcripts/{id}/{id}.jsonl")),
+                &format!(
+                    concat!(
+                        r#"{{"role":"user","message":{{"content":[{{"type":"text","text":"<timestamp>Tuesday</timestamp>\n<user_query>\n{prompt}\n</user_query>"}}]}}}}"#,
+                        "\n",
+                        r#"{{"role":"assistant","message":{{"content":[{{"type":"text","text":"Reading it."}},{{"type":"tool_use","name":"Shell","input":{{"command":"cat a.txt"}}}}]}}}}"#,
+                        "\n",
+                        r#"{{"role":"assistant","message":{{"content":[{{"type":"text","text":"Done."}}]}}}}"#,
+                        "\n",
+                        r#"{{"type":"turn_ended","status":"success"}}"#,
+                        "\n",
+                    ),
+                    prompt = prompt
+                ),
+            );
+            write(
+                &cursor.join(format!("chats/h-{id}/{id}/meta.json")),
+                &serde_json::json!({ "cwd": cwd }).to_string(),
+            );
+        };
+        chat("c-1", &proj, "explain this repo");
+        chat("c-2", &other, "something else");
+        let dirs = HistoryDirs {
+            cursor: Some(cursor),
+            ..Default::default()
+        };
+        let here = discover_all(&dirs, Some(&proj), false);
+        assert_eq!(here.len(), 1);
+        assert_eq!(here[0].provider, AgentProvider::Cursor);
+        assert_eq!(here[0].session_id, "c-1");
+        assert_eq!(here[0].title, "explain this repo");
+        assert_eq!(here[0].turn_count, 2);
+        assert_eq!(here[0].cwd.as_deref(), Some(proj.as_path()));
+        assert_eq!(discover_all(&dirs, Some(&proj), true).len(), 2);
+
+        let log = load_log(&here[0]).unwrap();
+        assert!(
+            matches!(&log[0], LogEntry::User { text, .. } if text == "explain this repo"),
+            "{log:?}"
+        );
+        assert!(log.len() >= 3, "{log:?}");
+        // the harness resumes it by its chat id
+        assert_eq!(
+            crate::harness::resume_args(here[0].provider.harness(), &here[0].session_id),
+            ["--resume", "c-1"]
+        );
     }
 
     #[test]

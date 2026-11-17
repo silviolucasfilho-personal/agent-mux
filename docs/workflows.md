@@ -149,7 +149,7 @@ The form shows while you type whether the agent fits the step. `Ctrl+S` saves it
 name = "review-changes"
 description = "Find issues per dimension, refute each one with three votes, report the survivors."
 when_to_use = "Reviewing a diff or the working tree with independent verification."
-harness = "any"            # any | claude | codex | agy | opencode | muse | ["claude", "codex"]
+harness = "any"            # any | claude | codex | agy | opencode | muse | cursor | ["claude", "codex"]
 output = "report"          # the step whose result is the run's result
 default_isolation = "none" # none | worktree, for steps that omit isolation
 budget_tokens = 400000     # optional ceiling
@@ -354,9 +354,11 @@ agent-mux validates it against the schema and retries the session once with the 
 | Path guard | per launch | per launch (after `trace hooks install codex`) | none: rely on isolation and budgets | none: rely on isolation and budgets | none: rely on isolation and budgets | none: rely on isolation and budgets | per launch |
 | Worktree isolation | yes | yes | not applied | yes | yes | yes | yes |
 
-Every harness runs workflow steps (Grok 1.0.77 and Pi 1.5.2 probed 2026-11-14; `src/workflows/harness.rs` records the probes). DeepSeek is deferred: it has no `Harness` variant yet. A document's own `harness = [...]` still narrows where its steps may run, and the Library's Harnesses tab shows that as the document's restriction.
+Cursor runs a step as `cursor-agent --print … --output-format stream-json --trust --force`; the final text is the `assistant` messages of its JSON stream (tokens from the `result` event, no cost), then the transcript, then the screen. Its path guard is per launch after `trace hooks install cursor`, and worktree isolation applies (`docs/cursor.md`).
 
-Flows live in the Library (`o` in the Agents list, or F1 → Open library): its flows section lists every document with its harness coverage (`n/7`), and Enter launches it through the harness picker into the same run dialog. The Agents list itself holds only launched work.
+Every harness runs workflow steps (Grok 1.0.77 and Pi 1.5.2 probed 2026-11-14, Cursor CLI 2026.11.13 on 2026-11-17; `src/workflows/harness.rs` records the probes). DeepSeek is deferred: it has no `Harness` variant yet. A document's own `harness = [...]` still narrows where its steps may run, and the Library's Harnesses tab shows that as the document's restriction.
+
+Flows live in the Library (`o` in the Agents list, or F1 → Open library): its flows section lists every document with its harness coverage (`n/8`), and Enter launches it through the harness picker into the same run dialog. The Agents list itself holds only launched work.
 
 Step skills are agent-mux packages (`wf-review-dimensions`, `wf-review-find`, `wf-refute`, `wf-synthesize`, `wf-read-map`, `wf-search`, `wf-deep-read`, `wf-critic`, `wf-find`, `wf-attempt`, `wf-judge`, `wf-discover-sites`, `wf-transform`, `wf-verify-site`, `wf-classify`, `wf-triage-bug`, `wf-triage-feature`, `wf-grimoire-brief`, `wf-grimoire-lens`, `wf-grimoire-verdict`, and the factory's `wf-factory-classify`, `wf-factory-research`, `wf-factory-analyze`, `wf-factory-implement`, `wf-factory-review`) with `hidden = true` in their `skill.toml`, so they stay out of the Agents sidebar. They are installed user-level for the run's harness before the first session. `writes = true` marks a skill that edits files; a step running it must have `isolation = "worktree"`, which the validator enforces.
 
@@ -395,7 +397,7 @@ agent-mux workflow ls [--json]                       workflows, their last run a
 agent-mux workflow show <name>                       the document
 agent-mux workflow check [<name>] [--workspace DIR]  validate documents, step skills and agents; exit 1 on problems
 agent-mux workflow skills                            step skills and where they are installed
-agent-mux workflow run <name> --workspace DIR [--harness claude|codex|agy|opencode|muse] [--profile P]
+agent-mux workflow run <name> --workspace DIR [--harness claude|codex|agy|opencode|muse|cursor] [--profile P]
     [--arg name=value …] [--budget N] [--max-cost USD] [--isolation none|worktree]
     [--resume RUN_ID] [--json]                       exit 0 finished, 1 failed, 2 cancelled, 3 budget,
                                                      4 a verdict the document does not accept

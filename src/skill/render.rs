@@ -14,7 +14,11 @@ use crate::harness::Harness;
 /// How a user (or an opening prompt) invokes the skill in this harness.
 pub fn invocation(id: &str, harness: Harness) -> String {
     match harness {
-        Harness::Claude | Harness::Antigravity | Harness::Grok | Harness::Muse => {
+        Harness::Claude
+        | Harness::Antigravity
+        | Harness::Grok
+        | Harness::Muse
+        | Harness::Cursor => {
             format!("/{id}")
         }
         Harness::Codex => format!("${id}"),

@@ -101,6 +101,7 @@ pub fn provider_of(harness: Harness) -> &'static str {
         Harness::Grok => "grok",
         Harness::Pi => "pi",
         Harness::Muse => "muse",
+        Harness::Cursor => "cursor",
     }
 }
 

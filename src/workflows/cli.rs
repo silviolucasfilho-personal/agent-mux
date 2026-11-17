@@ -104,7 +104,7 @@ impl Args {
 
 fn parse_harness(s: &str) -> anyhow::Result<Harness> {
     Harness::detect(s).ok_or_else(|| {
-        anyhow::anyhow!("unknown harness {s:?}: claude, codex, agy, opencode or muse")
+        anyhow::anyhow!("unknown harness {s:?}: claude, codex, agy, opencode, muse or cursor")
     })
 }
 
