@@ -4,8 +4,10 @@
 use super::config::{self, ProjectConfig};
 use super::contract::stage_plain;
 use super::next::{self, Decision};
+use super::run::{self as steps, Planned};
 use super::{DocState, Item, ItemType, Snapshot, doctor, ops, order, snapshot, stage, store};
 use crate::factory::deliver::Tools;
+use crate::harness::Harness;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -33,6 +35,11 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
   agent-mux project advance [--yes]
         the board moves the pull requests already justify; without --yes, only the plan
 
+  agent-mux project run <n> [--step spec|plan|bug|critique|validate] [--harness H] [--critic H] [--dry-run]
+        run the item's next document step: a read-only session writes the document,
+        agent-mux publishes it by pull request and comments on the issue; a plan and
+        a bug document are then audited by a second session
+
   every command: [--dir DIR] [--refresh] [--cached]
 
 The folder (or one above it) must hold .spec-wave.json. In a code repository
@@ -56,6 +63,9 @@ const VALUE_FLAGS: &[&str] = &[
     "--reason",
     "--severity",
     "--of",
+    "--step",
+    "--harness",
+    "--critic",
 ];
 
 struct Args {
@@ -221,7 +231,7 @@ fn number(a: &Args) -> anyhow::Result<u64> {
         .map_err(|_| anyhow::anyhow!("\"{raw}\" is not an issue number"))
 }
 
-pub fn run(args: &[String]) -> anyhow::Result<()> {
+pub async fn run(args: &[String]) -> anyhow::Result<()> {
     let rest = args.get(1..).unwrap_or_default();
     let a = Args::parse(rest);
     match args.first().map(String::as_str) {
@@ -292,6 +302,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             )
         }),
         Some("advance") => cmd_advance(&a),
+        Some("run") => cmd_run(&a).await,
         None | Some("help") | Some("--help") | Some("-h") => {
             println!("{USAGE}");
             Ok(())
@@ -400,6 +411,262 @@ fn cmd_advance(a: &Args) -> anyhow::Result<()> {
     }
     let _ = refresh_touched(&e.conn, &e.tools, &e.cfg, &report.touched);
     Ok(())
+}
+
+/// The harnesses a Project step may run on: the ones agent-mux traces.
+pub const HARNESSES: [Harness; 6] = [
+    Harness::Claude,
+    Harness::Codex,
+    Harness::Antigravity,
+    Harness::OpenCode,
+    Harness::Muse,
+    Harness::Cursor,
+];
+
+fn harness_of(raw: Option<&str>, default: Harness) -> Result<Harness, String> {
+    let h = match raw {
+        Some(name) => Harness::detect(name).ok_or_else(|| format!("unknown harness {name:?}"))?,
+        None => default,
+    };
+    if !HARNESSES.contains(&h) {
+        return Err(format!(
+            "{} is not traced by agent-mux, and a Project step must leave a trace: use one of {}",
+            h.as_str(),
+            HARNESSES.map(|h| h.as_str()).join(", ")
+        ));
+    }
+    Ok(h)
+}
+
+/// Runs one built-in flow headless in `workspace` and answers its
+/// result. `model`, when given, is the model of its one step.
+async fn run_flow(
+    flow: &str,
+    workspace: &Path,
+    harness: Harness,
+    args: Value,
+    model: Option<String>,
+) -> Result<Value, String> {
+    use crate::app::workflows::WorkflowRunRequest;
+    let entries = crate::workflows::cli::entries();
+    let entry = crate::workflows::library::find(&entries, flow)
+        .ok_or_else(|| format!("the {flow} workflow is missing from the library"))?;
+    if !entry.valid() {
+        return Err(format!("{flow}: {}", entry.problems.join("; ")));
+    }
+    let req = WorkflowRunRequest {
+        name: entry.name.clone(),
+        source: entry.source.label(),
+        document: entry.text.clone(),
+        workspace: workspace.to_path_buf(),
+        profile: None,
+        harness,
+        args,
+        budget_tokens: None,
+        usd_cap: None,
+        isolation: None,
+        resume_from: None,
+        worktree_base: None,
+        step_overrides: model
+            .map(|m| vec![("work".to_string(), "model".to_string(), m)])
+            .unwrap_or_default(),
+    };
+    let mut h = crate::workflows::cli::headless().map_err(|e| e.to_string())?;
+    let run_id = h.app.start_workflow_run(req)?;
+    eprintln!("  {flow} on {} · run {run_id}", harness.as_str());
+    let timeout = std::time::Duration::from_secs(h.app.workflows.run_timeout_s + 60);
+    let finished =
+        crate::workflows::cli::pump(&mut h, timeout, |a| a.live_workflow_runs.is_empty()).await;
+    let recent = h.app.recent_workflow_runs.first().cloned();
+    crate::workflows::cli::shutdown(h).await;
+    let Some(recent) = recent.filter(|_| finished) else {
+        return Err(format!("the run {run_id} did not finish"));
+    };
+    if recent.status != "finished" {
+        return Err(recent
+            .error
+            .unwrap_or_else(|| format!("the run {run_id} ended {}", recent.status)));
+    }
+    Ok(recent.result)
+}
+
+/// The model a step runs with: the one spec-wave's file asks for, when
+/// the harness takes that kind of id; else the harness's own.
+fn step_model(
+    cfg: &ProjectConfig,
+    harness: Harness,
+    action: &str,
+    labels: &[String],
+    attempt: u32,
+) -> Option<String> {
+    steps::model_for(cfg, action, labels, attempt)
+        .filter(|m| harness == Harness::Claude && m.starts_with("claude"))
+}
+
+async fn cmd_run(a: &Args) -> anyhow::Result<()> {
+    let mut e = env(a)?;
+    let n = number(a)?;
+    let harness =
+        harness_of(a.value("--harness"), Harness::Claude).map_err(|x| anyhow::anyhow!(x))?;
+    let critic = harness_of(a.value("--critic"), harness).map_err(|x| anyhow::anyhow!(x))?;
+    // a step is decided on what GitHub says now, documents included
+    e.fresh = Fresh::Refresh;
+    let s = snap(&e)?;
+    let item = s
+        .item(n)
+        .ok_or_else(|| anyhow::anyhow!("issue #{n} is not in the Project"))?
+        .clone();
+    let forced = match a.value("--step") {
+        Some(step) => {
+            Some(steps::forced_action(step, item.item_type).map_err(|x| anyhow::anyhow!(x))?)
+        }
+        None => None,
+    };
+    let detail =
+        super::github::issue_detail(&e.tools, &e.cfg, n).map_err(|x| anyhow::anyhow!(x))?;
+    let hub_root = steps::hub_root(&e.cfg).map_err(|x| anyhow::anyhow!(x))?;
+    let ctx = steps::Ctx {
+        tools: &e.tools,
+        cfg: &e.cfg,
+        scratch: steps::scratch_dir(&crate::tracing::analysis::default_snapshot_dir()),
+        hub_root: hub_root.clone(),
+    };
+    println!("#{n} {}", item.title);
+    let mut planned = ctx
+        .plan(&item, &detail, forced)
+        .map_err(|x| anyhow::anyhow!(x))?;
+    let mut touched: Vec<u64> = Vec::new();
+    let mut published: Option<(&'static str, String)> = None;
+    loop {
+        let report = match planned {
+            Planned::Stopped(d) => {
+                for line in decision_lines(&d) {
+                    println!("  {line}");
+                }
+                if d.blocked.is_some() {
+                    std::process::exit(1);
+                }
+                break;
+            }
+            Planned::NotBuilt(action) => {
+                println!("  next: {}", action.as_str());
+                println!("  agent-mux does not run this step yet");
+                break;
+            }
+            Planned::Validate if a.flag("--dry-run") => {
+                println!(
+                    "  next: validate (checks the merged documents and, if they pass, adds the approval label)"
+                );
+                break;
+            }
+            Planned::Generate(ref g) if a.flag("--dry-run") => {
+                println!(
+                    "  next: write {} with the flow {} on {}",
+                    g.path,
+                    g.flow,
+                    harness.as_str()
+                );
+                println!("  then: publish it on a pull request and comment on the issue");
+                if let Some(k) = g.then_critique {
+                    println!("  then: audit it ({}) on {}", k.as_str(), critic.as_str());
+                }
+                break;
+            }
+            Planned::Critique(ref job) if a.flag("--dry-run") => {
+                println!(
+                    "  next: audit {} (attempt {}/{}) on {}",
+                    job.kind.document(),
+                    job.attempt,
+                    job.max,
+                    critic.as_str()
+                );
+                break;
+            }
+            Planned::NeedsHuman { kind, attempt, max } if a.flag("--dry-run") => {
+                println!(
+                    "  next: stop for a person: the critique of {} failed {}/{max} times",
+                    kind.document(),
+                    attempt.saturating_sub(1)
+                );
+                break;
+            }
+            Planned::Validate => {
+                let r = ctx.validate(&item).map_err(|x| anyhow::anyhow!(x))?;
+                finish_report(&r, &mut touched);
+                break;
+            }
+            Planned::NeedsHuman { kind, attempt, max } => {
+                let r = ctx
+                    .stop_for_human(&item, kind, attempt, max)
+                    .map_err(|x| anyhow::anyhow!(x))?;
+                finish_report(&r, &mut touched);
+                break;
+            }
+            Planned::Generate(g) => {
+                let model = step_model(&e.cfg, harness, g.doc, &item.labels, 1);
+                let result = run_flow(g.flow, &hub_root, harness, g.args.clone(), model)
+                    .await
+                    .map_err(|x| anyhow::anyhow!(x))?;
+                let (r, follow) = ctx
+                    .finish_generate(&item, &detail, &g, &result)
+                    .map_err(|x| anyhow::anyhow!(x))?;
+                published = Some((g.doc, g.path.clone()));
+                finish_report(&r, &mut touched);
+                match follow {
+                    Some(next) => {
+                        planned = next;
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+            Planned::Critique(job) => {
+                let model = step_model(&e.cfg, critic, "critique", &item.labels, job.attempt);
+                let said = model.clone().unwrap_or_else(|| critic.as_str().to_string());
+                let result = run_flow(
+                    steps::FLOW_CRITIQUE,
+                    &hub_root,
+                    critic,
+                    job.args.clone(),
+                    model,
+                )
+                .await
+                .map_err(|x| anyhow::anyhow!(x))?;
+                ctx.finish_critique(&item, &job, &result, &said)
+                    .map_err(|x| anyhow::anyhow!(x))?
+            }
+        };
+        finish_report(&report, &mut touched);
+        break;
+    }
+    // the cache follows: labels from GitHub, and the document now in review
+    if let Ok(Some(mut cached)) = refresh_touched(&e.conn, &e.tools, &e.cfg, &touched)
+        && let Some((doc, path)) = published
+        && let Some(it) = cached.items.iter_mut().find(|i| i.number == n)
+    {
+        it.docs.insert(
+            doc.to_string(),
+            super::Doc {
+                state: DocState::Branch,
+                path,
+                pr: None,
+                branch: Some(super::contract::artifact_branch(n, doc)),
+            },
+        );
+        let _ = store::save(&e.conn, &cached);
+    }
+    Ok(())
+}
+
+fn finish_report(r: &ops::Report, touched: &mut Vec<u64>) {
+    for line in &r.lines {
+        println!("  {line}");
+    }
+    for n in &r.touched {
+        if !touched.contains(n) {
+            touched.push(*n);
+        }
+    }
 }
 
 fn cmd_doctor(a: &Args) -> anyhow::Result<()> {

@@ -44,6 +44,22 @@ pub const BUILTIN: &[(&str, &str)] = &[
         "factory-ci",
         include_str!("../../workflows/factory-ci.toml"),
     ),
+    (
+        "project-spec",
+        include_str!("../../workflows/project-spec.toml"),
+    ),
+    (
+        "project-plan",
+        include_str!("../../workflows/project-plan.toml"),
+    ),
+    (
+        "project-bug",
+        include_str!("../../workflows/project-bug.toml"),
+    ),
+    (
+        "project-critique",
+        include_str!("../../workflows/project-critique.toml"),
+    ),
 ];
 
 pub fn builtin(name: &str) -> Option<&'static str> {

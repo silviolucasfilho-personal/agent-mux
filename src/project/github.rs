@@ -641,6 +641,65 @@ fn thread_lines(v: &Value) -> Vec<String> {
     out
 }
 
+/// One comment of an issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub author: String,
+    pub body: String,
+}
+
+/// An issue as a step needs it: its text and every comment, read now.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Detail {
+    pub title: String,
+    pub body: String,
+    pub url: String,
+    pub comments: Vec<Comment>,
+}
+
+pub fn issue_detail(tools: &Tools, cfg: &ProjectConfig, number: u64) -> Result<Detail, String> {
+    let what = "gh issue view";
+    let out = gh(
+        tools,
+        cfg.root(),
+        &[
+            "issue",
+            "view",
+            &number.to_string(),
+            "-R",
+            &cfg.hub_repo().slug(),
+            "--json",
+            "title,body,url,comments",
+        ],
+        what,
+    )?;
+    let v = json(&out, what)?;
+    let text = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    Ok(Detail {
+        title: text("title"),
+        body: text("body"),
+        url: text("url"),
+        comments: v
+            .get("comments")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|c| Comment {
+                author: c
+                    .pointer("/author/login")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                body: c
+                    .get("body")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+            .collect(),
+    })
+}
+
 /// What `gh` says about itself, for `project doctor`.
 pub fn auth_status(tools: &Tools, cwd: &Path) -> Result<String, String> {
     gh(tools, cwd, &["auth", "status"], "gh auth status")

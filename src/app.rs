@@ -2883,6 +2883,8 @@ pub struct App {
     pub last_factory_needs: Option<Instant>,
     /// Items of cached Projects that wait on the operator.
     pub project_needs: usize,
+    /// The binary a Project step is started from; `None` is this one.
+    pub project_exe: Option<std::path::PathBuf>,
     /// The `gh` the Project screens run; `None` is `gh` on `PATH`.
     pub project_gh: Option<String>,
     /// The folder the Project screens open on in place of the selected
@@ -3084,6 +3086,7 @@ impl App {
             factory_return: None,
             last_factory_needs: None,
             project_needs: 0,
+            project_exe: None,
             project_gh: None,
             project_dir_override: None,
             factory_needs: 0,

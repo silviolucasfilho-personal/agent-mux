@@ -18,11 +18,15 @@
 pub mod cli;
 pub mod config;
 pub mod contract;
+pub mod critique;
+pub mod deliver;
+pub mod docs;
 pub mod doctor;
 pub mod github;
 pub mod next;
 pub mod ops;
 pub mod order;
+pub mod run;
 pub mod snapshot;
 pub mod stage;
 pub mod store;

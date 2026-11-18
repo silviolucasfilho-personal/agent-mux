@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phases 1 and 2 are implemented (§19, §20); nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1 and 2 are implemented (§19, §20), and the first part of phase 3 (§21); nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1109,3 +1109,41 @@ rows. Where the code differs from the sections above:
 - **Not built:** the Specification-and-later screens' verbs, editing an
   item's fields (milestone, priority, area) from a screen, role presets,
   the mouse. Homologação and Deploy moves are `m` on the UAT screen.
+
+## 21. Phase 3, first part, as built
+
+Built on 2026-11-18: the document steps for a Feature's spec and plan and
+for a Bug's document, their critique and validation, and the
+Specification and Technical review screens (`src/project/{docs,critique,
+deliver,run}.rs`, `workflows/project-*.toml`, `workflows/skills/wf-project-*`,
+`agent-mux project run`). The prompts were read and ported word for word,
+in Portuguese (decision 5 of §17). Where the code differs from §6:
+
+- **A step's session writes no file.** It is one read-only `single` step
+  whose result is the document as text; Rust commits it in a temporary
+  detached worktree, pushes it and opens the pull request. There is no
+  `revise` step and no worktree for the session. This is stricter than
+  §6.2: a model cannot leave a file anywhere.
+- **The critique is its own flow run** (`project-critique`), after the
+  publication, not a second step of the writing flow, so it can also run
+  alone on a document corrected by hand (`--step critique`).
+- **One session audits through three lenses.** spec-wave runs three
+  verifiers, one per lens. Its downgrade of a grave finding whose quote
+  is not in the documents is not ported.
+- **A spec is not audited when it is generated**, as in spec-wave. The
+  `spec` kind of the critique skill exists and is not wired to a step.
+- **The critic's harness** is the writer's unless `--critic` names
+  another: `harness = "other"` exists only for a `revise` step's review.
+- **The model** from `.spec-wave.json` is applied only on Claude Code and
+  only for a `claude-*` id.
+- **A run is not tagged with its work item** in `launches.metadata`
+  (§9.2). It is an ordinary workflow run, traced and listed in the runs
+  view, and the item's 🔎 and 📋 comments are what link them today.
+- **From a screen, `r` runs on Claude Code**; another harness is a CLI
+  flag.
+- **Comments** are spec-wave's texts, shortened where they told the
+  reader to apply a trigger label. A missing section is reported without
+  spec-wave's hint of the heading it was probably renamed to.
+- **Not built, the rest of phase 3:** the decomposition (draft, critique,
+  apply) and its screen, a Tech Leader's decisions on findings
+  (`risk-accepted`), and `engine = "actions"`.

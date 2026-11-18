@@ -347,13 +347,26 @@ pub fn spawn_cli(
     name: &str,
     args: &[String],
 ) -> Result<PathBuf, String> {
+    spawn_cli_as(exe, "factory", runtime, db, name, args)
+}
+
+/// `spawn_cli` for another subcommand of agent-mux (`project`): the same
+/// detached process, store, runtime folder and log file.
+pub fn spawn_cli_as(
+    exe: &Path,
+    subcommand: &str,
+    runtime: &Path,
+    db: Option<&Path>,
+    name: &str,
+    args: &[String],
+) -> Result<PathBuf, String> {
     let dir = dir(runtime);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let log = dir.join(format!("{name}.log"));
     let out = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let err = out.try_clone().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
-    cmd.arg("factory")
+    cmd.arg(subcommand)
         .args(args)
         .env("AGENT_MUX_RUNTIME_DIR", runtime)
         .stdin(std::process::Stdio::null())
