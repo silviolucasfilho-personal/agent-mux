@@ -2881,6 +2881,8 @@ pub struct App {
     /// The Factory screen as it was when it opened an item's run.
     pub(crate) factory_return: Option<Box<factory::FactoryView>>,
     pub last_factory_needs: Option<Instant>,
+    /// Items of cached Projects that wait on the operator.
+    pub project_needs: usize,
     /// The `gh` the Project screens run; `None` is `gh` on `PATH`.
     pub project_gh: Option<String>,
     /// The folder the Project screens open on in place of the selected
@@ -3081,6 +3083,7 @@ impl App {
             last_factory_poll: None,
             factory_return: None,
             last_factory_needs: None,
+            project_needs: 0,
             project_gh: None,
             project_dir_override: None,
             factory_needs: 0,

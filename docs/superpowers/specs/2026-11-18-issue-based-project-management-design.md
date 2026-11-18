@@ -1,6 +1,6 @@
 # Projects: every spec-wave flow, in agent-mux — design
 
-Status: proposal, 2026-11-18 (third draft). Phase 1 is implemented (§19); nothing else is.
+Status: proposal, 2026-11-18 (third draft). Phases 1 and 2 are implemented (§19, §20); nothing else is.
 
 **The requirement.** Any repository configured with spec-wave must open in
 agent-mux as a **Project** and work there: every flow spec-wave has, each
@@ -1081,3 +1081,31 @@ above:
   its board, its retired column and its documents in review.
 - **A read** of that hub (145 open issues) takes about 20 seconds, which
   is why the screens open on the cache.
+
+## 20. Phase 2 as built
+
+Built on 2026-11-18: `src/project/{write,ops}.rs`, the verbs in
+`agent-mux project`, the Bugs and UAT screens, the dialogs, the inbox
+rows. Where the code differs from the sections above:
+
+- **The board's catch-up moves** (§7.4) are not made on a refresh. They
+  are computed from the snapshot (`ops::auto_moves`) and made when the
+  operator says so: `A` on a screen, after a confirmation that lists
+  them, or `agent-mux project advance --yes`. A read never writes.
+- **Every change from a screen is confirmed** in a box that says what
+  will be written. The CLI verbs write at once, except `advance`.
+- **`task` and `story`** are CLI verbs only; on a screen the same moves
+  are `m`.
+- **The new-item form** has type, title, parent and priority. The area
+  and the body are CLI flags.
+- **The repair note** is spec-wave's text with `agent-mux project
+  repair-stage` and agent-mux's version in place of spec-wave's.
+- **A new Story or Task** is born in Ready (§13), where spec-wave's own
+  `issue` command puts every type in Backlog and tells the agent to move
+  it after.
+- **Screens run their changes in-process**, on a thread, and not by
+  spawning the CLI as the Factory screen does: the report comes back as
+  a notice and the touched issues are merged into the snapshot at once.
+- **Not built:** the Specification-and-later screens' verbs, editing an
+  item's fields (milestone, priority, area) from a screen, role presets,
+  the mouse. Homologação and Deploy moves are `m` on the UAT screen.

@@ -542,6 +542,7 @@ pub(crate) mod tests {
         let labels: Vec<String> = labels.iter().map(|s| s.to_string()).collect();
         Item {
             number: n,
+            node_id: format!("I_{n}"),
             title: title.to_string(),
             item_type: detect_type(title, &labels),
             open: true,

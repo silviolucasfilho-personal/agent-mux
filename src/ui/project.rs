@@ -4,7 +4,7 @@
 
 use super::flow::{dim, head, hints, key_style};
 use crate::app::project::{
-    Focus, ITEM_TABS, ProjectView, Row, Screen, milestone_features, needs_you,
+    Focus, ITEM_TABS, Modal, ProjectView, Row, Screen, milestone_features, needs_you,
 };
 use crate::project::contract::*;
 use crate::project::doctor::Status;
@@ -82,6 +82,9 @@ pub fn draw(f: &mut Frame, area: Rect, v: &ProjectView) {
         );
     }
     draw_foot(f, foot, v);
+    if let Some(modal) = &v.modal {
+        draw_modal(f, body, modal);
+    }
 }
 
 fn draw_nav(f: &mut Frame, area: Rect, v: &ProjectView) {
@@ -129,7 +132,11 @@ fn stage_short(stage: &str) -> String {
 
 fn draw_list(f: &mut Frame, area: Rect, v: &ProjectView) {
     let focused = v.item.is_none() && v.focus == Focus::List;
-    let reading = if v.syncing() { " · reading…" } else { "" };
+    let reading = match (&v.busy, v.syncing()) {
+        (Some(what), _) => format!(" · {what}…"),
+        (None, true) => " · reading…".to_string(),
+        (None, false) => String::new(),
+    };
     let needs = v.needs_you();
     let title = format!(
         " {}{}{reading} ",
@@ -783,6 +790,130 @@ fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
     );
 }
 
+/// A dialog over the middle of the screen.
+fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal) {
+    let (title, mut lines, hint): (String, Vec<Line>, Line) = match modal {
+        Modal::Pick {
+            title,
+            options,
+            cursor,
+            ..
+        } => (
+            format!(" {title} "),
+            options
+                .iter()
+                .enumerate()
+                .map(|(i, o)| {
+                    if i == *cursor {
+                        Line::styled(
+                            format!(" > {o} "),
+                            Style::default().add_modifier(Modifier::REVERSED),
+                        )
+                    } else {
+                        Line::raw(format!("   {o} "))
+                    }
+                })
+                .collect(),
+            hints(&[("↑↓", "choose"), ("Enter", "next"), ("Esc", "cancel")]),
+        ),
+        Modal::Text { label, text, .. } => (
+            format!(" {label} "),
+            vec![Line::from(vec![
+                Span::raw(format!(" {text}")),
+                Span::styled("▏", key_style()),
+            ])],
+            hints(&[("Enter", "next"), ("Esc", "cancel")]),
+        ),
+        Modal::New(form) => {
+            let field = |i: usize, name: &str, value: String, choice: bool| {
+                let on = form.field == i;
+                let shown = if choice {
+                    format!("‹ {value} ›")
+                } else if on {
+                    format!("{value}▏")
+                } else {
+                    value
+                };
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {} {name:<9}", if on { ">" } else { " " }),
+                        if on { key_style() } else { dim() },
+                    ),
+                    Span::raw(shown),
+                ])
+            };
+            let t = crate::project::ItemType::ALL
+                .get(form.item_type)
+                .map_or("Feature", |t| t.as_str());
+            let priority = form
+                .priority
+                .checked_sub(1)
+                .and_then(|i| PRIORITIES.get(i))
+                .copied()
+                .unwrap_or("none");
+            (
+                " New work item ".to_string(),
+                vec![
+                    field(0, "type", t.to_string(), true),
+                    field(1, "title", form.title.clone(), false),
+                    field(
+                        2,
+                        "parent",
+                        if form.parent.is_empty() && form.field != 2 {
+                            "(none)".to_string()
+                        } else {
+                            format!("#{}", form.parent)
+                        },
+                        false,
+                    ),
+                    field(3, "priority", priority.to_string(), true),
+                ],
+                hints(&[
+                    ("Tab", "field"),
+                    ("←→", "choose"),
+                    ("Enter", "next"),
+                    ("Esc", "cancel"),
+                ]),
+            )
+        }
+        Modal::Confirm { lines, .. } => (
+            " This writes to GitHub ".to_string(),
+            lines.iter().map(|l| Line::raw(format!(" {l}"))).collect(),
+            hints(&[("y", "do it"), ("n", "cancel")]),
+        ),
+    };
+    lines.push(Line::raw(""));
+    lines.push(hint);
+    let width = lines
+        .iter()
+        .map(Line::width)
+        .max()
+        .unwrap_or(20)
+        .max(title.chars().count())
+        .saturating_add(4)
+        .min(usize::from(area.width).saturating_sub(4))
+        .max(24) as u16;
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width.min(area.width),
+        height,
+    );
+    f.render_widget(Clear, rect);
+    let b = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(title);
+    let inner = b.inner(rect);
+    f.render_widget(b, rect);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
 fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
     let line = if v.filtering {
         hints(&[("Enter", "keep"), ("Esc", "clear")])
@@ -799,23 +930,31 @@ fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
             pairs.push(("Enter", enter));
         }
         pairs.extend([
+            ("m", "move"),
             ("o", "issue in browser"),
             ("Ctrl+R", "reload"),
             ("Esc", "back"),
         ]);
         hints(&pairs)
     } else {
-        hints(&[
+        let mut pairs = vec![
             ("[ ]", "screen"),
-            ("Tab", "screens/rows"),
-            ("↑↓", "move"),
             ("Enter", "open"),
-            ("←→", "tabs"),
+            ("n", "new"),
+            ("m", "move"),
+        ];
+        if v.screen == Screen::Bugs {
+            pairs.extend([("t", "accept"), ("R", "reject"), ("D", "duplicate")]);
+        } else {
+            pairs.extend([("M", "repair"), ("A", "catch up board")]);
+        }
+        pairs.extend([
             ("/", "filter"),
             ("o", "browser"),
             ("Ctrl+R", "reload"),
             ("Esc", "close"),
-        ])
+        ]);
+        hints(&pairs)
     };
     f.render_widget(Paragraph::new(line), area);
 }

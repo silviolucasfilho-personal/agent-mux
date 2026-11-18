@@ -25,7 +25,7 @@ const MAX_PAGES: usize = 100;
 /// Closed issues are read when they changed in this many days.
 pub const CLOSED_DAYS: i64 = 30;
 
-fn gh(tools: &Tools, cwd: &Path, args: &[&str], what: &str) -> Result<String, String> {
+pub(crate) fn gh(tools: &Tools, cwd: &Path, args: &[&str], what: &str) -> Result<String, String> {
     let out = Command::new(&tools.gh)
         .args(args)
         .current_dir(cwd)
@@ -45,11 +45,16 @@ fn gh(tools: &Tools, cwd: &Path, args: &[&str], what: &str) -> Result<String, St
     }
 }
 
-fn json(text: &str, what: &str) -> Result<Value, String> {
+pub(crate) fn json(text: &str, what: &str) -> Result<Value, String> {
     serde_json::from_str(text).map_err(|e| format!("{what}: not JSON: {e}"))
 }
 
-fn graphql(tools: &Tools, cwd: &Path, query: &str, vars: &[(&str, &str)]) -> Result<Value, String> {
+pub(crate) fn graphql(
+    tools: &Tools,
+    cwd: &Path,
+    query: &str,
+    vars: &[(&str, &str)],
+) -> Result<Value, String> {
     let mut args: Vec<String> = vec!["api".into(), "graphql".into(), "-f".into()];
     args.push(format!("query={query}"));
     for (k, v) in vars {
@@ -71,11 +76,145 @@ fn graphql(tools: &Tools, cwd: &Path, query: &str, vars: &[(&str, &str)]) -> Res
     Ok(v)
 }
 
+/// A GraphQL read that keeps what came back when part of it failed: `gh`
+/// exits non-zero on any error, with the data still on its output. A
+/// missing scope is still an error, since it empties what was asked for.
+fn graphql_lenient(
+    tools: &Tools,
+    cwd: &Path,
+    query: &str,
+    vars: &[(&str, &str)],
+) -> Result<Value, String> {
+    let mut cmd = Command::new(&tools.gh);
+    cmd.args(["api", "graphql", "-f", &format!("query={query}")]);
+    for (k, v) in vars {
+        cmd.args(["-f", &format!("{k}={v}")]);
+    }
+    let out = cmd
+        .current_dir(cwd)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .map_err(|e| format!("cannot run gh api graphql: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    let Ok(v) = serde_json::from_str::<Value>(stdout.trim()) else {
+        return Err(format!(
+            "gh api graphql: {}",
+            if stderr.is_empty() {
+                stdout.trim()
+            } else {
+                &stderr
+            }
+        ));
+    };
+    let messages: Vec<&str> = v
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.get("message").and_then(Value::as_str))
+        .collect();
+    let joined = messages.join("; ");
+    if v.pointer("/data/repository").is_none_or(Value::is_null) || scope_error(&joined) {
+        return Err(format!(
+            "gh api graphql: {}",
+            if joined.is_empty() { stderr } else { joined }
+        ));
+    }
+    Ok(v)
+}
+
+/// A single-select field of a Projects v2 board: its id and option ids.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FieldIds {
+    pub id: String,
+    pub options: std::collections::BTreeMap<String, String>,
+}
+
+/// The single-select fields of a board, by name, read from the board.
+pub fn board_fields(
+    tools: &Tools,
+    cwd: &Path,
+    project_id: &str,
+) -> Result<std::collections::BTreeMap<String, FieldIds>, String> {
+    let v = graphql(
+        tools,
+        cwd,
+        "query($id:ID!){node(id:$id){... on ProjectV2{fields(first:50){nodes{
+           ... on ProjectV2SingleSelectField{id name options{id name}}}}}}}",
+        &[("id", project_id)],
+    )?;
+    let mut out = std::collections::BTreeMap::new();
+    for f in v
+        .pointer("/data/node/fields/nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (Some(id), Some(name)) = (
+            f.get("id").and_then(Value::as_str),
+            f.get("name").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let options = f
+            .get("options")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|o| {
+                Some((
+                    o.get("name")?.as_str()?.to_string(),
+                    o.get("id")?.as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        out.insert(
+            name.to_string(),
+            FieldIds {
+                id: id.to_string(),
+                options,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// The login gh acts as.
+pub fn login(tools: &Tools, cwd: &Path) -> Result<String, String> {
+    gh(
+        tools,
+        cwd,
+        &["api", "user", "--jq", ".login"],
+        "gh api user",
+    )
+}
+
 const BOARD_PART: &str = "projectItems(first:5){nodes{id project{id}
   fieldValues(first:20){nodes{
     ... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{name}}}
     ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2Field{name}}}
   }}}}";
+
+const ISSUE_FIELDS: &str = "id number title state body updatedAt closedAt
+  labels(first:40){nodes{name}}
+  milestone{title}
+  assignees(first:5){nodes{login}}
+  parent{number}
+  subIssues(first:100){nodes{number}}
+  blockedBy(first:50){nodes{number repository{nameWithOwner}}}
+  closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{
+    number url state isDraft headRefName baseRefName reviewDecision repository{nameWithOwner}}}";
+
+/// The fields read of every issue; with `board`, its Projects v2 values.
+fn issue_fields(board: bool) -> String {
+    if board {
+        format!("{ISSUE_FIELDS}\n  {BOARD_PART}")
+    } else {
+        ISSUE_FIELDS.to_string()
+    }
+}
 
 fn issues_query(states: &str, since: bool, after: bool, board: bool) -> String {
     let mut decl = vec!["$owner:String!", "$repo:String!"];
@@ -95,21 +234,53 @@ fn issues_query(states: &str, since: bool, after: bool, board: bool) -> String {
     format!(
         "query({}){{repository(owner:$owner,name:$repo){{defaultBranchRef{{name}}
  issues({}){{pageInfo{{hasNextPage endCursor}} nodes{{
-  number title state body updatedAt closedAt
-  labels(first:40){{nodes{{name}}}}
-  milestone{{title}}
-  assignees(first:5){{nodes{{login}}}}
-  parent{{number}}
-  subIssues(first:100){{nodes{{number}}}}
-  blockedBy(first:50){{nodes{{number repository{{nameWithOwner}}}}}}
-  closedByPullRequestsReferences(first:10,includeClosedPrs:true){{nodes{{
-    number url state isDraft headRefName baseRefName reviewDecision repository{{nameWithOwner}}}}}}
   {}
  }}}}}}}}",
         decl.join(","),
         args.join(","),
-        if board { BOARD_PART } else { "" }
+        issue_fields(board)
     )
+}
+
+/// The issues with these numbers, in the shape of the page query, read
+/// now and not from a cache: what a verb acts on. One that does not exist
+/// is left out.
+pub fn issue_nodes(
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    numbers: &[u64],
+) -> Result<Vec<Value>, String> {
+    if numbers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let hub = cfg.hub_repo();
+    let read = |board: bool| -> Result<Vec<Value>, String> {
+        let parts: Vec<String> = numbers
+            .iter()
+            .map(|n| format!("i{n}:issue(number:{n}){{{}}}", issue_fields(board)))
+            .collect();
+        let query = format!(
+            "query($owner:String!,$repo:String!){{repository(owner:$owner,name:$repo){{{}}}}}",
+            parts.join(" ")
+        );
+        // an issue that does not exist is an error beside a null: read the data
+        let v = graphql_lenient(
+            tools,
+            cfg.root(),
+            &query,
+            &[("owner", &hub.owner), ("repo", &hub.repo)],
+        )?;
+        Ok(numbers
+            .iter()
+            .filter_map(|n| v.pointer(&format!("/data/repository/i{n}")))
+            .filter(|n| !n.is_null())
+            .cloned()
+            .collect())
+    };
+    match read(true) {
+        Err(e) if scope_error(&e) => read(false),
+        other => other,
+    }
 }
 
 /// A `gh` failure that means the token may not read Projects v2.

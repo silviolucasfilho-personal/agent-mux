@@ -817,6 +817,7 @@ impl App {
         }
         self.last_factory_needs = Some(now);
         self.factory_needs = self.factory_inbox_items().len();
+        self.project_needs = self.project_inbox_items().len();
     }
 
     /// Work items that wait on the operator and brain notes to decide,

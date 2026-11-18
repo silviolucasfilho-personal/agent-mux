@@ -20,7 +20,7 @@ use crate::project::config::{self, ProjectConfig, Role};
 use crate::project::contract::*;
 use crate::project::doctor::{self, Check};
 use crate::project::next::{self, Decision};
-use crate::project::{Item, ItemType, Snapshot, cli, order, snapshot, stage, store};
+use crate::project::{Item, ItemType, Snapshot, cli, ops, order, snapshot, stage, store};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -33,16 +33,20 @@ pub enum Screen {
     Board,
     Backlog,
     Ready,
+    Bugs,
+    Uat,
     Milestones,
     Health,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 6] = [
+    pub const ALL: [Screen; 8] = [
         Screen::Home,
         Screen::Board,
         Screen::Backlog,
         Screen::Ready,
+        Screen::Bugs,
+        Screen::Uat,
         Screen::Milestones,
         Screen::Health,
     ];
@@ -53,6 +57,8 @@ impl Screen {
             Screen::Board => "Board",
             Screen::Backlog => "Backlog",
             Screen::Ready => "Ready",
+            Screen::Bugs => "Bugs",
+            Screen::Uat => "UAT and release",
             Screen::Milestones => "Milestones",
             Screen::Health => "Health",
         }
@@ -135,6 +141,8 @@ pub enum Outcome {
     OpenDoc(PathBuf),
     /// Read the thread of this issue.
     LoadThread(u64),
+    /// Make this change on GitHub: the operator confirmed it.
+    Run(Op),
 }
 
 #[derive(Debug)]
@@ -151,7 +159,7 @@ pub struct ProjectView {
     pub focus: Focus,
     pub rows: Vec<Row>,
     /// The list cursor of each screen.
-    pub cursors: [usize; 6],
+    pub cursors: [usize; 8],
     pub tab: usize,
     pub scroll: u16,
     pub filter: String,
@@ -162,6 +170,12 @@ pub struct ProjectView {
     pub thread: Option<Thread>,
     pub checks: Option<Vec<Check>>,
     pub syncing_since: Option<Instant>,
+    /// A dialog over the screen: a picker, a line of text, the new-item
+    /// form or a confirmation.
+    pub modal: Option<Modal>,
+    /// A change is being made on GitHub: what it is.
+    pub busy: Option<String>,
+    op_rx: Option<Receiver<OpDone>>,
     sync_rx: Option<Receiver<Result<Snapshot, String>>>,
     health_rx: Option<Receiver<Vec<Check>>>,
     thread_rx: Option<Receiver<Thread>>,
@@ -184,7 +198,7 @@ impl ProjectView {
             screen: Screen::Home,
             focus: Focus::List,
             rows: Vec::new(),
-            cursors: [0; 6],
+            cursors: [0; 8],
             tab: 0,
             scroll: 0,
             filter: String::new(),
@@ -194,6 +208,9 @@ impl ProjectView {
             thread: None,
             checks: None,
             syncing_since: None,
+            modal: None,
+            busy: None,
+            op_rx: None,
             sync_rx: None,
             health_rx: None,
             thread_rx: None,
@@ -208,7 +225,11 @@ impl ProjectView {
     }
 
     pub fn text_entry_active(&self) -> bool {
-        self.filtering
+        self.filtering || matches!(self.modal, Some(Modal::Text { .. } | Modal::New(_)))
+    }
+
+    pub fn confirmation_active(&self) -> bool {
+        matches!(self.modal, Some(Modal::Confirm { .. }))
     }
 
     pub fn syncing(&self) -> bool {
@@ -272,6 +293,22 @@ impl ProjectView {
                     i.open
                         && matches!(i.item_type, Some(ItemType::Story | ItemType::Bug))
                         && stage::shown(i).stage == STAGE_READY
+                })
+                .count(),
+            Screen::Bugs => s
+                .items
+                .iter()
+                .filter(|i| {
+                    i.open
+                        && i.item_type == Some(ItemType::Bug)
+                        && stage::shown(i).stage == STAGE_TRIAGE
+                })
+                .count(),
+            Screen::Uat => s
+                .items
+                .iter()
+                .filter(|i| {
+                    i.open && matches!(stage::shown(i).stage.as_str(), STAGE_UAT | STAGE_DEPLOY)
                 })
                 .count(),
             Screen::Milestones => s.milestones.iter().filter(|m| m.open).count(),
@@ -360,6 +397,16 @@ impl ProjectView {
 
     pub fn handle_key(&mut self, key: &KeyEvent) -> Outcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.modal.is_some() {
+            return self.modal_key(key);
+        }
+        if !self.filtering
+            && !ctrl
+            && let KeyCode::Char(c) = key.code
+            && let Some(outcome) = self.verb_key(c)
+        {
+            return outcome;
+        }
         if self.filtering {
             match key.code {
                 KeyCode::Esc => {
@@ -464,6 +511,12 @@ impl ProjectView {
         let len = self.item_tab_len();
         let hub = self.hub();
         let hub_root = self.hub_root();
+        if !ctrl
+            && let KeyCode::Char(c) = key.code
+            && matches!(c, 'm' | 'M' | 't' | 'R' | 'D')
+        {
+            return self.verb_key(c).unwrap_or(Outcome::None);
+        }
         let Some(screen) = self.item.as_mut() else {
             return Outcome::None;
         };
@@ -571,6 +624,564 @@ impl ProjectView {
         }
         Outcome::None
     }
+}
+
+/// A change on GitHub, as the operator asked for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Op {
+    New(ops::NewItem),
+    Move {
+        number: u64,
+        stage: String,
+    },
+    Repair {
+        number: u64,
+        stage: String,
+        reason: String,
+    },
+    Triage {
+        action: &'static str,
+        number: u64,
+        severity: Option<String>,
+        reason: Option<String>,
+        of: Option<u64>,
+    },
+    /// The board moves the pull requests already justify.
+    Advance(Vec<ops::AutoMove>),
+}
+
+impl Op {
+    /// A few words for the status line while it runs.
+    pub fn label(&self) -> String {
+        match self {
+            Op::New(n) => format!(
+                "creating the {}",
+                n.item_type.map_or("item", ItemType::as_str)
+            ),
+            Op::Move { number, .. } => format!("moving #{number}"),
+            Op::Repair { number, .. } => format!("repairing the stage of #{number}"),
+            Op::Triage { number, .. } => format!("triaging #{number}"),
+            Op::Advance(m) => format!("making {} board move(s)", m.len()),
+        }
+    }
+}
+
+/// What a picker's choice is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pick {
+    MoveTo(u64),
+    RepairTo(u64),
+    /// The severity a Bug is accepted with; the first option keeps its own.
+    Severity(u64),
+}
+
+/// What a typed line is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextFor {
+    RepairReason { number: u64, stage: String },
+    RejectReason(u64),
+    DuplicateOf(u64),
+}
+
+/// The new-item form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewForm {
+    /// An index into [`ItemType::ALL`].
+    pub item_type: usize,
+    pub title: String,
+    /// The parent's number, as typed.
+    pub parent: String,
+    /// 0 is none; then an index into the priorities, plus one.
+    pub priority: usize,
+    /// The field with the keyboard: type, title, parent, priority.
+    pub field: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Modal {
+    Pick {
+        what: Pick,
+        title: String,
+        options: Vec<String>,
+        cursor: usize,
+    },
+    Text {
+        what: TextFor,
+        label: String,
+        text: String,
+    },
+    New(NewForm),
+    /// What will be written, and the operator's yes.
+    Confirm {
+        lines: Vec<String>,
+        op: Op,
+    },
+}
+
+/// What a finished change left: its report, and the snapshot with the
+/// changed issues read again.
+pub struct OpDone {
+    pub result: Result<ops::Report, String>,
+    pub snap: Option<Snapshot>,
+}
+
+impl std::fmt::Debug for OpDone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpDone")
+            .field("result", &self.result)
+            .finish()
+    }
+}
+
+/// The type a new item under `parent` most likely is.
+fn child_type(parent: Option<ItemType>) -> ItemType {
+    match parent {
+        Some(ItemType::Initiative) => ItemType::Epic,
+        Some(ItemType::Epic) => ItemType::Feature,
+        Some(ItemType::Feature) => ItemType::Story,
+        Some(ItemType::Story) => ItemType::Task,
+        _ => ItemType::Feature,
+    }
+}
+
+impl ProjectView {
+    /// The item a verb acts on: the item screen's, else the row's.
+    pub fn target(&self) -> Option<&Item> {
+        if self.item.is_some() {
+            self.open_item()
+        } else {
+            self.selected_item()
+        }
+    }
+
+    /// A verb's key. `None`: the key is not a verb here.
+    fn verb_key(&mut self, c: char) -> Option<Outcome> {
+        if !matches!(c, 'n' | 'm' | 'M' | 't' | 'R' | 'D' | 'A') {
+            return None;
+        }
+        if self.snap.is_none() {
+            return Some(Outcome::Notice("the Project is not read yet".into()));
+        }
+        if let Some(what) = &self.busy {
+            return Some(Outcome::Notice(format!("wait: {what}")));
+        }
+        let target = self.target().cloned();
+        let need = |what: &str| Some(Outcome::Notice(format!("select an item to {what}")));
+        match c {
+            'n' => {
+                let parent = target.as_ref().filter(|t| {
+                    matches!(
+                        t.item_type,
+                        Some(
+                            ItemType::Initiative
+                                | ItemType::Epic
+                                | ItemType::Feature
+                                | ItemType::Story
+                        )
+                    )
+                });
+                let t = child_type(parent.and_then(|p| p.item_type));
+                self.modal = Some(Modal::New(NewForm {
+                    item_type: ItemType::ALL.iter().position(|x| *x == t).unwrap_or(2),
+                    title: String::new(),
+                    parent: parent.map(|p| p.number.to_string()).unwrap_or_default(),
+                    priority: 0,
+                    field: 1,
+                }));
+            }
+            'm' | 'M' => {
+                let Some(it) = target else {
+                    return need("move");
+                };
+                if it.item_type == Some(ItemType::Spike) {
+                    return Some(Outcome::Notice(
+                        "a Spike's stage is moved by hand on the board".into(),
+                    ));
+                }
+                let repair = c == 'M';
+                let options: Vec<String> = STAGE_ORDER
+                    .iter()
+                    .filter(|s| repair || stage::plan_move(it.stage.as_deref(), s).advance)
+                    .filter(|s| it.stage.as_deref() != Some(**s))
+                    .map(|s| s.to_string())
+                    .collect();
+                if options.is_empty() {
+                    let why = match it.stage.as_deref().map(stage::kind) {
+                        Some(stage::Kind::Canonical) => "it is at the last stage",
+                        _ => "its column is not a stage of the flow: [M] repairs it",
+                    };
+                    return Some(Outcome::Notice(format!(
+                        "#{} cannot advance: {why}",
+                        it.number
+                    )));
+                }
+                self.modal = Some(Modal::Pick {
+                    title: if repair {
+                        format!(
+                            "Repair the stage of #{} (may go back; leaves a note)",
+                            it.number
+                        )
+                    } else {
+                        format!("Move #{} to", it.number)
+                    },
+                    what: if repair {
+                        Pick::RepairTo(it.number)
+                    } else {
+                        Pick::MoveTo(it.number)
+                    },
+                    options,
+                    cursor: 0,
+                });
+            }
+            't' | 'R' | 'D' => {
+                let Some(it) = target.filter(|t| t.item_type == Some(ItemType::Bug)) else {
+                    return Some(Outcome::Notice("triage is for a Bug: select one".into()));
+                };
+                self.modal = Some(match c {
+                    't' => {
+                        let mut options = vec![match &it.priority {
+                            Some(p) => format!("keep {p}"),
+                            None => "no severity".to_string(),
+                        }];
+                        options.extend(PRIORITIES.iter().map(|p| p.to_string()));
+                        Modal::Pick {
+                            what: Pick::Severity(it.number),
+                            title: format!("Accept Bug #{} with severity", it.number),
+                            options,
+                            cursor: 0,
+                        }
+                    }
+                    'R' => Modal::Text {
+                        what: TextFor::RejectReason(it.number),
+                        label: format!("Reject Bug #{}: why", it.number),
+                        text: String::new(),
+                    },
+                    _ => Modal::Text {
+                        what: TextFor::DuplicateOf(it.number),
+                        label: format!("Bug #{} is a duplicate of issue", it.number),
+                        text: String::new(),
+                    },
+                });
+            }
+            _ => {
+                let moves = self.snap.as_ref().map(ops::auto_moves).unwrap_or_default();
+                if moves.is_empty() {
+                    return Some(Outcome::Notice(
+                        "the board is up to date with the pull requests".into(),
+                    ));
+                }
+                let mut lines = vec!["The pull requests already justify these moves:".to_string()];
+                lines.extend(
+                    moves
+                        .iter()
+                        .map(|m| format!("#{}: {} → {} ({})", m.number, m.from, m.to, m.why)),
+                );
+                self.modal = Some(Modal::Confirm {
+                    lines,
+                    op: Op::Advance(moves),
+                });
+            }
+        }
+        Some(Outcome::None)
+    }
+
+    fn confirm(&mut self, lines: Vec<String>, op: Op) {
+        self.modal = Some(Modal::Confirm { lines, op });
+    }
+
+    fn modal_key(&mut self, key: &KeyEvent) -> Outcome {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(modal) = self.modal.take() else {
+            return Outcome::None;
+        };
+        if key.code == KeyCode::Esc {
+            return Outcome::None;
+        }
+        match modal {
+            Modal::Confirm { lines, op } => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    return Outcome::Run(op);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => {}
+                _ => self.modal = Some(Modal::Confirm { lines, op }),
+            },
+            Modal::Pick {
+                what,
+                title,
+                options,
+                mut cursor,
+            } => match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    cursor = (cursor + 1).min(options.len().saturating_sub(1));
+                    self.modal = Some(Modal::Pick {
+                        what,
+                        title,
+                        options,
+                        cursor,
+                    });
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    cursor = cursor.saturating_sub(1);
+                    self.modal = Some(Modal::Pick {
+                        what,
+                        title,
+                        options,
+                        cursor,
+                    });
+                }
+                KeyCode::Enter => {
+                    let choice = options.get(cursor).cloned().unwrap_or_default();
+                    match what {
+                        Pick::MoveTo(number) => self.confirm(
+                            vec![
+                                format!("Move #{number} to {choice}, with status Todo."),
+                                "This writes the board's Etapa and Status fields.".into(),
+                            ],
+                            Op::Move {
+                                number,
+                                stage: choice,
+                            },
+                        ),
+                        Pick::RepairTo(number) => {
+                            self.modal = Some(Modal::Text {
+                                what: TextFor::RepairReason {
+                                    number,
+                                    stage: choice.clone(),
+                                },
+                                label: format!("Repair #{number} to {choice}: why"),
+                                text: String::new(),
+                            });
+                        }
+                        Pick::Severity(number) => {
+                            let severity = (cursor > 0).then(|| choice.clone());
+                            let mut lines =
+                                vec![format!("Accept Bug #{number} for the technical queue.")];
+                            if let Some(s) = &severity {
+                                lines.push(format!("Its severity label becomes {s}."));
+                            }
+                            lines.push(
+                                "This adds `spec-wave:triaged`, comments on the issue and moves it to Ready.".into(),
+                            );
+                            self.confirm(
+                                lines,
+                                Op::Triage {
+                                    action: "accept",
+                                    number,
+                                    severity,
+                                    reason: None,
+                                    of: None,
+                                },
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    self.modal = Some(Modal::Pick {
+                        what,
+                        title,
+                        options,
+                        cursor,
+                    })
+                }
+            },
+            Modal::Text {
+                what,
+                label,
+                mut text,
+            } => {
+                match key.code {
+                    KeyCode::Backspace => {
+                        text.pop();
+                        self.modal = Some(Modal::Text { what, label, text });
+                    }
+                    KeyCode::Char(c) if !ctrl => {
+                        text.push(c);
+                        self.modal = Some(Modal::Text { what, label, text });
+                    }
+                    KeyCode::Enter => {
+                        let typed = text.trim().to_string();
+                        if typed.is_empty() {
+                            self.modal = Some(Modal::Text { what, label, text });
+                            return Outcome::Notice("it cannot be empty".into());
+                        }
+                        match what {
+                        TextFor::RepairReason { number, stage } => self.confirm(
+                            vec![
+                                format!("Repair #{number}: put it at {stage}, whatever the order says."),
+                                format!("Reason, left as a comment on the issue: {typed}"),
+                            ],
+                            Op::Repair { number, stage, reason: typed },
+                        ),
+                        TextFor::RejectReason(number) => self.confirm(
+                            vec![
+                                format!("Reject Bug #{number} and close it as not planned."),
+                                format!("Reason, left as a comment on the issue: {typed}"),
+                                "This adds `spec-wave:wont-fix` and `spec-wave:triaged`.".into(),
+                            ],
+                            Op::Triage {
+                                action: "reject",
+                                number,
+                                severity: None,
+                                reason: Some(typed),
+                                of: None,
+                            },
+                        ),
+                        TextFor::DuplicateOf(number) => {
+                            match typed.trim_start_matches('#').parse::<u64>() {
+                                Ok(original) if original != number => self.confirm(
+                                    vec![
+                                        format!("Close Bug #{number} as a duplicate of #{original}."),
+                                        "This comments on both issues and adds `spec-wave:duplicate` and `spec-wave:triaged`.".into(),
+                                    ],
+                                    Op::Triage {
+                                        action: "duplicate",
+                                        number,
+                                        severity: None,
+                                        reason: None,
+                                        of: Some(original),
+                                    },
+                                ),
+                                _ => {
+                                    self.modal = Some(Modal::Text { what: TextFor::DuplicateOf(number), label, text });
+                                    return Outcome::Notice(
+                                        "type the number of the original issue".into(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    }
+                    _ => self.modal = Some(Modal::Text { what, label, text }),
+                }
+            }
+            Modal::New(mut form) => {
+                match key.code {
+                    KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 4,
+                    KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 3) % 4,
+                    KeyCode::Left | KeyCode::Right if form.field == 0 => {
+                        let n = ItemType::ALL.len();
+                        form.item_type = if key.code == KeyCode::Right {
+                            (form.item_type + 1) % n
+                        } else {
+                            (form.item_type + n - 1) % n
+                        };
+                    }
+                    KeyCode::Left | KeyCode::Right if form.field == 3 => {
+                        let n = PRIORITIES.len() + 1;
+                        form.priority = if key.code == KeyCode::Right {
+                            (form.priority + 1) % n
+                        } else {
+                            (form.priority + n - 1) % n
+                        };
+                    }
+                    KeyCode::Backspace if form.field == 1 => {
+                        form.title.pop();
+                    }
+                    KeyCode::Backspace if form.field == 2 => {
+                        form.parent.pop();
+                    }
+                    KeyCode::Char(c) if !ctrl && form.field == 1 => form.title.push(c),
+                    KeyCode::Char(c) if !ctrl && form.field == 2 && c.is_ascii_digit() => {
+                        form.parent.push(c);
+                    }
+                    KeyCode::Enter => {
+                        let t = ItemType::ALL[form.item_type.min(ItemType::ALL.len() - 1)];
+                        let title = form.title.trim().to_string();
+                        if title.is_empty() {
+                            form.field = 1;
+                            self.modal = Some(Modal::New(form));
+                            return Outcome::Notice("a title is needed".into());
+                        }
+                        let parent = form.parent.trim().parse::<u64>().ok();
+                        let priority = form
+                            .priority
+                            .checked_sub(1)
+                            .and_then(|i| PRIORITIES.get(i))
+                            .map(|p| p.to_string());
+                        let stage = initial_stage(t, priority.as_deref());
+                        let mut lines = vec![format!("Create {} «{title}»", t.as_str())];
+                        if let Some(p) = parent {
+                            lines.push(format!("as a sub-issue of #{p}"));
+                        }
+                        lines.push(format!("and put it on the board in {stage}."));
+                        self.confirm(
+                            lines,
+                            Op::New(ops::NewItem {
+                                item_type: Some(t),
+                                title,
+                                parent,
+                                priority,
+                                area: None,
+                                body: String::new(),
+                            }),
+                        );
+                        return Outcome::None;
+                    }
+                    _ => {}
+                }
+                self.modal = Some(Modal::New(form));
+            }
+        }
+        Outcome::None
+    }
+}
+
+/// A work item that waits on the operator, as the inbox lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Need {
+    pub hub: String,
+    /// The folder the Project was read from.
+    pub root: String,
+    pub number: u64,
+    pub title: String,
+    /// `Feature`, `Bug`, `RFC`.
+    pub kind: String,
+    pub stage: String,
+    /// What it waits on: a block's code, or the step a person gives.
+    pub code: String,
+    pub reason: String,
+    pub unblock: String,
+}
+
+impl Need {
+    /// The few words that say what the item wants.
+    pub fn word(&self) -> &'static str {
+        match self.code.as_str() {
+            "pr-pending" => "document to merge",
+            "critique-failed" => "critique failed",
+            "needs-human" => "needs a person",
+            "inconsistent-state" => "labels and files disagree",
+            "validate" => "plan to validate",
+            "decompose-apply" => "draft to apply",
+            "triage" => "bug to triage",
+            _ => "waits on you",
+        }
+    }
+}
+
+/// The needs of one snapshot.
+pub fn needs_of(s: &Snapshot) -> Vec<Need> {
+    needs_you(s)
+        .into_iter()
+        .map(|(it, d)| Need {
+            hub: s.hub.clone(),
+            root: s.root.clone().unwrap_or_default(),
+            number: it.number,
+            title: it.name().to_string(),
+            kind: it.item_type.map_or("item", ItemType::as_str).to_string(),
+            stage: stage::shown(it).stage,
+            code: match &d.blocked {
+                Some(b) if b.code != "manual" => b.code.to_string(),
+                _ => d.action.as_str().to_string(),
+            },
+            reason: d.reason.clone(),
+            unblock: d
+                .blocked
+                .as_ref()
+                .map(|b| b.unblock.clone())
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 fn same_row(a: &Row, b: &Row) -> bool {
@@ -884,6 +1495,51 @@ pub fn rows_for(
                 rows.push(Row::Milestone(None));
             }
         }
+        Screen::Bugs => {
+            // triage first, then the flow's order
+            let stages: Vec<&str> = track(ItemType::Bug).unwrap_or_default();
+            for st in stages {
+                if st == STAGE_DONE {
+                    continue;
+                }
+                let mut items: Vec<&Item> = s
+                    .items
+                    .iter()
+                    .filter(|i| {
+                        i.open && i.item_type == Some(ItemType::Bug) && stage::shown(i).stage == st
+                    })
+                    .collect();
+                items.sort_by(by_priority);
+                let text = if st == STAGE_TRIAGE {
+                    "to triage".to_string()
+                } else {
+                    stage_plain(st).to_string()
+                };
+                if !items.is_empty() || st == STAGE_TRIAGE {
+                    group(&mut rows, format!("bugs:{st}"), text, items, 0);
+                }
+            }
+        }
+        Screen::Uat => {
+            for (key, text, st) in [
+                ("uat:uat", "in acceptance (Homologação)", STAGE_UAT),
+                ("uat:deploy", "waiting for deploy", STAGE_DEPLOY),
+            ] {
+                let mut items: Vec<&Item> = s
+                    .items
+                    .iter()
+                    .filter(|i| i.open && i.item_type.is_some() && stage::shown(i).stage == st)
+                    .collect();
+                items.sort_by(|a, b| {
+                    a.milestone
+                        .is_none()
+                        .cmp(&b.milestone.is_none())
+                        .then(a.milestone.cmp(&b.milestone))
+                        .then(a.number.cmp(&b.number))
+                });
+                group(&mut rows, key.into(), text.into(), items, 0);
+            }
+        }
         Screen::Health => {
             if let Some(c) = checks {
                 rows.extend((0..c.len()).map(Row::Check));
@@ -947,6 +1603,46 @@ impl App {
         if stale {
             self.project_sync();
         }
+    }
+
+    /// The Project of `need`, on its item's screen.
+    pub fn open_project_on(&mut self, need: &Need) {
+        if need.root.is_empty() {
+            self.notice = Some(Notice::info(
+                "this Project was read before agent-mux kept its folder: open it from a session there",
+            ));
+            return;
+        }
+        self.open_project_in(Path::new(&need.root));
+        if let Mode::Project(view) = &mut self.mode
+            && view
+                .snap
+                .as_ref()
+                .is_some_and(|s| s.item(need.number).is_some())
+        {
+            view.open_item_screen(need.number);
+        }
+    }
+
+    /// Items of every Project read on this machine that wait on the
+    /// operator, from the cache. Nothing is read from GitHub for this.
+    pub fn project_inbox_items(&self) -> Vec<super::inbox::InboxItem> {
+        let Some(conn) = self
+            .trace_db_path
+            .as_deref()
+            .filter(|p| p.is_file())
+            .and_then(|p| crate::tracing::store::open_ro(p).ok())
+        else {
+            return Vec::new();
+        };
+        let mut out: Vec<super::inbox::InboxItem> = store::hubs(&conn)
+            .into_iter()
+            .filter_map(|hub| store::load(&conn, &hub).ok().flatten())
+            .flat_map(|s| needs_of(&s))
+            .map(super::inbox::InboxItem::Project)
+            .collect();
+        out.retain(|i| !self.inbox_dismissed.contains(&i.key()));
+        out
     }
 
     /// Reads the Project from GitHub on a thread of its own; the tick
@@ -1033,9 +1729,91 @@ impl App {
             view.thread_rx = None;
             view.thread = Some(thread);
         }
+        if let Some(rx) = &view.op_rx
+            && let Ok(done) = rx.try_recv()
+        {
+            view.op_rx = None;
+            view.busy = None;
+            if let Some(snap) = done.snap {
+                view.snap = Some(snap);
+            }
+            notice = Some(match done.result {
+                Ok(report) => {
+                    let text = report.lines.join(" · ");
+                    if report.lines.iter().any(|l| l.starts_with('!')) {
+                        Notice::warn(text)
+                    } else {
+                        Notice::info(text)
+                    }
+                }
+                Err(e) => Notice::error(format!("project: {e}")),
+            });
+            view.rebuild();
+        }
         if notice.is_some() {
             self.notice = notice;
         }
+    }
+
+    /// Makes a change the operator confirmed, on a thread of its own. The
+    /// tick takes its report and the issues it changed, read again.
+    pub fn project_run(&mut self, op: Op) {
+        let tools = self.project_tools();
+        let db = self.trace_db_path.clone();
+        let Mode::Project(view) = &mut self.mode else {
+            return;
+        };
+        let Some(cfg) = view.cfg.clone() else { return };
+        if view.op_rx.is_some() {
+            return;
+        }
+        let mut snap = view.snap.clone();
+        let (tx, rx) = channel();
+        view.op_rx = Some(rx);
+        view.busy = Some(op.label());
+        std::thread::spawn(move || {
+            let run = ops::Ops {
+                tools: &tools,
+                cfg: &cfg,
+                seen_board: snap.as_ref().and_then(|s| s.board_id.clone()),
+            };
+            let result = match &op {
+                Op::New(new) => run.new_item(new),
+                Op::Move { number, stage } => run.move_item(*number, stage, None),
+                Op::Repair {
+                    number,
+                    stage,
+                    reason,
+                } => run.repair_stage(&[*number], stage, None, true, reason),
+                Op::Triage {
+                    action,
+                    number,
+                    severity,
+                    reason,
+                    of,
+                } => run.triage(action, *number, severity.as_deref(), reason.as_deref(), *of),
+                Op::Advance(moves) => run.apply_moves(moves),
+            };
+            // what changed is read again, into the screen and the cache
+            let mut fresh = None;
+            if let (Ok(report), Some(s)) = (&result, snap.as_mut())
+                && !report.touched.is_empty()
+                && let Ok(nodes) =
+                    crate::project::github::issue_nodes(&tools, &cfg, &report.touched)
+            {
+                snapshot::merge(s, &nodes, &cfg);
+                if let Some(db) = &db
+                    && let Ok(conn) = cli::open_store(db)
+                {
+                    let _ = store::save(&conn, s);
+                }
+                fresh = snap;
+            }
+            let _ = tx.send(OpDone {
+                result,
+                snap: fresh,
+            });
+        });
     }
 
     pub fn handle_project_key(&mut self, key: &KeyEvent) {
@@ -1058,6 +1836,7 @@ impl App {
             Outcome::OpenUrl(url) => self.open_url(&url),
             Outcome::OpenDoc(path) => self.open_markdown(&path),
             Outcome::LoadThread(n) => self.project_load_thread(n),
+            Outcome::Run(op) => self.project_run(op),
         }
     }
 }
@@ -1285,5 +2064,210 @@ mod tests {
             v.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
             Outcome::Sync
         );
+    }
+    fn typed(v: &mut ProjectView, text: &str) {
+        for c in text.chars() {
+            v.handle_key(&key(KeyCode::Char(c)));
+        }
+    }
+
+    fn on_item(v: &mut ProjectView, screen: Screen, number: u64) {
+        v.screen = screen;
+        v.rebuild();
+        let at = v
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Item { number: n, .. } if *n == number))
+            .unwrap_or_else(|| panic!("#{number} is not on {screen:?}"));
+        v.cursors[screen.index()] = at;
+    }
+
+    #[test]
+    fn bugs_and_acceptance_have_their_own_screens() {
+        let mut raw = fixture::raw();
+        raw.issues.push(serde_json::json!({
+            "number": 30, "title": "[STORY] aceitar", "state": "OPEN", "body": "",
+            "labels": {"nodes": []},
+            "projectItems": {"nodes": [{"id": "I30", "project": {"id": "PVT_x"}, "fieldValues": {"nodes": [
+                {"name": "📋 Homologação", "field": {"name": "Etapa"}}]}}]}}));
+        let s = snapshot::build(&raw, &fixture::cfg(), 1);
+        let none = BTreeSet::new();
+        let bugs = rows_for(Screen::Bugs, &s, "", &none, None);
+        assert!(matches!(&bugs[0], Row::Heading { text, count: 1, .. } if text == "to triage"));
+        assert_eq!(items(&bugs), vec![4]);
+        let uat = rows_for(Screen::Uat, &s, "", &none, None);
+        assert!(matches!(&uat[0], Row::Heading { count: 1, .. }));
+        assert_eq!(items(&uat), vec![30]);
+        assert!(matches!(&uat[2], Row::Heading { count: 0, .. }));
+    }
+
+    #[test]
+    fn a_move_is_picked_then_confirmed() {
+        let mut v = view();
+        on_item(&mut v, Screen::Board, 1);
+        assert_eq!(v.handle_key(&key(KeyCode::Char('m'))), Outcome::None);
+        let Some(Modal::Pick { options, .. }) = &v.modal else {
+            panic!("no picker: {:?}", v.modal)
+        };
+        // the Feature is in Ready: only later stages are offered
+        assert_eq!(options.first().map(String::as_str), Some(STAGE_DEVELOPMENT));
+        assert!(
+            !options
+                .iter()
+                .any(|o| o == STAGE_READY || o == STAGE_BACKLOG)
+        );
+        v.handle_key(&key(KeyCode::Down));
+        v.handle_key(&key(KeyCode::Enter));
+        assert!(v.confirmation_active());
+        // anything but yes keeps or cancels; `n` cancels and writes nothing
+        assert_eq!(v.handle_key(&key(KeyCode::Char('n'))), Outcome::None);
+        assert!(v.modal.is_none());
+
+        v.handle_key(&key(KeyCode::Char('m')));
+        v.handle_key(&key(KeyCode::Enter));
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Char('y'))),
+            Outcome::Run(Op::Move {
+                number: 1,
+                stage: STAGE_DEVELOPMENT.into()
+            })
+        );
+        assert!(v.modal.is_none());
+    }
+
+    #[test]
+    fn a_repair_offers_every_stage_and_asks_why() {
+        let mut v = view();
+        on_item(&mut v, Screen::Board, 2);
+        v.handle_key(&key(KeyCode::Char('M')));
+        let Some(Modal::Pick { options, .. }) = &v.modal else {
+            panic!()
+        };
+        // every stage but its own, earlier ones included
+        assert_eq!(options.len(), STAGE_ORDER.len() - 1);
+        assert_eq!(options[0], STAGE_BACKLOG);
+        v.handle_key(&key(KeyCode::Enter));
+        assert!(v.text_entry_active());
+        // an empty reason is not accepted
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Enter)),
+            Outcome::Notice(_)
+        ));
+        typed(&mut v, "corrida");
+        v.handle_key(&key(KeyCode::Enter));
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Enter)),
+            Outcome::Run(Op::Repair {
+                number: 2,
+                stage: STAGE_BACKLOG.into(),
+                reason: "corrida".into()
+            })
+        );
+    }
+
+    #[test]
+    fn triage_is_for_a_bug_and_each_outcome_is_confirmed() {
+        let mut v = view();
+        on_item(&mut v, Screen::Board, 1);
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('t'))),
+            Outcome::Notice(_)
+        ));
+        on_item(&mut v, Screen::Bugs, 4);
+        // accept, reclassified as P1
+        v.handle_key(&key(KeyCode::Char('t')));
+        v.handle_key(&key(KeyCode::Down));
+        v.handle_key(&key(KeyCode::Down));
+        v.handle_key(&key(KeyCode::Enter));
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Char('y'))),
+            Outcome::Run(Op::Triage {
+                action: "accept",
+                number: 4,
+                severity: Some("P1".into()),
+                reason: None,
+                of: None
+            })
+        );
+        // reject needs its reason
+        v.handle_key(&key(KeyCode::Char('R')));
+        typed(&mut v, "esperado");
+        v.handle_key(&key(KeyCode::Enter));
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Char('y'))),
+            Outcome::Run(Op::Triage {
+                action: "reject",
+                number: 4,
+                severity: None,
+                reason: Some("esperado".into()),
+                of: None
+            })
+        );
+        // a duplicate needs another issue's number
+        v.handle_key(&key(KeyCode::Char('D')));
+        typed(&mut v, "4");
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Enter)),
+            Outcome::Notice(_)
+        ));
+        v.handle_key(&key(KeyCode::Backspace));
+        typed(&mut v, "#17");
+        v.handle_key(&key(KeyCode::Enter));
+        assert_eq!(
+            v.handle_key(&key(KeyCode::Enter)),
+            Outcome::Run(Op::Triage {
+                action: "duplicate",
+                number: 4,
+                severity: None,
+                reason: None,
+                of: Some(17)
+            })
+        );
+    }
+
+    #[test]
+    fn a_new_item_starts_under_the_selected_one() {
+        let mut v = view();
+        on_item(&mut v, Screen::Board, 1);
+        v.handle_key(&key(KeyCode::Char('n')));
+        let Some(Modal::New(form)) = &v.modal else {
+            panic!()
+        };
+        // under a Feature, a Story, with the Feature as its parent
+        assert_eq!(ItemType::ALL[form.item_type], ItemType::Story);
+        assert_eq!(form.parent, "1");
+        assert!(v.text_entry_active());
+        // letters are the title, verbs included
+        typed(&mut v, "mover item");
+        // an empty title was refused before: here it is typed, so Enter confirms
+        v.handle_key(&key(KeyCode::Enter));
+        let Some(Modal::Confirm { lines, op }) = &v.modal else {
+            panic!("{:?}", v.modal)
+        };
+        assert!(lines[0].contains("Story «mover item»"));
+        assert!(lines.iter().any(|l| l.contains("sub-issue of #1")));
+        assert!(
+            matches!(op, Op::New(n) if n.parent == Some(1) && n.item_type == Some(ItemType::Story))
+        );
+        // Esc leaves without writing
+        assert_eq!(v.handle_key(&key(KeyCode::Esc)), Outcome::None);
+        assert!(v.modal.is_none());
+    }
+
+    #[test]
+    fn a_change_in_flight_holds_the_next_one() {
+        let mut v = view();
+        on_item(&mut v, Screen::Board, 1);
+        v.busy = Some("moving #1".into());
+        assert!(
+            matches!(v.handle_key(&key(KeyCode::Char('m'))), Outcome::Notice(t) if t.contains("moving #1"))
+        );
+        assert!(v.modal.is_none());
+        v.busy = None;
+        // nothing to catch up in the fixture
+        assert!(matches!(
+            v.handle_key(&key(KeyCode::Char('A'))),
+            Outcome::Notice(_)
+        ));
     }
 }

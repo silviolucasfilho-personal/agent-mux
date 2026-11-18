@@ -39,6 +39,10 @@ pub enum InboxItem {
     Work(Box<crate::factory::Item>),
     /// A fact a station suggests for a repository's brain.
     BrainNote(crate::factory::store::PendingNote),
+    /// A work item of a Project that waits on the operator: a document
+    /// to review and merge, a plan to validate, a draft to apply, a Bug
+    /// to triage, a critique that failed.
+    Project(super::project::Need),
 }
 
 impl InboxItem {
@@ -48,6 +52,7 @@ impl InboxItem {
             InboxItem::Loop(_) => "Loops",
             InboxItem::Plan { .. } | InboxItem::Run { .. } => "Workflows",
             InboxItem::Work(_) | InboxItem::BrainNote(_) => "Factory",
+            InboxItem::Project(_) => "Projects",
         }
     }
 
@@ -69,6 +74,7 @@ impl InboxItem {
                 _ => "failed",
             },
             InboxItem::BrainNote(_) => "brain note",
+            InboxItem::Project(n) => n.word(),
         }
     }
 
@@ -91,6 +97,9 @@ impl InboxItem {
             InboxItem::BrainNote(_) => {
                 " [↑/↓] select  [Enter] add to the brain  [e] add, then edit  [d] discard  [Esc] close"
             }
+            InboxItem::Project(_) => {
+                " [↑/↓] select  [Enter] open it in its Project  [d] dismiss  [Esc] close"
+            }
         }
     }
 
@@ -102,6 +111,8 @@ impl InboxItem {
             // by state: an item that needs you again after a retry is listed again
             InboxItem::Work(it) => format!("work:{}:{}", it.id, it.state.as_str()),
             InboxItem::BrainNote(n) => format!("brain:{}:{}", n.item, n.note),
+            // by what it waits on: the next gate lists it again
+            InboxItem::Project(n) => format!("project:{}:{}:{}", n.hub, n.number, n.code),
         }
     }
 }
@@ -184,13 +195,14 @@ impl App {
             .filter(|r| r.needs_human())
             .filter(|r| !self.inbox_dismissed.contains(&format!("run:{}", r.run_id)))
             .count();
-        loops + plans + runs + self.factory_needs
+        loops + plans + runs + self.factory_needs + self.project_needs
     }
 
     /// The inbox's rows: what the runs view also lists, then the factory's.
     fn inbox_rows(&self) -> (Vec<InboxItem>, Option<String>) {
         let (mut items, error) = self.inbox_items();
         items.extend(self.factory_inbox_items());
+        items.extend(self.project_inbox_items());
         (items, error)
     }
 
@@ -251,6 +263,13 @@ impl App {
                     self.notice = Some(Notice::info("dismissed; the item stays in the factory"));
                     self.reload_inbox();
                 }
+                Some(item @ InboxItem::Project(_)) if c == 'd' => {
+                    self.inbox_dismissed.insert(item.key());
+                    self.notice = Some(Notice::info(
+                        "dismissed; the item stays in its Project until its gate changes",
+                    ));
+                    self.reload_inbox();
+                }
                 Some(InboxItem::BrainNote(note)) if c == 'd' => {
                     self.notice = Some(match self.decide_brain_note(&note, false) {
                         Ok(()) => Notice::info("suggestion discarded; the brain is unchanged"),
@@ -288,6 +307,7 @@ impl App {
                 }
                 Some(InboxItem::Run { .. }) => {}
                 Some(InboxItem::Work(it)) => self.open_factory_on(&it.id, &it.workspace),
+                Some(InboxItem::Project(need)) => self.open_project_on(&need),
                 Some(InboxItem::BrainNote(note)) => {
                     self.notice = Some(match self.decide_brain_note(&note, true) {
                         Ok(()) => Notice::info(format!(
