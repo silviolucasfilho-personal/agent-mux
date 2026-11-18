@@ -4,7 +4,7 @@
 use super::config::{self, ProjectConfig};
 use super::contract::stage_plain;
 use super::next::{self, Decision};
-use super::{DocState, Item, ItemType, Snapshot, doctor, order, snapshot, stage, store};
+use super::{DocState, Item, ItemType, Snapshot, doctor, ops, order, snapshot, stage, store};
 use crate::factory::deliver::Tools;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -19,14 +19,44 @@ const USAGE: &str = "agent-mux project — a spec-wave repository's work items, 
   agent-mux project order [<feature>] [--milestone M] [--json]
         the Stories of a Feature in execution order; with no Feature, every one with work
 
+  agent-mux project new --type T --title \"…\" [--parent N] [--priority P] [--area A] [--body \"…\"]
+        create a work item, put it on the board at its type's first stage
+  agent-mux project move <n> <stage> [--status S]
+        advance an item; a stage never goes back
+  agent-mux project repair-stage <n[,m…]> <stage> --yes --reason \"…\" [--status S]
+        put items at a stage whatever the order says, with a note on each issue
+  agent-mux project task start|done <n>      a Task: in progress, or done
+  agent-mux project story review <n>         a Story to code review
+  agent-mux project triage accept <n> [--severity P]
+  agent-mux project triage reject <n> --reason \"…\"
+  agent-mux project triage duplicate <n> --of <original>
+  agent-mux project advance [--yes]
+        the board moves the pull requests already justify; without --yes, only the plan
+
   every command: [--dir DIR] [--refresh] [--cached]
 
 The folder (or one above it) must hold .spec-wave.json. In a code repository
 the Project shown is its hub's. A read is cached for `cache.ttlSec` of that
 file (600 s when unset): --refresh reads again, --cached never does.
-Nothing here writes to GitHub or to .spec-wave.json. docs/project.md has the rest.";
+The commands of the first block only read. The others write to GitHub (issues,
+labels, comments, the board) and never to .spec-wave.json. docs/project.md has
+the rest.";
 
-const VALUE_FLAGS: &[&str] = &["--dir", "--type", "--stage", "--milestone"];
+const VALUE_FLAGS: &[&str] = &[
+    "--dir",
+    "--type",
+    "--stage",
+    "--milestone",
+    "--title",
+    "--parent",
+    "--priority",
+    "--area",
+    "--body",
+    "--status",
+    "--reason",
+    "--severity",
+    "--of",
+];
 
 struct Args {
     values: Vec<(String, String)>,
@@ -201,6 +231,67 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         Some("show") => cmd_show(&a),
         Some("next") => cmd_next(&a),
         Some("order") => cmd_order(&a),
+        Some("new") => write_cmd(&a, |ops, a| {
+            let item_type = match a.value("--type") {
+                Some(t) => Some(
+                    ItemType::parse(t).ok_or_else(|| format!("\"{t}\" is not a work item type"))?,
+                ),
+                None => None,
+            };
+            ops.new_item(&ops::NewItem {
+                item_type,
+                title: a.value("--title").unwrap_or_default().to_string(),
+                parent: a.value("--parent").map(issue_number).transpose()?,
+                priority: a.value("--priority").map(str::to_string),
+                area: a.value("--area").map(str::to_string),
+                body: a.value("--body").unwrap_or_default().to_string(),
+            })
+        }),
+        Some("move") => write_cmd(&a, |ops, a| {
+            let (n, stage) = two(a, "an issue and a stage: project move 12 \"code review\"")?;
+            ops.move_item(issue_number(n)?, stage, a.value("--status"))
+        }),
+        Some("repair-stage") => write_cmd(&a, |ops, a| {
+            let (list, stage) = two(
+                a,
+                "issues and a stage: project repair-stage 529,530 ready --yes --reason \"…\"",
+            )?;
+            let numbers = list
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(issue_number)
+                .collect::<Result<Vec<u64>, String>>()?;
+            ops.repair_stage(
+                &numbers,
+                stage,
+                a.value("--status"),
+                a.flag("--yes"),
+                a.value("--reason").unwrap_or_default(),
+            )
+        }),
+        Some("task") => write_cmd(&a, |ops, a| {
+            let (action, n) = two(a, "an action and a Task: project task start 12")?;
+            ops.task(action, issue_number(n)?)
+        }),
+        Some("story") => write_cmd(&a, |ops, a| {
+            let (action, n) = two(a, "an action and a Story: project story review 12")?;
+            if action != "review" {
+                return Err(format!("\"{action}\" is not a story action: review"));
+            }
+            ops.story_review(issue_number(n)?)
+        }),
+        Some("triage") => write_cmd(&a, |ops, a| {
+            let (action, n) = two(a, "an outcome and a Bug: project triage accept 42")?;
+            ops.triage(
+                action,
+                issue_number(n)?,
+                a.value("--severity"),
+                a.value("--reason"),
+                a.value("--of").map(issue_number).transpose()?,
+            )
+        }),
+        Some("advance") => cmd_advance(&a),
         None | Some("help") | Some("--help") | Some("-h") => {
             println!("{USAGE}");
             Ok(())
@@ -210,6 +301,105 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             std::process::exit(2);
         }
     }
+}
+
+fn issue_number(raw: &str) -> Result<u64, String> {
+    raw.trim()
+        .trim_start_matches('#')
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| format!("\"{raw}\" is not an issue number"))
+}
+
+fn two<'a>(a: &'a Args, what: &str) -> Result<(&'a str, &'a str), String> {
+    match (a.positional.first(), a.positional.get(1)) {
+        (Some(x), Some(y)) => Ok((x.as_str(), y.as_str())),
+        _ => Err(format!("this needs {what}")),
+    }
+}
+
+/// Brings the cached copies of `touched` up to what GitHub has now, and
+/// answers the snapshot when there is one. A cache that was never read is
+/// left alone: the next read fills it.
+pub fn refresh_touched(
+    conn: &rusqlite::Connection,
+    tools: &Tools,
+    cfg: &ProjectConfig,
+    touched: &[u64],
+) -> Result<Option<Snapshot>, String> {
+    if touched.is_empty() {
+        return Ok(None);
+    }
+    let Some(mut snap) = store::load(conn, &cfg.hub_repo().slug())? else {
+        return Ok(None);
+    };
+    let nodes = super::github::issue_nodes(tools, cfg, touched)?;
+    snapshot::merge(&mut snap, &nodes, cfg);
+    store::save(conn, &snap)?;
+    Ok(Some(snap))
+}
+
+/// Runs one verb that writes, prints what it did, and refreshes the cache
+/// for what it changed.
+fn write_cmd(
+    a: &Args,
+    verb: impl FnOnce(&ops::Ops, &Args) -> Result<ops::Report, String>,
+) -> anyhow::Result<()> {
+    let e = env(a)?;
+    let seen_board = store::load(&e.conn, &e.cfg.hub_repo().slug())
+        .ok()
+        .flatten()
+        .and_then(|s| s.board_id);
+    let ops = ops::Ops {
+        tools: &e.tools,
+        cfg: &e.cfg,
+        seen_board,
+    };
+    let report = verb(&ops, a).map_err(|err| anyhow::anyhow!(err))?;
+    if a.flag("--json") {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for line in &report.lines {
+            println!("{line}");
+        }
+    }
+    if let Err(err) = refresh_touched(&e.conn, &e.tools, &e.cfg, &report.touched) {
+        eprintln!("the cache was not refreshed ({err}); `agent-mux project sync` reads it again");
+    }
+    Ok(())
+}
+
+fn cmd_advance(a: &Args) -> anyhow::Result<()> {
+    let mut e = env(a)?;
+    // the plan is made from what GitHub says now
+    e.fresh = Fresh::Refresh;
+    let s = snap(&e)?;
+    let moves = ops::auto_moves(&s);
+    if moves.is_empty() {
+        println!("the board is up to date with the pull requests");
+        return Ok(());
+    }
+    if !a.flag("--yes") {
+        for m in &moves {
+            println!("#{}: {} → {} ({})", m.number, m.from, m.to, m.why);
+        }
+        println!("{} move(s); run again with --yes to make them", moves.len());
+        return Ok(());
+    }
+    let ops = ops::Ops {
+        tools: &e.tools,
+        cfg: &e.cfg,
+        seen_board: s.board_id.clone(),
+    };
+    let report = ops
+        .apply_moves(&moves)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    for line in &report.lines {
+        println!("{line}");
+    }
+    let _ = refresh_touched(&e.conn, &e.tools, &e.cfg, &report.touched);
+    Ok(())
 }
 
 fn cmd_doctor(a: &Args) -> anyhow::Result<()> {

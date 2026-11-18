@@ -107,6 +107,7 @@ impl App {
                     || workspace_node.is_some()
                     || in_swarm
                     || factory.is_some()
+                    || matches!(self.mode, Mode::Project(_))
             }
             Edit => {
                 matches!(
@@ -888,6 +889,7 @@ impl App {
             Mode::Swarm(v) => v.confirmation_active(),
             Mode::Library(v) => v.confirmation_active(),
             Mode::Factory(v) => v.confirmation_active(),
+            Mode::Project(v) => v.confirmation_active(),
             Mode::ConfirmKill
             | Mode::ConfirmCloseAll
             | Mode::ConfirmRestart

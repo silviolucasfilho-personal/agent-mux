@@ -5793,6 +5793,7 @@ fn draw_inbox(f: &mut Frame, state: &crate::app::inbox::InboxState) {
             InboxItem::Run { name, .. } => name.clone(),
             InboxItem::Work(it) => crate::app::factory::row_name(it),
             InboxItem::BrainNote(n) => n.note.clone(),
+            InboxItem::Project(n) => format!("#{} {}", n.number, n.title),
         };
         let sel = i == state.selected;
         if sel {
@@ -5954,6 +5955,25 @@ fn draw_inbox(f: &mut Frame, state: &crate::app::inbox::InboxState) {
                     }
                     _ => "  [Enter] open it in the factory: [r] runs it again   [d] dismiss from the inbox",
                 },
+                dim,
+            ));
+        }
+        Some(InboxItem::Project(n)) => {
+            detail.push(Line::styled(
+                format!("  {} · {}", n.word().to_uppercase(), n.kind),
+                head,
+            ));
+            detail.push(row("project", n.hub.clone()));
+            detail.push(row("item", format!("#{} {}", n.number, n.title)));
+            detail.push(row("stage", n.stage.clone()));
+            detail.push(Line::raw(""));
+            detail.push(Line::raw(format!("  {}", n.reason)));
+            if !n.unblock.is_empty() {
+                detail.push(Line::raw(format!("  {}", n.unblock)));
+            }
+            detail.push(Line::raw(""));
+            detail.push(Line::styled(
+                "  [Enter] open it in its Project   [d] dismiss from the inbox",
                 dim,
             ));
         }

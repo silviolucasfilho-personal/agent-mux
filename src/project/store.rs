@@ -101,6 +101,16 @@ pub fn synced_ns(conn: &Connection, hub: &str) -> Option<i64> {
     .flatten()
 }
 
+/// Every hub that was ever read, as cached.
+pub fn hubs(conn: &Connection) -> Vec<String> {
+    let Ok(mut q) = conn.prepare("SELECT hub FROM project_boards ORDER BY hub") else {
+        return Vec::new();
+    };
+    q.query_map([], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

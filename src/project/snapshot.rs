@@ -66,6 +66,7 @@ fn pull_of(v: &Value, repo: &str) -> Option<Pull> {
 pub fn build(raw: &Raw, cfg: &ProjectConfig, now_ns: i64) -> Snapshot {
     let hub = raw.hub.clone();
     let board_id = cfg.board.as_ref().map(|b| b.id.as_str());
+    let mut seen_board: Option<String> = None;
     let mut warnings: Vec<String> = Vec::new();
     if let Some(e) = &raw.board_error {
         warnings.push(e.clone());
@@ -153,6 +154,12 @@ pub fn build(raw: &Raw, cfg: &ProjectConfig, now_ns: i64) -> Snapshot {
                 });
             if let Some(p) = pick {
                 board_item = p.get("id").and_then(Value::as_str).map(str::to_string);
+                if seen_board.is_none() {
+                    seen_board = p
+                        .pointer("/project/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
                 for fv in p
                     .pointer("/fieldValues/nodes")
                     .and_then(Value::as_array)
@@ -221,6 +228,7 @@ pub fn build(raw: &Raw, cfg: &ProjectConfig, now_ns: i64) -> Snapshot {
 
         items.push(Item {
             number,
+            node_id: text(node, "id"),
             item_type,
             open: text(node, "state").eq_ignore_ascii_case("open"),
             priority: contract::priority_of(&labels),
@@ -332,7 +340,69 @@ pub fn build(raw: &Raw, cfg: &ProjectConfig, now_ns: i64) -> Snapshot {
         items,
         milestones,
         warnings,
+        board_id: board_id.map(str::to_string).or(seen_board),
+        root: Some(cfg.root().to_string_lossy().into_owned()),
         synced_ns: now_ns,
+    }
+}
+
+/// Puts issues read just now into a snapshot, in place of what it had
+/// for them. Their documents are kept (a single issue's read does not
+/// list documents), and so are their pull requests in code repositories.
+pub fn merge(snap: &mut Snapshot, nodes: &[Value], cfg: &ProjectConfig) {
+    let raw = Raw {
+        hub: snap.hub.clone(),
+        default_branch: snap.default_branch.clone(),
+        issues: nodes.to_vec(),
+        board_error: snap.board_error.clone(),
+        milestones: Ok(Vec::new()),
+        doc_files: Err(String::new()),
+        open_pulls: Err(String::new()),
+        artifact_branches: Err(String::new()),
+        code_pulls: Vec::new(),
+    };
+    let fresh = build(&raw, cfg, snap.synced_ns);
+    for mut item in fresh.items {
+        match snap.items.iter_mut().find(|i| i.number == item.number) {
+            Some(old) => {
+                item.docs = std::mem::take(&mut old.docs);
+                for p in old.pulls.drain(..) {
+                    if !p.repo.eq_ignore_ascii_case(&snap.hub)
+                        && !item
+                            .pulls
+                            .iter()
+                            .any(|x| x.repo == p.repo && x.number == p.number)
+                    {
+                        item.pulls.push(p);
+                    }
+                }
+                if item.parent.is_none() {
+                    item.parent = old.parent;
+                }
+                *old = item;
+            }
+            None => {
+                // a new issue: its documents were not read, so say so
+                snap.items.push(item);
+            }
+        }
+    }
+    // a new child's parent lists it only after its own read
+    let links: Vec<(u64, u64)> = snap
+        .items
+        .iter()
+        .filter_map(|i| i.parent.map(|p| (p, i.number)))
+        .collect();
+    for (parent, child) in links {
+        if let Some(p) = snap.items.iter_mut().find(|i| i.number == parent)
+            && !p.children.contains(&child)
+        {
+            p.children.push(child);
+        }
+    }
+    snap.items.sort_by_key(|i| i.number);
+    if snap.board_id.is_none() {
+        snap.board_id = fresh.board_id;
     }
 }
 

@@ -21,10 +21,12 @@ pub mod contract;
 pub mod doctor;
 pub mod github;
 pub mod next;
+pub mod ops;
 pub mod order;
 pub mod snapshot;
 pub mod stage;
 pub mod store;
+pub mod write;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -181,6 +183,9 @@ impl Pull {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     pub number: u64,
+    /// GitHub's node id of the issue, for the mutations that need one.
+    #[serde(default)]
+    pub node_id: String,
     pub title: String,
     /// `None`: no type label and no title prefix.
     pub item_type: Option<ItemType>,
@@ -253,6 +258,12 @@ pub struct Snapshot {
     pub milestones: Vec<Milestone>,
     /// Reads that failed and what they leave unknown.
     pub warnings: Vec<String>,
+    /// The Projects v2 board the stages were read from.
+    #[serde(default)]
+    pub board_id: Option<String>,
+    /// The folder the Project was read from, to open it again.
+    #[serde(default)]
+    pub root: Option<String>,
     pub synced_ns: i64,
 }
 

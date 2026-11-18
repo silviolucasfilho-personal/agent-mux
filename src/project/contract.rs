@@ -438,6 +438,92 @@ pub fn closing_refs(text: &str, pr_repo: &str, hub: &str) -> Vec<u64> {
     out
 }
 
+// --- what the flow writes on an issue --------------------------------------
+//
+// spec-wave's own words (its `commands/issue.mjs`, `commands/triage.mjs`,
+// `commands/repair-stage.mjs`), so an issue reads the same whichever tool
+// acted on it.
+
+/// The body of a new work item: the parent line, the description, and
+/// the metadata block.
+pub fn new_item_body(
+    parent: Option<(u64, &str)>,
+    description: &str,
+    area: Option<&str>,
+    priority: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some((number, title)) = parent {
+        parts.push(format!("**Parent:** #{number} — {title}"));
+    }
+    let desc = description.trim();
+    if !desc.is_empty() {
+        parts.push(desc.to_string());
+    }
+    let mut meta: Vec<String> = Vec::new();
+    if let Some(a) = area {
+        meta.push(format!("- **Área:** {a}"));
+    }
+    if let Some(p) = priority {
+        meta.push(format!("- **Prioridade:** {p}"));
+    }
+    if !meta.is_empty() {
+        parts.push(format!("## Metadados\n{}", meta.join("\n")));
+    }
+    if parts.is_empty() {
+        "_(sem descrição)_".to_string()
+    } else {
+        parts.join("\n\n")
+    }
+}
+
+pub const COMMENT_TRIAGE_ACCEPTED: &str = "**Triado:** aceito para a fila técnica.";
+
+pub fn comment_triage_rejected(reason: &str) -> String {
+    format!("**Rejeitado na triagem:** {}", reason.trim())
+}
+
+pub fn comment_duplicate_of(original: u64) -> String {
+    format!("**Duplicata de #{original}.**")
+}
+
+pub fn comment_has_duplicate(duplicate: u64) -> String {
+    format!("#{duplicate} foi marcada como duplicata desta issue.")
+}
+
+/// The note a stage repair leaves on the issue. spec-wave's text, with
+/// the tool that made the repair named in its place.
+pub fn comment_stage_repair(
+    from: Option<&str>,
+    to: &str,
+    status: Option<&str>,
+    reason: &str,
+    actor: Option<&str>,
+    version: &str,
+) -> String {
+    [
+        "🛠️ **Etapa reparada manualmente** (`agent-mux project repair-stage`)".to_string(),
+        String::new(),
+        format!("- **De:** {}", from.unwrap_or("(sem etapa)")),
+        format!(
+            "- **Para:** {to}{}",
+            status.map(|s| format!(" · Status **{s}**")).unwrap_or_default()
+        ),
+        format!(
+            "- **Por:** {}",
+            actor.map_or("(usuário do token)".to_string(), |a| format!("@{a}"))
+        ),
+        format!("- **Motivo:** {}", reason.trim()),
+        String::new(),
+        format!("_A Etapa não retrocede pelo fluxo normal; este reparo foi explícito · agent-mux {version}._"),
+    ]
+    .join("\n")
+}
+
+/// The board's `Area` options.
+pub const AREAS: [&str; 6] = ["Frontend", "Backend", "Mobile", "Infra", "DevOps", "Data"];
+pub const FIELD_AREA: &str = "Area";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,5 +700,41 @@ mod tests {
         assert!(track(ItemType::Spike).is_none());
         assert_eq!(stage_plain("👀 Code Review"), "Code Review");
         assert_eq!(stage_plain("Custom"), "Custom");
+    }
+    #[test]
+    fn what_is_written_on_an_issue_is_spec_waves() {
+        assert_eq!(
+            new_item_body(
+                Some((7, "[EPIC] Vendas")),
+                " Como cliente ",
+                Some("Backend"),
+                Some("P1")
+            ),
+            "**Parent:** #7 — [EPIC] Vendas\n\nComo cliente\n\n## Metadados\n- **Área:** Backend\n- **Prioridade:** P1"
+        );
+        assert_eq!(new_item_body(None, "", None, None), "_(sem descrição)_");
+        assert_eq!(
+            COMMENT_TRIAGE_ACCEPTED,
+            "**Triado:** aceito para a fila técnica."
+        );
+        assert_eq!(
+            comment_triage_rejected(" esperado "),
+            "**Rejeitado na triagem:** esperado"
+        );
+        assert_eq!(comment_duplicate_of(17), "**Duplicata de #17.**");
+        assert_eq!(
+            comment_has_duplicate(42),
+            "#42 foi marcada como duplicata desta issue."
+        );
+        let note = comment_stage_repair(
+            Some("👀 Code Review"),
+            "✅ Ready",
+            Some("Todo"),
+            "corrida",
+            Some("ana"),
+            "0.1",
+        );
+        assert!(note.starts_with("🛠️ **Etapa reparada manualmente**"));
+        assert!(note.contains("- **De:** 👀 Code Review\n- **Para:** ✅ Ready · Status **Todo**\n- **Por:** @ana\n- **Motivo:** corrida"));
     }
 }
