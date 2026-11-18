@@ -22,6 +22,7 @@ mod loop_skills;
 mod loop_ui;
 mod mcp_protocol;
 mod persistent_sessions;
+mod project_ui;
 mod pty_session;
 mod scroll_ux;
 mod session_handoff;

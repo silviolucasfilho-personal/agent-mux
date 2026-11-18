@@ -23,6 +23,7 @@ pub mod mouse;
 pub mod opencode;
 pub mod persistence;
 pub mod pi;
+pub mod project;
 pub mod prompts;
 pub mod ptylog;
 pub mod search;

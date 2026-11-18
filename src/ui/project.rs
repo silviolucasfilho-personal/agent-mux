@@ -1,0 +1,937 @@
+//! Drawing the Project screens (`crate::app::project`): the screens and
+//! the selected screen's rows on the left, the selected row (or the item
+//! screen) on the right.
+
+use super::flow::{dim, head, hints, key_style};
+use crate::app::project::{
+    Focus, ITEM_TABS, ProjectView, Row, Screen, milestone_features, needs_you,
+};
+use crate::project::contract::*;
+use crate::project::doctor::Status;
+use crate::project::{DocState, Item, ItemType, Snapshot, cli, order, stage};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use std::collections::BTreeSet;
+
+fn cut(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn type_color(t: Option<ItemType>) -> Color {
+    match t {
+        Some(ItemType::Initiative | ItemType::Epic) => Color::Magenta,
+        Some(ItemType::Feature) => Color::Blue,
+        Some(ItemType::Story) => Color::Green,
+        Some(ItemType::Task) => Color::Yellow,
+        Some(ItemType::Bug) => Color::Red,
+        Some(ItemType::Spike | ItemType::Rfc) | None => Color::DarkGray,
+    }
+}
+
+fn block(title: String, focused: bool) -> Block<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        dim()
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(style)
+        .title(title)
+}
+
+pub fn draw(f: &mut Frame, area: Rect, v: &ProjectView) {
+    f.render_widget(Clear, area);
+    let [body, input, foot] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(if v.filtering { 1 } else { 0 }),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    let left_width = (body.width * 38 / 100).clamp(32, 52).min(body.width);
+    let [left, right] =
+        Layout::horizontal([Constraint::Length(left_width), Constraint::Min(0)]).areas(body);
+    let nav_height = (Screen::ALL.len() as u16 + 2).min(left.height);
+    let [nav, list] =
+        Layout::vertical([Constraint::Length(nav_height), Constraint::Min(0)]).areas(left);
+    draw_nav(f, nav, v);
+    draw_list(f, list, v);
+    if v.item.is_some() {
+        draw_item_screen(f, right, v);
+    } else {
+        draw_pane(f, right, v);
+    }
+    if v.filtering {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" filter: ", key_style()),
+                Span::raw(v.filter.clone()),
+                Span::styled("▏", key_style()),
+            ])),
+            input,
+        );
+    }
+    draw_foot(f, foot, v);
+}
+
+fn draw_nav(f: &mut Frame, area: Rect, v: &ProjectView) {
+    let focused = v.item.is_none() && v.focus == Focus::Nav;
+    let hub = v.hub();
+    let title = if hub.is_empty() {
+        " project ".to_string()
+    } else {
+        format!(
+            " project · {} ",
+            cut(&hub, usize::from(area.width).saturating_sub(14))
+        )
+    };
+    let b = block(title, focused);
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+    let width = usize::from(inner.width);
+    let lines: Vec<Line> = Screen::ALL
+        .into_iter()
+        .map(|s| {
+            let selected = s == v.screen;
+            let count = v.screen_count(s).map(|n| n.to_string()).unwrap_or_default();
+            let label = format!("{}{}", if selected { "> " } else { "  " }, s.label());
+            let pad = width.saturating_sub(label.chars().count() + count.chars().count() + 1);
+            let mut style = Style::default();
+            if selected {
+                style = style.add_modifier(if focused {
+                    Modifier::REVERSED
+                } else {
+                    Modifier::BOLD
+                });
+            }
+            Line::styled(format!("{label}{}{count} ", " ".repeat(pad)), style)
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// A stage in a few characters, for the right edge of a row.
+fn stage_short(stage: &str) -> String {
+    let plain = stage_plain(stage);
+    let first = plain.split_whitespace().next().unwrap_or(plain);
+    first.chars().take(6).collect()
+}
+
+fn draw_list(f: &mut Frame, area: Rect, v: &ProjectView) {
+    let focused = v.item.is_none() && v.focus == Focus::List;
+    let reading = if v.syncing() { " · reading…" } else { "" };
+    let needs = v.needs_you();
+    let title = format!(
+        " {}{}{reading} ",
+        v.screen.label(),
+        if needs > 0 && v.screen == Screen::Home {
+            format!(" · {needs} need you")
+        } else {
+            String::new()
+        }
+    );
+    let b = block(title, focused);
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+    let width = usize::from(inner.width);
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(e) = &v.error {
+        for l in wrap(e, width.saturating_sub(2)) {
+            lines.push(Line::styled(
+                format!(" {l}"),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        f.render_widget(Paragraph::new(lines), inner);
+        return;
+    }
+    let Some(s) = &v.snap else {
+        lines.push(Line::styled(
+            if v.syncing() {
+                " reading the Project from GitHub…"
+            } else {
+                " not read yet: [Ctrl+R] reads it"
+            },
+            dim(),
+        ));
+        f.render_widget(Paragraph::new(lines), inner);
+        return;
+    };
+    if !v.filter.is_empty() && !v.filtering {
+        lines.push(Line::styled(format!(" filter: {}", v.filter), dim()));
+    }
+    if v.rows.is_empty() {
+        lines.push(Line::styled(
+            match v.screen {
+                Screen::Health if v.checks.is_none() => " running the checks…",
+                Screen::Milestones => " no open milestone",
+                _ => " nothing here",
+            },
+            dim(),
+        ));
+    }
+    let waiting: BTreeSet<u64> = needs_you(s).into_iter().map(|(i, _)| i.number).collect();
+    let mut cursor_line = 0;
+    for (i, row) in v.rows.iter().enumerate() {
+        let selected = i == v.cursor();
+        if selected {
+            cursor_line = lines.len();
+        }
+        let marker = if selected { ">" } else { " " };
+        let mut spans: Vec<Span> = match row {
+            Row::Heading { key, text, count } => {
+                let fold = if v.collapsed.contains(key) {
+                    "▸"
+                } else {
+                    "▾"
+                };
+                let label = cut(text, width.saturating_sub(count.to_string().len() + 6));
+                vec![Span::styled(
+                    format!("{marker}{fold} {label} ({count})"),
+                    head(),
+                )]
+            }
+            Row::Item { number, depth } => match s.item(*number) {
+                Some(it) => item_spans(
+                    it,
+                    *depth,
+                    marker,
+                    width,
+                    v.screen,
+                    waiting.contains(number),
+                ),
+                None => vec![Span::styled(format!("{marker}  #{number}"), dim())],
+            },
+            Row::Milestone(at) => {
+                let (name, right) = match at.and_then(|i| s.milestones.get(i)) {
+                    Some(m) => {
+                        let total = m.open_issues + m.closed_issues;
+                        (
+                            m.title.clone(),
+                            (m.closed_issues * 100)
+                                .checked_div(total)
+                                .map_or("-".to_string(), |pct| format!("{pct}%")),
+                        )
+                    }
+                    None => ("(no milestone)".to_string(), String::new()),
+                };
+                let name = cut(&name, width.saturating_sub(right.len() + 4));
+                let pad = width.saturating_sub(name.chars().count() + right.len() + 3);
+                vec![
+                    Span::raw(format!("{marker} {name}")),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(format!("{right} "), dim()),
+                ]
+            }
+            Row::Check(at) => match v.checks.as_ref().and_then(|c| c.get(*at)) {
+                Some(c) => vec![
+                    Span::raw(format!("{marker} ")),
+                    Span::styled(format!("{} ", c.status.mark()), status_style(c.status)),
+                    Span::raw(cut(&c.name, width.saturating_sub(5))),
+                ],
+                None => vec![],
+            },
+        };
+        if selected && focused {
+            for sp in &mut spans {
+                sp.style = sp.style.add_modifier(Modifier::REVERSED);
+            }
+        } else if selected {
+            for sp in &mut spans {
+                sp.style = sp.style.add_modifier(Modifier::BOLD);
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    let visible = usize::from(inner.height);
+    let start = super::sidebar_window(cursor_line, lines.len(), visible);
+    f.render_widget(
+        Paragraph::new(lines.into_iter().skip(start).collect::<Vec<_>>()),
+        inner,
+    );
+}
+
+fn item_spans(
+    it: &Item,
+    depth: u8,
+    marker: &str,
+    width: usize,
+    screen: Screen,
+    waiting: bool,
+) -> Vec<Span<'static>> {
+    let indent = " ".repeat(usize::from(depth) * 2);
+    let right = match screen {
+        Screen::Board => it.priority.clone().unwrap_or_default(),
+        _ => stage_short(&stage::shown(it).stage),
+    };
+    let bang = if waiting { "!" } else { " " };
+    let lead = format!("{marker}{indent}");
+    let number = format!("#{} ", it.number);
+    let room =
+        width.saturating_sub(lead.chars().count() + 2 + number.len() + right.chars().count() + 3);
+    let name = cut(it.name(), room);
+    let used = lead.chars().count() + 2 + number.len() + name.chars().count();
+    let pad = width.saturating_sub(used + right.chars().count() + 2);
+    let mut name_style = Style::default();
+    if !it.open {
+        name_style = dim();
+    }
+    vec![
+        Span::raw(lead),
+        Span::styled(
+            format!("{} ", it.item_type.map_or("?", ItemType::glyph)),
+            Style::default().fg(type_color(it.item_type)),
+        ),
+        Span::styled(number, dim()),
+        Span::styled(name, name_style),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(bang.to_string(), Style::default().fg(Color::Yellow)),
+        Span::styled(format!("{right} "), dim()),
+    ]
+}
+
+fn status_style(s: Status) -> Style {
+    Style::default().fg(match s {
+        Status::Ok => Color::Green,
+        Status::Warn => Color::Yellow,
+        Status::Fail => Color::Red,
+        Status::Skip => Color::DarkGray,
+    })
+}
+
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut out = Vec::new();
+    for para in text.lines() {
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+                out.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        out.push(line);
+    }
+    out
+}
+
+/// Card and order lines carry their meaning in their first characters;
+/// this gives each kind its colour.
+fn styled(line: String) -> Line<'static> {
+    let t = line.trim_start();
+    let style = if t.starts_with("! ") || t.starts_with("blocked") {
+        Style::default().fg(Color::Yellow)
+    } else if t.starts_with("next:") {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else if t == "documents"
+        || t == "pull requests"
+        || t.starts_with("children (")
+        || t.starts_with("Feature #")
+    {
+        head()
+    } else {
+        Style::default()
+    };
+    Line::styled(format!(" {line}"), style)
+}
+
+fn tabs_line(tabs: &[&str], at: usize) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (i, t) in tabs.iter().enumerate() {
+        let label = format!(" {} {t} ", i + 1);
+        spans.push(if i == at {
+            Span::styled(label, Style::default().add_modifier(Modifier::REVERSED))
+        } else {
+            Span::styled(label, dim())
+        });
+        spans.push(Span::raw(" "));
+    }
+    Line::from(spans)
+}
+
+/// What the right side shows: a titled block, its tabs, and lines.
+struct Pane<'a> {
+    title: String,
+    tabs: &'a [&'a str],
+    tab: usize,
+    lines: Vec<Line<'static>>,
+    scroll: u16,
+    wrap: bool,
+    /// The pane has the keyboard (the item screen).
+    focused: bool,
+}
+
+fn render_pane(f: &mut Frame, area: Rect, pane: Pane) {
+    let b = block(pane.title, pane.focused);
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+    let [tab_area, _, content] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+    f.render_widget(Paragraph::new(tabs_line(pane.tabs, pane.tab)), tab_area);
+    let max = (pane.lines.len() as u16).saturating_sub(1);
+    let mut p = Paragraph::new(pane.lines).scroll((pane.scroll.min(max), 0));
+    if pane.wrap {
+        p = p.wrap(Wrap { trim: false });
+    }
+    f.render_widget(p, content);
+}
+
+fn board_summary(s: &Snapshot) -> Vec<Line<'static>> {
+    let mut out = vec![Line::styled(" items by stage", head()), Line::raw("")];
+    let stages: Vec<String> = if s.board_stages.is_empty() {
+        STAGE_ORDER.iter().map(|x| x.to_string()).collect()
+    } else {
+        s.board_stages.clone()
+    };
+    for st in stages {
+        let n = s
+            .items
+            .iter()
+            .filter(|i| i.item_type.is_some() && stage::shown(i).stage == st)
+            .filter(|i| i.open || st == STAGE_DONE)
+            .count();
+        let bar = "█".repeat(n.min(40));
+        out.push(Line::from(vec![
+            Span::raw(format!(" {:<20} {n:>4} ", cut(&st, 20))),
+            Span::styled(bar, Style::default().fg(Color::Blue)),
+        ]));
+    }
+    if let Some(e) = &s.board_error {
+        out.push(Line::raw(""));
+        out.push(Line::styled(
+            format!(" {}", e.lines().next().unwrap_or("")),
+            Style::default().fg(Color::Yellow),
+        ));
+        out.push(Line::styled(
+            " stages shown are derived from each issue",
+            dim(),
+        ));
+    }
+    out
+}
+
+fn doc_glyph(state: DocState) -> (&'static str, Color) {
+    match state {
+        DocState::Base => ("✓", Color::Green),
+        DocState::Pr | DocState::Branch => ("◐", Color::Yellow),
+        DocState::Missing => ("·", Color::DarkGray),
+        DocState::Unknown => ("?", Color::Red),
+    }
+}
+
+fn milestone_lines(s: &Snapshot, at: Option<usize>) -> Vec<Line<'static>> {
+    let m = at.and_then(|i| s.milestones.get(i));
+    let title = m.map(|m| m.title.as_str());
+    let mut out = Vec::new();
+    match m {
+        Some(m) => {
+            let total = m.open_issues + m.closed_issues;
+            out.push(Line::styled(format!(" {}", m.title), head()));
+            out.push(Line::raw(format!(
+                " {} of {total} issues closed{}",
+                m.closed_issues,
+                m.due
+                    .as_deref()
+                    .map(|d| format!(" · due {}", d.chars().take(10).collect::<String>()))
+                    .unwrap_or_default()
+            )));
+        }
+        None => out.push(Line::styled(" Features with no milestone", head())),
+    }
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        "        stage            spec plan dec  qa   Feature",
+        dim(),
+    ));
+    let features = milestone_features(s, title);
+    if features.is_empty() {
+        out.push(Line::styled(" no Feature", dim()));
+    }
+    for f in features {
+        let shown = stage::shown(f);
+        let mut spans = vec![Span::raw(format!(
+            " #{:<5} {:<16} ",
+            f.number,
+            cut(stage_plain(&shown.stage), 16)
+        ))];
+        for doc in ["spec", "plan", "decomposition", "qa-plan"] {
+            let (g, c) = doc_glyph(f.doc_state(doc));
+            spans.push(Span::styled(format!(" {g}   "), Style::default().fg(c)));
+        }
+        let style = if f.open { Style::default() } else { dim() };
+        spans.push(Span::styled(f.name().to_string(), style));
+        out.push(Line::from(spans));
+    }
+    out.push(Line::raw(""));
+    out.push(Line::styled(
+        " ✓ on the default branch   ◐ in review   · not written   ? not read",
+        dim(),
+    ));
+    out
+}
+
+fn order_of_row(v: &ProjectView, s: &Snapshot) -> Vec<Line<'static>> {
+    let feature = match v.selected_row() {
+        Some(Row::Heading { key, .. }) => key.strip_prefix("feature:").and_then(|n| n.parse().ok()),
+        Some(Row::Item { number, .. }) => s
+            .ancestor(*number, ItemType::Feature)
+            .or_else(|| s.ancestor(*number, ItemType::Rfc))
+            .map(|f| f.number),
+        _ => None,
+    };
+    match feature.map(|n| order::feature_order(s, n)) {
+        Some(Ok(o)) => cli::order_lines(&o).into_iter().map(styled).collect(),
+        Some(Err(e)) => vec![Line::styled(format!(" {e}"), dim())],
+        None => vec![Line::styled(" this row belongs to no Feature", dim())],
+    }
+}
+
+fn draw_pane(f: &mut Frame, area: Rect, v: &ProjectView) {
+    let tabs = v.screen.tabs();
+    let tab = v.tab.min(tabs.len().saturating_sub(1));
+    let Some(s) = &v.snap else {
+        let b = block(" project ".to_string(), false);
+        let inner = b.inner(area);
+        f.render_widget(b, area);
+        let text = match (&v.error, v.syncing()) {
+            (Some(_), _) => {
+                "Open this screen from a session in a repository that has .spec-wave.json."
+            }
+            (None, true) => "Reading issues, board, milestones and documents from GitHub…",
+            (None, false) => "Nothing was read yet.",
+        };
+        f.render_widget(
+            Paragraph::new(Line::styled(format!(" {text}"), dim())).wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    };
+    let mut wrap_text = false;
+    let (title, lines): (String, Vec<Line>) = match (v.screen, v.selected_row()) {
+        (Screen::Health, Some(Row::Check(at))) => {
+            wrap_text = true;
+            match v.checks.as_ref().and_then(|c| c.get(*at)) {
+                Some(c) => (
+                    format!(" {} ", c.name),
+                    vec![
+                        Line::from(vec![
+                            Span::styled(format!(" {} ", c.status.mark()), status_style(c.status)),
+                            Span::styled(c.name.clone(), head()),
+                        ]),
+                        Line::raw(""),
+                        Line::raw(format!(" {}", c.detail)),
+                    ],
+                ),
+                None => (" health ".into(), vec![]),
+            }
+        }
+        (Screen::Milestones, Some(Row::Milestone(at))) => {
+            let name = at
+                .and_then(|i| s.milestones.get(i))
+                .map_or("no milestone".to_string(), |m| m.title.clone());
+            let lines = if tab == 0 {
+                milestone_lines(s, *at)
+            } else {
+                let title = at
+                    .and_then(|i| s.milestones.get(i))
+                    .map(|m| m.title.as_str());
+                let orders: Vec<order::FeatureOrder> = match title {
+                    Some(t) => order::map(s, Some(t)),
+                    None => order::map(s, None)
+                        .into_iter()
+                        .filter(|o| o.milestone.is_none())
+                        .collect(),
+                };
+                let mut out = Vec::new();
+                for o in &orders {
+                    out.extend(cli::order_lines(o).into_iter().map(styled));
+                    out.push(Line::raw(""));
+                }
+                if out.is_empty() {
+                    out.push(Line::styled(" no Feature here has Stories yet", dim()));
+                }
+                out
+            };
+            (format!(" {name} "), lines)
+        }
+        (Screen::Ready, Some(_)) if tab == 0 => (" order ".into(), order_of_row(v, s)),
+        (_, Some(Row::Item { number, .. })) => match s.item(*number) {
+            Some(it) => (
+                format!(" #{} ", it.number),
+                cli::card_lines(it, s).into_iter().map(styled).collect(),
+            ),
+            None => (" item ".into(), vec![]),
+        },
+        (Screen::Board, _) => (" board ".into(), board_summary(s)),
+        (_, Some(Row::Heading { text, count, .. })) => (
+            format!(" {} ", cut(text, 40)),
+            vec![
+                Line::styled(format!(" {text}"), head()),
+                Line::raw(""),
+                Line::raw(format!(" {count} item(s)")),
+            ],
+        ),
+        _ => {
+            let mut lines = vec![Line::styled(format!(" {}", s.hub), head()), Line::raw("")];
+            let open = s.items.iter().filter(|i| i.open).count();
+            lines.push(Line::raw(format!(
+                " {} issues read, {open} open · {} milestones",
+                s.items.len(),
+                s.milestones.len()
+            )));
+            for w in &s.warnings {
+                lines.push(Line::styled(
+                    format!(" ! {}", w.lines().next().unwrap_or("")),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            (" project ".into(), lines)
+        }
+    };
+    render_pane(
+        f,
+        area,
+        Pane {
+            title,
+            tabs,
+            tab,
+            lines,
+            scroll: v.scroll,
+            wrap: wrap_text,
+            focused: false,
+        },
+    );
+}
+
+fn list_tab(lines: Vec<(String, Style)>, cursor: usize, empty: &str) -> Vec<Line<'static>> {
+    if lines.is_empty() {
+        return vec![Line::styled(format!(" {empty}"), dim())];
+    }
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, (text, style))| {
+            let marker = if i == cursor { ">" } else { " " };
+            let style = if i == cursor {
+                style.add_modifier(Modifier::REVERSED)
+            } else {
+                style
+            };
+            Line::styled(format!("{marker} {text} "), style)
+        })
+        .collect()
+}
+
+fn draw_item_screen(f: &mut Frame, area: Rect, v: &ProjectView) {
+    let (Some(screen), Some(s)) = (&v.item, &v.snap) else {
+        return;
+    };
+    let Some(it) = s.item(screen.number) else {
+        render_pane(
+            f,
+            area,
+            Pane {
+                title: format!(" #{} ", screen.number),
+                tabs: &ITEM_TABS,
+                tab: screen.tab,
+                lines: vec![Line::styled(
+                    " this issue is no longer in the Project",
+                    dim(),
+                )],
+                scroll: 0,
+                wrap: false,
+                focused: true,
+            },
+        );
+        return;
+    };
+    let mut wrap_text = false;
+    let mut scroll = screen.scroll;
+    let lines: Vec<Line> = match screen.tab {
+        0 => cli::card_lines(it, s).into_iter().map(styled).collect(),
+        1 => {
+            scroll = 0;
+            list_tab(
+                it.docs
+                    .iter()
+                    .map(|(name, d)| {
+                        let (g, c) = doc_glyph(d.state);
+                        let extra = match (d.pr, &d.branch) {
+                            (Some(pr), _) => format!("  pull request #{pr}"),
+                            (None, Some(b)) => format!("  branch {b}"),
+                            _ => String::new(),
+                        };
+                        (
+                            format!("{g} {name:<14} {:<8} {}{extra}", d.state.as_str(), d.path),
+                            Style::default().fg(c),
+                        )
+                    })
+                    .collect(),
+                screen.cursor,
+                "this type has no documents",
+            )
+        }
+        2 => {
+            scroll = 0;
+            list_tab(
+                s.children_of(it.number)
+                    .into_iter()
+                    .map(|k| {
+                        (
+                            cli::row_line(k),
+                            if k.open { Style::default() } else { dim() },
+                        )
+                    })
+                    .collect(),
+                screen.cursor,
+                "no children",
+            )
+        }
+        3 => {
+            scroll = 0;
+            list_tab(
+                it.pulls
+                    .iter()
+                    .map(|p| {
+                        (
+                            format!(
+                                "{}#{}  {}{}{}  {} → {}",
+                                p.repo,
+                                p.number,
+                                p.state.to_lowercase(),
+                                if p.draft { " (draft)" } else { "" },
+                                if p.review.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" · {}", p.review.to_lowercase().replace('_', " "))
+                                },
+                                p.head,
+                                p.base
+                            ),
+                            Style::default().fg(if p.merged() {
+                                Color::Magenta
+                            } else if p.open() {
+                                Color::Green
+                            } else {
+                                Color::DarkGray
+                            }),
+                        )
+                    })
+                    .collect(),
+                screen.cursor,
+                "no pull request is linked",
+            )
+        }
+        _ => {
+            wrap_text = true;
+            match &v.thread {
+                Some(t) if t.number == it.number => match &t.lines {
+                    Ok(lines) => lines
+                        .iter()
+                        .map(|l| {
+                            if l.starts_with("── ") || l.starts_with('@') {
+                                Line::styled(format!(" {l}"), head())
+                            } else {
+                                Line::raw(format!(" {l}"))
+                            }
+                        })
+                        .collect(),
+                    Err(e) => vec![Line::styled(
+                        format!(" the thread was not read: {e}"),
+                        Style::default().fg(Color::Yellow),
+                    )],
+                },
+                _ => vec![Line::styled(" reading the issue's thread…", dim())],
+            }
+        }
+    };
+    let title = format!(
+        " {} #{} · {} ",
+        it.item_type.map_or("issue", ItemType::as_str),
+        it.number,
+        cut(it.name(), usize::from(area.width).saturating_sub(24))
+    );
+    render_pane(
+        f,
+        area,
+        Pane {
+            title,
+            tabs: &ITEM_TABS,
+            tab: screen.tab,
+            lines,
+            scroll,
+            wrap: wrap_text,
+            focused: true,
+        },
+    );
+}
+
+fn draw_foot(f: &mut Frame, area: Rect, v: &ProjectView) {
+    let line = if v.filtering {
+        hints(&[("Enter", "keep"), ("Esc", "clear")])
+    } else if let Some(screen) = &v.item {
+        let enter = match screen.tab {
+            1 => "open document",
+            2 => "open child",
+            3 => "open pull request",
+            _ => "",
+        };
+        let mut pairs = vec![("←→ 1-5", "tabs")];
+        if !enter.is_empty() {
+            pairs.push(("↑↓", "move"));
+            pairs.push(("Enter", enter));
+        }
+        pairs.extend([
+            ("o", "issue in browser"),
+            ("Ctrl+R", "reload"),
+            ("Esc", "back"),
+        ]);
+        hints(&pairs)
+    } else {
+        hints(&[
+            ("[ ]", "screen"),
+            ("Tab", "screens/rows"),
+            ("↑↓", "move"),
+            ("Enter", "open"),
+            ("←→", "tabs"),
+            ("/", "filter"),
+            ("o", "browser"),
+            ("Ctrl+R", "reload"),
+            ("Esc", "close"),
+        ])
+    };
+    f.render_widget(Paragraph::new(line), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::snapshot::{self, tests as fixture};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn screen_text(v: &ProjectView, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, f.area(), v)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..h {
+            for x in 0..w {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn view() -> ProjectView {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = ProjectView::new(dir.path().to_path_buf());
+        v.cfg = Some(fixture::cfg());
+        v.error = None;
+        v.snap = Some(snapshot::build(&fixture::raw(), &fixture::cfg(), 1));
+        v.rebuild();
+        v
+    }
+
+    #[test]
+    fn a_folder_with_no_configuration_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = ProjectView::new(dir.path().to_path_buf());
+        let text = screen_text(&v, 110, 20);
+        assert!(text.contains("not a spec-wave"), "{text}");
+        assert!(text.contains(".spec-wave.json"));
+    }
+
+    #[test]
+    fn every_screen_draws_at_two_sizes() {
+        let mut v = view();
+        for screen in Screen::ALL {
+            v.screen = screen;
+            v.rebuild();
+            for (w, h) in [(120, 34), (64, 14)] {
+                let text = screen_text(&v, w, h);
+                assert!(text.contains(screen.label()), "{screen:?} at {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_board_lists_stages_and_the_card_of_the_selected_item() {
+        let mut v = view();
+        v.screen = Screen::Board;
+        v.rebuild();
+        let at = v
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Item { number: 1, .. }))
+            .unwrap();
+        v.cursors[1] = at;
+        let text = screen_text(&v, 150, 44);
+        // the Feature, and the Story whose stage is derived
+        assert!(text.contains("Ready (2)"), "{text}");
+        assert!(text.contains("Triagem (1)"));
+        assert!(text.contains("Feature #1  Cadastro de Pedidos"));
+        assert!(text.contains("blocked (pr-pending)"));
+        // the Feature waits on the operator
+        assert!(text.contains("acme/hub"));
+    }
+
+    #[test]
+    fn the_item_screen_lists_documents_children_and_pulls() {
+        let mut v = view();
+        v.item = Some(crate::app::project::ItemScreen {
+            number: 1,
+            tab: 1,
+            cursor: 0,
+            scroll: 0,
+            back: vec![],
+        });
+        let text = screen_text(&v, 150, 30);
+        assert!(text.contains("Documents"));
+        assert!(
+            text.contains("docs/features/cadastro-de-pedidos/spec.md"),
+            "{text}"
+        );
+        v.item.as_mut().unwrap().tab = 2;
+        let text = screen_text(&v, 150, 30);
+        assert!(text.contains("ver pedidos") && text.contains("cancelar pedido"));
+        v.item.as_mut().unwrap().number = 2;
+        v.item.as_mut().unwrap().tab = 3;
+        let text = screen_text(&v, 150, 30);
+        assert!(text.contains("acme/api#12  open (draft)"), "{text}");
+        v.item.as_mut().unwrap().tab = 4;
+        assert!(screen_text(&v, 150, 30).contains("reading the issue's thread"));
+    }
+
+    #[test]
+    fn milestones_show_each_features_documents() {
+        let mut v = view();
+        v.screen = Screen::Milestones;
+        v.rebuild();
+        let text = screen_text(&v, 150, 30);
+        assert!(text.contains("v1"));
+        assert!(
+            text.contains("1 of 4 issues closed · due 2026-12-01"),
+            "{text}"
+        );
+        assert!(text.contains("Cadastro de Pedidos"));
+    }
+}

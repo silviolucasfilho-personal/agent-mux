@@ -80,9 +80,8 @@ impl App {
                     || matches!(&self.mode, Mode::Swarm(v) if v.modal.is_some())
             }
             Commands | Help | FocusAgents | TestShortcuts | Quit | Runs | Skills
-            | Configuration | Memory | Workspaces | Library | Factory | Swarm | Inbox | History => {
-                true
-            }
+            | Configuration | Memory | Workspaces | Library | Factory | Project | Swarm | Inbox
+            | History => true,
             ReturnToSession => self.return_session_id().is_some(),
             PrevSession | NextSession => session.is_some(),
             CloseAllSessions => !self.sessions.is_empty(),
@@ -225,6 +224,7 @@ impl App {
                     | Mode::Memory(_)
                     | Mode::Workspaces(_)
                     | Mode::Factory(_)
+                    | Mode::Project(_)
                     | Mode::Swarm(_)
                     | Mode::Library(_)
                     | Mode::Langfuse(_)
@@ -332,6 +332,7 @@ impl App {
             Workspaces => self.request_navigation(NavigationTarget::Workspaces, now),
             Library => self.request_navigation(NavigationTarget::Library, now),
             Factory => self.request_navigation(NavigationTarget::Factory, now),
+            Project => self.request_navigation(NavigationTarget::Project, now),
             Swarm => self.request_navigation(NavigationTarget::Swarm, now),
             Inbox => self.request_navigation(NavigationTarget::Inbox, now),
             History => self.request_navigation(NavigationTarget::History, now),
@@ -443,6 +444,7 @@ pub enum NavigationTarget {
     Workspaces,
     Library,
     Factory,
+    Project,
     Swarm,
     Inbox,
     History,
@@ -763,6 +765,7 @@ impl App {
             NavigationTarget::Workspaces => self.open_workspaces_view(),
             NavigationTarget::Library => self.open_library(super::library::Section::Flows),
             NavigationTarget::Factory => self.open_factory(),
+            NavigationTarget::Project => self.open_project(),
             NavigationTarget::Swarm => self.open_swarm_view(),
             NavigationTarget::Inbox => self.open_inbox(),
             NavigationTarget::Langfuse => self.open_langfuse_view(),
@@ -794,6 +797,7 @@ impl App {
             Mode::Swarm(_) => "Swarm",
             Mode::Library(_) => "Library",
             Mode::Factory(_) => "Factory",
+            Mode::Project(_) => "Project",
             Mode::Langfuse(_) => "Langfuse",
             _ => "Dialog",
         }
@@ -870,6 +874,7 @@ impl App {
             Mode::Memory(v) => v.input.is_some(),
             Mode::Workspaces(v) => v.filtering,
             Mode::Factory(v) => v.text_entry_active(),
+            Mode::Project(v) => v.text_entry_active(),
             Mode::Swarm(v) => v.text_entry_active(),
             Mode::SessionRun(v) => v.pane_focused,
             Mode::Library(v) => v.text_entry_active(),
